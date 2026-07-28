@@ -3,6 +3,7 @@ import SwiftUI
 public enum LifeOSTokens {
     public static let pagePadding: CGFloat = 20
     public static let grid: CGFloat = 4
+    public static let spacing: CGFloat = grid * 3
     public static let corner: CGFloat = 16
 #if os(macOS)
     public static let canvas = Color(nsColor: .windowBackgroundColor)
