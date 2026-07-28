@@ -16,6 +16,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: native-apple-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   apple-build:
     runs-on: macos-15
@@ -72,6 +76,7 @@ jobs:
           fi
 
       - name: Build macOS app and widgets
+        if: always()
         run: |
           set -o pipefail
           xcodebuild \

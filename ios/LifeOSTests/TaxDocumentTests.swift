@@ -9,6 +9,7 @@ final class TaxDocumentTests: XCTestCase {
         XCTAssertEqual(result.amounts.first?.value, "1234.56")
         XCTAssertEqual(result.amounts.first?.label, "Einkommensteuer")
         XCTAssertEqual(result.amounts.first?.evidence.page, 1)
+        XCTAssertTrue(result.amounts.first?.evidence.snippet.contains("Einkommensteuer") == true)
     }
 
     func testEvidencePreservesPageAndSnippet() {
@@ -23,6 +24,7 @@ final class TaxDocumentTests: XCTestCase {
         XCTAssertNil(result.taxYear)
         XCTAssertTrue(result.amounts.isEmpty)
         XCTAssertTrue(result.warnings.contains("No embedded text was found."))
+        XCTAssertEqual(result.confidence, .low)
     }
 
     func testRulesExtractIssuerMaskedIdentifierAndConfidence() {
@@ -42,11 +44,15 @@ final class TaxDocumentTests: XCTestCase {
         XCTAssertTrue(result.amounts.isEmpty)
     }
 
-    func testPersistenceRoundTripAndCSVEscaping() throws {
+    func testPersistenceDeletionAndCSVEscaping() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
         let doc = TaxDocument(title: "A, \"quoted\"", documentType: "Tax", taxYear: 2024, issuer: "Issuer", taxpayerIdentifier: "****1234", referenceIdentifier: nil, dates: [], amounts: [], pages: [])
-        let store = TaxDocumentStore(directory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        let store = TaxDocumentStore(directory: directory)
         try store.save([doc])
         XCTAssertEqual(try store.load(), [doc])
         XCTAssertTrue(TaxCSVExporter.export([doc]).contains("\"A, \"\"quoted\"\"\""))
+        try store.delete(doc)
+        XCTAssertTrue(try store.load().isEmpty)
     }
 }
