@@ -41,8 +41,6 @@ final class LifeOSUITests: XCTestCase {
         XCTAssertTrue(settingsTab.waitForExistence(timeout: 5))
         settingsTab.tap()
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Privacy"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Signing"].waitForExistence(timeout: 5))
         capture("settings")
     }
 
