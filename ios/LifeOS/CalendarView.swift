@@ -80,7 +80,14 @@ private struct CalendarEditor: View {
         NavigationStack {
             Form {
                 Section("Details") {
-                    TextField("Icon", text: $icon).textInputAutocapitalization(.never).accessibilityLabel("Calendar icon")
+#if os(iOS)
+                    TextField("Icon", text: $icon)
+                        .textInputAutocapitalization(.never)
+                        .accessibilityLabel("Calendar icon")
+#else
+                    TextField("Icon", text: $icon)
+                        .accessibilityLabel("Calendar icon")
+#endif
                     TextField("Title", text: $title).accessibilityLabel("Calendar item title")
                     CalendarProgressPicker(progress: $status)
                 }
