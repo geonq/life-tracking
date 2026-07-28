@@ -30,7 +30,7 @@ targets:
     platform: iOS
     sources: [LifeOSWidget, Shared]
     settings:
-      PRODUCT_BUNDLE_IDENTIFIER: com.hermes.lifeos.widget
+      PRODUCT_BUNDLE_IDENTIFIER: com.hermes.lifeos.app.widget
       INFOPLIST_FILE: LifeOSWidget/Info.plist
       CODE_SIGN_ENTITLEMENTS: LifeOSWidget/LifeOSWidget.entitlements
   LifeOSTests:
