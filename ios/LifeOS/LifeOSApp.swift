@@ -10,6 +10,8 @@ struct LifeOSApp: App {
                     .tabItem { Label("Overview", systemImage: "square.grid.2x2") }
                 CalendarView(coordinator: calendarCoordinator)
                     .tabItem { Label("Calendar", systemImage: "calendar") }
+                TaxDocumentsView()
+                    .tabItem { Label("Tax", systemImage: "doc.text.magnifyingglass") }
                 NavigationStack { SettingsView() }
                     .tabItem { Label("Settings", systemImage: "gearshape") }
             }

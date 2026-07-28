@@ -60,6 +60,8 @@ accounts/
 ios/xcuserdata/
 ios/DerivedData/
 ios/build/
+artifacts/apple-validation/
+*.xcresult
 *.xcuserstate
 
 # Explicitly tracked public inputs include ios source, demo fixtures, tests,

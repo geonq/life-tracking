@@ -24,7 +24,7 @@ targets:
       - target: LifeOSWidget
         embed: true
     scheme:
-      testTargets: [LifeOSTests]
+      testTargets: [LifeOSTests, LifeOSUITests]
   LifeOSWidget:
     type: app-extension
     platform: iOS
@@ -41,6 +41,14 @@ targets:
       PRODUCT_BUNDLE_IDENTIFIER: com.hermes.lifeos.tests
     dependencies:
       - target: LifeOS
+  LifeOSUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [LifeOSUITests]
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.hermes.lifeos.uitests
+    dependencies:
+      - target: LifeOS
   LifeOSMac:
     type: application
     platform: macOS
@@ -51,6 +59,7 @@ targets:
       - LifeOS/CodexView.swift
       - LifeOS/Settings.swift
       - LifeOS/CalendarView.swift
+      - LifeOS/TaxDocumentsView.swift
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: com.hermes.lifeos.mac
       INFOPLIST_FILE: LifeOSMac/Info.plist

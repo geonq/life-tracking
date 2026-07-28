@@ -42,19 +42,34 @@ jobs:
         id: simulator
         run: |
           set -euo pipefail
-          UDID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; data=json.load(sys.stdin); devices=[d for runtime in data["devices"].values() for d in runtime if d.get("isAvailable") and "iPhone" in d["name"]]; print(devices[-1]["udid"] if devices else "")')
+          UDID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; data=json.load(sys.stdin); devices=[d for runtime in data["devices"].values() for d in runtime if d.get("isAvailable") and d["name"] == "iPhone 16 Pro"]; print(devices[0]["udid"] if devices else "")')
           test -n "$UDID"
           echo "udid=$UDID" >> "$GITHUB_OUTPUT"
 
-      - name: Build and test iOS
+      - name: Build and test iOS with screenshots
         run: |
           set -o pipefail
+          rm -rf ios-test-results.xcresult ui-screenshots
           xcodebuild \
             -project ios/LifeOS.xcodeproj \
             -scheme LifeOS \
             -destination 'id=${{ steps.simulator.outputs.udid }}' \
             CODE_SIGNING_ALLOWED=NO \
+            -resultBundlePath ios-test-results.xcresult \
+            -only-testing:LifeOSUITests \
+            -only-testing:LifeOSTests \
             test | tee ios-xcodebuild.log
+
+      - name: Export UI screenshot attachments
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p ui-screenshots
+          if [ -d ios-test-results.xcresult ]; then
+            xcrun xcresulttool export attachments \
+              --path ios-test-results.xcresult \
+              --output-path ui-screenshots
+          fi
 
       - name: Build macOS app and widgets
         run: |
@@ -70,6 +85,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: native-build-logs
-          path: "*-xcodebuild.log"
+          name: native-apple-validation
+          path: |
+            *-xcodebuild.log
+            ios-test-results.xcresult
+            ui-screenshots
           if-no-files-found: ignore

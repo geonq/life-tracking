@@ -10,16 +10,21 @@ This is the product track for the iPhone and Mac Life OS. It includes a writable
 
 ## Generate and verify on macOS
 
-From the repository root:
+From the repository root, the repeatable validation script generates the project, runs iOS unit/UI tests, preserves the `.xcresult` bundle and screenshot attachments, and builds the macOS app/widgets:
 
 ```sh
-cd iphone-automation/ios
-xcodegen generate
-xcodebuild -project LifeOS.xcodeproj -scheme LifeOS -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 15,OS=latest' test
-xcodebuild -project LifeOS.xcodeproj -scheme LifeOSMac -destination 'platform=macOS' build
+./scripts/validate_apple_on_mac.sh
 ```
 
-The repository also runs these source/build gates on a hosted macOS runner through `.github/workflows/native-apple.yml`.
+Artifacts are written to `artifacts/apple-validation/` and remain untracked. The equivalent manual commands are:
+
+```sh
+xcodegen generate --spec ios/project.yml
+xcodebuild -project ios/LifeOS.xcodeproj -scheme LifeOS -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 15,OS=latest' test
+xcodebuild -project ios/LifeOS.xcodeproj -scheme LifeOSMac -destination 'platform=macOS' build
+```
+
+The repository also runs unsigned source/build/test gates on a hosted macOS runner through `.github/workflows/native-apple.yml`. Hosted simulator results do not verify real-device signing, App Group entitlements, peer discovery, or WidgetKit placement.
 
 For a signed device build after selecting a development team in Xcode:
 
