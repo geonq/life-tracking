@@ -193,8 +193,9 @@ public enum SharedSnapshotStore {
 
     public static func read(fileManager: FileManager = .default,
                             appGroupIdentifier: String? = AppGroupConfiguration.identifier()) -> WidgetSnapshot? {
-        guard let target = url(fileManager: fileManager, appGroupIdentifier: appGroupIdentifier) else { return nil }
-        return decode(try? Data(contentsOf: target) ?? Data())
+        guard let target = url(fileManager: fileManager, appGroupIdentifier: appGroupIdentifier),
+              let data = try? Data(contentsOf: target) else { return nil }
+        return decode(data)
     }
 
     public enum StoreError: Error, Equatable, Sendable { case invalidAppGroup, unavailableContainer }
