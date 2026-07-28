@@ -1,0 +1,66 @@
+# Public repository boundary: generated, private, and machine-local state
+node_modules/
+dist/
+.vite/
+coverage/
+*.tsbuildinfo
+
+# Hermes/project-local planning and coordination (never publish)
+Coordination/
+AGENTS.md
+tasks/
+.hermes/
+.interface-design/*
+!.interface-design/system.md
+
+# Secrets, credentials, and signing material
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.cer
+*.mobileprovision
+*.provisionprofile
+*.secret
+secrets/
+
+# Runtime data, databases, snapshots, caches, logs
+*.log
+.cache/
+.tmp/
+runtime/
+usage-history.jsonl
+*.usage-history.jsonl
+snapshots/
+*.snapshot.json
+*.db
+*.sqlite
+*.sqlite3
+*.realm
+
+# Personal imports, exports, uploads, and media (global extensions)
+imports/
+exports/
+uploads/
+data/
+health/
+finance/
+accounts/
+*.m4a
+*.mp3
+*.wav
+*.ogg
+*.aac
+*.mp4
+*.mov
+
+# Xcode machine-local/build artifacts
+ios/xcuserdata/
+ios/DerivedData/
+ios/build/
+*.xcuserstate
+
+# Explicitly tracked public inputs include ios source, demo fixtures, tests,
+# project.yml, and plist/entitlements files.

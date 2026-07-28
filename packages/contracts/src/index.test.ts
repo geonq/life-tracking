@@ -1,0 +1,2 @@
+import { describe, expect, it } from 'vitest'; import { ConnectorState, parseOverview, fixtures } from './index.js';
+describe('contracts',()=>{ it('accepts truthful fixture',()=>expect(parseOverview(fixtures.overview).label).toBe('Demo data')); it('rejects invalid connector state',()=>expect(()=>ConnectorState.parse('connected')).toThrow()); it('requires provenance',()=>expect(()=>parseOverview({...fixtures.overview,codex:{...fixtures.overview.codex,usage5h:{value:1,unit:'%'}}})).toThrow()); });
