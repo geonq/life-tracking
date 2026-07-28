@@ -124,7 +124,7 @@ enum TaxDocumentParser {
                 let value = nsPage.substring(with: match.range)
                 let evidence = TaxEvidence(page: index + 1, snippet: evidenceSnippet(in: page, around: value))
                 dates.append(TaxDate(value: value, evidence: evidence))
-                let yearText = value.count == 10 ? String(value.suffix(4)) : String(value.prefix(4))
+                let yearText = value.contains("-") ? String(value.prefix(4)) : String(value.suffix(4))
                 if let year = Int(yearText), (1900...2100).contains(year) { years.append(year) }
             }
             moneyRegex?.enumerateMatches(in: page, range: range) { match, _, _ in
@@ -201,8 +201,9 @@ enum TaxDocumentParser {
     private static func identifierCandidate(in text: String) -> TaxCandidate? {
         let pattern = #"(?i)(?:steuer[- ]?nummer|tax id|id)\s*[:]?\s*([0-9A-Z][0-9A-Z /-]{3,})"#
         guard let raw = firstCapture(in: text, pattern: pattern)?.trimmingCharacters(in: .whitespacesAndNewlines), raw.count >= 4 else { return nil }
-        let suffix = String(raw.suffix(4))
-        return TaxCandidate(value: String(repeating: "*", count: max(0, raw.count - 4)) + suffix,
+        let visibleCharacterCount = 2
+        let suffix = String(raw.suffix(visibleCharacterCount))
+        return TaxCandidate(value: String(repeating: "*", count: max(0, raw.count - visibleCharacterCount)) + suffix,
                             evidence: TaxEvidence(page: 1, snippet: "identifier ending \(suffix)"))
     }
 

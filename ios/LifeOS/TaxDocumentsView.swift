@@ -123,7 +123,7 @@ struct TaxDocumentsView: View {
                 ForEach(model.documents) { document in
                     VStack(alignment: .leading, spacing: 4) {
                         Text(document.title).font(.headline)
-                        Text("\(document.documentType) · \(document.taxYear.map(String.init) ?? \"Year not found\") · \(document.confidence.rawValue) confidence")
+                        Text("\(document.documentType) · \(document.taxYear.map(String.init) ?? "Year not found") · \(document.confidence.rawValue) confidence")
                             .font(.subheadline).foregroundStyle(.secondary)
                     }
                 }

@@ -19,6 +19,12 @@ final class TaxDocumentTests: XCTestCase {
         XCTAssertTrue(result.amounts.first?.evidence.snippet.contains("USt") == true)
     }
 
+    func testParsesISODateYearWithoutTreatingDayAsYear() {
+        let result = TaxDocumentParser.parse(text: "Tax year document dated 2024-03-17", documentName: "notice.pdf")
+        XCTAssertEqual(result.taxYear, 2024)
+        XCTAssertEqual(result.dates.first?.value, "2024-03-17")
+    }
+
     func testMalformedOrNoTextIsConservative() {
         let result = TaxDocumentParser.parse(text: "\u{FFFD}\n", documentName: "bad.pdf")
         XCTAssertNil(result.taxYear)
