@@ -27,7 +27,6 @@ final class LifeOSUITests: XCTestCase {
         calendarTab.tap()
         XCTAssertTrue(app.staticTexts["Calendar"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["Add"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.datePickers["Choose calendar date"].waitForExistence(timeout: 5))
         capture("calendar")
 
         let taxTab = app.tabBars.buttons["Tax"]

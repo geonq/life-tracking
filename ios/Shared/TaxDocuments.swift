@@ -129,6 +129,9 @@ enum TaxDocumentParser {
             }
             moneyRegex?.enumerateMatches(in: page, range: range) { match, _, _ in
                 guard let match else { return }
+                let hasPrefixCurrency = match.range(at: 2).location != NSNotFound
+                let hasSuffixCurrency = match.range(at: 4).location != NSNotFound
+                guard hasPrefixCurrency || hasSuffixCurrency else { return }
                 let label = nsPage.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespaces)
                 let raw = nsPage.substring(with: match.range(at: 3))
                 let normalized = raw.replacingOccurrences(of: ".", with: "")
@@ -203,7 +206,8 @@ enum TaxDocumentParser {
         guard let raw = firstCapture(in: text, pattern: pattern)?.trimmingCharacters(in: .whitespacesAndNewlines), raw.count >= 4 else { return nil }
         let visibleCharacterCount = 2
         let suffix = String(raw.suffix(visibleCharacterCount))
-        return TaxCandidate(value: String(repeating: "*", count: max(0, raw.count - visibleCharacterCount)) + suffix,
+        let maskCharacterCount = min(8, max(0, raw.count - visibleCharacterCount))
+        return TaxCandidate(value: String(repeating: "*", count: maskCharacterCount) + suffix,
                             evidence: TaxEvidence(page: 1, snippet: "identifier ending \(suffix)"))
     }
 
