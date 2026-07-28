@@ -25,7 +25,7 @@
     <key>PROVISIONING_MODE</key>
     <string>$(PROVISIONING_MODE)</string>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>Life OS uses your local network to keep calendar items in sync with your Mac.</string>
+    <string>Life OS uses your local network to keep calendar items in sync with your iPhone.</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_lifeos-calendar._tcp</string>

@@ -1,0 +1,75 @@
+name: Native Apple validation
+
+on:
+  push:
+    paths:
+      - "ios/**"
+      - "scripts/validate_native_calendar.py"
+      - ".github/workflows/native-apple.yml"
+  pull_request:
+    paths:
+      - "ios/**"
+      - "scripts/validate_native_calendar.py"
+      - ".github/workflows/native-apple.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  apple-build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          set -euxo pipefail
+          sudo xcode-select -s /Applications/Xcode.app
+          xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Validate source invariants
+        run: python3 scripts/validate_native_calendar.py
+
+      - name: Generate Xcode project
+        run: xcodegen generate --spec ios/project.yml
+
+      - name: Select an available iPhone simulator
+        id: simulator
+        run: |
+          set -euo pipefail
+          UDID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; data=json.load(sys.stdin); devices=[d for runtime in data["devices"].values() for d in runtime if d.get("isAvailable") and "iPhone" in d["name"]]; print(devices[-1]["udid"] if devices else "")')
+          test -n "$UDID"
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+
+      - name: Build and test iOS
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project ios/LifeOS.xcodeproj \
+            -scheme LifeOS \
+            -destination 'id=${{ steps.simulator.outputs.udid }}' \
+            CODE_SIGNING_ALLOWED=NO \
+            test | tee ios-xcodebuild.log
+
+      - name: Build macOS app and widgets
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project ios/LifeOS.xcodeproj \
+            -scheme LifeOSMac \
+            -destination 'platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            build | tee macos-xcodebuild.log
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-build-logs
+          path: "*-xcodebuild.log"
+          if-no-files-found: ignore

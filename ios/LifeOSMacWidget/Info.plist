@@ -5,7 +5,7 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleDisplayName</key>
-    <string>Life OS</string>
+    <string>Life OS Widgets</string>
     <key>CFBundleExecutable</key>
     <string>$(EXECUTABLE_NAME)</string>
     <key>CFBundleIdentifier</key>
@@ -15,20 +15,17 @@
     <key>CFBundleName</key>
     <string>$(PRODUCT_NAME)</string>
     <key>CFBundlePackageType</key>
-    <string>APPL</string>
+    <string>XPC!</string>
     <key>CFBundleShortVersionString</key>
     <string>$(MARKETING_VERSION)</string>
     <key>CFBundleVersion</key>
     <string>$(CURRENT_PROJECT_VERSION)</string>
     <key>APP_GROUP_IDENTIFIER</key>
     <string>$(APP_GROUP_IDENTIFIER)</string>
-    <key>PROVISIONING_MODE</key>
-    <string>$(PROVISIONING_MODE)</string>
-    <key>NSLocalNetworkUsageDescription</key>
-    <string>Life OS uses your local network to keep calendar items in sync with your Mac.</string>
-    <key>NSBonjourServices</key>
-    <array>
-        <string>_lifeos-calendar._tcp</string>
-    </array>
+    <key>NSExtension</key>
+    <dict>
+        <key>NSExtensionPointIdentifier</key>
+        <string>com.apple.widgetkit-extension</string>
+    </dict>
 </dict>
 </plist>

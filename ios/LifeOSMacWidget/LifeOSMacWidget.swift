@@ -2,7 +2,7 @@ import SwiftUI
 import WidgetKit
 
 @main
-struct LifeOSWidgetBundle: WidgetBundle {
+struct LifeOSMacWidgetBundle: WidgetBundle {
     var body: some Widget {
         LifeOSWidget()
         CalendarWidget()

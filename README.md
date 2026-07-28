@@ -1,6 +1,6 @@
 # iPhone Life OS
 
-A native SwiftUI + WidgetKit read-only dashboard foundation for a private iPhone Life OS. The current slice serves clearly labeled **Demo data** from typed contracts; it is not live Codex, HealthKit, finance, or Clipper data and is not a system of record.
+A native SwiftUI + WidgetKit Life OS for iPhone and Mac. Usage dashboards remain read-only and provenance-first; the calendar is a writable local task system with emoji, progress, date/time ranges, and wide agenda widgets. Synthetic **Demo data** is used for account usage until authorized connectors exist; it is never presented as live telemetry.
 
 ## Public-source boundary
 
@@ -23,7 +23,9 @@ npm run build
 
 ## Native status and limitations
 
-Native generation, Swift compilation, XCTest, signing, widget rendering, and device validation require macOS/Xcode and a real iPhone; this Windows environment cannot validate them. The App Group is deliberately a build setting placeholder and runtime validation fails closed until a real team-configured `group.*` identifier is supplied. HealthKit, App Intents, authorized external connectors, and Hermes voice capture remain blocked/unimplemented. No live metric or connector value is claimed: displayed metrics expose source, freshness, quality, and connector state, and forecasts are explicitly estimates.
+The repository now contains shared iOS/macOS calendar, app, and WidgetKit source plus a macOS GitHub Actions validation path. Local Windows checks still cannot run Xcode, Swift compilation, simulators, signing, or visual WidgetKit rendering; those claims require the hosted macOS workflow or a real Mac/iPhone. The App Group remains a build-setting placeholder and runtime validation fails closed until signing supplies a valid `group.*` identifier. Account usage is Demo-only; HealthKit, authorized external connectors, and Hermes voice capture remain blocked/unimplemented.
+
+A free Apple Personal Team profile expires after seven days and Apple requires periodic reprovisioning. An installed app cannot replace its own signature. The app therefore reports signing state/guidance without claiming self-renewal; continuous free refresh requires an external workflow such as SideStore/AltStore, subject to their security and availability constraints.
 
 ## Privacy and publication policy
 
