@@ -23,6 +23,24 @@ final class CalendarDomainTests: XCTestCase {
         XCTAssertEqual(changed.status, .inProgress)
     }
 
+    func testUpdatingCanExplicitlyRemoveIconAssetWhileOmissionPreservesIt() throws {
+        let asset = try CalendarIconAsset(
+            format: .png,
+            bytes: Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        )
+        let item = try CalendarItem(
+            title: "Branded",
+            iconAsset: asset,
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: base
+        )
+
+        XCTAssertEqual(try item.updating(at: base.addingTimeInterval(1)).iconAsset, asset)
+        XCTAssertNil(try item.updating(clearIconAsset: true, at: base.addingTimeInterval(2)).iconAsset)
+    }
+
     func testMergeUsesLastWriteWinsAndPropagatesTombstone() throws {
         let id = UUID()
         let old = try CalendarItem(id: id, title: "old", start: base, end: base.addingTimeInterval(60), createdAt: base, updatedAt: base)

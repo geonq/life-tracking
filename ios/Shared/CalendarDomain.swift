@@ -62,9 +62,11 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
         try updating(status: status, at: at)
     }
 
-    public func updating(title: String? = nil, icon: String? = nil, iconAsset: CalendarIconAsset? = nil, status: CalendarProgress? = nil,
+    public func updating(title: String? = nil, icon: String? = nil, iconAsset: CalendarIconAsset? = nil,
+                         clearIconAsset: Bool = false, status: CalendarProgress? = nil,
                          start: Date? = nil, end: Date? = nil, at: Date) throws -> CalendarItem {
-        try CalendarItem(id: id, title: title ?? self.title, icon: icon ?? self.icon, iconAsset: iconAsset ?? self.iconAsset, status: status ?? self.status,
+        try CalendarItem(id: id, title: title ?? self.title, icon: icon ?? self.icon,
+                         iconAsset: clearIconAsset ? nil : (iconAsset ?? self.iconAsset), status: status ?? self.status,
                          start: start ?? self.start, end: end ?? self.end, createdAt: createdAt, updatedAt: at, deletedAt: deletedAt)
     }
 
