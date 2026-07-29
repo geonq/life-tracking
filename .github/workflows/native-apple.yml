@@ -53,7 +53,7 @@ jobs:
       - name: Build and test iOS with screenshots
         run: |
           set -o pipefail
-          rm -rf ios-test-results.xcresult ui-screenshots
+          rm -rf ios-test-results.xcresult ui-screenshots macos-test-results.xcresult macos-snapshots
           xcodebuild \
             -project ios/LifeOS.xcodeproj \
             -scheme LifeOS \
@@ -86,6 +86,31 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             build | tee macos-xcodebuild.log
 
+      - name: Run macOS headless snapshot tests
+        if: always()
+        run: |
+          set -o pipefail
+          rm -rf macos-test-results.xcresult macos-snapshots
+          xcodebuild \
+            -project ios/LifeOS.xcodeproj \
+            -scheme LifeOSMac \
+            -destination 'platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            -resultBundlePath macos-test-results.xcresult \
+            -only-testing:LifeOSMacSnapshotTests \
+            test | tee macos-snapshot-xcodebuild.log
+
+      - name: Export macOS snapshot attachments
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p macos-snapshots
+          if [ -d macos-test-results.xcresult ]; then
+            xcrun xcresulttool export attachments \
+              --path macos-test-results.xcresult \
+              --output-path macos-snapshots
+          fi
+
       - name: Upload build logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -93,6 +118,9 @@ jobs:
           name: native-apple-validation
           path: |
             *-xcodebuild.log
+            *-snapshot-xcodebuild.log
             ios-test-results.xcresult
+            macos-test-results.xcresult
             ui-screenshots
+            macos-snapshots
           if-no-files-found: ignore

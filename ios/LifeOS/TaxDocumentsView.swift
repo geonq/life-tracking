@@ -115,22 +115,48 @@ struct TaxDocumentsView: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                Section {
-                    Text("Stored only on this device. Candidates are rule-based, not tax advice, and nothing is filed automatically.")
-                        .font(.footnote).foregroundStyle(.secondary)
-                }
-                ForEach(model.documents) { document in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(document.title).font(.headline)
-                        Text("\(document.documentType) · \(document.taxYear.map(String.init) ?? "Year not found") · \(document.confidence.rawValue) confidence")
-                            .font(.subheadline).foregroundStyle(.secondary)
+            VStack(spacing: 0) {
+                HStack(alignment: .center, spacing: LifeOSTokens.spacing) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Tax Documents")
+                            .font(.largeTitle.bold())
+                        Text("Private, on-device review")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
                     }
+                    Spacer()
+                    Button { model.isImporterPresented = true } label: {
+                        Label("Import PDF", systemImage: "doc.badge.plus")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("import-tax-pdf")
                 }
-                .onDelete(perform: model.delete)
+                .padding(LifeOSTokens.pagePadding)
+
+                List {
+                    Section {
+                        Label {
+                            Text("Stored only on this device. Candidates are rule-based, not tax advice, and nothing is filed automatically.")
+                                .fixedSize(horizontal: false, vertical: true)
+                        } icon: {
+                            Image(systemName: "lock.shield")
+                                .foregroundStyle(LifeOSTokens.accent)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                    ForEach(model.documents) { document in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(document.title).font(.headline)
+                            Text("\(document.documentType) · \(document.taxYear.map(String.init) ?? "Year not found") · \(document.confidence.rawValue) confidence")
+                                .font(.subheadline).foregroundStyle(.secondary)
+                        }
+                    }
+                    .onDelete(perform: model.delete)
+                }
+                .scrollContentBackground(.hidden)
             }
-            .navigationTitle("Tax Documents")
-            .toolbar { ToolbarItem(placement: .primaryAction) { Button("Import PDF") { model.isImporterPresented = true } } }
+            .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
+            .tint(LifeOSTokens.accent)
         }
         .fileImporter(isPresented: $model.isImporterPresented, allowedContentTypes: [.pdf], allowsMultipleSelection: false) { result in
             if case .success(let urls) = result, let url = urls.first { model.importPDF(url: url) }

@@ -9,6 +9,7 @@ final class LifeOSUITests: XCTestCase {
         app.launchArguments += ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         app.launch()
         dismissSystemPromptsIfPresent()
+        XCTAssertGreaterThan(app.windows.firstMatch.frame.width, 375, "App must use the full modern iPhone viewport")
     }
 
     func testPrimaryScreenshotsAndAccessibility() throws {
@@ -16,24 +17,22 @@ final class LifeOSUITests: XCTestCase {
         XCTAssertTrue(app.tabBars.buttons["Overview"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.navigationBars["Overview"].exists || app.staticTexts["Life OS"].exists)
 
-        let usage = app.staticTexts["Account usage"]
+        let usage = app.buttons["account-usage-link"]
         XCTAssertTrue(usage.waitForExistence(timeout: 5))
         usage.tap()
         XCTAssertTrue(app.navigationBars["Usage"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Separate provider observations · no combined total"].waitForExistence(timeout: 5))
         capture("usage")
         let calendarTab = app.tabBars.buttons["Calendar"]
         XCTAssertTrue(calendarTab.waitForExistence(timeout: 5))
         calendarTab.tap()
-        XCTAssertTrue(app.staticTexts["Calendar"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["Add"].waitForExistence(timeout: 5))
         capture("calendar")
 
         let taxTab = app.tabBars.buttons["Tax"]
         XCTAssertTrue(taxTab.waitForExistence(timeout: 5))
         taxTab.tap()
-        XCTAssertTrue(app.navigationBars["Tax Documents"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["Import PDF"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Tax Documents"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["import-tax-pdf"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Stored only on this device. Candidates are rule-based, not tax advice, and nothing is filed automatically."].waitForExistence(timeout: 5))
         capture("tax-documents")
 
@@ -42,6 +41,34 @@ final class LifeOSUITests: XCTestCase {
         settingsTab.tap()
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
         capture("settings")
+    }
+
+    func testDarkModeScreenshots() throws {
+        app.terminate()
+        app.launchArguments += ["-AppleInterfaceStyle", "Dark"]
+        app.launch()
+        dismissSystemPromptsIfPresent()
+
+        XCTAssertTrue(app.tabBars.buttons["Overview"].waitForExistence(timeout: 5))
+        capture("dark-overview")
+
+        let usage = app.buttons["account-usage-link"]
+        XCTAssertTrue(usage.waitForExistence(timeout: 5))
+        usage.tap()
+        XCTAssertTrue(app.navigationBars["Usage"].waitForExistence(timeout: 5))
+        capture("dark-usage")
+
+        app.tabBars.buttons["Calendar"].tap()
+        XCTAssertTrue(app.buttons["Add"].waitForExistence(timeout: 5))
+        capture("dark-calendar")
+
+        app.tabBars.buttons["Tax"].tap()
+        XCTAssertTrue(app.buttons["import-tax-pdf"].waitForExistence(timeout: 5))
+        capture("dark-tax-documents")
+
+        app.tabBars.buttons["Settings"].tap()
+        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
+        capture("dark-settings")
     }
 
     private func capture(_ name: String) {

@@ -10,12 +10,14 @@ public enum CalendarProgress: String, Codable, CaseIterable, Sendable {
 public enum CalendarValidationError: Error, Equatable, Sendable {
     case blankTitle
     case invalidInterval
+    case invalidIconAsset
 }
 
 public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
     public let id: UUID
     public var title: String
     public var icon: String
+    public var iconAsset: CalendarIconAsset?
     public var status: CalendarProgress
     public var start: Date
     public var end: Date
@@ -25,12 +27,13 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
 
     public var isDeleted: Bool { deletedAt != nil }
 
-    public init(id: UUID = UUID(), title: String, icon: String = "📅", status: CalendarProgress = .planned,
+    public init(id: UUID = UUID(), title: String, icon: String = "📅", iconAsset: CalendarIconAsset? = nil, status: CalendarProgress = .planned,
                 start: Date, end: Date, createdAt: Date = .now, updatedAt: Date? = nil, deletedAt: Date? = nil) throws {
         guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw CalendarValidationError.blankTitle }
         guard end > start else { throw CalendarValidationError.invalidInterval }
         self.id = id; self.title = title.trimmingCharacters(in: .whitespacesAndNewlines)
         self.icon = CalendarItem.validIcon(icon) ? icon : "📅"
+        self.iconAsset = iconAsset
         self.status = status; self.start = start; self.end = end; self.createdAt = createdAt
         self.updatedAt = updatedAt ?? createdAt; self.deletedAt = deletedAt
     }
@@ -47,6 +50,7 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
             isDeleted ? "1" : "0",
             title,
             icon,
+            iconAsset?.deterministicKey ?? "",
             status.rawValue,
             String(start.timeIntervalSince1970),
             String(end.timeIntervalSince1970),
@@ -58,9 +62,9 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
         try updating(status: status, at: at)
     }
 
-    public func updating(title: String? = nil, icon: String? = nil, status: CalendarProgress? = nil,
+    public func updating(title: String? = nil, icon: String? = nil, iconAsset: CalendarIconAsset? = nil, status: CalendarProgress? = nil,
                          start: Date? = nil, end: Date? = nil, at: Date) throws -> CalendarItem {
-        try CalendarItem(id: id, title: title ?? self.title, icon: icon ?? self.icon, status: status ?? self.status,
+        try CalendarItem(id: id, title: title ?? self.title, icon: icon ?? self.icon, iconAsset: iconAsset ?? self.iconAsset, status: status ?? self.status,
                          start: start ?? self.start, end: end ?? self.end, createdAt: createdAt, updatedAt: at, deletedAt: deletedAt)
     }
 

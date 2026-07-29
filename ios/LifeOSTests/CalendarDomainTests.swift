@@ -16,7 +16,9 @@ final class CalendarDomainTests: XCTestCase {
         let earlier = try CalendarItem(title: "earlier", start: base, end: base.addingTimeInterval(60), createdAt: base, updatedAt: base)
         let snapshot = CalendarSnapshot(items: [later, earlier])
         XCTAssertEqual(snapshot.items.map(\.title), ["earlier", "later"])
-        XCTAssertEqual(snapshot.items(on: base).count, 2)
+        var utcCalendar = Calendar(identifier: .gregorian)
+        utcCalendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        XCTAssertEqual(snapshot.items(on: base, calendar: utcCalendar).count, 2)
         let changed = try earlier.updating(status: .inProgress, at: base.addingTimeInterval(10))
         XCTAssertEqual(changed.status, .inProgress)
     }

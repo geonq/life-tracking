@@ -1,6 +1,6 @@
 # iPhone Life OS
 
-A native SwiftUI + WidgetKit Life OS for iPhone and Mac. Usage dashboards remain read-only and provenance-first; the calendar is a writable local task system with emoji, progress, date/time ranges, and wide agenda widgets. Synthetic **Demo data** is used for account usage until authorized connectors exist; it is never presented as live telemetry.
+A native SwiftUI + WidgetKit Life OS for iPhone and Mac. The branded interface follows system appearance with dark mode as a first-class visual target while retaining an adaptive light mode. Usage dashboards remain read-only and provenance-first; the calendar is a writable local task system with emoji or bounded local PNG/JPEG icons, progress, date/time ranges, and wide agenda widgets. Synthetic **Demo data** is used for account usage until authorized connectors exist; it is never presented as live telemetry.
 
 ## Public-source boundary
 
@@ -23,7 +23,7 @@ npm run build
 
 ## Native status and limitations
 
-The repository now contains shared iOS/macOS calendar, app, and WidgetKit source plus a macOS GitHub Actions validation path. Local Windows checks still cannot run Xcode, Swift compilation, simulators, signing, or visual WidgetKit rendering; those claims require the hosted macOS workflow or a real Mac/iPhone. The App Group remains a build-setting placeholder and runtime validation fails closed until signing supplies a valid `group.*` identifier. Account usage is Demo-only; HealthKit, authorized external connectors, and Hermes voice capture remain blocked/unimplemented.
+The repository now contains shared iOS/macOS calendar, app, and WidgetKit source plus a macOS GitHub Actions validation path. Hosted validation runs iOS unit/UI tests with explicit light/dark screenshots and unsigned macOS headless light/dark snapshots. Local PNG/JPEG calendar icons are signature-validated, limited to 256 KiB, stored without filenames or paths, and retain emoji fallback. Local Windows checks still cannot run Xcode, Swift compilation, simulators, signing, or visual WidgetKit rendering; those claims require the hosted macOS workflow or a real Mac/iPhone. The App Group remains a build-setting placeholder and runtime validation fails closed until signing supplies a valid `group.*` identifier. Account usage is Demo-only; HealthKit, authorized external connectors, and Hermes voice capture remain blocked/unimplemented.
 
 A free Apple Personal Team profile expires after seven days and Apple requires periodic reprovisioning. An installed app cannot replace its own signature. The app therefore reports signing state/guidance without claiming self-renewal; continuous free refresh requires an external workflow such as SideStore/AltStore, subject to their security and availability constraints.
 

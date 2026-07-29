@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 public struct CalendarView: View {
     @ObservedObject private var coordinator: CalendarCoordinator
@@ -63,6 +64,8 @@ private struct CalendarEditor: View {
     @State private var start: Date
     @State private var end: Date
     @State private var validationMessage: String?
+    @State private var showingIconImporter = false
+    @State private var iconAsset: CalendarIconAsset?
     let existing: CalendarItem?
     let onSave: (CalendarItem) -> Void
     let onDelete: (CalendarItem) -> Void
@@ -71,6 +74,7 @@ private struct CalendarEditor: View {
         existing = item; self.onSave = onSave; self.onDelete = onDelete
         _title = State(initialValue: item?.title ?? "")
         _icon = State(initialValue: item?.icon ?? "📅")
+        _iconAsset = State(initialValue: item?.iconAsset)
         _status = State(initialValue: item?.status ?? .planned)
         _start = State(initialValue: item?.start ?? .now)
         _end = State(initialValue: item?.end ?? .now.addingTimeInterval(3600))
@@ -89,6 +93,17 @@ private struct CalendarEditor: View {
                         .accessibilityLabel("Calendar icon")
 #endif
                     TextField("Title", text: $title).accessibilityLabel("Calendar item title")
+                    Button("Choose PNG/JPEG icon") { showingIconImporter = true }
+                        .buttonStyle(.bordered).accessibilityLabel("Choose local calendar icon")
+                    if let iconAsset {
+                        HStack {
+                            Label("Custom \(iconAsset.format.rawValue.uppercased()) selected", systemImage: "photo.fill")
+                                .foregroundStyle(LifeOSTokens.accent)
+                            Spacer()
+                            Button("Remove", role: .destructive) { self.iconAsset = nil }
+                        }
+                    }
+                    Text("Emoji remains the fallback if no image is selected.").font(.caption).foregroundStyle(.secondary)
                     CalendarProgressPicker(progress: $status)
                 }
                 Section("When") {
@@ -97,7 +112,16 @@ private struct CalendarEditor: View {
                 }
                 if existing != nil { Section { Button("Delete item", role: .destructive) { if let existing { onDelete(existing) } } } }
             }
-            .navigationTitle(existing == nil ? "New item" : "Edit item")
+            .fileImporter(isPresented: $showingIconImporter, allowedContentTypes: [.png, .jpeg], allowsMultipleSelection: false) { result in
+                do {
+                    guard let url = try result.get().first else { return }
+                    let accessing = url.startAccessingSecurityScopedResource()
+                    defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+                    let data = try Data(contentsOf: url)
+                    let format: CalendarIconAsset.Format = url.pathExtension.lowercased() == "png" ? .png : .jpeg
+                    iconAsset = try CalendarIconAsset(format: format, bytes: data)
+                } catch { validationMessage = "Choose a valid PNG or JPEG smaller than 256 KB." }
+            }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
@@ -112,7 +136,7 @@ private struct CalendarEditor: View {
 
     private func commit() {
         do {
-            let item = try CalendarItem(id: existing?.id ?? UUID(), title: title, icon: icon, status: status,
+            let item = try CalendarItem(id: existing?.id ?? UUID(), title: title, icon: icon, iconAsset: iconAsset, status: status,
                                         start: start, end: end, createdAt: existing?.createdAt ?? .now,
                                         updatedAt: .now, deletedAt: existing?.deletedAt)
             onSave(item)

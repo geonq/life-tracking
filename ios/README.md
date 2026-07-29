@@ -1,6 +1,6 @@
 # Native iOS + macOS foundation
 
-This is the product track for the iPhone and Mac Life OS. It includes a writable calendar/task system and read-only provenance-first dashboards. The React dashboard remains a visual/reference prototype only.
+This is the product track for the iPhone and Mac Life OS. It includes a dark-mode-first adaptive branded interface, a writable calendar/task system with emoji or bounded local PNG/JPEG icons, and read-only provenance-first dashboards. The React dashboard remains a visual/reference prototype only.
 
 ## macOS prerequisites
 
@@ -24,7 +24,7 @@ xcodebuild -project ios/LifeOS.xcodeproj -scheme LifeOS -sdk iphonesimulator -de
 xcodebuild -project ios/LifeOS.xcodeproj -scheme LifeOSMac -destination 'platform=macOS' build
 ```
 
-The repository also runs unsigned source/build/test gates on a hosted macOS runner through `.github/workflows/native-apple.yml`. Hosted simulator results do not verify real-device signing, App Group entitlements, peer discovery, or WidgetKit placement.
+The repository also runs unsigned source/build/test gates on a hosted macOS runner through `.github/workflows/native-apple.yml`. The workflow preserves iOS light/dark UI screenshots and macOS light/dark headless snapshot attachments. Hosted simulator results do not verify real-device signing, App Group entitlements, peer discovery, or WidgetKit placement.
 
 For a signed device build after selecting a development team in Xcode:
 

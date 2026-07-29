@@ -67,7 +67,24 @@ targets:
     dependencies:
       - target: LifeOSMacWidget
         embed: true
-    scheme: {}
+    scheme:
+      testTargets: [LifeOSMacUITests, LifeOSMacSnapshotTests]
+  LifeOSMacUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources: [LifeOSMacUITests]
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.hermes.lifeos.mac.uitests
+    dependencies:
+      - target: LifeOSMac
+  LifeOSMacSnapshotTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources: [LifeOSMacSnapshotTests]
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.hermes.lifeos.mac.snapshottests
+    dependencies:
+      - target: LifeOSMac
   LifeOSMacWidget:
     type: app-extension
     platform: macOS

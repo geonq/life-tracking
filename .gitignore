@@ -57,10 +57,11 @@ accounts/
 *.mov
 
 # Xcode machine-local/build artifacts
+ios/*.xcodeproj/
 ios/xcuserdata/
 ios/DerivedData/
 ios/build/
-artifacts/apple-validation/
+artifacts/
 *.xcresult
 *.xcuserstate
 

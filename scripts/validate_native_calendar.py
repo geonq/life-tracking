@@ -17,6 +17,7 @@ def main() -> int:
     project = (IOS / "project.yml").read_text(encoding="utf-8")
     required_files = [
         "Shared/CalendarDomain.swift",
+        "Shared/CalendarIconAsset.swift",
         "Shared/CalendarStore.swift",
         "Shared/CalendarViews.swift",
         "LifeOS/CalendarView.swift",
@@ -28,6 +29,9 @@ def main() -> int:
         "LifeOSMacWidget/Info.plist",
         "LifeOSMacWidget/LifeOSMacWidget.entitlements",
         "LifeOSTests/CalendarDomainTests.swift",
+        "LifeOSTests/CalendarIconAssetTests.swift",
+        "LifeOSMacUITests/LifeOSMacUITests.swift",
+        "LifeOSMacSnapshotTests/LifeOSMacSnapshotTests.swift",
         "Shared/SigningStatus.swift",
         "LifeOSTests/SigningStatusTests.swift",
         "Shared/CalendarPeerSync.swift",
@@ -52,6 +56,29 @@ def main() -> int:
     require("- LifeOSMacWidget\n      - Shared" in project, "macOS widget source membership changed")
     require("- LifeOS/LifeOSApp.swift" not in project, "macOS target must not include iOS @main")
     require("- LifeOSMac/LifeOSMacApp.swift" not in project.split("LifeOSMacWidget:", 1)[-1], "macOS widget must not include macOS app @main")
+    require(
+        "testTargets: [LifeOSMacUITests, LifeOSMacSnapshotTests]" in project,
+        "macOS scheme must capture visual evidence through UI and headless snapshot tests",
+    )
+
+    design_tokens = (IOS / "Shared/DesignTokens.swift").read_text(encoding="utf-8")
+    for token in ("lifeOSDarkCanvas", "lifeOSLightCanvas", "traits.userInterfaceStyle == .dark", ".darkAqua"):
+        require(token in design_tokens, f"adaptive light/dark design tokens missing {token}")
+
+    ios_ui_tests = (IOS / "LifeOSUITests/LifeOSUITests.swift").read_text(encoding="utf-8")
+    for token in ("testDarkModeScreenshots", '"dark-overview"', '"dark-usage"', '"dark-calendar"',
+                  '"dark-tax-documents"', '"dark-settings"'):
+        require(token in ios_ui_tests, f"iOS dark visual coverage missing {token}")
+
+    mac_snapshots = (IOS / "LifeOSMacSnapshotTests/LifeOSMacSnapshotTests.swift").read_text(encoding="utf-8")
+    for token in ("testDarkModeSnapshots", "colorScheme: .dark", "LifeOSMacRootView-overview-dark",
+                  "CalendarView-dark", "TaxDocumentsView-dark"):
+        require(token in mac_snapshots, f"macOS dark snapshot coverage missing {token}")
+
+    usage_widget = (IOS / "LifeOSWidget/UsageWidget.swift").read_text(encoding="utf-8")
+    calendar_widget_source = (IOS / "LifeOSWidget/CalendarWidget.swift").read_text(encoding="utf-8")
+    require("LifeOSTokens.surface" in usage_widget, "usage widget must use an adaptive branded surface")
+    require("LifeOSTokens.surface" in calendar_widget_source, "calendar widget must use an adaptive branded surface")
 
     ios_widget = (IOS / "LifeOSWidget/LifeOSWidget.swift").read_text(encoding="utf-8")
     require("WidgetBundle" in ios_widget, "iOS widget entry point must bundle usage and calendar widgets")
@@ -93,8 +120,16 @@ def main() -> int:
     require("REPLACE_WITH_TEAM_CONFIGURED_ID" in project, "App Group configuration must remain explicit until team-configured")
 
     calendar_domain = (IOS / "Shared/CalendarDomain.swift").read_text(encoding="utf-8")
-    for token in ("CalendarItem", "CalendarProgress", "CalendarSnapshot", "deletedAt", "deleting(at:"):
+    for token in ("CalendarItem", "CalendarProgress", "CalendarSnapshot", "deletedAt", "deleting(at:", "iconAsset"):
         require(token in calendar_domain, f"calendar domain missing {token}")
+
+    icon_asset = (IOS / "Shared/CalendarIconAsset.swift").read_text(encoding="utf-8")
+    for token in ("maxBytes", "init(from decoder:", "deterministicKey"):
+        require(token in icon_asset, f"calendar icon validation missing {token}")
+
+    calendar_view = (IOS / "LifeOS/CalendarView.swift").read_text(encoding="utf-8")
+    for token in ("fileImporter", ".png", ".jpeg", "startAccessingSecurityScopedResource", "Emoji remains the fallback"):
+        require(token in calendar_view, f"calendar editor icon import missing {token}")
 
     shared_swift = "\n".join(path.read_text(encoding="utf-8") for path in (IOS / "Shared").glob("*.swift"))
     require(shared_swift.count("struct CalendarItem:") == 1, "CalendarItem must have one canonical shared declaration")
