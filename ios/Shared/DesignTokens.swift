@@ -23,8 +23,8 @@ public extension Color {
     static let lifeOSBlue950 = Color(red: 0x00/255, green: 0x0B/255, blue: 0x19/255)
 
     // Brand canvases
-    /// Dark canvas #00060A
-    static let lifeOSDarkCanvas = Color(red: 0x00/255, green: 0x06/255, blue: 0x0A/255)
+    /// Figma dark canvas #000205
+    static let lifeOSDarkCanvas = Color(red: 0x00/255, green: 0x02/255, blue: 0x05/255)
     /// Light canvas #F0F6FF
     static let lifeOSLightCanvas = Color(red: 0xF0/255, green: 0xF6/255, blue: 0xFF/255)
 }
@@ -39,29 +39,34 @@ public enum LifeOSTokens {
     public static let smallCorner: CGFloat = 10
     public static let cardPadding: CGFloat = 16
     public static let iconFrame: CGFloat = 32
+    public static let overviewContentInset: CGFloat = 40
+    public static let overviewCardHeight: CGFloat = 80
+    public static let overviewCardGap: CGFloat = 16
+    public static let overviewCardCorner: CGFloat = 24
+    public static let overviewIconTile: CGFloat = 36
 
     // MARK: Canvas & Surface (theme-aware)
 
 #if os(macOS)
     public static let canvas = Color(nsColor: NSColor(name: nil) { appearance in
         appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            ? NSColor(srgbRed: 0x00/255, green: 0x06/255, blue: 0x0A/255, alpha: 1)
+            ? NSColor(srgbRed: 0x00/255, green: 0x02/255, blue: 0x05/255, alpha: 1)
             : NSColor(srgbRed: 0xF0/255, green: 0xF6/255, blue: 0xFF/255, alpha: 1)
     })
     public static let surface = Color(nsColor: NSColor(name: nil) { appearance in
         appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            ? NSColor(srgbRed: 0x00/255, green: 0x0B/255, blue: 0x19/255, alpha: 1)
+            ? NSColor(srgbRed: 0x00/255, green: 0x0A/255, blue: 0x1D/255, alpha: 1)
             : .white
     })
 #else
     public static let canvas = Color(uiColor: UIColor { traits in
         traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0x00/255, green: 0x06/255, blue: 0x0A/255, alpha: 1)
+            ? UIColor(red: 0x00/255, green: 0x02/255, blue: 0x05/255, alpha: 1)
             : UIColor(red: 0xF0/255, green: 0xF6/255, blue: 0xFF/255, alpha: 1)
     })
     public static let surface = Color(uiColor: UIColor { traits in
         traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0x00/255, green: 0x0B/255, blue: 0x19/255, alpha: 1)
+            ? UIColor(red: 0x00/255, green: 0x0A/255, blue: 0x1D/255, alpha: 1)
             : .white
     })
 #endif
@@ -74,8 +79,8 @@ public enum LifeOSTokens {
 
     // MARK: Semantic Colors
 
-    /// Main brand accent — #0253C4
-    public static let accent = Color.lifeOSBlue600
+    /// Figma primary accent — #006BCF
+    public static let accent = Color(red: 0x00/255, green: 0x6B/255, blue: 0xCF/255)
     public static let accentHover = Color.lifeOSBlue700
     public static let accentPressed = Color.lifeOSBlue800
     public static let accentLight = Color.lifeOSBlue50
@@ -85,7 +90,7 @@ public enum LifeOSTokens {
     public static let danger  = Color(red: 0xDC/255, green: 0x26/255, blue: 0x26/255)
 
     // Borders & quiescent states
-    public static let quietBorder = Color.lifeOSBlue600.opacity(0.12)
+    public static let quietBorder = Color(red: 0x1D/255, green: 0x5D/255, blue: 0x9B/255).opacity(0.78)
     public static let hairlineBorder = Color.primary.opacity(0.06)
 
     // Card visual styling

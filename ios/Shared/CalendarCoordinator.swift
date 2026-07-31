@@ -15,7 +15,12 @@ public final class CalendarCoordinator: ObservableObject {
     private var revision: Int
     private let peerSync: CalendarPeerSync
 
-    public init(bundle: Bundle = .main, fileManager: FileManager = .default) {
+    public init(
+        bundle: Bundle = .main,
+        fileManager: FileManager = .default,
+        initialSnapshot: CalendarSnapshot = CalendarSnapshot()
+    ) {
+        snapshot = initialSnapshot
         let group = bundle.object(forInfoDictionaryKey: "APP_GROUP_IDENTIFIER") as? String
         let selected: (URL, String) = {
             if let group, let url = try? CalendarStoreURL.appGroupURL(identifier: group, fileManager: fileManager) {

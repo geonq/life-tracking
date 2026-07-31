@@ -66,7 +66,8 @@ def main() -> int:
         require(token in design_tokens, f"adaptive light/dark design tokens missing {token}")
 
     ios_ui_tests = (IOS / "LifeOSUITests/LifeOSUITests.swift").read_text(encoding="utf-8")
-    for token in ("testDarkModeScreenshots", '"dark-overview"', '"dark-usage"', '"dark-calendar"',
+    for token in ("testDarkModeScreenshots", '"dark-overview"', '"dark-usage"',
+                  '"dark-calendar-three-day"', '"dark-calendar-month"',
                   '"dark-tax-documents"', '"dark-settings"'):
         require(token in ios_ui_tests, f"iOS dark visual coverage missing {token}")
 
@@ -128,7 +129,7 @@ def main() -> int:
         require(token in icon_asset, f"calendar icon validation missing {token}")
 
     calendar_view = (IOS / "LifeOS/CalendarView.swift").read_text(encoding="utf-8")
-    for token in ("fileImporter", ".png", ".jpeg", "startAccessingSecurityScopedResource", "Emoji remains the fallback"):
+    for token in ("fileImporter", ".png", ".jpeg", "startAccessingSecurityScopedResource", "CalendarEmojiPicker", "customIconControls"):
         require(token in calendar_view, f"calendar editor icon import missing {token}")
 
     shared_swift = "\n".join(path.read_text(encoding="utf-8") for path in (IOS / "Shared").glob("*.swift"))

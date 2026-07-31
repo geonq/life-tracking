@@ -6,7 +6,7 @@ final class LifeOSMacUITests: XCTestCase {
     override func setUpWithError() throws {
         continueAfterFailure = false
         app = XCUIApplication()
-        app.launchArguments += ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launchArguments += ["-AppleLanguages", "(en)", "-AppleLocale", "en_US", "-LifeOSVisualFixtures"]
         app.launch()
     }
 
@@ -17,8 +17,11 @@ final class LifeOSMacUITests: XCTestCase {
         let calendar = app.staticTexts["Calendar"].firstMatch
         XCTAssertTrue(calendar.waitForExistence(timeout: 5))
         calendar.tap()
-        XCTAssertTrue(app.buttons["Add"].waitForExistence(timeout: 5))
-        capture("mac-calendar")
+        XCTAssertTrue(app.buttons["calendar-add"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.segmentedControls.buttons["Week"].waitForExistence(timeout: 5))
+        capture("mac-calendar-week")
+        app.segmentedControls.buttons["Month"].tap()
+        capture("mac-calendar-month")
 
         let taxDocuments = app.staticTexts["Tax Documents"].firstMatch
         XCTAssertTrue(taxDocuments.waitForExistence(timeout: 5))

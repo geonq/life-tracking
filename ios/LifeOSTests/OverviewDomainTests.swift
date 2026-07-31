@@ -16,4 +16,17 @@ final class OverviewDomainTests: XCTestCase {
         let metric = OverviewMetric(label: "Resting heart rate", value: nil, unit: "bpm", icon: .heartRate)
         XCTAssertNil(metric.displayValue)
     }
+
+    func testProductionOverviewFallbackContainsNoSyntheticValues() {
+        let generatedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let overview = OverviewSnapshot.unavailable(at: generatedAt)
+
+        XCTAssertEqual(overview.generatedAt, generatedAt)
+        XCTAssertEqual(overview.sections.map(\.kind), [.llm, .clipper, .health, .finance])
+        XCTAssertTrue(overview.sections.allSatisfy { section in
+            section.provenance.quality == .unavailable
+                && section.provenance.connector == .unavailable
+                && section.metrics.allSatisfy { $0.value == nil }
+        })
+    }
 }

@@ -1,5 +1,23 @@
 import Foundation
 
+public enum LifeOSDeepLink: Equatable, Sendable {
+    case usage
+    case calendar
+    case newCalendarEvent
+    case tax
+
+    public init?(url: URL) {
+        guard url.scheme?.lowercased() == "lifeos" else { return nil }
+        switch (url.host?.lowercased(), url.path.lowercased()) {
+        case ("usage", _): self = .usage
+        case ("calendar", "/new"): self = .newCalendarEvent
+        case ("calendar", _): self = .calendar
+        case ("tax", _): self = .tax
+        default: return nil
+        }
+    }
+}
+
 public enum Provider: String, Codable, CaseIterable, Sendable {
     case codex
     case claude
@@ -66,16 +84,31 @@ public struct UsageWindow: Codable, Equatable, Identifiable, Sendable {
     public let used: Double?
     public let resetAt: Date?
     public let projection: Projection?
+    public let durationMinutes: Int?
 
     public init(id: String, label: String, limit: Double? = nil, used: Double? = nil,
-                resetAt: Date? = nil, projection: Projection? = nil) {
+                resetAt: Date? = nil, projection: Projection? = nil, durationMinutes: Int? = nil) {
         self.id = id; self.label = label; self.limit = limit; self.used = used
-        self.resetAt = resetAt; self.projection = projection
+        self.resetAt = resetAt; self.projection = projection; self.durationMinutes = durationMinutes
     }
 
     public var usedPercent: Double? {
         guard let used, let limit, limit > 0 else { return nil }
         return min(max(used / limit, 0), 1)
+    }
+}
+
+public extension ProviderSnapshot {
+    /// The shortest observed limit window is the most actionable summary.
+    /// Unknown-duration and unavailable windows sort behind measured windows.
+    var smallestObservedWindow: UsageWindow? {
+        windows
+            .filter { $0.usedPercent != nil }
+            .sorted {
+                if $0.durationMinutes == $1.durationMinutes { return $0.id < $1.id }
+                return ($0.durationMinutes ?? .max) < ($1.durationMinutes ?? .max)
+            }
+            .first
     }
 }
 
@@ -113,6 +146,28 @@ public struct WidgetSnapshot: Codable, Equatable, Sendable {
     public let freshness: Freshness
     public let warning: String?
     public let provenance: Provenance
+}
+
+public extension WidgetSnapshot {
+    static func unavailable(at date: Date = .now) -> WidgetSnapshot {
+        let provenance = Provenance(
+            source: "No connected data source",
+            observedAt: date,
+            quality: .unavailable,
+            connector: .unavailable
+        )
+        return WidgetSnapshot(
+            providers: [],
+            codexStatus: "Unavailable",
+            clipperSignal: "Unavailable",
+            healthSignal: "Unavailable",
+            financeSignal: "Unavailable",
+            updatedAt: date,
+            freshness: .unavailable,
+            warning: "Usage data unavailable",
+            provenance: provenance
+        )
+    }
 }
 
 // The native client mirrors the provider-neutral /api/usage contract. No aggregate

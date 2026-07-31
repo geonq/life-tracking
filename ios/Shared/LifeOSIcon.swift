@@ -10,6 +10,7 @@ public enum LifeOSIconName: Sendable {
     case calendar
     case tax
     case settings
+    case chevronLeft
     case chevronRight
     case views
     case subscribers
@@ -41,6 +42,7 @@ public enum LifeOSIconName: Sendable {
         case .calendar: .calendar
         case .tax: .pageSearch
         case .settings: .settings
+        case .chevronLeft: .navArrowLeft
         case .chevronRight: .navArrowRight
         case .views: .eye
         case .subscribers: .userPlus

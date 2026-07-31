@@ -34,7 +34,7 @@ final class CalendarDomainTests: XCTestCase {
     func testUpdatingCanExplicitlyRemoveIconAssetWhileOmissionPreservesIt() throws {
         let asset = try CalendarIconAsset(
             format: .png,
-            bytes: Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+            bytes: Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")!
         )
         let item = try CalendarItem(
             title: "Branded",

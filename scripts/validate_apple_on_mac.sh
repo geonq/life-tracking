@@ -4,6 +4,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARTIFACT_DIR="${LIFEOS_ARTIFACT_DIR:-$ROOT/artifacts/apple-validation}"
 
+# Non-interactive SSH shells do not load Homebrew's shellenv. Include the
+# standard Apple Silicon and Intel prefixes so XcodeGen is still discoverable.
+for brew_prefix in /opt/homebrew/bin /usr/local/bin; do
+  if [[ -d "$brew_prefix" ]]; then
+    PATH="$brew_prefix:$PATH"
+  fi
+done
+export PATH
+
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "This validation requires macOS with Xcode." >&2
   exit 2
@@ -42,8 +51,10 @@ devices = [
     for device in entries
     if device.get("isAvailable") and "iPhone" in device["name"]
 ]
-preferred = [device for device in devices if "Pro" not in device["name"] and "SE" not in device["name"]]
-selected = (preferred or devices)[-1] if devices else None
+preferred = [device for device in devices if device["name"] == "iPhone 17"]
+if not preferred:
+    preferred = [device for device in devices if "Pro" not in device["name"] and "SE" not in device["name"]]
+selected = preferred[0] if preferred else (devices[-1] if devices else None)
 print(selected["udid"] if selected else "")
 ')"
 

@@ -42,8 +42,32 @@ final class DomainTests: XCTestCase {
         XCTAssertTrue(snapshot.financeSignal.hasPrefix("Blocked"))
     }
 
+    func testUnavailableWidgetSnapshotFailsClosedWithoutSyntheticProviders() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let snapshot = WidgetSnapshot.unavailable(at: now)
+
+        XCTAssertTrue(snapshot.providers.isEmpty)
+        XCTAssertEqual(snapshot.updatedAt, now)
+        XCTAssertEqual(snapshot.freshness, .unavailable)
+        XCTAssertEqual(snapshot.provenance.quality, .unavailable)
+        XCTAssertEqual(snapshot.provenance.connector, .unavailable)
+        XCTAssertEqual(snapshot.warning, "Usage data unavailable")
+    }
+
+    func testDemoFixturesUseAStableReferenceDate() {
+        XCTAssertEqual(DemoDataProvider.observedAt, Date(timeIntervalSince1970: 1_785_283_200))
+        XCTAssertEqual(DemoUsageAnalytics.snapshots.first?.provenance.observedAt, DemoDataProvider.observedAt)
+    }
+
     func testAppGroupStoreFailsClosedForPlaceholder() {
         XCTAssertNil(AppGroupConfiguration.validatedIdentifier("$(APP_GROUP_IDENTIFIER)"))
         XCTAssertNil(SharedSnapshotStore.url(appGroupIdentifier: "$(APP_GROUP_IDENTIFIER)"))
+    }
+
+    func testCalendarDeepLinkDistinguishesBrowseAndNewEvent() throws {
+        XCTAssertEqual(LifeOSDeepLink(url: try XCTUnwrap(URL(string: "lifeos://calendar"))), .calendar)
+        XCTAssertEqual(LifeOSDeepLink(url: try XCTUnwrap(URL(string: "lifeos://calendar/new"))), .newCalendarEvent)
+        XCTAssertEqual(LifeOSDeepLink(url: try XCTUnwrap(URL(string: "lifeos://usage"))), .usage)
+        XCTAssertNil(LifeOSDeepLink(url: try XCTUnwrap(URL(string: "https://calendar/new"))))
     }
 }

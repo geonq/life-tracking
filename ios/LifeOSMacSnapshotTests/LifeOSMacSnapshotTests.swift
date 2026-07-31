@@ -7,16 +7,43 @@ import XCTest
 @available(macOS 14.0, *)
 @MainActor
 final class LifeOSMacSnapshotTests: XCTestCase {
-    private let frame = CGSize(width: 980, height: 700)
+    private let frame = CGSize(width: 1512, height: 982)
 
     func testOverviewSnapshot() {
-        let coordinator = CalendarCoordinator()
-        render(LifeOSMacRootView(calendarCoordinator: coordinator), named: "LifeOSMacRootView-overview")
+        let coordinator = CalendarCoordinator(initialSnapshot: CalendarVisualFixtures.snapshot())
+        render(LifeOSMacRootView(calendarCoordinator: coordinator, usesVisualFixtures: true), named: "LifeOSMacRootView-overview")
     }
 
     func testCalendarSnapshot() {
-        let coordinator = CalendarCoordinator()
-        render(CalendarView(selectedDate: Date(timeIntervalSince1970: 0), calendar: Calendar(identifier: .gregorian), coordinator: coordinator), named: "CalendarView")
+        let anchor = visualFixtureAnchor
+        let coordinator = CalendarCoordinator(
+            initialSnapshot: CalendarVisualFixtures.snapshot(anchor: anchor, calendar: visualFixtureCalendar)
+        )
+        render(
+            CalendarView(selectedDate: anchor, calendar: visualFixtureCalendar, coordinator: coordinator),
+            named: "CalendarView"
+        )
+    }
+
+    func testCalendarMonthSnapshot() {
+        let anchor = visualFixtureAnchor
+        let coordinator = CalendarCoordinator(
+            initialSnapshot: CalendarVisualFixtures.snapshot(anchor: anchor, calendar: visualFixtureCalendar)
+        )
+        render(
+            CalendarView(
+                selectedDate: anchor,
+                calendar: visualFixtureCalendar,
+                coordinator: coordinator,
+                startsInMonthMode: true
+            ),
+            named: "CalendarView-month",
+            colorScheme: .dark
+        )
+    }
+
+    func testUsageSnapshot() {
+        render(UsageView(snapshots: DemoDataProvider.providers, analytics: DemoUsageAnalytics.snapshots), named: "UsageView", colorScheme: .light)
     }
 
     func testTaxDocumentsSnapshot() {
@@ -24,10 +51,26 @@ final class LifeOSMacSnapshotTests: XCTestCase {
     }
 
     func testDarkModeSnapshots() {
-        let coordinator = CalendarCoordinator()
-        render(LifeOSMacRootView(calendarCoordinator: coordinator), named: "LifeOSMacRootView-overview-dark", colorScheme: .dark)
-        render(CalendarView(selectedDate: Date(timeIntervalSince1970: 0), calendar: Calendar(identifier: .gregorian), coordinator: coordinator), named: "CalendarView-dark", colorScheme: .dark)
+        let anchor = visualFixtureAnchor
+        let coordinator = CalendarCoordinator(
+            initialSnapshot: CalendarVisualFixtures.snapshot(anchor: anchor, calendar: visualFixtureCalendar)
+        )
+        render(LifeOSMacRootView(calendarCoordinator: coordinator, usesVisualFixtures: true), named: "LifeOSMacRootView-overview-dark", colorScheme: .dark)
+        render(UsageView(snapshots: DemoDataProvider.providers, analytics: DemoUsageAnalytics.snapshots), named: "UsageView-dark", colorScheme: .dark)
+        render(CalendarView(selectedDate: anchor, calendar: visualFixtureCalendar, coordinator: coordinator), named: "CalendarView-dark", colorScheme: .dark)
         render(TaxDocumentsView(), named: "TaxDocumentsView-dark", colorScheme: .dark)
+    }
+
+    private var visualFixtureCalendar: Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.locale = Locale(identifier: "en_US")
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        calendar.firstWeekday = 2
+        return calendar
+    }
+
+    private var visualFixtureAnchor: Date {
+        visualFixtureCalendar.date(from: DateComponents(year: 2026, month: 7, day: 27, hour: 9))!
     }
 
     private func render<V: View>(_ view: V, named name: String, colorScheme: ColorScheme? = nil) {
@@ -54,6 +97,12 @@ final class LifeOSMacSnapshotTests: XCTestCase {
             defer: false
         )
         window.contentView = hostingView
+        window.layoutIfNeeded()
+        hostingView.layoutSubtreeIfNeeded()
+
+        // Allow SwiftUI tasks and chart entrance animations to settle before
+        // capturing; otherwise an off-screen host records their zero state.
+        RunLoop.main.run(until: Date().addingTimeInterval(1.0))
         window.layoutIfNeeded()
         hostingView.layoutSubtreeIfNeeded()
         hostingView.displayIfNeeded()

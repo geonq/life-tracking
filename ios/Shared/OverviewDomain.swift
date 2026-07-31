@@ -66,6 +66,41 @@ public struct OverviewSnapshot: Codable, Equatable, Sendable {
     }
 }
 
+public extension OverviewSnapshot {
+    static func unavailable(at date: Date = .now) -> OverviewSnapshot {
+        let provenance = Provenance(
+            source: "No connected data source",
+            observedAt: date,
+            quality: .unavailable,
+            connector: .unavailable
+        )
+        return OverviewSnapshot(
+            sections: [
+                .init(kind: .llm, title: "LLM", metrics: [
+                    .init(label: "Codex", value: nil, unit: "% left", icon: .usage),
+                    .init(label: "Claude", value: nil, unit: "% left", icon: .usage),
+                    .init(label: "GLM", value: nil, unit: "% left", icon: .usage),
+                    .init(label: "Banked resets", value: nil, icon: .usage)
+                ], provenance: provenance),
+                .init(kind: .clipper, title: "Clipper", metrics: [
+                    .init(label: "Views today", value: nil, icon: .views),
+                    .init(label: "Subscribers today", value: nil, icon: .subscribers),
+                    .init(label: "Revenue this month", value: nil, icon: .revenue)
+                ], provenance: provenance),
+                .init(kind: .health, title: "Health", metrics: [
+                    .init(label: "Resting heart rate", value: nil, unit: "bpm", icon: .heartRate),
+                    .init(label: "Sleep quality", value: nil, unit: "%", icon: .sleep)
+                ], provenance: provenance),
+                .init(kind: .finance, title: "Finance", metrics: [
+                    .init(label: "Savings goal", value: nil, unit: "%", icon: .savings),
+                    .init(label: "Monthly budget", value: nil, unit: "% used", icon: .budget)
+                ], provenance: provenance)
+            ],
+            generatedAt: date
+        )
+    }
+}
+
 public extension DemoDataProvider {
     static let overview = OverviewSnapshot(
         sections: [
