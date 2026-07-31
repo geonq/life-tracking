@@ -40,9 +40,9 @@ struct LifeOSMacRootView: View {
         NavigationSplitView {
             List(selection: $selection) {
                 Section {
-                    Label("Overview", systemImage: "square.grid.2x2").tag(SidebarItem.overview)
-                    Label("Calendar", systemImage: "calendar").tag(SidebarItem.calendar)
-                    Label("Tax Documents", systemImage: "doc.text.magnifyingglass").tag(SidebarItem.tax)
+                    Label { Text("Overview") } icon: { LifeOSIcon(.overview) }.tag(SidebarItem.overview)
+                    Label { Text("Calendar") } icon: { LifeOSIcon(.calendar) }.tag(SidebarItem.calendar)
+                    Label { Text("Tax Documents") } icon: { LifeOSIcon(.tax) }.tag(SidebarItem.tax)
                 }
             }
             .listStyle(.sidebar)

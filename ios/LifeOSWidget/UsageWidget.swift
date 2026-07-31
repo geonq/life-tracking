@@ -22,7 +22,10 @@ struct LifeOSWidgetView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Label("Usage", systemImage: "chart.bar.xaxis")
+                HStack(spacing: 7) {
+                    LifeOSIcon(.usage).frame(width: 17, height: 17)
+                    Text("Usage")
+                }
                     .font(.headline.weight(.bold))
                     .foregroundStyle(primaryText)
                 Spacer()

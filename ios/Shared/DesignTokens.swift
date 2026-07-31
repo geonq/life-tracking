@@ -152,17 +152,6 @@ extension View {
                 .overlay(LifeOSTokens.pillShape.stroke(color.opacity(0.22)))
         }
     }
-
-    /// Branded icon container: rounded-square tinted background behind an SF Symbol.
-    func lifeOSIconBadge(systemName: String, size: CGFloat = LifeOSTokens.iconFrame) -> some View {
-        self.overlay {
-            Image(systemName: systemName)
-                .font(.system(size: size * 0.5, weight: .medium))
-                .foregroundStyle(LifeOSTokens.accent)
-                .frame(width: size, height: size)
-                .background(LifeOSTokens.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        }
-    }
 }
 
 private struct LifeOSCardModifier: ViewModifier {

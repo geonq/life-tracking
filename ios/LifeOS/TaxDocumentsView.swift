@@ -126,7 +126,10 @@ struct TaxDocumentsView: View {
                     }
                     Spacer()
                     Button { model.isImporterPresented = true } label: {
-                        Label("Import PDF", systemImage: "doc.badge.plus")
+                        HStack(spacing: 6) {
+                            LifeOSIcon(.importDocument).frame(width: 16, height: 16)
+                            Text("Import PDF")
+                        }
                     }
                     .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("import-tax-pdf")
@@ -135,12 +138,12 @@ struct TaxDocumentsView: View {
 
                 List {
                     Section {
-                        Label {
+                        HStack(alignment: .top, spacing: 8) {
+                            LifeOSIcon(.security)
+                                .foregroundStyle(LifeOSTokens.accent)
+                                .frame(width: 17, height: 17)
                             Text("Stored only on this device. Candidates are rule-based, not tax advice, and nothing is filed automatically.")
                                 .fixedSize(horizontal: false, vertical: true)
-                        } icon: {
-                            Image(systemName: "lock.shield")
-                                .foregroundStyle(LifeOSTokens.accent)
                         }
                         .padding(.vertical, 4)
                     }

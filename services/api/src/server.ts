@@ -4,6 +4,7 @@ import { readCodexLive } from './codex-adapter.js';
 import { UsageHistory } from './history.js';
 import { projectUsage } from './projection.js';
 import { constantTimeEqual, ingestClaudeStatusline, validClaudeContentType, MAX_BODY_BYTES } from './claude-ingest.js';
+import { financeConnectors } from './finance-connectors.js';
 
 const history = () => new UsageHistory(process.env.USAGE_STORE_PATH || 'usage-history.jsonl');
 const json = (res: ServerResponse, status: number, value: unknown) => { res.statusCode = status; res.end(JSON.stringify(value)); };
@@ -39,6 +40,7 @@ export async function app(req: IncomingMessage, res: ServerResponse) {
   if (req.url === '/api/overview') return json(res, 200, parseOverview(fixtures.overview));
   if (req.url === '/api/codex') return json(res, 200, parseCodexFixture(fixtures.codex));
   if (req.url === '/api/codex/live') return json(res, 200, await readCodexLive());
+  if (req.url === '/api/finance/connectors') return json(res, 200, { connectors: financeConnectors });
   if (req.url === '/api/usage') {
     const now = new Date().toISOString(); const codex = await readCodexLive(); const store = history();
     const windows: UsageWindow[] = [];

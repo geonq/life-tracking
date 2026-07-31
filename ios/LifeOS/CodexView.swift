@@ -54,9 +54,9 @@ private struct ProviderCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: LifeOSTokens.spacing) {
             HStack(spacing: 10) {
-                Image(systemName: snapshot.provider == .codex ? "terminal" : "bubble.left.and.bubble.right")
-                    .font(.headline.weight(.semibold))
+                LifeOSIcon(snapshot.provider == .codex ? .usage : .assistant)
                     .foregroundStyle(LifeOSTokens.accent)
+                    .frame(width: 19, height: 19)
                     .frame(width: LifeOSTokens.iconFrame, height: LifeOSTokens.iconFrame)
                     .background(LifeOSTokens.accentLight, in: LifeOSTokens.smallCardShape)
                     .accessibilityHidden(true)

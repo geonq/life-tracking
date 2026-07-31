@@ -23,6 +23,14 @@ final class CalendarDomainTests: XCTestCase {
         XCTAssertEqual(changed.status, .inProgress)
     }
 
+    func testProgressUsesRequestedStatusesAndMigratesLegacyBlocked() throws {
+        XCTAssertEqual(CalendarProgress.allCases, [.planned, .inProgress, .done, .aborted])
+        let legacy = try JSONDecoder().decode(CalendarProgress.self, from: Data(#""blocked""#.utf8))
+        XCTAssertEqual(legacy, .aborted)
+        let encoded = try JSONEncoder().encode(CalendarProgress.aborted)
+        XCTAssertEqual(String(decoding: encoded, as: UTF8.self), #""aborted""#)
+    }
+
     func testUpdatingCanExplicitlyRemoveIconAssetWhileOmissionPreservesIt() throws {
         let asset = try CalendarIconAsset(
             format: .png,

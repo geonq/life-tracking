@@ -3,8 +3,26 @@ import Foundation
 public enum CalendarProgress: String, Codable, CaseIterable, Sendable {
     case planned
     case inProgress = "in_progress"
-    case blocked
     case done
+    case aborted
+
+    public init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        if value == "blocked" {
+            self = .aborted
+        } else if let progress = Self(rawValue: value) {
+            self = progress
+        } else {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: decoder.codingPath, debugDescription: "Unknown calendar progress: \(value)")
+            )
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
 }
 
 public enum CalendarValidationError: Error, Equatable, Sendable {

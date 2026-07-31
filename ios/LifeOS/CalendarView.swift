@@ -26,13 +26,27 @@ public struct CalendarView: View {
                     }
                     Spacer()
                     Button { editingItem = nil; showingEditor = true } label: {
-                        Label("Add", systemImage: "plus")
+                        HStack(spacing: 6) {
+                            LifeOSIcon(.add).frame(width: 16, height: 16)
+                            Text("Add")
+                        }
                     }.buttonStyle(.borderedProminent).accessibilityHint("Create a calendar item")
                 }
                 DatePicker("Choose date", selection: $selectedDate, displayedComponents: [.date])
                     .datePickerStyle(.graphical).labelsHidden().accessibilityLabel("Choose calendar date")
                 HStack { Text("Agenda").font(.title2.bold()); Spacer(); Text("\(dayItems.count) \(dayItems.count == 1 ? "item" : "items")").foregroundStyle(.secondary).font(.subheadline) }
-                if dayItems.isEmpty { ContentUnavailableView("A clear day", systemImage: "sun.max", description: Text("Add a time commitment to get started.")) }
+                if dayItems.isEmpty {
+                    VStack(spacing: 10) {
+                        LifeOSIcon(.empty)
+                            .foregroundStyle(LifeOSTokens.accent)
+                            .frame(width: 28, height: 28)
+                        Text("A clear day").font(.headline)
+                        Text("Add a time commitment to get started.").font(.subheadline).foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 36)
+                    .accessibilityElement(children: .combine)
+                }
                 else {
                     ForEach(dayItems) { item in
                         Button { editingItem = item; showingEditor = true } label: { CalendarItemRow(item: item) }
@@ -97,7 +111,10 @@ private struct CalendarEditor: View {
                         .buttonStyle(.bordered).accessibilityLabel("Choose local calendar icon")
                     if let iconAsset {
                         HStack {
-                            Label("Custom \(iconAsset.format.rawValue.uppercased()) selected", systemImage: "photo.fill")
+                            HStack(spacing: 7) {
+                                LifeOSIcon(.image).frame(width: 16, height: 16)
+                                Text("Custom \(iconAsset.format.rawValue.uppercased()) selected")
+                            }
                                 .foregroundStyle(LifeOSTokens.accent)
                             Spacer()
                             Button("Remove", role: .destructive) { self.iconAsset = nil }

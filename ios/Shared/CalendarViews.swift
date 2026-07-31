@@ -27,8 +27,8 @@ public extension CalendarProgress {
         switch self {
         case .planned: "Planned"
         case .inProgress: "In progress"
-        case .blocked: "Blocked"
         case .done: "Done"
+        case .aborted: "Aborted"
         }
     }
 
@@ -36,8 +36,8 @@ public extension CalendarProgress {
         switch self {
         case .planned: LifeOSTokens.accent
         case .inProgress: .orange
-        case .blocked: .red
         case .done: .green
+        case .aborted: .red
         }
     }
 }

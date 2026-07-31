@@ -9,13 +9,21 @@ struct LifeOSApp: App {
         WindowGroup {
             TabView {
                 OverviewView()
-                    .tabItem { Label("Overview", systemImage: "square.grid.2x2") }
+                    .tabItem {
+                        Label { Text("Overview") } icon: { LifeOSIcon(.overview) }
+                    }
                 CalendarView(coordinator: calendarCoordinator)
-                    .tabItem { Label("Calendar", systemImage: "calendar") }
+                    .tabItem {
+                        Label { Text("Calendar") } icon: { LifeOSIcon(.calendar) }
+                    }
                 TaxDocumentsView()
-                    .tabItem { Label("Tax", systemImage: "doc.text.magnifyingglass") }
+                    .tabItem {
+                        Label { Text("Tax") } icon: { LifeOSIcon(.tax) }
+                    }
                 NavigationStack { SettingsView() }
-                    .tabItem { Label("Settings", systemImage: "gearshape") }
+                    .tabItem {
+                        Label { Text("Settings") } icon: { LifeOSIcon(.settings) }
+                    }
             }
             .tint(LifeOSTokens.accent)
             .animation(reduceMotion ? nil : LifeOSMotion.ease, value: calendarCoordinator.snapshot.items.count)

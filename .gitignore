@@ -40,6 +40,10 @@ snapshots/
 *.sqlite3
 *.realm
 
+# Local design inspection and simulator evidence (never publish)
+/figma-*
+/lifeos-*.png
+
 # Personal imports, exports, uploads, and media (global extensions)
 imports/
 exports/
