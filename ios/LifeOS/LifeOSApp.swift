@@ -32,33 +32,28 @@ struct LifeOSApp: App {
 
     var body: some Scene {
         WindowGroup {
-            TabView(selection: $selection) {
+            Group {
+                switch selection {
+                case .overview:
                 OverviewView(
                     snapshot: usesVisualFixtures ? DemoDataProvider.overview : .unavailable(),
                     usageSnapshots: usesVisualFixtures ? DemoDataProvider.providers : [],
                     usageAnalytics: usesVisualFixtures ? DemoUsageAnalytics.snapshots : [],
                     showingUsage: $showingUsage
                 )
-                    .tabItem {
-                        Label { Text("Overview") } icon: { LifeOSIcon(.overview) }
-                    }
-                    .tag(LifeOSAppTab.overview)
-
+                case .calendar:
                 CalendarView(coordinator: calendarCoordinator, requestNewEvent: $requestingNewCalendarEvent)
-                    .tabItem {
-                        Label { Text("Calendar") } icon: { LifeOSIcon(.calendar) }
-                    }
-                    .tag(LifeOSAppTab.calendar)
+                case .tax:
                 TaxDocumentsView()
-                    .tabItem {
-                        Label { Text("Tax") } icon: { LifeOSIcon(.tax) }
-                    }
-                    .tag(LifeOSAppTab.tax)
+                case .settings:
                 NavigationStack { SettingsView() }
-                    .tabItem {
-                        Label { Text("Settings") } icon: { LifeOSIcon(.settings) }
-                    }
-                    .tag(LifeOSAppTab.settings)
+                }
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if !showingUsage {
+                    CompactTabBar(selection: $selection)
+                        .transition(reduceMotion ? .identity : .move(edge: .bottom).combined(with: .opacity))
+                }
             }
             .tint(LifeOSTokens.accent)
             .preferredColorScheme(forcedColorScheme)
@@ -83,5 +78,54 @@ struct LifeOSApp: App {
                 }
             }
         }
+    }
+}
+
+private struct CompactTabBar: View {
+    @Binding var selection: LifeOSAppTab
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        HStack(spacing: 0) {
+            item(.overview, title: "Overview", icon: .overview)
+            item(.calendar, title: "Calendar", icon: .calendar)
+            item(.tax, title: "Tax", icon: .tax)
+            item(.settings, title: "Settings", icon: .settings)
+        }
+        .padding(.horizontal, 10)
+        .padding(.top, 5)
+        .padding(.bottom, 2)
+        .frame(maxWidth: .infinity)
+        .background(.ultraThinMaterial)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(LifeOSTokens.hairlineBorder)
+                .frame(height: 0.5)
+        }
+        .accessibilityIdentifier("main-tab-bar")
+    }
+
+    private func item(_ tab: LifeOSAppTab, title: String, icon: LifeOSIconName) -> some View {
+        let selected = selection == tab
+        return Button {
+            withAnimation(reduceMotion ? nil : LifeOSMotion.springSnappy) {
+                selection = tab
+            }
+        } label: {
+            VStack(spacing: 2) {
+                LifeOSIcon(icon)
+                    .frame(width: 17, height: 17)
+                Text(title)
+                    .font(LifeOSFont.inter(9.5, weight: selected ? .semiBold : .regular))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(selected ? LifeOSTokens.accent : Color.secondary)
+            .frame(maxWidth: .infinity)
+            .frame(height: 38)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }

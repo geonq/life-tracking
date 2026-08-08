@@ -50,10 +50,10 @@ public actor CalendarStore {
     }
 }
 
-private extension JSONEncoder {
+extension JSONEncoder {
     static var calendar: JSONEncoder { let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601; encoder.outputFormatting = [.sortedKeys]; return encoder }
 }
 
-private extension JSONDecoder {
+extension JSONDecoder {
     static var calendar: JSONDecoder { let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601; return decoder }
 }

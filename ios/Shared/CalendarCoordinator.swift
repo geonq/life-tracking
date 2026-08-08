@@ -14,6 +14,7 @@ public final class CalendarCoordinator: ObservableObject {
     public let senderID: String
     private var revision: Int
     private let peerSync: CalendarPeerSync
+    private let tailscaleClient: TailscaleSyncClient
 
     public init(
         bundle: Bundle = .main,
@@ -37,11 +38,21 @@ public final class CalendarCoordinator: ObservableObject {
         else { let value = UUID().uuidString; defaults.set(value, forKey: key); senderID = value }
         revision = defaults.integer(forKey: "LifeOS.Calendar.revision")
         peerSync = CalendarPeerSync(displayName: senderID)
+        tailscaleClient = TailscaleSyncClient()
         peerSync.onStatusChanged = { [weak self] status in
             Task { @MainActor in self?.syncStatus = status }
         }
         peerSync.onSnapshotReceived = { [weak self] envelope, _ in
             Task { @MainActor in await self?.merge(envelope.snapshot, remoteRevision: envelope.revision) }
+        }
+
+        let client = tailscaleClient
+        Task { [weak self] in
+            guard await client.isConfigured else { return }
+            await client.connectChangeStream { type in
+                guard type == "calendar_changed" else { return }
+                Task { @MainActor in await self?.pullMerge() }
+            }
         }
     }
 
@@ -76,5 +87,54 @@ public final class CalendarCoordinator: ObservableObject {
             try peerSync.send(snapshot: snapshot, senderID: senderID, revision: revision)
             errorMessage = nil
         } catch { errorMessage = "Unable to save calendar: \(error.localizedDescription)" }
+
+        // Fire-and-forget Tailscale push: never blocks or fails the local save above,
+        // which has already succeeded by this point.
+        let client = tailscaleClient
+        Task { [weak self] in
+            guard await client.isConfigured else { return }
+            do {
+                let remoteData = try await client.fetchCalendar()
+                let remote = try JSONDecoder.calendar.decode(CalendarSnapshot.self, from: remoteData)
+                let merged = try await self?.store.merge(remote)
+                if let merged {
+                    let data = try JSONEncoder.calendar.encode(merged)
+                    try await client.pushCalendar(data)
+                    await MainActor.run { self?.snapshot = merged; UserDefaults.standard.set(Date.now.timeIntervalSince1970, forKey: "LifeOS.Sync.LastSuccess") }
+                }
+            } catch {
+                // Local save already succeeded; a Tailscale hiccup here is non-fatal and silent by design.
+            }
+        }
+    }
+
+    /// Pull-merge only, used when a remote change notification arrives over the WebSocket.
+    private func pullMerge() async {
+        do {
+            let remoteData = try await tailscaleClient.fetchCalendar()
+            let remote = try JSONDecoder.calendar.decode(CalendarSnapshot.self, from: remoteData)
+            snapshot = try await store.merge(remote)
+            UserDefaults.standard.set(Date.now.timeIntervalSince1970, forKey: "LifeOS.Sync.LastSuccess")
+            errorMessage = nil
+        } catch {
+            // Tailscale sync is opt-in/best-effort; do not surface transient network errors as blocking UI state.
+        }
+    }
+
+    /// Pull-merge-push cycle on demand (pull-to-refresh, Cmd+R).
+    public func manualRefresh() async {
+        guard await tailscaleClient.isConfigured else { return }
+        do {
+            let remoteData = try await tailscaleClient.fetchCalendar()
+            let remote = try JSONDecoder.calendar.decode(CalendarSnapshot.self, from: remoteData)
+            let merged = try await store.merge(remote)
+            let data = try JSONEncoder.calendar.encode(merged)
+            try await tailscaleClient.pushCalendar(data)
+            snapshot = merged
+            UserDefaults.standard.set(Date.now.timeIntervalSince1970, forKey: "LifeOS.Sync.LastSuccess")
+            errorMessage = nil
+        } catch {
+            errorMessage = "Unable to sync with Tailscale: \(error.localizedDescription)"
+        }
     }
 }

@@ -20,6 +20,8 @@ targets:
     type: application
     platform: iOS
     sources: [LifeOS, Shared]
+    resources:
+      - path: Shared/Resources/Fonts
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: com.hermes.lifeos.app
       INFOPLIST_FILE: LifeOS/Info.plist
@@ -34,6 +36,8 @@ targets:
     type: app-extension
     platform: iOS
     sources: [LifeOSWidget, Shared]
+    resources:
+      - path: Shared/Resources/Fonts
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: com.hermes.lifeos.app.widget
       INFOPLIST_FILE: LifeOSWidget/Info.plist
@@ -69,6 +73,8 @@ targets:
       - LifeOS/Settings.swift
       - LifeOS/CalendarView.swift
       - LifeOS/TaxDocumentsView.swift
+    resources:
+      - path: Shared/Resources/Fonts
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: com.hermes.lifeos.mac
       INFOPLIST_FILE: LifeOSMac/Info.plist
@@ -105,6 +111,8 @@ targets:
       - Shared
       - LifeOSWidget/UsageWidget.swift
       - LifeOSWidget/CalendarWidget.swift
+    resources:
+      - path: Shared/Resources/Fonts
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: com.hermes.lifeos.mac.widget
       INFOPLIST_FILE: LifeOSMacWidget/Info.plist

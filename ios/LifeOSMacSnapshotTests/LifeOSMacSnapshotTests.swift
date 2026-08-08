@@ -96,6 +96,9 @@ final class LifeOSMacSnapshotTests: XCTestCase {
             backing: .buffered,
             defer: false
         )
+        if let colorScheme {
+            window.appearance = NSAppearance(named: colorScheme == .dark ? .darkAqua : .aqua)
+        }
         window.contentView = hostingView
         window.layoutIfNeeded()
         hostingView.layoutSubtreeIfNeeded()

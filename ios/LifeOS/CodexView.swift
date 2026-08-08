@@ -20,6 +20,7 @@ struct UsageView: View {
     private let analytics: [UsageAnalyticsSnapshot]
     @State private var selectedProviders: Set<Provider>
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dismiss) private var dismiss
 
     init(snapshots: [ProviderSnapshot], analytics: [UsageAnalyticsSnapshot]) {
         self.snapshots = snapshots
@@ -29,7 +30,19 @@ struct UsageView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
+            VStack(alignment: .leading, spacing: 16) {
+#if os(iOS)
+                Button { dismiss() } label: {
+                    LifeOSIcon(.chevronLeft)
+                        .frame(width: 15, height: 15)
+                        .frame(width: 34, height: 34)
+                        .background(Color.primary.opacity(0.055), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Back")
+                .accessibilityIdentifier("usage-back")
+#endif
                 header
                 providerSelector
 
@@ -45,33 +58,39 @@ struct UsageView: View {
                 }
             }
             .frame(maxWidth: 1_180, alignment: .leading)
+#if os(iOS)
+            .padding(.horizontal, 18)
+            .padding(.top, 10)
+            .padding(.bottom, 24)
+#else
             .padding(LifeOSTokens.pagePadding)
+#endif
         }
         .accessibilityIdentifier("usage-screen")
         .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
-        .navigationTitle("Usage")
 #if os(iOS)
-        .toolbar(.hidden, for: .tabBar)
+        .toolbar(.hidden, for: .navigationBar)
 #endif
         .tint(LifeOSTokens.accent)
         .animation(reduceMotion ? nil : LifeOSMotion.spring, value: selectedProviders)
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 4) {
             Text("LLM usage")
-                .font(.title2.weight(.bold))
-            Text("Limits, activity, projections and model mix — always separated by provider")
-                .font(.subheadline)
+                .font(LifeOSFont.headerLarge(25))
+            Text("Limits, activity and model mix by provider")
+                .font(LifeOSFont.body(15))
                 .foregroundStyle(.secondary)
-            HStack(alignment: .top, spacing: 6) {
-                LifeOSIcon(.warning).frame(width: 13, height: 13)
-                Text("Preview analytics · connect official sources for live data")
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(LifeOSTokens.warning)
+                    .frame(width: 5, height: 5)
+                Text("Preview data · connect sources for live updates")
+                    .lineLimit(1)
             }
-                .font(.caption.weight(.medium))
-                .foregroundStyle(LifeOSTokens.warning)
+                .font(.caption)
+                .foregroundStyle(LifeOSTokens.tertiaryText)
                 .padding(.top, 2)
         }
         .accessibilityElement(children: .combine)
@@ -89,21 +108,21 @@ struct UsageView: View {
                             selectedProviders.insert(snapshot.provider)
                         }
                     } label: {
-                        HStack(spacing: 7) {
+                        HStack(spacing: 6) {
                             Circle()
                                 .fill(providerColor(snapshot.provider))
                                 .frame(width: 7, height: 7)
                             Text(snapshot.provider.displayName)
-                                .font(.subheadline.weight(.semibold))
+                                .font(.caption.weight(.semibold))
                             if selected {
-                                LifeOSIcon(.done).frame(width: 13, height: 13)
+                                LifeOSIcon(.done).frame(width: 11, height: 11)
                             }
                         }
-                        .foregroundStyle(selected ? Color.white : Color.primary)
-                        .padding(.horizontal, 13)
-                        .padding(.vertical, 9)
-                        .background(selected ? providerColor(snapshot.provider) : LifeOSTokens.surface, in: Capsule())
-                        .overlay(Capsule().stroke(providerColor(snapshot.provider).opacity(selected ? 0 : 0.25)))
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(selected ? Color.primary.opacity(0.07) : LifeOSTokens.surface, in: Capsule())
+                        .overlay(Capsule().stroke(selected ? Color.primary.opacity(0.13) : LifeOSTokens.quietBorder, lineWidth: 0.75))
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("\(snapshot.provider.displayName), \(selected ? "shown" : "hidden")")
@@ -168,8 +187,8 @@ private struct ProviderAnalyticsSection: View {
 
     private func compactStack(_ analytics: UsageAnalyticsSnapshot) -> some View {
         VStack(spacing: LifeOSTokens.spacing) {
-            ProviderLimitsCard(snapshot: snapshot)
             ProjectionChartCard(provider: snapshot.provider, analytics: analytics)
+            ProviderLimitsCard(snapshot: snapshot)
             TokenActivityCard(provider: snapshot.provider, activity: analytics.activity)
             ModelBreakdownCard(provider: snapshot.provider, models: analytics.modelBreakdowns)
             UsageHeatmapCard(provider: snapshot.provider, cells: analytics.heatmap)
@@ -211,8 +230,7 @@ private struct ProviderLimitsCard: View {
                             .foregroundStyle(window.usedPercent == nil ? Color.secondary : providerColor(snapshot.provider))
                     }
                     if let percent = window.usedPercent {
-                        ProgressView(value: percent)
-                            .tint(providerColor(snapshot.provider))
+                        LimitTrack(value: percent, color: providerColor(snapshot.provider))
                             .accessibilityValue(percent.formatted(.percent))
                     } else {
                         Text("Official window not supplied")
@@ -233,6 +251,23 @@ private struct ProviderLimitsCard: View {
 
     private func windowSort(_ lhs: UsageWindow, _ rhs: UsageWindow) -> Bool {
         (lhs.durationMinutes ?? .max) < (rhs.durationMinutes ?? .max)
+    }
+}
+
+private struct LimitTrack: View {
+    let value: Double
+    let color: Color
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.primary.opacity(0.07))
+                Capsule()
+                    .fill(color.opacity(0.88))
+                    .frame(width: geometry.size.width * min(max(value, 0), 1))
+            }
+        }
+        .frame(height: 3)
     }
 }
 
@@ -259,23 +294,37 @@ private struct ProjectionChartCard: View {
                 ForEach(analytics.activity) { point in
                     LineMark(x: .value("Time", point.date), y: .value("Used", plotted ? point.usedPercent : 0))
                         .foregroundStyle(providerColor(provider))
-                        .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
-                    AreaMark(x: .value("Time", point.date), y: .value("Used", plotted ? point.usedPercent : 0))
-                        .foregroundStyle(LinearGradient(colors: [providerColor(provider).opacity(0.22), .clear], startPoint: .top, endPoint: .bottom))
+                        .lineStyle(StrokeStyle(lineWidth: 1.6, lineCap: .round, lineJoin: .round))
                 }
                 ForEach(analytics.projection) { point in
                     LineMark(x: .value("Time", point.date), y: .value("Projection", plotted ? point.usedPercent : 0))
-                        .foregroundStyle(providerColor(provider).opacity(0.72))
-                        .lineStyle(StrokeStyle(lineWidth: 2.5, dash: [6, 4]))
+                        .foregroundStyle(providerColor(provider).opacity(0.62))
+                        .lineStyle(StrokeStyle(lineWidth: 1.3, lineCap: .round, dash: [6, 4]))
                 }
                 RuleMark(y: .value("Limit", 1))
-                    .foregroundStyle(providerColor(provider).opacity(0.35))
-                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                    .foregroundStyle(Color.secondary.opacity(0.22))
+                    .lineStyle(StrokeStyle(lineWidth: 0.75, dash: [2, 3]))
+                if let selectedPoint {
+                    RuleMark(x: .value("Selected", selectedPoint.date))
+                        .foregroundStyle(Color.primary.opacity(0.22))
+                        .lineStyle(StrokeStyle(lineWidth: 0.75))
+                    PointMark(
+                        x: .value("Selected time", selectedPoint.date),
+                        y: .value("Selected usage", selectedPoint.usedPercent)
+                    )
+                    .symbolSize(34)
+                    .foregroundStyle(LifeOSTokens.surface)
+                    .annotation(position: .overlay) {
+                        Circle()
+                            .fill(providerColor(provider))
+                            .frame(width: 6, height: 6)
+                    }
+                }
             }
             .chartYScale(domain: 0...1)
             .chartYAxis {
                 AxisMarks(values: [0, 0.5, 1]) { value in
-                    AxisGridLine().foregroundStyle(Color.secondary.opacity(0.12))
+                    AxisGridLine().foregroundStyle(LifeOSTokens.chartGrid)
                     AxisValueLabel {
                         if let number = value.as(Double.self) { Text(number, format: .percent.precision(.fractionLength(0))) }
                     }
@@ -283,7 +332,6 @@ private struct ProjectionChartCard: View {
             }
             .chartXAxis {
                 AxisMarks(values: .automatic(desiredCount: 4)) { value in
-                    AxisGridLine().foregroundStyle(Color.secondary.opacity(0.12))
                     AxisValueLabel {
                         if let date = value.as(Date.self) {
                             Text(date, format: .dateTime.weekday(.abbreviated).hour())
@@ -291,17 +339,14 @@ private struct ProjectionChartCard: View {
                     }
                 }
             }
+            .chartPlotStyle { plotArea in
+                plotArea.background(DotGridBackground())
+            }
             .chartOverlay { proxy in
                 GeometryReader { geometry in
                     if let plotFrame = proxy.plotFrame {
                         let frame = geometry[plotFrame]
                         Rectangle().fill(.clear).contentShape(Rectangle())
-                            .overlay {
-                                if let selectedPoint, let x = proxy.position(forX: selectedPoint.date) {
-                                    Rectangle().fill(providerColor(provider).opacity(0.7)).frame(width: 1)
-                                        .position(x: x + frame.minX, y: frame.midY)
-                                }
-                            }
                             .gesture(DragGesture(minimumDistance: 0).onChanged { value in
                                 let x = value.location.x - frame.origin.x
                                 if let date: Date = proxy.value(atX: x) { selectedDate = date }
@@ -309,15 +354,18 @@ private struct ProjectionChartCard: View {
                     }
                 }
             }
-            .overlay(alignment: .topLeading) {
+            .overlay(alignment: .topTrailing) {
                 if let selectedPoint {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(selectedPoint.isProjected ? "Projected" : "Observed").font(.caption.weight(.semibold))
                         Text(selectedPoint.date, format: .dateTime.month(.abbreviated).day().hour().minute())
                         Text(selectedPoint.usedPercent, format: .percent.precision(.fractionLength(0)))
                     }
-                    .font(.caption2.monospacedDigit()).padding(8)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                    .font(.caption2.monospacedDigit())
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 7)
+                    .background(LifeOSTokens.surface.opacity(0.96), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
                     .accessibilityElement(children: .combine)
                     .accessibilityLabel("\(selectedPoint.isProjected ? "Projected" : "Observed") usage \(selectedPoint.usedPercent.formatted(.percent))")
                 }
@@ -325,12 +373,12 @@ private struct ProjectionChartCard: View {
             .frame(height: 190)
             .task {
                 if reduceMotion { plotted = true }
-                else { withAnimation(.easeOut(duration: 0.85)) { plotted = true } }
+                else { withAnimation(LifeOSMotion.chartReveal) { plotted = true } }
             }
             HStack(spacing: 14) {
                 LegendKey(color: providerColor(provider), label: "Observed")
-                LegendKey(color: providerColor(provider).opacity(0.72), label: "Projected")
-                LegendKey(color: providerColor(provider).opacity(0.35), label: "Limit")
+                LegendKey(color: providerColor(provider).opacity(0.62), label: "Projected")
+                LegendKey(color: Color.secondary.opacity(0.35), label: "Limit")
             }
         }
         .lifeOSCard()
@@ -350,8 +398,8 @@ private struct TokenActivityCard: View {
             CardHeader(title: "Token activity", subtitle: "Observed volume by hour", icon: .assistant)
             Chart(activity) { point in
                 BarMark(x: .value("Time", point.date), y: .value("Tokens", plotted ? point.tokens : 0))
-                    .foregroundStyle(providerColor(provider).gradient)
-                    .cornerRadius(3)
+                    .foregroundStyle(providerColor(provider).opacity(0.82))
+                    .cornerRadius(2)
             }
             .chartXAxis {
                 AxisMarks(values: .automatic(desiredCount: 4)) { value in
@@ -362,11 +410,19 @@ private struct TokenActivityCard: View {
                     }
                 }
             }
-            .chartYAxis { AxisMarks(position: .leading) }
+            .chartYAxis {
+                AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { _ in
+                    AxisGridLine().foregroundStyle(LifeOSTokens.chartGrid)
+                    AxisValueLabel().foregroundStyle(.secondary)
+                }
+            }
+            .chartPlotStyle { plotArea in
+                plotArea.background(DotGridBackground())
+            }
             .frame(height: 180)
             .task {
                 if reduceMotion { plotted = true }
-                else { withAnimation(.easeOut(duration: 0.7)) { plotted = true } }
+                else { withAnimation(LifeOSMotion.chartReveal) { plotted = true } }
             }
         }
         .lifeOSCard()
@@ -381,129 +437,86 @@ private struct ModelBreakdownCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            CardHeader(title: "Model breakdown", subtitle: "Input, output, reasoning, tools and images", icon: .assistant)
-            RadarUsageChart(models: models, color: providerColor(provider))
-                .frame(height: 210)
-            VStack(alignment: .leading, spacing: 7) {
-                ForEach(Array(models.enumerated()), id: \.element.id) { index, model in
-                    HStack {
-                        Circle().fill(providerColor(provider).opacity(1 - Double(index) * 0.28)).frame(width: 7, height: 7)
-                        Text(model.model).font(.caption.weight(.medium))
-                        Spacer()
-                        Text(model.totalTokens.formatted(.number.notation(.compactName)))
-                            .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                    }
-                }
-            }
+            CardHeader(title: "Model mix", subtitle: "Token composition by model", icon: .assistant)
+            ModelCompositionChart(models: models, color: providerColor(provider))
         }
         .lifeOSCard()
         .accessibilityElement(children: .contain)
     }
 }
 
-private struct RadarUsageChart: View {
+private struct ModelCompositionChart: View {
     let models: [UsageModelBreakdown]
     let color: Color
-    @State private var selectedCategory: Int?
-    private let labels = ["Input", "Output", "Reasoning", "Tools", "Images"]
+    @State private var revealed = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private let categoryOpacity = [1.0, 0.78, 0.58, 0.40, 0.24]
+
+    private var legendCategories: [(label: String, value: Int)] {
+        models.first?.categories ?? []
+    }
 
     var body: some View {
-        GeometryReader { geometry in
-            let center = CGPoint(x: geometry.size.width / 2, y: geometry.size.height / 2)
-            ZStack(alignment: .topTrailing) {
-                Canvas { context, size in
-                    let radius = min(size.width, size.height) * 0.36
-                    let maxima = labels.indices.map { category in
-                        max(models.map { categoryValue(in: $0, at: category) }.max() ?? 1, 1)
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                ForEach(Array(legendCategories.enumerated()), id: \.offset) { index, category in
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(color.opacity(categoryOpacity[index]))
+                            .frame(width: 5, height: 5)
+                        Text(category.label)
+                            .font(.caption2)
+                            .foregroundStyle(LifeOSTokens.tertiaryText)
                     }
-
-                    for ring in 1...4 {
-                        let points = labels.indices.map { point(center: center, radius: radius * Double(ring) / 4, index: $0, count: labels.count) }
-                        context.stroke(polygon(points), with: .color(Color.secondary.opacity(0.12)), lineWidth: 1)
-                    }
-                    for index in labels.indices {
-                        let end = point(center: center, radius: radius, index: index, count: labels.count)
-                        var spoke = Path(); spoke.move(to: center); spoke.addLine(to: end)
-                        context.stroke(spoke, with: .color(Color.secondary.opacity(selectedCategory == nil || selectedCategory == index ? 0.16 : 0.05)), lineWidth: 1)
-                        let labelPoint = point(center: center, radius: radius + 20, index: index, count: labels.count)
-                        context.draw(
-                            Text(labels[index]).font(.caption2).foregroundStyle(selectedCategory == nil || selectedCategory == index ? Color.secondary : Color.secondary.opacity(0.35)),
-                            at: labelPoint
-                        )
-                    }
-                    for (modelIndex, model) in models.enumerated() {
-                        let points = labels.indices.map { category in
-                            point(center: center,
-                                  radius: radius * categoryValue(in: model, at: category) / maxima[category],
-                                  index: category, count: labels.count)
-                        }
-                        let path = polygon(points)
-                        let shade = color.opacity(max(0.35, 0.72 - Double(modelIndex) * 0.22))
-                        context.fill(path, with: .color(shade.opacity(selectedCategory == nil ? 0.18 : 0.10)))
-                        context.stroke(path, with: .color(shade), lineWidth: selectedCategory == nil ? 2 : 2.5)
-                    }
-                }
-
-                Rectangle()
-                    .fill(.clear)
-                    .contentShape(Rectangle())
-                    .gesture(SpatialTapGesture().onEnded { value in
-                        selectedCategory = UsageSelection.radarCategoryIndex(
-                            at: value.location,
-                            center: center,
-                            count: labels.count
-                        )
-                    })
-                    .accessibilityLabel("Model usage radar. Tap a category for exact values.")
-
-                if let selectedCategory {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text(labels[selectedCategory]).font(.caption.weight(.semibold))
-                            Spacer(minLength: 8)
-                            Button {
-                                self.selectedCategory = nil
-                            } label: {
-                                Text("Done").font(.caption2)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        ForEach(models) { model in
-                            HStack(spacing: 8) {
-                                Text(model.model).lineLimit(1)
-                                Spacer(minLength: 6)
-                                Text(Int(categoryValue(in: model, at: selectedCategory)).formatted(.number.notation(.compactName)))
-                                    .monospacedDigit()
-                            }
-                        }
-                    }
-                    .font(.caption2)
-                    .padding(8)
-                    .frame(maxWidth: 180)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-                    .accessibilityElement(children: .combine)
                 }
             }
+            .lineLimit(1)
+
+            ForEach(models) { model in
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(model.model)
+                            .font(.caption.weight(.semibold))
+                            .lineLimit(1)
+                        Spacer(minLength: 8)
+                        Text(model.totalTokens.formatted(.number.notation(.compactName)))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+
+                    GeometryReader { geometry in
+                        let categories = model.categories
+                        let gap: CGFloat = 2
+                        let available = max(0, geometry.size.width - gap * CGFloat(max(categories.count - 1, 0)))
+                        HStack(spacing: gap) {
+                            ForEach(Array(categories.enumerated()), id: \.offset) { index, category in
+                                let share = model.totalTokens == 0 ? 0 : Double(category.value) / Double(model.totalTokens)
+                                Capsule()
+                                    .fill(color.opacity(categoryOpacity[index]))
+                                    .frame(width: revealed ? available * share : 0)
+                                    .accessibilityLabel("\(category.label), \(category.value.formatted(.number.notation(.compactName)))")
+                            }
+                        }
+                    }
+                    .frame(height: 6)
+
+                    HStack(spacing: 0) {
+                        ForEach(model.categories, id: \.label) { category in
+                            Text(category.value.formatted(.number.notation(.compactName)))
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(LifeOSTokens.tertiaryText)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                }
+                .accessibilityElement(children: .combine)
+            }
         }
-    }
-
-    private func categoryValue(in model: UsageModelBreakdown, at index: Int) -> Double {
-        guard model.categories.indices.contains(index) else { return 0 }
-        return Double(model.categories[index].value)
-    }
-
-    private func point(center: CGPoint, radius: Double, index: Int, count: Int) -> CGPoint {
-        let angle = -Double.pi / 2 + 2 * Double.pi * Double(index) / Double(count)
-        return CGPoint(x: center.x + cos(angle) * radius, y: center.y + sin(angle) * radius)
-    }
-
-    private func polygon(_ points: [CGPoint]) -> Path {
-        var path = Path()
-        guard let first = points.first else { return path }
-        path.move(to: first)
-        points.dropFirst().forEach { path.addLine(to: $0) }
-        path.closeSubpath()
-        return path
+        .task {
+            if reduceMotion { revealed = true }
+            else { withAnimation(LifeOSMotion.chartReveal) { revealed = true } }
+        }
     }
 }
 
@@ -511,7 +524,7 @@ private struct UsageHeatmapCard: View {
     let provider: Provider
     let cells: [UsageHeatmapCell]
     @State private var selectedCell: UsageHeatmapCell?
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: 4), count: 8)
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 4), count: 9)
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -533,9 +546,9 @@ private struct UsageHeatmapCard: View {
             HStack(spacing: 6) {
                 Text("Less")
                 ForEach(0..<5, id: \.self) { step in
-                    RoundedRectangle(cornerRadius: 2)
+                    Circle()
                         .fill(providerColor(provider).opacity(0.08 + Double(step) * 0.205))
-                        .frame(width: 18, height: 7)
+                        .frame(width: 7, height: 7)
                 }
                 Text("More")
                 Spacer()
@@ -557,15 +570,16 @@ private struct UsageHeatmapCard: View {
     private func heatmapCell(_ cell: UsageHeatmapCell) -> some View {
         let isSelected = selectedCell?.id == cell.id
         let isDimmed = selectedCell != nil && !isSelected
-        let tile = RoundedRectangle(cornerRadius: 3)
+        let tile = Circle()
             .fill(providerColor(provider).opacity(0.08 + cell.intensity * 0.82))
             .overlay {
                 if isSelected {
-                    RoundedRectangle(cornerRadius: 3).stroke(Color.primary.opacity(0.8), lineWidth: 1)
+                    Circle().stroke(Color.primary.opacity(0.8), lineWidth: 1)
                 }
             }
             .opacity(isDimmed ? 0.28 : 1)
-            .frame(height: 16)
+            .frame(width: 11, height: 11)
+            .frame(maxWidth: .infinity, minHeight: 16)
             .contentShape(Rectangle())
             .onTapGesture { selectedCell = isSelected ? nil : cell }
             .accessibilityLabel("\(shortDay(cell.weekday)) \(cell.hour):00, \(cell.intensity.formatted(.percent)) activity")
@@ -591,18 +605,39 @@ private struct CardHeader: View {
     let icon: LifeOSIconName
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .top, spacing: 9) {
             LifeOSIcon(icon)
-                .foregroundStyle(LifeOSTokens.accent)
-                .frame(width: 17, height: 17)
-                .frame(width: 30, height: 30)
-                .background(LifeOSTokens.accent.opacity(0.10), in: LifeOSTokens.smallCardShape)
+                .foregroundStyle(.secondary)
+                .frame(width: 16, height: 16)
+                .padding(.top, 2)
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.headline)
+                Text(title).font(.subheadline.weight(.semibold))
                 Text(subtitle).font(.caption).foregroundStyle(.secondary)
             }
             Spacer(minLength: 0)
         }
+    }
+}
+
+private struct DotGridBackground: View {
+    var body: some View {
+        Canvas { context, size in
+            let spacing: CGFloat = 12
+            let radius: CGFloat = 0.65
+            var x: CGFloat = 0
+            while x <= size.width {
+                var y: CGFloat = 0
+                while y <= size.height {
+                    let edgeDistance = min(min(x, size.width - x), min(y, size.height - y))
+                    let edgeOpacity = min(max(edgeDistance / 28, 0.18), 1)
+                    let dot = CGRect(x: x - radius, y: y - radius, width: radius * 2, height: radius * 2)
+                    context.fill(Path(ellipseIn: dot), with: .color(Color.primary.opacity(0.08 * Double(edgeOpacity))))
+                    y += spacing
+                }
+                x += spacing
+            }
+        }
+        .allowsHitTesting(false)
     }
 }
 

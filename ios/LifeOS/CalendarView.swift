@@ -51,6 +51,24 @@ public struct CalendarView: View {
 #endif
     }
 
+    private var selectedDayItems: [CalendarItem] {
+        visibleItems
+            .filter { calendar.isDate($0.start, inSameDayAs: selectedDate) }
+            .sorted { $0.start < $1.start }
+    }
+
+    private var sidebarDateStyle: Date.FormatStyle {
+        var style = Date.FormatStyle.dateTime.weekday(.wide).month(.abbreviated).day()
+        style.timeZone = calendar.timeZone
+        return style
+    }
+
+    private var sidebarTimeStyle: Date.FormatStyle {
+        var style = Date.FormatStyle.dateTime.hour().minute()
+        style.timeZone = calendar.timeZone
+        return style
+    }
+
     public var body: some View {
         Group {
 #if os(macOS)
@@ -69,27 +87,55 @@ public struct CalendarView: View {
 #if os(macOS)
     private var macLayout: some View {
         HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 16) {
-                CalendarCompactMonth(selectedDate: $selectedDate, calendar: calendar)
-                Divider()
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Next").font(.headline)
-                    let upcoming = visibleItems.filter { $0.end > .now }.sorted { $0.start < $1.start }.prefix(4)
-                    if upcoming.isEmpty {
-                        Text("No upcoming events").font(.caption).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 0) {
+                CalendarCompactMonth(
+                    selectedDate: $selectedDate,
+                    calendar: calendar,
+                    items: visibleItems
+                )
+                .padding(.horizontal, 14)
+                .padding(.top, 14)
+                .padding(.bottom, 16)
+
+                Rectangle()
+                    .fill(LifeOSTokens.hairlineBorder)
+                    .frame(height: 1)
+
+                VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Schedule")
+                            .font(LifeOSFont.spaceGrotesk(12, weight: .medium))
+                        Text(selectedDate, format: sidebarDateStyle)
+                            .font(LifeOSFont.inter(10, weight: .medium))
+                            .foregroundStyle(LifeOSTokens.tertiaryText)
+                    }
+
+                    if selectedDayItems.isEmpty {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("No events")
+                                .font(LifeOSFont.inter(12, weight: .medium))
+                                .foregroundStyle(Color.secondary)
+                            Text("The day is clear.")
+                                .font(LifeOSFont.inter(10, weight: .regular))
+                                .foregroundStyle(LifeOSTokens.tertiaryText)
+                        }
+                        .padding(.top, 2)
                     } else {
-                        ForEach(Array(upcoming)) { item in
-                            Button { edit(item) } label: { CalendarItemRow(item: item) }
-                                .buttonStyle(.plain)
+                        ForEach(selectedDayItems.prefix(5)) { item in
+                            Button { edit(item) } label: {
+                                compactSidebarEvent(item)
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
                 }
-                Spacer()
+                .padding(14)
+
+                Spacer(minLength: 0)
             }
-            .padding(16)
-            .frame(width: 250)
-            .background(LifeOSTokens.surface.opacity(0.58))
-            .overlay(alignment: .trailing) { Rectangle().fill(Color.primary.opacity(0.08)).frame(width: 1) }
+            .frame(width: 248)
+            .background(LifeOSTokens.surface.opacity(0.44))
+            .overlay(alignment: .trailing) { Rectangle().fill(LifeOSTokens.hairlineBorder).frame(width: 1) }
 
             calendarContent
         }
@@ -99,13 +145,36 @@ public struct CalendarView: View {
                 .frame(minWidth: 560, idealWidth: 620, minHeight: 620, idealHeight: 700)
         }
     }
+
+    private func compactSidebarEvent(_ item: CalendarItem) -> some View {
+        HStack(spacing: 9) {
+            RoundedRectangle(cornerRadius: 2, style: .continuous)
+                .fill(item.status.color)
+                .frame(width: 3, height: 30)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.primary)
+                    .lineLimit(1)
+                Text("\(item.start, format: sidebarTimeStyle) – \(item.end, format: sidebarTimeStyle)")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+            }
+            Spacer(minLength: 0)
+            CalendarIconView(item: item, size: 17)
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 42)
+        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+    }
 #else
     private var mobileLayout: some View {
         calendarContent
+            .refreshable { await coordinator.manualRefresh() }
             .background(LifeOSTokens.canvas)
-            // The floating iOS tab bar overlays its content area. Keep timeline
-            // events and month cells above it while preserving scrollability.
-            .safeAreaPadding(.bottom, 68)
             .sheet(isPresented: $showingEditor) {
                 CalendarEditor(item: editingItem, onSave: save, onDelete: delete)
                     .presentationDetents([.medium, .large])
@@ -169,70 +238,136 @@ public struct CalendarView: View {
     }
 
     private var calendarHeader: some View {
-        VStack(spacing: 12) {
-            HStack(spacing: 10) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(selectedDate, format: .dateTime.month(.wide).year())
-                        .font(.title2.bold())
-                    Text(displayMode == .month ? "Month" : timelineSubtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button("Today") { selectedDate = .now }
-                    .buttonStyle(.bordered)
-                Button { move(by: -1) } label: {
-                    LifeOSIcon(.chevronLeft).frame(width: 16, height: 16)
-                }
-                .buttonStyle(.bordered)
-                .accessibilityLabel("Previous \(displayMode == .month ? "month" : timelinePeriodName)")
-                Button { move(by: 1) } label: {
-                    LifeOSIcon(.chevronRight).frame(width: 16, height: 16)
-                }
-                .buttonStyle(.bordered)
-                .accessibilityLabel("Next \(displayMode == .month ? "month" : timelinePeriodName)")
-                Button { create() } label: {
+        Group {
 #if os(iOS)
-                    LifeOSIcon(.add).frame(width: 17, height: 17)
-#else
-                    HStack(spacing: 6) {
-                        LifeOSIcon(.add).frame(width: 15, height: 15)
-                        Text("New")
+            VStack(spacing: 6) {
+                HStack(spacing: 8) {
+                    Text(selectedDate, format: .dateTime.month(.wide).year())
+                        .font(LifeOSFont.headerLarge(20))
+                        .lineLimit(1)
+                    Spacer(minLength: 8)
+                    Button("Today") { selectedDate = .now }
+                        .font(.system(size: 12, weight: .semibold))
+                        .buttonStyle(.plain)
+                        .foregroundStyle(LifeOSTokens.accent)
+                        .padding(.horizontal, 8)
+                        .frame(height: 30)
+                    Button { create() } label: {
+                        LifeOSIcon(.add).frame(width: 14, height: 14)
                     }
-#endif
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white)
+                    .frame(width: 30, height: 30)
+                    .background(LifeOSTokens.accent, in: Circle())
+                    .accessibilityIdentifier("calendar-add")
+                    .accessibilityLabel("New event")
+                    .accessibilityHint("Create a calendar event")
                 }
-                .buttonStyle(.borderedProminent)
-                .accessibilityIdentifier("calendar-add")
-                .accessibilityLabel("New event")
-                .accessibilityHint("Create a calendar event")
-            }
 
-            HStack {
-                Picker("Calendar view", selection: $displayMode) {
-                    Text(timelinePickerLabel).tag(CalendarDisplayMode.timeline)
-                    Text("Month").tag(CalendarDisplayMode.month)
-                }
-                .pickerStyle(.segmented)
-                .accessibilityIdentifier("calendar-view-picker")
-                .frame(maxWidth: 260)
-                Spacer()
-                if displayMode == .timeline {
-                    Text("\(Int(hourHeight)) pt/hour")
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.secondary)
-#if os(macOS)
-                    Slider(value: $hourHeight, in: 38...110, step: 2)
-                        .frame(width: 110)
-                        .accessibilityLabel("Hour height")
-#endif
+                HStack(spacing: 8) {
+                    HStack(spacing: 2) {
+                        calendarModeButton(.timeline, label: timelinePickerLabel)
+                        calendarModeButton(.month, label: "Month")
+                    }
+                    .accessibilityIdentifier("calendar-view-picker")
+                    .padding(2)
+                    .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .frame(maxWidth: 164)
+                    Spacer(minLength: 8)
+                    navigationButton(direction: -1, icon: .chevronLeft)
+                    navigationButton(direction: 1, icon: .chevronRight)
                 }
             }
+#else
+            VStack(spacing: 12) {
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(selectedDate, format: .dateTime.month(.wide).year())
+                            .font(LifeOSFont.headerLarge(22))
+                        Text(displayMode == .month ? "Month" : timelineSubtitle)
+                            .font(LifeOSFont.caption())
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Today") { selectedDate = .now }
+                        .buttonStyle(.bordered)
+                    Button { move(by: -1) } label: {
+                        LifeOSIcon(.chevronLeft).frame(width: 16, height: 16)
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityLabel("Previous \(displayMode == .month ? "month" : timelinePeriodName)")
+                    Button { move(by: 1) } label: {
+                        LifeOSIcon(.chevronRight).frame(width: 16, height: 16)
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityLabel("Next \(displayMode == .month ? "month" : timelinePeriodName)")
+                    Button { create() } label: {
+                        HStack(spacing: 6) {
+                            LifeOSIcon(.add).frame(width: 15, height: 15)
+                            Text("New")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("calendar-add")
+                    .accessibilityLabel("New event")
+                    .accessibilityHint("Create a calendar event")
+                }
+
+                HStack {
+                    Picker("Calendar view", selection: $displayMode) {
+                        Text(timelinePickerLabel).tag(CalendarDisplayMode.timeline)
+                        Text("Month").tag(CalendarDisplayMode.month)
+                    }
+                    .pickerStyle(.segmented)
+                    .accessibilityIdentifier("calendar-view-picker")
+                    .frame(maxWidth: 260)
+                    Spacer()
+                    if displayMode == .timeline {
+                        Slider(value: $hourHeight, in: 38...110, step: 2)
+                            .frame(width: 110)
+                            .accessibilityLabel("Hour height")
+                    }
+                }
+            }
+#endif
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 14)
+        .padding(.vertical, 6)
         .background(LifeOSTokens.canvas)
         .overlay(alignment: .bottom) { Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 1) }
     }
+
+#if os(iOS)
+    private func calendarModeButton(_ mode: CalendarDisplayMode, label: String) -> some View {
+        Button {
+            withAnimation(reduceMotion ? nil : LifeOSMotion.easeNavigate) { displayMode = mode }
+        } label: {
+            Text(label)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(displayMode == mode ? Color.primary : Color.secondary)
+                .frame(maxWidth: .infinity)
+                .frame(height: 28)
+                .background(
+                    displayMode == mode ? Color.primary.opacity(0.09) : .clear,
+                    in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+        .accessibilityAddTraits(displayMode == mode ? .isSelected : [])
+    }
+
+    private func navigationButton(direction: Int, icon: LifeOSIconName) -> some View {
+        Button { move(by: direction) } label: {
+            LifeOSIcon(icon).frame(width: 14, height: 14)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(LifeOSTokens.accent)
+        .frame(width: 32, height: 30)
+        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .accessibilityLabel("\(direction < 0 ? "Previous" : "Next") \(displayMode == .month ? "month" : timelinePeriodName)")
+    }
+#endif
 
     private var timelinePickerLabel: String {
 #if os(macOS)

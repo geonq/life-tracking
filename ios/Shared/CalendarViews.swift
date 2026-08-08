@@ -131,20 +131,25 @@ public struct CalendarTimelineView: View {
             ScrollView(.horizontal) {
                 VStack(spacing: 0) {
                     dayHeader(width: contentWidth)
-                    ScrollView(.vertical) {
-                        HStack(alignment: .top, spacing: 0) {
-                            hourLabels
-                                .frame(width: timeGutter)
-                            ForEach(days, id: \.self) { day in
-                                CalendarDayTimeline(
-                                    day: day,
-                                    items: items,
-                                    hourHeight: hourHeight,
-                                    calendar: calendar,
-                                    onSelect: onSelect
-                                )
-                                .frame(width: (contentWidth - timeGutter) / CGFloat(max(days.count, 1)))
+                    ScrollViewReader { scrollProxy in
+                        ScrollView(.vertical) {
+                            HStack(alignment: .top, spacing: 0) {
+                                hourLabels
+                                    .frame(width: timeGutter)
+                                ForEach(days, id: \.self) { day in
+                                    CalendarDayTimeline(
+                                        day: day,
+                                        items: items,
+                                        hourHeight: hourHeight,
+                                        calendar: calendar,
+                                        onSelect: onSelect
+                                    )
+                                    .frame(width: (contentWidth - timeGutter) / CGFloat(max(days.count, 1)))
+                                }
                             }
+                        }
+                        .task(id: days.first) {
+                            scrollProxy.scrollTo(initialVisibleHour, anchor: .top)
                         }
                     }
                 }
@@ -191,9 +196,25 @@ public struct CalendarTimelineView: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                     .padding(.trailing, 8)
+                    .id(hour)
             }
         }
         .frame(height: hourHeight * 24)
+    }
+
+    /// Starts near the first useful daytime event instead of an empty midnight grid.
+    /// Overnight events remain available by scrolling upward.
+    private var initialVisibleHour: Int {
+        let visibleDayStarts = Set(days.map { calendar.startOfDay(for: $0) })
+        let firstDaytimeEventHour = items
+            .filter { item in
+                visibleDayStarts.contains(calendar.startOfDay(for: item.start)) &&
+                    item.end.timeIntervalSince(item.start) <= 12 * 60 * 60
+            }
+            .map { calendar.component(.hour, from: $0.start) }
+            .filter { $0 >= 6 }
+            .min()
+        return max(0, min(8, (firstDaytimeEventHour ?? 9) - 1))
     }
 }
 
@@ -231,7 +252,12 @@ private struct CalendarDayTimeline: View {
                     let y = CGFloat(placement.yStart) * totalHeight
                     let rawHeight = CGFloat(placement.yEnd - placement.yStart) * totalHeight
                     Button { onSelect(placement.item) } label: {
-                        CalendarTimelineEvent(item: placement.item, compact: rawHeight < 44)
+                        CalendarTimelineEvent(
+                            item: placement.item,
+                            compact: rawHeight < 44,
+                            narrow: columnWidth < 82,
+                            timeZone: calendar.timeZone
+                        )
                     }
                     .buttonStyle(.plain)
                     .frame(width: max(24, columnWidth - 3), height: max(24, rawHeight - 2), alignment: .topLeading)
@@ -264,23 +290,45 @@ private struct CalendarDayTimeline: View {
 private struct CalendarTimelineEvent: View {
     let item: CalendarItem
     let compact: Bool
+    let narrow: Bool
+    let timeZone: TimeZone
+
+    private var timeStyle: Date.FormatStyle {
+        var style = Date.FormatStyle.dateTime.hour().minute()
+        style.timeZone = timeZone
+        return style
+    }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 5) {
-            Text(item.icon).font(.caption)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(item.title)
-                    .font(.caption.weight(.semibold))
-                    .lineLimit(compact ? 1 : 2)
-                if !compact {
-                    Text(item.start, format: .dateTime.hour().minute())
+        Group {
+            if narrow {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.icon)
+                        .font(.caption)
+                    Text(item.start, format: timeStyle)
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                }
+            } else {
+                HStack(alignment: .top, spacing: 5) {
+                    Text(item.icon).font(.caption)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(item.title)
+                            .font(.caption.weight(.semibold))
+                            .lineLimit(compact ? 1 : 2)
+                        if !compact {
+                            Text(item.start, format: timeStyle)
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Spacer(minLength: 0)
                 }
             }
-            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 6)
+        .padding(.horizontal, narrow ? 5 : 6)
         .padding(.vertical, 4)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .foregroundStyle(.primary)
@@ -290,7 +338,7 @@ private struct CalendarTimelineEvent: View {
         }
         .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).stroke(item.status.color.opacity(0.35)))
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(item.title), \(item.status.label), \(item.start.formatted(date: .omitted, time: .shortened))")
+        .accessibilityLabel("\(item.title), \(item.status.label), \(item.start.formatted(timeStyle))")
     }
 }
 
@@ -416,18 +464,145 @@ public struct CalendarMonthGrid: View {
 public struct CalendarCompactMonth: View {
     @Binding public var selectedDate: Date
     public let calendar: Calendar
+    public let items: [CalendarItem]
+    @State private var visibleMonth: Date
 
-    public init(selectedDate: Binding<Date>, calendar: Calendar = .current) {
+    public init(
+        selectedDate: Binding<Date>,
+        calendar: Calendar = .current,
+        items: [CalendarItem] = []
+    ) {
         _selectedDate = selectedDate
         self.calendar = calendar
+        self.items = items
+        _visibleMonth = State(initialValue: selectedDate.wrappedValue)
     }
 
     public var body: some View {
-        DatePicker("Date", selection: $selectedDate, displayedComponents: [.date])
-            .datePickerStyle(.graphical)
-            .labelsHidden()
-            .tint(LifeOSTokens.accent)
-            .accessibilityLabel("Choose calendar date")
+        VStack(spacing: 12) {
+            HStack(spacing: 6) {
+                Text(visibleMonth, format: .dateTime.month(.wide).year())
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color.primary)
+                    .contentTransition(.numericText())
+                Spacer(minLength: 8)
+                monthButton(direction: -1, icon: .chevronLeft)
+                monthButton(direction: 1, icon: .chevronRight)
+            }
+
+            LazyVGrid(columns: columns, spacing: 5) {
+                ForEach(Array(weekdaySymbols.enumerated()), id: \.offset) { _, symbol in
+                    Text(symbol)
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .frame(maxWidth: .infinity)
+                        .accessibilityHidden(true)
+                }
+
+                ForEach(monthDays, id: \.self) { day in
+                    CalendarCompactDayButton(
+                        day: day,
+                        visibleMonth: visibleMonth,
+                        selectedDate: selectedDate,
+                        hasEvents: items.contains { calendar.isDate($0.start, inSameDayAs: day) },
+                        calendar: calendar
+                    ) {
+                        selectedDate = day
+                    }
+                }
+            }
+        }
+        .onChange(of: selectedDate) { _, date in
+            guard !calendar.isDate(date, equalTo: visibleMonth, toGranularity: .month) else { return }
+            visibleMonth = date
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Mini calendar")
+    }
+
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 4), count: 7)
+
+    private var monthDays: [Date] {
+        CalendarDateRange.monthGrid(containing: visibleMonth, calendar: calendar)
+    }
+
+    private var weekdaySymbols: [String] {
+        let symbols = calendar.veryShortStandaloneWeekdaySymbols
+        let offset = max(0, min(symbols.count - 1, calendar.firstWeekday - 1))
+        return Array(symbols[offset...] + symbols[..<offset])
+    }
+
+    private func monthButton(direction: Int, icon: LifeOSIconName) -> some View {
+        Button {
+            guard let month = calendar.date(byAdding: .month, value: direction, to: visibleMonth) else { return }
+            withAnimation(LifeOSMotion.easeNavigate) { visibleMonth = month }
+        } label: {
+            LifeOSIcon(icon)
+                .frame(width: 11, height: 11)
+                .frame(width: 24, height: 24)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Color.secondary)
+        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .accessibilityLabel(direction < 0 ? "Previous month" : "Next month")
+    }
+}
+
+private struct CalendarCompactDayButton: View {
+    let day: Date
+    let visibleMonth: Date
+    let selectedDate: Date
+    let hasEvents: Bool
+    let calendar: Calendar
+    let action: () -> Void
+    @State private var isHovering = false
+
+    private var isSelected: Bool { calendar.isDate(day, inSameDayAs: selectedDate) }
+    private var isToday: Bool { calendar.isDateInToday(day) }
+    private var isInMonth: Bool { calendar.isDate(day, equalTo: visibleMonth, toGranularity: .month) }
+
+    var body: some View {
+        Button(action: action) {
+            ZStack(alignment: .bottom) {
+                Text(day, format: .dateTime.day())
+                    .font(.system(size: 11, weight: isSelected || isToday ? .semibold : .regular))
+                    .foregroundStyle(dayForeground)
+                    .frame(width: 26, height: 26)
+                    .background(dayBackground, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .overlay {
+                        if isToday && !isSelected {
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .stroke(LifeOSTokens.accent.opacity(0.65), lineWidth: 1)
+                        }
+                    }
+
+                if hasEvents {
+                    Circle()
+                        .fill(isSelected ? Color.white.opacity(0.9) : LifeOSTokens.accent.opacity(isInMonth ? 0.9 : 0.35))
+                        .frame(width: 2.5, height: 2.5)
+                        .padding(.bottom, 2.5)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .accessibilityLabel(day.formatted(.dateTime.weekday(.wide).month(.wide).day().year()))
+        .accessibilityValue(isSelected ? "Selected" : (hasEvents ? "Has events" : ""))
+    }
+
+    private var dayForeground: Color {
+        if isSelected { return .white }
+        if isToday { return LifeOSTokens.accent }
+        return isInMonth ? .primary : LifeOSTokens.tertiaryText.opacity(0.55)
+    }
+
+    private var dayBackground: Color {
+        if isSelected { return LifeOSTokens.accent }
+        if isHovering { return Color.primary.opacity(0.07) }
+        return .clear
     }
 }
 

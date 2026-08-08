@@ -14,25 +14,25 @@ final class LifeOSUITests: XCTestCase {
 
     func testPrimaryScreenshotsAndAccessibility() throws {
         capture("overview")
-        XCTAssertTrue(app.tabBars.buttons["Overview"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Overview"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.scrollViews["overview-screen"].waitForExistence(timeout: 5))
 
-        XCTAssertFalse(app.tabBars.buttons["Usage"].exists)
+        XCTAssertFalse(app.buttons["Usage"].exists)
         let usageCard = app.buttons["account-usage-link"]
         XCTAssertTrue(usageCard.waitForExistence(timeout: 5))
         XCTAssertTrue(tap(usageCard, untilVisible: app.scrollViews["usage-screen"]))
         capture("usage")
 
-        app.navigationBars.buttons.element(boundBy: 0).tap()
-        let calendarTab = app.tabBars.buttons["Calendar"]
+        app.buttons["usage-back"].tap()
+        let calendarTab = app.buttons["Calendar"]
         XCTAssertTrue(calendarTab.waitForExistence(timeout: 5))
         XCTAssertTrue(tap(calendarTab, untilVisible: app.buttons["calendar-add"]))
-        XCTAssertTrue(app.segmentedControls.buttons["3 Days"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["3 Days"].waitForExistence(timeout: 5))
         capture("calendar-three-day")
-        app.segmentedControls.buttons["Month"].tap()
+        app.buttons["Month"].tap()
         capture("calendar-month")
 
-        let taxTab = app.tabBars.buttons["Tax"]
+        let taxTab = app.buttons["Tax"]
         XCTAssertTrue(taxTab.waitForExistence(timeout: 5))
         taxTab.tap()
         XCTAssertTrue(app.staticTexts["Tax Documents"].waitForExistence(timeout: 5))
@@ -40,7 +40,7 @@ final class LifeOSUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Stored only on this device. Candidates are rule-based, not tax advice, and nothing is filed automatically."].waitForExistence(timeout: 5))
         capture("tax-documents")
 
-        let settingsTab = app.tabBars.buttons["Settings"]
+        let settingsTab = app.buttons["Settings"]
         XCTAssertTrue(settingsTab.waitForExistence(timeout: 5))
         settingsTab.tap()
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
@@ -53,28 +53,28 @@ final class LifeOSUITests: XCTestCase {
         app.launch()
         dismissSystemPromptsIfPresent()
 
-        XCTAssertTrue(app.tabBars.buttons["Overview"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Overview"].waitForExistence(timeout: 5))
         capture("dark-overview")
 
-        XCTAssertFalse(app.tabBars.buttons["Usage"].exists)
+        XCTAssertFalse(app.buttons["Usage"].exists)
         let usageCard = app.buttons["account-usage-link"]
         XCTAssertTrue(usageCard.waitForExistence(timeout: 5))
         XCTAssertTrue(tap(usageCard, untilVisible: app.scrollViews["usage-screen"]))
         capture("dark-usage")
 
-        app.navigationBars.buttons.element(boundBy: 0).tap()
+        app.buttons["usage-back"].tap()
 
-        XCTAssertTrue(tap(app.tabBars.buttons["Calendar"], untilVisible: app.buttons["calendar-add"]))
-        XCTAssertTrue(app.segmentedControls.buttons["3 Days"].waitForExistence(timeout: 5))
+        XCTAssertTrue(tap(app.buttons["Calendar"], untilVisible: app.buttons["calendar-add"]))
+        XCTAssertTrue(app.buttons["3 Days"].waitForExistence(timeout: 5))
         capture("dark-calendar-three-day")
-        app.segmentedControls.buttons["Month"].tap()
+        app.buttons["Month"].tap()
         capture("dark-calendar-month")
 
-        app.tabBars.buttons["Tax"].tap()
+        app.buttons["Tax"].tap()
         XCTAssertTrue(app.buttons["import-tax-pdf"].waitForExistence(timeout: 5))
         capture("dark-tax-documents")
 
-        app.tabBars.buttons["Settings"].tap()
+        app.buttons["Settings"].tap()
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
         capture("dark-settings")
     }

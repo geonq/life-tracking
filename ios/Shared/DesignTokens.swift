@@ -23,9 +23,9 @@ public extension Color {
     static let lifeOSBlue950 = Color(red: 0x00/255, green: 0x0B/255, blue: 0x19/255)
 
     // Brand canvases
-    /// Figma dark canvas #000205
-    static let lifeOSDarkCanvas = Color(red: 0x00/255, green: 0x02/255, blue: 0x05/255)
-    /// Light canvas #F0F6FF
+    /// Deep dark blue canvas #000306.
+    static let lifeOSDarkCanvas = Color(red: 0x00/255, green: 0x03/255, blue: 0x06/255)
+    /// White with a super subtle blue tint #F0F6FF.
     static let lifeOSLightCanvas = Color(red: 0xF0/255, green: 0xF6/255, blue: 0xFF/255)
 }
 
@@ -35,14 +35,14 @@ public enum LifeOSTokens {
     public static let pagePadding: CGFloat = 20
     public static let grid: CGFloat = 4
     public static let spacing: CGFloat = grid * 3
-    public static let corner: CGFloat = 16
-    public static let smallCorner: CGFloat = 10
+    public static let corner: CGFloat = 12
+    public static let smallCorner: CGFloat = 8
     public static let cardPadding: CGFloat = 16
     public static let iconFrame: CGFloat = 32
     public static let overviewContentInset: CGFloat = 40
     public static let overviewCardHeight: CGFloat = 80
-    public static let overviewCardGap: CGFloat = 16
-    public static let overviewCardCorner: CGFloat = 24
+    public static let overviewCardGap: CGFloat = 10
+    public static let overviewCardCorner: CGFloat = 12
     public static let overviewIconTile: CGFloat = 36
 
     // MARK: Canvas & Surface (theme-aware)
@@ -50,23 +50,23 @@ public enum LifeOSTokens {
 #if os(macOS)
     public static let canvas = Color(nsColor: NSColor(name: nil) { appearance in
         appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            ? NSColor(srgbRed: 0x00/255, green: 0x02/255, blue: 0x05/255, alpha: 1)
+            ? NSColor(srgbRed: 0x00/255, green: 0x03/255, blue: 0x06/255, alpha: 1)
             : NSColor(srgbRed: 0xF0/255, green: 0xF6/255, blue: 0xFF/255, alpha: 1)
     })
     public static let surface = Color(nsColor: NSColor(name: nil) { appearance in
         appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            ? NSColor(srgbRed: 0x00/255, green: 0x0A/255, blue: 0x1D/255, alpha: 1)
+            ? NSColor(srgbRed: 0x0B/255, green: 0x0E/255, blue: 0x13/255, alpha: 1)
             : .white
     })
 #else
     public static let canvas = Color(uiColor: UIColor { traits in
         traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0x00/255, green: 0x02/255, blue: 0x05/255, alpha: 1)
+            ? UIColor(red: 0x00/255, green: 0x03/255, blue: 0x06/255, alpha: 1)
             : UIColor(red: 0xF0/255, green: 0xF6/255, blue: 0xFF/255, alpha: 1)
     })
     public static let surface = Color(uiColor: UIColor { traits in
         traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0x00/255, green: 0x0A/255, blue: 0x1D/255, alpha: 1)
+            ? UIColor(red: 0x0B/255, green: 0x0E/255, blue: 0x13/255, alpha: 1)
             : .white
     })
 #endif
@@ -79,8 +79,8 @@ public enum LifeOSTokens {
 
     // MARK: Semantic Colors
 
-    /// Figma primary accent — #006BCF
-    public static let accent = Color(red: 0x00/255, green: 0x6B/255, blue: 0xCF/255)
+    /// Used only for focus and primary data, never as structural chrome.
+    public static let accent = Color.lifeOSBlue600
     public static let accentHover = Color.lifeOSBlue700
     public static let accentPressed = Color.lifeOSBlue800
     public static let accentLight = Color.lifeOSBlue50
@@ -90,13 +90,15 @@ public enum LifeOSTokens {
     public static let danger  = Color(red: 0xDC/255, green: 0x26/255, blue: 0x26/255)
 
     // Borders & quiescent states
-    public static let quietBorder = Color(red: 0x1D/255, green: 0x5D/255, blue: 0x9B/255).opacity(0.78)
-    public static let hairlineBorder = Color.primary.opacity(0.06)
+    public static let quietBorder = Color.primary.opacity(0.11)
+    public static let hairlineBorder = Color.primary.opacity(0.07)
+    public static let chartGrid = Color.primary.opacity(0.075)
+    public static let tertiaryText = Color.secondary.opacity(0.72)
 
     // Card visual styling
-    public static let cardShadowRadius: CGFloat = 3
+    public static let cardShadowRadius: CGFloat = 0
     public static let cardShadowX: CGFloat = 0
-    public static let cardShadowY: CGFloat = 2
+    public static let cardShadowY: CGFloat = 0
 
     // MARK: Convenience Shapes
 
@@ -117,16 +119,19 @@ public enum LifeOSTokens {
 
 public enum LifeOSMotion {
     /// Standard spring — callers omit it entirely when Reduce Motion is enabled.
-    public static let spring = Animation.spring(response: 0.35, dampingFraction: 0.82)
+    public static let spring = Animation.spring(response: 0.46, dampingFraction: 0.90)
 
     /// Snappier spring for small UI elements.
-    public static let springSnappy = Animation.spring(response: 0.25, dampingFraction: 0.85)
+    public static let springSnappy = Animation.spring(response: 0.32, dampingFraction: 0.92)
 
     /// Smooth ease for opacity and offset transitions.
-    public static let ease = Animation.easeInOut(duration: 0.2)
+    public static let ease = Animation.easeInOut(duration: 0.24)
 
     /// Slightly longer ease for push/navigation.
-    public static let easeNavigate = Animation.easeInOut(duration: 0.25)
+    public static let easeNavigate = Animation.easeInOut(duration: 0.34)
+
+    /// A calm reveal for data geometry; avoids springing chart values.
+    public static let chartReveal = Animation.easeOut(duration: 0.62)
 
     public static var reduceMotion: Bool {
 #if os(macOS)
@@ -140,7 +145,7 @@ public enum LifeOSMotion {
 // MARK: - Branded Modifier Helpers
 
 extension View {
-    /// Apply a branded card background: surface fill, subtle border, soft shadow.
+    /// Apply a quiet content surface with a neutral hairline and no decorative shadow.
     func lifeOSCard() -> some View {
         modifier(LifeOSCardModifier())
     }
@@ -164,11 +169,7 @@ private struct LifeOSCardModifier: ViewModifier {
         content
             .padding(LifeOSTokens.cardPadding)
             .background(LifeOSTokens.surface, in: LifeOSTokens.cardShape)
-            .overlay(LifeOSTokens.cardShape.stroke(LifeOSTokens.quietBorder, lineWidth: 1))
-            .shadow(color: Color.lifeOSBlue950.opacity(0.08),
-                    radius: LifeOSTokens.cardShadowRadius,
-                    x: LifeOSTokens.cardShadowX,
-                    y: LifeOSTokens.cardShadowY)
+            .overlay(LifeOSTokens.cardShape.stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
     }
 }
 

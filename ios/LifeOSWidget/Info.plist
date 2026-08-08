@@ -27,5 +27,11 @@
         <key>NSExtensionPointIdentifier</key>
         <string>com.apple.widgetkit-extension</string>
     </dict>
+    <key>UIAppFonts</key>
+    <array>
+        <string>Manrope-VariableFont_wght.ttf</string>
+        <string>SpaceGrotesk-VariableFont_wght.ttf</string>
+        <string>Inter-VariableFont.ttf</string>
+    </array>
 </dict>
 </plist>

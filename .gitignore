@@ -30,6 +30,8 @@ secrets/
 *.log
 .cache/
 .tmp/
+__pycache__/
+*.py[cod]
 runtime/
 usage-history.jsonl
 *.usage-history.jsonl
