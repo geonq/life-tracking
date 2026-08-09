@@ -11,7 +11,7 @@ final class LifeOSMacSnapshotTests: XCTestCase {
 
     func testOverviewSnapshot() {
         let coordinator = CalendarCoordinator(initialSnapshot: CalendarVisualFixtures.snapshot())
-        render(LifeOSMacRootView(calendarCoordinator: coordinator, usesVisualFixtures: true), named: "LifeOSMacRootView-overview")
+        render(LifeOSMacRootView(calendarCoordinator: coordinator, usesVisualFixtures: true, usageCoordinator: UsageCoordinator()), named: "LifeOSMacRootView-overview")
     }
 
     func testCalendarSnapshot() {
@@ -43,7 +43,7 @@ final class LifeOSMacSnapshotTests: XCTestCase {
     }
 
     func testUsageSnapshot() {
-        render(UsageView(snapshots: DemoDataProvider.providers, analytics: DemoUsageAnalytics.snapshots), named: "UsageView", colorScheme: .light)
+        render(UsageView(snapshots: DemoDataProvider.providers, analytics: DemoUsageAnalytics.snapshots, state: .demo), named: "UsageView", colorScheme: .light)
     }
 
     func testTaxDocumentsSnapshot() {
@@ -55,8 +55,8 @@ final class LifeOSMacSnapshotTests: XCTestCase {
         let coordinator = CalendarCoordinator(
             initialSnapshot: CalendarVisualFixtures.snapshot(anchor: anchor, calendar: visualFixtureCalendar)
         )
-        render(LifeOSMacRootView(calendarCoordinator: coordinator, usesVisualFixtures: true), named: "LifeOSMacRootView-overview-dark", colorScheme: .dark)
-        render(UsageView(snapshots: DemoDataProvider.providers, analytics: DemoUsageAnalytics.snapshots), named: "UsageView-dark", colorScheme: .dark)
+        render(LifeOSMacRootView(calendarCoordinator: coordinator, usesVisualFixtures: true, usageCoordinator: UsageCoordinator()), named: "LifeOSMacRootView-overview-dark", colorScheme: .dark)
+        render(UsageView(snapshots: DemoDataProvider.providers, analytics: DemoUsageAnalytics.snapshots, state: .demo), named: "UsageView-dark", colorScheme: .dark)
         render(CalendarView(selectedDate: anchor, calendar: visualFixtureCalendar, coordinator: coordinator), named: "CalendarView-dark", colorScheme: .dark)
         render(TaxDocumentsView(), named: "TaxDocumentsView-dark", colorScheme: .dark)
     }

@@ -7,6 +7,7 @@ private enum LifeOSAppTab: Hashable {
 @main
 struct LifeOSApp: App {
     @StateObject private var calendarCoordinator: CalendarCoordinator
+    @StateObject private var usageCoordinator: UsageCoordinator
     @State private var selection: LifeOSAppTab = .overview
     @State private var showingUsage = false
     @State private var requestingNewCalendarEvent = false
@@ -16,6 +17,11 @@ struct LifeOSApp: App {
     init() {
         let enabled = ProcessInfo.processInfo.arguments.contains("-LifeOSVisualFixtures")
         usesVisualFixtures = enabled
+        let cachedUsage = enabled ? nil : SharedSnapshotStore.read()
+        _usageCoordinator = StateObject(wrappedValue: UsageCoordinator(
+            initialProviders: cachedUsage?.providers ?? [],
+            initialUpdatedAt: cachedUsage?.updatedAt
+        ))
         _calendarCoordinator = StateObject(
             wrappedValue: CalendarCoordinator(
                 initialSnapshot: enabled ? CalendarVisualFixtures.snapshot() : CalendarSnapshot()
@@ -37,8 +43,13 @@ struct LifeOSApp: App {
                 case .overview:
                 OverviewView(
                     snapshot: usesVisualFixtures ? DemoDataProvider.overview : .unavailable(),
-                    usageSnapshots: usesVisualFixtures ? DemoDataProvider.providers : [],
-                    usageAnalytics: usesVisualFixtures ? DemoUsageAnalytics.snapshots : [],
+                    usageSnapshots: usesVisualFixtures ? DemoDataProvider.providers : usageCoordinator.providers,
+                    usageAnalytics: usesVisualFixtures ? DemoUsageAnalytics.snapshots : usageCoordinator.analytics,
+                    usageState: usesVisualFixtures ? .demo : usageCoordinator.state,
+                    refreshAction: usesVisualFixtures ? nil : {
+                        await calendarCoordinator.manualRefresh()
+                        await usageCoordinator.refresh()
+                    },
                     showingUsage: $showingUsage
                 )
                 case .calendar:
@@ -75,6 +86,7 @@ struct LifeOSApp: App {
                 if !usesVisualFixtures {
                     await calendarCoordinator.load()
                     calendarCoordinator.startSync()
+                    await usageCoordinator.refresh()
                 }
             }
         }

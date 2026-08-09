@@ -3,6 +3,7 @@ import SwiftUI
 @main
 struct LifeOSMacApp: App {
     @StateObject private var calendarCoordinator: CalendarCoordinator
+    @StateObject private var usageCoordinator: UsageCoordinator
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private let usesVisualFixtures: Bool
 
@@ -10,6 +11,11 @@ struct LifeOSMacApp: App {
         LifeOSFontRegistrar.registerBundledFonts()
         let enabled = ProcessInfo.processInfo.arguments.contains("-LifeOSVisualFixtures")
         usesVisualFixtures = enabled
+        let cachedUsage = enabled ? nil : SharedSnapshotStore.read()
+        _usageCoordinator = StateObject(wrappedValue: UsageCoordinator(
+            initialProviders: cachedUsage?.providers ?? [],
+            initialUpdatedAt: cachedUsage?.updatedAt
+        ))
         _calendarCoordinator = StateObject(
             wrappedValue: CalendarCoordinator(
                 initialSnapshot: enabled ? CalendarVisualFixtures.snapshot() : CalendarSnapshot()
@@ -21,7 +27,8 @@ struct LifeOSMacApp: App {
         WindowGroup {
             LifeOSMacRootView(
                 calendarCoordinator: calendarCoordinator,
-                usesVisualFixtures: usesVisualFixtures
+                usesVisualFixtures: usesVisualFixtures,
+                usageCoordinator: usageCoordinator
             )
                 .frame(minWidth: 900, minHeight: 640)
                 .tint(LifeOSTokens.accent)
@@ -31,6 +38,7 @@ struct LifeOSMacApp: App {
                     if !usesVisualFixtures {
                         await calendarCoordinator.load()
                         calendarCoordinator.startSync()
+                        await usageCoordinator.refresh()
                     }
                 }
         }
@@ -38,7 +46,10 @@ struct LifeOSMacApp: App {
         .commands {
             CommandGroup(after: .toolbar) {
                 Button("Refresh") {
-                    Task { await calendarCoordinator.manualRefresh() }
+                    Task {
+                        await calendarCoordinator.manualRefresh()
+                        await usageCoordinator.refresh()
+                    }
                 }
                 .keyboardShortcut("r", modifiers: .command)
             }
@@ -54,16 +65,20 @@ struct LifeOSMacApp: App {
 
 /// A compact, deterministic macOS split layout. Keeping the sidebar in SwiftUI
 /// avoids AppKit material placeholders when the view is rendered off-screen.
+@MainActor
 struct LifeOSMacRootView: View {
     @ObservedObject private var calendarCoordinator: CalendarCoordinator
+    @ObservedObject private var usageCoordinator: UsageCoordinator
     private let usesVisualFixtures: Bool
     @State private var selection: SidebarItem = .overview
     @State private var showingUsage = false
     @State private var requestingNewCalendarEvent = false
 
-    init(calendarCoordinator: CalendarCoordinator, usesVisualFixtures: Bool = false) {
+    @MainActor
+    init(calendarCoordinator: CalendarCoordinator, usesVisualFixtures: Bool = false, usageCoordinator: UsageCoordinator) {
         self.calendarCoordinator = calendarCoordinator
         self.usesVisualFixtures = usesVisualFixtures
+        self.usageCoordinator = usageCoordinator
     }
 
     var body: some View {
@@ -124,8 +139,13 @@ struct LifeOSMacRootView: View {
         case .overview:
             OverviewView(
                 snapshot: usesVisualFixtures ? DemoDataProvider.overview : .unavailable(),
-                usageSnapshots: usesVisualFixtures ? DemoDataProvider.providers : [],
-                usageAnalytics: usesVisualFixtures ? DemoUsageAnalytics.snapshots : [],
+                usageSnapshots: usesVisualFixtures ? DemoDataProvider.providers : usageCoordinator.providers,
+                usageAnalytics: usesVisualFixtures ? DemoUsageAnalytics.snapshots : usageCoordinator.analytics,
+                usageState: usesVisualFixtures ? .demo : usageCoordinator.state,
+                refreshAction: usesVisualFixtures ? nil : {
+                        await calendarCoordinator.manualRefresh()
+                        await usageCoordinator.refresh()
+                    },
                 showingUsage: $showingUsage
             )
             .transition(reduceMotion ? .identity : .opacity)

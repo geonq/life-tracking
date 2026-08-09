@@ -1,5 +1,35 @@
 import Foundation
 
+struct LifeOSAnyCodingKey: CodingKey {
+    let stringValue: String
+    let intValue: Int? = nil
+    init?(stringValue: String) { self.stringValue = stringValue }
+    init?(intValue: Int) { return nil }
+}
+
+func rejectUnknownLifeOSKeys(_ decoder: Decoder, allowed: Set<String>) throws {
+    let container = try decoder.container(keyedBy: LifeOSAnyCodingKey.self)
+    guard Set(container.allKeys.map(\.stringValue)).isSubset(of: allowed) else {
+        throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+            debugDescription: "Unknown LifeOS response field"))
+    }
+}
+
+func decodeStrictOptional<T: Decodable, Key: CodingKey>(
+    _ type: T.Type, forKey key: Key, from container: KeyedDecodingContainer<Key>
+) throws -> T? {
+    guard container.contains(key) else { return nil }
+    guard try !container.decodeNil(forKey: key) else {
+        throw DecodingError.valueNotFound(type, .init(codingPath: container.codingPath + [key],
+            debugDescription: "Explicit null is not accepted"))
+    }
+    return try container.decode(type, forKey: key)
+}
+
+extension CodingUserInfoKey {
+    static let lifeOSNow = CodingUserInfoKey(rawValue: "com.hermes.lifeos.now")!
+}
+
 public enum LifeOSDeepLink: Equatable, Sendable {
     case usage
     case calendar
@@ -55,9 +85,10 @@ public struct Provenance: Codable, Equatable, Sendable {
         self.connector = connector
     }
 
-    public func freshness(now: Date = .now, staleAfter: TimeInterval = 3600) -> Freshness {
+    public func freshness(now: Date = .now, staleAfter: TimeInterval = 15 * 60) -> Freshness {
         guard connector == .healthy || connector == .refreshDue else { return .unavailable }
-        let age = max(0, now.timeIntervalSince(observedAt))
+        let age = now.timeIntervalSince(observedAt)
+        guard age >= 0 else { return .unavailable }
         return age < staleAfter / 2 ? .fresh : age < staleAfter ? .aging : .stale
     }
 }
@@ -85,11 +116,14 @@ public struct UsageWindow: Codable, Equatable, Identifiable, Sendable {
     public let resetAt: Date?
     public let projection: Projection?
     public let durationMinutes: Int?
+    public let provenance: Provenance?
 
     public init(id: String, label: String, limit: Double? = nil, used: Double? = nil,
-                resetAt: Date? = nil, projection: Projection? = nil, durationMinutes: Int? = nil) {
+                resetAt: Date? = nil, projection: Projection? = nil, durationMinutes: Int? = nil,
+                provenance: Provenance? = nil) {
         self.id = id; self.label = label; self.limit = limit; self.used = used
         self.resetAt = resetAt; self.projection = projection; self.durationMinutes = durationMinutes
+        self.provenance = provenance
     }
 
     public var usedPercent: Double? {
@@ -177,6 +211,29 @@ public struct APIUsagePayload: Codable, Equatable, Sendable {
     public let windows: [APIUsageWindow]
     public let estimates: [APIUsageEstimate]
     public let connectors: [String: ConnectorState]
+
+    private enum CodingKeys: String, CodingKey { case generatedAt, windows, estimates, connectors }
+
+    public init(generatedAt: Date, windows: [APIUsageWindow], estimates: [APIUsageEstimate],
+                connectors: [String: ConnectorState]) {
+        self.generatedAt = generatedAt; self.windows = windows; self.estimates = estimates; self.connectors = connectors
+    }
+
+    public init(from decoder: Decoder) throws {
+        try rejectUnknownLifeOSKeys(decoder, allowed: ["generatedAt", "windows", "estimates", "connectors"])
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        generatedAt = try container.decode(Date.self, forKey: .generatedAt)
+        windows = try container.decode([APIUsageWindow].self, forKey: .windows)
+        estimates = try container.decode([APIUsageEstimate].self, forKey: .estimates)
+        connectors = try container.decode([String: ConnectorState].self, forKey: .connectors)
+        _ = try UsageIngestion.map(self, now: decoder.userInfo[.lifeOSNow] as? Date ?? .now)
+    }
+
+    public static func decode(_ data: Data, now: Date = .now) throws -> APIUsagePayload {
+        let decoder = JSONDecoder.lifeOS
+        decoder.userInfo[.lifeOSNow] = now
+        return try decoder.decode(APIUsagePayload.self, from: data)
+    }
 }
 
 public struct APIUsageWindow: Codable, Equatable, Sendable {
@@ -187,6 +244,30 @@ public struct APIUsageWindow: Codable, Equatable, Sendable {
     public let resetAt: Date?
     public let availability: String
     public let provenance: APIUsageProvenance
+
+    private enum CodingKeys: String, CodingKey {
+        case provider, window, durationMinutes, usedPercent, resetAt, availability, provenance
+    }
+
+    public init(provider: Provider, window: String, durationMinutes: Int, usedPercent: Double?, resetAt: Date?,
+                availability: String, provenance: APIUsageProvenance) {
+        self.provider = provider; self.window = window; self.durationMinutes = durationMinutes
+        self.usedPercent = usedPercent; self.resetAt = resetAt; self.availability = availability; self.provenance = provenance
+    }
+
+    public init(from decoder: Decoder) throws {
+        try rejectUnknownLifeOSKeys(decoder, allowed: [
+            "provider", "window", "durationMinutes", "usedPercent", "resetAt", "availability", "provenance"
+        ])
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        provider = try container.decode(Provider.self, forKey: .provider)
+        window = try container.decode(String.self, forKey: .window)
+        durationMinutes = try container.decode(Int.self, forKey: .durationMinutes)
+        usedPercent = try decodeStrictOptional(Double.self, forKey: .usedPercent, from: container)
+        resetAt = try decodeStrictOptional(Date.self, forKey: .resetAt, from: container)
+        availability = try container.decode(String.self, forKey: .availability)
+        provenance = try container.decode(APIUsageProvenance.self, forKey: .provenance)
+    }
 }
 
 public struct APIUsageProvenance: Codable, Equatable, Sendable {
@@ -196,6 +277,29 @@ public struct APIUsageProvenance: Codable, Equatable, Sendable {
     public let official: Bool
     public let quality: String
     public let connectorState: ConnectorState
+
+    private enum CodingKeys: String, CodingKey {
+        case source, observedAt, freshness, official, quality, connectorState
+    }
+
+    public init(source: String, observedAt: Date, freshness: String, official: Bool, quality: String,
+                connectorState: ConnectorState) {
+        self.source = source; self.observedAt = observedAt; self.freshness = freshness
+        self.official = official; self.quality = quality; self.connectorState = connectorState
+    }
+
+    public init(from decoder: Decoder) throws {
+        try rejectUnknownLifeOSKeys(decoder, allowed: [
+            "source", "observedAt", "freshness", "official", "quality", "connectorState"
+        ])
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        source = try container.decode(String.self, forKey: .source)
+        observedAt = try container.decode(Date.self, forKey: .observedAt)
+        freshness = try container.decode(String.self, forKey: .freshness)
+        official = try container.decode(Bool.self, forKey: .official)
+        quality = try container.decode(String.self, forKey: .quality)
+        connectorState = try container.decode(ConnectorState.self, forKey: .connectorState)
+    }
 }
 
 public struct APIUsageEstimate: Codable, Equatable, Sendable {
@@ -208,6 +312,36 @@ public struct APIUsageEstimate: Codable, Equatable, Sendable {
     public let sampleSpanHours: Double
     public let explanation: String
     public let official: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case provider, window, projectedPercentAtReset, estimatedExhaustionAt, velocityPercentPerHour,
+             confidence, sampleSpanHours, explanation, official
+    }
+
+    public init(provider: Provider, window: String, projectedPercentAtReset: Double?, estimatedExhaustionAt: Date?,
+                velocityPercentPerHour: Double?, confidence: String, sampleSpanHours: Double,
+                explanation: String, official: Bool) {
+        self.provider = provider; self.window = window; self.projectedPercentAtReset = projectedPercentAtReset
+        self.estimatedExhaustionAt = estimatedExhaustionAt; self.velocityPercentPerHour = velocityPercentPerHour
+        self.confidence = confidence; self.sampleSpanHours = sampleSpanHours; self.explanation = explanation; self.official = official
+    }
+
+    public init(from decoder: Decoder) throws {
+        try rejectUnknownLifeOSKeys(decoder, allowed: [
+            "provider", "window", "projectedPercentAtReset", "estimatedExhaustionAt", "velocityPercentPerHour",
+            "confidence", "sampleSpanHours", "explanation", "official"
+        ])
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        provider = try container.decode(Provider.self, forKey: .provider)
+        window = try container.decode(String.self, forKey: .window)
+        projectedPercentAtReset = try decodeStrictOptional(Double.self, forKey: .projectedPercentAtReset, from: container)
+        estimatedExhaustionAt = try decodeStrictOptional(Date.self, forKey: .estimatedExhaustionAt, from: container)
+        velocityPercentPerHour = try decodeStrictOptional(Double.self, forKey: .velocityPercentPerHour, from: container)
+        confidence = try container.decode(String.self, forKey: .confidence)
+        sampleSpanHours = try container.decode(Double.self, forKey: .sampleSpanHours)
+        explanation = try container.decode(String.self, forKey: .explanation)
+        official = try container.decode(Bool.self, forKey: .official)
+    }
 }
 
 public enum CapabilityState: Equatable, Sendable { case blocked(String) }
@@ -257,7 +391,22 @@ public enum SharedSnapshotStore {
 }
 
 public extension JSONDecoder {
-    static var lifeOS: JSONDecoder { let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601; return decoder }
+    static var lifeOS: JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .custom { nestedDecoder in
+            let container = try nestedDecoder.singleValueContainer()
+            let raw = try container.decode(String.self)
+            let fractional = ISO8601DateFormatter()
+            fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            let standard = ISO8601DateFormatter()
+            standard.formatOptions = [.withInternetDateTime]
+            guard let date = fractional.date(from: raw) ?? standard.date(from: raw) else {
+                throw DecodingError.dataCorruptedError(in: container, debugDescription: "Invalid ISO-8601 timestamp")
+            }
+            return date
+        }
+        return decoder
+    }
 }
 public extension JSONEncoder {
     static var lifeOS: JSONEncoder { let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601; return encoder }

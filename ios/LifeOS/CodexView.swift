@@ -17,13 +17,17 @@ struct CodexView: View {
 
 struct UsageView: View {
     let snapshots: [ProviderSnapshot]
+    let state: UsageLoadState
+    let refreshAction: (() async -> Void)?
     private let analytics: [UsageAnalyticsSnapshot]
     @State private var selectedProviders: Set<Provider>
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dismiss) private var dismiss
 
-    init(snapshots: [ProviderSnapshot], analytics: [UsageAnalyticsSnapshot]) {
+    init(snapshots: [ProviderSnapshot], analytics: [UsageAnalyticsSnapshot], state: UsageLoadState = .observed, refreshAction: (() async -> Void)? = nil) {
         self.snapshots = snapshots
+        self.state = state
+        self.refreshAction = refreshAction
         self.analytics = analytics
         _selectedProviders = State(initialValue: Set(snapshots.map(\.provider)))
     }
@@ -44,6 +48,7 @@ struct UsageView: View {
                 .accessibilityIdentifier("usage-back")
 #endif
                 header
+                stateBanner
                 providerSelector
 
                 ForEach(snapshots.filter { selectedProviders.contains($0.provider) }, id: \.provider) { snapshot in
@@ -73,6 +78,14 @@ struct UsageView: View {
 #endif
         .tint(LifeOSTokens.accent)
         .animation(reduceMotion ? nil : LifeOSMotion.spring, value: selectedProviders)
+        .refreshable { await refreshAction?() }
+        .toolbar {
+            ToolbarItem(placement: .automatic) {
+                Button("Refresh usage") { Task { await refreshAction?() } }
+                    .disabled(refreshAction == nil || state == .loading)
+                    .accessibilityLabel("Refresh usage data")
+            }
+        }
     }
 
     private var header: some View {
@@ -86,7 +99,7 @@ struct UsageView: View {
                 Circle()
                     .fill(LifeOSTokens.warning)
                     .frame(width: 5, height: 5)
-                Text("Preview data · connect sources for live updates")
+                Text(stateLabel)
                     .lineLimit(1)
             }
                 .font(.caption)
@@ -94,6 +107,34 @@ struct UsageView: View {
                 .padding(.top, 2)
         }
         .accessibilityElement(children: .combine)
+    }
+
+    private var stateBanner: some View {
+        Text(stateDetail)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(stateDetail)
+    }
+
+    private var stateLabel: String {
+        switch state {
+        case .demo: return "Demo fixtures · not live provider data"
+        case .loading: return "Loading live usage data"
+        case .observed: return "Observed live data"
+        case .stale: return "Stale observed data"
+        case .unavailable: return "Usage data unavailable"
+        }
+    }
+
+    private var stateDetail: String {
+        switch state {
+        case .demo: return "Deterministic preview values only. No provider account was queried."
+        case .loading: return "Refreshing read-only provider data…"
+        case .observed: return snapshots.map { "\($0.accountLabel), \($0.provenance.quality.rawValue) provenance" }.joined(separator: ", ")
+        case .stale: return "Last observed values are stale; refresh to verify them."
+        case .unavailable: return "No validated observation is available. Estimates and demo values are hidden."
+        }
     }
 
     private var providerSelector: some View {
@@ -237,14 +278,22 @@ private struct ProviderLimitsCard: View {
                             .font(.caption2).foregroundStyle(.secondary)
                     }
                     if let reset = window.resetAt {
-                        Text("Resets \(reset, style: .relative)")
+                        if reset > Date.now {
+                            Text("Resets \(reset, style: .relative)")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        } else {
+                            Text("Reset time passed")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+                    if let provenance = window.provenance {
+                        Text("Source: \(provenance.source) · \(provenance.freshness().rawValue)")
                             .font(.caption2).foregroundStyle(.secondary)
                     }
                 }
                 .accessibilityElement(children: .combine)
             }
-            Text("Source: \(snapshot.provenance.source) · \(snapshot.provenance.freshness().rawValue)")
-                .font(.caption2).foregroundStyle(.secondary)
+
         }
         .lifeOSCard()
     }

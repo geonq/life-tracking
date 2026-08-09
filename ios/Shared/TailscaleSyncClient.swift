@@ -4,6 +4,7 @@ public enum TailscaleSyncError: Error, Equatable, Sendable {
     case notConfigured
     case invalidServerURL
     case httpError(Int)
+    case responseTooLarge
 }
 
 /// `URLSessionWebSocketTask` on this toolchain never delivers its handshake or `receive()`
@@ -13,7 +14,16 @@ public enum TailscaleSyncError: Error, Equatable, Sendable {
 /// both hang forever with zero callback, zero socket ever opened; the only difference that
 /// fixed it was attaching this delegate. It doesn't need to do anything itself -- its mere
 /// presence is what unblocks event delivery.
-private final class WebSocketSessionDelegate: NSObject, URLSessionWebSocketDelegate {}
+private final class StrictSyncSessionDelegate: NSObject, URLSessionWebSocketDelegate, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest,
+                    completionHandler: @escaping (URLRequest?) -> Void) {
+        // Authorization must never cross a redirect boundary. The configured private
+        // endpoint is canonical, so any redirect is treated as a configuration failure.
+        completionHandler(nil)
+    }
+}
 
 /// Reads server URL / auth token from UserDefaults. Tailscale sync is opt-in:
 /// if either key is unset/empty, calls simply no-op (fetch/push throw `.notConfigured`,
@@ -21,23 +31,37 @@ private final class WebSocketSessionDelegate: NSObject, URLSessionWebSocketDeleg
 public actor TailscaleSyncClient {
     public static let serverURLDefaultsKey = "LifeOS.Sync.ServerURL"
     public static let tokenDefaultsKey = "LifeOS.Sync.Token"
+    public static let approvedHostsInfoPlistKey = "LIFEOS_SYNC_APPROVED_HOSTS"
 
     private let session: URLSession
     private let defaults: UserDefaults
+    private let approvedHosts: Set<String>
     private var webSocketTask: URLSessionWebSocketTask?
     private var reconnectAttempt = 0
     private var listening = false
     private var onChange: ((String) -> Void)?
 
     private static let backoffSteps: [UInt64] = [2, 5, 15, 30] // seconds, capped
+    private static let maximumReadOnlyResponseBytes = 1_048_576
 
-    public init(session: URLSession? = nil, defaults: UserDefaults = .standard) {
-        self.session = session ?? URLSession(configuration: .default, delegate: WebSocketSessionDelegate(), delegateQueue: nil)
+    public init(defaults: UserDefaults = .standard,
+                approvedHosts: Set<String> = TailscaleSyncClient.configuredApprovedHosts()) {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.urlCache = nil
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
+        self.session = URLSession(
+            configuration: configuration,
+            delegate: StrictSyncSessionDelegate(),
+            delegateQueue: nil
+        )
         self.defaults = defaults
+        self.approvedHosts = approvedHosts
     }
 
     public var isConfigured: Bool {
-        !serverURLString.isEmpty && !token.isEmpty
+        Self.validatedServerURL(serverURLString, approvedHosts: approvedHosts) != nil && Self.validatedToken(token) != nil
     }
 
     private var serverURLString: String {
@@ -49,9 +73,43 @@ public actor TailscaleSyncClient {
     }
 
     private func baseURL() throws -> URL {
-        guard isConfigured else { throw TailscaleSyncError.notConfigured }
-        guard let url = URL(string: serverURLString) else { throw TailscaleSyncError.invalidServerURL }
+        guard !serverURLString.isEmpty, !token.isEmpty else { throw TailscaleSyncError.notConfigured }
+        guard let url = Self.validatedServerURL(serverURLString, approvedHosts: approvedHosts) else { throw TailscaleSyncError.invalidServerURL }
+        guard Self.validatedToken(token) != nil else { throw TailscaleSyncError.notConfigured }
         return url
+    }
+
+    public static func configuredApprovedHosts(bundle: Bundle = .main) -> Set<String> {
+        guard let raw = bundle.object(forInfoDictionaryKey: approvedHostsInfoPlistKey) as? String,
+              !raw.contains("$(") else { return [] }
+        return Set(raw.split(separator: ",").compactMap { value in
+            let host = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard host.hasSuffix(".ts.net"), host.count > ".ts.net".count,
+                  URL(string: "https://\(host)")?.host == host else { return nil }
+            return host
+        })
+    }
+
+    public static func validatedServerURL(_ rawValue: String, approvedHosts: Set<String>) -> URL? {
+        guard let components = URLComponents(string: rawValue),
+              components.scheme?.lowercased() == "https",
+              components.user == nil, components.password == nil,
+              components.query == nil, components.fragment == nil,
+              components.path.isEmpty || components.path == "/",
+              components.port == nil || components.port == 443 || components.port == 8420,
+              let host = components.host?.lowercased(), approvedHosts.contains(host),
+              host.hasSuffix(".ts.net"), host.count > ".ts.net".count else { return nil }
+        return components.url
+    }
+
+    public static func validatedToken(_ rawValue: String) -> String? {
+        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let placeholders = ["replace-me", "changeme", "token", "your-token", "[redacted]"]
+        guard value.count >= 32, !placeholders.contains(value.lowercased()),
+              value.rangeOfCharacter(from: .controlCharacters) == nil,
+              value.rangeOfCharacter(from: .whitespacesAndNewlines) == nil,
+              !value.contains("$("), !value.contains("${") else { return nil }
+        return value
     }
 
     private func authorizedRequest(url: URL) -> URLRequest {
@@ -85,6 +143,47 @@ public actor TailscaleSyncClient {
         let url = try baseURL().appendingPathComponent("documents")
         let (data, response) = try await session.data(for: authorizedRequest(url: url))
         try Self.checkHTTPStatus(response)
+        return data
+    }
+
+    // MARK: - Read-only provider usage
+
+    public func fetchUsage() async throws -> Data {
+        try await fetchBoundedReadOnly(pathComponents: ["usage"])
+    }
+
+    // MARK: - Read-only finance summary
+
+    /// Reads the authenticated Python gateway route. The gateway, not the loopback-only
+    /// Node API, owns `/finance/summary` and proxies it to `/api/finance/summary`.
+    public func fetchFinanceSummary() async throws -> FinanceSummary {
+        let data = try await fetchBoundedReadOnly(pathComponents: ["finance", "summary"])
+        return try FinanceSummary.decode(data)
+    }
+
+    private func fetchBoundedReadOnly(pathComponents: [String]) async throws -> Data {
+        let url = try pathComponents.reduce(baseURL()) { partial, component in
+            partial.appendingPathComponent(component)
+        }
+        let (bytes, response) = try await session.bytes(for: authorizedRequest(url: url))
+        try Self.checkHTTPStatus(response)
+        if let expected = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Length"),
+           let count = Int(expected), count > Self.maximumReadOnlyResponseBytes {
+            throw TailscaleSyncError.responseTooLarge
+        }
+        return try await Self.collectBounded(bytes, maximumBytes: Self.maximumReadOnlyResponseBytes)
+    }
+
+    nonisolated static func collectBounded<Bytes: AsyncSequence>(
+        _ bytes: Bytes,
+        maximumBytes: Int
+    ) async throws -> Data where Bytes.Element == UInt8 {
+        var data = Data()
+        data.reserveCapacity(min(max(maximumBytes, 0), 64 * 1024))
+        for try await byte in bytes {
+            guard data.count < maximumBytes else { throw TailscaleSyncError.responseTooLarge }
+            data.append(byte)
+        }
         return data
     }
 

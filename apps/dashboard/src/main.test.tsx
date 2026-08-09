@@ -8,16 +8,18 @@ import { fixtures } from '@iphone-life-os/contracts';
 import App from './main';
 
 const response = (body: unknown, ok = true) => ({ ok, json: async () => body });
+const observedAt = new Date(Date.now() - 5 * 60_000).toISOString();
+const resetAt = new Date(Date.now() + 3 * 60 * 60_000).toISOString();
 const unifiedUsage = {
-  generatedAt: '2026-07-28T12:00:00+00:00',
+  generatedAt: new Date().toISOString(),
   windows: [
-    { provider: 'codex', window: 'five_hour', durationMinutes: 300, usedPercent: 42, resetAt: '2026-07-28T15:00:00+00:00', availability: 'observed', provenance: { source: 'codex-official', observedAt: '2026-07-28T11:55:00+00:00', freshness: 'fresh', official: true, quality: 'observed', connectorState: 'healthy' } },
-    { provider: 'codex', window: 'seven_day', durationMinutes: 10080, usedPercent: 31, availability: 'observed', provenance: { source: 'codex-official', observedAt: '2026-07-28T11:55:00+00:00', freshness: 'fresh', official: true, quality: 'observed', connectorState: 'healthy' } },
-    { provider: 'claude', window: 'five_hour', durationMinutes: 300, availability: 'unavailable', provenance: { source: 'claude-connector', observedAt: '2026-07-28T11:55:00+00:00', freshness: 'unknown', official: false, quality: 'unavailable', connectorState: 'unavailable' } },
-    { provider: 'claude', window: 'seven_day', durationMinutes: 10080, usedPercent: 28, availability: 'observed', provenance: { source: 'claude-estimator', observedAt: '2026-07-28T11:55:00+00:00', freshness: 'fresh', official: false, quality: 'estimated', connectorState: 'healthy' } },
+    { provider: 'codex', window: 'five_hour', durationMinutes: 300, usedPercent: 42, resetAt, availability: 'observed', provenance: { source: 'codex-official', observedAt, freshness: 'fresh', official: true, quality: 'observed', connectorState: 'healthy' } },
+    { provider: 'codex', window: 'seven_day', durationMinutes: 10080, usedPercent: 31, availability: 'observed', provenance: { source: 'codex-official', observedAt, freshness: 'fresh', official: true, quality: 'observed', connectorState: 'healthy' } },
+    { provider: 'claude', window: 'five_hour', durationMinutes: 300, availability: 'unavailable', provenance: { source: 'claude-connector', observedAt, freshness: 'unknown', official: false, quality: 'unavailable', connectorState: 'unavailable' } },
+    { provider: 'claude', window: 'seven_day', durationMinutes: 10080, availability: 'unavailable', provenance: { source: 'claude-connector', observedAt, freshness: 'unknown', official: false, quality: 'unavailable', connectorState: 'unavailable' } },
   ],
-  estimates: [{ provider: 'claude', window: 'seven_day', projectedPercentAtReset: 41, confidence: 'insufficient', sampleSpanHours: 4, explanation: 'Insufficient history', official: false }],
-  connectors: { codex: 'healthy', claude: 'healthy' },
+  estimates: [{ provider: 'codex', window: 'seven_day', projectedPercentAtReset: 41, confidence: 'insufficient', sampleSpanHours: 4, explanation: 'Insufficient history', official: false }],
+  connectors: { codex: 'healthy', claude: 'unavailable' },
 };
 
 describe('dashboard API states and honesty labels', () => {

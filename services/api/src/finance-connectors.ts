@@ -1,15 +1,6 @@
-export type FinanceConnectorDescriptor = {
-  id: 'sparkasse' | 'paypal' | 'trade_republic';
-  displayName: string;
-  accessMethod: 'regulated_open_banking' | 'official_oauth' | 'regulated_provider_pending';
-  provider: string;
-  enabled: false;
-  requiresExplicitOptIn: true;
-  risk: 'provider_confirmation_required' | 'account_eligibility_required' | 'experimental_only';
-  recommendation: string;
-};
+import type { FinanceConnectorDescriptor } from '@iphone-life-os/contracts';
 
-export const financeConnectors: readonly FinanceConnectorDescriptor[] = [
+export const financeConnectors = [
   {
     id: 'sparkasse',
     displayName: 'Sparkasse',
@@ -40,4 +31,4 @@ export const financeConnectors: readonly FinanceConnectorDescriptor[] = [
     risk: 'experimental_only',
     recommendation: 'Keep pytr out of production because it uses an unsupported private API and handles PIN/SMS device authentication.',
   },
-] as const;
+] as const satisfies readonly FinanceConnectorDescriptor[];

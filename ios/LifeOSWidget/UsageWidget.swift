@@ -73,7 +73,9 @@ struct LifeOSWidgetView: View {
 
             Spacer(minLength: 0)
             HStack {
-                Text("Target 35% · projection 65% opacity")
+                Text(summaries.contains(where: { $0.projectedUsedPercent != nil })
+                     ? "Current use · dashed estimate"
+                     : "Current observed use")
                 Spacer()
                 Text(entry.snapshot.updatedAt, style: .time)
             }
@@ -120,26 +122,18 @@ private struct SharedUsageGraph: View {
 
             for summary in summaries {
                 let providerColor = color(summary.provider)
-                let start = max(0, summary.observedUsedPercent * 0.72)
-                let end = summary.projectedUsedPercent ?? min(1, summary.observedUsedPercent * 1.28)
+                let observedX = 0.62
+                var observed = Path()
+                observed.move(to: point(x: 0, value: summary.observedUsedPercent, width: graphWidth, height: graphHeight, inset: inset))
+                observed.addLine(to: point(x: observedX, value: summary.observedUsedPercent, width: graphWidth, height: graphHeight, inset: inset))
+                context.stroke(observed, with: .color(providerColor), style: StrokeStyle(lineWidth: 2.2, lineCap: .round))
 
-                var target = Path()
-                target.move(to: point(x: 0, value: start, width: graphWidth, height: graphHeight, inset: inset))
-                target.addCurve(
-                    to: point(x: 1, value: min(1, summary.observedUsedPercent + 0.10), width: graphWidth, height: graphHeight, inset: inset),
-                    control1: point(x: 0.35, value: start + 0.02, width: graphWidth, height: graphHeight, inset: inset),
-                    control2: point(x: 0.72, value: summary.observedUsedPercent + 0.04, width: graphWidth, height: graphHeight, inset: inset)
-                )
-                context.stroke(target, with: .color(providerColor.opacity(0.35)), style: StrokeStyle(lineWidth: 1.5, dash: [3, 3]))
-
-                var projection = Path()
-                projection.move(to: point(x: 0, value: summary.observedUsedPercent, width: graphWidth, height: graphHeight, inset: inset))
-                projection.addCurve(
-                    to: point(x: 1, value: end, width: graphWidth, height: graphHeight, inset: inset),
-                    control1: point(x: 0.28, value: summary.observedUsedPercent + (end - summary.observedUsedPercent) * 0.16, width: graphWidth, height: graphHeight, inset: inset),
-                    control2: point(x: 0.66, value: summary.observedUsedPercent + (end - summary.observedUsedPercent) * 0.78, width: graphWidth, height: graphHeight, inset: inset)
-                )
-                context.stroke(projection, with: .color(providerColor.opacity(0.65)), style: StrokeStyle(lineWidth: 2.2, lineCap: .round))
+                if let projected = summary.projectedUsedPercent {
+                    var estimate = Path()
+                    estimate.move(to: point(x: observedX, value: summary.observedUsedPercent, width: graphWidth, height: graphHeight, inset: inset))
+                    estimate.addLine(to: point(x: 1, value: projected, width: graphWidth, height: graphHeight, inset: inset))
+                    context.stroke(estimate, with: .color(providerColor.opacity(0.65)), style: StrokeStyle(lineWidth: 2.2, lineCap: .round, dash: [3, 3]))
+                }
             }
         }
         .accessibilityHidden(true)

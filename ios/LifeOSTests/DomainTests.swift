@@ -3,14 +3,21 @@ import XCTest
 
 final class DomainTests: XCTestCase {
     func testDecodesRepresentativeUsagePayloadWithOptionalFields() throws {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let now = Date.now
+        let generatedAt = formatter.string(from: now.addingTimeInterval(-30))
+        let observedAt = formatter.string(from: now.addingTimeInterval(-300))
+        let resetAt = formatter.string(from: now.addingTimeInterval(3 * 3600))
+        let exhaustionAt = formatter.string(from: now.addingTimeInterval(24 * 3600))
         let json = """
-        {"generatedAt":"2026-07-28T12:00:00+00:00","windows":[
-          {"provider":"codex","window":"five_hour","durationMinutes":300,"usedPercent":42,"resetAt":"2026-07-28T15:00:00+00:00","availability":"observed","provenance":{"source":"codex-official","observedAt":"2026-07-28T11:55:00+00:00","freshness":"fresh","official":true,"quality":"observed","connectorState":"healthy"}},
-          {"provider":"claude","window":"five_hour","durationMinutes":300,"availability":"unavailable","provenance":{"source":"claude-connector","observedAt":"2026-07-28T11:55:00+00:00","freshness":"unknown","official":false,"quality":"unavailable","connectorState":"unavailable"}}],
-          "estimates":[{"provider":"codex","window":"seven_day","projectedPercentAtReset":41,"estimatedExhaustionAt":"2026-07-29T12:00:00+00:00","velocityPercentPerHour":1.5,"confidence":"medium","sampleSpanHours":24,"explanation":"Observed trend","official":false}],
+        {"generatedAt":"\(generatedAt)","windows":[
+          {"provider":"codex","window":"five_hour","durationMinutes":300,"usedPercent":42,"resetAt":"\(resetAt)","availability":"observed","provenance":{"source":"codex-official","observedAt":"\(observedAt)","freshness":"fresh","official":true,"quality":"observed","connectorState":"healthy"}},
+          {"provider":"claude","window":"five_hour","durationMinutes":300,"availability":"unavailable","provenance":{"source":"claude-connector","observedAt":"\(observedAt)","freshness":"unknown","official":false,"quality":"unavailable","connectorState":"unavailable"}}],
+          "estimates":[{"provider":"codex","window":"seven_day","projectedPercentAtReset":41,"estimatedExhaustionAt":"\(exhaustionAt)","velocityPercentPerHour":1.5,"confidence":"medium","sampleSpanHours":24,"explanation":"Observed trend","official":false}],
           "connectors":{"codex":"healthy","claude":"unavailable"}}
         """.data(using: .utf8)!
-        let payload = try JSONDecoder.lifeOS.decode(APIUsagePayload.self, from: json)
+        let payload = try APIUsagePayload.decode(json, now: now)
         XCTAssertEqual(payload.windows.first?.usedPercent, 42)
         XCTAssertNotNil(payload.windows.first?.resetAt)
         XCTAssertEqual(payload.windows[1].availability, "unavailable")

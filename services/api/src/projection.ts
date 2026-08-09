@@ -11,7 +11,11 @@ export function projectUsage(samples: UsageHistoryEntry[], now = new Date()): Es
   if (!(span > 0) || b.usedPercent < a.usedPercent) return { ...base, provider: first.provider, window, sampleSpanHours: Math.max(0, span), explanation: 'Counter decreased or reset rollover detected; projection unavailable.' };
   const velocity = (b.usedPercent - a.usedPercent) / span;
   const resetMs = b.resetAt ? Date.parse(b.resetAt) : NaN;
-  const until = Number.isFinite(resetMs) ? Math.max(0, (resetMs - Date.parse(b.observedAt)) / 3600000) : 0;
+  const observedMs = Date.parse(b.observedAt);
+  if (!Number.isFinite(resetMs) || !Number.isFinite(observedMs) || resetMs <= Math.max(observedMs, now.getTime())) {
+    return { ...base, provider: first.provider, window, sampleSpanHours: span, explanation: 'No valid future reset boundary; projection unavailable.' };
+  }
+  const until = (resetMs - observedMs) / 3600000;
   const projected = Math.min(100, b.usedPercent + velocity * until);
   const exhaustion = velocity > 0 && projected >= 100 && Number.isFinite(resetMs) ? new Date(Date.parse(b.observedAt) + ((100 - b.usedPercent) / velocity) * 3600000).toISOString() : undefined;
   return { provider: first.provider, window, projectedPercentAtReset: projected, ...(exhaustion ? { estimatedExhaustionAt: exhaustion } : {}), velocityPercentPerHour: velocity, confidence: span >= 1 ? 'medium' : 'low', sampleSpanHours: span, explanation: 'Nonofficial estimate from increasing samples in the same reset cycle.', official: false };

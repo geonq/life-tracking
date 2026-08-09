@@ -4,6 +4,8 @@ struct OverviewView: View {
     private let snapshot: OverviewSnapshot
     private let usageSnapshots: [ProviderSnapshot]
     private let usageAnalytics: [UsageAnalyticsSnapshot]
+    private let usageState: UsageLoadState
+    private let refreshAction: (() async -> Void)?
     @Binding private var showingUsage: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -11,11 +13,15 @@ struct OverviewView: View {
         snapshot: OverviewSnapshot = .unavailable(),
         usageSnapshots: [ProviderSnapshot] = [],
         usageAnalytics: [UsageAnalyticsSnapshot] = [],
+        usageState: UsageLoadState = .unavailable,
+        refreshAction: (() async -> Void)? = nil,
         showingUsage: Binding<Bool> = .constant(false)
     ) {
         self.snapshot = snapshot
         self.usageSnapshots = usageSnapshots
         self.usageAnalytics = usageAnalytics
+        self.usageState = usageState
+        self.refreshAction = refreshAction
         _showingUsage = showingUsage
     }
 
@@ -43,10 +49,13 @@ struct OverviewView: View {
             .accessibilityIdentifier("overview-screen")
 #endif
             .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
+            .refreshable { await refreshAction?() }
             .navigationDestination(isPresented: $showingUsage) {
                 UsageView(
                     snapshots: usageSnapshots,
-                    analytics: usageAnalytics
+                    analytics: usageAnalytics,
+                    state: usageState,
+                    refreshAction: refreshAction
                 )
             }
         }
@@ -86,7 +95,7 @@ struct OverviewView: View {
 
     private var snapshotStatusLabel: String {
         let qualities = snapshot.sections.map(\.provenance.quality)
-        if qualities.allSatisfy({ $0 == .demo }) { return "PREVIEW DATA" }
+        if qualities.allSatisfy({ $0 == .demo }) { return "DEMO FIXTURES · NOT LIVE DATA" }
         if qualities.allSatisfy({ $0 == .unavailable }) { return "DATA UNAVAILABLE" }
         return "CONNECTED DATA"
     }
@@ -124,6 +133,16 @@ struct OverviewView: View {
                 .font(LifeOSFont.inter(13, weight: .regular))
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .lineLimit(2)
+            Text(snapshotStatusLabel)
+                .font(LifeOSFont.inter(9, weight: .semiBold))
+                .tracking(0.45)
+                .foregroundStyle(snapshotStatusLabel.hasPrefix("DEMO") ? Color.orange : LifeOSTokens.accent)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(
+                    (snapshotStatusLabel.hasPrefix("DEMO") ? Color.orange : LifeOSTokens.accent).opacity(0.12),
+                    in: Capsule()
+                )
         }
         .accessibilityElement(children: .combine)
 #endif
