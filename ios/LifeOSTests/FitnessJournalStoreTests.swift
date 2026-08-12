@@ -84,6 +84,48 @@ final class FitnessJournalStoreTests: XCTestCase {
         XCTAssertNil(store.integrityWarning)
     }
 
+    func testFixtureUnavailableAutomaticCannotClaimCompletionWithoutObservation() {
+        let invalid = FitnessJournalRecord(
+            id: "fixture-false-completion", title: "Morning daylight", emoji: "☀️",
+            section: .automatic, date: day, source: .unavailable,
+            provenance: "Fixture source unavailable", tagState: .yes,
+            window: "Selected day", editable: false
+        )
+        let store = FitnessJournalStore(
+            initialRecords: [invalid], persistenceURL: nil, fixtureOnly: true
+        )
+
+        XCTAssertNil(store.record(id: invalid.id))
+        XCTAssertNotNil(store.integrityWarning)
+        XCTAssertFalse(store.upsert(invalid))
+    }
+
+    func testFixtureBoundaryKeepsUnavailableAutomaticButRejectsDemoAndManualRows() {
+        let automaticUnavailable = FitnessJournalRecord(
+            id: "fixture-unavailable", title: "Daylight", emoji: "☀️", section: .automatic,
+            date: day, source: .unavailable, provenance: "Fixture only",
+            window: "Selected day", editable: false
+        )
+        let automaticDemo = FitnessJournalRecord(
+            id: "fixture-demo", title: "Demo steps", emoji: "👟", section: .automatic,
+            date: day, source: .demo, provenance: "Fixture only",
+            observedValue: "10,000 steps", window: "Selected day", editable: false
+        )
+        let manualDemo = FitnessJournalRecord(
+            id: "fixture-demo-manual", title: "Demo mood", emoji: "😊", section: .day,
+            date: day, source: .demo, provenance: "Fixture only",
+            observedValue: "happy", window: "Selected day", editable: true
+        )
+        let store = FitnessJournalStore(
+            initialRecords: [automaticUnavailable, automaticDemo, manualDemo], persistenceURL: nil, fixtureOnly: true
+        )
+
+        XCTAssertEqual(store.record(id: "fixture-unavailable"), automaticUnavailable)
+        XCTAssertNil(store.record(id: "fixture-demo"))
+        XCTAssertNil(store.record(id: "fixture-demo-manual"))
+        XCTAssertNotNil(store.integrityWarning)
+    }
+
     func testFixtureRelaxationCannotBeCombinedWithDurableFileStorage() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("lifeos-journal-fixture-boundary-\(UUID().uuidString)", isDirectory: true)
@@ -163,6 +205,40 @@ final class FitnessJournalStoreTests: XCTestCase {
         XCTAssertNil(store.record(id: "bad-manual"))
     }
 
+    func testNonManualSourcesAreRejectedOutsideAutomaticSectionWithoutMutation() {
+        let store = FitnessJournalStore(persistenceURL: nil)
+        let valid = FitnessJournalRecord(
+            id: "source-boundary", title: "Daily mood", emoji: "😊", section: .day,
+            date: day, source: .manual, tagState: .yes
+        )
+        XCTAssertTrue(store.upsert(valid))
+
+        for section in [FitnessJournalRecord.Section.day, .pinned] {
+            for source in [FitnessJournalRecord.Source.derived, .healthKit, .inferred] {
+                let invalid = FitnessJournalRecord(
+                    id: "source-boundary", title: "Imported mood", emoji: "⚠️", section: section,
+                    date: day, source: source, provenance: "Importer",
+                    observedValue: "42", window: "Selected day", editable: false
+                )
+                XCTAssertFalse(store.upsert(invalid), "\(source) must not enter \(section)")
+                XCTAssertEqual(store.record(id: "source-boundary"), valid)
+            }
+        }
+
+        let lockedManual = FitnessJournalRecord(
+            id: "locked-manual", title: "Daily mood", emoji: "😊", section: .pinned,
+            date: day, source: .manual, editable: false
+        )
+        XCTAssertFalse(store.upsert(lockedManual))
+
+        let invalidAutomaticInference = FitnessJournalRecord(
+            id: "automatic-inference", title: "Inferred stress", emoji: "⚠️", section: .automatic,
+            date: day, source: .inferred, provenance: "Inference", observedValue: "42",
+            window: "Selected day", editable: false
+        )
+        XCTAssertFalse(store.upsert(invalidAutomaticInference))
+    }
+
     func testInvalidQuantityDoesNotMutateOrReplaceDurableManualValue() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("lifeos-journal-quantity-\(UUID().uuidString)", isDirectory: true)
@@ -190,14 +266,43 @@ final class FitnessJournalStoreTests: XCTestCase {
         let validAutomatic = FitnessJournalRecord(id: "steps", title: "Steps", emoji: "👟", section: .automatic, date: day, source: .derived, provenance: "HealthKit-derived importer", observedValue: "10,482 steps", window: "Selected day", editable: false)
         let missingValue = FitnessJournalRecord(id: "stress", title: "Stress", emoji: "🔴", section: .automatic, date: day, source: .derived, provenance: "HealthKit-derived importer", window: "Selected day", editable: false)
         let wrongSource = FitnessJournalRecord(id: "bad-source", title: "Bad source", emoji: "⚠️", section: .automatic, date: day, source: .manual, provenance: "Manual", observedValue: "42", window: "Selected day", editable: false)
+        let derivedManualSection = FitnessJournalRecord(id: "derived-day", title: "Imported stress", emoji: "⚠️", section: .day, date: day, source: .derived, provenance: "HealthKit-derived importer", observedValue: "42", window: "Selected day", editable: false)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        try JSONEncoder().encode([validManual, validAutomatic, missingValue, wrongSource]).write(to: url, options: .atomic)
+        try JSONEncoder().encode([validManual, validAutomatic, missingValue, wrongSource, derivedManualSection]).write(to: url, options: .atomic)
 
         let store = FitnessJournalStore(persistenceURL: url)
         XCTAssertNotNil(store.record(id: "mood"))
         XCTAssertNotNil(store.record(id: "steps"))
         XCTAssertNil(store.record(id: "stress"))
         XCTAssertNil(store.record(id: "bad-source"))
+        XCTAssertNil(store.record(id: "derived-day"))
+        XCTAssertNotNil(store.integrityWarning)
+    }
+
+    func testReloadFiltersInvalidPersistedManualSectionRecord() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lifeos-journal-reload-integrity-\(UUID().uuidString)", isDirectory: true)
+        let url = root.appendingPathComponent("journal.json")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let validManual = FitnessJournalRecord(
+            id: "mood", title: "Daily mood", emoji: "😊", section: .pinned,
+            date: day, source: .manual, tagState: .yes
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try JSONEncoder().encode([validManual]).write(to: url, options: .atomic)
+        let store = FitnessJournalStore(persistenceURL: url)
+
+        let invalidDerived = FitnessJournalRecord(
+            id: "derived-pinned", title: "Imported mood", emoji: "⚠️", section: .pinned,
+            date: day, source: .derived, provenance: "Importer",
+            observedValue: "42", window: "Selected day", editable: false
+        )
+        try JSONEncoder().encode([validManual, invalidDerived]).write(to: url, options: .atomic)
+        store.reload()
+
+        XCTAssertEqual(store.record(id: "mood"), validManual)
+        XCTAssertNil(store.record(id: "derived-pinned"))
         XCTAssertNotNil(store.integrityWarning)
     }
 

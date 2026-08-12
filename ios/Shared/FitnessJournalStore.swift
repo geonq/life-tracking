@@ -400,18 +400,15 @@ public final class FitnessJournalStore: ObservableObject {
             let observed = record.observedValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             guard !provenance.isEmpty, !window.isEmpty, !record.editable else { return false }
             if fixtureOnly, record.source == .unavailable {
-                return observed.isEmpty
+                return observed.isEmpty && record.tagState == .unknown
             }
             guard record.source == .healthKit || record.source == .derived else { return false }
             return !observed.isEmpty
         }
-        if record.source == .manual {
-            let observed = record.observedValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let window = record.window?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            guard observed.isEmpty, window.isEmpty else { return false }
-        }
-        guard record.source != .demo, record.source != .unavailable else { return fixtureOnly }
-        return true
+        guard record.source == .manual, record.editable else { return false }
+        let observed = record.observedValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let window = record.window?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return observed.isEmpty && window.isEmpty
     }
 
     private static func sortRecords(_ lhs: FitnessJournalRecord, _ rhs: FitnessJournalRecord) -> Bool {
