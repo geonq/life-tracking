@@ -1,16 +1,35 @@
 import { describe, expect, it } from 'vitest';
 import { request } from 'node:http';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, rmdir, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApiServer } from './server.js';
 
+const postClaudeIngest = (port: number, secret: string) => new Promise<{ status: number; body: string }>(resolve => {
+  const req = request({ port, path: '/api/usage/claude-ingest', method: 'POST', headers: {
+    authorization: `Bearer ${secret}`, 'content-type': 'application/json',
+  } }, response => { let value = ''; response.on('data', chunk => value += chunk);
+    response.on('end', () => resolve({ status: response.statusCode!, body: value })); });
+  req.end('{}');
+});
+const postClaudePayload = (port: number, secret: string, payload: unknown) => new Promise<{ status: number; body: string }>(resolve => {
+  const req = request({ port, path: '/api/usage/claude-ingest', method: 'POST', headers: {
+    authorization: `Bearer ${secret}`, 'content-type': 'application/json',
+  } }, response => { let value = ''; response.on('data', chunk => value += chunk);
+    response.on('end', () => resolve({ status: response.statusCode!, body: value })); });
+  req.end(JSON.stringify(payload));
+});
+
 describe('HTTP API', () => {
-  it('rejects Claude ingestion when parsing yields no observed usage', async () => {
+  it('ignores inline Claude secrets when no secret file is configured', async () => {
     const previousEnabled = process.env.CLAUDE_INGEST_ENABLED;
     const previousSecret = process.env.CLAUDE_INGEST_SECRET;
+    const previousStatuslineToken = process.env.CLAUDE_STATUSLINE_TOKEN;
+    const previousSecretFile = process.env.CLAUDE_INGEST_SECRET_FILE;
     process.env.CLAUDE_INGEST_ENABLED = 'true';
     process.env.CLAUDE_INGEST_SECRET = 'a'.repeat(32);
+    process.env.CLAUDE_STATUSLINE_TOKEN = 'b'.repeat(32);
+    delete process.env.CLAUDE_INGEST_SECRET_FILE;
     const server = createApiServer(); await new Promise<void>(resolve => server.listen(0, resolve));
     const address = server.address(); if (!address || typeof address === 'string') throw Error('no address');
     const result = await new Promise<{ status: number; body: { error?: string } }>(resolve => {
@@ -23,7 +42,89 @@ describe('HTTP API', () => {
     await new Promise(resolve => server.close(resolve));
     if (previousEnabled === undefined) delete process.env.CLAUDE_INGEST_ENABLED; else process.env.CLAUDE_INGEST_ENABLED = previousEnabled;
     if (previousSecret === undefined) delete process.env.CLAUDE_INGEST_SECRET; else process.env.CLAUDE_INGEST_SECRET = previousSecret;
-    expect(result).toEqual({ status: 422, body: { error: 'usage_unavailable' } });
+    if (previousSecretFile === undefined) delete process.env.CLAUDE_INGEST_SECRET_FILE; else process.env.CLAUDE_INGEST_SECRET_FILE = previousSecretFile;
+    expect(result).toEqual({ status: 401, body: { error: 'unauthorized' } });
+    if (previousStatuslineToken === undefined) delete process.env.CLAUDE_STATUSLINE_TOKEN; else process.env.CLAUDE_STATUSLINE_TOKEN = previousStatuslineToken;
+  });
+  it('prefers a validated Claude secret file and never falls back when it is bad', async () => {
+    const previousEnabled = process.env.CLAUDE_INGEST_ENABLED;
+    const previousSecret = process.env.CLAUDE_INGEST_SECRET;
+    const previousFile = process.env.CLAUDE_INGEST_SECRET_FILE;
+    const directory = await mkdtemp(join(tmpdir(), 'usage-claude-secret-'));
+    const secretPath = join(directory, 'claude-ingest.secret');
+    const fileSecret = 'f'.repeat(32);
+    process.env.CLAUDE_INGEST_ENABLED = 'true';
+    process.env.CLAUDE_INGEST_SECRET = 'i'.repeat(32);
+    process.env.CLAUDE_INGEST_SECRET_FILE = secretPath;
+    await writeFile(secretPath, fileSecret, { mode: 0o600 });
+    await chmod(secretPath, 0o600);
+    const server = createApiServer(); await new Promise<void>(resolve => server.listen(0, resolve));
+    const address = server.address(); if (!address || typeof address === 'string') throw Error('no address');
+    const accepted = await postClaudeIngest(address.port, fileSecret);
+    const inlineRejected = await postClaudeIngest(address.port, 'i'.repeat(32));
+    await new Promise(resolve => server.close(resolve));
+    if (previousEnabled === undefined) delete process.env.CLAUDE_INGEST_ENABLED; else process.env.CLAUDE_INGEST_ENABLED = previousEnabled;
+    if (previousSecret === undefined) delete process.env.CLAUDE_INGEST_SECRET; else process.env.CLAUDE_INGEST_SECRET = previousSecret;
+    if (previousFile === undefined) delete process.env.CLAUDE_INGEST_SECRET_FILE; else process.env.CLAUDE_INGEST_SECRET_FILE = previousFile;
+    expect(accepted.status).toBe(422);
+    expect(inlineRejected).toEqual({ status: 401, body: '{"error":"unauthorized"}' });
+  });
+  it('fails closed for missing, short, whitespace, and oversized Claude secret files', async () => {
+    const previousEnabled = process.env.CLAUDE_INGEST_ENABLED;
+    const previousSecret = process.env.CLAUDE_INGEST_SECRET;
+    const previousFile = process.env.CLAUDE_INGEST_SECRET_FILE;
+    const directory = await mkdtemp(join(tmpdir(), 'usage-claude-bad-secret-'));
+    const secretPath = join(directory, 'claude-ingest.secret');
+    process.env.CLAUDE_INGEST_ENABLED = 'true';
+    process.env.CLAUDE_INGEST_SECRET = 'i'.repeat(32);
+    process.env.CLAUDE_INGEST_SECRET_FILE = secretPath;
+    const server = createApiServer(); await new Promise<void>(resolve => server.listen(0, resolve));
+    const address = server.address(); if (!address || typeof address === 'string') throw Error('no address');
+    for (const value of [undefined, 'short', 'v'.repeat(31), `${'v'.repeat(32)}\n`, 'x'.repeat(4097)]) {
+      if (value === undefined) {
+        await expect(postClaudeIngest(address.port, 'i'.repeat(32))).resolves.toMatchObject({ status: 401 });
+      } else {
+        await writeFile(secretPath, value);
+        await expect(postClaudeIngest(address.port, value.trim())).resolves.toMatchObject({ status: 401 });
+      }
+    }
+    await new Promise(resolve => server.close(resolve));
+    if (previousEnabled === undefined) delete process.env.CLAUDE_INGEST_ENABLED; else process.env.CLAUDE_INGEST_ENABLED = previousEnabled;
+    if (previousSecret === undefined) delete process.env.CLAUDE_INGEST_SECRET; else process.env.CLAUDE_INGEST_SECRET = previousSecret;
+    if (previousFile === undefined) delete process.env.CLAUDE_INGEST_SECRET_FILE; else process.env.CLAUDE_INGEST_SECRET_FILE = previousFile;
+  });
+  it('fails closed for secret symlinks, directories, and permissive modes', async () => {
+    const previousEnabled = process.env.CLAUDE_INGEST_ENABLED;
+    const previousSecretFile = process.env.CLAUDE_INGEST_SECRET_FILE;
+    const directory = await mkdtemp(join(tmpdir(), 'usage-claude-file-types-'));
+    const secretPath = join(directory, 'claude-ingest.secret');
+    const targetPath = join(directory, 'target.secret');
+    process.env.CLAUDE_INGEST_ENABLED = 'true';
+    process.env.CLAUDE_INGEST_SECRET_FILE = secretPath;
+    await writeFile(targetPath, 't'.repeat(32), { mode: 0o600 });
+    await chmod(targetPath, 0o600);
+    await writeFile(secretPath, 's'.repeat(32), { mode: 0o600 });
+    await chmod(secretPath, 0o600);
+    const server = createApiServer(); await new Promise<void>(resolve => server.listen(0, resolve));
+    const address = server.address(); if (!address || typeof address === 'string') throw Error('no address');
+
+    if (process.platform !== 'win32') {
+      await chmod(secretPath, 0o644);
+      expect((await postClaudeIngest(address.port, 's'.repeat(32))).status).toBe(401);
+    }
+    await unlink(secretPath);
+    await mkdir(secretPath);
+    expect((await postClaudeIngest(address.port, 's'.repeat(32))).status).toBe(401);
+    await rmdir(secretPath);
+    if (process.platform !== 'win32') {
+      await symlink(targetPath, secretPath);
+      expect((await postClaudeIngest(address.port, 't'.repeat(32))).status).toBe(401);
+      await unlink(secretPath);
+    }
+
+    await new Promise(resolve => server.close(resolve));
+    if (previousEnabled === undefined) delete process.env.CLAUDE_INGEST_ENABLED; else process.env.CLAUDE_INGEST_ENABLED = previousEnabled;
+    if (previousSecretFile === undefined) delete process.env.CLAUDE_INGEST_SECRET_FILE; else process.env.CLAUDE_INGEST_SECRET_FILE = previousSecretFile;
   });
   it('serves health, overview and codex, rejects methods and unknown paths', async () => {
     const server = createApiServer(); await new Promise<void>(r => server.listen(0, r));
@@ -33,15 +134,37 @@ describe('HTTP API', () => {
     expect((await call('/api/overview')).body.label).toBe('Demo data');
     expect((await call('/api/codex')).body.kind).toBe('codex');
 
+    const usage = await call('/api/usage');
+    expect(usage.status).toBe(200);
+    expect(Object.keys(usage.body.connectors)).toEqual([
+      'codex', 'claude', 'glm', 'deepseek', 'google_ai_studio',
+    ]);
+    expect(usage.body.connectors.glm).toBe('unavailable');
+    expect(usage.body.connectors.deepseek).toBe('unavailable');
+    expect(usage.body.connectors.google_ai_studio).toBe('unavailable');
+
     const finance = await call('/api/finance/connectors');
     expect(finance.status).toBe(200);
     expect(finance.body.connectors.map((connector: { id: string }) => connector.id)).toEqual([
       'sparkasse',
-      'paypal',
+      'revolut_personal',
+      'revolut_business',
       'trade_republic',
     ]);
     expect(finance.body.connectors.every((connector: { enabled: boolean }) => !connector.enabled)).toBe(true);
-    expect(finance.body.connectors.find((connector: { id: string }) => connector.id === 'trade_republic').risk).toBe('experimental_only');
+    expect(finance.body.connectors.every((connector: { requiresExplicitOptIn: boolean }) => connector.requiresExplicitOptIn)).toBe(true);
+    expect(finance.body.connectors.filter((connector: { provider: string }) => connector.provider === 'GoCardless Bank Account Data')).toHaveLength(2);
+    expect(finance.body.connectors.filter((connector: { risk: string }) => connector.risk === 'consent_required')).toHaveLength(2);
+    expect(finance.body.connectors.find((connector: { id: string }) => connector.id === 'revolut_business')).toMatchObject({
+      accessMethod: 'official_oauth',
+      provider: 'Official Revolut Business API',
+      risk: 'account_eligibility_required',
+    });
+    expect(finance.body.connectors.find((connector: { id: string }) => connector.id === 'trade_republic')).toMatchObject({
+      accessMethod: 'manual_import',
+      provider: 'Manual CSV/PDF import',
+      risk: 'manual_import_only',
+    });
 
     const financeSummary = await call('/api/finance/summary');
     expect(financeSummary.status).toBe(200);
@@ -50,6 +173,25 @@ describe('HTTP API', () => {
       expect(financeSummary.body[key]).toMatchObject({ availability: 'unavailable', provenance: { quality: 'unavailable', connectorState: 'unavailable' } });
       expect(financeSummary.body[key]).not.toHaveProperty('amountCents');
     }
+    // A summary-only unavailable response must omit the transaction snapshot;
+    // an empty array would falsely claim that a connector observed an empty ledger.
+    expect(financeSummary.body).not.toHaveProperty('transactions');
+
+    const clipper = await call('/api/clipper/summary');
+    expect(clipper.status).toBe(200);
+    expect(clipper.body).toMatchObject({
+      schemaVersion: 1,
+      availability: 'unavailable',
+      currency: 'EUR',
+      provenance: {
+        source: 'no-authorized-clipper-source',
+        quality: 'unavailable',
+        freshness: 'unknown',
+        connectorState: 'unavailable',
+      },
+    });
+    expect(clipper.body).not.toHaveProperty('metrics');
+    expect(clipper.body).not.toHaveProperty('accounts');
 
     expect((await call('/missing')).status).toBe(404);
     expect((await call('/health','POST')).status).toBe(405);
@@ -117,9 +259,11 @@ describe('HTTP API', () => {
 
   it('prefers a live Codex window over an older cached copy', async () => {
     const previous = process.env.USAGE_STORE_PATH;
+    const previousLive = process.env.CODEX_LIVE_ENABLED;
     const directory = await mkdtemp(join(tmpdir(), 'usage-dedupe-'));
     const storePath = join(directory, 'history.jsonl');
     process.env.USAGE_STORE_PATH = storePath;
+    process.env.CODEX_LIVE_ENABLED = 'true';
     await writeFile(storePath, JSON.stringify({
       provider: 'codex', window: 'five_hour', durationMinutes: 300,
       usedPercent: 10, observedAt: '2020-01-01T00:00:00Z',
@@ -134,6 +278,7 @@ describe('HTTP API', () => {
     });
     await new Promise(resolve => server.close(resolve));
     if (previous === undefined) delete process.env.USAGE_STORE_PATH; else process.env.USAGE_STORE_PATH = previous;
+    if (previousLive === undefined) delete process.env.CODEX_LIVE_ENABLED; else process.env.CODEX_LIVE_ENABLED = previousLive;
     const matching = body.windows.filter(window => window.provider === 'codex' && window.window === 'five_hour');
     expect(matching).toHaveLength(1);
     expect(matching[0]?.usedPercent).toBe(25);
@@ -154,5 +299,67 @@ describe('HTTP API', () => {
     await new Promise(resolve => server.close(resolve));
     if (previous === undefined) delete process.env.USAGE_STORE_PATH; else process.env.USAGE_STORE_PATH = previous;
     expect(body.windows).toEqual([]);
+  });
+
+  it('writes both validated Claude windows as one history batch', async () => {
+    const previousStore = process.env.USAGE_STORE_PATH;
+    const previousEnabled = process.env.CLAUDE_INGEST_ENABLED;
+    const previousSecret = process.env.CLAUDE_INGEST_SECRET;
+    const previousSecretFile = process.env.CLAUDE_INGEST_SECRET_FILE;
+    const directory = await mkdtemp(join(tmpdir(), 'usage-claude-batch-'));
+    const storePath = join(directory, 'history.jsonl');
+    const secretPath = join(directory, 'secret');
+    const secret = 'b'.repeat(32);
+    process.env.USAGE_STORE_PATH = storePath;
+    process.env.CLAUDE_INGEST_ENABLED = 'true';
+    process.env.CLAUDE_INGEST_SECRET = 'wrong'.repeat(8);
+    process.env.CLAUDE_INGEST_SECRET_FILE = secretPath;
+    await writeFile(secretPath, secret, { mode: 0o600 });
+    const server = createApiServer(); await new Promise<void>(resolve => server.listen(0, resolve));
+    const address = server.address(); if (!address || typeof address === 'string') throw Error('no address');
+    const result = await postClaudePayload(address.port, secret, { rate_limits: {
+      five_hour: { used_percentage: 12, resets_at: '2026-08-10T05:00:00Z' },
+      seven_day: { used_percentage: 3, resets_at: '2026-08-17T00:00:00Z' },
+    } });
+    await new Promise(resolve => server.close(resolve));
+    if (previousStore === undefined) delete process.env.USAGE_STORE_PATH; else process.env.USAGE_STORE_PATH = previousStore;
+    if (previousEnabled === undefined) delete process.env.CLAUDE_INGEST_ENABLED; else process.env.CLAUDE_INGEST_ENABLED = previousEnabled;
+    if (previousSecret === undefined) delete process.env.CLAUDE_INGEST_SECRET; else process.env.CLAUDE_INGEST_SECRET = previousSecret;
+    if (previousSecretFile === undefined) delete process.env.CLAUDE_INGEST_SECRET_FILE; else process.env.CLAUDE_INGEST_SECRET_FILE = previousSecretFile;
+    expect(result.status).toBe(200);
+    const lines = (await readFile(storePath, 'utf8')).trim().split(/\r?\n/).map(line => JSON.parse(line));
+    expect(lines).toHaveLength(2);
+    expect(lines.map((line: { window: string }) => line.window)).toEqual(['five_hour', 'seven_day']);
+  });
+
+  it('returns a bounded 503 and preserves corrupt history bytes', async () => {
+    const previousStore = process.env.USAGE_STORE_PATH;
+    const previousEnabled = process.env.CLAUDE_INGEST_ENABLED;
+    const previousSecret = process.env.CLAUDE_INGEST_SECRET;
+    const previousSecretFile = process.env.CLAUDE_INGEST_SECRET_FILE;
+    const directory = await mkdtemp(join(tmpdir(), 'usage-claude-corrupt-'));
+    const storePath = join(directory, 'history.jsonl');
+    const secretPath = join(directory, 'secret');
+    const secret = 'c'.repeat(32);
+    const corrupt = '{not-json}\n';
+    process.env.USAGE_STORE_PATH = storePath;
+    process.env.CLAUDE_INGEST_ENABLED = 'true';
+    process.env.CLAUDE_INGEST_SECRET_FILE = secretPath;
+    delete process.env.CLAUDE_INGEST_SECRET;
+    await writeFile(secretPath, secret, { mode: 0o600 });
+    await writeFile(storePath, corrupt, { mode: 0o600 });
+    const server = createApiServer(); await new Promise<void>(resolve => server.listen(0, resolve));
+    const address = server.address(); if (!address || typeof address === 'string') throw Error('no address');
+    const result = await postClaudePayload(address.port, secret, { rate_limits: {
+      five_hour: { used_percentage: 12, resets_at: '2026-08-10T05:00:00Z' },
+      seven_day: { used_percentage: 3, resets_at: '2026-08-17T00:00:00Z' },
+    } });
+    await new Promise(resolve => server.close(resolve));
+    if (previousStore === undefined) delete process.env.USAGE_STORE_PATH; else process.env.USAGE_STORE_PATH = previousStore;
+    if (previousEnabled === undefined) delete process.env.CLAUDE_INGEST_ENABLED; else process.env.CLAUDE_INGEST_ENABLED = previousEnabled;
+    if (previousSecret === undefined) delete process.env.CLAUDE_INGEST_SECRET; else process.env.CLAUDE_INGEST_SECRET = previousSecret;
+    if (previousSecretFile === undefined) delete process.env.CLAUDE_INGEST_SECRET_FILE; else process.env.CLAUDE_INGEST_SECRET_FILE = previousSecretFile;
+    expect(result).toEqual({ status: 503, body: '{"error":"usage_store_unavailable"}' });
+    expect(await readFile(storePath, 'utf8')).toBe(corrupt);
   });
 });

@@ -35,14 +35,86 @@ public enum LifeOSDeepLink: Equatable, Sendable {
     case calendar
     case newCalendarEvent
     case tax
+    case finance
+    case financeSpend
+    case financeCashFlow
+    case fitness
+    case fitnessDailyOverview
+    case fitnessStrain
+    case fitnessRecovery
+    case fitnessSleep
+    case fitnessHealthMonitor
+    case fitnessRespiration
+    case fitnessHeartRate
+    case fitnessHRV
+    case fitnessSpO2
+    case fitnessTemperature
+    case fitnessSleepDuration
+    case fitnessNutrition
+    case fitnessNutritionGoals
+    case fitnessNutritionImport
+    case fitnessNutritionCamera
+    case fitnessNutritionBarcode
+    case fitnessNutritionAIProposal
+    case fitnessNutritionSearch
+    case fitnessNetEnergy
+    case fitnessStress
+    case fitnessEnergyReserve
+    case tasks
+    case settings
 
     public init?(url: URL) {
         guard url.scheme?.lowercased() == "lifeos" else { return nil }
-        switch (url.host?.lowercased(), url.path.lowercased()) {
+        // `lifeos://finance/spend` is the canonical shape. Accepting a path-only
+        // form as well keeps links copied from universal-link tooling useful
+        // (`lifeos:///finance/spend`) without weakening the scheme check.
+        let host = url.host?.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        let pathSegments = url.path
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .map { $0.lowercased().replacingOccurrences(of: "_", with: "-") }
+        let segments: [String] = (host.map { [$0] } ?? []) + pathSegments
+        guard let module = segments.first else { return nil }
+        let section = segments.dropFirst().first
+
+        if module == "fitness" {
+            switch Array(segments.dropFirst()) {
+            case ["daily-overview"], ["overview"]: self = .fitnessDailyOverview; return
+            case ["strain"], ["load"]: self = .fitnessStrain; return
+            case ["recovery"], ["readiness"]: self = .fitnessRecovery; return
+            case ["sleep"]: self = .fitnessSleep; return
+            case ["health"]: self = .fitnessHealthMonitor; return
+            case ["health", "respiration"]: self = .fitnessRespiration; return
+            case ["health", "heart-rate"], ["health", "heartrate"]: self = .fitnessHeartRate; return
+            case ["health", "hrv"]: self = .fitnessHRV; return
+            case ["health", "spo2"], ["health", "oxygen"]: self = .fitnessSpO2; return
+            case ["health", "temperature"]: self = .fitnessTemperature; return
+            case ["health", "sleep"], ["health", "sleep-duration"]: self = .fitnessSleepDuration; return
+            case ["nutrition", "goals"]: self = .fitnessNutritionGoals; return
+            case ["nutrition", "import"], ["nutrition", "photo"]: self = .fitnessNutritionImport; return
+            case ["nutrition", "camera"]: self = .fitnessNutritionCamera; return
+            case ["nutrition", "barcode"]: self = .fitnessNutritionBarcode; return
+            case ["nutrition", "ai-proposal"], ["nutrition", "ai"]: self = .fitnessNutritionAIProposal; return
+            case ["nutrition", "search"]: self = .fitnessNutritionSearch; return
+            default: break
+            }
+        }
+
+        switch (module, section) {
         case ("usage", _): self = .usage
-        case ("calendar", "/new"): self = .newCalendarEvent
+        case ("calendar", "new"): self = .newCalendarEvent
         case ("calendar", _): self = .calendar
         case ("tax", _): self = .tax
+        case ("finance", nil): self = .finance
+        case ("finance", "spend"), ("finance", "spending"): self = .financeSpend
+        case ("finance", "cash-flow"), ("finance", "cashflow"): self = .financeCashFlow
+        case ("fitness", nil): self = .fitness
+        case ("fitness", "nutrition"): self = .fitnessNutrition
+        case ("fitness", "health"): self = .fitnessHealthMonitor
+        case ("fitness", "net-energy"), ("fitness", "netenergy"): self = .fitnessNetEnergy
+        case ("fitness", "stress"): self = .fitnessStress
+        case ("fitness", "energy-reserve"), ("fitness", "energyreserve"): self = .fitnessEnergyReserve
+        case ("tasks", _): self = .tasks
+        case ("settings", _): self = .settings
         default: return nil
         }
     }
@@ -51,6 +123,19 @@ public enum LifeOSDeepLink: Equatable, Sendable {
 public enum Provider: String, Codable, CaseIterable, Sendable {
     case codex
     case claude
+    case glm
+    case deepseek
+    case googleAIStudio = "google_ai_studio"
+
+    public var displayName: String {
+        switch self {
+        case .codex: "Codex"
+        case .claude: "Claude"
+        case .glm: "GLM"
+        case .deepseek: "DeepSeek"
+        case .googleAIStudio: "Google AI Studio"
+        }
+    }
 }
 
 public enum ConnectorState: String, Codable, CaseIterable, Equatable, Sendable {

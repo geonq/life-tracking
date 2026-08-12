@@ -39,6 +39,8 @@
     <string>$(LIFEOS_SYNC_APPROVED_HOSTS)</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>Life OS uses your local network to keep calendar items in sync with your Mac.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>Life OS uses the camera only to scan a food barcode; no camera frames are stored or uploaded.</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_lifeos-calendar._tcp</string>

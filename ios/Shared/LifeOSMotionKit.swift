@@ -1,0 +1,309 @@
+import SwiftUI
+
+#if os(iOS)
+import UIKit
+#endif
+
+// MARK: - LifeOS Motion Kit
+//
+// Reusable, Reduce-Motion-aware motion primitives per
+// `developers/design-coordination/03-motion-revolut.md`. These are building blocks —
+// Usage/Finance widgets and screens adopt them; this file does not redesign any screen.
+//
+// Every primitive here reads `LifeOSMotion.reduceMotion` (or the environment key where a
+// live SwiftUI environment is available) and degrades per the spec's Reduce-Motion table:
+// morphs → cross-fade, ring sweeps → static, chart draw → instant, scrub still works but
+// the bubble jumps (no follow spring), pills swap without slide.
+
+// MARK: - A. Progress Ring
+
+/// A progress ring with an optional, restrained one-shot reveal halo. The crisp arc is the
+/// resting state; the halo is mounted only while the initial reveal is settling and is removed
+/// afterward. Reduce Motion skips both the sweep and halo.
+public struct GlowRing<Center: View>: View {
+    public let progress: Double
+    public let hue: LifeOSTokens.Hue
+    public let diameter: CGFloat
+    public let lineWidth: CGFloat
+    private let center: () -> Center
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var animatedProgress: Double = 0
+    @State private var revealHaloOpacity: Double = 0
+
+    public init(
+        progress: Double,
+        hue: LifeOSTokens.Hue,
+        diameter: CGFloat = 120,
+        lineWidth: CGFloat = 10,
+        @ViewBuilder center: @escaping () -> Center = { EmptyView() }
+    ) {
+        self.progress = progress
+        self.hue = hue
+        self.diameter = diameter
+        self.lineWidth = lineWidth
+        self.center = center
+    }
+
+    private var clampedTarget: Double {
+        min(max(progress, 0), 1)
+    }
+
+    public var body: some View {
+        ZStack {
+            // Track
+            Circle()
+                .stroke(LifeOSTokens.Ring.track, lineWidth: lineWidth)
+
+            // Optional reveal halo. This layer exists only during the one-shot load cue and
+            // fades out completely; settled rings contain no blurred duplicate.
+            if revealHaloOpacity > 0 {
+                Circle()
+                    .trim(from: 0, to: animatedProgress)
+                    .stroke(
+                        LifeOSTokens.Ring.progress(hue),
+                        style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
+                    )
+                    .blur(radius: LifeOSTokens.Glow.blurRadius)
+                    .opacity(revealHaloOpacity)
+            }
+
+            // Crisp progress arc.
+            Circle()
+                .trim(from: 0, to: animatedProgress)
+                .stroke(
+                    LifeOSTokens.Ring.progress(hue),
+                    style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
+                )
+        }
+        .rotationEffect(.degrees(-90))
+        .frame(width: diameter, height: diameter)
+        .overlay {
+            center()
+                .frame(width: diameter - lineWidth * 3, height: diameter - lineWidth * 3)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityValue(Text(clampedTarget, format: .percent.precision(.fractionLength(0))))
+        .task(id: "\(clampedTarget)-\(reduceMotion)") {
+            if reduceMotion {
+                revealHaloOpacity = 0
+                animatedProgress = clampedTarget
+                return
+            }
+
+            // Keep this cue bounded and cancellable. A data refresh cancels the old task and
+            // starts a new reveal; a settled view always ends with opacity exactly zero.
+            revealHaloOpacity = LifeOSTokens.Glow.opacity * 0.42
+            withAnimation(LifeOSMotion.ringReveal) { animatedProgress = clampedTarget }
+
+            do {
+                try await Task.sleep(nanoseconds: 720_000_000)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeOut(duration: 0.18)) {
+                revealHaloOpacity = 0
+            }
+        }
+    }
+}
+
+// MARK: - B. Spring Pill Selector
+
+/// A generic segmented control whose selected-pill background travels between options via
+/// `matchedGeometryEffect`, animated with `LifeOSMotion.snappy` (`03-motion-revolut.md` §E).
+/// Labels stay put; only the highlight moves. Reduce-Motion: highlight swaps without slide.
+public struct SpringPillSelector<T: Hashable, Label: View>: View {
+    public let options: [T]
+    @Binding public var selection: T
+    private let label: (T, Bool) -> Label
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Namespace private var namespace
+    private let highlightID = "lifeos.pillSelector.highlight"
+
+    public init(
+        options: [T],
+        selection: Binding<T>,
+        @ViewBuilder label: @escaping (T, Bool) -> Label
+    ) {
+        self.options = options
+        self._selection = selection
+        self.label = label
+    }
+
+    public var body: some View {
+        HStack(spacing: 4) {
+            ForEach(options, id: \.self) { option in
+                let isSelected = option == selection
+                Button {
+                    if reduceMotion {
+                        selection = option
+                    } else {
+                        withAnimation(LifeOSMotion.snappy) { selection = option }
+                    }
+                } label: {
+                    label(option, isSelected)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background {
+                            if isSelected {
+                                if reduceMotion {
+                                    Capsule().fill(LifeOSTokens.surface)
+                                        .overlay(Capsule().stroke(Color.primary.opacity(0.13), lineWidth: 0.75))
+                                } else {
+                                    Capsule().fill(LifeOSTokens.surface)
+                                        .overlay(Capsule().stroke(Color.primary.opacity(0.13), lineWidth: 0.75))
+                                        .matchedGeometryEffect(id: highlightID, in: namespace)
+                                }
+                            }
+                        }
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+}
+
+// MARK: - C. Chart draw-on
+
+/// Tracks a `drawn` progress value (0→1) that animates on appear with `LifeOSMotion.chartDraw`,
+/// for driving `.trim(from:to:)` on chart strokes/masks. Instant under Reduce-Motion.
+public struct DrawOnProgress: DynamicProperty {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var drawn: CGFloat = 0
+
+    public init() {}
+
+    public var value: CGFloat { drawn }
+
+    /// Call once, e.g. from `.task { drawOn.start() }`.
+    public func start() {
+        if reduceMotion {
+            drawn = 1
+        } else {
+            withAnimation(LifeOSMotion.chartDraw) { drawn = 1 }
+        }
+    }
+
+    /// Resets to 0 without animating (e.g. before re-running `start()` on new data).
+    public func reset() {
+        drawn = 0
+    }
+}
+
+private struct ChartDrawOnModifier: ViewModifier {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var drawn: CGFloat = 0
+
+    func body(content: Content) -> some View {
+        content
+            .task {
+                if reduceMotion {
+                    drawn = 1
+                } else {
+                    withAnimation(LifeOSMotion.chartDraw) { drawn = 1 }
+                }
+            }
+            .environment(\.lifeOSChartDrawn, drawn)
+    }
+}
+
+private struct LifeOSChartDrawnKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 1
+}
+
+extension EnvironmentValues {
+    /// The current chart draw-on progress (0→1), set by `.chartDrawOn()`.
+    public var lifeOSChartDrawn: CGFloat {
+        get { self[LifeOSChartDrawnKey.self] }
+        set { self[LifeOSChartDrawnKey.self] = newValue }
+    }
+}
+
+extension View {
+    /// Drives a one-shot 0→1 draw-on animation (`LifeOSMotion.chartDraw`) on appear, exposed to
+    /// descendants via `\.lifeOSChartDrawn`. Instant under Reduce-Motion. See
+    /// `03-motion-revolut.md` §C — animate the stroke/mask, not the underlying y-values.
+    public func chartDrawOn() -> some View {
+        modifier(ChartDrawOnModifier())
+    }
+}
+
+// MARK: - D. Scrub bubble
+
+/// A value bubble that follows an x-position with `LifeOSMotion.track`, for chart scrubbing
+/// (`03-motion-revolut.md` §D). Elevation-3 surface. Reduce-Motion: bubble jumps to position
+/// with no follow spring (scrub still works).
+public struct ScrubBubble<Content: View>: View {
+    public let x: CGFloat
+    public let y: CGFloat
+    private let content: () -> Content
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    public init(x: CGFloat, y: CGFloat, @ViewBuilder content: @escaping () -> Content) {
+        self.x = x
+        self.y = y
+        self.content = content
+    }
+
+    public var body: some View {
+        content()
+            .font(.caption2.monospacedDigit())
+            .padding(.horizontal, 9)
+            .padding(.vertical, 7)
+            .background(LifeOSTokens.surface.opacity(0.96), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+            .shadow(radius: 0)
+            .position(x: x, y: y)
+            .animation(reduceMotion ? nil : LifeOSMotion.track, value: x)
+            .animation(reduceMotion ? nil : LifeOSMotion.track, value: y)
+    }
+
+    /// Fires a light impact haptic when the scrubbed point changes. Call from `.onChange` of
+    /// the snapped data point's identity. No-op on macOS.
+    public static func snapHaptic() {
+#if os(iOS)
+        let generator = UIImpactFeedbackGenerator(style: .light)
+        generator.impactOccurred()
+#endif
+    }
+}
+
+// MARK: - E. Numeric transitions
+
+extension View {
+    /// Applies `.contentTransition(.numericText())` (iOS 17+) for count-up number changes
+    /// (`03-motion-revolut.md` §F). No-op fallback on platforms/OS versions without it.
+    @ViewBuilder
+    public func numericTransition() -> some View {
+        if #available(iOS 17, macOS 14, *) {
+            self.contentTransition(.numericText())
+        } else {
+            self
+        }
+    }
+}
+
+// MARK: - F. Hero morph helper
+//
+// Usage: a parent view owns `@Namespace private var heroNamespace` and applies
+// `.matchedCard(id:in:)` with the SAME id to both the source card and the destination
+// detail header, then toggles a `@State` selection inside
+// `withAnimation(LifeOSMotion.heroMorph) { ... }`. Under Reduce-Motion, skip the
+// `matchedGeometryEffect` entirely and cross-fade with `.opacity` instead — do not call
+// `.matchedCard` when `LifeOSMotion.reduceMotion` is true.
+//
+// This helper does not wire any cross-screen navigation morph; that requires the owning
+// screen's redesign and is out of scope for the motion-system foundation.
+
+extension View {
+    /// Tags this view as one endpoint of a hero-morph transition. Apply the same `id` in the
+    /// same `namespace` to both the source card and the destination detail header. Caller is
+    /// responsible for skipping this (using a cross-fade instead) under Reduce-Motion.
+    public func matchedCard(id: some Hashable, in namespace: Namespace.ID) -> some View {
+        matchedGeometryEffect(id: id, in: namespace)
+    }
+}

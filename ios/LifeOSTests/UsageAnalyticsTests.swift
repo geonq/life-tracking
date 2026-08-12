@@ -196,6 +196,37 @@ final class UsageAnalyticsTests: XCTestCase {
         ))
     }
 
+    func testWindowScopedAnalyticsDoesNotCrossReuseFiveHourDataForSevenDayRange() {
+        XCTAssertNotNil(UsageAnalyticsResolver.matching(
+            snapshot: DemoDataProvider.codex,
+            candidates: DemoUsageAnalytics.snapshots,
+            windowID: "5h"
+        ))
+        XCTAssertNil(UsageAnalyticsResolver.matching(
+            snapshot: DemoDataProvider.codex,
+            candidates: DemoUsageAnalytics.snapshots,
+            windowID: "7d"
+        ))
+    }
+
+    func testUnscopedAnalyticsRemainsProviderFallbackWithoutWindowScope() {
+        let unscoped = UsageAnalyticsSnapshot(
+            provider: .codex,
+            activity: [],
+            projection: [UsageProjectionPoint(date: .now, usedPercent: 0.4)],
+            modelBreakdowns: [],
+            heatmap: [],
+            provenance: DemoDataProvider.provenance
+        )
+
+        XCTAssertNotNil(UsageAnalyticsResolver.matching(
+            snapshot: DemoDataProvider.codex,
+            candidates: [unscoped],
+            windowID: "7d"
+        ))
+        XCTAssertNil(unscoped.windowID)
+    }
+
     func testModelBreakdownTotalIncludesEveryUsageCategory() {
         let model = UsageModelBreakdown(
             model: "gpt-5.6-sol",

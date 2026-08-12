@@ -23,9 +23,21 @@ public enum CalendarStoreURL {
 public actor CalendarStore {
     public let url: URL
     private let fileManager: FileManager
+    // This is an internal test seam used to make coordinator overlap
+    // deterministic. It runs before the actor takes its synchronous
+    // read/modify/write section; production stores leave it nil.
+    private let beforeMutation: (@Sendable () async throws -> Void)?
     private var cached: CalendarSnapshot?
 
-    public init(url: URL, fileManager: FileManager = .default) { self.url = url; self.fileManager = fileManager }
+    public init(
+        url: URL,
+        fileManager: FileManager = .default,
+        beforeMutation: (@Sendable () async throws -> Void)? = nil
+    ) {
+        self.url = url
+        self.fileManager = fileManager
+        self.beforeMutation = beforeMutation
+    }
 
     public func load() throws -> CalendarSnapshot {
         guard fileManager.fileExists(atPath: url.path) else { let empty = CalendarSnapshot(); cached = empty; return empty }
@@ -42,6 +54,18 @@ public actor CalendarStore {
         try data.write(to: temporary, options: .atomic)
         if fileManager.fileExists(atPath: url.path) { _ = try fileManager.replaceItemAt(url, withItemAt: temporary) } else { try fileManager.moveItem(at: temporary, to: url) }
         cached = snapshot; return snapshot
+    }
+
+    /// Applies one read/modify/write transaction against the latest durable
+    /// snapshot. The mutation itself and the subsequent save contain no
+    /// suspension points, so actor reentrancy cannot allow two callers to
+    /// derive candidates from the same old snapshot.
+    public func mutate(
+        _ mutation: @Sendable (CalendarSnapshot) throws -> CalendarSnapshot
+    ) async throws -> CalendarSnapshot {
+        try await beforeMutation?()
+        let current = try load()
+        return try save(try mutation(current))
     }
 
     public func merge(_ remote: CalendarSnapshot) throws -> CalendarSnapshot {

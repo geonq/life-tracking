@@ -19,13 +19,19 @@ targets:
   LifeOS:
     type: application
     platform: iOS
-    sources: [LifeOS, Shared]
+    sources:
+      - LifeOS
+      - Shared
+      - Shared/FitnessMetric.swift
     resources:
       - path: Shared/Resources/Fonts
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: com.hermes.lifeos.app
       INFOPLIST_FILE: LifeOS/Info.plist
       CODE_SIGN_ENTITLEMENTS: LifeOS/LifeOS.entitlements
+      # A signed local/CI Release configuration must inject the exact private
+      # `.ts.net` host. Missing configuration intentionally fails closed.
+      LIFEOS_SYNC_APPROVED_HOSTS: ""
     dependencies:
       - target: LifeOSWidget
         embed: true
@@ -35,7 +41,10 @@ targets:
   LifeOSWidget:
     type: app-extension
     platform: iOS
-    sources: [LifeOSWidget, Shared]
+    sources:
+      - LifeOSWidget
+      - Shared
+      - Shared/FitnessMetric.swift
     resources:
       - path: Shared/Resources/Fonts
     settings:
@@ -68,10 +77,13 @@ targets:
     sources:
       - LifeOSMac
       - Shared
+      - Shared/FitnessMetric.swift
       - LifeOS/OverviewView.swift
       - LifeOS/CodexView.swift
+      - LifeOS/Usage
       - LifeOS/Settings.swift
       - LifeOS/CalendarView.swift
+      - LifeOS/Modules
       - LifeOS/TaxDocumentsView.swift
     resources:
       - path: Shared/Resources/Fonts
@@ -79,12 +91,14 @@ targets:
       PRODUCT_BUNDLE_IDENTIFIER: com.hermes.lifeos.mac
       INFOPLIST_FILE: LifeOSMac/Info.plist
       CODE_SIGN_ENTITLEMENTS: LifeOSMac/LifeOSMac.entitlements
+      # Same release gate as iOS; never commit the private MagicDNS hostname.
+      LIFEOS_SYNC_APPROVED_HOSTS: ""
     dependencies:
       - target: LifeOSMacWidget
         embed: true
       - package: Iconoir
     scheme:
-      testTargets: [LifeOSMacUITests, LifeOSMacSnapshotTests]
+      testTargets: [LifeOSMacUITests, LifeOSMacSnapshotTests, LifeOSWidgetSnapshotTests]
   LifeOSMacUITests:
     type: bundle.ui-testing
     platform: macOS
@@ -103,14 +117,35 @@ targets:
       GENERATE_INFOPLIST_FILE: YES
     dependencies:
       - target: LifeOSMac
+  LifeOSWidgetSnapshotTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - LifeOSWidgetSnapshotTests
+      - Shared
+      - Shared/FitnessMetric.swift
+      - LifeOSWidget/CalendarWidget.swift
+      - LifeOSWidget/UsageWidget.swift
+      - LifeOSWidget/NextEventWidget.swift
+      - LifeOSWidget/FutureModuleWidgets.swift
+    resources:
+      - path: Shared/Resources/Fonts
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.hermes.lifeos.mac.widget.snapshottests
+      GENERATE_INFOPLIST_FILE: YES
+    dependencies:
+      - package: Iconoir
   LifeOSMacWidget:
     type: app-extension
     platform: macOS
     sources:
       - LifeOSMacWidget
       - Shared
+      - Shared/FitnessMetric.swift
       - LifeOSWidget/UsageWidget.swift
       - LifeOSWidget/CalendarWidget.swift
+      - LifeOSWidget/NextEventWidget.swift
+      - LifeOSWidget/FutureModuleWidgets.swift
     resources:
       - path: Shared/Resources/Fonts
     settings:

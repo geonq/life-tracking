@@ -1,3 +1,4 @@
+import Foundation
 import WidgetKit
 import SwiftUI
 
@@ -27,44 +28,165 @@ public struct CalendarWidgetProvider: TimelineProvider {
     }
 
     public func getSnapshot(in context: Context, completion: @escaping (CalendarWidgetEntry) -> Void) {
-        if context.isPreview { completion(placeholder(in: context)); return }
+        if context.isPreview {
+            completion(placeholder(in: context))
+            return
+        }
         load(completion: completion)
     }
 
     public func getTimeline(in context: Context, completion: @escaping (Timeline<CalendarWidgetEntry>) -> Void) {
         load { entry in
-            completion(Timeline(entries: [entry], policy: .after(entry.date.addingTimeInterval(900))))
+            let refresh = Self.nextRefreshDate(for: entry.snapshot, after: entry.date)
+            completion(Timeline(entries: [entry], policy: .after(refresh)))
         }
+    }
+
+    /// Refresh at the next event boundary only when that boundary is close enough to
+    /// matter. A quiet calendar still gets a bounded refresh so a newly-saved event can
+    /// appear without waiting for the next day.
+    static func nextRefreshDate(for snapshot: CalendarSnapshot, after date: Date) -> Date {
+        let boundaries = snapshot.items
+            .filter { !$0.isDeleted }
+            .flatMap { [$0.start, $0.end] }
+            .filter { $0 > date }
+            .sorted()
+
+        if let nextBoundary = boundaries.first, nextBoundary.timeIntervalSince(date) <= 2 * 60 * 60 {
+            return nextBoundary
+        }
+        return date.addingTimeInterval(30 * 60)
     }
 
     private func load(completion: @escaping (CalendarWidgetEntry) -> Void) {
         guard let identifier = Bundle.main.object(forInfoDictionaryKey: "APP_GROUP_IDENTIFIER") as? String else {
-            completion(CalendarWidgetEntry(snapshot: CalendarSnapshot(), storageAvailable: false)); return
+            completion(CalendarWidgetEntry(snapshot: CalendarSnapshot(), storageAvailable: false))
+            return
         }
         do {
             let url = try CalendarStoreURL.appGroupURL(identifier: identifier)
             Task {
-                do { completion(CalendarWidgetEntry(snapshot: try await CalendarStore(url: url).load())) }
-                catch { completion(CalendarWidgetEntry(snapshot: CalendarSnapshot(), storageAvailable: false)) }
+                do {
+                    completion(CalendarWidgetEntry(snapshot: try await CalendarStore(url: url).load()))
+                } catch {
+                    completion(CalendarWidgetEntry(snapshot: CalendarSnapshot(), storageAvailable: false))
+                }
             }
-        } catch { completion(CalendarWidgetEntry(snapshot: CalendarSnapshot(), storageAvailable: false)) }
+        } catch {
+            completion(CalendarWidgetEntry(snapshot: CalendarSnapshot(), storageAvailable: false))
+        }
     }
 }
 
 public struct CalendarWidgetView: View {
     public let entry: CalendarWidgetEntry
-    public init(entry: CalendarWidgetEntry) { self.entry = entry }
 
-    private let calendar = Calendar.current
-    private var upcoming: [CalendarItem] {
-        entry.snapshot.items.filter { !$0.isDeleted && $0.end >= entry.date }.sorted { $0.start < $1.start }.prefix(1).map { $0 }
+    @Environment(\.calendar) private var environmentCalendar
+    @Environment(\.locale) private var environmentLocale
+    @Environment(\.showsWidgetContainerBackground) private var showsWidgetContainerBackground
+    @Environment(\.widgetRenderingMode) private var widgetRenderingMode
+
+    public init(entry: CalendarWidgetEntry) {
+        self.entry = entry
     }
-    private var monthDays: [Date] { CalendarWidgetDateGrid.days(containing: entry.date, calendar: calendar) }
-    private var monthTitle: String { entry.date.formatted(.dateTime.month(.wide).year()) }
-    private var daySymbols: [String] {
-        let symbols = calendar.veryShortWeekdaySymbols
+
+    private let weekNumberWidth: CGFloat = 14
+    private let leftColumnWidth: CGFloat = 124
+    private let dayCellSize: CGFloat = 17
+
+    private var calendar: Calendar {
+        var calendar = environmentCalendar
+        calendar.locale = environmentLocale
+        // The Figma frame is Monday-first. Keep the symbols locale-aware while making
+        // the ordering deterministic across a user's locale/week-start preference.
+        calendar.firstWeekday = 2
+        return calendar
+    }
+
+    private var formatLocale: Locale {
+        calendar.locale ?? .current
+    }
+
+    private var isoCalendar: Calendar {
+        var calendar = Calendar(identifier: .iso8601)
+        calendar.locale = environmentLocale
+        calendar.timeZone = self.calendar.timeZone
+        return calendar
+    }
+
+    private var usesTransparentTreatment: Bool {
+        !showsWidgetContainerBackground || widgetRenderingMode != .fullColor
+    }
+
+    private var primaryForeground: Color {
+        usesTransparentTreatment ? .white : .primary
+    }
+
+    private var secondaryForeground: Color {
+        usesTransparentTreatment ? .white.opacity(0.76) : .secondary
+    }
+
+    private var tertiaryForeground: Color {
+        usesTransparentTreatment ? .white.opacity(0.53) : LifeOSTokens.tertiaryText
+    }
+
+    private var monthDays: [Date] {
+        CalendarWidgetDateGrid.days(containing: entry.date, calendar: calendar)
+    }
+
+    private var monthTitle: String {
+        entry.date.formatted(.dateTime.locale(formatLocale).month(.wide))
+    }
+
+    private var weekLabel: String {
+        formatLocale.identifier.lowercased().hasPrefix("de") ? "Woche" : "Week"
+    }
+
+    private var isoWeek: Int {
+        isoCalendar.component(.weekOfYear, from: entry.date)
+    }
+
+    private var weekdaySymbols: [String] {
+        let symbols = calendar.shortWeekdaySymbols
         let start = max(0, calendar.firstWeekday - 1)
-        return Array(symbols[start...]) + Array(symbols[..<start])
+        let reordered = Array(symbols[start...]) + Array(symbols[..<start])
+        return reordered.map(compactWeekdaySymbol)
+    }
+
+    private func compactWeekdaySymbol(_ symbol: String) -> String {
+        let lettersAndNumbers = symbol.filter { $0.isLetter || $0.isNumber }
+        return String(lettersAndNumbers.prefix(2))
+    }
+
+    private var agendaEvents: [CalendarItem] {
+        Array(snapshotItems(on: entry.date).prefix(3))
+    }
+
+    private var agendaOverflow: Int {
+        let total = snapshotItems(on: entry.date).count
+        return max(0, total - agendaEvents.count)
+    }
+
+    private func snapshotItems(on day: Date) -> [CalendarItem] {
+        entry.snapshot.items(on: day, calendar: calendar)
+    }
+
+    private func isInDisplayedMonth(_ day: Date) -> Bool {
+        calendar.component(.year, from: day) == calendar.component(.year, from: entry.date) &&
+            calendar.component(.month, from: day) == calendar.component(.month, from: entry.date)
+    }
+
+    private func timeString(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = formatLocale
+        formatter.calendar = calendar
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = "HH:mm"
+        return formatter.string(from: date)
+    }
+
+    private func timeRange(for item: CalendarItem) -> String {
+        "\(timeString(item.start))–\(timeString(item.end))"
     }
 
     public var body: some View {
@@ -72,122 +194,207 @@ public struct CalendarWidgetView: View {
             if !entry.storageAvailable && !entry.isPreview {
                 unavailableView
             } else {
-                HStack(alignment: .top, spacing: 14) {
-                    monthGrid
-                        .frame(width: 148)
-                    Rectangle().fill(Color.primary.opacity(0.08)).frame(width: 1)
-                    detailPane
-                }
+                widgetContent
             }
         }
-        .padding(14)
-        .containerBackground(for: .widget) { LifeOSTokens.surface }
-        .widgetURL(URL(string: "lifeos://calendar"))
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(accessibilitySummary)
+        .containerBackground(for: .widget) {
+            usesTransparentTreatment ? Color.clear : LifeOSTokens.surface
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    private var widgetContent: some View {
+        ZStack(alignment: .bottomTrailing) {
+            Link(destination: URL(string: "lifeos://calendar")!) {
+                HStack(alignment: .top, spacing: 16) {
+                    monthGrid
+                        .frame(width: leftColumnWidth)
+                    agendaPane
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .contentShape(Rectangle())
+            }
+            .accessibilityLabel(accessibilitySummary)
+
+            Link(destination: URL(string: "lifeos://calendar/new")!) {
+                plusButton
+            }
+            .accessibilityLabel("Create calendar event")
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
     }
 
     private var unavailableView: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 7) {
-                LifeOSIcon(.calendar).frame(width: 16, height: 16)
-                Text("Calendar").font(.headline.weight(.bold))
-            }
-            .foregroundStyle(LifeOSTokens.accent)
-            Spacer(minLength: 0)
-            Text("Calendar unavailable").font(.subheadline.weight(.semibold))
-            Text("Open LifeOS to configure shared calendar storage.")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            Spacer(minLength: 0)
+        VStack(alignment: .leading, spacing: 7) {
+            Text("Calendar unavailable")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(primaryForeground)
+            Text("Open LifeOS to reconnect shared calendar storage.")
+                .font(.system(size: 11))
+                .foregroundStyle(secondaryForeground)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        .padding(16)
     }
 
     private var monthGrid: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack {
-                Text(monthTitle).font(.subheadline.weight(.bold)).foregroundStyle(.primary)
-                Spacer()
-                Text(entry.date, format: .dateTime.day()).font(.caption.weight(.bold)).foregroundStyle(LifeOSTokens.accent)
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline, spacing: 5) {
+                Text(monthTitle)
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(usesTransparentTreatment ? .white : LifeOSTokens.calendarRed)
+                    .lineLimit(1)
+                Text("\(weekLabel) \(isoWeek)")
+                    .font(.system(size: 11))
+                    .foregroundStyle(secondaryForeground)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
             }
+            .frame(height: 18, alignment: .leading)
+
             HStack(spacing: 0) {
-                ForEach(daySymbols, id: \.self) { Text($0).frame(maxWidth: .infinity) }
+                Color.clear.frame(width: weekNumberWidth)
+                ForEach(weekdaySymbols.indices, id: \.self) { index in
+                    Text(weekdaySymbols[index])
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(secondaryForeground)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.55)
+                        .frame(maxWidth: .infinity)
+                }
             }
-            .font(.system(size: 8, weight: .semibold)).foregroundStyle(.secondary)
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 2), count: 7), spacing: 5) {
-                ForEach(monthDays, id: \.self) { day in
-                    let isToday = calendar.isDate(day, inSameDayAs: entry.date)
-                    let hasEvent = !entry.snapshot.items(on: day, calendar: calendar).isEmpty
-                    Text(calendar.component(.day, from: day).description)
-                        .font(.system(size: 10, weight: isToday ? .bold : .regular, design: .rounded))
-                        .foregroundStyle(isToday ? Color.white : calendar.component(.month, from: day) == calendar.component(.month, from: entry.date) ? .primary : .secondary.opacity(0.45))
-                        .frame(width: 17, height: 17)
-                        .background { if isToday { Circle().fill(LifeOSTokens.accent) } }
-                        .overlay(alignment: .bottom) { if hasEvent && !isToday { Circle().fill(LifeOSTokens.accent).frame(width: 3, height: 3).offset(y: 2) } }
-                        .accessibilityLabel(day.formatted(.dateTime.month().day()) + (hasEvent ? ", has event" : ""))
+            .frame(height: 11)
+
+            VStack(spacing: 0) {
+                ForEach(0..<6, id: \.self) { row in
+                    HStack(spacing: 0) {
+                        Text("\(isoCalendar.component(.weekOfYear, from: monthDays[row * 7]))")
+                            .font(.system(size: 9))
+                            .foregroundStyle(tertiaryForeground)
+                            .frame(width: weekNumberWidth, height: dayCellSize)
+
+                        ForEach(0..<7, id: \.self) { column in
+                            dayCell(monthDays[row * 7 + column])
+                                .frame(maxWidth: .infinity, maxHeight: dayCellSize)
+                        }
+                    }
+                    .frame(height: dayCellSize)
                 }
             }
         }
     }
 
-    private var detailPane: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack {
-                HStack(spacing: 5) {
-                    LifeOSIcon(.calendar).frame(width: 11, height: 11)
-                    Text("UP NEXT")
-                }
-                .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(LifeOSTokens.accent)
-                Spacer()
-                Link(destination: URL(string: "lifeos://calendar/new")!) {
-                    LifeOSIcon(.add)
-                        .frame(width: 12, height: 12)
-                        .foregroundStyle(LifeOSTokens.accent)
-                        .frame(width: 24, height: 24)
-                        .background(LifeOSTokens.accentLight, in: Circle())
-                }
-                .accessibilityLabel("Create calendar event")
+    private func dayCell(_ day: Date) -> some View {
+        let isToday = calendar.isDate(day, inSameDayAs: entry.date)
+        let isCurrentMonth = isInDisplayedMonth(day)
+        let textColor: Color = isToday
+            ? (usesTransparentTreatment ? .lifeOSBlack : .white)
+            : (isCurrentMonth ? primaryForeground : secondaryForeground.opacity(0.58))
+
+        return ZStack {
+            if isToday {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(usesTransparentTreatment ? Color.white : LifeOSTokens.calendarRed)
             }
-            if !entry.storageAvailable && !entry.isPreview {
+            Text(calendar.component(.day, from: day).description)
+                .font(.system(size: 10, weight: isToday ? .bold : .regular, design: .rounded))
+                .foregroundStyle(textColor)
+        }
+        .frame(width: dayCellSize, height: dayCellSize)
+        .accessibilityLabel(day.formatted(.dateTime.locale(formatLocale).month().day()) + (isToday ? ", today" : ""))
+    }
+
+    private var agendaPane: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text(compactWeekdaySymbol(entry.date.formatted(.dateTime.locale(formatLocale).weekday(.abbreviated))))
+                    .foregroundStyle(primaryForeground)
+                Text(entry.date, format: .dateTime.locale(formatLocale).day())
+                    .foregroundStyle(usesTransparentTreatment ? .white : LifeOSTokens.calendarRed)
+            }
+            .font(.system(size: 19, weight: .bold))
+            .lineLimit(1)
+
+            if agendaEvents.isEmpty {
                 Spacer(minLength: 0)
-                Text("Calendar unavailable").font(.subheadline.weight(.semibold))
-                Text("Open LifeOS to reconnect.").font(.caption2).foregroundStyle(.secondary)
+                Text("No events today")
+                    .font(.system(size: 12))
+                    .foregroundStyle(secondaryForeground)
+                    .frame(maxWidth: .infinity, alignment: .center)
                 Spacer(minLength: 0)
-            } else if let item = upcoming.first {
-                CalendarIconView(item: item).frame(width: 34, height: 34).accessibilityLabel("Icon \(item.icon)")
-                Text(item.title).font(.subheadline.weight(.bold)).lineLimit(2)
-                Text("\(item.start, format: .dateTime.weekday(.abbreviated).month(.abbreviated).day())")
-                    .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-                Text("\(item.start, format: .dateTime.hour().minute()) – \(item.end, format: .dateTime.hour().minute())")
-                    .font(.caption.weight(.medium)).foregroundStyle(LifeOSTokens.accent)
             } else {
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(agendaEvents) { item in
+                        agendaRow(item)
+                    }
+                    if agendaOverflow > 0 {
+                        Text("+\(agendaOverflow) more")
+                            .font(.system(size: 11))
+                            .foregroundStyle(tertiaryForeground)
+                            .padding(.leading, 10)
+                    }
+                }
+                .padding(.top, 2)
                 Spacer(minLength: 0)
-                Text(entry.isPreview ? "Preview calendar" : "Nothing scheduled")
-                    .font(.subheadline.weight(.semibold))
-                Text(entry.isPreview ? "Your next event will appear here." : "Enjoy the open time.")
-                    .font(.caption2).foregroundStyle(.secondary)
-                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    private func agendaRow(_ item: CalendarItem) -> some View {
+        HStack(alignment: .top, spacing: 7) {
+            RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                .fill(LifeOSTokens.Hue.green.base)
+                .frame(width: 3, height: 28)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(item.title)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(primaryForeground)
+                    .lineLimit(1)
+                Text(timeRange(for: item))
+                    .font(.system(size: 12))
+                    .foregroundStyle(secondaryForeground)
+                    .lineLimit(1)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private var plusButton: some View {
+        ZStack {
+            Circle()
+                .fill(usesTransparentTreatment ? Color.white : Color.white.opacity(0.14))
+            Text("+")
+                .font(.system(size: 30, weight: .light))
+                .foregroundStyle(usesTransparentTreatment ? Color.lifeOSBlack : Color.white)
+                .offset(y: -1)
+        }
+        .frame(width: 34, height: 34)
+    }
+
     private var accessibilitySummary: String {
-        if !entry.storageAvailable && !entry.isPreview { return "Calendar unavailable. Open LifeOS to reconnect." }
-        guard let item = upcoming.first else { return entry.isPreview ? "Preview calendar. Your next event will appear here." : "Calendar. Nothing scheduled." }
-        return "Next event, \(item.title), \(item.start.formatted(.dateTime.weekday().month().day().hour().minute())). Create event button available."
+        if !entry.storageAvailable && !entry.isPreview {
+            return "Calendar unavailable. Open LifeOS to reconnect."
+        }
+        if agendaEvents.isEmpty {
+            return "Calendar. No events today. Create event button available."
+        }
+        let titles = agendaEvents.map(\.title).joined(separator: ", ")
+        return "Calendar for \(monthTitle). Today's events: \(titles). Create event button available."
     }
 }
 
 public struct CalendarWidget: Widget {
     public let kind = "LifeOSCalendarWidget"
+
     public init() {}
+
     public var body: some WidgetConfiguration {
         StaticConfiguration(kind: kind, provider: CalendarWidgetProvider()) { CalendarWidgetView(entry: $0) }
             .configurationDisplayName("Calendar")
-            .description("A month at a glance and your next commitment.")
+            .description("A month at a glance and today's agenda.")
             .supportedFamilies([.systemMedium])
     }
 }

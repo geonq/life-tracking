@@ -188,7 +188,7 @@ struct TaxDocumentReviewView: View {
                     Text("No tax advice is provided and no filing occurs automatically.").font(.footnote).foregroundStyle(.secondary)
                 }
                 if !document.warnings.isEmpty {
-                    Section("Warnings") { ForEach(document.warnings, id: \.self) { Text($0).foregroundStyle(.orange) } }
+                    Section("Warnings") { ForEach(document.warnings, id: \.self) { Text($0).foregroundStyle(LifeOSTokens.warning) } }
                 }
                 Section("Detected amounts") {
                     ForEach(Array(document.amounts.enumerated()), id: \.offset) { _, amount in

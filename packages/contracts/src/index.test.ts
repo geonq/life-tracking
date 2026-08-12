@@ -3,8 +3,14 @@ import { normalizeWindow, UnifiedUsage, UsageHistoryEntry, UsageProvenance, Usag
 import {
   ConnectorState, FinanceConnectorCatalog, FinanceConnectorDescriptor,
   FinanceSummary, parseOverview, fixtures,
+  NutritionBenchmarkFoodClass,
 } from './index.js';
 describe('contracts',()=>{ it('accepts truthful fixture',()=>expect(parseOverview(fixtures.overview).label).toBe('Demo data')); it('rejects invalid connector state',()=>expect(()=>ConnectorState.parse('connected')).toThrow()); it('requires provenance',()=>expect(()=>parseOverview({...fixtures.overview,codex:{...fixtures.overview.codex,usage5h:{value:1,unit:'%'}}})).toThrow()); });
+describe('contract index exports', () => {
+  it('re-exports the bounded nutrition benchmark contract', () => {
+    expect(NutritionBenchmarkFoodClass.parse('unknown_portion')).toBe('unknown_portion');
+  });
+});
 
 describe('usage window truthfulness', () => {
   const currentObservedAt = new Date().toISOString();
@@ -12,6 +18,13 @@ describe('usage window truthfulness', () => {
     source: 'codex-app-server', observedAt: currentObservedAt,
     freshness: 'fresh' as const, official: true, quality: 'observed' as const,
     connectorState: 'healthy' as const,
+  };
+  const connectorStates = {
+    codex: 'healthy' as const,
+    claude: 'unavailable' as const,
+    glm: 'unavailable' as const,
+    deepseek: 'unavailable' as const,
+    google_ai_studio: 'unavailable' as const,
   };
 
   it('rejects unknown usage fields at every shared boundary', () => {
@@ -21,16 +34,23 @@ describe('usage window truthfulness', () => {
     expect(() => UsageHistoryEntry.parse({ provider: 'codex', window: 'five_hour', durationMinutes: 300,
       usedPercent: 25, observedAt: provenance.observedAt, extra: true })).toThrow();
     expect(() => UnifiedUsage.parse({ generatedAt: provenance.observedAt, windows: [], estimates: [],
-      connectors: { codex: 'healthy', claude: 'unavailable', arbitrary: 'healthy' } })).toThrow();
+      connectors: { ...connectorStates, arbitrary: 'healthy' } })).toThrow();
   });
 
   it('rejects duplicate records and contradictory unavailable provenance', () => {
     const observed = { provider: 'codex' as const, window: 'five_hour' as const, durationMinutes: 300,
       usedPercent: 25, availability: 'observed' as const, provenance };
     expect(() => UnifiedUsage.parse({ generatedAt: provenance.observedAt,
-      windows: [observed, observed], estimates: [], connectors: { codex: 'healthy', claude: 'unavailable' } })).toThrow();
+      windows: [observed, observed], estimates: [], connectors: connectorStates })).toThrow();
     expect(() => UsageWindow.parse({ ...observed, usedPercent: undefined, availability: 'unavailable',
       provenance: { ...provenance, official: false, quality: 'unavailable' } })).toThrow();
+  });
+
+  it('requires the complete five-provider connector catalog and preserves unavailable states', () => {
+    expect(() => UnifiedUsage.parse({ generatedAt: provenance.observedAt, windows: [], estimates: [],
+      connectors: { codex: 'healthy', claude: 'unavailable', glm: 'unavailable', deepseek: 'unavailable' } })).toThrow();
+    expect(UnifiedUsage.parse({ generatedAt: provenance.observedAt, windows: [], estimates: [],
+      connectors: connectorStates }).connectors).toEqual(connectorStates);
   });
   it('marks old observations stale', () => {
     const window = normalizeWindow({ usedPercent: 25 }, 'codex', 'five_hour', 'codex-app-server', '2020-01-01T00:00:00Z');
@@ -75,24 +95,29 @@ describe('usage window truthfulness', () => {
 const connectors = [
   {
     id: 'sparkasse', displayName: 'Sparkasse', accessMethod: 'regulated_open_banking',
-    provider: 'candidate', enabled: false, requiresExplicitOptIn: true,
-    risk: 'provider_confirmation_required', recommendation: 'Confirm eligibility.',
+    provider: 'GoCardless Bank Account Data', enabled: false, requiresExplicitOptIn: true,
+    risk: 'consent_required', recommendation: 'Configure the institution and complete one-time consent before enabling.',
   },
   {
-    id: 'paypal', displayName: 'PayPal', accessMethod: 'official_oauth',
-    provider: 'official', enabled: false, requiresExplicitOptIn: true,
-    risk: 'account_eligibility_required', recommendation: 'Use OAuth only.',
+    id: 'revolut_personal', displayName: 'Revolut Personal', accessMethod: 'regulated_open_banking',
+    provider: 'GoCardless Bank Account Data', enabled: false, requiresExplicitOptIn: true,
+    risk: 'consent_required', recommendation: 'Configure the institution and complete one-time consent before enabling.',
   },
   {
-    id: 'trade_republic', displayName: 'Trade Republic', accessMethod: 'regulated_provider_pending',
-    provider: 'pending', enabled: false, requiresExplicitOptIn: true,
-    risk: 'experimental_only', recommendation: 'Do not use private APIs.',
+    id: 'revolut_business', displayName: 'Revolut Business', accessMethod: 'official_oauth',
+    provider: 'Official Revolut Business API', enabled: false, requiresExplicitOptIn: true,
+    risk: 'account_eligibility_required', recommendation: 'Register an eligible app and complete official OAuth before enabling.',
+  },
+  {
+    id: 'trade_republic', displayName: 'Trade Republic', accessMethod: 'manual_import',
+    provider: 'Manual CSV/PDF import', enabled: false, requiresExplicitOptIn: true,
+    risk: 'manual_import_only', recommendation: 'Permanent manual CSV/PDF import only; do not use private APIs.',
   },
 ] as const;
 
 describe('finance connector safety contract', () => {
   it('accepts the complete disabled opt-in catalog', () => {
-    expect(FinanceConnectorCatalog.parse({ connectors }).connectors).toHaveLength(3);
+    expect(FinanceConnectorCatalog.parse({ connectors }).connectors).toHaveLength(4);
   });
 
   it('rejects enabled, non-opt-in, and unknown connector descriptions', () => {
@@ -161,5 +186,141 @@ describe('finance summary truthfulness', () => {
     expect(() => FinanceSummary.parse({ ...unavailableFinance, generatedAt: current, spent: {
       ...observed, provenance: { ...observed.provenance, freshness: 'stale', connectorState: 'refresh_due' },
     } })).toThrow();
+  });
+
+  it('accepts an optional source-aware observed transaction snapshot', () => {
+    const observedAt = new Date().toISOString();
+    const row = {
+      id: 'revolut-1', merchant: 'REWE', title: 'Groceries', signedAmountCents: -2450,
+      timestamp: observedAt, account: 'Revolut Personal', source: 'revolut_personal', category: 'Food',
+      provenance: {
+        source: 'revolut_personal', observedAt, freshness: 'fresh' as const,
+        quality: 'observed' as const, connectorState: 'healthy' as const,
+      },
+    };
+    const parsed = FinanceSummary.parse({
+      ...unavailableFinance,
+      generatedAt: observedAt,
+      transactions: {
+        availability: 'observed', transactions: [row], provenance: row.provenance,
+      },
+    });
+    expect(parsed.transactions?.availability).toBe('observed');
+    if (parsed.transactions?.availability !== 'observed') throw new Error('expected observed transaction snapshot');
+    expect(parsed.transactions.transactions[0]).toMatchObject({
+      merchant: 'REWE', signedAmountCents: -2450, source: 'revolut_personal', category: 'Food',
+    });
+  });
+
+  it('accepts an explicitly derived mixed-source transaction snapshot', () => {
+    const observedAt = new Date().toISOString();
+    const provenance = (source: string) => ({
+      source, observedAt, freshness: 'fresh' as const,
+      quality: 'observed' as const, connectorState: 'healthy' as const,
+    });
+    const revolutRow = {
+      id: 'revolut-1', merchant: 'REWE', title: 'Groceries', signedAmountCents: -2450,
+      timestamp: observedAt, account: 'Revolut Personal', source: 'revolut_personal', category: 'Food',
+      provenance: provenance('revolut_personal'),
+    };
+    const sparkasseRow = {
+      id: 'sparkasse-1', merchant: 'EDEKA', title: 'Groceries', signedAmountCents: -1000,
+      timestamp: observedAt, account: 'Sparkasse', source: 'sparkasse', category: 'Food',
+      provenance: provenance('sparkasse'),
+    };
+
+    const parsed = FinanceSummary.parse({
+      ...unavailableFinance,
+      generatedAt: observedAt,
+      transactions: {
+        availability: 'observed',
+        transactions: [revolutRow, sparkasseRow],
+        provenance: { ...provenance('derived-transaction-snapshot') },
+      },
+    });
+
+    expect(parsed.transactions?.availability).toBe('observed');
+  });
+
+  it('rejects Finance row and envelope provenance mismatches', () => {
+    const observedAt = new Date().toISOString();
+    const row = {
+      id: 'revolut-1', merchant: 'REWE', title: 'Groceries', signedAmountCents: -2450,
+      timestamp: observedAt, account: 'Revolut Personal', source: 'revolut_personal', category: 'Food',
+      provenance: {
+        source: 'revolut_personal', observedAt, freshness: 'fresh' as const,
+        quality: 'observed' as const, connectorState: 'healthy' as const,
+      },
+    };
+    const base = { ...unavailableFinance, generatedAt: observedAt };
+
+    expect(() => FinanceSummary.parse({
+      ...base,
+      transactions: {
+        availability: 'observed',
+        transactions: [{ ...row, source: 'sparkasse' }],
+        provenance: row.provenance,
+      },
+    })).toThrow();
+
+    expect(() => FinanceSummary.parse({
+      ...base,
+      transactions: {
+        availability: 'observed',
+        transactions: [row],
+        provenance: { ...row.provenance, source: 'sparkasse' },
+      },
+    })).toThrow();
+
+    const oldEnvelope = new Date(Date.parse(observedAt) - 1_000).toISOString();
+    expect(() => FinanceSummary.parse({
+      ...base,
+      transactions: {
+        availability: 'observed',
+        transactions: [row],
+        provenance: { ...row.provenance, observedAt: oldEnvelope },
+      },
+    })).toThrow();
+  });
+
+  it('keeps summary-only responses source honest and rejects fake transaction states', () => {
+    expect(FinanceSummary.parse({ ...unavailableFinance, transactions: null }).transactions).toBeNull();
+    const unavailable = {
+      availability: 'unavailable',
+      provenance: unavailableFinance.spent.provenance,
+    };
+    expect(() => FinanceSummary.parse({ ...unavailableFinance, transactions: {
+      ...unavailable, transactions: [],
+    } })).toThrow();
+    expect(() => FinanceSummary.parse({ ...unavailableFinance, transactions: {
+      availability: 'observed', transactions: [], provenance: unavailableFinance.spent.provenance,
+    } })).toThrow();
+  });
+
+  it('rejects unknown transaction fields and incomplete observed provenance', () => {
+    const observedAt = new Date().toISOString();
+    const row = {
+      id: 'revolut-1', merchant: 'REWE', title: 'Groceries', signedAmountCents: -2450,
+      timestamp: observedAt, account: 'Revolut Personal', source: 'revolut_personal', category: 'Food',
+      provenance: {
+        source: 'revolut_personal', observedAt, freshness: 'fresh' as const,
+        quality: 'observed' as const, connectorState: 'healthy' as const,
+      }, extra: true,
+    };
+    expect(() => FinanceSummary.parse({
+      ...unavailableFinance,
+      generatedAt: observedAt,
+      transactions: { availability: 'observed', transactions: [row], provenance: row.provenance },
+    })).toThrow();
+    expect(() => FinanceSummary.parse({
+      ...unavailableFinance,
+      generatedAt: observedAt,
+      transactions: {
+        availability: 'observed', transactions: [], provenance: {
+          source: 'revolut_personal', observedAt, freshness: 'unknown',
+          quality: 'observed', connectorState: 'healthy',
+        },
+      },
+    })).toThrow();
   });
 });

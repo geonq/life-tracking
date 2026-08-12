@@ -166,15 +166,19 @@ public enum UsageHeatmapGrid {
 
 public struct UsageAnalyticsSnapshot: Codable, Equatable, Sendable {
     public let provider: Provider
+    /// Analytics are scoped to one provider window. Keeping that scope explicit prevents a
+    /// 5-hour estimate from being shown after the user switches the detail surface to 7 days.
+    public let windowID: String?
     public let activity: [UsageActivityPoint]
     public let projection: [UsageProjectionPoint]
     public let modelBreakdowns: [UsageModelBreakdown]
     public let heatmap: [UsageHeatmapCell]
     public let provenance: Provenance
 
-    public init(provider: Provider, activity: [UsageActivityPoint], projection: [UsageProjectionPoint],
+    public init(provider: Provider, windowID: String? = nil, activity: [UsageActivityPoint], projection: [UsageProjectionPoint],
                 modelBreakdowns: [UsageModelBreakdown], heatmap: [UsageHeatmapCell], provenance: Provenance) {
         self.provider = provider
+        self.windowID = windowID
         self.activity = activity
         self.projection = projection
         self.modelBreakdowns = modelBreakdowns
@@ -219,15 +223,26 @@ public enum UsageSelection {
 public enum UsageAnalyticsResolver {
     public static func matching(
         snapshot: ProviderSnapshot,
-        candidates: [UsageAnalyticsSnapshot]
+        candidates: [UsageAnalyticsSnapshot],
+        windowID: String? = nil
     ) -> UsageAnalyticsSnapshot? {
-        candidates.first { candidate in
+        let qualityMatches = candidates.filter { candidate in
             guard candidate.provider == snapshot.provider else { return false }
             if snapshot.provenance.quality == .demo {
                 return candidate.provenance.quality == .demo
             }
             return candidate.provenance.quality != .demo
         }
+
+        guard let windowID else { return qualityMatches.first }
+
+        // A scoped analytics record must never be reused for another range. An unscoped
+        // record remains a valid provider-level fallback, but it cannot contribute a forward
+        // estimate because `UsageProjectionChart` requires an explicit matching window ID.
+        if let exact = qualityMatches.first(where: { $0.windowID == windowID }) {
+            return exact
+        }
+        return qualityMatches.first(where: { $0.windowID == nil })
     }
 }
 
@@ -288,7 +303,7 @@ public enum DemoUsageAnalytics {
         let projection = UsageProjectionEngine.points(
             currentUsedPercent: activity.last?.usedPercent ?? 0,
             observedAt: DemoDataProvider.observedAt,
-            resetAt: DemoDataProvider.observedAt.addingTimeInterval(12 * 3_600),
+            resetAt: DemoDataProvider.observedAt.addingTimeInterval(3_600),
             baselineHourlyIncrease: 0.018 * scale,
             profile: profile
         )
@@ -300,7 +315,7 @@ public enum DemoUsageAnalytics {
                                         intensity: min((active ? 0.45 : 0.08) + variation * scale, 1))
             }
         }
-        return UsageAnalyticsSnapshot(provider: provider, activity: activity, projection: projection,
+        return UsageAnalyticsSnapshot(provider: provider, windowID: "5h", activity: activity, projection: projection,
                                       modelBreakdowns: models, heatmap: heatmap,
                                       provenance: DemoDataProvider.provenance)
     }

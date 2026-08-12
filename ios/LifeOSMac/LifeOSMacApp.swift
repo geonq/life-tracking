@@ -4,6 +4,8 @@ import SwiftUI
 struct LifeOSMacApp: App {
     @StateObject private var calendarCoordinator: CalendarCoordinator
     @StateObject private var usageCoordinator: UsageCoordinator
+    @StateObject private var financeCoordinator: FinanceCoordinator
+    @StateObject private var clipperCoordinator: ClipperCoordinator
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private let usesVisualFixtures: Bool
 
@@ -15,6 +17,12 @@ struct LifeOSMacApp: App {
         _usageCoordinator = StateObject(wrappedValue: UsageCoordinator(
             initialProviders: cachedUsage?.providers ?? [],
             initialUpdatedAt: cachedUsage?.updatedAt
+        ))
+        _financeCoordinator = StateObject(wrappedValue: FinanceCoordinator(
+            initialState: enabled ? .demo : .unavailable
+        ))
+        _clipperCoordinator = StateObject(wrappedValue: ClipperCoordinator(
+            initialState: enabled ? .demo : .unavailable
         ))
         _calendarCoordinator = StateObject(
             wrappedValue: CalendarCoordinator(
@@ -28,7 +36,9 @@ struct LifeOSMacApp: App {
             LifeOSMacRootView(
                 calendarCoordinator: calendarCoordinator,
                 usesVisualFixtures: usesVisualFixtures,
-                usageCoordinator: usageCoordinator
+                usageCoordinator: usageCoordinator,
+                financeCoordinator: financeCoordinator,
+                clipperCoordinator: clipperCoordinator
             )
                 .frame(minWidth: 900, minHeight: 640)
                 .tint(LifeOSTokens.accent)
@@ -39,6 +49,8 @@ struct LifeOSMacApp: App {
                         await calendarCoordinator.load()
                         calendarCoordinator.startSync()
                         await usageCoordinator.refresh()
+                        await financeCoordinator.refresh()
+                        await clipperCoordinator.refresh()
                     }
                 }
         }
@@ -49,6 +61,8 @@ struct LifeOSMacApp: App {
                     Task {
                         await calendarCoordinator.manualRefresh()
                         await usageCoordinator.refresh()
+                        await financeCoordinator.refresh()
+                        await clipperCoordinator.refresh()
                     }
                 }
                 .keyboardShortcut("r", modifiers: .command)
@@ -63,122 +77,356 @@ struct LifeOSMacApp: App {
     }
 }
 
-/// A compact, deterministic macOS split layout. Keeping the sidebar in SwiftUI
-/// avoids AppKit material placeholders when the view is rendered off-screen.
+/// The macOS shell keeps the primary navigation persistent. This is intentionally
+/// a SwiftUI layout so snapshots and the actual app share the same structure.
 @MainActor
 struct LifeOSMacRootView: View {
     @ObservedObject private var calendarCoordinator: CalendarCoordinator
     @ObservedObject private var usageCoordinator: UsageCoordinator
+    @ObservedObject private var financeCoordinator: FinanceCoordinator
+    @ObservedObject private var clipperCoordinator: ClipperCoordinator
     private let usesVisualFixtures: Bool
-    @State private var selection: SidebarItem = .overview
-    @State private var showingUsage = false
+    @State private var selection: LifeOSModule
+    @State private var selectedRoute: LifeOSDeepLink?
+    @State private var showingUsage: Bool
     @State private var requestingNewCalendarEvent = false
+    @State private var sidebarCollapsed = false
+    @State private var showingCommandPalette = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @MainActor
-    init(calendarCoordinator: CalendarCoordinator, usesVisualFixtures: Bool = false, usageCoordinator: UsageCoordinator) {
+    init(
+        calendarCoordinator: CalendarCoordinator,
+        usesVisualFixtures: Bool = false,
+        usageCoordinator: UsageCoordinator,
+        financeCoordinator: FinanceCoordinator? = nil,
+        clipperCoordinator: ClipperCoordinator? = nil,
+        initialModule: LifeOSModule = .home,
+        initialRoute: LifeOSDeepLink? = nil,
+        initiallyShowingUsage: Bool = false
+    ) {
         self.calendarCoordinator = calendarCoordinator
         self.usesVisualFixtures = usesVisualFixtures
         self.usageCoordinator = usageCoordinator
+        self.financeCoordinator = financeCoordinator ?? FinanceCoordinator(initialState: .demo)
+        self.clipperCoordinator = clipperCoordinator ?? ClipperCoordinator(initialState: usesVisualFixtures ? .demo : .unavailable)
+        _selection = State(initialValue: initialModule)
+        _selectedRoute = State(initialValue: initialRoute)
+        _showingUsage = State(initialValue: initiallyShowingUsage || initialRoute == .usage)
     }
 
     var body: some View {
         HStack(spacing: 0) {
             sidebar
-                .frame(width: 218)
             Rectangle()
                 .fill(LifeOSTokens.hairlineBorder)
                 .frame(width: 1)
-            ZStack {
-                LifeOSTokens.screenCanvas
+            VStack(spacing: 0) {
+                topBar
+                Rectangle()
+                    .fill(LifeOSTokens.hairlineBorder)
+                    .frame(height: 1)
                 detail
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(LifeOSTokens.screenCanvas)
         .animation(reduceMotion ? nil : LifeOSMotion.easeNavigate, value: selection)
         .onOpenURL { url in
-            switch LifeOSDeepLink(url: url) {
-            case .usage:
-                selection = .overview
-                showingUsage = true
-            case .newCalendarEvent:
-                selection = .calendar
-                requestingNewCalendarEvent = true
-            case .calendar: selection = .calendar
-            case .tax: selection = .tax
-            case nil: selection = .overview
-            }
+            guard let destination = LifeOSDeepLink(url: url) else { return }
+            navigate(to: destination)
+        }
+        .sheet(isPresented: $showingCommandPalette) {
+            LifeOSMacCommandPalette(selection: $selection, selectedRoute: $selectedRoute)
+                .frame(width: 560, height: 420)
         }
     }
 
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    enum SidebarItem: Hashable { case overview, calendar, tax }
-
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("LIFE OS")
-                .font(LifeOSFont.manrope(10, weight: .extraBold))
-                .tracking(0.8)
+            HStack(spacing: 8) {
+                LifeOSIcon(.home)
+                    .foregroundStyle(LifeOSTokens.accent)
+                    .frame(width: 18, height: 18)
+                if !sidebarCollapsed {
+                    Text("LIFE OS")
+                        .font(LifeOSFont.manrope(10, weight: .extraBold))
+                        .tracking(0.8)
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                }
+                Spacer(minLength: 0)
+                Button {
+                    withAnimation(reduceMotion ? nil : LifeOSMotion.snappy) {
+                        sidebarCollapsed.toggle()
+                    }
+                } label: {
+                    LifeOSIcon(sidebarCollapsed ? .chevronRight : .chevronLeft)
+                        .frame(width: 16, height: 16)
+                }
+                .buttonStyle(.plain)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
-                .padding(.horizontal, 10)
-                .padding(.top, 4)
-                .padding(.bottom, 8)
+                .accessibilityLabel(sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar")
+                .accessibilityIdentifier("mac-sidebar-collapse")
+            }
+            .padding(.horizontal, sidebarCollapsed ? 14 : 12)
+            .padding(.top, 12)
+            .padding(.bottom, 12)
 
-            sidebarButton("Overview", icon: .overview, item: .overview)
-            sidebarButton("Calendar", icon: .calendar, item: .calendar)
-            sidebarButton("Tax Documents", icon: .tax, item: .tax)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(LifeOSModule.macPrimaryModules) { module in
+                        sidebarButton(module)
+                    }
+                }
+                .padding(.horizontal, 8)
+            }
             Spacer(minLength: 0)
         }
-        .padding(10)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .frame(width: sidebarCollapsed ? 68 : 228)
+        .frame(maxHeight: .infinity, alignment: .topLeading)
         .background(LifeOSTokens.canvas)
+        .accessibilityIdentifier("mac-persistent-sidebar")
+    }
+
+    private var topBar: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(selection.title)
+                    .font(LifeOSFont.spaceGrotesk(16, weight: .bold))
+                if let section = selectedRoute?.sectionTitle ?? (selectedRoute == .usage ? "Usage" : nil) {
+                    Text(section)
+                        .font(LifeOSFont.inter(11))
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                }
+            }
+            .accessibilityElement(children: .combine)
+            Spacer(minLength: 16)
+
+            Button { showingCommandPalette = true } label: {
+                HStack(spacing: 8) {
+                    LifeOSIcon(.views).frame(width: 15, height: 15)
+                    Text("Search or jump").font(LifeOSFont.inter(12))
+                    Text("⌘K").font(LifeOSFont.inter(10, weight: .semiBold))
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                }
+                .foregroundStyle(LifeOSTokens.tertiaryText)
+                .padding(.horizontal, 11)
+                .frame(height: 30)
+                .background(LifeOSTokens.surface, in: Capsule())
+                .overlay(Capsule().stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut("k", modifiers: .command)
+            .accessibilityLabel("Open command palette")
+            .accessibilityIdentifier("mac-command-palette-trigger")
+        }
+        .padding(.horizontal, 18)
+        .frame(height: 56)
+        .background(LifeOSTokens.canvas)
+        .accessibilityIdentifier("mac-global-top-bar")
     }
 
     @ViewBuilder
     private var detail: some View {
         switch selection {
-        case .overview:
-            OverviewView(
-                snapshot: usesVisualFixtures ? DemoDataProvider.overview : .unavailable(),
-                usageSnapshots: usesVisualFixtures ? DemoDataProvider.providers : usageCoordinator.providers,
-                usageAnalytics: usesVisualFixtures ? DemoUsageAnalytics.snapshots : usageCoordinator.analytics,
-                usageState: usesVisualFixtures ? .demo : usageCoordinator.state,
-                refreshAction: usesVisualFixtures ? nil : {
+        case .home:
+            if showingUsage {
+                UsageView(
+                    snapshots: usesVisualFixtures ? DemoDataProvider.providers : usageCoordinator.providers,
+                    analytics: usesVisualFixtures ? DemoUsageAnalytics.snapshots : usageCoordinator.analytics,
+                    state: usesVisualFixtures ? .demo : usageCoordinator.state,
+                    refreshAction: usesVisualFixtures ? nil : { await usageCoordinator.refresh() }
+                )
+                .transition(reduceMotion ? .identity : .opacity)
+            } else {
+                OverviewView(
+                    snapshot: usesVisualFixtures
+                        ? DemoDataProvider.overview
+                        : OverviewSnapshot.production(clipper: clipperCoordinator.snapshot),
+                    usageSnapshots: usesVisualFixtures ? DemoDataProvider.providers : usageCoordinator.providers,
+                    usageAnalytics: usesVisualFixtures ? DemoUsageAnalytics.snapshots : usageCoordinator.analytics,
+                    usageState: usesVisualFixtures ? .demo : usageCoordinator.state,
+                    refreshAction: usesVisualFixtures ? nil : {
                         await calendarCoordinator.manualRefresh()
                         await usageCoordinator.refresh()
+                        await financeCoordinator.refresh()
+                        await clipperCoordinator.refresh()
                     },
-                showingUsage: $showingUsage
-            )
-            .transition(reduceMotion ? .identity : .opacity)
+                    clipperRefreshAction: usesVisualFixtures ? nil : { await clipperCoordinator.refresh() },
+                    clipperState: usesVisualFixtures ? .demo : clipperCoordinator.state,
+                    openDestination: navigate,
+                    showingUsage: $showingUsage
+                )
+                .transition(reduceMotion ? .identity : .opacity)
+            }
         case .calendar:
             CalendarView(coordinator: calendarCoordinator, requestNewEvent: $requestingNewCalendarEvent)
                 .transition(reduceMotion ? .identity : .opacity)
+        case .finance:
+            FinanceView(
+                summary: financeCoordinator.summary,
+                usesVisualFixtures: usesVisualFixtures,
+                initialDetail: financeDetailRoute
+            )
+                .transition(reduceMotion ? .identity : .opacity)
+        case .fitness:
+            FitnessView(
+                snapshot: usesVisualFixtures ? .demo : .unavailable,
+                initialSection: selectedRoute?.fitnessSection ?? .today,
+                initialNutritionEntryPoint: selectedRoute?.nutritionEntryPoint,
+                initialFitnessEntryPoint: selectedRoute?.fitnessEntryPoint,
+                usesVisualFixtures: usesVisualFixtures
+            )
+            .transition(reduceMotion ? .identity : .opacity)
         case .tax:
             TaxDocumentsView()
                 .transition(reduceMotion ? .identity : .opacity)
+        case .aiUsage:
+            UsageView(
+                snapshots: usesVisualFixtures ? DemoDataProvider.providers : usageCoordinator.providers,
+                analytics: usesVisualFixtures ? DemoUsageAnalytics.snapshots : usageCoordinator.analytics,
+                state: usesVisualFixtures ? .demo : usageCoordinator.state,
+                refreshAction: usesVisualFixtures ? nil : { await usageCoordinator.refresh() }
+            )
+            .transition(reduceMotion ? .identity : .opacity)
+        case .settings:
+            NavigationStack { SettingsView() }
+                .transition(reduceMotion ? .identity : .opacity)
+        default:
+            LifeOSModuleLandingView(
+                module: selection,
+                route: selectedRoute,
+                usesVisualFixtures: usesVisualFixtures
+            )
+            .transition(reduceMotion ? .identity : .opacity)
         }
     }
 
-    private func sidebarButton(_ title: String, icon: LifeOSIconName, item: SidebarItem) -> some View {
-        Button {
-            selection = item
+    private func sidebarButton(_ module: LifeOSModule) -> some View {
+        let selected = selection == module
+        return Button {
+            select(module)
         } label: {
             HStack(spacing: 9) {
-                LifeOSIcon(icon)
-                    .frame(width: 16, height: 16)
-                Text(title)
-                    .font(LifeOSFont.inter(13, weight: selection == item ? .semiBold : .regular))
-                Spacer(minLength: 0)
+                LifeOSIcon(module.icon).frame(width: 16, height: 16)
+                if !sidebarCollapsed {
+                    Text(module.title)
+                        .font(LifeOSFont.inter(13, weight: selected ? .semiBold : .regular))
+                    Spacer(minLength: 0)
+                }
             }
-            .foregroundStyle(selection == item ? Color.primary : Color.secondary)
+            .foregroundStyle(selected ? Color.primary : Color.secondary)
             .padding(.horizontal, 10)
             .frame(height: 34)
             .background(
-                selection == item ? Color.primary.opacity(0.08) : Color.clear,
+                selected ? LifeOSTokens.accent.opacity(0.12) : Color.clear,
                 in: RoundedRectangle(cornerRadius: 7, style: .continuous)
             )
+            .frame(maxWidth: .infinity, alignment: sidebarCollapsed ? .center : .leading)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(title)
+        .accessibilityLabel(module.title)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityIdentifier("mac-sidebar-\(module.rawValue)")
+    }
+
+    private var financeDetailRoute: FinanceDetailRoute? {
+        switch selectedRoute {
+        case .financeSpend: .spend
+        case .financeCashFlow: .cashFlow
+        default: nil
+        }
+    }
+
+    private func select(_ module: LifeOSModule) {
+        selectedRoute = nil
+        showingUsage = false
+        requestingNewCalendarEvent = false
+        selection = module
+    }
+
+    private func navigate(to destination: LifeOSDeepLink) {
+        selectedRoute = destination
+        switch destination {
+        case .usage:
+            selection = .home
+            showingUsage = true
+            requestingNewCalendarEvent = false
+        case .newCalendarEvent:
+            selection = .calendar
+            showingUsage = false
+            requestingNewCalendarEvent = true
+        default:
+            selection = destination.module
+            showingUsage = false
+            requestingNewCalendarEvent = false
+        }
+    }
+}
+
+private struct LifeOSMacCommandPalette: View {
+    @Binding var selection: LifeOSModule
+    @Binding var selectedRoute: LifeOSDeepLink?
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+
+    private var modules: [LifeOSModule] {
+        let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return LifeOSModule.macPrimaryModules }
+        return LifeOSModule.macPrimaryModules.filter {
+            $0.title.localizedCaseInsensitiveContains(normalized)
+                || $0.subtitle.localizedCaseInsensitiveContains(normalized)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("Command palette")
+                    .font(LifeOSFont.spaceGrotesk(18, weight: .bold))
+                Spacer()
+                Text("ESC")
+                    .font(LifeOSFont.inter(10, weight: .semiBold))
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+            }
+            TextField("Jump to a module…", text: $query)
+                .textFieldStyle(.roundedBorder)
+                .accessibilityLabel("Command palette search")
+                .accessibilityIdentifier("mac-command-palette-search")
+            ScrollView {
+                VStack(spacing: 2) {
+                    ForEach(modules) { module in
+                        Button {
+                            selection = module
+                            selectedRoute = nil
+                            dismiss()
+                        } label: {
+                            HStack(spacing: 10) {
+                                LifeOSIcon(module.icon).frame(width: 17, height: 17)
+                                Text(module.title)
+                                    .font(LifeOSFont.inter(13, weight: .medium))
+                                Spacer()
+                                if !module.hasWorkingView {
+                                    Text("Not connected")
+                                        .font(LifeOSFont.inter(11))
+                                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                                }
+                            }
+                            .padding(.horizontal, 10)
+                            .frame(height: 34)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(module.title)
+                        .accessibilityIdentifier("command-palette-\(module.rawValue)")
+                    }
+                }
+            }
+        }
+        .padding(20)
+        .background(LifeOSTokens.screenCanvas)
     }
 }

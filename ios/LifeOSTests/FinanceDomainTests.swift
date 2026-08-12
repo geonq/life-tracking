@@ -19,31 +19,36 @@ final class FinanceDomainTests: XCTestCase {
     }
 
     func testFinanceConnectorCatalogFailsClosedUntilExplicitlyConfigured() {
-        XCTAssertEqual(FinanceConnectorCatalog.defaults.map(\.kind), [.sparkasse, .paypal, .tradeRepublic])
+        XCTAssertEqual(FinanceConnectorCatalog.defaults.map(\.kind), [.sparkasse, .revolutPersonal, .revolutBusiness, .tradeRepublic])
         XCTAssertTrue(FinanceConnectorCatalog.defaults.allSatisfy { !$0.isEnabled })
         XCTAssertTrue(FinanceConnectorCatalog.defaults.allSatisfy(\.requiresExplicitOptIn))
         XCTAssertTrue(FinanceConnectorCatalog.defaults.allSatisfy { !$0.provider.isEmpty && !$0.recommendation.isEmpty })
-        XCTAssertEqual(FinanceConnectorCatalog.defaults.first { $0.kind == .paypal }?.accessMethod, .officialOAuth)
-        XCTAssertEqual(FinanceConnectorCatalog.defaults.first { $0.kind == .tradeRepublic }?.accessMethod, .regulatedProviderPending)
-        XCTAssertEqual(FinanceConnectorCatalog.defaults.first { $0.kind == .tradeRepublic }?.risk, .experimentalOnly)
+        XCTAssertEqual(FinanceConnectorCatalog.defaults.filter { $0.accessMethod == .regulatedOpenBanking }.map(\.provider), ["GoCardless Bank Account Data", "GoCardless Bank Account Data"])
+        XCTAssertEqual(FinanceConnectorCatalog.defaults.filter { $0.risk == .consentRequired }.map(\.kind), [.sparkasse, .revolutPersonal])
+        XCTAssertEqual(FinanceConnectorCatalog.defaults.first { $0.kind == .revolutBusiness }?.accessMethod, .officialOAuth)
+        XCTAssertEqual(FinanceConnectorCatalog.defaults.first { $0.kind == .revolutBusiness }?.provider, "Official Revolut Business API")
+        XCTAssertEqual(FinanceConnectorCatalog.defaults.first { $0.kind == .revolutBusiness }?.risk, .accountEligibilityRequired)
+        XCTAssertEqual(FinanceConnectorCatalog.defaults.first { $0.kind == .tradeRepublic }?.accessMethod, .manualImport)
+        XCTAssertEqual(FinanceConnectorCatalog.defaults.first { $0.kind == .tradeRepublic }?.provider, "Manual CSV/PDF import")
+        XCTAssertEqual(FinanceConnectorCatalog.defaults.first { $0.kind == .tradeRepublic }?.risk, .manualImportOnly)
     }
 
     func testFinanceConnectorWireKeysMatchSharedAPIContract() throws {
         let data = Data("""
         {
-          "id": "paypal",
-          "displayName": "PayPal",
+          "id": "revolut_business",
+          "displayName": "Revolut Business",
           "accessMethod": "official_oauth",
-          "provider": "PayPal Transaction Search API",
+          "provider": "Official Revolut Business API",
           "enabled": false,
           "requiresExplicitOptIn": true,
           "risk": "account_eligibility_required",
-          "recommendation": "Use official OAuth only; fall back to statement import if this account cannot access transaction history."
+          "recommendation": "Register an eligible Revolut Business app and complete official OAuth before enabling; Revolut review may delay access."
         }
         """.utf8)
 
         let descriptor = try JSONDecoder().decode(FinanceConnectorDescriptor.self, from: data)
-        XCTAssertEqual(descriptor.kind, .paypal)
+        XCTAssertEqual(descriptor.kind, .revolutBusiness)
         XCTAssertFalse(descriptor.isEnabled)
         XCTAssertEqual(descriptor.accessMethod, .officialOAuth)
 
@@ -58,7 +63,7 @@ final class FinanceDomainTests: XCTestCase {
         }
         let catalogData = try JSONSerialization.data(withJSONObject: ["connectors": connectorArray])
         let catalog = try FinanceConnectorCatalog.decode(catalogData)
-        XCTAssertEqual(catalog.connectors.map(\.kind), [.sparkasse, .paypal, .tradeRepublic])
+        XCTAssertEqual(catalog.connectors.map(\.kind), [.sparkasse, .revolutPersonal, .revolutBusiness, .tradeRepublic])
 
         let incompleteData = try JSONSerialization.data(withJSONObject: ["connectors": Array(connectorArray.dropLast())])
         XCTAssertThrowsError(try FinanceConnectorCatalog.decode(incompleteData))
@@ -207,6 +212,232 @@ final class FinanceDomainTests: XCTestCase {
             payload(observedAt: now.addingTimeInterval(60), freshness: "fresh", connector: "healthy"), now: now))
         XCTAssertThrowsError(try FinanceSummary.decode(
             payload(observedAt: now.addingTimeInterval(-3600), freshness: "fresh", connector: "healthy"), now: now))
+    }
+
+    func testTransactionTotalsReconcileIncomeSpendAndCashFlow() {
+        let transactions = fixtureTransactions()
+        let totals = FinanceTransactionTotals(transactions: transactions)
+
+        XCTAssertEqual(totals.incomeCents, 10_500)
+        XCTAssertEqual(totals.spendingCents, 4_000)
+        XCTAssertEqual(totals.netCashFlowCents, 6_500)
+        XCTAssertEqual(totals.transactionCount, 4)
+        XCTAssertEqual(totals.categoryObservations.map(\.name), ["Food", "Transport"])
+        XCTAssertEqual(totals.categoryObservations.map(\.amountCents), [2_500, 1_500])
+        XCTAssertEqual(totals.categoryObservations.map(\.transactionCount), [1, 1])
+        XCTAssertEqual(totals.categoryObservations.reduce(0) { $0 + $1.amountCents }, totals.spendingCents)
+        XCTAssertEqual(totals.categoryObservations.reduce(0.0) { $0 + $1.fraction }, 1.0, accuracy: 0.0001)
+    }
+
+    func testCategoryProvenanceIsExplicitlyDerivedForMixedSources() {
+        let base = fixtureTransactions()
+        let sparkasseObservedAt = base[1].provenance.observedAt.addingTimeInterval(-60 * 60)
+        let sparkasseProvenance = FinancePayloadProvenance(
+            source: "sparkasse", observedAt: sparkasseObservedAt,
+            freshness: .stale, quality: .observed, connectorState: .refreshDue
+        )
+        let secondFood = FinanceTransactionObservation(
+            id: "food-2", merchant: "EDEKA", title: "Groceries", signedAmountCents: -1_000,
+            timestamp: sparkasseObservedAt, account: "Sparkasse", source: "sparkasse",
+            category: "Food", provenance: sparkasseProvenance
+        )
+        let totals = FinanceTransactionTotals(transactions: base + [secondFood])
+        let food = try! XCTUnwrap(totals.categoryObservations.first(where: { $0.name == "Food" }))
+
+        XCTAssertEqual(food.source, "derived-transaction-rollup")
+        XCTAssertEqual(food.provenance.source, "derived-transaction-rollup")
+        XCTAssertEqual(food.contributingSources, ["revolut_personal", "sparkasse"])
+        XCTAssertTrue(food.isMixedSource)
+        XCTAssertEqual(food.sourceSummary, "revolut_personal, sparkasse")
+        XCTAssertEqual(food.provenance.observedAt, sparkasseObservedAt)
+        XCTAssertEqual(food.provenance.freshness, .stale)
+        XCTAssertEqual(food.provenance.connectorState, .refreshDue)
+    }
+
+    func testTransactionFilterComposesCategorySourceDateAndSpendingOnly() {
+        let transactions = fixtureTransactions()
+        let filter = FinanceTransactionFilter(
+            category: "Food",
+            source: "revolut_personal",
+            startDate: transactions[1].timestamp,
+            endDate: transactions[1].timestamp,
+            spendingOnly: true
+        )
+
+        let filtered = filter.applying(to: transactions)
+
+        XCTAssertEqual(filtered.map(\.id), ["food-1"])
+        XCTAssertTrue(filtered.allSatisfy { $0.category == "Food" && $0.isSpending })
+    }
+
+    func testSummaryWithoutTransactionSourceDoesNotInventLedgerTotals() throws {
+        let summary = try decodeSummary(
+            monthlyIncome: 10_500,
+            fixedCosts: nil,
+            discretionaryBuffer: nil,
+            spent: 4_000,
+            savingsGoal: nil,
+            saved: nil
+        )
+
+        XCTAssertNil(summary.transactions)
+        XCTAssertNil(summary.transactions?.transactions)
+    }
+
+    func testObservedTransactionSnapshotPreservesSourceAwareFields() throws {
+        let transaction = fixtureTransactions()[0]
+        let snapshot = FinanceTransactionSnapshot(
+            availability: .observed,
+            transactions: [transaction],
+            provenance: transaction.provenance
+        )
+        let encoded = try JSONEncoder.lifeOS.encode(snapshot)
+        let decoder = JSONDecoder.lifeOS
+        decoder.userInfo[.lifeOSNow] = Date(timeIntervalSince1970: 1_754_660_000)
+        let decoded = try decoder.decode(FinanceTransactionSnapshot.self, from: encoded)
+
+        XCTAssertEqual(decoded.transactions?.first?.merchant, "Salary")
+        XCTAssertEqual(decoded.transactions?.first?.signedAmountCents, 10_000)
+        XCTAssertEqual(decoded.transactions?.first?.account, "Revolut Personal")
+        XCTAssertEqual(decoded.transactions?.first?.source, "revolut_personal")
+        XCTAssertEqual(decoded.transactions?.first?.provenance.quality, .observed)
+    }
+
+    func testTransactionObservationRejectsSourceProvenanceMismatch() throws {
+        let transaction = fixtureTransactions()[0]
+        var payload = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: JSONEncoder.lifeOS.encode(transaction)) as? [String: Any]
+        )
+        payload["source"] = "sparkasse"
+
+        let decoder = JSONDecoder.lifeOS
+        decoder.userInfo[.lifeOSNow] = Date(timeIntervalSince1970: 1_754_660_000)
+        XCTAssertThrowsError(try decoder.decode(
+            FinanceTransactionObservation.self,
+            from: JSONSerialization.data(withJSONObject: payload)
+        ))
+    }
+
+    func testObservedTransactionSnapshotRejectsUnreconciledSourceAndRowObservationTime() throws {
+        let transaction = fixtureTransactions()[0]
+        let snapshot = FinanceTransactionSnapshot(
+            availability: .observed,
+            transactions: [transaction],
+            provenance: transaction.provenance
+        )
+        let encoded = try JSONSerialization.jsonObject(with: JSONEncoder.lifeOS.encode(snapshot)) as! [String: Any]
+        var sourceMismatch = encoded
+        sourceMismatch["provenance"] = [
+            "source": "sparkasse",
+            "observedAt": "2025-08-08T13:30:00.000Z",
+            "freshness": "fresh",
+            "quality": "observed",
+            "connectorState": "healthy"
+        ]
+        var oldEnvelope = encoded
+        oldEnvelope["provenance"] = [
+            "source": "revolut_personal",
+            "observedAt": "2025-08-08T11:00:00.000Z",
+            "freshness": "fresh",
+            "quality": "observed",
+            "connectorState": "healthy"
+        ]
+
+        let decoder = JSONDecoder.lifeOS
+        decoder.userInfo[.lifeOSNow] = Date(timeIntervalSince1970: 1_754_660_000)
+        XCTAssertThrowsError(try decoder.decode(
+            FinanceTransactionSnapshot.self,
+            from: JSONSerialization.data(withJSONObject: sourceMismatch)
+        ))
+        XCTAssertThrowsError(try decoder.decode(
+            FinanceTransactionSnapshot.self,
+            from: JSONSerialization.data(withJSONObject: oldEnvelope)
+        ))
+    }
+
+    func testCategoryObservationRejectsMalformedInvariants() throws {
+        let category = try XCTUnwrap(
+            FinanceTransactionTotals(transactions: fixtureTransactions())
+                .categoryObservations.first(where: { $0.name == "Food" })
+        )
+        let valid = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: JSONEncoder.lifeOS.encode(category)) as? [String: Any]
+        )
+        let decoder = JSONDecoder.lifeOS
+        decoder.userInfo[.lifeOSNow] = Date(timeIntervalSince1970: 1_754_660_000)
+
+        for (key, value) in [("amountCents", 0), ("transactionCount", 0), ("fraction", 1.5)] as [(String, Any)] {
+            var invalid = valid
+            invalid[key] = value
+            XCTAssertThrowsError(
+                try decoder.decode(
+                    FinanceCategoryObservation.self,
+                    from: JSONSerialization.data(withJSONObject: invalid)
+                ),
+                "Expected malformed category \(key) to be rejected"
+            )
+        }
+
+        var duplicateSources = valid
+        duplicateSources["contributingSources"] = ["revolut_personal", "revolut_personal"]
+        XCTAssertThrowsError(try decoder.decode(
+            FinanceCategoryObservation.self,
+            from: JSONSerialization.data(withJSONObject: duplicateSources)
+        ))
+    }
+
+    func testUnavailableTransactionSnapshotRejectsAnEmptyObservedLookingLedger() throws {
+        let payload: [String: Any] = [
+            "availability": "unavailable",
+            "transactions": [],
+            "provenance": [
+                "source": "no-authorized-finance-source",
+                "observedAt": "2026-08-08T12:00:00.123Z",
+                "freshness": "unknown",
+                "quality": "unavailable",
+                "connectorState": "unavailable"
+            ]
+        ]
+        let decoder = JSONDecoder.lifeOS
+        decoder.userInfo[.lifeOSNow] = ISO8601DateFormatter().date(from: "2026-08-08T12:05:00Z")!
+
+        XCTAssertThrowsError(try decoder.decode(
+            FinanceTransactionSnapshot.self,
+            from: JSONSerialization.data(withJSONObject: payload)
+        ))
+    }
+
+    private func fixtureTransactions() -> [FinanceTransactionObservation] {
+        let observedAt = Date(timeIntervalSince1970: 1_754_659_800)
+        let provenance = FinancePayloadProvenance(
+            source: "revolut_personal",
+            observedAt: observedAt,
+            freshness: .fresh,
+            quality: .observed,
+            connectorState: .healthy
+        )
+        return [
+            FinanceTransactionObservation(
+                id: "salary-1", merchant: "Salary", title: "Monthly salary", signedAmountCents: 10_000,
+                timestamp: observedAt, account: "Revolut Personal", source: "revolut_personal",
+                category: "Income", provenance: provenance
+            ),
+            FinanceTransactionObservation(
+                id: "food-1", merchant: "REWE", title: "Groceries", signedAmountCents: -2_500,
+                timestamp: observedAt, account: "Revolut Personal", source: "revolut_personal",
+                category: "Food", provenance: provenance
+            ),
+            FinanceTransactionObservation(
+                id: "transport-1", merchant: "BVG", title: "Transit", signedAmountCents: -1_500,
+                timestamp: observedAt, account: "Revolut Personal", source: "revolut_personal",
+                category: "Transport", provenance: provenance
+            ),
+            FinanceTransactionObservation(
+                id: "refund-1", merchant: "REWE", title: "Refund", signedAmountCents: 500,
+                timestamp: observedAt, account: "Revolut Personal", source: "revolut_personal",
+                category: "Food", provenance: provenance
+            )
+        ]
     }
 
     private func decodeSummary(

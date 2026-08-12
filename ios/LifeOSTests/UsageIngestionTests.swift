@@ -4,6 +4,22 @@ import XCTest
 final class UsageIngestionTests: XCTestCase {
     private let observedAt = Date.now
 
+    private static func connectors(
+        codex: ConnectorState,
+        claude: ConnectorState,
+        glm: ConnectorState = .unavailable,
+        deepseek: ConnectorState = .unavailable,
+        googleAIStudio: ConnectorState = .unavailable
+    ) -> [String: ConnectorState] {
+        [
+            "codex": codex,
+            "claude": claude,
+            "glm": glm,
+            "deepseek": deepseek,
+            "google_ai_studio": googleAIStudio,
+        ]
+    }
+
     private func provenance(
         quality: String = "observed",
         official: Bool = true,
@@ -30,7 +46,7 @@ final class UsageIngestionTests: XCTestCase {
     func testObservedCodexWindowsPreserveFiveHourAndSevenDayUnits() throws {
         let payload = APIUsagePayload(generatedAt: observedAt,
             windows: [window(kind: "five_hour", minutes: 300), window(kind: "seven_day", minutes: 10_080)],
-            estimates: [], connectors: ["codex": .healthy, "claude": .unavailable])
+            estimates: [], connectors: Self.connectors(codex: .healthy, claude: .unavailable))
         let snapshot = try XCTUnwrap(UsageIngestion.map(payload).providers.first)
         XCTAssertEqual(snapshot.windows.map(\.durationMinutes), [300, 10_080])
         XCTAssertEqual(snapshot.windows.map(\.usedPercent), [0.42, 0.42])
@@ -40,7 +56,7 @@ final class UsageIngestionTests: XCTestCase {
         let payload = APIUsagePayload(generatedAt: observedAt,
             windows: [window(kind: "five_hour", minutes: 300, used: nil, availability: "unavailable",
                              provenance: provenance(quality: "unavailable", official: false, connector: .unavailable, freshness: "unknown"))],
-            estimates: [], connectors: ["codex": .unavailable, "claude": .unavailable])
+            estimates: [], connectors: Self.connectors(codex: .unavailable, claude: .unavailable))
         let mapped = try XCTUnwrap(try XCTUnwrap(UsageIngestion.map(payload).providers.first).windows.first)
         XCTAssertNil(mapped.usedPercent)
         XCTAssertNil(mapped.resetAt)
@@ -50,7 +66,7 @@ final class UsageIngestionTests: XCTestCase {
     func testDuplicateProviderWindowRecordsFailClosed() {
         let duplicate = window(kind: "five_hour", minutes: 300)
         let payload = APIUsagePayload(generatedAt: observedAt, windows: [duplicate, duplicate],
-                                      estimates: [], connectors: ["codex": .healthy, "claude": .unavailable])
+                                      estimates: [], connectors: Self.connectors(codex: .healthy, claude: .unavailable))
         XCTAssertThrowsError(try UsageIngestion.map(payload))
     }
 
@@ -59,7 +75,7 @@ final class UsageIngestionTests: XCTestCase {
             let payload = APIUsagePayload(generatedAt: observedAt,
                 windows: [window(kind: "five_hour", minutes: 300, used: nil, availability: "unavailable",
                                  provenance: provenance(quality: "unavailable", official: false, connector: connector, freshness: "unknown"))],
-                estimates: [], connectors: ["codex": connector, "claude": .unavailable])
+                estimates: [], connectors: Self.connectors(codex: connector, claude: .unavailable))
             XCTAssertThrowsError(try UsageIngestion.map(payload))
         }
     }
@@ -70,7 +86,7 @@ final class UsageIngestionTests: XCTestCase {
             windows: [window(kind: "five_hour", minutes: 300, resetAt: reset), window(kind: "seven_day", minutes: 10_080)],
             estimates: [APIUsageEstimate(provider: .codex, window: "five_hour", projectedPercentAtReset: 78,
                 estimatedExhaustionAt: nil, velocityPercentPerHour: 4, confidence: "high", sampleSpanHours: 12,
-                explanation: "Observed activity", official: false)], connectors: ["codex": .healthy, "claude": .unavailable])
+                explanation: "Observed activity", official: false)], connectors: Self.connectors(codex: .healthy, claude: .unavailable))
         let snapshot = try XCTUnwrap(UsageIngestion.map(payload).providers.first)
         XCTAssertEqual(snapshot.provenance.quality, .observed)
         XCTAssertEqual(snapshot.windows.first?.projection?.percentAtReset, 0.78)
@@ -83,7 +99,7 @@ final class UsageIngestionTests: XCTestCase {
             freshness: "stale", official: true, quality: "observed", connectorState: .refreshDue)
         let payload = APIUsagePayload(generatedAt: observedAt,
             windows: [window(kind: "five_hour", minutes: 300, provenance: staleProvenance)],
-            estimates: [], connectors: ["codex": .reauthRequired, "claude": .unavailable])
+            estimates: [], connectors: Self.connectors(codex: .reauthRequired, claude: .unavailable))
         let result = try UsageIngestion.map(payload)
         XCTAssertEqual(result.providers.first?.provenance.connector, ConnectorState.reauthRequired)
         XCTAssertEqual(result.connectorStates[Provider.codex], ConnectorState.reauthRequired)
@@ -91,19 +107,26 @@ final class UsageIngestionTests: XCTestCase {
     }
 
     func testAnalyticsAreAbsentWhenContractHasNoAnalytics() throws {
-        let payload = APIUsagePayload(generatedAt: observedAt, windows: [window(kind: "five_hour", minutes: 300)], estimates: [], connectors: ["codex": .healthy, "claude": .unavailable])
+        let payload = APIUsagePayload(generatedAt: observedAt, windows: [window(kind: "five_hour", minutes: 300)], estimates: [], connectors: Self.connectors(codex: .healthy, claude: .unavailable))
         XCTAssertTrue(try UsageIngestion.map(payload).analytics.isEmpty)
     }
 
     func testConnectorOnlyProviderRemainsVisibleButUnavailable() throws {
         let payload = APIUsagePayload(generatedAt: observedAt, windows: [], estimates: [],
-                                      connectors: ["codex": .unavailable, "claude": .reauthRequired])
+                                      connectors: Self.connectors(codex: .unavailable, claude: .reauthRequired))
         let result = try UsageIngestion.map(payload)
         let claude = try XCTUnwrap(result.providers.first { $0.provider == .claude })
         XCTAssertTrue(claude.windows.isEmpty)
         XCTAssertEqual(claude.provenance.quality, .unavailable)
         XCTAssertEqual(claude.provenance.connector, .reauthRequired)
         XCTAssertEqual(result.connectorStates[.claude], .reauthRequired)
+        XCTAssertEqual(result.providers.map(\.provider), Provider.allCases)
+        for provider in [.glm, .deepseek, .googleAIStudio] as [Provider] {
+            let snapshot = try XCTUnwrap(result.providers.first { $0.provider == provider })
+            XCTAssertTrue(snapshot.windows.isEmpty)
+            XCTAssertEqual(snapshot.provenance.quality, .unavailable)
+            XCTAssertEqual(snapshot.provenance.connector, .unavailable)
+        }
     }
 
     func testEachWindowRetainsItsOwnProvenance() throws {
@@ -114,7 +137,7 @@ final class UsageIngestionTests: XCTestCase {
         let payload = APIUsagePayload(generatedAt: observedAt, windows: [
             window(kind: "five_hour", minutes: 300, provenance: fiveHourSource),
             window(kind: "seven_day", minutes: 10_080, provenance: sevenDaySource)
-        ], estimates: [], connectors: ["codex": .healthy, "claude": .unavailable])
+        ], estimates: [], connectors: Self.connectors(codex: .healthy, claude: .unavailable))
         let snapshot = try XCTUnwrap(UsageIngestion.map(payload).providers.first)
         XCTAssertEqual(snapshot.windows[0].provenance?.source, "live-five-hour")
         XCTAssertEqual(snapshot.windows[1].provenance?.source, "cached-seven-day")
@@ -123,7 +146,7 @@ final class UsageIngestionTests: XCTestCase {
 
     func testCoordinatorRetainsConnectorStateAndDoesNotCallUnavailableObserved() async throws {
         let payload = APIUsagePayload(generatedAt: Date.now, windows: [], estimates: [],
-                                      connectors: ["codex": .unavailable, "claude": .reauthRequired])
+                                      connectors: Self.connectors(codex: .unavailable, claude: .reauthRequired))
         let coordinator = await MainActor.run { UsageCoordinator(fetch: { payload }) }
         await coordinator.refresh()
         let result = await MainActor.run { (coordinator.state, coordinator.connectorStates[.claude]) }
@@ -136,7 +159,7 @@ final class UsageIngestionTests: XCTestCase {
             freshness: "fresh", official: true, quality: "observed", connectorState: .healthy)
         let payload = APIUsagePayload(generatedAt: Date.now,
             windows: [window(kind: "five_hour", minutes: 300, provenance: source)],
-            estimates: [], connectors: ["codex": .unavailable, "claude": .unavailable])
+            estimates: [], connectors: Self.connectors(codex: .unavailable, claude: .unavailable))
         let coordinator = await MainActor.run { UsageCoordinator(fetch: { payload }) }
         await coordinator.refresh()
         let result = await MainActor.run { (coordinator.state, coordinator.providers.first?.provenance.connector) }
@@ -159,7 +182,7 @@ final class UsageIngestionTests: XCTestCase {
                 let now = Date.now
                 let source = APIUsageProvenance(source: "test", observedAt: now, freshness: "fresh", official: true, quality: "observed", connectorState: .healthy)
                 let usage = APIUsageWindow(provider: .codex, window: "five_hour", durationMinutes: 300, usedPercent: 20, resetAt: nil, availability: "observed", provenance: source)
-                return APIUsagePayload(generatedAt: now, windows: [usage], estimates: [], connectors: ["codex": .healthy, "claude": .unavailable])
+                return APIUsagePayload(generatedAt: now, windows: [usage], estimates: [], connectors: Self.connectors(codex: .healthy, claude: .unavailable))
             })
         }
         let first = Task { await coordinator.refresh() }
@@ -177,7 +200,7 @@ final class UsageIngestionTests: XCTestCase {
 
     func testCachedSnapshotRetainsItsTimestampAndStartsStale() async throws {
         let payload = APIUsagePayload(generatedAt: observedAt,
-            windows: [window(kind: "five_hour", minutes: 300)], estimates: [], connectors: ["codex": .healthy, "claude": .unavailable])
+            windows: [window(kind: "five_hour", minutes: 300)], estimates: [], connectors: Self.connectors(codex: .healthy, claude: .unavailable))
         let providers = try UsageIngestion.map(payload).providers
         let cachedAt = Date.now.addingTimeInterval(-7200)
         let coordinator = await MainActor.run {
@@ -193,8 +216,7 @@ final class UsageIngestionTests: XCTestCase {
         let defaults = UserDefaults(suiteName: "UsageIngestionTests.invalid-url")!
         defaults.removePersistentDomain(forName: "UsageIngestionTests.invalid-url")
         defaults.set("http://example.invalid", forKey: TailscaleSyncClient.serverURLDefaultsKey)
-        defaults.set("fixture-auth-value", forKey: TailscaleSyncClient.tokenDefaultsKey)
-        let client = TailscaleSyncClient(defaults: defaults, approvedHosts: ["lifeos-server.example.ts.net"])
+        let client = TailscaleSyncClient(defaults: defaults)
         do {
             _ = try await client.fetchUsage()
             XCTFail("invalid non-HTTPS URL must fail closed")
@@ -203,17 +225,16 @@ final class UsageIngestionTests: XCTestCase {
         } catch { XCTFail("unexpected error: \(error)") }
     }
 
-    func testPlaceholderTokenFailsBeforeNetworkRequest() async {
-        let defaults = UserDefaults(suiteName: "UsageIngestionTests.placeholder-token")!
-        defaults.removePersistentDomain(forName: "UsageIngestionTests.placeholder-token")
-        defaults.set("https://lifeos-server.example.ts.net", forKey: TailscaleSyncClient.serverURLDefaultsKey)
-        defaults.set("[REDACTED]", forKey: TailscaleSyncClient.tokenDefaultsKey)
-        let client = TailscaleSyncClient(defaults: defaults, approvedHosts: ["lifeos-server.example.ts.net"])
+    func testUnapprovedHostFailsClosedBeforeNetworkRequest() async {
+        let defaults = UserDefaults(suiteName: "UsageIngestionTests.unapproved-host")!
+        defaults.removePersistentDomain(forName: "UsageIngestionTests.unapproved-host")
+        defaults.set("https://unapproved.example-tailnet.ts.net", forKey: TailscaleSyncClient.serverURLDefaultsKey)
+        let client = TailscaleSyncClient(defaults: defaults)
         do {
             _ = try await client.fetchUsage()
-            XCTFail("placeholder token must fail closed")
+            XCTFail("unapproved host must fail closed")
         } catch let error as TailscaleSyncError {
-            XCTAssertEqual(error, .notConfigured)
+            XCTAssertEqual(error, .invalidServerURL)
         } catch { XCTFail("unexpected error: \(error)") }
     }
 
@@ -229,7 +250,7 @@ final class UsageIngestionTests: XCTestCase {
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let observed = formatter.string(from: Date.now.addingTimeInterval(-60))
         let payload = """
-        {"generatedAt":"\(observed)","windows":[{"provider":"codex","window":"five_hour","durationMinutes":300,"usedPercent":25,"availability":"observed","provenance":{"source":"codex-app-server","observedAt":"\(observed)","freshness":"fresh","official":true,"quality":"observed","connectorState":"healthy"}}],"estimates":[],"connectors":{"codex":"healthy","claude":"unavailable"}}
+        {"generatedAt":"\(observed)","windows":[{"provider":"codex","window":"five_hour","durationMinutes":300,"usedPercent":25,"availability":"observed","provenance":{"source":"codex-app-server","observedAt":"\(observed)","freshness":"fresh","official":true,"quality":"observed","connectorState":"healthy"}}],"estimates":[],"connectors":{"codex":"healthy","claude":"unavailable","glm":"unavailable","deepseek":"unavailable","google_ai_studio":"unavailable"}}
         """
         XCTAssertNoThrow(try APIUsagePayload.decode(Data(payload.utf8)))
         let unknown = payload.replacingOccurrences(of: "\"generatedAt\":", with: "\"unexpected\":true,\"generatedAt\":")
@@ -248,13 +269,13 @@ final class UsageIngestionTests: XCTestCase {
             freshness: "fresh", official: true, quality: "observed", connectorState: .healthy)
         let futurePayload = APIUsagePayload(generatedAt: observedAt,
             windows: [window(kind: "five_hour", minutes: 300, provenance: futureProvenance)], estimates: [],
-            connectors: ["codex": .healthy, "claude": .unavailable])
+            connectors: Self.connectors(codex: .healthy, claude: .unavailable))
         XCTAssertThrowsError(try UsageIngestion.map(futurePayload, now: observedAt))
 
         let unavailableConnector = provenance(connector: .unavailable)
         let contradictory = APIUsagePayload(generatedAt: observedAt,
             windows: [window(kind: "five_hour", minutes: 300, provenance: unavailableConnector)], estimates: [],
-            connectors: ["codex": .unavailable, "claude": .unavailable])
+            connectors: Self.connectors(codex: .unavailable, claude: .unavailable))
         XCTAssertThrowsError(try UsageIngestion.map(contradictory, now: observedAt))
         XCTAssertEqual(Provenance(source: "future", observedAt: future, quality: .observed, connector: .healthy)
             .freshness(now: observedAt), .unavailable)
@@ -266,7 +287,7 @@ final class UsageIngestionTests: XCTestCase {
             freshness: "fresh", official: true, quality: "observed", connectorState: .healthy)
         let observedPayload = APIUsagePayload(generatedAt: observedAt,
             windows: [window(kind: "five_hour", minutes: 300, provenance: observedSource)], estimates: [],
-            connectors: ["codex": .healthy, "claude": .unavailable])
+            connectors: Self.connectors(codex: .healthy, claude: .unavailable))
         XCTAssertNoThrow(try UsageIngestion.map(observedPayload, now: observedAt))
 
         let unavailableSource = APIUsageProvenance(source: "no-observation", observedAt: withinSkew,
@@ -274,7 +295,7 @@ final class UsageIngestionTests: XCTestCase {
         let unavailablePayload = APIUsagePayload(generatedAt: observedAt,
             windows: [window(kind: "five_hour", minutes: 300, used: nil, availability: "unavailable",
                             provenance: unavailableSource)], estimates: [],
-            connectors: ["codex": .unavailable, "claude": .unavailable])
+            connectors: Self.connectors(codex: .unavailable, claude: .unavailable))
         XCTAssertNoThrow(try UsageIngestion.map(unavailablePayload, now: observedAt))
 
         let futureSource = APIUsageProvenance(source: "no-observation", observedAt: observedAt.addingTimeInterval(60),
@@ -282,7 +303,7 @@ final class UsageIngestionTests: XCTestCase {
         let futurePayload = APIUsagePayload(generatedAt: observedAt,
             windows: [window(kind: "five_hour", minutes: 300, used: nil, availability: "unavailable",
                             provenance: futureSource)], estimates: [],
-            connectors: ["codex": .unavailable, "claude": .unavailable])
+            connectors: Self.connectors(codex: .unavailable, claude: .unavailable))
         XCTAssertThrowsError(try UsageIngestion.map(futurePayload, now: observedAt))
     }
 
@@ -293,7 +314,7 @@ final class UsageIngestionTests: XCTestCase {
             let payload = APIUsagePayload(generatedAt: observedAt,
                 windows: [window(kind: "five_hour", minutes: 300, used: nil, availability: "unavailable",
                                 provenance: source)], estimates: [],
-                connectors: ["codex": .unavailable, "claude": .unavailable])
+                connectors: Self.connectors(codex: .unavailable, claude: .unavailable))
             XCTAssertThrowsError(try UsageIngestion.map(payload, now: observedAt))
         }
     }
@@ -309,7 +330,7 @@ final class UsageIngestionTests: XCTestCase {
         ]
         for estimate in invalid {
             let payload = APIUsagePayload(generatedAt: observedAt, windows: [], estimates: [estimate],
-                connectors: ["codex": .unavailable, "claude": .unavailable])
+                connectors: Self.connectors(codex: .unavailable, claude: .unavailable))
             XCTAssertThrowsError(try UsageIngestion.map(payload, now: observedAt))
         }
     }

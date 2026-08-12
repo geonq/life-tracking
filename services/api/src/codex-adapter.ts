@@ -1,9 +1,12 @@
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
+import { win32 } from 'node:path';
 
 export type CodexWindow = { minutes: number; usedPercent: number; resetAt?: string };
 export type CodexLiveResult = { connectorState: 'healthy' | 'unavailable' | 'rate_limited'; windows: CodexWindow[]; error?: string };
 export type Transport = ((request: Record<string, unknown>) => Promise<unknown>) & { close?: () => void };
+
+const supportedCodexMinutes = new Set([300, 10_080]);
 
 const timeoutMs = 8_000;
 const maxProtocolBufferBytes = 1_048_576;
@@ -11,10 +14,51 @@ const maxPendingRequests = 4;
 const sensitive = /token|secret|password|credential|account|email|workspace|thread|prompt|path|home|user|credit/i;
 const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 
+/**
+ * Parse the deliberately small collector wire payload. The collector sends
+ * only this shape; rejecting every sibling is what prevents prompt/account/
+ * path/token data from crossing into the API or history store.
+ */
+export function parseCodexIngestPayload(input: unknown): CodexWindow[] {
+  if (!isObject(input) || Object.keys(input).length !== 1 || !Object.hasOwn(input, 'windows')
+    || !Array.isArray(input.windows) || input.windows.length === 0 || input.windows.length > 2) {
+    throw new Error('invalid_codex_payload');
+  }
+  const seen = new Set<number>();
+  const windows: CodexWindow[] = [];
+  for (const value of input.windows) {
+    if (!isObject(value)) throw new Error('invalid_codex_payload');
+    const keys = Object.keys(value);
+    if (!(keys.length === 2 || keys.length === 3)
+      || !Object.hasOwn(value, 'minutes') || !Object.hasOwn(value, 'usedPercent')
+      || keys.some(key => key !== 'minutes' && key !== 'usedPercent' && key !== 'resetAt')) {
+      throw new Error('invalid_codex_payload');
+    }
+    const minutes = value.minutes;
+    const usedPercent = value.usedPercent;
+    if (typeof minutes !== 'number' || !Number.isInteger(minutes) || !supportedCodexMinutes.has(minutes)
+      || seen.has(minutes) || typeof usedPercent !== 'number' || !Number.isFinite(usedPercent)
+      || usedPercent < 0 || usedPercent > 100) {
+      throw new Error('invalid_codex_payload');
+    }
+    let resetAt: string | undefined;
+    if (Object.hasOwn(value, 'resetAt')) {
+      if (typeof value.resetAt !== 'string' || !Number.isFinite(Date.parse(value.resetAt))) {
+        throw new Error('invalid_codex_payload');
+      }
+      resetAt = new Date(value.resetAt).toISOString();
+    }
+    seen.add(minutes);
+    windows.push({ minutes, usedPercent, ...(resetAt ? { resetAt } : {}) });
+  }
+  return windows.sort((a, b) => a.minutes - b.minutes);
+}
+
 /** Map only the public RateLimitSnapshot fields. Unknown/sensitive fields are intentionally discarded. */
 export function mapCodexResponse(rateLimits: unknown): CodexLiveResult {
   const envelope = isObject(rateLimits) && 'result' in rateLimits ? rateLimits.result : rateLimits;
-  const root = isObject(envelope) && isObject(envelope.rateLimits) ? envelope.rateLimits : envelope;
+  const root = isObject(envelope) && isObject(envelope.rateLimits) ? envelope.rateLimits
+    : isObject(envelope) && isObject(envelope.rate_limits) ? envelope.rate_limits : envelope;
   const candidates = isObject(root) ? [root.primary, root.secondary, ...(Array.isArray(root.windows) ? root.windows : [])] : [];
   const windows: CodexWindow[] = [];
   const seenSupportedDurations = new Set<number>();
@@ -51,9 +95,22 @@ export function codexSpawnSpec(platform = process.platform, commandShell = proce
     : { command: 'codex', args: ['app-server'] };
 }
 
+/** Never let a writable collector working directory shadow `codex.cmd`. */
+export function codexWorkingDirectory(platform = process.platform, commandShell = process.env.ComSpec || 'cmd.exe'): string {
+  if (platform !== 'win32') return '/';
+  // Keep the parameter in the signature for deterministic platform tests, but
+  // never derive cwd from ComSpec: an overridden shell path may be writable.
+  void commandShell;
+  const systemRoot = typeof process.env.SystemRoot === 'string' && /^[A-Za-z]:\\Windows$/i.test(process.env.SystemRoot)
+    ? process.env.SystemRoot : 'C:\\Windows';
+  return win32.join(systemRoot, 'System32');
+}
+
 function spawnCodex(): ChildProcess {
   const spec = codexSpawnSpec();
-  return spawn(spec.command, spec.args, { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+  return spawn(spec.command, spec.args, {
+    cwd: codexWorkingDirectory(), stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true,
+  });
 }
 
 export function createCodexTransport(child: ChildProcess = spawnCodex()): Transport {
@@ -68,9 +125,13 @@ export function createCodexTransport(child: ChildProcess = spawnCodex()): Transp
   return request;
 }
 
+export async function readCodexAppServer(transportFactory: () => Transport = () => createCodexTransport()): Promise<CodexLiveResult> {
+  let transport: Transport | undefined; try { transport = transportFactory(); await transport({ method: 'initialize', params: { clientInfo: { name: 'iphone-life-os', version: '0.1.0' } } }); const limits = await transport({ method: 'account/rateLimits/read', params: {} }); return mapCodexResponse(limits); } catch { return { connectorState: 'unavailable', windows: [], error: 'Codex connector unavailable' }; } finally { transport?.close?.(); }
+}
+
 export async function readCodexLive(transportFactory: () => Transport = () => createCodexTransport()): Promise<CodexLiveResult> {
   if (process.env.CODEX_LIVE_ENABLED !== 'true') return { connectorState: 'unavailable', windows: [], error: 'Live Codex connector disabled' };
-  let transport: Transport | undefined; try { transport = transportFactory(); await transport({ method: 'initialize', params: { clientInfo: { name: 'iphone-life-os', version: '0.1.0' } } }); const limits = await transport({ method: 'account/rateLimits/read', params: {} }); return mapCodexResponse(limits); } catch { return { connectorState: 'unavailable', windows: [], error: 'Codex connector unavailable' }; } finally { transport?.close?.(); }
+  return readCodexAppServer(transportFactory);
 }
 
 export const containsSensitiveKeys = (value: unknown): boolean => JSON.stringify(value, (key, v) => sensitive.test(key) ? '[REDACTED]' : v).includes('[REDACTED]');

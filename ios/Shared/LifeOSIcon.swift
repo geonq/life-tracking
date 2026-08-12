@@ -3,13 +3,24 @@ import Iconoir
 
 public enum LifeOSIconName: Sendable {
     case overview
+    case home
     case usage
     case clipper
     case health
     case finance
+    case bankConnections
+    case investments
+    case business
     case calendar
     case tax
+    case documents
+    case tasks
+    case grocery
+    case shopping
+    case reports
+    case fitness
     case settings
+    case more
     case chevronLeft
     case chevronRight
     case views
@@ -20,6 +31,7 @@ public enum LifeOSIconName: Sendable {
     case savings
     case budget
     case add
+    case refresh
     case assistant
     case security
     case verified
@@ -35,13 +47,24 @@ public enum LifeOSIconName: Sendable {
     fileprivate var icon: Iconoir {
         switch self {
         case .overview: .viewGrid
+        case .home: .home
         case .usage: .terminal
         case .clipper: .statsUpSquare
         case .health: .heart
         case .finance: .bank
+        case .bankConnections: .link
+        case .investments: .statsUpSquare
+        case .business: .suitcase
         case .calendar: .calendar
         case .tax: .pageSearch
+        case .documents: .page
+        case .tasks: .taskList
+        case .grocery: .cart
+        case .shopping: .shoppingBag
+        case .reports: .reports
+        case .fitness: .activity
         case .settings: .settings
+        case .more: .list
         case .chevronLeft: .navArrowLeft
         case .chevronRight: .navArrowRight
         case .views: .eye
@@ -52,6 +75,7 @@ public enum LifeOSIconName: Sendable {
         case .savings: .piggyBank
         case .budget: .wallet
         case .add: .plus
+        case .refresh: .refresh
         case .assistant: .chatBubble
         case .security: .lock
         case .verified: .badgeCheck
