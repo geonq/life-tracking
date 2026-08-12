@@ -155,6 +155,12 @@ public struct FitnessActivitySeriesPoint: Identifiable, Equatable, Sendable {
 }
 
 public struct FitnessPerformanceTarget: Equatable, Sendable {
+    public enum TargetStatus: String, Equatable, Sendable {
+        case below
+        case within
+        case above
+    }
+
     public enum State: Equatable, Sendable {
         case unavailable(reason: String)
         case calibrating(reason: String)
@@ -178,6 +184,29 @@ public struct FitnessPerformanceTarget: Equatable, Sendable {
 
     public let state: State
     public let series: [FitnessActivitySeriesPoint]
+
+    /// Classifies only the source current value against the source target
+    /// band. The source-provided deviation is a separate comparison and must
+    /// never decide whether the current load is below, within, or above band.
+    public var targetStatus: TargetStatus? {
+        switch state {
+        case .unavailable, .calibrating:
+            return nil
+        case .observed(let current, _, let lower, let upper, _, _),
+             .demo(let current, _, let lower, let upper, _, _):
+            return Self.targetStatus(current: current, lowerBound: lower, upperBound: upper)
+        }
+    }
+
+    public static func targetStatus(
+        current: Double,
+        lowerBound: Double,
+        upperBound: Double
+    ) -> TargetStatus {
+        if current < lowerBound { return .below }
+        if current > upperBound { return .above }
+        return .within
+    }
 
     public init(state: State, series: [FitnessActivitySeriesPoint] = []) {
         self.state = Self.validated(state)

@@ -96,6 +96,60 @@ final class FitnessActivityPerformanceTests: XCTestCase {
         XCTAssertEqual(targetProvenance, provenance)
     }
 
+    func testPerformanceTargetStatusUsesCurrentAgainstInclusiveTargetBand() {
+        let expected: [(Double, FitnessPerformanceTarget.TargetStatus)] = [
+            (19, .below),
+            (20, .within),
+            (24, .within),
+            (40, .within),
+            (41, .above)
+        ]
+
+        for (current, status) in expected {
+            XCTAssertEqual(
+                FitnessPerformanceTarget.targetStatus(current: current, lowerBound: 20, upperBound: 40),
+                status,
+                "Expected \(current) against 20...40 to be \(status.rawValue)"
+            )
+        }
+    }
+
+    func testPerformanceTargetStateExposesBandStatusAndLeavesUnavailableStatesUnclassified() {
+        let observed = FitnessPerformanceTarget(state: .observed(
+            current: 19,
+            deviationPercent: 12,
+            lowerBound: 20,
+            upperBound: 40,
+            window: "Last 30 days",
+            provenance: "Reviewed source"
+        ))
+        XCTAssertEqual(observed.targetStatus, .below)
+
+        let demo = FitnessPerformanceTarget(state: .demo(
+            current: 24,
+            deviationPercent: -99,
+            lowerBound: 20,
+            upperBound: 40,
+            window: "Demo window",
+            provenance: "DEMO · NOT LIVE"
+        ))
+        XCTAssertEqual(demo.targetStatus, .within, "Deviation sign must not override the displayed band")
+
+        XCTAssertEqual(
+            FitnessPerformanceTarget.targetStatus(current: 20, lowerBound: 20, upperBound: 20),
+            .within,
+            "A zero-width target includes its exact boundary"
+        )
+        XCTAssertEqual(FitnessPerformanceTarget.targetStatus(current: 19, lowerBound: 20, upperBound: 20), .below)
+        XCTAssertEqual(FitnessPerformanceTarget.targetStatus(current: 21, lowerBound: 20, upperBound: 20), .above)
+
+        let calibrating = FitnessPerformanceTarget(state: .calibrating(reason: "Waiting for source calibration"))
+        XCTAssertNil(calibrating.targetStatus)
+
+        let unavailable = FitnessPerformanceTarget(state: .unavailable(reason: "No source target"))
+        XCTAssertNil(unavailable.targetStatus)
+    }
+
     func testObservedMetricPreservesSourceWindowAndProvenanceWithoutRecalculation() {
         XCTAssertEqual(FitnessActivityMetric.Unit.sourceDefined.suffix, "source-defined")
         XCTAssertNotEqual(FitnessActivityMetric.Unit.sourceDefined.suffix, "/100")

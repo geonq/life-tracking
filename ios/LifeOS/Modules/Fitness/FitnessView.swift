@@ -4400,6 +4400,9 @@ private struct FitnessPerformanceTargetCard: View {
                     FitnessActivityCardHeader(title: "Performance / load", icon: .budget, accent: .green)
                     HStack(alignment: .bottom, spacing: 12) {
                         VStack(alignment: .leading, spacing: 3) {
+                            Text("Source comparison")
+                                .font(LifeOSFont.caption(10))
+                                .foregroundStyle(LifeOSTokens.tertiaryText)
                             Text(FitnessPerformanceTargetFormatter.value(target))
                                 .font(LifeOSFont.spaceGrotesk(31, weight: .bold))
                                 .monospacedDigit()
@@ -4749,6 +4752,9 @@ private struct FitnessActivityDetailView: View {
                 case .performanceTarget:
                     FitnessCard {
                         VStack(alignment: .leading, spacing: 12) {
+                            Text("Source comparison")
+                                .font(LifeOSFont.caption(10))
+                                .foregroundStyle(LifeOSTokens.tertiaryText)
                             Text(FitnessPerformanceTargetFormatter.value(snapshot.performanceTarget))
                                 .font(LifeOSFont.spaceGrotesk(40, weight: .bold))
                             FitnessActivityLineChart(
@@ -4925,8 +4931,13 @@ private enum FitnessPerformanceTargetFormatter {
         switch target.state {
         case .unavailable: "Unavailable"
         case .calibrating: "Calibrating"
-        case .observed(_, let deviation, _, _, _, _), .demo(_, let deviation, _, _, _, _):
-            if deviation < 0 { "Under target" } else if deviation > 0 { "Over target" } else { "Within target" }
+        case .observed, .demo:
+            switch target.targetStatus {
+            case .below: "Below target"
+            case .within: "Within target"
+            case .above: "Above target"
+            case nil: "Unavailable"
+            }
         }
     }
 
@@ -4949,7 +4960,13 @@ private enum FitnessPerformanceTargetFormatter {
         switch target.state {
         case .unavailable: LifeOSTokens.tertiaryText
         case .calibrating: LifeOSTokens.warning
-        case .observed(_, let deviation, _, _, _, _), .demo(_, let deviation, _, _, _, _): deviation == 0 ? LifeOSTokens.success : deviation < 0 ? LifeOSTokens.accent : LifeOSTokens.warning
+        case .observed, .demo:
+            switch target.targetStatus {
+            case .below: LifeOSTokens.accent
+            case .within: LifeOSTokens.success
+            case .above: LifeOSTokens.warning
+            case nil: LifeOSTokens.tertiaryText
+            }
         }
     }
 }
