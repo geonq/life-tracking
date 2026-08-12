@@ -796,27 +796,72 @@ public struct CalendarView: View {
 /// Pure date translation used by the editor when its day property changes.
 /// Translating the existing interval, rather than rebuilding the end from its
 /// wall-clock components, preserves both duration and overnight placement.
+struct CalendarEditorDateBounds: Equatable {
+    let start: Date
+    let end: Date
+}
+
+enum CalendarEditorDateAdjustmentError: Error, Equatable {
+    case invalidInterval
+    case unavailableLocalTime
+}
+
 struct CalendarEditorDateAdjustment {
     static func translatedBounds(
         start: Date,
         end: Date,
         to date: Date,
         calendar: Calendar
-    ) -> (start: Date, end: Date) {
-        // CalendarItem normally guarantees this, but keep this helper safe on
-        // its own as well: an editor update must never hand the model a
-        // reversed (or zero-length) interval after a date change.
-        let rawDuration = end.timeIntervalSince(start)
-        let duration = rawDuration.isFinite && rawDuration > 0 ? rawDuration : 1
-        let components = calendar.dateComponents([.hour, .minute, .second], from: start)
+    ) -> Result<CalendarEditorDateBounds, CalendarEditorDateAdjustmentError> {
+        let duration = end.timeIntervalSince(start)
+        guard duration.isFinite, duration > 0 else { return .failure(.invalidInterval) }
+
+        let components = calendar.dateComponents([.hour, .minute, .second, .nanosecond], from: start)
         let day = calendar.startOfDay(for: date)
-        let translatedStart = calendar.date(
-            bySettingHour: components.hour ?? 0,
-            minute: components.minute ?? 0,
-            second: components.second ?? 0,
-            of: day
-        ) ?? day
-        return (translatedStart, translatedStart.addingTimeInterval(duration))
+        let dayComponents = calendar.dateComponents([.year, .month, .day], from: day)
+        var target = DateComponents()
+        target.calendar = calendar
+        target.timeZone = calendar.timeZone
+        target.year = dayComponents.year
+        target.month = dayComponents.month
+        target.day = dayComponents.day
+        target.hour = components.hour
+        target.minute = components.minute
+        target.second = components.second
+        target.nanosecond = components.nanosecond
+
+        guard let firstOccurrence = calendar.date(from: target) else {
+            return .failure(.unavailableLocalTime)
+        }
+        func wallSignature(_ value: Date) -> [Int] {
+            let parts = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second, .nanosecond], from: value)
+            return [parts.year, parts.month, parts.day, parts.hour, parts.minute, parts.second, parts.nanosecond]
+                .map { $0 ?? 0 }
+        }
+        let requestedWall = [target.year, target.month, target.day, target.hour, target.minute, target.second, target.nanosecond]
+            .map { $0 ?? 0 }
+        guard wallSignature(firstOccurrence) == requestedWall else {
+            // Calendar normalizes a spring-forward gap such as 02:30 to 03:30.
+            // Changing the event's visible time silently is never acceptable.
+            return .failure(.unavailableLocalTime)
+        }
+
+        var translatedStart = firstOccurrence
+        if let sourceEarlier = calendar.date(byAdding: .hour, value: -1, to: start),
+           wallSignature(sourceEarlier) == wallSignature(start),
+           let targetLater = calendar.date(byAdding: .hour, value: 1, to: firstOccurrence),
+           wallSignature(targetLater) == wallSignature(firstOccurrence) {
+            // The source is the later occurrence of a repeated fall-back hour;
+            // preserve that fold choice when the target has the same ambiguity.
+            translatedStart = targetLater
+        }
+
+        let translatedEnd = translatedStart.addingTimeInterval(duration)
+        guard translatedEnd > translatedStart,
+              translatedEnd.timeIntervalSince(translatedStart) == duration else {
+            return .failure(.invalidInterval)
+        }
+        return .success(CalendarEditorDateBounds(start: translatedStart, end: translatedEnd))
     }
 }
 
@@ -911,7 +956,7 @@ struct CalendarEditor: View {
 #endif
         }
         .accessibilityIdentifier("calendar-event-editor")
-        .alert("Unable to save event", isPresented: Binding(get: { validationMessage != nil }, set: { if !$0 { validationMessage = nil } })) {
+        .alert("Unable to update event", isPresented: Binding(get: { validationMessage != nil }, set: { if !$0 { validationMessage = nil } })) {
             if retryAvailable {
                 Button("Retry") { retryLastMutation() }
             }
@@ -934,14 +979,24 @@ struct CalendarEditor: View {
             if allDay {
                 setAllDayBounds(for: date)
             } else {
-                let translated = CalendarEditorDateAdjustment.translatedBounds(
+                let previousDate = calendar.startOfDay(for: start)
+                let result = CalendarEditorDateAdjustment.translatedBounds(
                     start: start,
                     end: end,
                     to: date,
                     calendar: calendar
                 )
-                start = translated.start
-                end = translated.end
+                switch result {
+                case .success(let translated):
+                    start = translated.start
+                    end = translated.end
+                case .failure:
+                    retryAvailable = false
+                    validationMessage = "That local time does not exist on the selected date. The previous date was kept."
+                    if !calendar.isDate(eventDate, inSameDayAs: previousDate) {
+                        eventDate = previousDate
+                    }
+                }
             }
         }
         .onChange(of: allDay) { _, enabled in

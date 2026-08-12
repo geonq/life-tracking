@@ -88,12 +88,12 @@ final class CalendarDomainTests: XCTestCase {
         let end = try XCTUnwrap(calendar.date(byAdding: .minute, value: 150, to: start))
         let target = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 8, day: 20, hour: 0, minute: 0)))
 
-        let translated = CalendarEditorDateAdjustment.translatedBounds(
+        let translated = try CalendarEditorDateAdjustment.translatedBounds(
             start: start,
             end: end,
             to: target,
             calendar: calendar
-        )
+        ).get()
 
         XCTAssertEqual(translated.end.timeIntervalSince(translated.start), end.timeIntervalSince(start))
         XCTAssertEqual(calendar.component(.hour, from: translated.start), 23)
@@ -105,18 +105,63 @@ final class CalendarDomainTests: XCTestCase {
         XCTAssertGreaterThan(translated.end, translated.start)
     }
 
-    func testEditorDateAdjustmentDoesNotReverseMalformedBounds() {
+    func testEditorDateAdjustmentRejectsMalformedBounds() {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
         let start = Date(timeIntervalSince1970: 1_700_000_000)
-        let translated = CalendarEditorDateAdjustment.translatedBounds(
+        let result = CalendarEditorDateAdjustment.translatedBounds(
             start: start,
             end: start.addingTimeInterval(-60),
             to: start,
             calendar: calendar
         )
 
-        XCTAssertGreaterThan(translated.end, translated.start)
+        guard case .failure(let error) = result else {
+            return XCTFail("Malformed bounds must be rejected")
+        }
+        XCTAssertEqual(error, .invalidInterval)
+    }
+
+    func testEditorDateAdjustmentRejectsSpringForwardGapWithoutNormalizing() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "America/New_York"))
+        let start = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 3, day: 7, hour: 2, minute: 30)))
+        let target = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 3, day: 8)))
+
+        let result = CalendarEditorDateAdjustment.translatedBounds(
+            start: start,
+            end: start.addingTimeInterval(3_600),
+            to: target,
+            calendar: calendar
+        )
+
+        guard case .failure(let error) = result else {
+            return XCTFail("A nonexistent local time must not be normalized")
+        }
+        XCTAssertEqual(error, .unavailableLocalTime)
+    }
+
+    func testEditorDateAdjustmentPreservesLaterFallBackOccurrenceAndDuration() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "America/New_York"))
+        let sourceFirst = try XCTUnwrap(calendar.date(from: DateComponents(year: 2025, month: 11, day: 2, hour: 1, minute: 30)))
+        let sourceLater = sourceFirst.addingTimeInterval(3_600)
+        XCTAssertEqual(calendar.component(.hour, from: sourceLater), 1)
+        let target = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 11, day: 1)))
+        let duration: TimeInterval = 5_400
+
+        let translated = try CalendarEditorDateAdjustment.translatedBounds(
+            start: sourceLater,
+            end: sourceLater.addingTimeInterval(duration),
+            to: target,
+            calendar: calendar
+        ).get()
+
+        XCTAssertEqual(calendar.component(.hour, from: translated.start), 1)
+        XCTAssertEqual(calendar.component(.minute, from: translated.start), 30)
+        let prior = try XCTUnwrap(calendar.date(byAdding: .hour, value: -1, to: translated.start))
+        XCTAssertEqual(calendar.component(.hour, from: prior), 1)
+        XCTAssertEqual(translated.end.timeIntervalSince(translated.start), duration)
     }
 
     func testEditorMutationResolutionDismissesOnlySuccessfulCompletion() {
