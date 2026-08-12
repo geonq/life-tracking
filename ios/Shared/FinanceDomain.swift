@@ -1,7 +1,21 @@
 import Foundation
 
 private let financeMaximumClockSkew: TimeInterval = 5
+private let financeStaleAfter: TimeInterval = 15 * 60
 private let financeDerivedTransactionSnapshotSource = "derived-transaction-snapshot"
+
+private func financeObservedProvenanceIsAgeConsistent(
+    _ provenance: FinancePayloadProvenance,
+    now: Date
+) -> Bool {
+    let age = now.timeIntervalSince(provenance.observedAt)
+    guard age >= -financeMaximumClockSkew else { return false }
+    let expectedFreshness: FinancePayloadFreshness = age <= financeStaleAfter ? .fresh : .stale
+    let expectedConnector: ConnectorState = expectedFreshness == .fresh ? .healthy : .refreshDue
+    return provenance.quality == .observed
+        && provenance.freshness == expectedFreshness
+        && provenance.connectorState == expectedConnector
+}
 
 private struct FinanceAnyCodingKey: CodingKey {
     let stringValue: String
@@ -279,8 +293,7 @@ public struct FinanceTransactionObservation: Codable, Equatable, Identifiable, S
               validAmount,
               timestamp <= now.addingTimeInterval(financeMaximumClockSkew),
               source == provenance.source,
-              provenance.quality == .observed,
-              provenance.connectorState == .healthy || provenance.connectorState == .refreshDue else {
+              financeObservedProvenanceIsAgeConsistent(provenance, now: now) else {
             throw DecodingError.dataCorruptedError(
                 forKey: .id,
                 in: container,
@@ -458,6 +471,7 @@ public struct FinanceTransactionSnapshot: Codable, Equatable, Sendable {
         provenance = try container.decode(FinancePayloadProvenance.self, forKey: .provenance)
 
         let healthy = provenance.connectorState == .healthy || provenance.connectorState == .refreshDue
+        let now = decoder.userInfo[.lifeOSNow] as? Date ?? .now
         let valid: Bool
         switch availability {
         case .observed:
@@ -466,6 +480,22 @@ public struct FinanceTransactionSnapshot: Codable, Equatable, Sendable {
             let sourceReconciles = rowSources.isEmpty
                 || (rowSources.count == 1 && rowSources.contains(provenance.source))
                 || provenance.source == financeDerivedTransactionSnapshotSource
+            let hasStaleRow = rows.contains {
+                $0.provenance.freshness == .stale || $0.provenance.connectorState == .refreshDue
+            }
+            let rowsMatchEnvelopeFreshness = !rows.isEmpty && (
+                provenance.freshness == (hasStaleRow ? .stale : .fresh)
+                && provenance.connectorState == (hasStaleRow ? .refreshDue : .healthy)
+            )
+            // A non-empty derived envelope's observedAt is the aggregation
+            // time. Its freshness is the worst constituent row, not the age
+            // of that aggregation timestamp. Empty envelopes have no rows to
+            // derive from and therefore use the ordinary age contract.
+            let envelopeTruthIsValid = rows.isEmpty
+                ? financeObservedProvenanceIsAgeConsistent(provenance, now: now)
+                : provenance.quality == .observed
+                    && provenance.observedAt <= now.addingTimeInterval(financeMaximumClockSkew)
+                    && rowsMatchEnvelopeFreshness
             let latestRowObservation = rows.map(\.provenance.observedAt).max()
             let observationTimeCoversRows = latestRowObservation.map {
                 provenance.observedAt >= $0
@@ -474,6 +504,7 @@ public struct FinanceTransactionSnapshot: Codable, Equatable, Sendable {
                 && provenance.quality == .observed
                 && provenance.freshness != .unknown
                 && healthy
+                && envelopeTruthIsValid
                 && sourceReconciles
                 && observationTimeCoversRows
         case .unavailable:
@@ -600,7 +631,7 @@ public struct FinanceAmountMetric: Decodable, Equatable, Sendable {
         switch availability {
         case .observed:
             let age = (decoder.userInfo[.lifeOSNow] as? Date ?? .now).timeIntervalSince(provenance.observedAt)
-            let expectedFreshness: FinancePayloadFreshness = age <= 15 * 60 ? .fresh : .stale
+            let expectedFreshness: FinancePayloadFreshness = age <= financeStaleAfter ? .fresh : .stale
             let expectedConnector: ConnectorState = expectedFreshness == .fresh ? .healthy : .refreshDue
             valid = amountCents.map { $0 >= 0 && $0 <= 9_007_199_254_740_991 } == true
                 && age >= -financeMaximumClockSkew && provenance.quality == .observed

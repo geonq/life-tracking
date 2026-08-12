@@ -214,6 +214,110 @@ final class FinanceDomainTests: XCTestCase {
             payload(observedAt: now.addingTimeInterval(-3600), freshness: "fresh", connector: "healthy"), now: now))
     }
 
+    func testTransactionObservationRejectsUnknownAndAgeInconsistentFreshness() throws {
+        let now = Date(timeIntervalSince1970: 1_754_660_000)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let base = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: JSONEncoder.lifeOS.encode(fixtureTransactions()[0])) as? [String: Any]
+        )
+
+        func assertRejects(observedAt: Date, freshness: String, connector: String) throws {
+            var payload = base
+            payload["provenance"] = [
+                "source": "revolut_personal",
+                "observedAt": formatter.string(from: observedAt),
+                "freshness": freshness,
+                "quality": "observed",
+                "connectorState": connector
+            ]
+            let decoder = JSONDecoder.lifeOS
+            decoder.userInfo[.lifeOSNow] = now
+            XCTAssertThrowsError(try decoder.decode(
+                FinanceTransactionObservation.self,
+                from: JSONSerialization.data(withJSONObject: payload)
+            ))
+        }
+
+        try assertRejects(observedAt: now.addingTimeInterval(-60), freshness: "unknown", connector: "healthy")
+        try assertRejects(observedAt: now.addingTimeInterval(-60), freshness: "stale", connector: "refresh_due")
+        try assertRejects(observedAt: now.addingTimeInterval(-3600), freshness: "fresh", connector: "healthy")
+
+        var staleRow = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: JSONEncoder.lifeOS.encode(fixtureTransactions()[0])) as? [String: Any]
+        )
+        staleRow["provenance"] = [
+            "source": "revolut_personal",
+            "observedAt": formatter.string(from: now.addingTimeInterval(-3_600)),
+            "freshness": "stale",
+            "quality": "observed",
+            "connectorState": "refresh_due"
+        ]
+        func snapshotPayload(observedAt: Date, freshness: String, connector: String) -> [String: Any] {
+            [
+                "availability": "observed",
+                "transactions": [staleRow],
+                "provenance": [
+                    "source": "derived-transaction-snapshot",
+                    "observedAt": formatter.string(from: observedAt),
+                    "freshness": freshness,
+                    "quality": "observed",
+                    "connectorState": connector
+                ]
+            ]
+        }
+        let decoder = JSONDecoder.lifeOS
+        decoder.userInfo[.lifeOSNow] = now
+        XCTAssertThrowsError(try decoder.decode(
+            FinanceTransactionSnapshot.self,
+            from: JSONSerialization.data(withJSONObject: snapshotPayload(
+                observedAt: now.addingTimeInterval(-60), freshness: "fresh", connector: "healthy"
+            ))
+        ), "A fresh envelope must not hide a stale contributing row")
+        XCTAssertNoThrow(try decoder.decode(
+            FinanceTransactionSnapshot.self,
+            from: JSONSerialization.data(withJSONObject: snapshotPayload(
+                observedAt: now.addingTimeInterval(-3_600), freshness: "stale", connector: "refresh_due"
+            ))
+        ))
+    }
+
+    func testTransactionSnapshotRejectsUnknownAndAgeInconsistentFreshness() throws {
+        let now = Date(timeIntervalSince1970: 1_754_660_000)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let valid = FinancePayloadProvenance(
+            source: "revolut_personal", observedAt: now.addingTimeInterval(-60),
+            freshness: .fresh, quality: .observed, connectorState: .healthy
+        )
+        let base = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: JSONEncoder.lifeOS.encode(
+                FinanceTransactionSnapshot(availability: .observed, transactions: [], provenance: valid)
+            )) as? [String: Any]
+        )
+
+        func assertRejects(observedAt: Date, freshness: String, connector: String) throws {
+            var payload = base
+            payload["provenance"] = [
+                "source": "revolut_personal",
+                "observedAt": formatter.string(from: observedAt),
+                "freshness": freshness,
+                "quality": "observed",
+                "connectorState": connector
+            ]
+            let decoder = JSONDecoder.lifeOS
+            decoder.userInfo[.lifeOSNow] = now
+            XCTAssertThrowsError(try decoder.decode(
+                FinanceTransactionSnapshot.self,
+                from: JSONSerialization.data(withJSONObject: payload)
+            ))
+        }
+
+        try assertRejects(observedAt: now.addingTimeInterval(-60), freshness: "unknown", connector: "healthy")
+        try assertRejects(observedAt: now.addingTimeInterval(-60), freshness: "stale", connector: "refresh_due")
+        try assertRejects(observedAt: now.addingTimeInterval(-3600), freshness: "fresh", connector: "healthy")
+    }
+
     func testTransactionTotalsReconcileIncomeSpendAndCashFlow() {
         let transactions = fixtureTransactions()
         let totals = FinanceTransactionTotals(transactions: transactions)
@@ -301,6 +405,106 @@ final class FinanceDomainTests: XCTestCase {
         XCTAssertEqual(decoded.transactions?.first?.account, "Revolut Personal")
         XCTAssertEqual(decoded.transactions?.first?.source, "revolut_personal")
         XCTAssertEqual(decoded.transactions?.first?.provenance.quality, .observed)
+    }
+
+    func testObservedTransactionSnapshotRejectsFreshEnvelopeForStaleRow() throws {
+        let now = Date(timeIntervalSince1970: 1_754_660_000)
+        let staleAt = now.addingTimeInterval(-60 * 60)
+        let row = FinanceTransactionObservation(
+            id: "stale-1", merchant: "REWE", title: "Groceries", signedAmountCents: -2_450,
+            timestamp: staleAt, account: "Revolut Personal", source: "revolut_personal",
+            category: "Food", provenance: FinancePayloadProvenance(
+                source: "revolut_personal", observedAt: staleAt,
+                freshness: .stale, quality: .observed, connectorState: .refreshDue
+            )
+        )
+        let snapshot = FinanceTransactionSnapshot(
+            availability: .observed,
+            transactions: [row],
+            provenance: FinancePayloadProvenance(
+                source: "derived-transaction-snapshot", observedAt: now.addingTimeInterval(-60),
+                freshness: .fresh, quality: .observed, connectorState: .healthy
+            )
+        )
+        let decoder = JSONDecoder.lifeOS
+        decoder.userInfo[.lifeOSNow] = now
+
+        XCTAssertThrowsError(try decoder.decode(
+            FinanceTransactionSnapshot.self,
+            from: JSONEncoder.lifeOS.encode(snapshot)
+        ))
+    }
+
+    func testObservedTransactionSnapshotAcceptsAllStaleRowsWithStaleEnvelope() throws {
+        let now = Date(timeIntervalSince1970: 1_754_660_000)
+        let staleAt = now.addingTimeInterval(-60 * 60)
+        let staleProvenance = FinancePayloadProvenance(
+            source: "revolut_personal", observedAt: staleAt,
+            freshness: .stale, quality: .observed, connectorState: .refreshDue
+        )
+        let row = FinanceTransactionObservation(
+            id: "stale-1", merchant: "REWE", title: "Groceries", signedAmountCents: -2_450,
+            timestamp: staleAt, account: "Revolut Personal", source: "revolut_personal",
+            category: "Food", provenance: staleProvenance
+        )
+        let snapshot = FinanceTransactionSnapshot(
+            availability: .observed,
+            transactions: [row],
+            provenance: FinancePayloadProvenance(
+                source: "derived-transaction-snapshot", observedAt: staleAt,
+                freshness: .stale, quality: .observed, connectorState: .refreshDue
+            )
+        )
+        let decoder = JSONDecoder.lifeOS
+        decoder.userInfo[.lifeOSNow] = now
+
+        let decoded = try decoder.decode(
+            FinanceTransactionSnapshot.self,
+            from: JSONEncoder.lifeOS.encode(snapshot)
+        )
+        XCTAssertEqual(decoded.provenance.freshness, .stale)
+        XCTAssertEqual(decoded.provenance.connectorState, .refreshDue)
+    }
+
+    func testObservedTransactionSnapshotAcceptsMixedRowsAsStaleAtCurrentAggregationTime() throws {
+        let now = Date(timeIntervalSince1970: 1_754_660_000)
+        let freshAt = now.addingTimeInterval(-60)
+        let staleAt = now.addingTimeInterval(-3_600)
+        let fresh = FinanceTransactionObservation(
+            id: "fresh-row", merchant: "Salary", title: "Salary", signedAmountCents: 10_000,
+            timestamp: freshAt, account: "Revolut Personal", source: "revolut_personal",
+            category: "Income", provenance: FinancePayloadProvenance(
+                source: "revolut_personal", observedAt: freshAt,
+                freshness: .fresh, quality: .observed, connectorState: .healthy
+            )
+        )
+        let stale = FinanceTransactionObservation(
+            id: "stale-row", merchant: "REWE", title: "Groceries", signedAmountCents: -2_450,
+            timestamp: staleAt, account: "Revolut Personal", source: "revolut_personal",
+            category: "Food", provenance: FinancePayloadProvenance(
+                source: "revolut_personal", observedAt: staleAt,
+                freshness: .stale, quality: .observed, connectorState: .refreshDue
+            )
+        )
+        let snapshot = FinanceTransactionSnapshot(
+            availability: .observed,
+            transactions: [fresh, stale],
+            provenance: FinancePayloadProvenance(
+                source: "derived-transaction-snapshot", observedAt: now.addingTimeInterval(-30),
+                freshness: .stale, quality: .observed, connectorState: .refreshDue
+            )
+        )
+        let decoder = JSONDecoder.lifeOS
+        decoder.userInfo[.lifeOSNow] = now
+
+        let decoded = try decoder.decode(
+            FinanceTransactionSnapshot.self,
+            from: JSONEncoder.lifeOS.encode(snapshot)
+        )
+
+        XCTAssertEqual(decoded.provenance.freshness, .stale)
+        XCTAssertEqual(decoded.provenance.connectorState, .refreshDue)
+        XCTAssertEqual(decoded.transactions?.count, 2)
     }
 
     func testTransactionObservationRejectsSourceProvenanceMismatch() throws {
