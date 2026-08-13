@@ -1,9 +1,11 @@
 # LifeOS execution plan to a defensible 95% checkpoint
 
-Updated: 2026-08-13. Branch: `lifeos-foundation-checkpoint-20260812` at
-`32fbdfc`. Draft PR: https://github.com/geonq/life-tracking/pull/1. This is the
-reviewed execution plan; its companion acceptance registry is intentionally
-**UNFROZEN** until T0 completes, so no completion percentage is currently valid.
+Updated: 2026-08-13. Branch: `lifeos-foundation-checkpoint-20260812`; current
+reviewed implementation checkpoint `f3338c4`. Draft PR:
+https://github.com/geonq/life-tracking/pull/1. This is the reviewed execution
+plan. Its companion registry is frozen at the recorded T0 hash; the 2026-08-13
+Helio device-management scope clarification requires one controlled,
+deduplicated refreeze before those new leaves can be scored.
 
 ## 1. Current truth
 
@@ -80,6 +82,42 @@ severity, status, and blocking input.
   A screenshot fixture never proves a live data path.
 - Keep `services/windows-service-host/deploy/` untracked and untouched until it
   is explicitly reviewed and approved.
+
+### 2026-08-13 Fitness/device scope clarification
+
+- Every functional behavior visible in Bevel references `0382–0433` remains a
+  product requirement; only `0380` and `0381` are style-only. The existing
+  `BF-0427`–`BF-0433` leaves already bind hydration, caffeine, alcohol, their
+  settings/history flows, and historical activity-status recomputation. They
+  are not complete merely because summary cards or generic Journal quantities
+  exist.
+- Water, caffeine, and alcohol are timestamped, editable, durable source facts
+  with explicit none-versus-missing semantics. They may participate in
+  descriptive correlations and in a reviewed, versioned LifeOS model only when
+  that model names its inputs, window, uncertainty, and provenance. LifeOS must
+  never present correlation as causation or silently copy Bevel/Amazfit scores.
+- “Biological age” is an experimental LifeOS estimate, not a diagnosis. It stays
+  gated/unavailable until an adult profile, adequate observed history, a
+  reviewed model/version, uncertainty, freshness, and an explanation of every
+  contributing input are present. Manual lifestyle facts cannot masquerade as
+  Helio observations.
+- Helio Strap is the sensor authority. The currently documented production path
+  is Helio → Zepp → Apple Health → HealthKit for exported samples; Amazfit also
+  documents real-time Bluetooth heart-rate broadcast. Direct battery level,
+  firmware, device controls, or raw sensor access must not be claimed from a
+  Zepp OS watch API or guessed private BLE service. Settings reserves truthful
+  connected/last-sync/battery/firmware/capability states, but each field remains
+  unavailable until its public interface or a reviewed physical-device probe
+  proves it.
+- LifeOS aims to replace everyday Bevel/Whoop/Zepp viewing and logging. Zepp-only
+  pairing, firmware, and device-management actions remain an explicit external
+  dependency unless Amazfit exposes a supported third-party interface. A deep
+  link or honest “requires Zepp” state is preferable to a fake replacement.
+- The Helio capability and battery/device-management requirements are a genuine
+  scope amendment. They will be added to the frozen registry through one
+  reviewed, deduplicated registry refreeze after the official-source and
+  physical-device capability matrix is complete; existing Bevel leaves are not
+  duplicated or rescored in the meantime.
 
 ## 4. Execution topology
 
@@ -210,7 +248,10 @@ Deliverables:
 - keep photo/barcode proposals ephemeral or explicitly draft: exclude them from
   totals, sync, widgets, and backups. Only edited explicit confirmation creates
   a durable meal. Add history, totals, macros, hydration, caffeine/alcohol,
-  correction/delete, expiry, and sync envelopes;
+  correction/delete, expiry, and sync envelopes. Hydration/caffeine/alcohol
+  must include timestamped add/edit/delete, explicit none versus missing,
+  quick/custom actions, unit validation, per-day history, and persisted goals,
+  presets and reminders matching `BF-0427`–`BF-0432`;
 - finish Open Food Facts gateway composition and honest miss/manual fallback;
 - implement Gemini photo analysis only through the Windows gateway, with local
   sanitization, explicit confirmation, correction lineage, provenance, original
@@ -231,11 +272,16 @@ Deliverables, in this order:
    reconciliation, query anchors, units, freshness, duplicates, partial nights,
    and deleted samples. Confirmed nutrition writes require explicit user
    confirmation and write authorization; if deferred, those registry leaves
-   remain blocking. HealthKit is never claimed on macOS/from fixtures.
+   remain blocking. HealthKit is never claimed on macOS/from fixtures. Use the
+   official dietary-water, dietary-caffeine, and number-of-alcoholic-beverages
+   sample types when enabled; preserve manual versus HealthKit provenance and
+   never treat blood-alcohol concentration as a user-entered drink count.
 2. `0382–0386`: Today/readiness hierarchy, monitor, timeline, navigation,
    permission/unavailable states.
 3. `0387–0395`: Journal, automatic observations, activity, Strength, Biology,
-   trends and drilldowns.
+   trends and drilldowns. Journal lifestyle facts feed transparent correlation
+   views; experimental biological age is gated by its reviewed model, adult
+   profile, observed-history sufficiency and uncertainty—not by a fixture.
 4. `0396–0404`: Load, zones, Recovery, Sleep interval/stages/timeline/trends.
 5. `0405–0414`: Stress and Energy Reserve full ranges and drilldowns.
 6. `0415–0423`: source-backed Fitness nutrition, glucose, expenditure, and Net
@@ -295,6 +341,11 @@ Deliverables:
 - choose and document Clipper's authoritative source before implementing it;
 - compose and audit Settings workflows implemented in T4/T6 plus provider,
   sync, storage, privacy, signing, and diagnostics states;
+- add a Helio device detail in Settings with connection authority, last
+  successful Zepp/HealthKit sync, permissions, supported metric inventory,
+  source freshness, and battery/firmware state only when a verified interface
+  supplies them. Unsupported pairing/configuration remains explicitly Zepp-only
+  rather than an inert or fabricated LifeOS control;
 - publish versioned per-module snapshots only from confirmed state using atomic
   protected writes, explicit locked/redacted behavior, expiry/freshness, signed
   App Group access, and coalesced `WidgetCenter.reloadTimelines(ofKind:)`;
