@@ -11,6 +11,7 @@ import Foundation
 /// Monday is 2, and Saturday is 7.  This is intentionally not ISO weekday
 /// numbering; the choice is contained here at the schedule boundary.
 public struct SupplementNotificationPlanner {
+    public static let defaultLookAheadDays = 30
     public let lookAheadDays: Int
     public let maxPendingIntents: Int
     public let calendar: Calendar
@@ -23,7 +24,7 @@ public struct SupplementNotificationPlanner {
     public init(
         clock: @escaping @Sendable () -> Date = { Date() },
         calendar: Calendar = Calendar(identifier: .gregorian),
-        lookAheadDays: Int = 30,
+        lookAheadDays: Int = SupplementNotificationPlanner.defaultLookAheadDays,
         maxPendingIntents: Int = 64
     ) {
         self.clock = clock
@@ -43,7 +44,7 @@ public struct SupplementNotificationPlanner {
     public init(
         now: Date,
         calendar: Calendar = Calendar(identifier: .gregorian),
-        lookAheadDays: Int = 30,
+        lookAheadDays: Int = SupplementNotificationPlanner.defaultLookAheadDays,
         maxPendingIntents: Int = 64
     ) {
         self.init(
@@ -56,11 +57,13 @@ public struct SupplementNotificationPlanner {
 
     /// Computes the bounded set of future notification intents.
     ///
-    /// Existing occurrences are optional because a schedule can be planned
-    /// before its first occurrence has been materialized.  When history is
-    /// supplied, Taken/Skipped/Missed occurrences are terminal and never
-    /// produce another dose.  A Snoozed occurrence reuses its original stable
-    /// occurrence ID and moves that one reminder to `snoozedUntil`.
+    /// Every returned intent must have a matching durable occurrence in the
+    /// supplied snapshot.  Materialization belongs to the session/store
+    /// reconciliation boundary; the planner is intentionally read-only and
+    /// fails closed when that boundary has not run yet.  Taken/Skipped/Missed
+    /// occurrences are terminal and never produce another dose.  A Snoozed
+    /// occurrence reuses its original stable occurrence ID and moves that one
+    /// reminder to `snoozedUntil`.
     public func plan(
         plans: [SupplementPlan],
         occurrences: [SupplementOccurrence] = [],
@@ -169,6 +172,10 @@ public struct SupplementNotificationPlanner {
                             // doubling, catch-up, or extra dose.
                             break
                         case .snoozed:
+                            guard existing.planID == plan.id,
+                                  existing.scheduledFor == resolved.date else {
+                                break
+                            }
                             guard let snoozedUntil = existing.snoozedUntil,
                                   snoozedUntil > now else {
                                 break
@@ -185,6 +192,10 @@ public struct SupplementNotificationPlanner {
                                 )
                             )
                         case .planned:
+                            guard existing.planID == plan.id,
+                                  existing.scheduledFor == resolved.date else {
+                                break
+                            }
                             if resolved.date > now {
                                 candidates.append(
                                     try makeIntent(
@@ -199,18 +210,6 @@ public struct SupplementNotificationPlanner {
                                 )
                             }
                         }
-                    } else if resolved.date > now {
-                        candidates.append(
-                            try makeIntent(
-                                plan: plan,
-                                scheduleIdentifier: Self.scheduleIdentifier(planID: plan.id),
-                                occurrenceID: occurrenceID,
-                                        fireDate: resolved.date,
-                                        timeZone: timeZone,
-                                        timeZoneIdentifier: schedule.timeZoneIdentifier,
-                                        resolution: resolved.resolution
-                            )
-                        )
                     }
                 }
 
@@ -427,103 +426,14 @@ public struct SupplementNotificationPlanner {
         on day: DateComponents,
         calendar: Calendar
     ) throws -> ResolvedLocalTime? {
-        let parts = value.split(separator: ":")
-        guard parts.count == 2, let hour = Int(parts[0]), let minute = Int(parts[1]) else {
-            throw SupplementValidationError.invalidSchedule("localTime")
-        }
-
-        var dayStartComponents = day
-        dayStartComponents.hour = 0
-        dayStartComponents.minute = 0
-        dayStartComponents.second = 0
-        dayStartComponents.nanosecond = 0
-        guard let dayStart = calendar.date(from: dayStartComponents),
-              let searchAnchor = calendar.date(byAdding: .second, value: -1, to: dayStart) else {
+        guard let resolved = try SupplementNotificationTimeResolver.resolve(
+            value,
+            on: day,
+            calendar: calendar
+        ) else {
             return nil
         }
-        var matching = DateComponents()
-        matching.hour = hour
-        matching.minute = minute
-        matching.second = 0
-        matching.nanosecond = 0
-        matching.timeZone = calendar.timeZone
-
-        // Searching from just before the local day start keeps pre-noon times
-        // on this date.  The date guard also rejects any Foundation fallback
-        // that would otherwise roll a gap into the following local day.
-        let targetComponents = calendar.dateComponents([.year, .month, .day], from: dayStart)
-        func isOnTargetDay(_ date: Date) -> Bool {
-            let components = calendar.dateComponents([.year, .month, .day], from: date)
-            return components.year == targetComponents.year &&
-                components.month == targetComponents.month &&
-                components.day == targetComponents.day
-        }
-        func isSameLocalTimeOnTargetDay(_ date: Date) -> Bool {
-            guard isOnTargetDay(date) else { return false }
-            let components = calendar.dateComponents(
-                [.year, .month, .day, .hour, .minute, .second],
-                from: date
-            )
-            return components.hour == hour &&
-                components.minute == minute &&
-                components.second == 0
-        }
-
-        let first = calendar.nextDate(
-            after: searchAnchor,
-            matching: matching,
-            matchingPolicy: .strict,
-            repeatedTimePolicy: .first,
-            direction: .forward
-        )
-        let resolved: Date
-        let resolution: SupplementNotificationLocalTimeResolution
-        if let first, isOnTargetDay(first) {
-            resolved = first
-            let afterFirst = first.addingTimeInterval(0.001)
-            // On some iOS Foundation versions, nextDate's repeated-time
-            // policy returns nil after the first match.  Keep the strict
-            // nextDate probe, then use the equivalent same-day setter as a
-            // compatibility fallback; the local-date/time guard below keeps
-            // a normal day's next occurrence from being treated as repeated.
-            let last = calendar.nextDate(
-                after: afterFirst,
-                matching: matching,
-                matchingPolicy: .strict,
-                repeatedTimePolicy: .last,
-                direction: .forward
-            )
-            let fallbackLast = calendar.date(
-                bySettingHour: hour,
-                minute: minute,
-                second: 0,
-                of: afterFirst,
-                matchingPolicy: .strict,
-                repeatedTimePolicy: .last,
-                direction: .forward
-            )
-            let repeatedCandidate = last ?? fallbackLast
-            resolution = (repeatedCandidate.map(isSameLocalTimeOnTargetDay) == true && repeatedCandidate != first)
-                ? .firstRepeatedTime
-                : .exactLocalTime
-        } else {
-            // Spring-forward (or another timezone gap): Foundation's
-            // nextTime policy intentionally moves to the first valid local
-            // instant after the gap.  It never invents a second dose.
-            guard let next = calendar.nextDate(
-                after: searchAnchor,
-                matching: matching,
-                matchingPolicy: .nextTime,
-                repeatedTimePolicy: .first,
-                direction: .forward
-            ), isOnTargetDay(next) else {
-                return nil
-            }
-            resolved = next
-            resolution = .nextValidTime
-        }
-
-        return ResolvedLocalTime(date: resolved, resolution: resolution)
+        return ResolvedLocalTime(date: resolved.date, resolution: resolved.resolution)
     }
 
     private func localDateTimeString(_ date: Date, timeZone: TimeZone) -> (date: String, time: String) {
@@ -635,6 +545,11 @@ public struct SupplementNotificationIntent: Equatable, Identifiable, Sendable {
               SupplementValidation.isIANATimeZone(timeZoneIdentifier) else {
             throw SupplementValidationError.invalidSchedule("notification intent")
         }
+        do {
+            try SupplementNotificationActionToken.validateFireDate(fireDate)
+        } catch {
+            throw SupplementValidationError.invalidSchedule("notification fire date")
+        }
         try SupplementValidation.validateText(title, field: "notification.title", max: 160)
         try SupplementValidation.validateText(body, field: "notification.body", max: 1_000)
     }
@@ -690,6 +605,9 @@ public enum SupplementNotificationActionIdentifier {
     public static let namespace = "lifeos.supplement"
     public static let planIDKey = "lifeos.supplement.planID"
     public static let occurrenceIDKey = "lifeos.supplement.occurrenceID"
+    public static let actionTokenKey = "lifeos.supplement.actionToken"
+    public static let generationKey = "lifeos.supplement.generation"
+    public static let fireDateKey = "lifeos.supplement.fireDate"
 }
 
 public struct SupplementNotificationActionContext: Equatable, Sendable {

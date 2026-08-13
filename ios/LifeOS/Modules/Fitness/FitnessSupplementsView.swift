@@ -19,6 +19,7 @@ private extension SupplementOccurrenceState {
 
 struct FitnessSupplementsView: View {
     let selectedDate: Date
+    private let persistenceEnabled: Bool
     @Environment(\.scenePhase) private var scenePhase
     @State private var session: FitnessSupplementSession?
     @State private var sessionError: String?
@@ -34,11 +35,25 @@ struct FitnessSupplementsView: View {
         notificationAdapter: SupplementNotificationAdapter = SupplementNotificationAdapter()
     ) {
         self.selectedDate = selectedDate
+        let usesVisualFixtures = supplements.contains(where: \.isVisualFixture)
+        self.persistenceEnabled = !usesVisualFixtures
         _permissionCoordinator = StateObject(
             wrappedValue: SupplementNotificationPermissionCoordinator(adapter: notificationAdapter)
         )
         do {
-            _session = State(initialValue: try FitnessSupplementSession(supplements: supplements, selectedDate: selectedDate))
+            let store: SupplementStore?
+            if usesVisualFixtures {
+                store = nil
+            } else {
+                store = try SupplementStore()
+            }
+            _session = State(
+                initialValue: try FitnessSupplementSession(
+                    supplements: supplements,
+                    selectedDate: selectedDate,
+                    store: store
+                )
+            )
             _sessionError = State(initialValue: nil)
         } catch {
             _session = State(initialValue: nil)
@@ -68,17 +83,25 @@ struct FitnessSupplementsView: View {
             FitnessSupplementsPrivacyCard()
 
             if let session {
-                FitnessReminderStatusCard(
-                    permissionState: permissionCoordinator.state,
-                    schedulingState: permissionCoordinator.schedulingState,
-                    hasActionableSchedule: session.snapshot.plans.contains { $0.reminderEnabled },
-                    onRequestPermission: {
-                        permissionCoordinator.requestPermission(snapshot: session.snapshot)
-                    },
-                    onRetry: {
-                        permissionCoordinator.refresh(snapshot: session.snapshot)
+                if persistenceEnabled {
+                    FitnessReminderStatusCard(
+                        permissionState: permissionCoordinator.state,
+                        schedulingState: permissionCoordinator.schedulingState,
+                        hasActionableSchedule: session.snapshot.plans.contains { $0.reminderEnabled },
+                        onRequestPermission: {
+                            permissionCoordinator.requestPermission(snapshot: session.snapshot)
+                        },
+                        onRetry: {
+                            permissionCoordinator.refresh(snapshot: session.snapshot)
+                        }
+                    )
+                } else {
+                    FitnessCard {
+                        Text("Visual fixture session · local notifications are disabled and nothing is persisted.")
+                            .font(LifeOSFont.caption(10))
+                            .foregroundStyle(LifeOSTokens.tertiaryText)
                     }
-                )
+                }
 
                 if session.records.isEmpty {
                     FitnessCard {
@@ -89,7 +112,7 @@ struct FitnessSupplementsView: View {
                         FitnessSupplementProductCard(
                             supplement: supplement,
                             stock: session.stock(for: supplement.id),
-                            occurrenceState: session.state(for: supplement.id) ?? .planned,
+                            occurrenceState: session.state(for: supplement.id),
                             onAction: { action in perform(action, for: supplement) }
                         )
                     }
@@ -100,7 +123,7 @@ struct FitnessSupplementsView: View {
                 Toggle("Show read-only Calendar overlay", isOn: $showingCalendarOverlay)
                     .font(LifeOSFont.inter(12, weight: .medium))
                 if showingCalendarOverlay {
-                    FitnessSupplementCalendarOverlay(supplements: session.records)
+                    FitnessSupplementCalendarOverlay(supplements: session.records, states: session.states)
                 }
             } else {
                 FitnessCard {
@@ -127,7 +150,7 @@ struct FitnessSupplementsView: View {
             }
         }
         .sheet(isPresented: $showingAddSheet) {
-            FitnessAddSupplementSheet { supplement in
+            FitnessAddSupplementSheet(persistenceEnabled: persistenceEnabled) { supplement in
                 guard var current = session else {
                     noticeIsError = true
                     notice = sessionError ?? "Supplement session is unavailable."
@@ -139,9 +162,14 @@ struct FitnessSupplementsView: View {
                     session = current
                     sessionError = nil
                     noticeIsError = false
-                    notice = "\(supplement.name) added for this session only. It is not saved to persistent storage."
-                    permissionCoordinator.reconcile(snapshot: current.snapshot, now: now)
+                    notice = persistenceEnabled
+                        ? "\(supplement.name) saved locally on this device."
+                        : "\(supplement.name) added for this visual fixture session only."
+                    if persistenceEnabled {
+                        permissionCoordinator.reconcile(snapshot: current.snapshot, now: now)
+                    }
                 } catch {
+                    handleSessionError(error)
                     noticeIsError = true
                     notice = error.localizedDescription
                 }
@@ -150,6 +178,9 @@ struct FitnessSupplementsView: View {
         }
         .onAppear {
             reconcileCurrentSession()
+        }
+        .onChange(of: selectedDate) { _, newDate in
+            reconcileCurrentSession(selectedDate: newDate)
         }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
@@ -160,11 +191,24 @@ struct FitnessSupplementsView: View {
         }
     }
 
-    private func reconcileCurrentSession() {
-        if let session {
-            permissionCoordinator.refresh(snapshot: session.snapshot)
-        } else {
-            permissionCoordinator.refresh()
+    private func reconcileCurrentSession(selectedDate: Date? = nil) {
+        guard var current = session else {
+            return
+        }
+        let now = Date.now
+        do {
+            try current.reconcile(selectedDate: selectedDate ?? self.selectedDate, now: now)
+            session = current
+            sessionError = nil
+            if persistenceEnabled {
+                // Only production sessions touch UserNotifications.  Fixture
+                // sessions still reconcile their in-memory occurrence set on
+                // every date/scene/time-zone change so visual state never
+                // becomes stale merely because persistence is disabled.
+                permissionCoordinator.refresh(snapshot: current.snapshot, now: now)
+            }
+        } catch {
+            sessionError = error.localizedDescription
         }
     }
 
@@ -178,7 +222,9 @@ struct FitnessSupplementsView: View {
         do {
             let response = try current.apply(action, to: supplement.id, now: now)
             session = current
-            permissionCoordinator.reconcile(snapshot: current.snapshot, now: now)
+            if persistenceEnabled {
+                permissionCoordinator.reconcile(snapshot: current.snapshot, now: now)
+            }
             noticeIsError = false
             switch action {
             case .taken:
@@ -195,9 +241,18 @@ struct FitnessSupplementsView: View {
                 notice = "Skip recorded locally. Stock did not change; a missed dose is never rescheduled as an extra dose."
             }
         } catch {
+            handleSessionError(error)
             noticeIsError = true
             notice = "Could not record \(action.rawValue): \(error.localizedDescription)"
         }
+    }
+
+    private func handleSessionError(_ error: Error) {
+        _ = error
+        // A persistence failure leaves the previous durable snapshot and its
+        // pending requests authoritative.  Do not reconcile a fabricated
+        // empty snapshot: that would silently delete valid reminders and make
+        // recovery depend on a later foreground launch.
     }
 }
 
@@ -403,7 +458,7 @@ private struct FitnessReminderStatusCard: View {
 private struct FitnessSupplementProductCard: View {
     let supplement: FitnessSupplement
     let stock: Int
-    let occurrenceState: SupplementOccurrenceState
+    let occurrenceState: SupplementOccurrenceState?
     let onAction: (SupplementAction) -> Void
 
     var body: some View {
@@ -443,13 +498,13 @@ private struct FitnessSupplementProductCard: View {
                     Button("Taken") { onAction(.taken) }
                         .buttonStyle(.borderedProminent)
                         .tint(LifeOSTokens.success)
-                        .disabled(occurrenceState == .taken || occurrenceState == .skipped)
+                        .disabled(!canAct || occurrenceState == .taken || occurrenceState == .skipped || occurrenceState == .missed)
                     Button("Snooze") { onAction(.snooze) }
                         .buttonStyle(.bordered)
-                        .disabled(occurrenceState == .taken || occurrenceState == .skipped)
+                        .disabled(!canAct || occurrenceState == .taken || occurrenceState == .skipped || occurrenceState == .missed)
                     Button("Skip") { onAction(.skip) }
                         .buttonStyle(.bordered)
-                        .disabled(occurrenceState == .taken)
+                        .disabled(!canAct || occurrenceState == .taken || occurrenceState == .skipped || occurrenceState == .missed)
                 }
                 Text("Only a confirmed Taken action decrements stock by the configured inventory dose (\(supplement.inventoryUnitsPerDose) \(supplement.servingUnit)). Snooze and Skip never change inventory.")
                     .font(LifeOSFont.caption(9))
@@ -465,18 +520,22 @@ private struct FitnessSupplementProductCard: View {
         let dose = supplement.userDose?.isEmpty == false ? supplement.userDose! : "Not entered"
         return "Your dose: \(dose) · \(supplement.servingUnit)"
     }
+
+    private var canAct: Bool {
+        occurrenceState != nil
+    }
 }
 
 private struct FitnessOccurrencePill: View {
-    let state: SupplementOccurrenceState
+    let state: SupplementOccurrenceState?
 
     var body: some View {
-        Text(state.fitnessLabel)
+        Text(state?.fitnessLabel ?? "Not scheduled")
             .font(LifeOSFont.inter(10, weight: .semiBold))
-            .foregroundStyle(state.fitnessColor)
+            .foregroundStyle(state?.fitnessColor ?? LifeOSTokens.tertiaryText)
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
-            .background(state.fitnessColor.opacity(0.12), in: Capsule())
+            .background((state?.fitnessColor ?? LifeOSTokens.tertiaryText).opacity(0.12), in: Capsule())
     }
 }
 
@@ -623,7 +682,7 @@ private struct FitnessSupplementTimelineCard: View {
                     ForEach(supplements) { supplement in
                         HStack(spacing: 9) {
                             Rectangle()
-                                .fill((states[supplement.id]?.fitnessColor ?? LifeOSTokens.accent).opacity(0.8))
+                                .fill((states[supplement.id]?.fitnessColor ?? LifeOSTokens.tertiaryText).opacity(0.8))
                                 .frame(width: 2, height: 38)
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(supplement.timing)
@@ -648,7 +707,7 @@ private struct FitnessSupplementTimelineCard: View {
     }
 
     private func timelineLabel(for supplement: FitnessSupplement) -> String {
-        let state = states[supplement.id]?.fitnessLabel ?? "Planned"
+        let state = states[supplement.id]?.fitnessLabel ?? "Not scheduled"
         let units = stock[supplement.id] ?? supplement.stockUnits
         return "\(state) · stock \(units)"
     }
@@ -656,6 +715,7 @@ private struct FitnessSupplementTimelineCard: View {
 
 private struct FitnessSupplementCalendarOverlay: View {
     let supplements: [FitnessSupplement]
+    let states: [String: SupplementOccurrenceState]
 
     var body: some View {
         FitnessCard {
@@ -678,7 +738,9 @@ private struct FitnessSupplementCalendarOverlay: View {
                         Text(supplement.timing).font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
                         Text(supplement.name).font(LifeOSFont.inter(12, weight: .medium))
                         Spacer()
-                        Text("Planned").font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.accent)
+                        Text(states[supplement.id]?.fitnessLabel ?? "Not scheduled")
+                            .font(LifeOSFont.caption(10))
+                            .foregroundStyle(states[supplement.id]?.fitnessColor ?? LifeOSTokens.tertiaryText)
                     }
                 }
             }
@@ -687,13 +749,16 @@ private struct FitnessSupplementCalendarOverlay: View {
 }
 
 private struct FitnessAddSupplementSheet: View {
+    let persistenceEnabled: Bool
     let onAdd: (FitnessSupplement) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
     @State private var form = FitnessSupplement.Form.capsule
     @State private var strength = ""
     @State private var userDose = ""
-    @State private var timing = "Before lunch"
+    @State private var hasReminderTime = true
+    @State private var reminderTime = Date.now
+    @State private var timingNote = ""
     @State private var stock = ""
     @State private var reorderThreshold = ""
     @State private var expectedLeadTimeDays = ""
@@ -722,8 +787,14 @@ private struct FitnessAddSupplementSheet: View {
                             FitnessSupplementField(title: "Label strength", text: $strength)
                             FitnessSupplementField(title: "Your dose", text: $userDose)
                             FitnessSupplementField(title: "Inventory units / dose", text: $inventoryUnitsPerDose, numeric: true)
-                            FitnessSupplementField(title: "Timing (HH:mm or note)", text: $timing)
-                            Text("Use HH:mm (for example 08:30) to make a clock schedule actionable. Any other text stays a free-form note and will not request notifications.")
+                            Toggle("Set a reminder time", isOn: $hasReminderTime)
+                            if hasReminderTime {
+                                DatePicker("Reminder time", selection: $reminderTime, displayedComponents: .hourAndMinute)
+                                FitnessSupplementField(title: "Context label (optional)", text: $timingNote)
+                            } else {
+                                FitnessSupplementField(title: "Timing note (optional)", text: $timingNote)
+                            }
+                            Text("Choose the clock explicitly. An optional context label is stored separately; LifeOS never infers 11:30 from a phrase such as Before lunch.")
                                 .font(LifeOSFont.caption(9))
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -738,7 +809,11 @@ private struct FitnessAddSupplementSheet: View {
                     }
                     Text("Reminders use the local timezone, and Taken/Snooze/Skip are separate from this product record.")
                         .font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
-                    Text("Add is local to this open session. Nothing entered here is written to persistent storage.")
+                    Text(
+                        persistenceEnabled
+                            ? "Add saves this user-entered record locally on this device. No network or provider lookup is used."
+                            : "Add is local to this visual fixture session. Nothing entered here is written to persistent storage."
+                    )
                         .font(LifeOSFont.caption(10))
                         .foregroundStyle(LifeOSTokens.warning)
                         .fixedSize(horizontal: false, vertical: true)
@@ -776,6 +851,7 @@ private struct FitnessAddSupplementSheet: View {
         let parsedThreshold = max(0, Int(reorderThreshold.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0)
         let parsedLeadTime = Int(expectedLeadTimeDays.trimmingCharacters(in: .whitespacesAndNewlines)).map { max(0, $0) }
         let parsedUnits = max(1, Int(inventoryUnitsPerDose.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 1)
+        let trimmedTimingNote = timingNote.trimmingCharacters(in: .whitespacesAndNewlines)
         let supplement = FitnessSupplement(
             id: "local-\(UUID().uuidString)",
             name: trimmedName,
@@ -785,7 +861,9 @@ private struct FitnessAddSupplementSheet: View {
             servingUnit: form.inventoryUnit,
             userDose: userDose.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : userDose,
             inventoryUnitsPerDose: parsedUnits,
-            timing: timing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Timing not entered" : timing,
+            timing: hasReminderTime ? formattedReminderTime :
+                (trimmedTimingNote.isEmpty ? "Timing not entered" : trimmedTimingNote),
+            timingNote: hasReminderTime && !trimmedTimingNote.isEmpty ? trimmedTimingNote : nil,
             reminderStatus: .localOnly,
             stockUnits: parsedStock,
             reorderThreshold: parsedThreshold,
@@ -794,6 +872,14 @@ private struct FitnessAddSupplementSheet: View {
         )
         onAdd(supplement)
         dismiss()
+    }
+
+    private var formattedReminderTime: String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone.current
+        formatter.dateFormat = "HH:mm"
+        return formatter.string(from: reminderTime)
     }
 }
 

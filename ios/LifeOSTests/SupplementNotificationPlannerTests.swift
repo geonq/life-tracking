@@ -90,6 +90,26 @@ final class SupplementNotificationPlannerTests: XCTestCase {
         return intents.map { formatter.string(from: $0.fireDate) }
     }
 
+    private func occurrences(
+        for plans: [SupplementPlan],
+        at now: Date,
+        lookAheadDays: Int
+    ) throws -> [SupplementOccurrence] {
+        let snapshot = try SupplementSnapshot(
+            generatedAt: now,
+            revision: 0,
+            plans: plans,
+            occurrences: []
+        )
+        let state = try SupplementStoreState(snapshot: snapshot, now: now)
+        return try FitnessSupplementSession.reconciledState(
+            state,
+            selectedDate: now,
+            now: now,
+            lookAheadDays: lookAheadDays
+        ).snapshot.occurrences
+    }
+
     func testEnabledSchedulesAreDedupedAndBounded() throws {
         let enabled = try plan()
         let disabled = try plan(id: "disabled", reminderEnabled: false)
@@ -101,7 +121,14 @@ final class SupplementNotificationPlannerTests: XCTestCase {
             maxPendingIntents: 3
         )
 
-        let result = try planner.plan(plans: [enabled, enabled, disabled, preferenceDisabled])
+        let result = try planner.plan(
+            plans: [enabled, enabled, disabled, preferenceDisabled],
+            occurrences: try occurrences(
+                for: [enabled, disabled, preferenceDisabled],
+                at: localDate(2026, 8, 9, 08, 00),
+                lookAheadDays: 30
+            )
+        )
         XCTAssertEqual(result.intents.count, 3)
         XCTAssertEqual(result.intents.count, result.identifiers.count)
         XCTAssertTrue(result.intents.allSatisfy { $0.planID == enabled.id })
@@ -117,7 +144,14 @@ final class SupplementNotificationPlannerTests: XCTestCase {
             maxPendingIntents: 999
         )
 
-        let result = try planner.plan(plans: [scheduled])
+        let result = try planner.plan(
+            plans: [scheduled],
+            occurrences: try occurrences(
+                for: [scheduled],
+                at: localDate(2026, 8, 9, 08, 00),
+                lookAheadDays: 366
+            )
+        )
 
         XCTAssertEqual(result.maxPendingIntents, 64)
         XCTAssertEqual(result.intents.count, 64)
@@ -140,17 +174,26 @@ final class SupplementNotificationPlannerTests: XCTestCase {
             now: fixedNow,
             calendar: deviceBerlin,
             lookAheadDays: 10
-        ).plan(plans: [scheduled])
+        ).plan(
+            plans: [scheduled],
+            occurrences: try occurrences(for: [scheduled], at: fixedNow, lookAheadDays: 10)
+        )
         let afterReboot = try SupplementNotificationPlanner(
             now: fixedNow,
             calendar: deviceBerlin,
             lookAheadDays: 10
-        ).plan(plans: [scheduled])
+        ).plan(
+            plans: [scheduled],
+            occurrences: try occurrences(for: [scheduled], at: fixedNow, lookAheadDays: 10)
+        )
         let afterDeviceTimezoneChange = try SupplementNotificationPlanner(
             now: fixedNow,
             calendar: deviceLosAngeles,
             lookAheadDays: 10
-        ).plan(plans: [scheduled])
+        ).plan(
+            plans: [scheduled],
+            occurrences: try occurrences(for: [scheduled], at: fixedNow, lookAheadDays: 10)
+        )
 
         XCTAssertEqual(first.intents, afterReboot.intents)
         XCTAssertEqual(first.intents.map(\.identifier), afterDeviceTimezoneChange.intents.map(\.identifier))
@@ -192,7 +235,14 @@ final class SupplementNotificationPlannerTests: XCTestCase {
             now: localDate(2026, 8, 9, 08, 00),
             calendar: berlinCalendar(),
             lookAheadDays: 0
-        ).plan(plans: [longPlan])
+        ).plan(
+            plans: [longPlan],
+            occurrences: try occurrences(
+                for: [longPlan],
+                at: localDate(2026, 8, 9, 08, 00),
+                lookAheadDays: 0
+            )
+        )
 
         XCTAssertEqual(result.intents.count, 1)
         let intent = try XCTUnwrap(result.intents.first)
@@ -213,7 +263,14 @@ final class SupplementNotificationPlannerTests: XCTestCase {
             calendar: berlinCalendar(),
             lookAheadDays: 30
         )
-        let result = try planner.plan(plans: [bounded])
+        let result = try planner.plan(
+            plans: [bounded],
+            occurrences: try occurrences(
+                for: [bounded],
+                at: localDate(2026, 8, 10, 08, 00),
+                lookAheadDays: 30
+            )
+        )
         XCTAssertEqual(localDateStrings(result.intents), ["2026-08-10", "2026-08-11", "2026-08-14", "2026-08-15"])
         XCTAssertFalse(localDateStrings(result.intents).contains("2026-08-12"))
         XCTAssertFalse(localDateStrings(result.intents).contains("2026-08-13"))
@@ -223,31 +280,45 @@ final class SupplementNotificationPlannerTests: XCTestCase {
         let spring = try plan(
             weekdays: [1],
             localTime: "02:30",
-            startDate: "2026-03-29",
-            endDate: "2026-03-29"
+            startDate: "2025-03-30",
+            endDate: "2025-03-30"
         )
         let springResult = try SupplementNotificationPlanner(
-            now: localDate(2026, 3, 29, 00, 00),
+            now: localDate(2025, 3, 30, 00, 00),
             calendar: berlinCalendar(),
             lookAheadDays: 1
-        ).plan(plans: [spring])
+        ).plan(
+            plans: [spring],
+            occurrences: try occurrences(
+                for: [spring],
+                at: localDate(2025, 3, 30, 00, 00),
+                lookAheadDays: 1
+            )
+        )
         XCTAssertEqual(springResult.intents.count, 1)
         let springIntent = try XCTUnwrap(springResult.intents.first)
         XCTAssertEqual(springIntent.resolution, .nextValidTime)
         XCTAssertEqual(springIntent.localTime, "03:00")
-        XCTAssertEqual(springIntent.localDate, "2026-03-29")
+        XCTAssertEqual(springIntent.localDate, "2025-03-30")
 
         let autumn = try plan(
             weekdays: [1],
             localTime: "02:30",
-            startDate: "2026-10-25",
-            endDate: "2026-10-25"
+            startDate: "2025-10-26",
+            endDate: "2025-10-26"
         )
         let autumnResult = try SupplementNotificationPlanner(
-            now: localDate(2026, 10, 25, 00, 00),
+            now: localDate(2025, 10, 26, 00, 00),
             calendar: berlinCalendar(),
             lookAheadDays: 1
-        ).plan(plans: [autumn])
+        ).plan(
+            plans: [autumn],
+            occurrences: try occurrences(
+                for: [autumn],
+                at: localDate(2025, 10, 26, 00, 00),
+                lookAheadDays: 1
+            )
+        )
         XCTAssertEqual(autumnResult.intents.count, 1)
         let autumnIntent = try XCTUnwrap(autumnResult.intents.first)
         XCTAssertEqual(autumnIntent.resolution, .firstRepeatedTime)
@@ -256,10 +327,32 @@ final class SupplementNotificationPlannerTests: XCTestCase {
             autumnResult.intents.map(\.occurrenceIdentifier),
             [SupplementNotificationPlanner.occurrenceIdentifier(
                 planID: autumn.id,
-                localDate: "2026-10-25",
+                localDate: "2025-10-26",
                 localTime: "02:30"
             )]
         )
+    }
+
+    func testSessionMaterializationAndPlannerShareExactDSTResolution() throws {
+        let spring = try plan(
+            weekdays: [1],
+            localTime: "02:30",
+            startDate: "2026-03-29",
+            endDate: "2026-03-29"
+        )
+        let fixedNow = localDate(2026, 3, 29, 00, 00)
+        let materialized = try occurrences(for: [spring], at: fixedNow, lookAheadDays: 1)
+        let result = try SupplementNotificationPlanner(
+            now: fixedNow,
+            calendar: berlinCalendar(),
+            lookAheadDays: 1
+        ).plan(plans: [spring], occurrences: materialized)
+        let intent = try XCTUnwrap(result.intents.first)
+        let occurrence = try XCTUnwrap(
+            materialized.first(where: { $0.id == intent.occurrenceIdentifier })
+        )
+        XCTAssertEqual(occurrence.scheduledFor, intent.fireDate)
+        XCTAssertEqual(intent.resolution, .nextValidTime)
     }
 
     func testCopyRespectsPrivatePreferenceAndNeverIncludesDoseFacts() throws {
@@ -381,7 +474,16 @@ final class SupplementNotificationPlannerTests: XCTestCase {
             calendar: berlinCalendar(),
             lookAheadDays: 1
         )
-        XCTAssertThrowsError(try planner.plan(plans: [invalidPlan]))
+        XCTAssertThrowsError(
+            try planner.plan(
+                plans: [invalidPlan],
+                occurrences: try occurrences(
+                    for: [validPlan],
+                    at: localDate(2026, 8, 9, 08, 00),
+                    lookAheadDays: 1
+                )
+            )
+        )
 
         let validOccurrence = try SupplementOccurrence(
             id: "magnesium-occurrence",
@@ -407,7 +509,14 @@ final class SupplementNotificationPlannerTests: XCTestCase {
             now: localDate(2026, 8, 9, 08, 00),
             calendar: berlinCalendar(),
             lookAheadDays: 0
-        ).plan(plans: [generic])
+        ).plan(
+            plans: [generic],
+            occurrences: try occurrences(
+                for: [generic],
+                at: localDate(2026, 8, 9, 08, 00),
+                lookAheadDays: 0
+            )
+        )
 
         XCTAssertEqual(result.intents.count, 1)
         let copy = try XCTUnwrap(result.intents.first)

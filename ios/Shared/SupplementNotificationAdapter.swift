@@ -165,19 +165,109 @@ public enum SupplementNotificationAdapterError: Error, Equatable, Sendable {
     case invalidIntent(String)
     case pendingRequestsFailed
     case authorizationRequestFailed
+    /// A UserNotifications callback did not arrive within the adapter's
+    /// bounded operation window.  Durable state remains authoritative and a
+    /// reconciliation timeout is never reported as success.
+    case operationTimedOut
 }
 
-public final class SupplementNotificationAdapter {
+/// The delegate uses this small boundary instead of depending directly on
+/// `UNUserNotificationCenter`.  It makes the durable-action-before-schedule
+/// ordering testable without constructing `UNNotificationResponse` values on
+/// platforms where those initializers are unavailable.
+public protocol SupplementNotificationReconciler: AnyObject {
+    func reconcile(
+        snapshot: SupplementSnapshot,
+        now: Date,
+        completion: @escaping (Result<SupplementNotificationReconciliation, SupplementNotificationAdapterError>) -> Void
+    )
+}
+
+/// A thread-safe one-shot callback guard for UserNotifications operations.
+/// The platform may deliver a late callback after the adapter's timeout; the
+/// first terminal result wins and late callbacks become no-ops.
+private final class SupplementNotificationOnceGate: @unchecked Sendable {
+    // The center fakes and some UserNotifications implementations can invoke
+    // a callback synchronously.  A recursive lock lets the callback inspect
+    // or claim the same gate while the initial operation is still inside the
+    // permit, without reopening the check/mutation race.
+    private let lock = NSRecursiveLock()
+    private var claimed = false
+
+    func claim() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !claimed else { return false }
+        claimed = true
+        return true
+    }
+
+    var isOpen: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return !claimed
+    }
+
+    /// Starts one platform operation only while this reconciliation is still
+    /// open.  The gate remains locked through the synchronous center call, so
+    /// a timeout cannot claim the operation between the check and the center
+    /// mutation; synchronous callbacks are safe because the lock is recursive.
+    @discardableResult
+    func performIfOpen(
+        before deadline: SupplementNotificationDeadline,
+        _ operation: () -> Void
+    ) -> Bool {
+        lock.lock()
+        guard !claimed, !deadline.isExpired else {
+            lock.unlock()
+            return false
+        }
+        operation()
+        lock.unlock()
+        return true
+    }
+}
+
+/// A monotonic wall-clock deadline shared by every stage of one
+/// reconciliation.  Dispatch timers are still used as the lost-callback
+/// wake-up, but callbacks also consult this value so a delayed timer cannot
+/// turn an already-expired operation into a success.
+private struct SupplementNotificationDeadline: Sendable {
+    let dispatchTime: DispatchTime
+
+    init(timeout: TimeInterval) {
+        dispatchTime = .now() + timeout
+    }
+
+    var isExpired: Bool {
+        DispatchTime.now().uptimeNanoseconds >= dispatchTime.uptimeNanoseconds
+    }
+}
+
+public final class SupplementNotificationAdapter: SupplementNotificationReconciler {
     public static let maxPendingIntents = 64
+    public static let defaultOperationTimeout: TimeInterval = 5
+    public static let minimumOperationTimeout: TimeInterval = 0.001
     /// Hard input bound for callers constructing a plan outside the planner.
     /// It bounds validation and duplicate tracking as well as UserNotifications
     /// work; the pending request cap remains `maxPendingIntents`.
     public static let maxInputIntents = 4_096
 
     private let center: SupplementNotificationCenter
+    private let operationTimeout: TimeInterval
 
-    public init(center: SupplementNotificationCenter = SystemSupplementNotificationCenter()) {
+    public init(
+        center: SupplementNotificationCenter = SystemSupplementNotificationCenter(),
+        operationTimeout: TimeInterval = 5
+    ) {
         self.center = center
+        guard operationTimeout.isFinite else {
+            self.operationTimeout = Self.defaultOperationTimeout
+            return
+        }
+        self.operationTimeout = operationTimeout > 0
+            ? max(Self.minimumOperationTimeout, operationTimeout)
+            : Self.defaultOperationTimeout
     }
 
     /// Registers the one category used by supplement reminders.  Repeating
@@ -190,7 +280,21 @@ public final class SupplementNotificationAdapter {
     public func authorizationStatus(
         completion: @escaping (SupplementNotificationAuthorizationStatus) -> Void
     ) {
-        center.getAuthorizationStatus(completion: completion)
+        let deadline = SupplementNotificationDeadline(timeout: operationTimeout)
+        let gate = SupplementNotificationOnceGate()
+        guard !deadline.isExpired else {
+            completion(.unknown(-1))
+            return
+        }
+        center.getAuthorizationStatus { status in
+            guard gate.claim() else { return }
+            completion(deadline.isExpired ? .unknown(-1) : status)
+        }
+        armTimeout(gate, deadline: deadline) {
+            // Unknown is deliberately not schedulable; callers must not
+            // claim permission when the platform callback was lost.
+            completion(.unknown(-1))
+        }
     }
 
     /// Requests only the permission needed for local supplement reminders.
@@ -200,13 +304,27 @@ public final class SupplementNotificationAdapter {
     public func requestAuthorization(
         completion: @escaping (Result<Bool, SupplementNotificationAdapterError>) -> Void
     ) {
+        let deadline = SupplementNotificationDeadline(timeout: operationTimeout)
+        let gate = SupplementNotificationOnceGate()
+        guard !deadline.isExpired else {
+            completion(.failure(.operationTimedOut))
+            return
+        }
         center.requestAuthorization(options: [.alert, .sound]) { result in
+            guard gate.claim() else { return }
+            guard !deadline.isExpired else {
+                completion(.failure(.operationTimedOut))
+                return
+            }
             switch result {
             case .success(let granted):
                 completion(.success(granted))
             case .failure:
                 completion(.failure(.authorizationRequestFailed))
             }
+        }
+        armTimeout(gate, deadline: deadline) {
+            completion(.failure(.operationTimedOut))
         }
     }
 
@@ -216,6 +334,21 @@ public final class SupplementNotificationAdapter {
     public func reconcile(
         plan: SupplementNotificationPlan,
         now: Date = .now,
+        completion: @escaping (Result<SupplementNotificationReconciliation, SupplementNotificationAdapterError>) -> Void
+    ) {
+        let deadline = SupplementNotificationDeadline(timeout: operationTimeout)
+        reconcile(
+            plan: plan,
+            now: now,
+            deadline: deadline,
+            completion: completion
+        )
+    }
+
+    private func reconcile(
+        plan: SupplementNotificationPlan,
+        now: Date,
+        deadline: SupplementNotificationDeadline,
         completion: @escaping (Result<SupplementNotificationReconciliation, SupplementNotificationAdapterError>) -> Void
     ) {
         let prepared: [(intent: SupplementNotificationIntent, request: UNNotificationRequest)]
@@ -229,34 +362,125 @@ public final class SupplementNotificationAdapter {
             return
         }
 
-        registerActionsAndCategory()
-        center.getAuthorizationStatus { status in
-            guard status.canSchedule else {
-                completion(.success(SupplementNotificationReconciliation(
-                    authorizationStatus: status,
-                    pendingOutcome: .notScheduled
-                )))
-                return
-            }
+        guard !deadline.isExpired else {
+            completion(.failure(.operationTimedOut))
+            return
+        }
 
-            self.center.getPendingNotificationRequests { result in
-                switch result {
-                case .failure(let error):
-                    // Center errors are intentionally reduced to a stable
-                    // public code.  System error descriptions can contain
-                    // arbitrary/private text; callers still get the truthful
-                    // failed operation and no scheduling result is claimed.
-                    _ = error
-                    completion(.failure(.pendingRequestsFailed))
-                case .success(let pending):
-                    self.reconcilePrepared(
-                        prepared,
-                        pending: pending,
+        let finishGate = SupplementNotificationOnceGate()
+        let finish: (Result<SupplementNotificationReconciliation, SupplementNotificationAdapterError>) -> Void = { result in
+            guard finishGate.claim() else { return }
+            completion(result)
+        }
+        // This is intentionally armed before the first center call.  The
+        // per-operation timers below still make each lost callback progress,
+        // but this gate bounds the entire reconciliation wall clock rather
+        // than multiplying the timeout by the number of additions.
+        armTimeout(finishGate, deadline: deadline) {
+            completion(.failure(.operationTimedOut))
+        }
+        guard !deadline.isExpired else {
+            finish(.failure(.operationTimedOut))
+            return
+        }
+        let registered = finishGate.performIfOpen(before: deadline) {
+            registerActionsAndCategory()
+        }
+        guard registered else {
+            finish(.failure(.operationTimedOut))
+            return
+        }
+        let authorizationGate = SupplementNotificationOnceGate()
+        let authorizationStarted = finishGate.performIfOpen(before: deadline) {
+            center.getAuthorizationStatus { status in
+                guard authorizationGate.claim() else { return }
+                guard finishGate.isOpen else { return }
+                guard !deadline.isExpired else {
+                    finish(.failure(.operationTimedOut))
+                    return
+                }
+                guard status.canSchedule else {
+                    finish(.success(SupplementNotificationReconciliation(
                         authorizationStatus: status,
-                        completion: completion
-                    )
+                        pendingOutcome: .notScheduled
+                    )))
+                    return
+                }
+
+                let pendingGate = SupplementNotificationOnceGate()
+                let pendingStarted = finishGate.performIfOpen(before: deadline) {
+                    self.center.getPendingNotificationRequests { result in
+                        guard pendingGate.claim() else { return }
+                        guard finishGate.isOpen else { return }
+                        guard !deadline.isExpired else {
+                            finish(.failure(.operationTimedOut))
+                            return
+                        }
+                        switch result {
+                        case .failure(let error):
+                            // Center errors are intentionally reduced to a stable
+                            // public code.  System error descriptions can contain
+                            // arbitrary/private text; callers still get the truthful
+                            // failed operation and no scheduling result is claimed.
+                            _ = error
+                            finish(.failure(.pendingRequestsFailed))
+                        case .success(let pending):
+                            self.reconcilePrepared(
+                                prepared,
+                                pending: pending,
+                                authorizationStatus: status,
+                                finishGate: finishGate,
+                                deadline: deadline,
+                                completion: finish
+                            )
+                        }
+                    }
+                }
+                guard pendingStarted else {
+                    finish(.failure(.operationTimedOut))
+                    return
+                }
+                self.armTimeout(pendingGate, deadline: deadline) {
+                    finish(.failure(.operationTimedOut))
                 }
             }
+        }
+        guard authorizationStarted else {
+            finish(.failure(.operationTimedOut))
+            return
+        }
+        armTimeout(authorizationGate, deadline: deadline) {
+            finish(.failure(.operationTimedOut))
+        }
+    }
+
+    /// Builds the planner output from the supplied durable snapshot and then
+    /// reconciles the platform pending set.  The planner is deliberately
+    /// strict: if the session/store did not materialize a matching occurrence,
+    /// no request is created.
+    public func reconcile(
+        snapshot: SupplementSnapshot,
+        now: Date,
+        completion: @escaping (Result<SupplementNotificationReconciliation, SupplementNotificationAdapterError>) -> Void
+    ) {
+        let deadline = SupplementNotificationDeadline(timeout: operationTimeout)
+        do {
+            let plan = try SupplementNotificationPlanner(
+                now: now,
+                lookAheadDays: SupplementNotificationPlanner.defaultLookAheadDays,
+                maxPendingIntents: Self.maxPendingIntents
+            ).plan(
+                plans: snapshot.plans,
+                occurrences: snapshot.occurrences,
+                now: now
+            )
+            guard !deadline.isExpired else {
+                completion(.failure(.operationTimedOut))
+                return
+            }
+            reconcile(plan: plan, now: now, deadline: deadline, completion: completion)
+        } catch {
+            completion(.failure(.invalidPlan("snapshot")))
         }
     }
 
@@ -372,8 +596,15 @@ public final class SupplementNotificationAdapter {
         _ prepared: [(intent: SupplementNotificationIntent, request: UNNotificationRequest)],
         pending: [UNNotificationRequest],
         authorizationStatus: SupplementNotificationAuthorizationStatus,
+        finishGate: SupplementNotificationOnceGate,
+        deadline: SupplementNotificationDeadline,
         completion: @escaping (Result<SupplementNotificationReconciliation, SupplementNotificationAdapterError>) -> Void
     ) {
+        guard finishGate.isOpen else { return }
+        guard !deadline.isExpired else {
+            completion(.failure(.operationTimedOut))
+            return
+        }
         let desiredByID = Dictionary(uniqueKeysWithValues: prepared.map { ($0.intent.identifier, $0) })
         let managedPending = pending.filter { Self.isManagedIdentifier($0.identifier) }
         let pendingByID = Dictionary(uniqueKeysWithValues: managedPending.map { ($0.identifier, $0) })
@@ -382,8 +613,26 @@ public final class SupplementNotificationAdapter {
             .filter { !desiredIdentifiers.contains($0) }
             .sorted()
 
-        if !staleIdentifiers.isEmpty {
-            center.removePendingNotificationRequests(withIdentifiers: staleIdentifiers)
+        let replacementIdentifiers = prepared.compactMap { item -> String? in
+            guard let existing = pendingByID[item.intent.identifier],
+                  !requestsMatch(existing, item.request) else {
+                return nil
+            }
+            return item.intent.identifier
+        }
+        let identifiersToRemove = (staleIdentifiers + replacementIdentifiers).sorted()
+        if !identifiersToRemove.isEmpty {
+            // Removing a mismatched request first makes a snooze replacement
+            // deterministic across UserNotifications implementations.  The
+            // durable snooze already exists; a later add failure therefore
+            // leaves truth intact and launch reconciliation can retry it.
+            let removalStarted = finishGate.performIfOpen(before: deadline) {
+                center.removePendingNotificationRequests(withIdentifiers: identifiersToRemove)
+            }
+            guard removalStarted else {
+                completion(.failure(.operationTimedOut))
+                return
+            }
         }
 
         let additions = prepared.compactMap { item -> (String, UNNotificationRequest)? in
@@ -406,8 +655,10 @@ public final class SupplementNotificationAdapter {
             failed: [],
             errors: [],
             authorizationStatus: authorizationStatus,
-            removedIdentifiers: staleIdentifiers,
+            removedIdentifiers: identifiersToRemove,
             unchangedIdentifiers: unchanged,
+            finishGate: finishGate,
+            deadline: deadline,
             completion: completion
         )
     }
@@ -421,9 +672,21 @@ public final class SupplementNotificationAdapter {
         authorizationStatus: SupplementNotificationAuthorizationStatus,
         removedIdentifiers: [String],
         unchangedIdentifiers: [String],
+        finishGate: SupplementNotificationOnceGate,
+        deadline: SupplementNotificationDeadline,
+        timedOut: Bool = false,
         completion: @escaping (Result<SupplementNotificationReconciliation, SupplementNotificationAdapterError>) -> Void
     ) {
+        guard finishGate.isOpen else { return }
+        guard !deadline.isExpired else {
+            completion(.failure(.operationTimedOut))
+            return
+        }
         guard index < additions.count else {
+            if timedOut {
+                completion(.failure(.operationTimedOut))
+                return
+            }
             let outcome: SupplementNotificationPendingOutcome
             if !failed.isEmpty {
                 outcome = .partialFailure
@@ -445,32 +708,72 @@ public final class SupplementNotificationAdapter {
         }
 
         let (identifier, request) = additions[index]
-        center.add(request) { error in
-            if error != nil {
-                self.addSequentially(
-                    additions,
-                    index: index + 1,
-                    added: added,
-                    failed: failed + [identifier],
-                    errors: errors + ["addFailed"],
-                    authorizationStatus: authorizationStatus,
-                    removedIdentifiers: removedIdentifiers,
-                    unchangedIdentifiers: unchangedIdentifiers,
-                    completion: completion
-                )
-            } else {
-                self.addSequentially(
-                    additions,
-                    index: index + 1,
-                    added: added + [identifier],
-                    failed: failed,
-                    errors: errors,
-                    authorizationStatus: authorizationStatus,
-                    removedIdentifiers: removedIdentifiers,
-                    unchangedIdentifiers: unchangedIdentifiers,
-                    completion: completion
-                )
+        let addGate = SupplementNotificationOnceGate()
+        let addStarted = finishGate.performIfOpen(before: deadline) {
+            center.add(request) { error in
+                guard addGate.claim() else { return }
+                guard finishGate.isOpen else { return }
+                guard !deadline.isExpired else {
+                    completion(.failure(.operationTimedOut))
+                    return
+                }
+                if error != nil {
+                    self.addSequentially(
+                        additions,
+                        index: index + 1,
+                        added: added,
+                        failed: failed + [identifier],
+                        errors: errors + ["addFailed"],
+                        authorizationStatus: authorizationStatus,
+                        removedIdentifiers: removedIdentifiers,
+                        unchangedIdentifiers: unchangedIdentifiers,
+                        finishGate: finishGate,
+                        deadline: deadline,
+                        timedOut: timedOut,
+                        completion: completion
+                    )
+                } else {
+                    self.addSequentially(
+                        additions,
+                        index: index + 1,
+                        added: added + [identifier],
+                        failed: failed,
+                        errors: errors,
+                        authorizationStatus: authorizationStatus,
+                        removedIdentifiers: removedIdentifiers,
+                        unchangedIdentifiers: unchangedIdentifiers,
+                        finishGate: finishGate,
+                        deadline: deadline,
+                        timedOut: timedOut,
+                        completion: completion
+                    )
+                }
             }
+        }
+        guard addStarted else {
+            completion(.failure(.operationTimedOut))
+            return
+        }
+        armTimeout(addGate, deadline: deadline) {
+            guard finishGate.isOpen else { return }
+            guard !deadline.isExpired else {
+                completion(.failure(.operationTimedOut))
+                return
+            }
+            self.addSequentially(
+                additions,
+                index: index + 1,
+                added: added,
+                failed: failed + [identifier],
+                errors: errors + ["operationTimedOut"],
+                authorizationStatus: authorizationStatus,
+                removedIdentifiers: removedIdentifiers,
+                unchangedIdentifiers: unchangedIdentifiers,
+                finishGate: finishGate,
+                deadline: deadline,
+                timedOut: true,
+                completion: completion
+            )
         }
     }
 
@@ -497,9 +800,32 @@ public final class SupplementNotificationAdapter {
         content.userInfo = [
             SupplementNotificationActionIdentifier.planIDKey: intent.planID,
             SupplementNotificationActionIdentifier.occurrenceIDKey: intent.occurrenceIdentifier,
+            SupplementNotificationActionIdentifier.actionTokenKey:
+                try SupplementNotificationActionToken.make(
+                    occurrenceID: intent.occurrenceIdentifier,
+                    fireDate: intent.fireDate
+                ),
+            SupplementNotificationActionIdentifier.generationKey:
+                try SupplementNotificationActionToken.make(
+                    occurrenceID: intent.occurrenceIdentifier,
+                    fireDate: intent.fireDate
+                ),
+            SupplementNotificationActionIdentifier.fireDateKey:
+                SupplementNotificationActionToken.wireDate(intent.fireDate),
         ]
         content.sound = .default
         return UNNotificationRequest(identifier: intent.identifier, content: content, trigger: trigger)
+    }
+
+    private func armTimeout(
+        _ gate: SupplementNotificationOnceGate,
+        deadline: SupplementNotificationDeadline,
+        action: @escaping () -> Void
+    ) {
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: deadline.dispatchTime) {
+            guard gate.claim() else { return }
+            action()
+        }
     }
 
     private func requestsMatch(
@@ -514,7 +840,13 @@ public final class SupplementNotificationAdapter {
               existing.content.userInfo[SupplementNotificationActionIdentifier.planIDKey] as? String ==
                 expected.content.userInfo[SupplementNotificationActionIdentifier.planIDKey] as? String,
               existing.content.userInfo[SupplementNotificationActionIdentifier.occurrenceIDKey] as? String ==
-                expected.content.userInfo[SupplementNotificationActionIdentifier.occurrenceIDKey] as? String else {
+                expected.content.userInfo[SupplementNotificationActionIdentifier.occurrenceIDKey] as? String,
+              existing.content.userInfo[SupplementNotificationActionIdentifier.actionTokenKey] as? String ==
+                expected.content.userInfo[SupplementNotificationActionIdentifier.actionTokenKey] as? String,
+              existing.content.userInfo[SupplementNotificationActionIdentifier.generationKey] as? String ==
+                expected.content.userInfo[SupplementNotificationActionIdentifier.generationKey] as? String,
+              existing.content.userInfo[SupplementNotificationActionIdentifier.fireDateKey] as? String ==
+                expected.content.userInfo[SupplementNotificationActionIdentifier.fireDateKey] as? String else {
             return false
         }
         guard let existingTrigger = existing.trigger as? UNCalendarNotificationTrigger,

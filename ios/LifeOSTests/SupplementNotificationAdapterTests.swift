@@ -305,6 +305,217 @@ final class SupplementNotificationAdapterTests: XCTestCase {
         XCTAssertTrue(center.removedIdentifiers.isEmpty)
     }
 
+    func testLostAuthorizationStatusCallbackReturnsUnknownExactlyOnce() {
+        let center = FakeSupplementNotificationCenter()
+        center.dropAuthorizationStatusCallback = true
+        let adapter = SupplementNotificationAdapter(center: center, operationTimeout: 0.01)
+        let expectation = expectation(description: "authorization timeout")
+        var callbacks = 0
+        var status: SupplementNotificationAuthorizationStatus?
+        adapter.authorizationStatus {
+            callbacks += 1
+            status = $0
+            expectation.fulfill()
+        }
+
+        wait(for: [expectation], timeout: 1)
+        XCTAssertEqual(callbacks, 1)
+        XCTAssertEqual(status, .unknown(-1))
+    }
+
+    func testDuplicateAuthorizationStatusCallbacksAreReducedToOne() {
+        let center = FakeSupplementNotificationCenter()
+        center.duplicateAuthorizationStatusCallback = true
+        let adapter = SupplementNotificationAdapter(center: center, operationTimeout: 0.01)
+        var callbacks = 0
+        var status: SupplementNotificationAuthorizationStatus?
+        adapter.authorizationStatus {
+            callbacks += 1
+            status = $0
+        }
+
+        XCTAssertEqual(callbacks, 1)
+        XCTAssertEqual(status, .authorized)
+    }
+
+    func testLostAuthorizationRequestCallbackFailsWithoutHanging() {
+        let center = FakeSupplementNotificationCenter()
+        center.dropAuthorizationRequestCallback = true
+        let adapter = SupplementNotificationAdapter(center: center, operationTimeout: 0.01)
+        let expectation = expectation(description: "authorization request timeout")
+        var output: Result<Bool, SupplementNotificationAdapterError>?
+        adapter.requestAuthorization {
+            output = $0
+            expectation.fulfill()
+        }
+
+        wait(for: [expectation], timeout: 1)
+        XCTAssertEqual(output, .failure(.operationTimedOut))
+    }
+
+    func testLostPendingCallbackFailsWithoutClaimingReconciliation() throws {
+        let center = FakeSupplementNotificationCenter()
+        center.dropPendingCallback = true
+        let adapter = SupplementNotificationAdapter(center: center, operationTimeout: 0.01)
+        let expectation = expectation(description: "pending timeout")
+        var output: Result<SupplementNotificationReconciliation, SupplementNotificationAdapterError>?
+        adapter.reconcile(plan: notificationPlan([try intent()]), now: now) {
+            output = $0
+            expectation.fulfill()
+        }
+
+        wait(for: [expectation], timeout: 1)
+        XCTAssertEqual(output, .failure(.operationTimedOut))
+    }
+
+    func testLostAddCallbackFailsAndLateOrDuplicateCallbacksCannotClaimSuccess() throws {
+        let first = try intent()
+        let second = try intent(index: 1)
+        let center = FakeSupplementNotificationCenter()
+        center.dropAddCallbacks = [first.identifier]
+        center.duplicateAddCallbacks = [second.identifier]
+        let adapter = SupplementNotificationAdapter(center: center, operationTimeout: 0.01)
+        let expectation = expectation(description: "add timeout")
+        var callbacks = 0
+        var output: Result<SupplementNotificationReconciliation, SupplementNotificationAdapterError>?
+        adapter.reconcile(plan: notificationPlan([first, second]), now: now) {
+            callbacks += 1
+            output = $0
+            expectation.fulfill()
+        }
+
+        wait(for: [expectation], timeout: 1)
+        XCTAssertEqual(callbacks, 1)
+        XCTAssertEqual(output, .failure(.operationTimedOut))
+    }
+
+    func testDuplicatePendingCallbackProducesExactlyOneFinalCompletion() throws {
+        let center = FakeSupplementNotificationCenter()
+        center.duplicatePendingCallback = true
+        let adapter = SupplementNotificationAdapter(center: center, operationTimeout: 0.05)
+        let expectation = expectation(description: "duplicate pending callback")
+        var callbacks = 0
+        var output: Result<SupplementNotificationReconciliation, SupplementNotificationAdapterError>?
+        adapter.reconcile(plan: notificationPlan([try intent()]), now: now) {
+            callbacks += 1
+            output = $0
+            expectation.fulfill()
+        }
+
+        wait(for: [expectation], timeout: 1)
+        XCTAssertEqual(callbacks, 1)
+        guard case .success(let reconciliation)? = output else {
+            return XCTFail("expected one successful reconciliation")
+        }
+        XCTAssertEqual(reconciliation.pendingOutcome, .reconciled)
+    }
+
+    func testLateAuthorizationPendingAndAddCallbacksAfterGlobalTimeoutAreIgnored() throws {
+        let configurations: [(String, (FakeSupplementNotificationCenter) -> Void)] = [
+            ("authorization", { $0.lateAuthorizationStatusCallback = true }),
+            ("pending", { $0.latePendingCallback = true }),
+            ("add", { $0.lateAddCallbacks = [try! self.intent().identifier] }),
+        ]
+
+        for (label, configure) in configurations {
+            let center = FakeSupplementNotificationCenter()
+            configure(center)
+            let adapter = SupplementNotificationAdapter(center: center, operationTimeout: 0.01)
+            let expectation = expectation(description: "global timeout \(label)")
+            let callbackLock = NSLock()
+            var callbacks = 0
+            var output: Result<SupplementNotificationReconciliation, SupplementNotificationAdapterError>?
+            adapter.reconcile(plan: notificationPlan([try intent()]), now: now) {
+                callbackLock.lock()
+                callbacks += 1
+                output = $0
+                callbackLock.unlock()
+                expectation.fulfill()
+            }
+
+            wait(for: [expectation], timeout: 1)
+            Thread.sleep(forTimeInterval: center.lateCallbackDelay * 2)
+            callbackLock.lock()
+            let finalCallbacks = callbacks
+            let finalOutput = output
+            callbackLock.unlock()
+            XCTAssertEqual(finalCallbacks, 1, label)
+            XCTAssertEqual(finalOutput, .failure(.operationTimedOut), label)
+        }
+    }
+
+    func testGlobalTimeoutAfterPartialMutationNeverClaimsSuccess() throws {
+        let intents = try (0..<4).map { try intent(index: $0) }
+        let center = FakeSupplementNotificationCenter()
+        center.dropAddCallbacks = Set(intents.dropFirst().map(\.identifier))
+        let adapter = SupplementNotificationAdapter(center: center, operationTimeout: 0.02)
+        let expectation = expectation(description: "partial mutation timeout")
+        var callbacks = 0
+        var output: Result<SupplementNotificationReconciliation, SupplementNotificationAdapterError>?
+        adapter.reconcile(plan: notificationPlan(intents), now: now) {
+            callbacks += 1
+            output = $0
+            expectation.fulfill()
+        }
+
+        wait(for: [expectation], timeout: 1)
+        XCTAssertEqual(callbacks, 1)
+        XCTAssertEqual(output, .failure(.operationTimedOut))
+        XCTAssertEqual(center.addedRequests.count, 2, "one successful add and one in-flight add only")
+        XCTAssertNotNil(center.pendingRequests.first { $0.identifier == intents[0].identifier })
+    }
+
+    func testSixtyFourLostAddsShareOneReconciliationDeadline() throws {
+        let intents = try (0..<64).map { try intent(index: $0) }
+        let center = FakeSupplementNotificationCenter()
+        center.dropAddCallbacks = Set(intents.map(\.identifier))
+        let timeout: TimeInterval = 0.02
+        let adapter = SupplementNotificationAdapter(center: center, operationTimeout: timeout)
+        let expectation = expectation(description: "bounded add chain")
+        let started = Date()
+        var callbacks = 0
+        var output: Result<SupplementNotificationReconciliation, SupplementNotificationAdapterError>?
+        adapter.reconcile(plan: notificationPlan(intents), now: now) {
+            callbacks += 1
+            output = $0
+            expectation.fulfill()
+        }
+
+        wait(for: [expectation], timeout: 1)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 0.3)
+        XCTAssertEqual(callbacks, 1)
+        XCTAssertEqual(output, .failure(.operationTimedOut))
+        XCTAssertEqual(center.addedRequests.count, 1)
+    }
+
+    func testFiniteOutOfRangeTokenDateIsRejectedWithoutIntegerTrap() {
+        let extreme = Date(timeIntervalSinceReferenceDate: Double.greatestFiniteMagnitude)
+        XCTAssertThrowsError(
+            try SupplementNotificationActionToken.make(
+                occurrenceID: "magnesium-200",
+                fireDate: extreme
+            )
+        ) { error in
+            XCTAssertEqual(error as? SupplementNotificationActionTokenError, .invalidFireDate)
+        }
+        XCTAssertThrowsError(
+            try SupplementNotificationIntent(
+                identifier: "lifeos.supplement.occurrence.magnesium-200.2026-08-09.15-40",
+                scheduleIdentifier: "lifeos.supplement.schedule.magnesium-200",
+                occurrenceIdentifier: "magnesium-200.2026-08-09.15-40",
+                planID: "magnesium-200",
+                fireDate: extreme,
+                localDate: "2026-08-09",
+                localTime: "15:40",
+                timeZoneIdentifier: "Europe/Berlin",
+                title: "Reminder",
+                body: "Take it.",
+                isPrivate: true,
+                resolution: .exactLocalTime
+            )
+        )
+    }
+
     func testNonObservedPlanEvaluationIsRejected() throws {
         let output = result(
             SupplementNotificationAdapter(center: FakeSupplementNotificationCenter()),
@@ -406,6 +617,17 @@ private final class FakeSupplementNotificationCenter: SupplementNotificationCent
     var pendingRequests: [UNNotificationRequest]
     var pendingError: Error?
     var addFailures: [String: Error]
+    var dropAuthorizationStatusCallback = false
+    var duplicateAuthorizationStatusCallback = false
+    var lateAuthorizationStatusCallback = false
+    var dropAuthorizationRequestCallback = false
+    var dropPendingCallback = false
+    var duplicatePendingCallback = false
+    var latePendingCallback = false
+    var dropAddCallbacks: Set<String> = []
+    var duplicateAddCallbacks: Set<String> = []
+    var lateAddCallbacks: Set<String> = []
+    let lateCallbackDelay: TimeInterval = 0.05
     private(set) var addedRequests: [UNNotificationRequest] = []
     private(set) var removedIdentifiers: [String] = []
 
@@ -426,7 +648,18 @@ private final class FakeSupplementNotificationCenter: SupplementNotificationCent
     func getAuthorizationStatus(
         completion: @escaping (SupplementNotificationAuthorizationStatus) -> Void
     ) {
+        if lateAuthorizationStatusCallback {
+            let status = authorizationStatus
+            DispatchQueue.global().asyncAfter(deadline: .now() + lateCallbackDelay) {
+                completion(status)
+            }
+            return
+        }
+        guard !dropAuthorizationStatusCallback else { return }
         completion(authorizationStatus)
+        if duplicateAuthorizationStatusCallback {
+            completion(authorizationStatus)
+        }
     }
 
     func requestAuthorization(
@@ -435,6 +668,7 @@ private final class FakeSupplementNotificationCenter: SupplementNotificationCent
     ) {
         authorizationRequestCount += 1
         authorizationOptions = options
+        guard !dropAuthorizationRequestCallback else { return }
         completion(authorizationRequestResult)
     }
 
@@ -445,22 +679,52 @@ private final class FakeSupplementNotificationCenter: SupplementNotificationCent
     func getPendingNotificationRequests(
         completion: @escaping (Result<[UNNotificationRequest], Error>) -> Void
     ) {
+        if latePendingCallback {
+            let pending = pendingRequests
+            DispatchQueue.global().asyncAfter(deadline: .now() + lateCallbackDelay) {
+                completion(.success(pending))
+            }
+            return
+        }
+        guard !dropPendingCallback else { return }
         if let pendingError {
             completion(.failure(pendingError))
         } else {
+            completion(.success(pendingRequests))
+        }
+        if duplicatePendingCallback {
             completion(.success(pendingRequests))
         }
     }
 
     func add(_ request: UNNotificationRequest, completion: @escaping (Error?) -> Void) {
         addedRequests.append(request)
+        if lateAddCallbacks.contains(request.identifier) {
+            pendingRequests.removeAll { $0.identifier == request.identifier }
+            pendingRequests.append(request)
+            DispatchQueue.global().asyncAfter(deadline: .now() + lateCallbackDelay) {
+                completion(nil)
+            }
+            return
+        }
+        if dropAddCallbacks.contains(request.identifier) {
+            pendingRequests.removeAll { $0.identifier == request.identifier }
+            pendingRequests.append(request)
+            return
+        }
         if let error = addFailures[request.identifier] {
             completion(error)
+            if duplicateAddCallbacks.contains(request.identifier) {
+                completion(error)
+            }
             return
         }
         pendingRequests.removeAll { $0.identifier == request.identifier }
         pendingRequests.append(request)
         completion(nil)
+        if duplicateAddCallbacks.contains(request.identifier) {
+            completion(nil)
+        }
     }
 
     func removePendingNotificationRequests(withIdentifiers identifiers: [String]) {

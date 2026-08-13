@@ -56,6 +56,14 @@ struct LifeOSApp: App {
     init() {
         let enabled = ProcessInfo.processInfo.arguments.contains("-LifeOSVisualFixtures")
         usesVisualFixtures = enabled
+#if os(iOS)
+        if !enabled {
+            // UserNotifications keeps only a weak delegate reference.  The
+            // shared installer retains the production durable delegate and
+            // makes action delivery valid after background/terminated launch.
+            SupplementNotificationDelegate.install()
+        }
+#endif
         let cachedUsage = enabled ? nil : SharedSnapshotStore.read()
         _usageCoordinator = StateObject(wrappedValue: UsageCoordinator(
             initialProviders: cachedUsage?.providers ?? [],

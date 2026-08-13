@@ -208,7 +208,8 @@ final class SupplementNotificationPermissionCoordinatorTests: XCTestCase {
         let snoozedTrigger = try XCTUnwrap(snoozed.trigger as? UNCalendarNotificationTrigger)
         XCTAssertEqual(snoozed.identifier, original.identifier)
         XCTAssertNotEqual(snoozedTrigger.dateComponents, originalTrigger.dateComponents)
-        XCTAssertEqual(coordinator.schedulingState, .reconciled(addedCount: 1, removedCount: 0, pendingCount: 1))
+        XCTAssertEqual(center.removedIdentifiers, [original.identifier])
+        XCTAssertEqual(coordinator.schedulingState, .reconciled(addedCount: 1, removedCount: 1, pendingCount: 1))
 
         _ = try session.apply(
             .taken,
