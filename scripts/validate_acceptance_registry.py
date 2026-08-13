@@ -1271,6 +1271,9 @@ def validate_registry(
     if producing_commit is not None and not SHA_RE.fullmatch(str(producing_commit)):
         errors.append(f"invalid legacy registry-producing commit {producing_commit!r}")
     if state == "FROZEN":
+        unresolved = materialised.get("unresolved_scope_decisions")
+        if not isinstance(unresolved, list) or unresolved:
+            errors.append("FROZEN registry requires an explicit empty unresolved_scope_decisions list")
         if not _git_repository_available(repo_root):
             errors.append("FROZEN registry requires a real Git repository for immutable verification")
         frozen_hash = materialised.get("frozen_registry_sha256")

@@ -1,8 +1,8 @@
 # LifeOS acceptance registry
 
 State: **UNFROZEN — SCORING PROHIBITED**
-Created: 2026-08-13 from the binding Design repository and three independent
-read-only audits of app commit `32fbdfc`.
+Created: 2026-08-13 from the binding Design repository and independent source,
+contract, and evidence audits through app commit `f24388a`.
 
 This file is the denominator for the 95% checkpoint after T0 completes. Until
 every leaf has an exact acceptance statement, evidence type, owner, severity,
@@ -56,7 +56,7 @@ each table row into a leaf with the complete contract: `id`, `aliases`,
 `workstream`, `owner`, `severity`, exact `source` path(s), exact `acceptance`,
 `evidence_types`, `evidence_path`, `evidence_sha256`, `producing_sha`, `threshold`,
 `blocker`, and `status`, plus a bounded `claim_kind` enum.
-`implementation_baseline_commit` (`32fbdfc`) is the audited app baseline;
+`implementation_baseline_commit` (`f24388a`) is the audited app baseline;
 the legacy nullable `registry_producing_commit` field is retained only for
 schema compatibility and is not a trust anchor. The tracked `HEAD` blob proves
 the frozen registry definition, while each accepted row's `producing_sha` (E)
@@ -88,55 +88,55 @@ are style-only and enforced through `UX-*`, not feature leaves.
 |---|---|---:|---|---|
 | BF-0382 | Transparent LifeOS load/strain gauge, inputs, reset/explanation; no Bevel formula claim | P0 | foundation | unit + device + visual |
 | BF-0383 | Source-labelled recovery/readiness, wake timing, HRV explanation | P0 | foundation | unit + device + visual |
-| BF-0384 | Date/share/profile/activity/weather plus Load/Recovery/Sleep/coaching/Stress/Energy/Nutrition routes | P0 | foundation | ui-runtime + visual |
+| BF-0384 | Date/share/profile/activity/weather plus Load/Recovery/Sleep/coaching/Stress/Energy/Nutrition routes | P0 | foundation | integration + ui-runtime + visual |
 | BF-0385 | Macro/glucose surface plus six independently sourced Health Monitor metrics | P0 | foundation | integration + device + visual |
 | BF-0386 | Health timeline rows, routing, reorder/filter/edit persistence | P1 | foundation | integration + ui-runtime |
-| BF-0387 | Journal week/date navigation, pinned mood and daytime tags | P1 | foundation | unit + ui-runtime + visual |
+| BF-0387 | Journal week/date navigation, pinned mood and daytime tags | P1 | foundation | unit + integration + ui-runtime + visual |
 | BF-0388 | Journal night/day tags plus automatic goals with provenance | P0 | foundation | unit + integration |
-| BF-0389 | Automatic goal completed/failed/neutral truth states | P0 | foundation | unit + visual |
-| BF-0390 | Remaining goals, exceeded/calibrating semantics, date selection | P0 | foundation | unit + visual |
-| BF-0391 | 30-day activity calendar/counts/chart and source-defined performance target | P1 | foundation | unit + ui-runtime + visual |
+| BF-0389 | Automatic goal completed/failed/neutral truth states | P0 | foundation | unit + integration + visual |
+| BF-0390 | Remaining goals, exceeded/calibrating semantics, date selection | P0 | foundation | unit + integration + visual |
+| BF-0391 | 30-day activity calendar/counts/chart and source-defined performance target | P1 | foundation | unit + integration + ui-runtime + visual |
 | BF-0392 | Cardio load/focus/recovery and Strength volume with reviewed units | P0 | foundation | unit + device |
-| BF-0393 | Strength anatomy/groups, progress, templates and add workflow | P1 | foundation | unit + ui-runtime + visual |
+| BF-0393 | Strength anatomy/groups, progress, templates and add workflow | P1 | foundation | unit + integration + ui-runtime + visual |
 | BF-0394 | Biology gated age/date/radial and biomarker navigation | P0 | foundation | unit + device + visual |
 | BF-0395 | Weight/HRV/RHR/body-fat/fat-free/VO2 trends and show-all | P0 | foundation | integration + device |
-| BF-0396 | Load detail/date/target/duration/energy/coaching/workout drilldown | P1 | foundation | unit + ui-runtime + visual |
-| BF-0397 | Expandable HR zones 0–5 with reconciled durations/bpm/range | P0 | foundation | unit + ui-runtime |
-| BF-0398 | Load/duration/day-HR/energy/steps trend cards and source-defined status | P0 | foundation | unit + visual |
-| BF-0399 | Recovery unavailable state, why-no-data, insights and empty timeline | P0 | foundation | ui-runtime + visual |
+| BF-0396 | Load detail/date/target/duration/energy/coaching/workout drilldown | P1 | foundation | unit + integration + ui-runtime + visual |
+| BF-0397 | Expandable HR zones 0–5 with reconciled durations/bpm/range | P0 | foundation | unit + integration + ui-runtime |
+| BF-0398 | Load/duration/day-HR/energy/steps trend cards and source-defined status | P0 | foundation | unit + integration + visual |
+| BF-0399 | Recovery unavailable state, why-no-data, insights and empty timeline | P0 | foundation | integration + ui-runtime + visual |
 | BF-0400 | Six independently sourced recovery trends, range/date/detail | P0 | foundation | integration + visual |
-| BF-0401 | Sleep quality/duration/time-in-bed semantics, why-no-data, need/wind-down | P0 | foundation | unit + visual |
+| BF-0401 | Sleep quality/duration/time-in-bed semantics, why-no-data, need/wind-down | P0 | foundation | unit + integration + visual |
 | BF-0402 | Typed sleep interval, wind-down/target/wake/need radial and timeline | P0 | foundation | unit + device + visual |
-| BF-0403 | Meaningful range-specific sleep/REM/deep/HR-drop/balance trends | P0 | foundation | unit + visual |
-| BF-0404 | Sleep-balance/wake/onset continuation with honest empty states | P0 | foundation | unit + visual |
-| BF-0405 | Stress hero, HRV/HR/coaching and interpretable daily chart | P1 | foundation | unit + visual |
-| BF-0406 | Stress month calendar/rings/navigation/today/info | P1 | foundation | ui-runtime + visual |
-| BF-0407 | Intraday 0–100 chart, time axis, duration and reconciled bands | P0 | foundation | unit + visual |
-| BF-0408 | Stress/non-activity/sleep-stress trends with independent availability | P0 | foundation | unit + visual |
-| BF-0409 | Stress tabs, average, ranges, calendar navigation and scrubbing | P1 | foundation | ui-runtime + visual |
-| BF-0410 | Source-defined stress bands, multi-window analysis and resources | P0 | foundation | unit + visual |
-| BF-0411 | Non-activity stress drilldown parity and range analysis | P1 | foundation | ui-runtime + visual |
-| BF-0412 | Non-activity resources/explanation and provenance | P1 | foundation | source + visual |
-| BF-0413 | Energy Reserve level/charge/discharge/coaching/daily chart with uncertainty | P0 | foundation | unit + visual |
+| BF-0403 | Meaningful range-specific sleep/REM/deep/HR-drop/balance trends | P0 | foundation | unit + integration + visual |
+| BF-0404 | Sleep-balance/wake/onset continuation with honest empty states | P0 | foundation | unit + integration + visual |
+| BF-0405 | Stress hero, HRV/HR/coaching and interpretable daily chart | P1 | foundation | unit + integration + visual |
+| BF-0406 | Stress month calendar/rings/navigation/today/info | P1 | foundation | integration + ui-runtime + visual |
+| BF-0407 | Intraday 0–100 chart, time axis, duration and reconciled bands | P0 | foundation | unit + integration + visual |
+| BF-0408 | Stress/non-activity/sleep-stress trends with independent availability | P0 | foundation | unit + integration + visual |
+| BF-0409 | Stress tabs, average, ranges, calendar navigation and scrubbing | P1 | foundation | integration + ui-runtime + visual |
+| BF-0410 | Source-defined stress bands, multi-window analysis and resources | P0 | foundation | unit + integration + visual |
+| BF-0411 | Non-activity stress drilldown parity and range analysis | P1 | foundation | integration + ui-runtime + visual |
+| BF-0412 | Non-activity resources/explanation and provenance | P1 | foundation | source + integration + visual |
+| BF-0413 | Energy Reserve level/charge/discharge/coaching/daily chart with uncertainty | P0 | foundation | unit + integration + visual |
 | BF-0414 | Energy intraday chart and expenditure/activity event reconciliation | P0 | foundation | integration + visual |
 | BF-0415 | Nutrition quality/protocol/library/goals with honest locked state | P0 | foundation | integration + visual |
-| BF-0416 | Macro units/progress, net-energy sign convention and quality contributions | P0 | foundation | unit + visual |
+| BF-0416 | Macro units/progress, net-energy sign convention and quality contributions | P0 | foundation | unit + integration + visual |
 | BF-0417 | Food-quality categories and explicit glucose unavailable/observed state | P0 | foundation | integration + visual |
 | BF-0418 | Durable meal timeline, empty meal, ranges and trends navigation | P0 | foundation | integration + ui-runtime |
 | BF-0419 | Nutrition/macro/net-energy/glucose trends with independent empty states | P0 | foundation | integration + visual |
-| BF-0420 | Macro drilldown/date/tabs/chart/ranges/average-total semantics | P1 | foundation | unit + ui-runtime |
-| BF-0421 | Macro week table across periods with average/total reconciliation | P1 | foundation | unit + visual |
+| BF-0420 | Macro drilldown/date/tabs/chart/ranges/average-total semantics | P1 | foundation | unit + integration + ui-runtime |
+| BF-0421 | Macro week table across periods with average/total reconciliation | P1 | foundation | unit + integration + visual |
 | BF-0422 | Net-energy eaten/burned chart, ranges and analysis | P0 | foundation | integration + visual |
-| BF-0423 | Net-energy multi-window table and deficit/average/total semantics | P0 | foundation | unit + visual |
-| BF-0424 | Performance target uncertainty/chart/zone/status breakdown | P0 | foundation | unit + visual |
-| BF-0425 | Cardio-load trend/status breakdown with calibrating/no-data truth | P0 | foundation | unit + visual |
-| BF-0426 | Cardio-focus filters/splits/trends/no-data | P0 | foundation | unit + ui-runtime |
-| BF-0427 | Durable hydration day/history/none/add/settings workflow | P1 | missing | integration + ui-runtime |
-| BF-0428 | Hydration add/edit quantity/unit/time/journal confirmation | P1 | missing | unit + ui-runtime |
+| BF-0423 | Net-energy multi-window table and deficit/average/total semantics | P0 | foundation | unit + integration + visual |
+| BF-0424 | Performance target uncertainty/chart/zone/status breakdown | P0 | foundation | unit + integration + visual |
+| BF-0425 | Cardio-load trend/status breakdown with calibrating/no-data truth | P0 | foundation | unit + integration + visual |
+| BF-0426 | Cardio-focus filters/splits/trends/no-data | P0 | foundation | unit + integration + ui-runtime |
+| BF-0427 | Durable hydration day/history/none/add/settings workflow | P1 | foundation | integration + ui-runtime |
+| BF-0428 | Hydration add/edit quantity/unit/time/journal confirmation | P1 | foundation | unit + integration + ui-runtime |
 | BF-0429 | Hydration goal/preset/nightly reminder persistence | P1 | missing | integration + device |
-| BF-0430 | Caffeine history/none/quick/custom workflow | P1 | missing | integration + ui-runtime |
+| BF-0430 | Caffeine history/none/quick/custom workflow | P1 | foundation | integration + ui-runtime |
 | BF-0431 | Caffeine goal/quick/nightly/recommended-context settings | P1 | missing | integration + device |
-| BF-0432 | Alcohol history/alcohol-free/none/quick/custom/settings workflow | P1 | missing | integration + ui-runtime |
+| BF-0432 | Alcohol history/alcohol-free/none/quick/custom/settings workflow | P1 | foundation | integration + ui-runtime |
 | BF-0433 | Durable historical Active/Sick/Injured/Training break annotation and recomputation audit | P0 | foundation | unit + integration |
 
 ## B. Revolut Finance feature rows — 21 scored leaves
@@ -148,25 +148,25 @@ archived reference matrix.
 |---|---|---:|---|---|
 | RF-01 | Finance overview: search/profile, linked accounts, spend, watchlist, navigation | P0 | foundation | live-readonly + ui-runtime + visual |
 | RF-02 | Travel globe/map, percent/country/trip counts, auto/manual add, Reduce Motion | P1 | missing | integration + ui-runtime + visual |
-| RF-03 | Analytics overview: wealth, spending-abroad and working Tool routes | P1 | foundation | ui-runtime |
+| RF-03 | Analytics overview: wealth, spending-abroad and working Tool routes | P1 | missing | integration + ui-runtime |
 | RF-04 | Durable validated budget amount/cycle setup | P0 | missing | unit + integration + ui-runtime |
 | RF-05 | Automatic income-sorting CRUD and deterministic allocation preview | P0 | missing | unit + integration |
-| RF-06 | Wealth allocation categories, percentages, add/consent flow | P0 | foundation | live-readonly + ui-runtime |
-| RF-07 | Wealth observations/projection data, axes and exact-value semantics | P0 | foundation | unit + ui-runtime + visual |
+| RF-06 | Wealth allocation categories, percentages, add/consent flow | P0 | missing | live-readonly + ui-runtime |
+| RF-07 | Wealth observations/projection data, axes and exact-value semantics | P0 | missing | unit + integration + ui-runtime + visual |
 | RF-08 | Income line/bar/ring modes, ranges, weekly bars and category management | P0 | missing | integration + ui-runtime + visual |
-| RF-09 | Income category totals/count/percent/transaction drilldown | P0 | foundation | unit + ui-runtime |
-| RF-10 | Net cash flow income/spend series, signed categories and periods | P0 | foundation | unit + visual |
-| RF-11 | Spending modes/categories/percent/count/transactions | P0 | foundation | unit + ui-runtime + visual |
+| RF-09 | Income category totals/count/percent/transaction drilldown | P0 | foundation | unit + integration + ui-runtime |
+| RF-10 | Net cash flow income/spend series, signed categories and periods | P0 | foundation | unit + integration + visual |
+| RF-11 | Spending modes/categories/percent/count/transactions | P0 | foundation | unit + integration + ui-runtime + visual |
 | RF-12 | Back/navigation preserves selected Finance context | P1 | foundation | ui-runtime |
 | RF-13 | Income/expense tracking preferences, frequency/date, save/cancel | P1 | missing | integration + ui-runtime |
-| RF-14 | Income selected amount/category updates across mode/range | P1 | missing | ui-runtime + visual |
-| RF-15 | Income category ring and timestamped merchant/source transactions | P0 | foundation | unit + ui-runtime |
-| RF-16 | Selected-day/value data semantics and accessible textual summary | P1 | foundation | unit + ui-runtime |
-| RF-17 | Spending period average/category summary and restored context | P1 | foundation | unit + ui-runtime |
-| RF-18 | Spending merchant/date/amount/source drilldown and reconciliation | P0 | foundation | unit + ui-runtime |
+| RF-14 | Income selected amount/category updates across mode/range | P1 | missing | integration + ui-runtime + visual |
+| RF-15 | Income category ring and timestamped merchant/source transactions | P0 | foundation | unit + integration + ui-runtime |
+| RF-16 | Selected-day/value data semantics and accessible textual summary | P1 | foundation | unit + integration + ui-runtime |
+| RF-17 | Spending period average/category summary and restored context | P1 | foundation | unit + integration + ui-runtime |
+| RF-18 | Spending merchant/date/amount/source drilldown and reconciliation | P0 | foundation | unit + integration + ui-runtime |
 | RF-19 | Net-cash-flow graph/bar switch and category selection | P1 | foundation | ui-runtime + visual |
-| RF-20 | Overview wealth/travel scroll context and routes | P1 | foundation | ui-runtime |
-| RF-21 | Wealth range/asset selection retains context through Tools/end-to-end routes | P1 | foundation | ui-runtime + visual |
+| RF-20 | Overview wealth/travel scroll context and routes | P1 | missing | ui-runtime |
+| RF-21 | Wealth range/asset selection retains context through Tools/end-to-end routes | P1 | missing | ui-runtime + visual |
 
 ### Revolut motion quality — six additional scored leaves
 
@@ -252,20 +252,20 @@ and a new registry hash.
 | US-01 | Usage route, durable history, source-truth metadata, hero shell, honesty banner, tabs, account switcher, and range controls (expanded into atomic leaves below) | P0 | foundation | integration + ui-runtime |
 | US-02 | Usage facts, provider capability labels, Facts rows, projection/bar charts, selection controls, model mix, heatmap, and honest states (expanded into atomic leaves below) | P0 | foundation | unit + integration |
 | NU-01 | Manual/barcode/photo proposals never enter totals/sync/widgets before confirmation | P0 | foundation | unit + integration |
-| NU-02 | Food-photo held-out accuracy, correction lineage, consent, deletion and retention pass | P0 | missing | integration + operator |
-| NU-03 | Gateway-owned Open Food Facts barcode/package lookup validates and provenance-labels responses; honest misses fall back to manual/package-label entry without fabricated nutrition | P0 | missing | integration + live-readonly |
+| NU-02 | Food-photo held-out accuracy, correction lineage, consent, deletion and retention pass | P0 | foundation | integration + operator |
+| NU-03 | Gateway-owned Open Food Facts barcode/package lookup validates and provenance-labels responses; honest misses fall back to manual/package-label entry without fabricated nutrition | P0 | foundation | integration + live-readonly |
 | SU-01 | Supplement plans/schedules/actions/inventory/refills persist and sync idempotently | P0 | foundation | integration + device |
-| SU-02 | Launch-time notification delegate implements `willPresent` and `didReceive`; validates occurrence, persists idempotently before completion, handles foreground/background/terminated Taken/Snooze/Skip, relaunch/DST/denial/lock screen | P0 | missing | device + integration |
+| SU-02 | Launch-time notification delegate implements `willPresent` and `didReceive`; validates occurrence, persists idempotently before completion, handles foreground/background/terminated Taken/Snooze/Skip, relaunch/DST/denial/lock screen | P0 | foundation | device + integration |
 | SY-01 | BitLocker C/D verified before deployment/credentials | P0 | blocked-external | operator |
 | SY-02 | Tracked gateway identity/ACL/loopback/direct-listener/forged-header negatives pass | P0 | missing | security-negative |
 | SY-03 | Dual-auth canary/rollback passes before transitional bearer removal | P0 | missing | security-negative + operator |
 | SY-04 | Exact private host and App Group injected only by signed release configuration | P0 | blocked-external | device + security-negative |
 | SY-05 | Calendar server ETag/If-Match conflict returns truth; bounded merge retry, no blind PUT | P0 | missing | integration |
 | DT-02 | Encryption/key custody/protection/atomicity/backup/export/delete/locked-device proven | P0 | missing | device + integration |
-| DT-03 | Rolling 12-month retention: max 3 images/meal, originals 90d, detail 365d, derivatives <=500 KiB; 8/9 GiB warnings, 10 GiB ingest gate; all storage classes; transactional compaction/export/provenance and never silent deletion | P0 | missing | integration + performance |
-| SG-01 | Release xcconfig fails on placeholders/unknown/empty/unresolved/fixture flags | P0 | missing | source + integration |
+| DT-03 | Rolling 12-month retention: max 3 images/meal, originals 90d, detail 365d, derivatives <=500 KiB; 8/9 GiB warnings, 10 GiB ingest gate; all storage classes; transactional compaction/export/provenance and never silent deletion | P0 | foundation | integration + performance |
+| SG-01 | Release xcconfig fails on placeholders/unknown/empty/unresolved/fixture flags | P0 | foundation | source + integration |
 | SG-02 | Signed apps/extensions pass strict signature/entitlement/App Group inspection | P0 | blocked-external | device |
-| QA-01 | Committed isolated Xcode schemes/plans run with nonzero expected test counts | P0 | missing | integration |
+| QA-01 | Committed isolated Xcode schemes/plans run with nonzero expected test counts | P0 | foundation | integration |
 | QA-02 | Pointer runner materialization is isolated; cancellation/zero-test never passes | P0 | foundation | ui-runtime |
 | QA-03 | Accessibility audit, Dynamic Type, VoiceOver, Reduce Motion pass thresholds | P0 | missing | device |
 | QA-04 | Launch/render/scroll/storage performance pass frozen thresholds | P1 | missing | performance |
@@ -300,8 +300,8 @@ not-found/manual package-label fallback.
 | CL-02 | Clipper ingestion→gateway→typed API/client preserves integer cents, provenance, partial/stale and safe retry | P0 | missing | integration + live-readonly |
 | CL-03 | Clipper Overview/detail workflow and connection/revoke/error states pass without fabricated normal data | P0 | foundation | ui-runtime + live-readonly |
 | PR-01 | Fixture/demo routes are unreachable through production app/gateway config; `/health` cannot resemble live product data | P0 | missing | integration + security-negative |
-| WS-01 | Confirmed app state publishes versioned protected per-module widget snapshots and coalesced budget-aware reloads | P0 | missing | integration + device |
-| WS-02 | Widget providers read fresh/expired/locked snapshots after reload; reload is a request, never an immediate-display promise | P0 | missing | integration + device |
+| WS-01 | Confirmed app state publishes versioned protected per-module widget snapshots and coalesced budget-aware reloads | P0 | foundation | integration + device |
+| WS-02 | Widget providers read fresh/expired/locked snapshots after reload; reload is a request, never an immediate-display promise | P0 | foundation | integration + device |
 
 ## G. Per-domain authority and synchronization
 
@@ -346,12 +346,14 @@ integration evidence before that domain is live-enabled.
 ## T0 freeze checklist
 
 - [x] Re-read binding references and record the resolved Calendar platform split: iOS compact/Figma interaction layout; macOS five-view sidebar + inspector. The old `04` conflict note is stale.
-- [ ] Replace initial cross-cutting compound rows with atomic leaves.
-- [ ] Add exact source paths and acceptance text to every leaf.
-- [ ] Re-audit all `foundation`/`missing` statuses at the new producing commit.
-- [ ] Add evidence/registry validator and run its negative tests.
-- [ ] Record owners, dependencies, external-input IDs, artifact paths and SHA.
-- [ ] Record fixed per-workstream numerators/denominators and registry SHA-256.
+- [x] Replace initial cross-cutting compound rows with atomic leaves.
+- [x] Add exact source paths and acceptance text to every leaf.
+- [x] Re-audit all `foundation`/`missing` statuses at the new producing commit.
+- [x] Add evidence/registry validator and run its negative tests.
+- [x] Record owners, dependencies, and external-input IDs; accepted rows must
+  add tracked artifact paths, SHA-256, explicit result, and positive test count.
+- [x] Record fixed per-workstream numerators/denominators and workstream map.
+- [ ] Record the reviewed freeze manifest and registry SHA-256.
 - [ ] Independent Luna/max review: no duplicates, omissions, split/merge gaming,
       stale evidence, fixture-live confusion, or P0 bypass.
 - [ ] Only then change State to `FROZEN` and permit percentage reporting.
@@ -361,16 +363,15 @@ integration evidence before that domain is live-enabled.
 {
   "schema_version": 1,
   "state": "UNFROZEN",
-  "implementation_baseline_commit": "32fbdfc",
+  "implementation_baseline_commit": "f24388a82649a54ba5c9cf6567420c2d34b63fa6",
   "registry_producing_commit": null,
   "frozen_registry_sha256": null,
   "freeze_manifest": null,
-  "unresolved_scope_decisions": [
-    "The exact performance/accessibility/runtime thresholds that are not supplied by the binding plan must be frozen before State changes to FROZEN; no placeholder is counted as a pass.",
-    "The registry-producing commit is unknown until the registry and validator are reviewed and committed; 32fbdfc is implementation baseline evidence only."
-  ],
+  "unresolved_scope_decisions": [],
   "resolved_scope_decisions": [
-    "Calendar platform split: iOS follows the Figma compact/current interaction layout; macOS keeps the five-view Day/Week/Month/Timeline/Agenda sidebar plus persistent inspector layout."
+    "Calendar platform split: iOS follows the Figma compact/current interaction layout; macOS keeps the five-view Day/Week/Month/Timeline/Agenda sidebar plus persistent inspector layout.",
+    "Runtime, accessibility, storage, image-analysis, barcode, freshness, retry/replay, and responsive thresholds are fixed before freeze; no placeholder counts as a pass.",
+    "The tracked clean HEAD blob anchors the registry definition without a self-referential embedded commit; each accepted row independently anchors evidence at its producing SHA."
   ],
   "workstream_leaf_counts": {
     "Accessibility": 7,
@@ -503,10 +504,16 @@ integration evidence before that domain is live-enabled.
     "RM-03": {"atomic_key": "finance.revolut.chart-draw-motion"},
     "RF-16": {"atomic_key": "finance.revolut.scrub-value-semantics"},
     "RM-04": {"atomic_key": "finance.revolut.scrub-motion"},
-    "RF-21": {"atomic_key": "finance.revolut.range-context"},
+    "RF-21": {"atomic_key": "finance.revolut.range-context", "claim_kind": "interaction"},
     "RM-05": {"atomic_key": "finance.revolut.range-pill-motion"},
     "RF-14": {"atomic_key": "finance.revolut.selected-amount-semantics"},
     "RM-06": {"atomic_key": "finance.revolut.numeric-update-motion"},
+    "RF-12": {"claim_kind": "interaction"},
+    "RF-19": {"claim_kind": "interaction"},
+    "RF-20": {"claim_kind": "interaction"},
+    "SY-01": {"claim_kind": "operator", "threshold": "BitLocker protection status is On and percentage encrypted is 100% (Fully Encrypted) for Windows volumes C: and D: before credentials or deployment."},
+    "QA-05": {"claim_kind": "operator"},
+    "CL-01": {"claim_kind": "operator"},
     "CA-01": {"platform": "iOS"},
     "CA-02": {"platform": "iOS"},
     "CA-03": {"platform": "iOS"},
@@ -520,7 +527,7 @@ integration evidence before that domain is live-enabled.
     "CA-11": {"platform": "macOS", "source": ["design://modules/calendar/overview.md", "design://developers/design-coordination/00-READ-FIRST.md"]},
     "CA-12": {"platform": "macOS", "source": ["design://modules/calendar/overview.md", "design://developers/design-coordination/00-READ-FIRST.md"]},
     "CA-13": {"platform": "macOS", "source": ["design://modules/calendar/overview.md", "design://developers/design-coordination/00-READ-FIRST.md"]},
-    "NU-03": {"source": ["design://modules/fitness/nutrition-and-food.md", "design://developers/design-coordination/05-real-data-connectors.md", "repo://services/api/src/open-food-facts.ts", "repo://services/api/src/barcode-server.test.ts"], "atomic_key": "nutrition.barcode.open-food-facts-gateway"}
+    "NU-03": {"source": ["design://modules/fitness/nutrition-and-food.md", "design://developers/design-coordination/05-real-data-connectors.md", "repo://services/api/src/open-food-facts.ts", "repo://services/api/src/barcode-server.test.ts"], "atomic_key": "nutrition.barcode.open-food-facts-gateway", "threshold": "EAN-8, EAN-13, and UPC-A only; request/response <=256 KiB; timeout <=5s; <=15 requests/minute/IP; cache <=1000 entries; bounded retry backoff 5/15/60/300 seconds; miss or invalid response falls back to explicit manual/package-label entry."}
   },
   "split_groups": {
     "IA-03": [
@@ -529,12 +536,12 @@ integration evidence before that domain is live-enabled.
       {"id": "IA-03C", "severity": "P0", "acceptance": "Normal KPI surfaces never fabricate a value when their source is missing, stale, or unavailable.", "evidence_types": ["source", "ui-runtime"]}
     ],
     "UX-01": [
-      {"id": "UX-01A", "severity": "P1", "acceptance": "Release surfaces use black/white-led hierarchy in both themes.", "evidence_types": ["milestone-visual"]},
-      {"id": "UX-01B", "severity": "P1", "acceptance": "Semantic and brand accents are used only where a real distinction exists.", "evidence_types": ["source", "milestone-visual"]},
-      {"id": "UX-01C", "severity": "P1", "acceptance": "Gradients are restrained component treatments and no resting glow, bloom, or halo remains.", "evidence_types": ["source", "milestone-visual"]}
+      {"id": "UX-01A", "severity": "P1", "acceptance": "Release surfaces use black/white-led hierarchy in both themes.", "evidence_types": ["milestone-visual"], "evidence_profile": "interaction-layout"},
+      {"id": "UX-01B", "severity": "P1", "acceptance": "Semantic and brand accents are used only where a real distinction exists.", "evidence_types": ["source", "milestone-visual"], "evidence_profile": "interaction-layout"},
+      {"id": "UX-01C", "severity": "P1", "acceptance": "Gradients are restrained component treatments and no resting glow, bloom, or halo remains.", "evidence_types": ["source", "milestone-visual"], "evidence_profile": "interaction-layout"}
     ],
     "UX-02": [
-      {"id": "UX-02A", "severity": "P1", "acceptance": "Every Mac release area lays out correctly at the frozen narrow, default, and max widths.", "evidence_types": ["milestone-visual"]},
+      {"id": "UX-02A", "severity": "P1", "acceptance": "Every Mac release area lays out correctly at the frozen narrow, default, and max widths.", "threshold": "Mac widths 900/1200/1512/1800x982 plus physical iPhone 17 portrait", "evidence_types": ["milestone-visual"], "evidence_profile": "interaction-layout"},
       {"id": "UX-02B", "severity": "P1", "acceptance": "Responsive layouts preserve content and interaction at both themes and Reduce Motion.", "evidence_types": ["milestone-visual", "ui-runtime"]}
     ],
     "UX-03": [
@@ -558,7 +565,7 @@ integration evidence before that domain is live-enabled.
       {"id": "US-01A", "severity": "P0", "acceptance": "Usage has one Home-owned route and durable daily history across relaunch.", "evidence_types": ["integration", "ui-runtime"]},
       {"id": "US-01B", "severity": "P0", "acceptance": "Usage distinguishes observed, estimated, projected, stale, and unavailable facts.", "evidence_types": ["integration", "ui-runtime"]},
       {"id": "US-01C", "severity": "P0", "acceptance": "Usage reset, target pace, runway, streak, and credit facts derive only from retained source observations or render Not available.", "evidence_types": ["unit", "integration"]},
-      {"id": "US-01D", "severity": "P0", "acceptance": "The Usage hero shell shows remaining percent/unit, Reset, Banked resets, and freshness metadata; missing fields render Not available.", "evidence_types": ["ui-runtime", "integration"]},
+      {"id": "US-01D", "severity": "P0", "acceptance": "The Usage hero shell shows remaining percent/unit, Reset, Banked resets, and freshness metadata; missing fields render Not available.", "threshold": "Observed provider data is fresh only when observedAt is <=15 minutes old; older data is stale/refresh_due and missing data remains Not available.", "evidence_types": ["ui-runtime", "integration"]},
       {"id": "US-01E", "severity": "P0", "acceptance": "The Usage honesty banner renders confidence headline, reason, and quality tags only from provenance and never fabricates confidence.", "evidence_types": ["ui-runtime", "integration"]},
       {"id": "US-01F", "severity": "P0", "acceptance": "Graphs, Facts, and Insights tabs are present; Insights uses the truthful requires-more-history or not-connected state when no source exists.", "evidence_types": ["ui-runtime", "integration"]},
       {"id": "US-01G", "severity": "P0", "acceptance": "The graph selector and Account switcher change Usage remaining versus token activity/provider in place and update the whole screen.", "evidence_types": ["ui-runtime", "integration"]},
@@ -566,15 +573,15 @@ integration evidence before that domain is live-enabled.
     ],
     "US-02": [
       {"id": "US-02A", "severity": "P0", "acceptance": "Every displayed Usage fact maps to a sourced wire field or an explicit unavailable state.", "evidence_types": ["unit", "integration"]},
-      {"id": "US-02B", "severity": "P0", "acceptance": "Provider capability, freshness, and unsupported-state labels remain distinct and source-labelled.", "evidence_types": ["unit", "integration"]},
+      {"id": "US-02B", "severity": "P0", "acceptance": "Provider capability, freshness, and unsupported-state labels remain distinct and source-labelled.", "threshold": "Fresh <=15 minutes from observedAt; stale >15 minutes; future clock skew >5 seconds is invalid/unknown; unsupported remains unavailable.", "evidence_types": ["unit", "integration"]},
       {"id": "US-02C", "severity": "P0", "acceptance": "Facts rows for lifetime, peak daily, longest turn, current/longest streak, credits, and banked resets are sourced or Not available with account and timestamp semantics.", "evidence_types": ["ui-runtime", "integration"]},
       {"id": "US-02D", "severity": "P0", "acceptance": "The projection chart maps Target, Actual, Current estimate, and Past estimate to distinct series and styles; Past estimate is omitted when stored history is absent.", "evidence_types": ["ui-runtime", "integration"]},
       {"id": "US-02E", "severity": "P0", "acceptance": "The token-activity bar chart shows honest daily coverage and complete-day summary, with a selectable nearest bar.", "evidence_types": ["ui-runtime", "integration"]},
-      {"id": "US-02F", "severity": "P0", "acceptance": "Pointer, touch, and hover nearest-point scrubbing updates the bubble/detail row continuously with selected series, value, and date.", "evidence_types": ["ui-runtime"]},
+      {"id": "US-02F", "severity": "P0", "acceptance": "Pointer, touch, and hover nearest-point scrubbing updates the bubble/detail row continuously with selected series, value, and date.", "evidence_types": ["integration", "ui-runtime"]},
       {"id": "US-02G", "severity": "P0", "acceptance": "Keyboard previous/next stepper controls select the same chart points independently of dragging and preserve exact value/date semantics.", "evidence_types": ["ui-runtime", "device"]},
-      {"id": "US-02H", "severity": "P0", "acceptance": "Model-mix stacked capsules use the usage.primary to usage.primaryGlow tonal ramp rather than a provider palette.", "evidence_types": ["ui-runtime", "milestone-visual"]},
-      {"id": "US-02I", "severity": "P0", "acceptance": "The Usage heatmap supports tap/hover selection and dimming and uses usage.primary to usage.primaryGlow intensity.", "evidence_types": ["ui-runtime", "milestone-visual"]},
-      {"id": "US-02J", "severity": "P0", "acceptance": "Not-connected, demo, loading, and Reduce Motion states remain honest with no fabricated values and no resting glow.", "evidence_types": ["ui-runtime", "milestone-visual"]}
+      {"id": "US-02H", "severity": "P0", "acceptance": "Model-mix stacked capsules use the usage.primary to usage.primaryGlow tonal ramp rather than a provider palette.", "evidence_types": ["ui-runtime", "milestone-visual"], "claim_kind": "interaction", "evidence_profile": "interaction-layout"},
+      {"id": "US-02I", "severity": "P0", "acceptance": "The Usage heatmap supports tap/hover selection and dimming and uses usage.primary to usage.primaryGlow intensity.", "evidence_types": ["ui-runtime", "milestone-visual"], "claim_kind": "interaction", "evidence_profile": "interaction-layout"},
+      {"id": "US-02J", "severity": "P0", "acceptance": "Not-connected, demo, loading, and Reduce Motion states remain honest with no fabricated values and no resting glow.", "evidence_types": ["integration", "ui-runtime", "milestone-visual"]}
     ],
     "NU-01": [
       {"id": "NU-01A", "severity": "P0", "acceptance": "Manual meal proposals stay out of totals, sync, and widgets until explicit confirmation.", "evidence_types": ["unit", "integration"]},
@@ -582,10 +589,10 @@ integration evidence before that domain is live-enabled.
       {"id": "NU-01C", "severity": "P0", "acceptance": "Photo meal proposals stay out of totals, sync, and widgets until explicit confirmation.", "evidence_types": ["unit", "integration"]}
     ],
     "NU-02": [
-      {"id": "NU-02A", "severity": "P0", "acceptance": "A held-out weighed/labeled photo corpus has at least 80% of meals within ±20% calories.", "threshold": ">=80% of held-out meals within ±20% calories", "evidence_types": ["integration", "operator"]},
-      {"id": "NU-02B", "severity": "P0", "acceptance": "Photo corrections preserve explicit correction lineage and source provenance.", "evidence_types": ["integration"]},
-      {"id": "NU-02C", "severity": "P0", "acceptance": "Photo analysis requires explicit consent and user confirmation before durable commit.", "evidence_types": ["integration", "ui-runtime"]},
-      {"id": "NU-02D", "severity": "P0", "acceptance": "Photo originals and derived data obey the frozen deletion and retention policy.", "evidence_types": ["integration", "operator"]}
+      {"id": "NU-02A", "severity": "P0", "acceptance": "A held-out weighed/labeled photo corpus has at least 80% of meals within ±20% calories.", "threshold": ">=140 meals; >=20 meals per food class; calories >=80% within ±20%; MAPE <=25%; median <=15%; p95 <=60%; per-class >=70%; failure <=20%; macros >=70% within ±20%; macro MAPE <=30%; macro MAE protein <=10 g, carbs <=15 g, fat <=10 g; proposal-only until explicit confirmation.", "evidence_types": ["integration", "operator"], "status": "missing"},
+      {"id": "NU-02B", "severity": "P0", "acceptance": "Photo corrections preserve explicit correction lineage and source provenance.", "evidence_types": ["integration"], "status": "foundation"},
+      {"id": "NU-02C", "severity": "P0", "acceptance": "Photo analysis requires explicit consent and user confirmation before durable commit.", "evidence_types": ["integration", "ui-runtime"], "status": "foundation"},
+      {"id": "NU-02D", "severity": "P0", "acceptance": "Photo originals and derived data obey the frozen deletion and retention policy.", "evidence_types": ["integration", "operator"], "status": "missing"}
     ],
     "SU-01": [
       {"id": "SU-01A", "severity": "P0", "acceptance": "Supplement products, plans, schedules, occurrences, and inventory persist across relaunch.", "evidence_types": ["integration", "device"]},
@@ -593,19 +600,19 @@ integration evidence before that domain is live-enabled.
       {"id": "SU-01C", "severity": "P0", "acceptance": "Refill and expiry state syncs with revisions and never silently loses user actions.", "evidence_types": ["integration", "device"]}
     ],
     "SU-02": [
-      {"id": "SU-02A", "severity": "P0", "acceptance": "The launch-time notification delegate implements foreground delivery and background/terminated action delivery.", "evidence_types": ["device", "integration"]},
-      {"id": "SU-02B", "severity": "P0", "acceptance": "Notification actions validate plan and occurrence identity and reject stale or unknown actions.", "evidence_types": ["device", "integration"]},
-      {"id": "SU-02C", "severity": "P0", "acceptance": "Notification action state is persisted idempotently before the completion handler runs.", "evidence_types": ["device", "integration"]},
-      {"id": "SU-02D", "severity": "P0", "acceptance": "Foreground/background/terminated, relaunch, DST, denial, and lock-screen states are covered without fabricated adherence.", "evidence_types": ["device", "integration"]}
+      {"id": "SU-02A", "severity": "P0", "acceptance": "The launch-time notification delegate implements foreground delivery and background/terminated action delivery.", "evidence_types": ["device", "integration"], "status": "missing"},
+      {"id": "SU-02B", "severity": "P0", "acceptance": "Notification actions validate plan and occurrence identity and reject stale or unknown actions.", "evidence_types": ["device", "integration"], "status": "foundation"},
+      {"id": "SU-02C", "severity": "P0", "acceptance": "Notification action state is persisted idempotently before the completion handler runs.", "evidence_types": ["device", "integration"], "status": "missing"},
+      {"id": "SU-02D", "severity": "P0", "acceptance": "Foreground/background/terminated, relaunch, DST, denial, and lock-screen states are covered without fabricated adherence.", "evidence_types": ["device", "integration"], "status": "missing"}
     ],
     "SY-02": [
-      {"id": "SY-02A", "severity": "P0", "acceptance": "The tracked gateway authenticates the intended Tailscale identity and enforces ACL authorization.", "evidence_types": ["security-negative"]},
-      {"id": "SY-02B", "severity": "P0", "acceptance": "Direct listeners and forged identity headers are rejected fail-closed.", "evidence_types": ["security-negative"]},
-      {"id": "SY-02C", "severity": "P0", "acceptance": "Unauthorized peers cannot reach protected gateway routes or mutate stored state.", "evidence_types": ["security-negative"]}
+      {"id": "SY-02A", "severity": "P0", "acceptance": "The tracked gateway authenticates the intended Tailscale identity and enforces ACL authorization.", "evidence_types": ["security-negative", "operator"], "claim_kind": "operator"},
+      {"id": "SY-02B", "severity": "P0", "acceptance": "Direct listeners and forged identity headers are rejected fail-closed.", "evidence_types": ["security-negative", "operator"], "claim_kind": "operator"},
+      {"id": "SY-02C", "severity": "P0", "acceptance": "Unauthorized peers cannot reach protected gateway routes or mutate stored state.", "evidence_types": ["security-negative", "operator"], "claim_kind": "operator"}
     ],
     "SY-03": [
-      {"id": "SY-03A", "severity": "P0", "acceptance": "Dual-auth canary accepts the new identity path while retaining the transitional bearer read-only.", "evidence_types": ["security-negative", "operator"]},
-      {"id": "SY-03B", "severity": "P0", "acceptance": "Rollback is proven before the transitional bearer can be removed.", "evidence_types": ["security-negative", "operator"]}
+      {"id": "SY-03A", "severity": "P0", "acceptance": "Dual-auth canary accepts the new identity path while retaining the transitional bearer read-only.", "threshold": "At most 3 attempts per request; replaying the same accepted mutation 10 times yields exactly 1 durable record.", "evidence_types": ["security-negative", "operator"], "claim_kind": "operator"},
+      {"id": "SY-03B", "severity": "P0", "acceptance": "Rollback is proven before the transitional bearer can be removed.", "evidence_types": ["security-negative", "operator"], "claim_kind": "operator"}
     ],
     "SY-04": [
       {"id": "SY-04A", "severity": "P0", "acceptance": "The exact private .ts.net host is injected only by signed local or CI release configuration.", "evidence_types": ["device", "security-negative"]},
@@ -614,7 +621,7 @@ integration evidence before that domain is live-enabled.
     "SY-05": [
       {"id": "SY-05A", "severity": "P0", "acceptance": "Calendar GET returns an ETag and PUT requires If-Match for the authoritative revision.", "evidence_types": ["integration"]},
       {"id": "SY-05B", "severity": "P0", "acceptance": "A revision conflict returns authoritative truth and never silently overwrites it.", "evidence_types": ["integration"]},
-      {"id": "SY-05C", "severity": "P0", "acceptance": "The client performs bounded fetch-merge-retry and has no blind PUT fallback.", "evidence_types": ["integration"]}
+      {"id": "SY-05C", "severity": "P0", "acceptance": "The client performs bounded fetch-merge-retry and has no blind PUT fallback.", "threshold": "At most 3 fetch-merge-retry attempts; replaying one accepted mutation 10 times yields exactly 1 durable record.", "evidence_types": ["integration"]}
     ],
     "DT-02": [
       {"id": "DT-02A", "severity": "P0", "acceptance": "Key custody, encryption at rest, protection class, and locked-device behavior are proven for every persisted payload.", "evidence_types": ["device", "integration"]},
@@ -622,60 +629,60 @@ integration evidence before that domain is live-enabled.
       {"id": "DT-02C", "severity": "P0", "acceptance": "Backup exclusion, export, restore, and user deletion propagate across all storage classes.", "evidence_types": ["device", "integration"]}
     ],
     "DT-03": [
-      {"id": "DT-03A", "severity": "P0", "acceptance": "Retention enforces at most three images per meal, 90-day originals, 365-day detail, and derivatives no larger than 500 KiB.", "threshold": "3 images/meal; originals <=90d; detail <=365d; derivatives <=500 KiB", "evidence_types": ["integration", "performance"]},
-      {"id": "DT-03B", "severity": "P0", "acceptance": "The 8 GiB warning, 9 GiB compaction warning, and 10 GiB ingest gate include database, WAL, cache, logs, backups, and temporary files.", "threshold": "8/9/10 GiB thresholds fire at exact configured boundaries", "evidence_types": ["integration", "performance"]},
-      {"id": "DT-03C", "severity": "P0", "acceptance": "Compaction is transactional, proves export and provenance first, and never silently deletes user truth.", "evidence_types": ["integration", "operator"]}
+      {"id": "DT-03A", "severity": "P0", "acceptance": "Retention enforces at most three images per meal, 90-day originals, 365-day detail, and derivatives no larger than 500 KiB.", "threshold": "3 images/meal; originals <=90d; detail <=365d; derivatives <=500 KiB (binary KiB)", "evidence_types": ["integration", "performance"], "status": "foundation"},
+      {"id": "DT-03B", "severity": "P0", "acceptance": "The 8 GiB warning, 9 GiB compaction warning, and 10 GiB ingest gate include database, WAL, cache, logs, backups, and temporary files.", "threshold": "8/9/10 GiB thresholds fire at exact configured binary GiB boundaries; all storage bytes are included", "evidence_types": ["integration", "performance"], "status": "foundation"},
+      {"id": "DT-03C", "severity": "P0", "acceptance": "Compaction is transactional, proves export and provenance first, and never silently deletes user truth.", "evidence_types": ["integration", "operator"], "status": "foundation"}
     ],
     "SG-01": [
-      {"id": "SG-01A", "severity": "P0", "acceptance": "Release configuration fails on placeholder App Group or host values.", "evidence_types": ["source", "integration"]},
-      {"id": "SG-01B", "severity": "P0", "acceptance": "Release configuration fails on unknown provisioning mode or empty release allowlists.", "evidence_types": ["source", "integration"]},
-      {"id": "SG-01C", "severity": "P0", "acceptance": "Release configuration fails on unresolved build variables or fixture/demo flags.", "evidence_types": ["source", "integration"]}
+      {"id": "SG-01A", "severity": "P0", "acceptance": "Release configuration fails on placeholder App Group or host values.", "evidence_types": ["source", "integration", "operator"], "status": "foundation"},
+      {"id": "SG-01B", "severity": "P0", "acceptance": "Release configuration fails on unknown provisioning mode or empty release allowlists.", "evidence_types": ["source", "integration", "operator"], "status": "foundation"},
+      {"id": "SG-01C", "severity": "P0", "acceptance": "Release configuration fails on unresolved build variables or fixture/demo flags.", "evidence_types": ["source", "integration", "operator"], "status": "foundation"}
     ],
     "SG-02": [
       {"id": "SG-02A", "severity": "P0", "acceptance": "Signed app and extension binaries pass strict signature inspection.", "evidence_types": ["release-signature", "device"]},
       {"id": "SG-02B", "severity": "P0", "acceptance": "Expanded entitlements and App Group membership match the signed release contract.", "evidence_types": ["release-signature", "device"]}
     ],
     "QA-01": [
-      {"id": "QA-01A", "severity": "P0", "acceptance": "The seven isolated schemes/test plans are committed and named: LifeOSLogic, LifeOSUI, LifeOSMacLogic, LifeOSMacUI, LifeOSWidgets, LifeOSPrereleaseIOS, and LifeOSPrereleaseMac.", "evidence_types": ["source", "integration"]},
-      {"id": "QA-01B", "severity": "P0", "acceptance": "Each lane has a runnable command, exact only-testing scope, minimum nonzero expected count, timeout, and retained result path.", "threshold": "every lane expected count >0", "evidence_types": ["integration"]}
+      {"id": "QA-01A", "severity": "P0", "acceptance": "The seven isolated schemes/test plans are committed and named: LifeOSLogic, LifeOSUI, LifeOSMacLogic, LifeOSMacUI, LifeOSWidgets, LifeOSPrereleaseIOS, and LifeOSPrereleaseMac.", "evidence_types": ["source", "integration"], "status": "foundation"},
+      {"id": "QA-01B", "severity": "P0", "acceptance": "Each lane has a runnable command, exact only-testing scope, minimum nonzero expected count, timeout, and retained result path.", "threshold": "Exact only-testing lane counts: LifeOSLogic=386, LifeOSUI=18, LifeOSMacLogic=31, LifeOSMacUI=6, LifeOSWidgets=26, LifeOSPrereleaseIOS=404, LifeOSPrereleaseMac=63; no skip/cancel; exact only-testing scope", "evidence_types": ["integration"], "status": "foundation"}
     ],
     "QA-02": [
       {"id": "QA-02A", "severity": "P0", "acceptance": "Mac UI runner materialization is isolated with inspected host, loader, and app paths before a smoke test.", "evidence_types": ["ui-runtime"]},
       {"id": "QA-02B", "severity": "P0", "acceptance": "Canceled, materialization-failed, and zero-test runs are retained as failures and never accepted.", "evidence_types": ["ui-runtime"]}
     ],
     "QA-03": [
-      {"id": "QA-03A", "severity": "P0", "acceptance": "Accessibility audit covers labels, actions, focus order, and contrast on every release area.", "evidence_types": ["device", "ui-runtime"]},
-      {"id": "QA-03B", "severity": "P0", "acceptance": "Dynamic Type and VoiceOver/custom-action alternatives preserve the critical workflows.", "evidence_types": ["device", "ui-runtime"]},
-      {"id": "QA-03C", "severity": "P0", "acceptance": "Reduce Motion removes decorative animation while preserving information and interaction.", "evidence_types": ["device", "ui-runtime"]}
+      {"id": "QA-03A", "severity": "P0", "acceptance": "Accessibility audit covers labels, actions, focus order, and contrast on every release area.", "threshold": "WCAG labels/role/value/action; contrast >=4.5:1 normal text and >=3:1 large text/UI components; charts convey distinctions without color alone", "evidence_types": ["device", "ui-runtime"]},
+      {"id": "QA-03B", "severity": "P0", "acceptance": "Dynamic Type and VoiceOver/custom-action alternatives preserve the critical workflows.", "threshold": "Maximum Dynamic Type and largest Mac text size across all P0 flows; no clipping, overlap, or lost action", "evidence_types": ["device", "ui-runtime"]},
+      {"id": "QA-03C", "severity": "P0", "acceptance": "Reduce Motion removes decorative animation while preserving information and interaction.", "threshold": "All P0 flows with Reduce Motion; no decorative animation/resting glow; transitions instant or <=100ms crossfade", "evidence_types": ["device", "ui-runtime"]}
     ],
     "QA-04": [
-      {"id": "QA-04A", "severity": "P1", "acceptance": "Launch and first-render latency meet the frozen release threshold.", "threshold": "UNRESOLVED: exact launch/first-render threshold must be recorded before FROZEN", "evidence_types": ["performance"]},
-      {"id": "QA-04B", "severity": "P1", "acceptance": "Scroll and interaction latency meet the frozen release threshold at narrow/default/max sizes.", "threshold": "UNRESOLVED: exact scroll/interaction threshold must be recorded before FROZEN", "evidence_types": ["performance"]},
-      {"id": "QA-04C", "severity": "P1", "acceptance": "Storage accounting, compaction, and restore meet the frozen performance threshold.", "threshold": "UNRESOLVED: exact storage/restore threshold must be recorded before FROZEN", "evidence_types": ["performance"]}
+      {"id": "QA-04A", "severity": "P1", "acceptance": "Launch and first-render latency meet the frozen release threshold.", "threshold": "Signed Release on physical iPhone 17 and Mac; 30 fresh launches each; p95 shell <=1.5s; meaningful cached route <=2.5s; none >5s or failure; offline shell required; simulator diagnostic only", "evidence_types": ["performance"], "evidence_profile": "interaction-performance"},
+      {"id": "QA-04B", "severity": "P1", "acceptance": "Scroll and interaction latency meet the frozen release threshold at narrow/default/max sizes.", "threshold": "Widths 900/1200/1800x982 plus physical iPhone 17 portrait; both themes and Reduce Motion; 3x30s per surface for scroll/calendar drag/chart scrub/tab; p95 frame <=16.7ms; none >50ms; input-visible p95 <=100ms; zero lost input", "evidence_types": ["performance"], "evidence_profile": "interaction-performance"},
+      {"id": "QA-04C", "severity": "P1", "acceptance": "Storage accounting, compaction, and restore meet the frozen performance threshold.", "threshold": "Versioned 12-month benchmark including all storage bytes with manifest SHA; authoritative Windows accounting <=5s p95, compaction <=120s, encrypted restore <=180s; signed physical iPhone 17 client-cache accounting <=2s p95 and encrypted cache rebuild from the same manifest-backed server snapshot <=60s; crash at each transaction boundary; zero loss, duplication, provenance/correction/tombstone/pinned-media mismatch; 100% manifest equality", "evidence_types": ["performance"], "evidence_profile": "interaction-performance"}
     ],
     "GW-01": [
       {"id": "GW-01A", "severity": "P0", "acceptance": "The approved gateway authenticates and bounds every Calendar, Usage, Finance, Clipper, Nutrition, Fitness, and Supplement route.", "evidence_types": ["integration", "security-negative"]},
-      {"id": "GW-01B", "severity": "P0", "acceptance": "Direct listeners, forged headers, and unauthorized route access fail closed.", "evidence_types": ["security-negative"]},
-      {"id": "GW-01C", "severity": "P0", "acceptance": "Oversized bodies/responses and timeouts are rejected within the frozen limits.", "threshold": "body/response/timeout limits match signed gateway config", "evidence_types": ["integration", "security-negative"]}
+      {"id": "GW-01B", "severity": "P0", "acceptance": "Direct listeners, forged headers, and unauthorized route access fail closed.", "evidence_types": ["security-negative", "operator"], "claim_kind": "operator"},
+      {"id": "GW-01C", "severity": "P0", "acceptance": "Oversized bodies/responses and timeouts are rejected within the frozen limits.", "threshold": "Usage/Finance/Clipper/Calendar/Supplement/Fitness control or telemetry request/response <=256 KiB and <=8s; Claude/Codex ingest <=16 KiB and <=8s; nutrition barcode <=256 KiB and <=5s; nutrition photo <=3 images and <=20 MiB aggregate sanitized input, schema response <=256 KiB, provider timeout <=30s; exact content type required; overflow, redirect, and timeout fail closed.", "evidence_types": ["integration", "security-negative"]}
     ],
     "GW-02": [
-      {"id": "GW-02A", "severity": "P0", "acceptance": "Provider secrets are encrypted at rest and scoped to the service identity.", "evidence_types": ["security-negative", "operator"]},
-      {"id": "GW-02B", "severity": "P0", "acceptance": "Service-SID ACLs prevent unauthorized read or write of provider secrets.", "evidence_types": ["security-negative"]},
-      {"id": "GW-02C", "severity": "P0", "acceptance": "Rotation, revocation, and fail-closed startup behavior are tested.", "evidence_types": ["security-negative", "operator"]}
+      {"id": "GW-02A", "severity": "P0", "acceptance": "Provider secrets are encrypted at rest and scoped to the service identity.", "evidence_types": ["security-negative", "operator"], "claim_kind": "operator"},
+      {"id": "GW-02B", "severity": "P0", "acceptance": "Service-SID ACLs prevent unauthorized read or write of provider secrets.", "evidence_types": ["security-negative", "operator"], "claim_kind": "operator"},
+      {"id": "GW-02C", "severity": "P0", "acceptance": "Rotation, revocation, and fail-closed startup behavior are tested.", "evidence_types": ["security-negative", "operator"], "claim_kind": "operator"}
     ],
     "GW-03": [
       {"id": "GW-03A", "severity": "P0", "acceptance": "Codex collector reaches the authenticated gateway and Node route without collecting prompts or file contents.", "evidence_types": ["integration", "security-negative"]},
-      {"id": "GW-03B", "severity": "P0", "acceptance": "Codex collector retry and restart behavior is idempotent and bounded.", "evidence_types": ["integration", "security-negative"]}
+      {"id": "GW-03B", "severity": "P0", "acceptance": "Codex collector retry and restart behavior is idempotent and bounded.", "threshold": "At most 3 attempts per delivery; replaying one accepted observation 10 times yields exactly 1 durable record.", "evidence_types": ["integration", "security-negative"]}
     ],
     "GW-04": [
       {"id": "GW-04A", "severity": "P0", "acceptance": "Claude collector uses the exact external-to-loopback route and authenticated forwarder.", "evidence_types": ["integration", "security-negative"]},
-      {"id": "GW-04B", "severity": "P0", "acceptance": "Claude retry and replay handling is idempotent and dual-auth compatible.", "evidence_types": ["integration", "security-negative"]},
-      {"id": "GW-04C", "severity": "P0", "acceptance": "Unauthorized Claude requests and forged identity are rejected.", "evidence_types": ["security-negative"]}
+      {"id": "GW-04B", "severity": "P0", "acceptance": "Claude retry and replay handling is idempotent and dual-auth compatible.", "threshold": "At most 3 attempts per delivery; replaying one accepted observation 10 times yields exactly 1 durable record.", "evidence_types": ["integration", "security-negative"]},
+      {"id": "GW-04C", "severity": "P0", "acceptance": "Unauthorized Claude requests and forged identity are rejected.", "evidence_types": ["security-negative", "operator"], "claim_kind": "operator"}
     ],
     "CL-02": [
       {"id": "CL-02A", "severity": "P0", "acceptance": "Clipper ingestion preserves integer EUR cents, typed fields, and source provenance through gateway and client.", "evidence_types": ["integration", "live-readonly"]},
-      {"id": "CL-02B", "severity": "P0", "acceptance": "Partial, stale, and unavailable Clipper states remain distinct from zero.", "evidence_types": ["integration", "live-readonly"]},
-      {"id": "CL-02C", "severity": "P0", "acceptance": "Clipper-only retry preserves typed error details and cannot duplicate an accepted record.", "evidence_types": ["integration"]}
+      {"id": "CL-02B", "severity": "P0", "acceptance": "Partial, stale, and unavailable Clipper states remain distinct from zero.", "threshold": "Fresh <=15 minutes from observedAt; stale >15 minutes; future clock skew >5 seconds is invalid; partial quality never becomes observed and unavailable never becomes zero.", "evidence_types": ["integration", "live-readonly"]},
+      {"id": "CL-02C", "severity": "P0", "acceptance": "Clipper-only retry preserves typed error details and cannot duplicate an accepted record.", "threshold": "At most 3 attempts; replaying one accepted snapshot 10 times yields exactly 1 durable record.", "evidence_types": ["integration"]}
     ],
     "CL-03": [
       {"id": "CL-03A", "severity": "P0", "acceptance": "Clipper Overview and detail surfaces expose only confirmed or honest unavailable data.", "evidence_types": ["ui-runtime", "live-readonly"]},
@@ -686,12 +693,12 @@ integration evidence before that domain is live-enabled.
       {"id": "PR-01B", "severity": "P0", "acceptance": "The production health endpoint cannot be mistaken for live product data.", "evidence_types": ["integration", "security-negative"]}
     ],
     "WS-01": [
-      {"id": "WS-01A", "severity": "P0", "acceptance": "Confirmed app state publishes versioned, privacy-filtered, protected per-module widget snapshots atomically.", "evidence_types": ["integration", "device"]},
+      {"id": "WS-01A", "severity": "P0", "acceptance": "Confirmed app state publishes versioned, privacy-filtered, protected per-module widget snapshots atomically.", "evidence_types": ["integration", "device"], "status": "foundation"},
       {"id": "WS-01B", "severity": "P0", "acceptance": "Widget timeline reload requests are coalesced and budget-aware.", "evidence_types": ["integration", "device"]}
     ],
     "WS-02": [
-      {"id": "WS-02A", "severity": "P0", "acceptance": "Widget providers render fresh, expired, locked, redacted, unavailable, and stale snapshots truthfully after reload.", "evidence_types": ["integration", "device"]},
-      {"id": "WS-02B", "severity": "P0", "acceptance": "A reload request is not treated as an immediate-display guarantee.", "evidence_types": ["integration", "device"]}
+      {"id": "WS-02A", "severity": "P0", "acceptance": "Widget providers render fresh, expired, locked, redacted, unavailable, and stale snapshots truthfully after reload.", "threshold": "Fresh <=15 minutes from observedAt; stale >15 minutes; expired at the snapshot schema's explicit expiresAt; locked/redacted never expose private values.", "evidence_types": ["integration", "device"], "status": "foundation"},
+      {"id": "WS-02B", "severity": "P0", "acceptance": "A reload request is not treated as an immediate-display guarantee.", "evidence_types": ["integration", "device"], "status": "foundation"}
     ],
     "DA-01": [
       {"id": "DA-01A", "severity": "P0", "acceptance": "Calendar authority and schema version are explicit at the client/server boundary.", "evidence_types": ["source", "integration"]},
@@ -743,39 +750,39 @@ integration evidence before that domain is live-enabled.
     ],
     "PC-01": [
       {"id": "PC-01A", "severity": "P0", "acceptance": "Sparkasse/GoCardless consent and PKCE lifecycle is gateway-owned and read-only.", "evidence_types": ["integration", "live-readonly"]},
-      {"id": "PC-01B", "severity": "P0", "acceptance": "Sparkasse/GoCardless expiry, revoke, freshness, and retry states are source-labelled.", "evidence_types": ["integration", "live-readonly"]}
+      {"id": "PC-01B", "severity": "P0", "acceptance": "Sparkasse/GoCardless expiry, revoke, freshness, and retry states are source-labelled.", "threshold": "Fresh <=15 minutes from observedAt; stale >15 minutes; at most 3 attempts; replaying one observation 10 times yields exactly 1 durable history record.", "evidence_types": ["integration", "live-readonly"]}
     ],
     "PC-02": [
       {"id": "PC-02A", "severity": "P0", "acceptance": "Revolut Personal support or unavailable capability is explicit and consent is gateway-owned.", "evidence_types": ["integration", "live-readonly"]},
-      {"id": "PC-02B", "severity": "P0", "acceptance": "Revolut Personal expiry, revoke, freshness, retry, and no-secret-client behavior are proven.", "evidence_types": ["integration", "live-readonly"]}
+      {"id": "PC-02B", "severity": "P0", "acceptance": "Revolut Personal expiry, revoke, freshness, retry, and no-secret-client behavior are proven.", "threshold": "Fresh <=15 minutes from observedAt; stale >15 minutes; at most 3 attempts; replaying one observation 10 times yields exactly 1 durable history record.", "evidence_types": ["integration", "live-readonly"]}
     ],
     "PC-03": [
       {"id": "PC-03A", "severity": "P0", "acceptance": "Revolut Business eligibility and consent/token lifecycle are explicit and gateway-owned.", "evidence_types": ["integration", "live-readonly"]},
-      {"id": "PC-03B", "severity": "P0", "acceptance": "Revolut Business expiry, revoke, freshness, retry, and no-secret-client behavior are proven.", "evidence_types": ["integration", "live-readonly"]}
+      {"id": "PC-03B", "severity": "P0", "acceptance": "Revolut Business expiry, revoke, freshness, retry, and no-secret-client behavior are proven.", "threshold": "Fresh <=15 minutes from observedAt; stale >15 minutes; at most 3 attempts; replaying one observation 10 times yields exactly 1 durable history record.", "evidence_types": ["integration", "live-readonly"]}
     ],
     "PC-04": [
       {"id": "PC-04A", "severity": "P0", "acceptance": "Trade Republic manual import parses supported records with provenance and duplicate detection.", "evidence_types": ["integration"]},
       {"id": "PC-04B", "severity": "P0", "acceptance": "Trade Republic reimport and reconciliation preserve corrections without duplicate balances.", "evidence_types": ["integration"]}
     ],
     "PC-05": [
-      {"id": "PC-05A", "severity": "P0", "acceptance": "Codex capability, wire fields, freshness, and rate-limit semantics are explicit.", "evidence_types": ["integration", "live-readonly"]},
-      {"id": "PC-05B", "severity": "P0", "acceptance": "Codex history, scheduler, restart, retry, and unavailable behavior are proven.", "evidence_types": ["integration", "live-readonly"]}
+      {"id": "PC-05A", "severity": "P0", "acceptance": "Codex capability, wire fields, freshness, and rate-limit semantics are explicit.", "threshold": "Fresh <=15 minutes from observedAt; stale >15 minutes; future clock skew >5 seconds is invalid/unknown.", "evidence_types": ["integration", "live-readonly"]},
+      {"id": "PC-05B", "severity": "P0", "acceptance": "Codex history, scheduler, restart, retry, and unavailable behavior are proven.", "threshold": "At most 3 attempts; replaying one accepted observation 10 times yields exactly 1 durable history record.", "evidence_types": ["integration", "live-readonly"]}
     ],
     "PC-06": [
-      {"id": "PC-06A", "severity": "P0", "acceptance": "Claude statusline capability, freshness, history, and forwarder install contract are explicit.", "evidence_types": ["integration", "live-readonly"]},
-      {"id": "PC-06B", "severity": "P0", "acceptance": "Claude restart, retry, and unavailable behavior are proven without prompt/file-content collection.", "evidence_types": ["integration", "live-readonly"]}
+      {"id": "PC-06A", "severity": "P0", "acceptance": "Claude statusline capability, freshness, history, and forwarder install contract are explicit.", "threshold": "Fresh <=15 minutes from observedAt; stale >15 minutes; future clock skew >5 seconds is invalid/unknown.", "evidence_types": ["integration", "live-readonly"]},
+      {"id": "PC-06B", "severity": "P0", "acceptance": "Claude restart, retry, and unavailable behavior are proven without prompt/file-content collection.", "threshold": "At most 3 attempts; replaying one accepted observation 10 times yields exactly 1 durable history record.", "evidence_types": ["integration", "live-readonly"]}
     ],
     "PC-07": [
       {"id": "PC-07A", "severity": "P0", "acceptance": "GLM credential scope and wire capability are explicit or the provider is visibly unavailable.", "evidence_types": ["integration", "live-readonly"]},
-      {"id": "PC-07B", "severity": "P0", "acceptance": "GLM freshness, retry, rate-limit, history, and restart behavior are proven or unavailable.", "evidence_types": ["integration", "live-readonly"]}
+      {"id": "PC-07B", "severity": "P0", "acceptance": "GLM freshness, retry, rate-limit, history, and restart behavior are proven or unavailable.", "threshold": "Fresh <=15 minutes from observedAt; stale >15 minutes; at most 3 attempts; replaying one observation 10 times yields exactly 1 durable record; unsupported stays unavailable.", "evidence_types": ["integration", "live-readonly"]}
     ],
     "PC-08": [
       {"id": "PC-08A", "severity": "P0", "acceptance": "DeepSeek credential scope and wire capability are explicit or the provider is visibly unavailable.", "evidence_types": ["integration", "live-readonly"]},
-      {"id": "PC-08B", "severity": "P0", "acceptance": "DeepSeek freshness, retry, rate-limit, history, and restart behavior are proven or unavailable.", "evidence_types": ["integration", "live-readonly"]}
+      {"id": "PC-08B", "severity": "P0", "acceptance": "DeepSeek freshness, retry, rate-limit, history, and restart behavior are proven or unavailable.", "threshold": "Fresh <=15 minutes from observedAt; stale >15 minutes; at most 3 attempts; replaying one observation 10 times yields exactly 1 durable record; unsupported stays unavailable.", "evidence_types": ["integration", "live-readonly"]}
     ],
     "PC-09": [
       {"id": "PC-09A", "severity": "P0", "acceptance": "Google AI Studio credential scope and wire capability are explicit or the provider is visibly unavailable.", "evidence_types": ["integration", "live-readonly"]},
-      {"id": "PC-09B", "severity": "P0", "acceptance": "Google AI Studio freshness, retry, rate-limit, history, and restart behavior are proven or unavailable.", "evidence_types": ["integration", "live-readonly"]}
+      {"id": "PC-09B", "severity": "P0", "acceptance": "Google AI Studio freshness, retry, rate-limit, history, and restart behavior are proven or unavailable.", "threshold": "Fresh <=15 minutes from observedAt; stale >15 minutes; at most 3 attempts; replaying one observation 10 times yields exactly 1 durable record; unsupported stays unavailable.", "evidence_types": ["integration", "live-readonly"]}
     ]
   }
 }

@@ -56,6 +56,7 @@ def registry(rows=None, **overrides):
         "implementation_baseline_commit": "abc1234",
         "frozen_registry_sha256": None,
         "freeze_manifest": None,
+        "unresolved_scope_decisions": [],
         "aliases": [],
         "rows": rows if rows is not None else [leaf()],
     }
@@ -561,6 +562,26 @@ class AcceptanceRegistryTests(unittest.TestCase):
         self.assertTrue(any("real Git repository" in error for error in report.errors))
         with self.assertRaisesRegex(RegistryError, "Git repository"):
             score_registry(data, report)
+
+    def test_frozen_registry_rejects_unresolved_scope_decisions(self):
+        data = frozen_registry([leaf(evidence_types=["integration"])], registry_producing_commit=None)
+        data["unresolved_scope_decisions"] = ["performance threshold is still TBD"]
+        data["frozen_registry_sha256"] = registry_hash(data)
+        with tempfile.TemporaryDirectory() as temporary:
+            repo_root = Path(temporary)
+            subprocess.run(["git", "init", "-q", str(repo_root)], check=True)
+            report = validate_registry(data, repo_root=repo_root)
+        self.assertTrue(any("empty unresolved_scope_decisions" in error for error in report.errors))
+
+    def test_frozen_registry_requires_explicit_unresolved_scope_decisions(self):
+        data = frozen_registry([leaf(evidence_types=["integration"])], registry_producing_commit=None)
+        del data["unresolved_scope_decisions"]
+        data["frozen_registry_sha256"] = registry_hash(data)
+        with tempfile.TemporaryDirectory() as temporary:
+            repo_root = Path(temporary)
+            subprocess.run(["git", "init", "-q", str(repo_root)], check=True)
+            report = validate_registry(data, repo_root=repo_root)
+        self.assertTrue(any("explicit empty unresolved_scope_decisions" in error for error in report.errors))
 
     def test_remote_evidence_and_directory_bundle_are_rejected(self):
         with git_fixture() as (repo_root, evidence_commit, registry_commit, digest):
