@@ -10,6 +10,17 @@ public enum TailscaleSyncError: Error, Equatable, Sendable {
     case responseTooLarge
 }
 
+/// A deliberately coarse connection result. It is safe to render because it
+/// never carries a hostname, bearer, response body, or underlying error text.
+public enum TailscaleConnectionPreflightState: String, Equatable, Sendable {
+    case reachable
+    case configurationRequired = "configuration_required"
+    case authenticationRejected = "authentication_rejected"
+    case serverUnavailable = "server_unavailable"
+    case networkUnavailable = "network_unavailable"
+    case invalidResponse = "invalid_response"
+}
+
 public enum CalendarSyncError: Error, Equatable, Sendable {
     case missingIfMatch
     case missingETag
@@ -181,6 +192,7 @@ public actor TailscaleSyncClient {
     nonisolated static func authenticatedRequest(url: URL, bearer: String) -> URLRequest? {
         guard let bearer = validatedBearer(bearer) else { return nil }
         var request = URLRequest(url: url)
+        request.httpMethod = "GET"
         request.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
         return request
     }
@@ -326,6 +338,80 @@ public actor TailscaleSyncClient {
         try await fetchBoundedReadOnly(pathComponents: ["usage"])
     }
 
+    /// Performs one authenticated, bounded, read-only request through the same
+    /// production boundary used by Usage. Cancellation returns no result so a
+    /// disappearing or superseded view never renders a cancellation as a
+    /// connection failure. The result intentionally contains no endpoint,
+    /// credential, response body, or raw error description.
+    public func checkConnection() async -> TailscaleConnectionPreflightState? {
+        do {
+            let url = try baseURL().appendingPathComponent("usage")
+            let request = try request(url: url)
+            return await Self.performConnectionPreflight(session: session, request: request,
+                                                         maximumBytes: Self.maximumReadOnlyResponseBytes)
+        } catch {
+            return Self.connectionPreflightState(for: error)
+        }
+    }
+
+    nonisolated static func connectionPreflightState(for error: Error) -> TailscaleConnectionPreflightState? {
+        guard !Self.isCancellation(error) else { return nil }
+        if let syncError = error as? TailscaleSyncError {
+            switch syncError {
+            case .notConfigured, .invalidServerURL:
+                return .configurationRequired
+            case .httpError(401), .httpError(403):
+                return .authenticationRejected
+            case .httpError(let status) where status == 408 || status == 429 || (500...599).contains(status):
+                return .serverUnavailable
+            case .invalidBarcode, .invalidResponse, .responseTooLarge, .httpError:
+                return .invalidResponse
+            }
+        }
+        if error is URLError {
+            return (error as? URLError)?.code == .timedOut ? .serverUnavailable : .networkUnavailable
+        }
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain {
+            return nsError.code == NSURLErrorTimedOut ? .serverUnavailable : .networkUnavailable
+        }
+        return .invalidResponse
+    }
+
+    nonisolated private static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let urlError = error as? URLError { return urlError.code == .cancelled }
+        let nsError = error as NSError
+        return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
+    }
+
+    nonisolated private static func performConnectionPreflight(
+        session: URLSession,
+        request: URLRequest,
+        maximumBytes: Int
+    ) async -> TailscaleConnectionPreflightState? {
+        do {
+            try Task.checkCancellation()
+            _ = try await performBoundedReadOnly(session: session, request: request, maximumBytes: maximumBytes)
+            try Task.checkCancellation()
+            return .reachable
+        } catch {
+            return Self.connectionPreflightState(for: error)
+        }
+    }
+
+#if DEBUG
+    /// Test-only transport seam. It is omitted from Release builds so no
+    /// production caller can inject an arbitrary session, endpoint, or bearer.
+    nonisolated static func performConnectionPreflightForTesting(
+        session: URLSession,
+        request: URLRequest,
+        maximumBytes: Int = 1_048_576
+    ) async -> TailscaleConnectionPreflightState? {
+        await performConnectionPreflight(session: session, request: request, maximumBytes: maximumBytes)
+    }
+#endif
+
     /// Read-only barcode lookup. The gateway is expected to authenticate the
     /// tailnet request and proxy this path to the loopback Node API's
     /// `/api/nutrition/barcode/{canonical}` route. No provider request is made
@@ -364,13 +450,24 @@ public actor TailscaleSyncClient {
         let url = try pathComponents.reduce(baseURL()) { partial, component in
             partial.appendingPathComponent(component)
         }
-        let (bytes, response) = try await session.bytes(for: try request(url: url))
-        try Self.checkHTTPStatus(response)
-        let declaredLength = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Length")
-        guard Self.contentLengthIsAllowed(declaredLength, maximumBytes: Self.maximumReadOnlyResponseBytes) else {
+        return try await Self.performBoundedReadOnly(session: session, request: try request(url: url),
+                                                     maximumBytes: Self.maximumReadOnlyResponseBytes)
+    }
+
+    nonisolated private static func performBoundedReadOnly(
+        session: URLSession,
+        request: URLRequest,
+        maximumBytes: Int
+    ) async throws -> Data {
+        guard request.httpMethod == "GET" else { throw TailscaleSyncError.invalidResponse }
+        let (bytes, response) = try await session.bytes(for: request)
+        guard let http = response as? HTTPURLResponse else { throw TailscaleSyncError.invalidResponse }
+        try Self.checkHTTPStatus(http)
+        let declaredLength = http.value(forHTTPHeaderField: "Content-Length")
+        guard Self.contentLengthIsAllowed(declaredLength, maximumBytes: maximumBytes) else {
             throw TailscaleSyncError.responseTooLarge
         }
-        return try await Self.collectBounded(bytes, maximumBytes: Self.maximumReadOnlyResponseBytes)
+        return try await Self.collectBounded(bytes, maximumBytes: maximumBytes)
     }
 
     nonisolated static func collectBounded<Bytes: AsyncSequence>(

@@ -346,6 +346,10 @@ private struct SyncStorageSettingsView: View {
     @AppStorage(TailscaleSyncClient.serverURLDefaultsKey) private var syncServerURL = ""
     @AppStorage("LifeOS.Sync.LastSuccess") private var lastSyncTimestamp: Double = 0
     @State private var syncIsConfigured = false
+    @State private var connectionPreflight: TailscaleConnectionPreflightState?
+    @State private var isCheckingConnection = false
+    @State private var connectionPreflightTask: Task<Void, Never>?
+    @State private var connectionPreflightGeneration = 0
 
     var body: some View {
         ScrollView {
@@ -371,6 +375,47 @@ private struct SyncStorageSettingsView: View {
                         Text(syncStatusLabel)
                             .font(LifeOSFont.inter(12, weight: .semiBold))
                             .foregroundStyle(LifeOSTokens.tertiaryText)
+                        Button {
+                            runConnectionPreflight()
+                        } label: {
+                            HStack(spacing: 7) {
+                                if isCheckingConnection {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                } else {
+                                    LifeOSIcon(.refresh)
+                                        .frame(width: 15, height: 15)
+                                }
+                                Text(isCheckingConnection ? "Checking secure connection…" : "Check secure connection")
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(isCheckingConnection)
+                        .accessibilityIdentifier("settings-sync-check-connection")
+
+                        if let connectionPreflight {
+                            HStack(alignment: .top, spacing: 8) {
+                                LifeOSIcon(connectionPreflight == .reachable ? .verified : .warning)
+                                    .frame(width: 15, height: 15)
+                                    .foregroundStyle(connectionPreflightColor(connectionPreflight))
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(connectionPreflightTitle(connectionPreflight))
+                                        .font(LifeOSFont.inter(12, weight: .semiBold))
+                                        .foregroundStyle(connectionPreflightColor(connectionPreflight))
+                                    Text(connectionPreflightDetail(connectionPreflight))
+                                        .font(LifeOSFont.inter(12))
+                                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                            .accessibilityElement(children: .combine)
+                            .accessibilityIdentifier("settings-sync-connection-result")
+                        }
+
+                        Text("This sends one authenticated, read-only request to the approved Windows gateway. It does not change or reveal credentials.")
+                            .font(LifeOSFont.inter(11))
+                            .foregroundStyle(LifeOSTokens.tertiaryText)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
 
@@ -415,8 +460,83 @@ private struct SyncStorageSettingsView: View {
         .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
         .navigationTitle("Sync & Storage")
         .task(id: syncServerURL) {
+            cancelConnectionPreflight()
+            connectionPreflight = nil
             syncIsConfigured = await syncClient.isConfigured
         }
+        .onDisappear {
+            cancelConnectionPreflight()
+        }
+    }
+
+    private func runConnectionPreflight() {
+        guard !isCheckingConnection else { return }
+        connectionPreflightTask?.cancel()
+        connectionPreflightGeneration &+= 1
+        let generation = connectionPreflightGeneration
+        let requestedServerURL = syncServerURL
+        let client = syncClient
+        isCheckingConnection = true
+        connectionPreflight = nil
+        connectionPreflightTask = Task { @MainActor in
+            defer {
+                if connectionPreflightGeneration == generation {
+                    isCheckingConnection = false
+                }
+            }
+
+            let result = await client.checkConnection()
+            guard !Task.isCancelled,
+                  connectionPreflightGeneration == generation,
+                  syncServerURL == requestedServerURL,
+                  let result else { return }
+
+            let configured = await client.isConfigured
+            guard !Task.isCancelled,
+                  connectionPreflightGeneration == generation,
+                  syncServerURL == requestedServerURL else { return }
+            syncIsConfigured = configured
+            connectionPreflight = result
+        }
+    }
+
+    private func cancelConnectionPreflight() {
+        connectionPreflightGeneration &+= 1
+        connectionPreflightTask?.cancel()
+        connectionPreflightTask = nil
+        isCheckingConnection = false
+    }
+
+    private func connectionPreflightTitle(_ state: TailscaleConnectionPreflightState) -> String {
+        switch state {
+        case .reachable: "Windows gateway reachable"
+        case .configurationRequired: "Secure configuration required"
+        case .authenticationRejected: "Authorization rejected"
+        case .serverUnavailable: "Windows gateway unavailable"
+        case .networkUnavailable: "Tailscale network unavailable"
+        case .invalidResponse: "Gateway response rejected"
+        }
+    }
+
+    private func connectionPreflightDetail(_ state: TailscaleConnectionPreflightState) -> String {
+        switch state {
+        case .reachable:
+            "The approved gateway accepted the read-only request. This does not prove that every provider is connected."
+        case .configurationRequired:
+            "The signed approved-host configuration, server URL, or transitional Keychain authorization is missing or invalid."
+        case .authenticationRejected:
+            "The gateway is reachable, but it did not authorize this device request. No credential was changed."
+        case .serverUnavailable:
+            "The approved gateway returned a temporary server or rate-limit failure. Try again after checking the Windows services."
+        case .networkUnavailable:
+            "The approved gateway could not be reached. Check Tailscale on this device and the Windows PC, then retry."
+        case .invalidResponse:
+            "The response did not satisfy the fail-closed transport contract. No returned data was accepted."
+        }
+    }
+
+    private func connectionPreflightColor(_ state: TailscaleConnectionPreflightState) -> Color {
+        state == .reachable ? LifeOSTokens.success : LifeOSTokens.warning
     }
 
     private var syncStatusLabel: String {
