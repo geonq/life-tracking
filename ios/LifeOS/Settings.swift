@@ -1,16 +1,106 @@
 import SwiftUI
 
+struct HealthReadAccessSettings: Equatable, Sendable {
+    enum State: Equatable, Sendable {
+        case unavailable
+        case notRequested
+        case requestRequired
+        case requestPending
+        case readIndeterminate
+        case restricted
+        case protectedDataUnavailable
+        case error
+    }
+
+    let state: State
+    let errorDescription: String?
+
+    init(state: State, errorDescription: String? = nil) {
+        self.state = state
+        self.errorDescription = errorDescription
+    }
+
+    static var platformDefault: Self {
+#if os(macOS)
+        Self(state: .unavailable, errorDescription: "HealthKit reads are available only in the iPhone app.")
+#else
+        Self(state: .unavailable, errorDescription: "Open Health & devices from the main Settings screen to configure HealthKit.")
+#endif
+    }
+
+    var title: String {
+        switch state {
+        case .unavailable: "Unavailable"
+        case .notRequested: "Not requested"
+        case .requestRequired: "Permission required"
+        case .requestPending: "Waiting for Apple Health"
+        case .readIndeterminate: "Read request completed"
+        case .restricted: "Restricted"
+        case .protectedDataUnavailable: "Device locked"
+        case .error: "Could not connect"
+        }
+    }
+
+    var detail: String {
+        if let errorDescription, !errorDescription.isEmpty { return errorDescription }
+        switch state {
+        case .unavailable:
+            return "HealthKit transport is not available in this app context."
+        case .notRequested, .requestRequired:
+            return "Choose the Health categories LifeOS may read. Manual logs remain available if you decline."
+        case .requestPending:
+            return "Complete the Apple Health sheet. LifeOS cannot see per-category read approval."
+        case .readIndeterminate:
+            return "Apple's sheet completed. Empty reads can mean no data or limited access, so each metric remains source-checked."
+        case .restricted:
+            return "Health data access is restricted on this device."
+        case .protectedDataUnavailable:
+            return "Unlock the iPhone before LifeOS retries protected health data."
+        case .error:
+            return "HealthKit setup did not complete. Retry from this screen."
+        }
+    }
+
+    var buttonTitle: String {
+        switch state {
+        case .readIndeterminate: "Review Health access"
+        case .requestPending: "Waiting…"
+        default: "Allow Health reads"
+        }
+    }
+
+    var allowsRequest: Bool {
+        switch state {
+        case .requestPending, .unavailable, .restricted, .protectedDataUnavailable: false
+        default: true
+        }
+    }
+}
+
 /// Settings is for infrequent setup and trust decisions. Product data views
 /// stay focused; connections, credentials status, and device permissions live
 /// here instead of becoming extra primary destinations.
 struct SettingsView: View {
-    private let categories: [SettingsCategory] = [
-        .init(id: "providers", title: "AI providers", subtitle: "Codex, Claude, GLM, DeepSeek, Google AI Studio", readiness: .serverGatePending, icon: .assistant),
-        .init(id: "finance", title: "Bank connections", subtitle: "Sparkasse, Revolut Personal / Business, Trade Republic, and consent", readiness: .consentRequired, icon: .bankConnections),
-        .init(id: "health", title: "Health & devices", subtitle: "Helio → Zepp → Apple Health / HealthKit", readiness: .permissionRequired, icon: .health),
-        .init(id: "sync", title: "Sync & storage", subtitle: "Windows authority, server URL, and local data", readiness: .identityPending, icon: .refresh),
-        .init(id: "privacy", title: "Privacy & security", subtitle: "Local safeguards, signing, and unresolved server gates", readiness: .localSafeguards, icon: .security)
-    ]
+    private let healthReadAccess: HealthReadAccessSettings
+    private let requestHealthReadAccess: (@MainActor () async -> Void)?
+
+    private var categories: [SettingsCategory] {
+        [
+            .init(id: "providers", title: "AI providers", subtitle: "Codex, Claude, GLM, DeepSeek, Google AI Studio", readiness: .serverGatePending, icon: .assistant),
+            .init(id: "finance", title: "Bank connections", subtitle: "Sparkasse, Revolut Personal / Business, Trade Republic, and consent", readiness: .consentRequired, icon: .bankConnections),
+            .init(id: "health", title: "Health & devices", subtitle: "Helio → Zepp → Apple Health / HealthKit", readiness: .healthRead(healthReadAccess.state), icon: .health),
+            .init(id: "sync", title: "Sync & storage", subtitle: "Windows authority, server URL, and local data", readiness: .identityPending, icon: .refresh),
+            .init(id: "privacy", title: "Privacy & security", subtitle: "Local safeguards, signing, and unresolved server gates", readiness: .localSafeguards, icon: .security)
+        ]
+    }
+
+    init(
+        healthReadAccess: HealthReadAccessSettings = .platformDefault,
+        requestHealthReadAccess: (@MainActor () async -> Void)? = nil
+    ) {
+        self.healthReadAccess = healthReadAccess
+        self.requestHealthReadAccess = requestHealthReadAccess
+    }
 
     var body: some View {
         ScrollView {
@@ -43,7 +133,10 @@ struct SettingsView: View {
                         .accessibilityIdentifier("settings-category-finance")
 
                         NavigationLink {
-                            HealthDevicesSettingsView()
+                            HealthDevicesSettingsView(
+                                healthReadAccess: healthReadAccess,
+                                requestHealthReadAccess: requestHealthReadAccess
+                            )
                         } label: {
                             SettingsHubCard(category: categories[2])
                         }
@@ -92,7 +185,7 @@ private struct SettingsCategory: Identifiable {
 private enum SettingsReadiness: Equatable {
     case serverGatePending
     case consentRequired
-    case permissionRequired
+    case healthRead(HealthReadAccessSettings.State)
     case identityPending
     case localSafeguards
 
@@ -100,7 +193,16 @@ private enum SettingsReadiness: Equatable {
         switch self {
         case .serverGatePending: "Server gate pending"
         case .consentRequired: "Consent required"
-        case .permissionRequired: "Permissions pending"
+        case .healthRead(let state):
+            switch state {
+            case .notRequested, .requestRequired: "Health permission pending"
+            case .requestPending: "Waiting for Apple Health"
+            case .readIndeterminate: "Read request completed · source checked"
+            case .protectedDataUnavailable: "Unlock iPhone to refresh"
+            case .restricted: "Health access restricted"
+            case .unavailable: "Available on iPhone only"
+            case .error: "Health setup needs attention"
+            }
         case .identityPending: "Identity migration pending"
         case .localSafeguards: "Local safeguards active · server gate pending"
         }
@@ -108,7 +210,10 @@ private enum SettingsReadiness: Equatable {
 
     var color: Color {
         switch self {
-        case .localSafeguards, .serverGatePending, .consentRequired, .permissionRequired, .identityPending:
+        case .healthRead(.readIndeterminate):
+            LifeOSTokens.info
+        case .localSafeguards, .serverGatePending, .consentRequired, .healthRead,
+             .identityPending:
             LifeOSTokens.warning
         }
     }
@@ -276,6 +381,8 @@ private struct FinanceConnectionsSettingsView: View {
 
 private struct HealthDevicesSettingsView: View {
     private let snapshot = HelioDeviceSettingsSnapshot.current
+    let healthReadAccess: HealthReadAccessSettings
+    let requestHealthReadAccess: (@MainActor () async -> Void)?
 
     var body: some View {
         ScrollView {
@@ -301,6 +408,33 @@ private struct HealthDevicesSettingsView: View {
 
                 SettingsSection(title: "Connection & permission", icon: .health) {
                     VStack(spacing: 0) {
+                        SettingsStatusRow(
+                            title: "Apple Health read access",
+                            detail: healthReadAccess.detail,
+                            status: healthReadAccess.title,
+                            icon: .security,
+                            statusColor: healthReadAccessStatusColor
+                        )
+                        .accessibilityIdentifier("settings-health-read-status")
+                        if let requestHealthReadAccess {
+                            Button {
+                                Task { @MainActor in await requestHealthReadAccess() }
+                            } label: {
+                                HStack(spacing: 8) {
+                                    if healthReadAccess.state == .requestPending {
+                                        ProgressView().controlSize(.small)
+                                    }
+                                    Text(healthReadAccess.buttonTitle)
+                                }
+                                .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(LifeOSTokens.accent)
+                            .disabled(!healthReadAccess.allowsRequest)
+                            .accessibilityIdentifier("settings-health-request-read-access")
+                            .padding(.vertical, 10)
+                        }
+                        Divider().padding(.leading, 38)
                         SettingsStatusRow(
                             title: "Current connection",
                             detail: snapshot.connection.detail,
@@ -398,13 +532,24 @@ private struct HealthDevicesSettingsView: View {
                     .accessibilityIdentifier("settings-health-device-management")
                 }
 
-                TruthfulSetupNote(text: "No HealthKit entitlement/importer, CoreBluetooth scanner, battery API, firmware API, private BLE protocol, or verified Zepp URL scheme is claimed by this build. Demo fixtures remain separate from observed device data.")
+                TruthfulSetupNote(text: "HealthKit reads are iPhone-only and read-only. Battery, firmware, pairing, reboot, configuration, private BLE control, and a verified Zepp launch route remain unavailable or Zepp-only until a supported interface is proven. Demo fixtures remain separate from observed device data.")
             }
             .frame(maxWidth: 760, alignment: .leading)
             .padding(LifeOSTokens.pagePadding)
         }
         .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
         .navigationTitle("Health & Devices")
+    }
+
+    private var healthReadAccessStatusColor: Color {
+        switch healthReadAccess.state {
+        case .readIndeterminate:
+            return LifeOSTokens.info
+        case .notRequested, .requestRequired, .requestPending, .protectedDataUnavailable, .unavailable:
+            return LifeOSTokens.warning
+        case .restricted, .error:
+            return LifeOSTokens.danger
+        }
     }
 
     private func connectionStatusColor(_ connection: HelioDeviceConnection) -> Color {

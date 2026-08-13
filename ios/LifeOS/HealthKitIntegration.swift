@@ -48,7 +48,7 @@ public protocol HealthKitIntegrationClient {
     func requestReadAuthorization(for metrics: [HealthKitMetricID]) async -> HealthKitAuthorizationReport
     func startObservers(
         metrics: [HealthKitMetricID],
-        onUpdate: @escaping (HealthKitObserverCompletion) -> Void
+        onUpdate: @escaping @Sendable (HealthKitObserverCompletion) -> Void
     )
     func stopAllObservers()
 }
@@ -56,7 +56,7 @@ public protocol HealthKitIntegrationClient {
 /// Closure-backed client used by previews, fixtures, and focused tests.
 @MainActor
 public struct HealthKitIntegrationClientClosures: HealthKitIntegrationClient {
-    public typealias ObserverUpdate = (HealthKitObserverCompletion) -> Void
+    public typealias ObserverUpdate = @Sendable (HealthKitObserverCompletion) -> Void
     public typealias ObserverStarter = ([HealthKitMetricID], ObserverUpdate) -> Void
 
     private let availability: () -> HealthKitAuthorizationState
@@ -133,12 +133,19 @@ public final class HealthKitIntegrationController: ObservableObject {
     public init(
         client: (any HealthKitIntegrationClient)? = nil,
         usesVisualFixtures: Bool = false,
-        persistenceURL: URL? = nil
+        persistenceURL: URL? = nil,
+        initialExplicitRequestCompleted: Bool = false
     ) {
         self.client = usesVisualFixtures ? nil : client
         self.usesVisualFixtures = usesVisualFixtures
         self.persistenceURL = persistenceURL ?? Self.defaultPersistenceURL
-        self.snapshot = HealthKitIntegrationSnapshot()
+        self.explicitRequestCompleted = usesVisualFixtures ? false : initialExplicitRequestCompleted
+        self.snapshot = HealthKitIntegrationSnapshot(
+            authorizationState: initialExplicitRequestCompleted && !usesVisualFixtures
+                ? .readIndeterminate
+                : .notRequested,
+            explicitRequestCompleted: initialExplicitRequestCompleted && !usesVisualFixtures
+        )
     }
 
     /// Status is intentionally limited to availability and request status.
@@ -165,8 +172,30 @@ public final class HealthKitIntegrationController: ObservableObject {
         guard token == generation, currentOperation == statusOperationID else { return }
         statusTask = nil
         // A status check started before a completed explicit request cannot
-        // downgrade that result back to “request required.”
-        guard !explicitRequestCompleted else { return }
+        // downgrade that result back to “request required.” Device-level
+        // terminal states still replace the optimistic history flag: a prior
+        // prompt is not proof that HealthKit remains available or readable.
+        if explicitRequestCompleted {
+            switch report.state {
+            case .unavailable, .restricted, .protectedDataUnavailable, .revoked, .error:
+                stopSessionIfRunning()
+                publish(
+                    authorizationState: report.state,
+                    lastObserverCompletion: .replace(nil),
+                    errorDescription: .replace(report.errorDescription)
+                )
+            case .readIndeterminate:
+                publish(
+                    authorizationState: .readIndeterminate,
+                    errorDescription: .replace(report.errorDescription)
+                )
+                startSessionIfEligible()
+            case .notRequested, .requestRequired, .requestPending,
+                 .writeNotDetermined, .writeAuthorized, .writeDenied:
+                break
+            }
+            return
+        }
         publish(authorizationState: report.state, errorDescription: .replace(report.errorDescription))
     }
 
@@ -257,6 +286,7 @@ public final class HealthKitIntegrationController: ObservableObject {
         guard !usesVisualFixtures,
               snapshot.lifecycle == .active,
               explicitRequestCompleted,
+              snapshot.authorizationState == .readIndeterminate,
               !sessionStarted,
               let client else { return }
 
@@ -272,6 +302,16 @@ public final class HealthKitIntegrationController: ObservableObject {
                 self?.receiveObserverCompletion(completion, generation: token)
             }
         }
+    }
+
+    /// Invalidates the current observer generation before stopping the
+    /// adapter. A callback already queued by HealthKit must not republish a
+    /// stale session after a terminal availability result.
+    private func stopSessionIfRunning() {
+        guard sessionStarted else { return }
+        generation &+= 1
+        sessionStarted = false
+        client?.stopAllObservers()
     }
 
     private func receiveObserverCompletion(_ completion: HealthKitObserverCompletion, generation token: UInt64) {

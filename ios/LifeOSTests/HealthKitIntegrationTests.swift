@@ -26,6 +26,106 @@ final class HealthKitIntegrationTests: XCTestCase {
         XCTAssertEqual(client.stopCalls, 0)
     }
 
+    func testPersistedPromptCompletionRestoresIndeterminateTruthAndStartsWhenActive() async {
+        let client = RecordingHealthKitIntegrationClient()
+        let controller = HealthKitIntegrationController(
+            client: client,
+            initialExplicitRequestCompleted: true
+        )
+
+        XCTAssertEqual(controller.snapshot.authorizationState, .readIndeterminate)
+        XCTAssertTrue(controller.snapshot.explicitRequestCompleted)
+        XCTAssertEqual(client.startCalls, 0)
+
+        controller.appActive()
+        await waitUntil { client.startCalls == 1 }
+    }
+
+    func testPersistedPromptDoesNotHideDeviceLevelRestriction() async {
+        let client = RecordingHealthKitIntegrationClient()
+        client.availabilityResult = .restricted
+        let controller = HealthKitIntegrationController(
+            client: client,
+            initialExplicitRequestCompleted: true
+        )
+
+        await controller.refreshStatus()
+
+        XCTAssertEqual(controller.snapshot.authorizationState, .restricted)
+        XCTAssertTrue(controller.snapshot.explicitRequestCompleted)
+        XCTAssertEqual(client.statusCalls, 0)
+    }
+
+    func testPersistedPromptStopsActiveObserversWhenStatusBecomesTerminal() async {
+        let client = RecordingHealthKitIntegrationClient()
+        let controller = HealthKitIntegrationController(
+            client: client,
+            initialExplicitRequestCompleted: true
+        )
+
+        controller.appActive()
+        await waitUntil { client.startCalls == 1 }
+
+        client.availabilityResult = .restricted
+        await controller.refreshStatus()
+
+        XCTAssertEqual(controller.snapshot.authorizationState, .restricted)
+        XCTAssertTrue(controller.snapshot.isActive)
+        XCTAssertEqual(client.stopCalls, 1)
+    }
+
+    func testPersistedPromptRestartsObserversAfterTerminalStatusRecovers() async {
+        let client = RecordingHealthKitIntegrationClient()
+        let controller = HealthKitIntegrationController(
+            client: client,
+            initialExplicitRequestCompleted: true
+        )
+
+        controller.appActive()
+        await waitUntil { client.startCalls == 1 }
+
+        client.availabilityResult = .restricted
+        await controller.refreshStatus()
+        XCTAssertEqual(client.stopCalls, 1)
+
+        client.availabilityResult = .readIndeterminate
+        client.statusResult = .init(state: .readIndeterminate)
+        await controller.refreshStatus()
+
+        XCTAssertEqual(controller.snapshot.authorizationState, .readIndeterminate)
+        XCTAssertTrue(controller.snapshot.explicitRequestCompleted)
+        XCTAssertEqual(client.startCalls, 2)
+        XCTAssertEqual(client.stopCalls, 1)
+    }
+
+    func testPersistedPromptStillRejectsFalseRequestRequiredDowngrade() async {
+        let client = RecordingHealthKitIntegrationClient()
+        client.statusResult = .init(state: .requestRequired)
+        let controller = HealthKitIntegrationController(
+            client: client,
+            initialExplicitRequestCompleted: true
+        )
+
+        await controller.refreshStatus()
+
+        XCTAssertEqual(controller.snapshot.authorizationState, .readIndeterminate)
+        XCTAssertTrue(controller.snapshot.explicitRequestCompleted)
+    }
+
+    func testFixtureModeIgnoresPersistedPromptCompletion() {
+        let client = RecordingHealthKitIntegrationClient()
+        let controller = HealthKitIntegrationController(
+            client: client,
+            usesVisualFixtures: true,
+            initialExplicitRequestCompleted: true
+        )
+
+        XCTAssertEqual(controller.snapshot.authorizationState, .notRequested)
+        XCTAssertFalse(controller.snapshot.explicitRequestCompleted)
+        controller.appActive()
+        XCTAssertEqual(client.startCalls, 0)
+    }
+
     func testInitAndStatusRefreshNeverPromptOrQuerySamples() async {
         let client = RecordingHealthKitIntegrationClient()
         let controller = HealthKitIntegrationController(client: client)
@@ -273,7 +373,7 @@ private final class RecordingHealthKitIntegrationClient: HealthKitIntegrationCli
 
     func startObservers(
         metrics: [HealthKitMetricID],
-        onUpdate: @escaping (HealthKitObserverCompletion) -> Void
+        onUpdate: @escaping @Sendable (HealthKitObserverCompletion) -> Void
     ) {
         XCTAssertEqual(metrics, HealthKitIntegrationController.supportedMetrics)
         startCalls += 1

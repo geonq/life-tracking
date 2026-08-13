@@ -5141,7 +5141,6 @@ private struct FitnessTimelineEntryRow: View {
 private struct FitnessSettingsView: View {
     let source: FitnessSourceState
     let onSourceTap: () -> Void
-    @State private var healthKitWrites = false
     @State private var photoInference = false
     @State private var lockScreenPrivacy = true
 
@@ -5156,8 +5155,9 @@ private struct FitnessSettingsView: View {
                     Text("Helio Strap is the sensor authority. Apple Health and HealthKit are transport and permission layers, not a substitute sensor.")
                         .font(LifeOSFont.body(12))
                         .foregroundStyle(LifeOSTokens.tertiaryText)
-                    Toggle("Allow confirmed nutrition writes to HealthKit", isOn: $healthKitWrites)
-                    Text(healthKitWrites ? "Writes remain blocked until a meal is explicitly confirmed and write permission is granted." : "Read-only by default")
+                    Label("Read-only HealthKit access", systemImage: "lock.shield")
+                        .font(LifeOSFont.body(12))
+                    Text("This build never writes meals, nutrition, scores, or device settings to HealthKit.")
                         .font(LifeOSFont.caption(10))
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }

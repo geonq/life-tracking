@@ -6,7 +6,7 @@ import Foundation
 /// observer registration, and the initial bounded reconciliation task.
 @MainActor
 public final class HealthKitProductionClient: HealthKitIntegrationClient {
-    public typealias ObserverUpdate = (HealthKitObserverCompletion) -> Void
+    public typealias ObserverUpdate = @Sendable (HealthKitObserverCompletion) -> Void
 
     private let availability: () -> HealthKitAuthorizationState
     private let status: ([HealthKitMetricID]) async -> HealthKitAuthorizationReport

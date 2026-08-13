@@ -42,15 +42,18 @@ private enum LifeOSAppTab: Hashable, CaseIterable {
 
 @main
 struct LifeOSApp: App {
+    private static let healthReadPromptCompletedKey = "LifeOS.HealthKit.ReadPromptCompleted.v1"
     @StateObject private var calendarCoordinator: CalendarCoordinator
     @StateObject private var usageCoordinator: UsageCoordinator
     @StateObject private var financeCoordinator: FinanceCoordinator
     @StateObject private var clipperCoordinator: ClipperCoordinator
+    @StateObject private var healthKitController: HealthKitIntegrationController
     @State private var selection: LifeOSAppTab = .home
     @State private var showingUsage = false
     @State private var requestingNewCalendarEvent = false
     @State private var selectedModuleRoute: LifeOSDeepLink?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
     private let usesVisualFixtures: Bool
 
     init() {
@@ -81,6 +84,12 @@ struct LifeOSApp: App {
                 usesVisualFixtures: enabled
             )
         )
+        let promptCompleted = !enabled && UserDefaults.standard.bool(forKey: Self.healthReadPromptCompletedKey)
+        _healthKitController = StateObject(wrappedValue: HealthKitIntegrationController(
+            client: enabled ? nil : HealthKitProductionClient(),
+            usesVisualFixtures: enabled,
+            initialExplicitRequestCompleted: promptCompleted
+        ))
     }
 
     private var forcedColorScheme: ColorScheme? {
@@ -176,6 +185,23 @@ struct LifeOSApp: App {
                     await usageCoordinator.refresh()
                     await financeCoordinator.refresh()
                     await clipperCoordinator.refresh()
+                    await healthKitController.refreshStatus()
+                }
+            }
+            .onAppear {
+                if scenePhase == .active { healthKitController.appActive() }
+            }
+            .onChange(of: scenePhase) { _, phase in
+                switch phase {
+                case .active:
+                    healthKitController.appActive()
+                    Task { await healthKitController.refreshStatus() }
+                case .inactive:
+                    healthKitController.appInactive()
+                case .background:
+                    healthKitController.applicationDidEnterBackground()
+                @unknown default:
+                    healthKitController.applicationDidEnterBackground()
                 }
             }
         }
@@ -270,13 +296,46 @@ struct LifeOSApp: App {
         case .tax:
             return AnyView(TaxDocumentsView())
         case .settings:
-            return AnyView(SettingsView())
+            return AnyView(SettingsView(
+                healthReadAccess: healthReadAccessSettings,
+                requestHealthReadAccess: usesVisualFixtures ? nil : requestHealthReadAccess
+            ))
         default:
             return AnyView(LifeOSModuleLandingView(
                 module: module,
                 route: route,
                 usesVisualFixtures: usesVisualFixtures
             ))
+        }
+    }
+
+    private var healthReadAccessSettings: HealthReadAccessSettings {
+        let snapshot = healthKitController.snapshot
+        let state: HealthReadAccessSettings.State
+        if snapshot.isRequestInFlight {
+            state = .requestPending
+        } else {
+            switch snapshot.authorizationState {
+            case .unavailable: state = .unavailable
+            case .restricted, .revoked: state = .restricted
+            case .protectedDataUnavailable: state = .protectedDataUnavailable
+            case .notRequested: state = .notRequested
+            case .requestRequired: state = .requestRequired
+            case .requestPending: state = .requestPending
+            case .readIndeterminate: state = .readIndeterminate
+            case .error: state = .error
+            case .writeNotDetermined, .writeAuthorized, .writeDenied:
+                state = .error
+            }
+        }
+        return HealthReadAccessSettings(state: state, errorDescription: snapshot.errorDescription)
+    }
+
+    @MainActor
+    private func requestHealthReadAccess() async {
+        let report = await healthKitController.requestReadAuthorization()
+        if report.promptCompleted == true {
+            UserDefaults.standard.set(true, forKey: Self.healthReadPromptCompletedKey)
         }
     }
 }

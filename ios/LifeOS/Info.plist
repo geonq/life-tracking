@@ -41,6 +41,8 @@
     <string>Life OS uses your local network to keep calendar items in sync with your Mac.</string>
     <key>NSCameraUsageDescription</key>
     <string>Life OS uses the camera only to scan a food barcode; no camera frames are stored or uploaded.</string>
+    <key>NSHealthShareUsageDescription</key>
+    <string>Life OS reads only the Health categories you select to show source-backed fitness, sleep, activity, hydration, and caffeine data.</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_lifeos-calendar._tcp</string>

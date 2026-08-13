@@ -43,7 +43,8 @@ targets:
     platform: iOS
     sources:
       - LifeOSWidget
-      - Shared
+      - path: Shared
+        excludes: [HealthKit*.swift]
       - Shared/FitnessMetric.swift
     resources:
       - path: Shared/Resources/Fonts
@@ -76,7 +77,8 @@ targets:
     platform: macOS
     sources:
       - LifeOSMac
-      - Shared
+      - path: Shared
+        excludes: [HealthKit*.swift]
       - Shared/FitnessMetric.swift
       - LifeOS/OverviewView.swift
       - LifeOS/CodexView.swift
@@ -122,7 +124,8 @@ targets:
     platform: macOS
     sources:
       - LifeOSWidgetSnapshotTests
-      - Shared
+      - path: Shared
+        excludes: [HealthKit*.swift]
       - Shared/FitnessMetric.swift
       - LifeOSWidget/CalendarWidget.swift
       - LifeOSWidget/UsageWidget.swift
@@ -145,7 +148,8 @@ targets:
     platform: macOS
     sources:
       - LifeOSMacWidget
-      - Shared
+      - path: Shared
+        excludes: [HealthKit*.swift]
       - Shared/FitnessMetric.swift
       - LifeOSWidget/UsageWidget.swift
       - LifeOSWidget/CalendarWidget.swift
