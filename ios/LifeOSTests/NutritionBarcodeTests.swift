@@ -4,6 +4,28 @@ import XCTest
 final class NutritionBarcodeTests: XCTestCase {
     private let fetchedAt = "2026-08-12T00:00:00Z"
 
+    func testBarcodeRequestGateRejectsStaleCompletionFromOlderGenerationForDisplayAndConfirm() throws {
+        var gate = NutritionBarcodeRequestGate()
+        let first = try XCTUnwrap(gate.begin(rawInput: "3017620422003"))
+        let second = try XCTUnwrap(gate.begin(rawInput: "96385074"))
+
+        // A transport is allowed to finish the cancelled A request late. Its
+        // result must be rejected for both the visible proposal and the save
+        // action once B owns the current generation.
+        XCTAssertFalse(gate.accepts(first, visibleInput: first.barcode))
+        XCTAssertFalse(gate.accepts(first, visibleInput: second.barcode))
+        XCTAssertTrue(gate.accepts(second, visibleInput: second.barcode))
+    }
+
+    func testBarcodeRequestGateRejectsCompletionAfterDismissal() throws {
+        var gate = NutritionBarcodeRequestGate()
+        let request = try XCTUnwrap(gate.begin(rawInput: "3017620422003"))
+
+        gate.invalidate() // The review sheet disappeared.
+
+        XCTAssertFalse(gate.accepts(request, visibleInput: request.barcode))
+    }
+
     func testEANNormalizationAcceptsGermanEANAndUPCButRejectsMalformedInput() {
         XCTAssertEqual(NutritionBarcodeNormalizer.normalize(" 30-17620422003 "), "3017620422003")
         XCTAssertEqual(NutritionBarcodeNormalizer.normalize("96385074"), "96385074")

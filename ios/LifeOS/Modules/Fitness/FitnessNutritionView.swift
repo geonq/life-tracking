@@ -77,6 +77,10 @@ public struct FitnessNutritionSnapshot {
     public let hydrationMilliliters: Int?
     public let hydrationTargetMilliliters: Int?
     public let caffeineMilligrams: Int?
+    /// Legacy field name retained for snapshot compatibility. Values are
+    /// canonical standard drinks; an Apple Health beverage count remains
+    /// unavailable unless the importer receives explicit standard-drink
+    /// semantics from its source.
     public let alcoholUnits: Double?
     public let qualityScore: Int?
     public let qualityDetail: String?
@@ -262,30 +266,30 @@ public enum FitnessNutritionEntryPoint: Equatable, Sendable {
 private extension FitnessNutritionCaptureAction {
     var title: String {
         switch self {
-        case .photoLibrary: "Photo library import"
-        case .camera: "Camera capture proposal"
-        case .barcode: "Barcode lookup proposal"
-        case .aiProposal: "AI photo proposal"
-        case .search: "Food search proposal"
+        case .photoLibrary: return "Photo library import"
+        case .camera: return "Camera capture proposal"
+        case .barcode: return "Barcode lookup proposal"
+        case .aiProposal: return "AI photo proposal"
+        case .search: return "Food search proposal"
         }
     }
 
     var detail: String {
         switch self {
         case .photoLibrary:
-            "The app-side review flow is open. Photos remain local until an explicit future send; nothing is uploaded implicitly."
+            return "The app-side review flow is open. Photos remain local until an explicit future send; nothing is uploaded implicitly."
         case .camera:
-            "Camera capture is not connected in this build. This is an honest proposal state; no camera or upload was started."
+            return "Camera capture is not connected in this build. This is an honest proposal state; no camera or upload was started."
         case .barcode:
 #if os(iOS)
-            "Scan an EAN-8, EAN-13, or UPC-A with the permission-gated camera, or enter it manually for a read-only Germany-capable lookup."
+            return "Scan an EAN-8, EAN-13, or UPC-A with the permission-gated camera, or enter it manually for a read-only Germany-capable lookup."
 #else
-            "Enter an EAN-8, EAN-13, or UPC-A manually for a read-only Germany-capable lookup. Camera scanning is available only on iPhone."
+            return "Enter an EAN-8, EAN-13, or UPC-A manually for a read-only Germany-capable lookup. Camera scanning is available only on iPhone."
 #endif
         case .aiProposal:
-            "Server-side Google/Gemini analysis is not connected. The proposal remains unconfirmed and no image was sent."
+            return "Server-side Google/Gemini analysis is not connected. The proposal remains unconfirmed and no image was sent."
         case .search:
-            "Food search is not connected in this build. No database result or calorie value was invented."
+            return "Food search is not connected in this build. No database result or calorie value was invented."
         }
     }
 }
@@ -379,9 +383,9 @@ struct FitnessNutritionView: View {
 
     private func method(for action: FitnessNutritionCaptureAction) -> FitnessFoodCaptureMethod {
         switch action {
-        case .photoLibrary, .camera, .aiProposal: .photo
-        case .barcode: .barcode
-        case .search: .recent
+        case .photoLibrary, .camera, .aiProposal: return .photo
+        case .barcode: return .barcode
+        case .search: return .recent
         }
     }
 
@@ -473,7 +477,11 @@ private struct FitnessNutritionSurface: View {
                 onReview: { _ in photoStage = .needsConfirmation }
             )
             FitnessNutritionTrendsCard(nutrition: nutrition)
-            FitnessHydrationLifestyleCard(nutrition: nutrition)
+            FitnessHydrationLifestyleCard(
+                nutrition: nutrition,
+                selectedDate: selectedDate,
+                isFixture: sourceStatus == .demo
+            )
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityIdentifier("fitness-nutrition-surface")
@@ -1137,10 +1145,10 @@ private struct NutritionTrendCell: View {
 
     private var available: Bool {
         switch kind {
-        case .nutritionScore: nutrition.qualityScore != nil
-        case .macroBalance: nutrition.macroValues.contains { $0.value != nil }
-        case .netEnergy: nutrition.caloriesConsumed != nil && nutrition.sourceSupportedExpenditure != nil
-        case .fastingGlucose, .averageGlucose, .glucoseVariability: false
+        case .nutritionScore: return nutrition.qualityScore != nil
+        case .macroBalance: return nutrition.macroValues.contains { $0.value != nil }
+        case .netEnergy: return nutrition.caloriesConsumed != nil && nutrition.sourceSupportedExpenditure != nil
+        case .fastingGlucose, .averageGlucose, .glucoseVariability: return false
         }
     }
 
@@ -1356,10 +1364,10 @@ private struct NutritionTrendDetailView: View {
 
     private var available: Bool {
         switch kind {
-        case .nutritionScore: nutrition.qualityScore != nil
-        case .macroBalance: nutrition.macroValues.contains { $0.value != nil }
-        case .netEnergy: nutrition.caloriesConsumed != nil && nutrition.sourceSupportedExpenditure != nil
-        case .fastingGlucose, .averageGlucose, .glucoseVariability: false
+        case .nutritionScore: return nutrition.qualityScore != nil
+        case .macroBalance: return nutrition.macroValues.contains { $0.value != nil }
+        case .netEnergy: return nutrition.caloriesConsumed != nil && nutrition.sourceSupportedExpenditure != nil
+        case .fastingGlucose, .averageGlucose, .glucoseVariability: return false
         }
     }
 
@@ -1524,6 +1532,57 @@ private enum FitnessPhotoStage: String {
     case confirmed = "User confirmed"
 }
 
+/// Identifies one normalized barcode lookup.  The visible input remains
+/// editable while a lookup is in flight, so a result is only allowed to touch
+/// the review state when both its generation and its canonical barcode still
+/// match the current sheet.
+struct NutritionBarcodeRequestToken: Equatable, Sendable {
+    let generation: UInt64
+    let barcode: String
+}
+
+/// Small, deterministic guard for the asynchronous barcode review flow.
+///
+/// Cancellation is an optimization; the generation and normalized-identity
+/// checks are the correctness boundary because a transport may still invoke a
+/// completion after cancellation.  Keeping this model independent from the
+/// network client makes the stale-result and dismissed-sheet cases testable
+/// without inventing provider data or depending on timing.
+struct NutritionBarcodeRequestGate: Sendable {
+    private(set) var generation: UInt64 = 0
+    private(set) var activeBarcode: String?
+
+    mutating func begin(rawInput: String) -> NutritionBarcodeRequestToken? {
+        invalidate()
+        guard let barcode = NutritionBarcodeNormalizer.normalize(rawInput) else { return nil }
+        generation &+= 1
+        activeBarcode = barcode
+        return NutritionBarcodeRequestToken(generation: generation, barcode: barcode)
+    }
+
+    /// Invalidates a request only when the user's visible input changed its
+    /// canonical barcode identity. Formatting changes such as spaces or a
+    /// hyphen do not make an already-valid proposal stale.
+    @discardableResult
+    mutating func invalidateIfVisibleInputChanged(_ rawInput: String) -> Bool {
+        guard let activeBarcode,
+              NutritionBarcodeNormalizer.normalize(rawInput) != activeBarcode else { return false }
+        invalidate()
+        return true
+    }
+
+    mutating func invalidate() {
+        generation &+= 1
+        activeBarcode = nil
+    }
+
+    func accepts(_ token: NutritionBarcodeRequestToken, visibleInput: String) -> Bool {
+        activeBarcode == token.barcode
+            && generation == token.generation
+            && NutritionBarcodeNormalizer.normalize(visibleInput) == token.barcode
+    }
+}
+
 private struct FitnessFoodCaptureCard: View {
     let isDemo: Bool
     let photoStage: FitnessPhotoStage
@@ -1612,6 +1671,9 @@ private struct FitnessFoodReviewSheet: View {
     @State private var confirmedBarcodeRecord: NutritionRecord?
     @State private var barcodeMealAt = ""
     @State private var barcodeSaving = false
+    @State private var barcodeLookupTask: Task<Void, Never>?
+    @State private var barcodeRequestGate = NutritionBarcodeRequestGate()
+    @State private var barcodeProposalToken: NutritionBarcodeRequestToken?
 #if os(iOS)
     @StateObject private var barcodeScanner = NutritionBarcodeScannerCoordinator()
 #endif
@@ -1664,7 +1726,7 @@ private struct FitnessFoodReviewSheet: View {
                             Button(savedMessage == nil ? ((confirmedBarcodeRecord == nil && barcodeError == nil) ? "Confirm and save locally" : "Retry local save") : "Saved locally") { confirmBarcodeProposal() }
                                 .buttonStyle(.borderedProminent)
                                 .tint(LifeOSTokens.accent)
-                                .disabled((barcodeProposal == nil && confirmedBarcodeRecord == nil) || barcodeLoading || barcodeSaving || savedMessage != nil)
+                                .disabled((barcodeProposal == nil && confirmedBarcodeRecord == nil) || !barcodeConfirmationIsCurrent || barcodeLoading || barcodeSaving || savedMessage != nil)
                         }
                     } else {
                         HStack {
@@ -1705,11 +1767,23 @@ private struct FitnessFoodReviewSheet: View {
 #if os(iOS)
             barcodeScanner.stop()
 #endif
+            cancelBarcodeLookup()
             photoSelectionGeneration &+= 1
             photoLoadTask?.cancel()
             photoLoadTask = nil
             photoPreparation.clear()
             selectedPhotoItems.removeAll()
+        }
+        .onChange(of: barcodeInput) { _, newValue in
+            guard barcodeRequestGate.invalidateIfVisibleInputChanged(newValue) else { return }
+            barcodeLookupTask?.cancel()
+            barcodeLookupTask = nil
+            barcodeLoading = false
+            barcodeLookup = nil
+            barcodeProposal = nil
+            barcodeProposalToken = nil
+            confirmedBarcodeRecord = nil
+            barcodeError = nil
         }
     }
 
@@ -1861,47 +1935,64 @@ private struct FitnessFoodReviewSheet: View {
 
     private func startBarcodeLookup() {
         guard let normalized = NutritionBarcodeNormalizer.normalize(barcodeInput) else {
+            cancelBarcodeLookup()
             barcodeError = "Enter a checksum-valid EAN-8, EAN-13, or UPC-A barcode."
             barcodeLookup = nil
             barcodeProposal = nil
+            barcodeProposalToken = nil
             return
         }
+        barcodeLookupTask?.cancel()
+        barcodeLookupTask = nil
+        guard let request = barcodeRequestGate.begin(rawInput: normalized) else { return }
         barcodeInput = normalized
         barcodeError = nil
         barcodeLookup = nil
         barcodeProposal = nil
+        barcodeProposalToken = nil
+        confirmedBarcodeRecord = nil
         barcodeLoading = true
-        Task {
+        barcodeLookupTask = Task { @MainActor in
             do {
                 let lookup = try await barcodeClient.fetchNutritionBarcode(normalized)
-                await MainActor.run {
-                    barcodeLoading = false
-                    applyBarcodeLookup(lookup)
-                }
+                guard !Task.isCancelled,
+                      barcodeRequestGate.accepts(request, visibleInput: barcodeInput) else { return }
+                barcodeLoading = false
+                barcodeLookupTask = nil
+                applyBarcodeLookup(lookup, token: request)
             } catch let error as TailscaleSyncError {
-                await MainActor.run {
-                    barcodeLoading = false
-                    barcodeError = barcodeErrorMessage(error)
-                }
+                guard !Task.isCancelled,
+                      barcodeRequestGate.accepts(request, visibleInput: barcodeInput) else { return }
+                barcodeLoading = false
+                barcodeLookupTask = nil
+                barcodeError = barcodeErrorMessage(error)
             } catch {
-                await MainActor.run {
-                    barcodeLoading = false
-                    barcodeError = "Barcode lookup returned an invalid response. No values are available."
-                }
+                guard !Task.isCancelled,
+                      barcodeRequestGate.accepts(request, visibleInput: barcodeInput) else { return }
+                barcodeLoading = false
+                barcodeLookupTask = nil
+                barcodeError = "Barcode lookup returned an invalid response. No values are available."
             }
         }
+    }
+
+    private func cancelBarcodeLookup() {
+        barcodeLookupTask?.cancel()
+        barcodeLookupTask = nil
+        barcodeRequestGate.invalidate()
+        barcodeLoading = false
     }
 
 #if os(iOS)
     private var barcodeScannerStatus: String {
         switch barcodeScanner.state {
-        case .permissionRequired: "Camera permission is required. If denied, enter the barcode manually below."
-        case .denied: "Camera access is denied or restricted. Enable it in Settings, or use manual entry."
-        case .unavailable: "This device has no available camera scanner. Manual entry remains available."
-        case .ready: "Camera is ready for a one-shot EAN-8, EAN-13, or UPC-A scan."
-        case .scanning: "Scanning one barcode… No camera frame is stored."
-        case .captured(let barcode): "Captured \(barcode); starting the bounded lookup."
-        case .failed: "Camera could not start. Manual entry remains available."
+        case .permissionRequired: return "Camera permission is required. If denied, enter the barcode manually below."
+        case .denied: return "Camera access is denied or restricted. Enable it in Settings, or use manual entry."
+        case .unavailable: return "This device has no available camera scanner. Manual entry remains available."
+        case .ready: return "Camera is ready for a one-shot EAN-8, EAN-13, or UPC-A scan."
+        case .scanning: return "Scanning one barcode… No camera frame is stored."
+        case .captured(let barcode): return "Captured \(barcode); starting the bounded lookup."
+        case .failed: return "Camera could not start. Manual entry remains available."
         }
     }
 
@@ -1914,15 +2005,17 @@ private struct FitnessFoodReviewSheet: View {
     }
 #endif
 
-    private func applyBarcodeLookup(_ lookup: NutritionBarcodeLookup) {
+    private func applyBarcodeLookup(_ lookup: NutritionBarcodeLookup, token: NutritionBarcodeRequestToken) {
         barcodeLookup = lookup
         guard case .found(let found) = lookup else {
             barcodeProposal = nil
+            barcodeProposalToken = nil
             return
         }
         do {
             let proposal = try NutritionBarcodeProposal(proposalID: "barcode-\(found.barcode)", lookup: lookup)
             barcodeProposal = proposal
+            barcodeProposalToken = token
             barcodeProductName = found.product.name ?? ""
             if let values = found.perServing {
                 barcodeBasis = .perServing
@@ -1939,6 +2032,7 @@ private struct FitnessFoodReviewSheet: View {
             }
         } catch {
             barcodeProposal = nil
+            barcodeProposalToken = nil
             barcodeError = "The provider response could not be turned into an editable proposal."
         }
     }
@@ -1960,7 +2054,13 @@ private struct FitnessFoodReviewSheet: View {
     }
 
     private func confirmBarcodeProposal() {
-        guard let barcodeProposal else { return }
+        guard let barcodeProposal,
+              let barcodeProposalToken,
+              barcodeRequestGate.accepts(barcodeProposalToken, visibleInput: barcodeInput),
+              barcodeProposal.barcode == barcodeProposalToken.barcode else {
+            barcodeError = "The barcode input changed. Look up the current barcode before confirming."
+            return
+        }
         if let confirmedBarcodeRecord {
             saveBarcodeRecord(confirmedBarcodeRecord)
             return
@@ -2008,6 +2108,13 @@ private struct FitnessFoodReviewSheet: View {
         }
     }
 
+    private var barcodeConfirmationIsCurrent: Bool {
+        guard let barcodeProposal,
+              let barcodeProposalToken else { return false }
+        return barcodeProposal.barcode == barcodeProposalToken.barcode
+            && barcodeRequestGate.accepts(barcodeProposalToken, visibleInput: barcodeInput)
+    }
+
     private func saveBarcodeRecord(_ record: NutritionRecord) {
         barcodeSaving = true
         barcodeError = nil
@@ -2037,12 +2144,12 @@ private struct FitnessFoodReviewSheet: View {
 
     private func barcodeErrorMessage(_ error: TailscaleSyncError) -> String {
         switch error {
-        case .notConfigured: "LifeOS server is not configured. No lookup was attempted."
-        case .invalidBarcode: "Enter a checksum-valid EAN-8, EAN-13, or UPC-A barcode."
-        case .httpError(let status): "The authenticated gateway returned HTTP \(status). No values are available."
-        case .responseTooLarge: "The gateway response exceeded the safety bound. No values are available."
-        case .invalidResponse: "The gateway returned an invalid barcode response. No values are available."
-        case .invalidServerURL: "The LifeOS server URL is not approved. No lookup was attempted."
+        case .notConfigured: return "LifeOS server is not configured. No lookup was attempted."
+        case .invalidBarcode: return "Enter a checksum-valid EAN-8, EAN-13, or UPC-A barcode."
+        case .httpError(let status): return "The authenticated gateway returned HTTP \(status). No values are available."
+        case .responseTooLarge: return "The gateway response exceeded the safety bound. No values are available."
+        case .invalidResponse: return "The gateway returned an invalid barcode response. No values are available."
+        case .invalidServerURL: return "The LifeOS server URL is not approved. No lookup was attempted."
         }
     }
 
@@ -2305,28 +2412,154 @@ private struct FitnessMealRow: View {
 
 private struct FitnessHydrationLifestyleCard: View {
     let nutrition: FitnessNutritionSnapshot
+    let selectedDate: Date
+    let isFixture: Bool
+    @StateObject private var repository: FitnessLifestyleRepository
+    @State private var refreshToken = UUID()
+
+    init(nutrition: FitnessNutritionSnapshot, selectedDate: Date, isFixture: Bool) {
+        self.nutrition = nutrition
+        self.selectedDate = selectedDate
+        self.isFixture = isFixture
+        _repository = StateObject(wrappedValue: FitnessLifestyleRepository(usesVisualFixtures: isFixture))
+    }
 
     var body: some View {
         FitnessCard {
             VStack(alignment: .leading, spacing: 11) {
-                Text("Hydration, caffeine, alcohol")
-                    .font(LifeOSFont.header(15))
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Hydration, caffeine, alcohol")
+                            .font(LifeOSFont.header(15))
+                        Text(isFixture ? "Fixture preview · not persisted" : "Durable local facts · exact timestamps")
+                            .font(LifeOSFont.caption(10))
+                            .foregroundStyle(isFixture ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)
+                    }
+                    Spacer(minLength: 8)
+                    Text("Open logs")
+                        .font(LifeOSFont.caption(10))
+                        .foregroundStyle(LifeOSTokens.accent)
+                }
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), spacing: 12)], spacing: 10) {
-                    LifestyleColumn(title: "Hydration", value: hydrationLabel, detail: "manual amounts", hue: .blue)
-                    LifestyleColumn(title: "Caffeine", value: nutrition.caffeineMilligrams.map { "\($0) mg" } ?? "Not available", detail: "user tracking intent", hue: .orange)
-                    LifestyleColumn(title: "Alcohol", value: nutrition.alcoholUnits.map { "\($0.formatted(.number.precision(.fractionLength(1)))) units" } ?? "Not available", detail: "user-entered log", hue: .pink)
+                    lifestyleLink(kind: .hydration, hue: .blue)
+                    lifestyleLink(kind: .caffeine, hue: .orange)
+                    lifestyleLink(kind: .alcohol, hue: .pink)
                 }
                 Text("No health-risk conclusion is inferred from these logs. Empty entries remain empty rather than becoming zero.")
                     .font(LifeOSFont.caption(10))
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
         }
+        .task { reloadLedger() }
+        .onChange(of: selectedDate) { _, _ in reloadLedger() }
+        .onReceive(NotificationCenter.default.publisher(for: .fitnessLifestyleLedgerDidChange)) { note in
+            guard !isFixture,
+                  let key = note.object as? String,
+                  key == repository.store.persistenceKey else { return }
+            reloadLedger()
+        }
+        .accessibilityIdentifier("fitness-lifestyle-summary-card")
     }
 
-    private var hydrationLabel: String {
-        guard let amount = nutrition.hydrationMilliliters else { return "Not available" }
-        if let target = nutrition.hydrationTargetMilliliters { return "\(amount) / \(target) ml" }
-        return "\(amount) ml"
+    @ViewBuilder
+    private func lifestyleLink(kind: FitnessLifestyleKind, hue: LifeOSTokens.Hue) -> some View {
+        NavigationLink {
+            FitnessLifestyleView(
+                kind: kind,
+                selectedDate: selectedDate,
+                usesVisualFixtures: isFixture,
+                fixtureTotal: fixtureTotal(for: kind),
+                fixtureUnit: fixtureUnit(for: kind),
+                repository: repository
+            )
+        } label: {
+            LifestyleColumn(title: kind.displayName, value: value(for: kind), detail: detail(for: kind), hue: hue)
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("fitness-lifestyle-open-\(kind.rawValue)")
+    }
+
+    private var timeZoneIdentifier: String {
+        let identifier = TimeZone.current.identifier
+        return FitnessLifestyleTime.isValidTimeZoneIdentifier(identifier) ? identifier : "UTC"
+    }
+
+    private func reloadLedger() {
+        guard !isFixture else {
+            refreshToken = UUID()
+            return
+        }
+        repository.refresh()
+        refreshToken = UUID()
+    }
+
+    private func summary(for kind: FitnessLifestyleKind) -> Result<FitnessLifestyleDaySummary, FitnessLifestyleStoreError> {
+        _ = refreshToken
+        guard !isFixture else {
+            return .failure(.corruptStorage("fixture summary is supplied by the preview snapshot"))
+        }
+        let localDay = FitnessLifestyleTime.localDay(for: selectedDate, timeZoneIdentifier: timeZoneIdentifier)
+        do {
+            return .success(try repository.summary(on: localDay, kind: kind, timeZoneIdentifier: timeZoneIdentifier))
+        } catch let error as FitnessLifestyleStoreError {
+            return .failure(error)
+        } catch {
+            return .failure(.corruptStorage(error.localizedDescription))
+        }
+    }
+
+    private func value(for kind: FitnessLifestyleKind) -> String {
+        if isFixture {
+            switch kind {
+            case .hydration:
+                guard let amount = nutrition.hydrationMilliliters else { return "Fixture · —" }
+                return "Fixture · \(amount) ml"
+            case .caffeine:
+                return nutrition.caffeineMilligrams.map { "Fixture · \($0) mg" } ?? "Fixture · —"
+            case .alcohol:
+                return nutrition.alcoholUnits.map { "Fixture · \($0.formatted(.number.precision(.fractionLength(1)))) standard drinks" } ?? "Fixture · —"
+            }
+        }
+        switch summary(for: kind) {
+        case .failure: return "Unavailable"
+        case .success(let summary):
+            if summary.explicitNone { return "None" }
+            if summary.alcoholFree { return "Alcohol-free" }
+            guard let total = summary.total else { return "—" }
+            return "\(total.formatted(.number.precision(.fractionLength(0...2)))) \(summary.unit?.label ?? "")"
+        }
+    }
+
+    private func fixtureTotal(for kind: FitnessLifestyleKind) -> Double? {
+        guard isFixture else { return nil }
+        switch kind {
+        case .hydration: return nutrition.hydrationMilliliters.map(Double.init)
+        case .caffeine: return nutrition.caffeineMilligrams.map(Double.init)
+        case .alcohol: return nutrition.alcoholUnits
+        }
+    }
+
+    private func fixtureUnit(for kind: FitnessLifestyleKind) -> FitnessLifestyleUnit? {
+        guard isFixture else { return nil }
+        switch kind {
+        case .hydration: return .milliliters
+        case .caffeine: return .milligrams
+        case .alcohol: return .standardDrinks
+        }
+    }
+
+    private func detail(for kind: FitnessLifestyleKind) -> String {
+        if isFixture { return "Fixture only · not live" }
+        switch summary(for: kind) {
+        case .failure: return "Local log unavailable"
+        case .success(let summary):
+            switch summary.missingness {
+            case .observed: return "\(summary.sampleCount) saved fact\(summary.sampleCount == 1 ? "" : "s")"
+            case .explicitNone: return "Explicit none"
+            case .alcoholFree: return "Alcohol-free"
+            case .missing: return "No observation"
+            }
+        }
     }
 }
 
