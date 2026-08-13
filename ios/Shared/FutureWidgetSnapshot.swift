@@ -636,10 +636,16 @@ public struct WidgetEnergyReserveSummary: Codable, Equatable, Sendable {
     ) {
         let validUnits = [level, startingLevel, chargedPercent, dischargedPercent]
             .allSatisfy { $0.unit == .percent }
-        let values = [level.value, startingLevel.value, chargedPercent.value, dischargedPercent.value]
-        let reconciles = values.allSatisfy { $0 != nil }
-            ? abs((startingLevel.value ?? 0) + (chargedPercent.value ?? 0) - (dischargedPercent.value ?? 0) - (level.value ?? 0)) <= 0.01
-            : true
+        let reconciles: Bool
+        if let levelValue = level.value,
+           let startingValue = startingLevel.value,
+           let chargedValue = chargedPercent.value,
+           let dischargedValue = dischargedPercent.value {
+            let calculatedLevel = startingValue + chargedValue - dischargedValue
+            reconciles = abs(calculatedLevel - levelValue) <= 0.01
+        } else {
+            reconciles = true
+        }
         let latestMetricObservation = [level.observedAt, startingLevel.observedAt, chargedPercent.observedAt, dischargedPercent.observedAt]
             .compactMap { $0 }
             .max()

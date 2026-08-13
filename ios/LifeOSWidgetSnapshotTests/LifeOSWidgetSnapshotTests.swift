@@ -591,7 +591,20 @@ final class LifeOSWidgetSnapshotTests: XCTestCase {
         XCTAssertNil(WidgetFitnessMetric(value: 12, unit: .score, state: .fresh, observedAt: now, sourceLabel: "bad\nsource").value)
         XCTAssertNil(WidgetFitnessMetric(value: 12, unit: .score, state: .fresh, observedAt: now, sourceLabel: String(repeating: "x", count: 101)).value)
         let demoEnergy = WidgetEnergyReserveSummary.demo(at: now)
+        XCTAssertEqual(demoEnergy.level.value, 70)
         XCTAssertNotNil(demoEnergy.lastChargedAt)
+        let unreconciledEnergy = WidgetEnergyReserveSummary(
+            level: WidgetFitnessMetric(value: 71, unit: .percent, state: .fresh, observedAt: now, sourceLabel: source),
+            startingLevel: demoEnergy.startingLevel,
+            chargedPercent: demoEnergy.chargedPercent,
+            dischargedPercent: demoEnergy.dischargedPercent,
+            lastChargedAt: demoEnergy.lastChargedAt
+        )
+        XCTAssertNil(unreconciledEnergy.level.value)
+        XCTAssertNil(unreconciledEnergy.startingLevel.value)
+        XCTAssertNil(unreconciledEnergy.chargedPercent.value)
+        XCTAssertNil(unreconciledEnergy.dischargedPercent.value)
+        XCTAssertNil(unreconciledEnergy.lastChargedAt)
         let missingChargedTimestamp = WidgetEnergyReserveSummary(
             level: demoEnergy.level,
             startingLevel: demoEnergy.startingLevel,
