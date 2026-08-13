@@ -1,0 +1,736 @@
+import Foundation
+
+#if os(iOS) && canImport(HealthKit)
+import HealthKit
+#endif
+
+public enum HealthKitAdapterError: Error, Equatable, Sendable {
+    case unavailable
+    case restricted
+    case protectedDataUnavailable
+    case readAccessIndeterminate
+    case unsupportedMetric(HealthKitMetricID)
+    case invalidAnchor
+    case invalidSample(String)
+    case queryFailed(String)
+    case authorizationFailed(String)
+
+    public static func mappedHealthKitError(domain: String, code: Int, description: String) -> HealthKitAdapterError {
+        if domain == NSPOSIXErrorDomain,
+           let rawPOSIXCode = Int32(exactly: code),
+           let posixCode = POSIXErrorCode(rawValue: rawPOSIXCode),
+           posixCode == .EPERM || posixCode == .EACCES {
+            return .protectedDataUnavailable
+        }
+#if os(iOS) && canImport(HealthKit)
+        guard domain == HKErrorDomain else { return .queryFailed(description) }
+        switch HKError.Code(rawValue: code) {
+        case .errorHealthDataUnavailable: return .unavailable
+        case .errorHealthDataRestricted: return .restricted
+        case .errorDatabaseInaccessible: return .protectedDataUnavailable
+        // HealthKit does not expose per-type read authorization. A denied,
+        // not-determined, required-denied, or no-data query must remain
+        // ambiguous rather than being relabeled as zero/no data.
+        case .errorAuthorizationDenied,
+             .errorAuthorizationNotDetermined,
+             .errorRequiredAuthorizationDenied,
+             .errorNoData:
+            return .readAccessIndeterminate
+        default: return .queryFailed(description)
+        }
+#else
+        // HealthKit transport is intentionally iOS-only. Non-iOS targets can
+        // preserve the typed error surface but cannot interpret HK codes.
+        return .queryFailed(description)
+#endif
+    }
+}
+
+public struct HealthKitAuthorizationReport: Equatable, Sendable {
+    public let state: HealthKitAuthorizationState
+    public let promptCompleted: Bool?
+    public let errorDescription: String?
+
+    public init(state: HealthKitAuthorizationState, promptCompleted: Bool? = nil, errorDescription: String? = nil) {
+        self.state = state
+        self.promptCompleted = promptCompleted
+        self.errorDescription = errorDescription
+    }
+}
+
+#if os(iOS) && canImport(HealthKit)
+private final class HealthKitAnchoredQueryState<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private let store: HKHealthStore
+    private var continuation: CheckedContinuation<Value, Error>?
+    private var query: HKAnchoredObjectQuery?
+    private var finished = false
+
+    init(store: HKHealthStore) { self.store = store }
+
+    func setContinuation(_ continuation: CheckedContinuation<Value, Error>) {
+        lock.lock()
+        if finished {
+            lock.unlock()
+            continuation.resume(throwing: CancellationError())
+        } else {
+            self.continuation = continuation
+            lock.unlock()
+        }
+    }
+
+    func setQuery(_ query: HKAnchoredObjectQuery) {
+        lock.lock()
+        if finished {
+            lock.unlock()
+            store.stop(query)
+        } else {
+            self.query = query
+            lock.unlock()
+        }
+    }
+
+    func finish(_ result: Result<Value, Error>) {
+        lock.lock()
+        guard !finished, let continuation else {
+            lock.unlock()
+            return
+        }
+        finished = true
+        self.continuation = nil
+        lock.unlock()
+        continuation.resume(with: result)
+    }
+
+    func cancel() {
+        lock.lock()
+        guard !finished else {
+            lock.unlock()
+            return
+        }
+        finished = true
+        let continuation = self.continuation
+        self.continuation = nil
+        let query = self.query
+        lock.unlock()
+        if let query { store.stop(query) }
+        continuation?.resume(throwing: CancellationError())
+    }
+}
+
+private final class HealthKitObserverQueryState: @unchecked Sendable {
+    private let lock = NSLock()
+    private let store: HKHealthStore
+    private var query: HKObserverQuery?
+    private var stopped = false
+    private var taskState: HealthKitObserverTaskState?
+    private var cancellationHandlers: [UUID: @Sendable () -> Void] = [:]
+
+    init(store: HKHealthStore) { self.store = store }
+
+    func setQuery(_ query: HKObserverQuery) {
+        lock.lock()
+        guard !stopped else {
+            lock.unlock()
+            store.stop(query)
+            return
+        }
+        self.query = query
+        lock.unlock()
+    }
+
+    @discardableResult
+    func beginCallback() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return !stopped
+    }
+
+    func setTaskState(_ taskState: HealthKitObserverTaskState) {
+        lock.lock()
+        if stopped {
+            lock.unlock()
+            taskState.cancel()
+        } else {
+            self.taskState = taskState
+            lock.unlock()
+        }
+    }
+
+    @discardableResult
+    func registerCancellation(id: UUID, handler: @escaping @Sendable () -> Void) -> Bool {
+        lock.lock()
+        if stopped {
+            lock.unlock()
+            handler()
+            return false
+        } else {
+            cancellationHandlers[id] = handler
+            lock.unlock()
+            return true
+        }
+    }
+
+    func unregisterCancellation(id: UUID) {
+        lock.lock()
+        cancellationHandlers.removeValue(forKey: id)
+        lock.unlock()
+    }
+
+    func stop() {
+        lock.lock()
+        guard !stopped else {
+            lock.unlock()
+            return
+        }
+        stopped = true
+        let query = self.query
+        let taskState = self.taskState
+        let handlers = Array(cancellationHandlers.values)
+        cancellationHandlers.removeAll()
+        lock.unlock()
+        if let query { store.stop(query) }
+        taskState?.cancel()
+        handlers.forEach { $0() }
+    }
+}
+
+private final class HealthKitObserverTaskState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var task: Task<Void, Never>?
+
+    func set(_ task: Task<Void, Never>) {
+        lock.lock()
+        self.task = task
+        lock.unlock()
+    }
+
+    func cancel() {
+        lock.lock()
+        let task = self.task
+        lock.unlock()
+        task?.cancel()
+    }
+}
+
+/// iOS-only HealthKit adapter. It owns one HKHealthStore and exposes only
+/// read operations. No view or macOS target imports HealthKit through this
+/// type; the shared contract above remains platform-neutral.
+public final class LifeOSHealthKitAdapter: @unchecked Sendable, HealthKitReconciliationClient {
+    /// A finite first page keeps an unexpectedly large HealthKit store
+    /// bounded. Pagination is deliberately not claimed until the adapter can
+    /// prove that draining pages and advancing anchors is safe.
+    public static let defaultQueryLimit = 500
+
+    public let store: HKHealthStore
+    private let evidenceRegistry: HealthKitHelioEvidenceRegistry
+    private let queryLimit: Int
+    private let observerStatesLock = NSLock()
+    private var observerStates: [ObjectIdentifier: HealthKitObserverQueryState] = [:]
+
+    public init(
+        store: HKHealthStore = HKHealthStore(),
+        evidenceRegistry: HealthKitHelioEvidenceRegistry = .canonical,
+        queryLimit: Int = LifeOSHealthKitAdapter.defaultQueryLimit
+    ) {
+        self.store = store
+        // Persisted and newly-adapted provenance must use the same reviewed
+        // inventory. The parameter remains source-compatible for callers but
+        // cannot smuggle an unreviewed registry into HealthKit observations.
+        _ = evidenceRegistry
+        self.evidenceRegistry = .canonical
+        // HKObjectQueryNoLimit is intentionally not accepted as an unbounded
+        // default (or through a corrupted caller value). Keep every request
+        // within a finite safety envelope.
+        self.queryLimit = min(HealthKitSafetyLimits.maxSyncBatchItems, max(1, queryLimit))
+    }
+
+    public static func isSupportedMetric(_ metric: HealthKitMetricID) -> Bool {
+        metric != .alcoholicBeverages
+    }
+
+    public var isHealthDataAvailable: Bool {
+        HKHealthStore.isHealthDataAvailable()
+    }
+
+    public func availabilityState() -> HealthKitAuthorizationState {
+        isHealthDataAvailable ? .readIndeterminate : .unavailable
+    }
+
+    public func requestStatus(for metrics: [HealthKitMetricID]) async -> HealthKitAuthorizationReport {
+        guard isHealthDataAvailable else { return HealthKitAuthorizationReport(state: .unavailable) }
+        do {
+            let status = try await requestStatusValue(for: metrics)
+            switch status {
+            case .shouldRequest:
+                return HealthKitAuthorizationReport(state: .requestRequired)
+            case .unnecessary:
+                return HealthKitAuthorizationReport(state: .readIndeterminate)
+            case .unknown:
+                return HealthKitAuthorizationReport(state: .requestPending)
+            @unknown default:
+                return HealthKitAuthorizationReport(state: .requestPending)
+            }
+        } catch {
+            switch Self.map(error) {
+            case .unavailable: return HealthKitAuthorizationReport(state: .unavailable, errorDescription: error.localizedDescription)
+            case .restricted: return HealthKitAuthorizationReport(state: .restricted, errorDescription: error.localizedDescription)
+            case .protectedDataUnavailable: return HealthKitAuthorizationReport(state: .protectedDataUnavailable, errorDescription: error.localizedDescription)
+            case .readAccessIndeterminate: return HealthKitAuthorizationReport(state: .readIndeterminate, errorDescription: error.localizedDescription)
+            default: return HealthKitAuthorizationReport(state: .error, errorDescription: error.localizedDescription)
+            }
+        }
+    }
+
+    /// The completion Boolean says only that the request sheet completed. It
+    /// is never mapped to per-type read authorization, because HealthKit does
+    /// not expose that information to the app.
+    public func requestReadAuthorization(for metrics: [HealthKitMetricID]) async -> HealthKitAuthorizationReport {
+        guard isHealthDataAvailable else { return HealthKitAuthorizationReport(state: .unavailable) }
+        do {
+            let types = try objectTypes(for: metrics)
+            let success = try await requestAuthorization(read: types)
+            return HealthKitAuthorizationReport(
+                state: .readIndeterminate,
+                promptCompleted: success,
+                errorDescription: nil
+            )
+        } catch {
+            let mapped = Self.map(error)
+            let state: HealthKitAuthorizationState
+            switch mapped {
+            case .unavailable: state = .unavailable
+            case .restricted: state = .restricted
+            case .protectedDataUnavailable: state = .protectedDataUnavailable
+            default: state = .readIndeterminate
+            }
+            return HealthKitAuthorizationReport(state: state, promptCompleted: false, errorDescription: error.localizedDescription)
+        }
+    }
+
+    public func writeAuthorizationStatus(for metric: HealthKitMetricID) -> HealthKitAuthorizationState {
+        guard isHealthDataAvailable else { return .unavailable }
+        guard let type = try? objectType(for: metric) else { return .error }
+        switch store.authorizationStatus(for: type) {
+        case .notDetermined: return .writeNotDetermined
+        case .sharingAuthorized: return .writeAuthorized
+        case .sharingDenied: return .writeDenied
+        @unknown default: return .error
+        }
+    }
+
+    public func changes(for metric: HealthKitMetricID, from anchor: HealthKitOpaqueAnchor?) async throws -> HealthKitMetricSyncInput {
+        guard isHealthDataAvailable else { throw HealthKitAdapterError.unavailable }
+        let type = try objectType(for: metric)
+        let hkAnchor = try unarchive(anchor)
+        let queryState = HealthKitAnchoredQueryState<HealthKitMetricSyncInput>(store: store)
+        return try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { continuation in
+                queryState.setContinuation(continuation)
+                let query = HKAnchoredObjectQuery(
+                    type: type,
+                    predicate: nil,
+                    anchor: hkAnchor,
+                    limit: queryLimit
+                ) { [weak self, weak queryState] _, samples, deleted, newAnchor, error in
+                    guard let queryState else { return }
+                    guard let self else {
+                        queryState.finish(.failure(HealthKitAdapterError.queryFailed("Adapter was released")))
+                        return
+                    }
+                    if let error {
+                        queryState.finish(.failure(Self.map(error)))
+                        return
+                    }
+                    Task {
+                        do {
+                            let additions = try self.observations(metric: metric, samples: samples ?? [])
+                            let deletions = try self.tombstones(metric: metric, deleted: deleted ?? [], deletedAt: .now)
+                            let objectCount = (samples?.count ?? 0) + (deleted?.count ?? 0)
+                            let partial = objectCount >= self.queryLimit
+                            // A bounded page cannot safely claim that its
+                            // returned anchor drained all changes. Leaving
+                            // nextAnchor nil makes the store retain the prior
+                            // anchor and causes a safe replay on the next run.
+                            let nextAnchor = partial ? nil : try self.archive(newAnchor)
+                            let readability: HealthKitReadability =
+                                objectCount == 0 && anchor == nil ? .emptyIndeterminate : .established
+                            let input = try HealthKitMetricSyncInput(
+                                metric: metric,
+                                additions: additions,
+                                deletions: deletions,
+                                nextAnchor: nextAnchor,
+                                observedAt: .now,
+                                partial: partial,
+                                readability: readability
+                            )
+                            queryState.finish(.success(input))
+                        } catch {
+                            queryState.finish(.failure(error))
+                        }
+                    }
+                }
+                queryState.setQuery(query)
+                self.store.execute(query)
+            }
+        }, onCancel: {
+            queryState.cancel()
+        })
+    }
+
+    /// Installs a background observer. The reconciler performs the anchored
+    /// read and durable commit before this completion is called. The gate in
+    /// HealthKitReconciliation guarantees the system callback is invoked once
+    /// even when the query fails or the client times out.
+    @discardableResult
+    public func startObserver(
+        for metric: HealthKitMetricID,
+        reconciler: HealthKitReconciliationCoordinator,
+        timeout: TimeInterval = 30,
+        completion: @escaping @Sendable (HealthKitObserverCompletion) -> Void
+    ) throws -> HKObserverQuery {
+        guard isHealthDataAvailable else { throw HealthKitAdapterError.unavailable }
+        let type = try objectType(for: metric)
+        let normalizedTimeout = HealthKitReconciliationCoordinator.normalizedTimeout(timeout)
+        let queryState = HealthKitObserverQueryState(store: store)
+        let query = HKObserverQuery(sampleType: type, predicate: nil) { [weak self, weak reconciler, queryState] _, healthKitCompletion, error in
+            guard queryState.beginCallback() else {
+                // A stopped observer may still deliver a platform callback.
+                // Complete this callback without starting reconciliation.
+                healthKitCompletion()
+                return
+            }
+            let gate = HealthKitObserverCompletionGate(timeout: normalizedTimeout)
+            if let error {
+                gate.finish(.failure(error.localizedDescription), completion: healthKitCompletion, report: completion)
+                return
+            }
+            guard self != nil, let reconciler else {
+                gate.finish(.failure("Adapter was released"), completion: healthKitCompletion, report: completion)
+                return
+            }
+            let taskState = HealthKitObserverTaskState()
+            let callbackID = UUID()
+            let reconciliationTask = Task {
+                let result = await reconciler.reconcile(metric: metric)
+                queryState.unregisterCancellation(id: callbackID)
+                gate.finish(result.completion, completion: healthKitCompletion, report: completion)
+            }
+            taskState.set(reconciliationTask)
+            queryState.setTaskState(taskState)
+            queryState.registerCancellation(id: callbackID) {
+                reconciliationTask.cancel()
+            }
+            Task {
+                try? await Task.sleep(nanoseconds: UInt64(normalizedTimeout * 1_000_000_000))
+                gate.finish(
+                    .timedOut,
+                    completion: healthKitCompletion,
+                    report: completion,
+                    onFirst: {
+                        queryState.unregisterCancellation(id: callbackID)
+                        taskState.cancel()
+                        queryState.stop()
+                        self?.unregisterObserver(queryState)
+                    }
+                )
+            }
+        }
+        queryState.setQuery(query)
+        registerObserver(queryState, for: query)
+        return query
+    }
+
+    public func stopObserver(_ query: HKObserverQuery) {
+        if let state = unregisterObserver(query) {
+            state.stop()
+        } else {
+            store.stop(query)
+        }
+    }
+
+    /// Idempotently stops every observer and cancels any reconciliation or
+    /// timeout task associated with its callback. It is safe to call from
+    /// lifecycle teardown while a callback is concurrently being delivered.
+    public func stopAllObservers() {
+        observerStatesLock.lock()
+        let states = Array(observerStates.values)
+        observerStates.removeAll()
+        observerStatesLock.unlock()
+        states.forEach { $0.stop() }
+    }
+
+    private func registerObserver(_ state: HealthKitObserverQueryState, for query: HKObserverQuery) {
+        observerStatesLock.lock()
+        observerStates[ObjectIdentifier(query)] = state
+        // Serialize registration with stopAll/stopObserver so a teardown
+        // cannot stop a query between registration and execute().
+        store.execute(query)
+        observerStatesLock.unlock()
+    }
+
+    @discardableResult
+    private func unregisterObserver(_ query: HKObserverQuery) -> HealthKitObserverQueryState? {
+        observerStatesLock.lock()
+        let state = observerStates.removeValue(forKey: ObjectIdentifier(query))
+        observerStatesLock.unlock()
+        return state
+    }
+
+    private func unregisterObserver(_ state: HealthKitObserverQueryState) {
+        observerStatesLock.lock()
+        observerStates = observerStates.filter { $0.value !== state }
+        observerStatesLock.unlock()
+    }
+
+    private func objectTypes(for metrics: [HealthKitMetricID]) throws -> Set<HKObjectType> {
+        Set(try metrics.map { try objectType(for: $0) })
+    }
+
+    private static func map(_ error: Error) -> HealthKitAdapterError {
+        if let error = error as? HealthKitAdapterError { return error }
+        let nsError = error as NSError
+        return HealthKitAdapterError.mappedHealthKitError(domain: nsError.domain, code: nsError.code, description: nsError.localizedDescription)
+    }
+
+    private func objectType(for metric: HealthKitMetricID) throws -> HKSampleType {
+        switch metric {
+        case .sleep:
+            guard let type = HKObjectType.categoryType(forIdentifier: .sleepAnalysis) else { throw HealthKitAdapterError.unsupportedMetric(metric) }
+            return type
+        case .workout:
+            return HKObjectType.workoutType()
+        default:
+            let identifier: HKQuantityTypeIdentifier
+            switch metric {
+            case .water: identifier = .dietaryWater
+            case .caffeine: identifier = .dietaryCaffeine
+            case .alcoholicBeverages: throw HealthKitAdapterError.unsupportedMetric(metric)
+            case .heartRate: identifier = .heartRate
+            case .restingHeartRate: identifier = .restingHeartRate
+            case .heartRateVariabilitySDNN: identifier = .heartRateVariabilitySDNN
+            case .oxygenSaturation: identifier = .oxygenSaturation
+            case .vo2Max: identifier = .vo2Max
+            case .activeEnergy: identifier = .activeEnergyBurned
+            case .steps: identifier = .stepCount
+            case .respiratoryRate: identifier = .respiratoryRate
+            case .bodyMass: identifier = .bodyMass
+            case .bodyFatPercentage: identifier = .bodyFatPercentage
+            case .leanBodyMass: identifier = .leanBodyMass
+            case .sleep, .workout: throw HealthKitAdapterError.unsupportedMetric(metric)
+            }
+            guard let type = HKObjectType.quantityType(forIdentifier: identifier) else { throw HealthKitAdapterError.unsupportedMetric(metric) }
+            return type
+        }
+    }
+
+    private func requestStatusValue(for metrics: [HealthKitMetricID]) async throws -> HKAuthorizationRequestStatus {
+        let types = try objectTypes(for: metrics)
+        return try await withCheckedThrowingContinuation { continuation in
+            store.getRequestStatusForAuthorization(toShare: [], read: types) { status, error in
+                if let error { continuation.resume(throwing: Self.map(error)) }
+                else { continuation.resume(returning: status) }
+            }
+        }
+    }
+
+    private func requestAuthorization(read types: Set<HKObjectType>) async throws -> Bool {
+        try await withCheckedThrowingContinuation { continuation in
+            store.requestAuthorization(toShare: nil, read: types) { success, error in
+                if let error { continuation.resume(throwing: Self.map(error)) }
+                else { continuation.resume(returning: success) }
+            }
+        }
+    }
+
+    private func archive(_ anchor: HKQueryAnchor?) throws -> HealthKitOpaqueAnchor? {
+        guard let anchor else { return nil }
+        do {
+            let data = try NSKeyedArchiver.archivedData(withRootObject: anchor, requiringSecureCoding: true)
+            return try HealthKitOpaqueAnchor(archivedData: data)
+        } catch {
+            throw HealthKitAdapterError.invalidAnchor
+        }
+    }
+
+    private func unarchive(_ anchor: HealthKitOpaqueAnchor?) throws -> HKQueryAnchor? {
+        guard let anchor else { return nil }
+        do {
+            return try NSKeyedUnarchiver.unarchivedObject(ofClass: HKQueryAnchor.self, from: anchor.archivedData)
+        } catch {
+            throw HealthKitAdapterError.invalidAnchor
+        }
+    }
+
+    private func observations(metric: HealthKitMetricID, samples: [HKSample]) throws -> [HealthKitObservation] {
+        try samples.map { sample in
+            let identity = try sampleIdentity(for: sample)
+            let provenance = try provenance(for: sample)
+            let value: HealthKitObservationValue
+            switch metric {
+            case .sleep:
+                guard let category = sample as? HKCategorySample else { throw HealthKitAdapterError.invalidSample("Sleep sample is not a category sample") }
+                let timeZone = sample.metadata?[HKMetadataKeyTimeZone] as? String
+                value = .sleep(try HealthKitSleepValue(stage: HealthKitSleepStage(rawValue: category.value), timeZoneIdentifier: timeZone))
+            case .workout:
+                guard let workout = sample as? HKWorkout else { throw HealthKitAdapterError.invalidSample("Workout sample is not a workout") }
+                let energy: Double?
+                if let totalEnergyBurned = workout.totalEnergyBurned {
+                    energy = totalEnergyBurned.doubleValue(for: .kilocalorie())
+                } else {
+                    energy = nil
+                }
+                value = .workout(try HealthKitWorkoutValue(
+                    activityTypeRawValue: Int(workout.workoutActivityType.rawValue),
+                    durationSeconds: workout.duration,
+                    activeEnergyKilocalories: energy
+                ))
+            default:
+                guard let quantitySample = sample as? HKQuantitySample else { throw HealthKitAdapterError.invalidSample("Quantity sample is not a quantity sample") }
+                let quantity = try canonicalQuantity(metric: metric, sample: quantitySample)
+                value = .quantity(quantity)
+            }
+            do {
+                return try HealthKitObservation(
+                    metric: metric,
+                    identity: identity,
+                    value: value,
+                    startDate: sample.startDate,
+                    endDate: sample.endDate,
+                    provenance: provenance,
+                    now: .now
+                )
+            } catch {
+                throw HealthKitAdapterError.invalidSample(String(describing: error))
+            }
+        }
+    }
+
+    private func tombstones(metric: HealthKitMetricID, deleted: [HKDeletedObject], deletedAt: Date) throws -> [HealthKitDeletionTombstone] {
+        try deleted.map { deletedObject in
+            // HKDeletedObject metadata is optional and may be incomplete.
+            // A deletion must never discard the whole page merely because a
+            // provider omitted sync identifier/version metadata; UUID is the
+            // documented stable tombstone identity available in that case.
+            try HealthKitDeletionTombstone(
+                metric: metric,
+                identity: tombstoneIdentity(uuid: deletedObject.uuid, metadata: deletedObject.metadata),
+                deletedAt: deletedAt
+            )
+        }
+    }
+
+    private func sampleIdentity(for sample: HKSample) throws -> HealthKitSampleIdentity {
+        try sampleIdentity(uuid: sample.uuid, metadata: sample.metadata)
+    }
+
+    internal func sampleIdentity(uuid: UUID, metadata: [String: Any]?) throws -> HealthKitSampleIdentity {
+        let syncIdentifier: String?
+        if let raw = metadata?[HKMetadataKeySyncIdentifier] {
+            guard let value = raw as? String else { throw HealthKitAdapterError.invalidSample("Sync identifier is not a string") }
+            let clean = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !clean.isEmpty, clean.count <= 512 else { throw HealthKitAdapterError.invalidSample("Sync identifier is invalid") }
+            syncIdentifier = clean
+        } else {
+            syncIdentifier = nil
+        }
+
+        let revision: HealthKitSampleRevision
+        if let raw = metadata?[HKMetadataKeySyncVersion] {
+            if let number = raw as? NSNumber {
+                let value = number.doubleValue
+                guard value.isFinite, value >= 0, value.rounded() == value, value <= Double(Int64.max) else {
+                    throw HealthKitAdapterError.invalidSample("Sync version is not a non-negative integer")
+                }
+                revision = try HealthKitSampleRevision(syncVersion: number.int64Value)
+            } else {
+                throw HealthKitAdapterError.invalidSample("Sync version is not numeric")
+            }
+        } else {
+            revision = .uuidFallback
+        }
+        guard syncIdentifier == nil || revision.numericValue != nil else {
+            throw HealthKitAdapterError.invalidSample("Sync identifier requires a numeric sync version")
+        }
+        return HealthKitSampleIdentity(uuid: uuid, syncIdentifier: syncIdentifier, revision: revision)
+    }
+
+    internal func tombstoneIdentity(uuid: UUID, metadata: [String: Any]?) -> HealthKitSampleIdentity {
+        (try? sampleIdentity(uuid: uuid, metadata: metadata)) ?? HealthKitSampleIdentity(uuid: uuid)
+    }
+
+    private func provenance(for sample: HKSample) throws -> HealthKitProvenance {
+        let revision = sample.sourceRevision
+        let source = try HealthKitSourceMetadata(
+            bundleIdentifier: revision.source.bundleIdentifier,
+            name: revision.source.name,
+            version: revision.version,
+            productType: revision.productType,
+            operatingSystemVersion: Self.osString(revision.operatingSystemVersion)
+        )
+        let device: HealthKitDeviceMetadata?
+        if let hkDevice = sample.device {
+            device = try HealthKitDeviceMetadata(
+                name: hkDevice.name,
+                manufacturer: hkDevice.manufacturer,
+                model: hkDevice.model,
+                hardwareVersion: hkDevice.hardwareVersion,
+                firmwareVersion: hkDevice.firmwareVersion,
+                softwareVersion: hkDevice.softwareVersion,
+                localIdentifier: hkDevice.localIdentifier
+            )
+        } else {
+            device = nil
+        }
+        return try HealthKitProvenance.from(source: source, device: device, registry: evidenceRegistry)
+    }
+
+    private func canonicalQuantity(metric: HealthKitMetricID, sample: HKQuantitySample) throws -> HealthKitQuantityValue {
+        let unit: HKUnit
+        switch metric {
+        case .water: unit = HKUnit(from: "mL")
+        case .caffeine: unit = HKUnit(from: "mg")
+        case .alcoholicBeverages: throw HealthKitAdapterError.unsupportedMetric(metric)
+        case .heartRate, .restingHeartRate, .respiratoryRate: unit = HKUnit(from: "count/min")
+        case .heartRateVariabilitySDNN: unit = HKUnit(from: "ms")
+        case .oxygenSaturation, .bodyFatPercentage: unit = .percent()
+        case .vo2Max: unit = HKUnit(from: "mL/kg/min")
+        case .activeEnergy: unit = .kilocalorie()
+        case .steps: unit = .count()
+        case .bodyMass, .leanBodyMass: unit = .gramUnit(with: .kilo)
+        case .sleep, .workout: throw HealthKitAdapterError.unsupportedMetric(metric)
+        }
+        var value = sample.quantity.doubleValue(for: unit)
+        if metric == .oxygenSaturation || metric == .bodyFatPercentage { value *= 100 }
+        guard let canonical = metric.canonicalUnit else { throw HealthKitAdapterError.unsupportedMetric(metric) }
+        do { return try HealthKitQuantityValue(metric: metric, value: value, unit: canonical) }
+        catch { throw HealthKitAdapterError.invalidSample(String(describing: error)) }
+    }
+
+    private static func osString(_ version: OperatingSystemVersion) -> String {
+        "\(version.majorVersion).\(version.minorVersion).\(version.patchVersion)"
+    }
+}
+
+#else
+
+/// macOS and non-iOS builds deliberately expose an unavailable adapter rather
+/// than importing HealthKit or presenting a fixture as a live source.
+public final class LifeOSHealthKitAdapter: @unchecked Sendable, HealthKitReconciliationClient {
+    public init(evidenceRegistry: HealthKitHelioEvidenceRegistry = .canonical) { _ = evidenceRegistry }
+
+    public static func isSupportedMetric(_ metric: HealthKitMetricID) -> Bool {
+        metric != .alcoholicBeverages
+    }
+
+    public var isHealthDataAvailable: Bool { false }
+    public func availabilityState() -> HealthKitAuthorizationState { .unavailable }
+    public func requestStatus(for metrics: [HealthKitMetricID]) async -> HealthKitAuthorizationReport { HealthKitAuthorizationReport(state: .unavailable) }
+    public func requestReadAuthorization(for metrics: [HealthKitMetricID]) async -> HealthKitAuthorizationReport { HealthKitAuthorizationReport(state: .unavailable) }
+    public func writeAuthorizationStatus(for metric: HealthKitMetricID) -> HealthKitAuthorizationState { .unavailable }
+    public func changes(for metric: HealthKitMetricID, from anchor: HealthKitOpaqueAnchor?) async throws -> HealthKitMetricSyncInput { throw HealthKitAdapterError.unavailable }
+
+    public func stopAllObservers() {}
+}
+
+#endif
