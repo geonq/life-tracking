@@ -5,34 +5,81 @@ This is the product track for the iPhone and Mac Life OS. It includes a dark-mod
 ## macOS prerequisites
 
 - macOS with Xcode 15.4+ (Swift 5.9, iOS 17 SDK)
-- XcodeGen: `brew install xcodegen`
+- XcodeGen 2.46.0 (the hosted workflow downloads the upstream release and
+  verifies SHA-256 `4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806`)
 - An iPhone for eventual WidgetKit/device validation
 
 ## Generate and verify on macOS
 
-From the repository root, the repeatable validation script generates the project, runs iOS unit/UI tests, preserves the `.xcresult` bundle and screenshot attachments, and builds the macOS app/widgets:
+From the repository root, the repeatable validation script generates the project,
+runs the focused iOS logic lane by default, and validates its `.xcresult`
+minimum count:
 
 ```sh
 ./scripts/validate_apple_on_mac.sh
 ```
 
+UI lanes and their attachment export are explicit opt-ins:
+
+```sh
+./scripts/validate_apple_on_mac.sh ui   # iOS UI + macOS UI
+./scripts/validate_apple_on_mac.sh all  # all five split debug lanes
+```
+
 Artifacts are written to `artifacts/apple-validation/` and remain untracked. The equivalent manual commands are:
 
 ```sh
-xcodegen generate --spec ios/project.yml
-xcodebuild -project ios/LifeOS.xcodeproj -scheme LifeOS -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 15,OS=latest' test
-xcodebuild -project ios/LifeOS.xcodeproj -scheme LifeOSMac -destination 'platform=macOS' build
+xcodegen generate --spec ios/project.yml --project ios --project-root ios
+python3 -B scripts/validate_xcodegen.py
+xcodebuild -project ios/LifeOS.xcodeproj -scheme LifeOSLogic -showTestPlans
+xcodebuild -project ios/LifeOS.xcodeproj -scheme LifeOSLogic -testPlan LifeOSLogic \
+  -destination 'platform=iOS Simulator,name=iPhone 17,OS=latest' \
+  -only-testing:LifeOSTests CODE_SIGNING_ALLOWED=NO test
+xcodebuild -project ios/LifeOS.xcodeproj -scheme LifeOSMacLogic -testPlan LifeOSMacLogic \
+  -destination 'platform=macOS' -only-testing:LifeOSMacSnapshotTests \
+  CODE_SIGNING_ALLOWED=NO test
 ```
 
-The repository also runs unsigned source/build/test gates on a hosted macOS runner through `.github/workflows/native-apple.yml`. The workflow preserves iOS light/dark UI screenshots and macOS light/dark headless snapshot attachments. Hosted simulator results do not verify real-device signing, App Group entitlements, peer discovery, or WidgetKit placement.
+The split debug acceptance surface is seven lanes total: five hosted debug
+lanes (`LifeOSLogic`, `LifeOSUI`, `LifeOSMacLogic`, `LifeOSMacUI`, and
+`LifeOSWidgets`) plus the two Release prerelease lanes
+(`LifeOSPrereleaseIOS` and `LifeOSPrereleaseMac`). The machine-readable
+`scripts/native_lane_manifest.json` is the shared command contract for schemes,
+test plans, configurations, target scopes, timeouts, result paths, and minimum
+counts. The hosted workflow regenerates from `ios/project.yml` and rejects
+empty/canceled/under-counted result bundles.
+
+Run the Release pair with isolated per-platform DerivedData and result bundles:
+
+```sh
+./scripts/run_prerelease_lanes.sh build-for-testing
+./scripts/run_prerelease_lanes.sh test-without-building
+```
+
+Hosted simulator results do not verify real-device signing, App Group
+entitlements, peer discovery, or WidgetKit placement.
+
+The checked-in project settings are intentionally development-safe: the App
+Group is a team-owned placeholder, `PROVISIONING_MODE` is `unknown`, and the
+sync allowlist is empty. Do not replace those values in source. A signed
+release environment must create an ephemeral xcodebuild-settings/xcconfig file
+with its own approved values and run:
+
+```sh
+python3 -B scripts/validate_native_release.py \
+  --mode release --settings-file /private/path/to/ephemeral-settings.txt
+```
+
+Keep that file outside the repository and out of logs/artifacts. The validator
+rejects unresolved variables, fixture build flags, placeholder/unknown signing,
+and empty/non-`.ts.net` release allowlists; development mode preserves the
+fail-closed source defaults.
 
 For a signed device build after selecting a development team in Xcode:
 
 ```sh
-xcodebuild -project LifeOS.xcodeproj -scheme LifeOS -configuration Debug -sdk iphoneos -destination 'generic/platform=iOS' -allowProvisioningUpdates build
+xcodebuild -project ios/LifeOS.xcodeproj -scheme LifeOS -configuration Debug -sdk iphoneos -destination 'generic/platform=iOS' -allowProvisioningUpdates build
 ```
-
-These commands have **not** been run in this Windows workspace. Swift, Xcode, XcodeGen, simulator, signing, and device behavior remain unverified here.
 
 ## Capability boundaries and provisioning steps
 

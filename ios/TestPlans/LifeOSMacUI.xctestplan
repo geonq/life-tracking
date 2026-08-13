@@ -1,0 +1,30 @@
+{
+  "configurations" : [
+    {
+      "id" : "A6A9D0DC-1A39-4F09-B13D-3B846C2021F8",
+      "name" : "Debug",
+      "options" : {
+        "testExecutionOrdering" : "lexical"
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "codeCoverage" : false,
+    "targetForVariableExpansion" : {
+      "containerPath" : "container:LifeOS.xcodeproj",
+      "identifier" : "71437E54A44714BC8BB2AFEC",
+      "name" : "LifeOSMac"
+    }
+  },
+  "testTargets" : [
+    {
+      "parallelizable" : false,
+      "target" : {
+        "containerPath" : "container:LifeOS.xcodeproj",
+        "identifier" : "E02714DF1E6E1D2F74181BCC",
+        "name" : "LifeOSMacUITests"
+      }
+    }
+  ],
+  "version" : 1
+}

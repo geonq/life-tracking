@@ -5,11 +5,31 @@ on:
     paths:
       - "ios/**"
       - "scripts/validate_native_calendar.py"
+      - "scripts/validate_acceptance_registry.py"
+      - "scripts/validate_native_release.py"
+      - "scripts/validate_xcodegen.py"
+      - "scripts/validate_xcresult.py"
+      - "scripts/lane_manifest.py"
+      - "scripts/native_lane_manifest.json"
+      - "scripts/validate_apple_on_mac.sh"
+      - "scripts/run_prerelease_lanes.sh"
+      - "scripts/tests/**"
+      - "docs/LIFEOS_ACCEPTANCE_REGISTRY.md"
       - ".github/workflows/native-apple.yml"
   pull_request:
     paths:
       - "ios/**"
       - "scripts/validate_native_calendar.py"
+      - "scripts/validate_acceptance_registry.py"
+      - "scripts/validate_native_release.py"
+      - "scripts/validate_xcodegen.py"
+      - "scripts/validate_xcresult.py"
+      - "scripts/lane_manifest.py"
+      - "scripts/native_lane_manifest.json"
+      - "scripts/validate_apple_on_mac.sh"
+      - "scripts/run_prerelease_lanes.sh"
+      - "scripts/tests/**"
+      - "docs/LIFEOS_ACCEPTANCE_REGISTRY.md"
       - ".github/workflows/native-apple.yml"
   workflow_dispatch:
 
@@ -20,12 +40,32 @@ concurrency:
   group: native-apple-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # XcodeGen's Homebrew formula is floating. Download the upstream release
+  # artifact and verify its digest so generation cannot silently change when
+  # Homebrew updates on a hosted runner.
+  XCODEGEN_VERSION: "2.46.0"
+  XCODEGEN_SHA256: "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806"
+  XCODEGEN_URL: "https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip"
+
 jobs:
-  apple-build:
+  apple-lanes:
+    name: ${{ matrix.lane }}
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: ios-logic
+          - lane: ios-ui
+          - lane: mac-logic
+          - lane: mac-ui
+          - lane: widgets
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Select Xcode
         run: |
@@ -33,94 +73,144 @@ jobs:
           sudo xcode-select -s /Applications/Xcode.app
           xcodebuild -version
 
-      - name: Install XcodeGen
-        run: brew install xcodegen
+      - name: Install pinned XcodeGen
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/xcodegen-${XCODEGEN_VERSION}.zip"
+          install_dir="$RUNNER_TEMP/xcodegen-${XCODEGEN_VERSION}"
+          curl --fail --location --silent --show-error --retry 3 --retry-delay 1 \
+            "$XCODEGEN_URL" -o "$archive"
+          echo "$XCODEGEN_SHA256  $archive" | shasum --algorithm 256 --check --strict
+          rm -rf "$install_dir"
+          mkdir -p "$install_dir"
+          unzip -q "$archive" -d "$install_dir"
+          xcodegen_path="$(find "$install_dir" -type f -name xcodegen -print -quit)"
+          test -n "$xcodegen_path"
+          chmod +x "$xcodegen_path"
+          echo "$(dirname "$xcodegen_path")" >> "$GITHUB_PATH"
+          test "$($xcodegen_path version | sed -n 's/.*Version: //p')" = "$XCODEGEN_VERSION"
 
-      - name: Validate source invariants
-        run: python3 scripts/validate_native_calendar.py
+      - name: Load lane manifest
+        id: lane
+        run: |
+          set -euo pipefail
+          python3 -B scripts/lane_manifest.py \
+            --lane "${{ matrix.lane }}" \
+            --github-output "$GITHUB_OUTPUT"
 
-      - name: Generate Xcode project
-        run: xcodegen generate --spec ios/project.yml
+      - name: Run focused source checks
+        run: |
+          set -euo pipefail
+          python3 -B -m unittest discover -s scripts/tests -p 'test_*.py' -v
+          bash -n scripts/run_prerelease_lanes.sh
+          bash -n scripts/validate_apple_on_mac.sh
+          python3 -B scripts/validate_native_calendar.py
+          expected_commit="${{ github.event.pull_request.head.sha || github.sha }}"
+          git cat-file -e "${expected_commit}^{commit}"
+          python3 -B scripts/validate_acceptance_registry.py --expected-commit "$expected_commit"
+          python3 -B scripts/validate_native_release.py --mode development
+
+      - name: Generate authoritative Xcode project
+        run: |
+          set -euo pipefail
+          # The generated project is ignored by design. Removing it first makes
+          # project.yml the only input that can determine this CI project.
+          rm -rf ios/LifeOS.xcodeproj
+          xcodegen generate --spec ios/project.yml --project ios --project-root ios
+          python3 -B scripts/validate_xcodegen.py \
+            --project ios/LifeOS.xcodeproj \
+            --spec ios/project.yml \
+            --expected-version "$XCODEGEN_VERSION"
 
       - name: Select an available iPhone simulator
         id: simulator
+        if: steps.lane.outputs.platform == 'ios'
         run: |
           set -euo pipefail
-          UDID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; data=json.load(sys.stdin); devices=[d for runtime in data["devices"].values() for d in runtime if d.get("isAvailable") and d["name"] == "iPhone 16 Pro"]; print(devices[0]["udid"] if devices else "")')
+          UDID="$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          data = json.load(sys.stdin)
+          devices = [
+              device
+              for runtime, entries in data.get("devices", {}).items()
+              if "iOS" in runtime
+              for device in entries
+              if device.get("isAvailable") and "iPhone" in device.get("name", "")
+          ]
+          preferred = [device for device in devices if device["name"] == "${{ steps.lane.outputs.simulator_name }}"]
+          selected = preferred[0] if preferred else (devices[0] if devices else None)
+          print(selected["udid"] if selected else "")
+          ' )"
           test -n "$UDID"
           echo "udid=$UDID" >> "$GITHUB_OUTPUT"
 
-      - name: Build and test iOS with screenshots
+      - name: Run isolated test lane
+        shell: bash
         run: |
           set -o pipefail
-          rm -rf ios-test-results.xcresult ui-screenshots macos-test-results.xcresult macos-snapshots
-          xcodebuild \
-            -project ios/LifeOS.xcodeproj \
-            -scheme LifeOS \
-            -destination 'id=${{ steps.simulator.outputs.udid }}' \
-            CODE_SIGNING_ALLOWED=NO \
-            -resultBundlePath ios-test-results.xcresult \
-            -only-testing:LifeOSUITests \
-            -only-testing:LifeOSTests \
-            test | tee ios-xcodebuild.log
+          if [[ "${{ steps.lane.outputs.platform }}" == "ios" ]]; then
+            destination="id=${{ steps.simulator.outputs.udid }}"
+          else
+            destination="${{ steps.lane.outputs.destination }}"
+          fi
+          result="${{ runner.temp }}/${{ steps.lane.outputs.result_path }}"
+          log="${{ steps.lane.outputs.log_path }}"
+          derived_data="${{ runner.temp }}/${{ steps.lane.outputs.derived_data_path }}"
+          rm -rf "$result" "$derived_data"
+          IFS=',' read -r -a only_testing <<< "${{ steps.lane.outputs.only_testing }}"
+          command=(
+            xcodebuild
+            -project ios/LifeOS.xcodeproj
+            -scheme "${{ steps.lane.outputs.scheme }}"
+            -testPlan "${{ steps.lane.outputs.test_plan }}"
+            -configuration "${{ steps.lane.outputs.configuration }}"
+            -destination "$destination"
+            -derivedDataPath "$derived_data"
+            -parallel-testing-enabled NO
+            -resultBundlePath "$result"
+            CODE_SIGNING_ALLOWED=NO
+          )
+          for target in "${only_testing[@]}"; do
+            command+=("-only-testing:$target")
+          done
+          command+=(test)
+          "${command[@]}" | tee "$log"
 
-      - name: Export UI screenshot attachments
+      - name: Reject empty or canceled test results
         if: always()
         run: |
           set -euo pipefail
-          mkdir -p ui-screenshots
-          if [ -d ios-test-results.xcresult ]; then
-            xcrun xcresulttool export attachments \
-              --path ios-test-results.xcresult \
-              --output-path ui-screenshots
-          fi
+          result="${{ runner.temp }}/${{ steps.lane.outputs.result_path }}"
+          python3 -B scripts/validate_xcresult.py \
+            --result "$result" \
+            --minimum-tests "${{ steps.lane.outputs.minimum_tests }}"
 
-      - name: Build macOS app and widgets
-        if: always()
-        run: |
-          set -o pipefail
-          xcodebuild \
-            -project ios/LifeOS.xcodeproj \
-            -scheme LifeOSMac \
-            -destination 'platform=macOS' \
-            CODE_SIGNING_ALLOWED=NO \
-            build | tee macos-xcodebuild.log
-
-      - name: Run macOS headless snapshot tests
-        if: always()
-        run: |
-          set -o pipefail
-          rm -rf macos-test-results.xcresult macos-snapshots
-          xcodebuild \
-            -project ios/LifeOS.xcodeproj \
-            -scheme LifeOSMac \
-            -destination 'platform=macOS' \
-            CODE_SIGNING_ALLOWED=NO \
-            -resultBundlePath macos-test-results.xcresult \
-            -only-testing:LifeOSMacSnapshotTests \
-            test | tee macos-snapshot-xcodebuild.log
-
-      - name: Export macOS snapshot attachments
-        if: always()
+      - name: Export iOS UI attachments
+        if: always() && matrix.lane == 'ios-ui'
         run: |
           set -euo pipefail
-          mkdir -p macos-snapshots
-          if [ -d macos-test-results.xcresult ]; then
+          result="${{ runner.temp }}/${{ steps.lane.outputs.result_path }}"
+          mkdir -p "ui-screenshots-${{ matrix.lane }}"
+          if [[ -d "$result" ]]; then
             xcrun xcresulttool export attachments \
-              --path macos-test-results.xcresult \
-              --output-path macos-snapshots
+              --path "$result" \
+              --output-path "ui-screenshots-${{ matrix.lane }}"
           fi
 
-      - name: Upload build logs
+      - name: Upload lane artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: native-apple-validation
+          name: native-apple-${{ matrix.lane }}
           path: |
-            *-xcodebuild.log
-            *-snapshot-xcodebuild.log
-            ios-test-results.xcresult
-            macos-test-results.xcresult
-            ui-screenshots
-            macos-snapshots
+            ${{ steps.lane.outputs.log_path }}
+            ${{ runner.temp }}/${{ steps.lane.outputs.result_path }}
+            ui-screenshots-${{ matrix.lane }}
           if-no-files-found: ignore
+
+# The release-only validator is intentionally not wired to public hosted CI.
+# A signed local/CI release environment must create an ephemeral xcconfig or
+# xcodebuild-settings file and invoke:
+#   python3 scripts/validate_native_release.py --mode release --settings-file <path>
+# The file must never be committed, logged, or populated with source defaults.

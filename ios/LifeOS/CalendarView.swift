@@ -1824,6 +1824,7 @@ enum CalendarEmojiCatalog {
         🤥|lie people
         😶|quiet speechless people
         🫠|melting people
+        🫨|shaking face shock surprise startled dizzy zittern schütteln erschrocken people
         😐|neutral people
         😑|expressionless people
         😬|grimace people

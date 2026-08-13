@@ -133,6 +133,11 @@ targets:
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: com.hermes.lifeos.mac.widget.snapshottests
       GENERATE_INFOPLIST_FILE: YES
+      # These tests render widget views from source and do not load an app or
+      # extension. Keep both host settings explicitly empty so XcodeGen's
+      # unit-test defaults cannot materialize a nonexistent TEST_HOST.
+      TEST_HOST: ""
+      BUNDLE_LOADER: ""
     dependencies:
       - package: Iconoir
   LifeOSMacWidget:
@@ -154,3 +159,121 @@ targets:
       CODE_SIGN_ENTITLEMENTS: LifeOSMacWidget/LifeOSMacWidget.entitlements
     dependencies:
       - package: Iconoir
+
+# The target-level schemes above are retained for the legacy local workflow.
+# These named lanes are the T0 acceptance surface: each has one checked-in
+# test plan and one bounded test-target set, so an xcodebuild invocation cannot
+# accidentally widen into a broad UI/visual run.
+schemes:
+  LifeOSLogic:
+    build:
+      targets:
+        LifeOS: all
+        LifeOSTests: [test]
+    test:
+      config: Debug
+      targets: [LifeOSTests]
+      testPlans:
+        - path: TestPlans/LifeOSLogic.xctestplan
+          defaultPlan: true
+    management:
+      shared: true
+      orderHint: 10
+  LifeOSUI:
+    build:
+      targets:
+        LifeOS: all
+        LifeOSUITests: [test]
+    test:
+      config: Debug
+      targets: [LifeOSUITests]
+      testPlans:
+        - path: TestPlans/LifeOSUI.xctestplan
+          defaultPlan: true
+    management:
+      shared: true
+      orderHint: 20
+  LifeOSMacLogic:
+    build:
+      targets:
+        LifeOSMac: all
+        LifeOSMacSnapshotTests: [test]
+    test:
+      config: Debug
+      targets: [LifeOSMacSnapshotTests]
+      testPlans:
+        - path: TestPlans/LifeOSMacLogic.xctestplan
+          defaultPlan: true
+    management:
+      shared: true
+      orderHint: 30
+  LifeOSMacUI:
+    build:
+      targets:
+        LifeOSMac: all
+        LifeOSMacUITests: [test]
+    test:
+      config: Debug
+      # Deliberately only the pointer/UI runner. Headless snapshots and widget
+      # snapshots have independent lanes below.
+      targets: [LifeOSMacUITests]
+      testPlans:
+        - path: TestPlans/LifeOSMacUI.xctestplan
+          defaultPlan: true
+    management:
+      shared: true
+      orderHint: 40
+  LifeOSWidgets:
+    build:
+      targets:
+        LifeOSWidgetSnapshotTests: all
+    test:
+      config: Debug
+      targets: [LifeOSWidgetSnapshotTests]
+      testPlans:
+        - path: TestPlans/LifeOSWidgets.xctestplan
+          defaultPlan: true
+    management:
+      shared: true
+      orderHint: 50
+  # Prerelease is orchestrated as two platform-valid schemes. Xcode cannot
+  # use one test action to materialize disjoint iOS and macOS products; the
+  # runner script invokes these lanes separately.
+  LifeOSPrereleaseIOS:
+    build:
+      targets:
+        LifeOS: all
+        LifeOSWidget: all
+        LifeOSTests: [test]
+        LifeOSUITests: [test]
+    test:
+      config: Release
+      targets:
+        - LifeOSTests
+        - LifeOSUITests
+      testPlans:
+        - path: TestPlans/LifeOSPrereleaseIOS.xctestplan
+          defaultPlan: true
+    management:
+      shared: true
+      orderHint: 60
+  LifeOSPrereleaseMac:
+    build:
+      targets:
+        LifeOSMac: all
+        LifeOSMacWidget: all
+        LifeOSMacSnapshotTests: [test]
+        LifeOSMacUITests: [test]
+        LifeOSWidgetSnapshotTests: [test]
+    test:
+      config: Release
+      targets:
+        - LifeOSMacSnapshotTests
+        - LifeOSMacUITests
+        - LifeOSWidgetSnapshotTests
+      testPlans:
+        - path: TestPlans/LifeOSPrereleaseMac.xctestplan
+          defaultPlan: true
+    management:
+      shared: true
+      orderHint: 70

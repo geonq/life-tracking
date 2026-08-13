@@ -111,7 +111,8 @@ Deliverables:
 - add registry validation that rejects duplicate IDs, missing/stale producing
   commits or artifacts, canceled/zero-test results, and fixture-only “passes”;
 - commit `LifeOSLogic`, `LifeOSUI`, `LifeOSMacLogic`, `LifeOSMacUI`,
-  `LifeOSWidgets`, and `LifeOSPrerelease` schemes/test plans; document runnable
+  `LifeOSWidgets`, `LifeOSPrereleaseIOS`, and `LifeOSPrereleaseMac` schemes/test
+  plans; document runnable
   `-showTestPlans`, `-testPlan`, `build-for-testing`, and
   `test-without-building` commands;
 - add a plan matrix naming exact targets, destination/configuration,
