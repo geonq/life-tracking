@@ -7,6 +7,7 @@ import Foundation
 @MainActor
 public final class HealthKitProductionClient: HealthKitIntegrationClient {
     public typealias ObserverUpdate = @Sendable (HealthKitObserverCompletion) -> Void
+    internal typealias StoredStateReader = ([HealthKitMetricID]) async -> [HealthKitStoredMetricState]
 
     private let availability: () -> HealthKitAuthorizationState
     private let status: ([HealthKitMetricID]) async -> HealthKitAuthorizationReport
@@ -14,6 +15,7 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
     private let registerObserver: (HealthKitMetricID, @escaping ObserverUpdate) throws -> Void
     private let stopObservers: () -> Void
     private let reconcile: ([HealthKitMetricID]) async -> HealthKitReconciliationReport
+    private let storedStateReader: StoredStateReader
 
     private var generation: UInt64 = 0
     private var reconciliationTask: Task<Void, Never>?
@@ -32,7 +34,24 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
                 _ = try adapter.startObserver(for: metric, reconciler: coordinator, completion: update)
             },
             stopObservers: { adapter.stopAllObservers() },
-            reconcile: { metrics in await coordinator.reconcile(metrics: metrics) }
+            reconcile: { metrics in await coordinator.reconcile(metrics: metrics) },
+            stateReader: { metrics in
+                // The reader and reconciler intentionally capture the same
+                // actor. A load failure must remain an error rather than
+                // looking like a first-launch empty store.
+                guard !(await store.hasLoadFailure()) else {
+                    return metrics.map(Self.errorState(for:))
+                }
+                var states: [HealthKitStoredMetricState] = []
+                states.reserveCapacity(metrics.count)
+                for metric in metrics {
+                    states.append(await store.snapshot(for: metric))
+                }
+                guard !(await store.hasLoadFailure()) else {
+                    return metrics.map(Self.errorState(for:))
+                }
+                return states
+            }
         )
     }
 
@@ -42,7 +61,8 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
         request: @escaping ([HealthKitMetricID]) async -> HealthKitAuthorizationReport,
         registerObserver: @escaping (HealthKitMetricID, @escaping ObserverUpdate) throws -> Void,
         stopObservers: @escaping () -> Void,
-        reconcile: @escaping ([HealthKitMetricID]) async -> HealthKitReconciliationReport
+        reconcile: @escaping ([HealthKitMetricID]) async -> HealthKitReconciliationReport,
+        stateReader: @escaping StoredStateReader
     ) {
         self.availability = availability
         self.status = status
@@ -50,6 +70,7 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
         self.registerObserver = registerObserver
         self.stopObservers = stopObservers
         self.reconcile = reconcile
+        self.storedStateReader = stateReader
     }
 
     public func availabilityState() -> HealthKitAuthorizationState { availability() }
@@ -66,6 +87,16 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
             return Self.configurationRejectedReport()
         }
         return Self.sanitizedAuthorizationReport(await request(metrics), operation: .request)
+    }
+
+    /// Returns the bounded durable HealthKit projection in the caller's
+    /// requested order. This is deliberately narrower than exposing the
+    /// mutable actor store: only the exact app-supported, alcohol-free set can
+    /// be read, and malformed reader output fails closed to error states.
+    public func storedStates(for metrics: [HealthKitMetricID]) async -> [HealthKitStoredMetricState] {
+        guard Self.isExactSupportedMetricSet(metrics) else { return [] }
+        let states = await storedStateReader(metrics)
+        return Self.orderedStoredStates(states, for: metrics)
     }
 
     public func startObservers(
@@ -115,8 +146,57 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
     }
 
     private static func isExactSupportedMetricSet(_ metrics: [HealthKitMetricID]) -> Bool {
-        metrics == HealthKitIntegrationController.supportedMetrics &&
+        metrics.count == HealthKitIntegrationController.supportedMetrics.count &&
+            metrics == HealthKitIntegrationController.supportedMetrics &&
             !metrics.contains(.alcoholicBeverages)
+    }
+
+    private static func orderedStoredStates(
+        _ states: [HealthKitStoredMetricState],
+        for metrics: [HealthKitMetricID]
+    ) -> [HealthKitStoredMetricState] {
+        guard states.count == metrics.count else {
+            return metrics.map(errorState(for:))
+        }
+
+        var byMetric: [HealthKitMetricID: HealthKitStoredMetricState] = [:]
+        byMetric.reserveCapacity(states.count)
+        for state in states {
+            guard metrics.contains(state.metric),
+                  byMetric[state.metric] == nil,
+                  isBoundedStoredState(state) else {
+                return metrics.map(errorState(for:))
+            }
+            byMetric[state.metric] = state
+        }
+
+        guard byMetric.count == metrics.count else {
+            return metrics.map(errorState(for:))
+        }
+        return metrics.compactMap { byMetric[$0] }
+    }
+
+    private static func isBoundedStoredState(_ state: HealthKitStoredMetricState) -> Bool {
+        state.observations.count <= HealthKitSafetyLimits.maxProjectionItems &&
+            state.tombstones.count <= HealthKitSafetyLimits.maxProjectionItems &&
+            state.sourceIndex.count <= HealthKitSafetyLimits.maxSourceIndexItems &&
+            state.conflicts.count <= HealthKitSafetyLimits.maxConflictItems &&
+            state.observations.allSatisfy { $0.metric == state.metric } &&
+            state.tombstones.allSatisfy { $0.metric == state.metric } &&
+            state.conflicts.allSatisfy { $0.metric == state.metric }
+    }
+
+    private static func errorState(for metric: HealthKitMetricID) -> HealthKitStoredMetricState {
+        // A finite commit date is required for a persisted `.error` state;
+        // the value is diagnostic only and never represents observed data.
+        guard let projection = try? HealthKitMetricProjection(
+            metric: metric,
+            lastCommittedAt: Date(timeIntervalSinceReferenceDate: 0),
+            syncState: .error
+        ) else {
+            return .empty(for: metric)
+        }
+        return HealthKitStoredMetricState(projection: projection)
     }
 
     private static func sanitizedRegistrationFailure(_ error: Error) -> String {

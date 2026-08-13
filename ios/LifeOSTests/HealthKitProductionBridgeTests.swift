@@ -116,6 +116,75 @@ final class HealthKitProductionBridgeTests: XCTestCase {
         XCTAssertEqual(request.errorDescription, "HealthKit metric configuration was rejected")
     }
 
+    func testStoredStatesUsesInjectedReaderAndReturnsRequestedOrder() async {
+        var readerMetrics: [HealthKitMetricID] = []
+        let expected = HealthKitIntegrationController.supportedMetrics
+            .map(HealthKitStoredMetricState.empty(for:))
+        let client = makeClient(stateReader: { metrics in
+            readerMetrics = metrics
+            return Array(expected.reversed())
+        })
+
+        let states = await client.storedStates(for: expected.map(\.metric))
+
+        XCTAssertEqual(readerMetrics, expected.map(\.metric))
+        XCTAssertEqual(states.map(\.metric), expected.map(\.metric))
+        XCTAssertEqual(states, expected)
+    }
+
+    func testStoredStatesRejectsInvalidAndAlcoholSetsWithoutReading() async {
+        var readerCalls = 0
+        let client = makeClient(stateReader: { _ in
+            readerCalls += 1
+            return []
+        })
+
+        let invalid: [HealthKitMetricID] = [.water, .alcoholicBeverages]
+        let states = await client.storedStates(for: invalid)
+
+        XCTAssertTrue(states.isEmpty)
+        XCTAssertEqual(readerCalls, 0)
+    }
+
+    func testStoredStatesPreservesErrorAndEmptyTruth() async {
+        let metrics = HealthKitIntegrationController.supportedMetrics
+        let errorProjection = try! HealthKitMetricProjection(
+            metric: metrics[0],
+            lastCommittedAt: Date(timeIntervalSinceReferenceDate: 0),
+            syncState: .error
+        )
+        let errorState = HealthKitStoredMetricState(projection: errorProjection)
+        var provided = metrics.map(HealthKitStoredMetricState.empty(for:))
+        provided[0] = errorState
+        let client = makeClient(stateReader: { _ in provided })
+
+        let states = await client.storedStates(for: metrics)
+
+        XCTAssertEqual(states[0].syncState, .error)
+        XCTAssertTrue(states[0].observations.isEmpty)
+        XCTAssertEqual(states[1...].allSatisfy { $0.syncState == .neverSynced }, true)
+        XCTAssertTrue(states[1...].allSatisfy { $0.observations.isEmpty })
+    }
+
+    func testStoredStatesFailsClosedForMissingDuplicateOrUnexpectedReaderStates() async {
+        let metrics = HealthKitIntegrationController.supportedMetrics
+        let emptyStates = metrics.map(HealthKitStoredMetricState.empty(for:))
+        let malformedOutputs: [[HealthKitStoredMetricState]] = [
+            Array(emptyStates.dropLast()),
+            Array(emptyStates.dropLast()) + [.empty(for: metrics[0])],
+            Array(emptyStates.dropLast()) + [.empty(for: .alcoholicBeverages)]
+        ]
+
+        for malformed in malformedOutputs {
+            let client = makeClient(stateReader: { _ in malformed })
+            let states = await client.storedStates(for: metrics)
+
+            XCTAssertEqual(states.map(\.metric), metrics)
+            XCTAssertTrue(states.allSatisfy { $0.syncState == .error })
+            XCTAssertTrue(states.allSatisfy { $0.observations.isEmpty })
+        }
+    }
+
     func testImmediateStopPreventsInitialReconciliationFromStarting() async {
         var reconciliationCalls = 0
         var updates: [HealthKitObserverCompletion] = []
@@ -181,7 +250,10 @@ final class HealthKitProductionBridgeTests: XCTestCase {
         request: @escaping ([HealthKitMetricID]) async -> HealthKitAuthorizationReport = { _ in .init(state: .readIndeterminate, promptCompleted: true) },
         register: @escaping (HealthKitMetricID, @escaping HealthKitProductionClient.ObserverUpdate) throws -> Void = { _, _ in },
         stop: @escaping () -> Void = {},
-        reconcile: @escaping ([HealthKitMetricID]) async -> HealthKitReconciliationReport = { _ in .init(results: []) }
+        reconcile: @escaping ([HealthKitMetricID]) async -> HealthKitReconciliationReport = { _ in .init(results: []) },
+        stateReader: @escaping HealthKitProductionClient.StoredStateReader = { metrics in
+            metrics.map(HealthKitStoredMetricState.empty(for:))
+        }
     ) -> HealthKitProductionClient {
         HealthKitProductionClient(
             availability: availability,
@@ -189,7 +261,8 @@ final class HealthKitProductionBridgeTests: XCTestCase {
             request: request,
             registerObserver: register,
             stopObservers: stop,
-            reconcile: reconcile
+            reconcile: reconcile,
+            stateReader: stateReader
         )
     }
 
