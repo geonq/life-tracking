@@ -57,9 +57,14 @@ cd "$ROOT"
 rm -rf "$ARTIFACT_DIR"
 mkdir -p "$ARTIFACT_DIR/DerivedData"
 
-expected_commit="${LIFEOS_EXPECTED_COMMIT:-$(git rev-parse HEAD)}"
-git cat-file -e "${expected_commit}^{commit}"
-python3 -B scripts/validate_acceptance_registry.py --expected-commit "$expected_commit"
+if [[ -n "${LIFEOS_EXPECTED_COMMIT:-}" ]]; then
+  git cat-file -e "${LIFEOS_EXPECTED_COMMIT}^{commit}"
+  python3 -B scripts/validate_acceptance_registry.py --expected-commit "$LIFEOS_EXPECTED_COMMIT"
+else
+  # Normal validation binds the registry blob at HEAD and each row's evidence E.
+  # It must not silently turn HEAD into an evidence override.
+  python3 -B scripts/validate_acceptance_registry.py
+fi
 python3 -B scripts/validate_native_calendar.py
 xcodegen_project="$ROOT/ios/LifeOS.xcodeproj"
 rm -rf "$xcodegen_project"

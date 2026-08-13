@@ -15,22 +15,36 @@ hash—no percentage is valid.
   not increase the denominator. `IMG_0645–0651` alias widget rows `WG-11–WG-16`
   and `WG-09`; they are not seven extra rows.
 - Statuses: `missing`, `foundation`, `blocked-external`, `accepted`. `accepted`
-  requires evidence at the recorded commit; a canceled/zero-test result is not
-  evidence. Fixture screenshots can prove layout only, never live data.
-- Claim kinds: `live`, `interaction`, `operator`, and `layout-only`. Fixture or
-  demo evidence is permitted only for `layout-only`; it can never satisfy a live,
-  provider, interaction, or operator claim, regardless of status.
+  requires immutable evidence at the recorded evidence commit; a
+  canceled/zero-test result is not evidence. Fixture screenshots can prove
+  layout only, never live data.
+- Claim kinds: `live`, `interaction`, `operator`, and `layout-only`. Accepted
+  `live` claims require at least one substantive real-data contract:
+  `integration`, `device`, or `live-readonly`. Source, unit, UI, visual,
+  security-negative, release-signature, or performance evidence cannot accept a
+  live claim by itself. Accepted `interaction` claims require integration,
+  UI-runtime, or
+  device contract; explicitly profiled performance/layout interaction rows may
+  use the bounded `interaction-performance` or `interaction-layout` contracts.
+  Accepted `operator` claims require `operator`, or the bounded device plus
+  release-signature/security-negative alternatives. Accepted `layout-only`
+  claims require `milestone-visual` or `ui-runtime` and can never use
+  `live-readonly`. Foundation rows may declare an incomplete future contract
+  while UNFROZEN; every row must satisfy its bounded contract before FROZEN.
 - Every P0 must be accepted. Aggregate >=95% is insufficient if any workstream
   is below 90% or geonq has not accepted the final visual/interaction review.
 - Evidence types: `source`, `unit`, `integration`, `ui-runtime`, `device`,
-  `milestone-visual`, `security-negative`, `operator`, `live-readonly`.
+  `milestone-visual`, `security-negative`, `operator`, `live-readonly`,
   `performance`, and `release-signature`. The validator rejects unknown types.
 - Every release area must cover its applicable honest states: observed,
   unavailable, stale, partial/calibrating, fixture-only demo, pending/denied/
   revoked, and locked/redacted. Missing values never become zero.
 - T0 must replace `TBD` values, reconcile the status against current source,
   write evidence paths and producing SHAs, validate unique IDs/aliases, and
-  record `Frozen registry SHA-256:` here.
+  record `Frozen registry SHA-256:` here. Every accepted row also records a
+  64-character `evidence_sha256`; local `repo://` artifacts are hashed from
+  tracked repository content. Remote `https://` evidence is not accepted.
+  This is unconditional; the legacy CLI path switch cannot disable it.
 
 Frozen registry SHA-256: `UNFROZEN`
 
@@ -40,23 +54,30 @@ The fenced JSON block at the end of this file is normative metadata for the
 Markdown tables above. `scripts/validate_acceptance_registry.py` materialises
 each table row into a leaf with the complete contract: `id`, `aliases`,
 `workstream`, `owner`, `severity`, exact `source` path(s), exact `acceptance`,
-`evidence_types`, `evidence_path`, `producing_sha`, `threshold`, `blocker`, and
-`status`, plus a bounded `claim_kind` enum. `implementation_baseline_commit`
-(`32fbdfc`) is the audited app
-baseline; `registry_producing_commit` is separate and remains unset until this
-registry is reviewed and committed. Split definitions replace compound
+`evidence_types`, `evidence_path`, `evidence_sha256`, `producing_sha`, `threshold`,
+`blocker`, and `status`, plus a bounded `claim_kind` enum.
+`implementation_baseline_commit` (`32fbdfc`) is the audited app baseline;
+the legacy nullable `registry_producing_commit` field is retained only for
+schema compatibility and is not a trust anchor. The tracked `HEAD` blob proves
+the frozen registry definition, while each accepted row's `producing_sha` (E)
+independently binds its source and evidence artifact. Split definitions replace compound
 scaffold rows with atomic leaves before scoring; their source rows are not
 counted. The seven Bevel widget frame references are aliases of existing widget
 leaves, never scored leaves. RF/RM boundaries and atomic keys are declared in
 `non_overlap_groups` and are checked for duplicates. `--score` always fails
 while State is `UNFROZEN`. Source locators are stable (`design://` resolves in
-the LifeOS Design repository; `repo://` resolves in this app repository) and do
-not embed a developer's absolute filesystem path. CI may pass
-`--expected-commit HEAD`; when supplied, accepted leaves must have evidence
-produced by that resolved commit, and the validator verifies producing SHAs with
-`git cat-file` when a repository is available. The registry's
-`registry_producing_commit` remains audited evidence metadata and is never used
-as a self-referential replacement for that explicit expected-commit input.
+the LifeOS Design repository; `repo://` resolves to a tracked file in this app
+repository) and do not embed a developer's absolute filesystem path. CI may pass
+`--expected-commit` only as an intentional audit override: when supplied, accepted
+leaves must have evidence produced by that resolved commit. Normal CI/local
+validation does not pass `HEAD` as an evidence override. FROZEN validation
+requires a real Git repository, an exact tracked `HEAD` registry blob, and
+resolves every accepted E with `git cat-file`. No field attempts to embed the
+SHA of the commit containing itself. Normal development CI validates this
+integrity contract; final/release acceptance explicitly invokes `--score` so
+the P0, 95%, and per-workstream gates do not make every intermediate tranche
+red immediately after the denominator is frozen. The Native Apple workflow's
+manual `final_acceptance` input invokes that gate in hosted CI as well.
 
 ## A. Bevel non-widget functional rows — 52 scored leaves
 
@@ -377,6 +398,16 @@ integration evidence before that domain is live-enabled.
     "operator": "A signed-device, operator, release, or security procedure claim; fixture/demo evidence is forbidden.",
     "layout-only": "A non-live layout/demo claim; fixture evidence is allowed, but it can never prove provider or live facts."
   },
+  "claim_kind_evidence_matrix": {
+    "live": {"alternatives": [["integration"], ["device"], ["live-readonly"]], "accepted_forbidden": []},
+    "interaction": {"alternatives": [["integration"], ["ui-runtime"], ["device"]], "accepted_forbidden": []},
+    "operator": {"alternatives": [["operator"], ["device", "release-signature"], ["device", "security-negative"]], "accepted_forbidden": []},
+    "layout-only": {"alternatives": [["milestone-visual"], ["ui-runtime"]], "accepted_forbidden": ["live-readonly"]}
+  },
+  "evidence_profiles": {
+    "interaction-performance": {"claim_kind": "interaction", "required_all": ["performance"]},
+    "interaction-layout": {"claim_kind": "interaction", "required_all": ["milestone-visual"]}
+  },
   "defaults": {
     "threshold": "All required evidence types pass at the producing commit; no canceled, zero-test, or fixture-only result."
   },
@@ -434,10 +465,10 @@ integration evidence before that domain is live-enabled.
     "US": ["repo://docs/LIFEOS_95_EXECUTION_PLAN.md", "design://developers/design-coordination/02-charts-rings-widgets.md"],
     "NU": ["repo://docs/LIFEOS_95_EXECUTION_PLAN.md", "design://modules/fitness/overview.md"],
     "SU": ["repo://docs/LIFEOS_95_EXECUTION_PLAN.md", "design://modules/fitness/supplements-and-reminders.md"],
-    "SY": ["repo://docs/LIFEOS_95_EXECUTION_PLAN.md", "repo://Coordination/DECISIONS.md"],
+    "SY": ["repo://docs/LIFEOS_95_EXECUTION_PLAN.md", "design://technical/architecture-overview.md"],
     "DT": ["repo://docs/LIFEOS_95_EXECUTION_PLAN.md", "design://technical/architecture-overview.md"],
-    "SG": ["repo://docs/LIFEOS_95_EXECUTION_PLAN.md", "repo://AGENTS.md"],
-    "QA": ["repo://docs/LIFEOS_95_EXECUTION_PLAN.md", "repo://Coordination/HANDOFF.md"],
+    "SG": ["repo://docs/LIFEOS_95_EXECUTION_PLAN.md", "repo://scripts/validate_native_release.py"],
+    "QA": ["repo://docs/LIFEOS_95_EXECUTION_PLAN.md", "design://developers/design-coordination/00-READ-FIRST.md"],
     "GW": ["repo://docs/LIFEOS_95_EXECUTION_PLAN.md", "repo://services/api/README.md"],
     "CL": ["repo://docs/LIFEOS_95_EXECUTION_PLAN.md", "repo://packages/contracts/src/clipper.ts"],
     "PR": ["repo://docs/LIFEOS_95_EXECUTION_PLAN.md", "repo://services/api/src/server.ts"],

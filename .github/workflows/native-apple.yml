@@ -32,6 +32,12 @@ on:
       - "docs/LIFEOS_ACCEPTANCE_REGISTRY.md"
       - ".github/workflows/native-apple.yml"
   workflow_dispatch:
+    inputs:
+      final_acceptance:
+        description: "Apply frozen P0/95%/per-workstream score gates"
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -106,9 +112,13 @@ jobs:
           bash -n scripts/run_prerelease_lanes.sh
           bash -n scripts/validate_apple_on_mac.sh
           python3 -B scripts/validate_native_calendar.py
-          expected_commit="${{ github.event.pull_request.head.sha || github.sha }}"
-          git cat-file -e "${expected_commit}^{commit}"
-          python3 -B scripts/validate_acceptance_registry.py --expected-commit "$expected_commit"
+          # Normal CI binds the frozen registry to tracked HEAD and each row to
+          # its evidence E commit. Do not pass HEAD as an evidence override;
+          # --expected-commit remains an explicit local audit mode.
+          python3 -B scripts/validate_acceptance_registry.py
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.final_acceptance }}" == "true" ]]; then
+            python3 -B scripts/validate_acceptance_registry.py --score
+          fi
           python3 -B scripts/validate_native_release.py --mode development
 
       - name: Generate authoritative Xcode project

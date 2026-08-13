@@ -214,16 +214,17 @@ def validate_lane_manifest() -> None:
     require('if: steps.lane.outputs.platform == \'ios\'' in workflow, "native workflow must gate simulator selection by manifest platform")
     require('"iPhone" in device.get("name", "")' in workflow, "native workflow fallback must remain iPhone-only")
     require(
-        'expected_commit="${{ github.event.pull_request.head.sha || github.sha }}"' in workflow,
-        "native workflow must resolve the push/PR evidence commit",
+        "python3 -B scripts/validate_acceptance_registry.py\n" in workflow,
+        "native workflow must run normal registry integrity validation without an evidence override",
     )
     require(
-        'git cat-file -e "${expected_commit}^{commit}"' in workflow,
-        "native workflow must verify the evidence commit exists",
+        "python3 -B scripts/validate_acceptance_registry.py --score\n" in workflow
+        and "inputs.final_acceptance" in workflow,
+        "native workflow must expose an explicit manual final-acceptance score gate",
     )
     require(
-        'python3 -B scripts/validate_acceptance_registry.py --expected-commit "$expected_commit"' in workflow,
-        "native workflow must validate registry provenance against the resolved commit",
+        "--expected-commit \"$expected_commit\"" not in workflow,
+        "native workflow must not pass HEAD/PR SHA as an implicit evidence override",
     )
     for lane_id, scheme in expected_lane_ids.items():
         lane = manifest_lanes[lane_id]
