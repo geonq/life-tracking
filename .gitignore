@@ -73,3 +73,5 @@ artifacts/
 
 # Explicitly tracked public inputs include ios source, demo fixtures, tests,
 # project.yml, and plist/entitlements files.
+!ios/LifeOS/Modules/Finance/
+!ios/LifeOS/Modules/Finance/FinanceView.swift
