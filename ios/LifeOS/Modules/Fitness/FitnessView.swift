@@ -582,6 +582,10 @@ public enum FitnessWidgetEntryPoint: Hashable, Sendable {
 public struct FitnessView: View {
     private static let contentTopID = "fitness-content-top"
     public let snapshot: FitnessSnapshot
+    /// Optional date-aware provider used by production HealthKit wiring. The
+    /// static snapshot remains the source-compatible default for fixtures and
+    /// macOS callers.
+    public let snapshotProvider: ((Date) -> FitnessSnapshot)?
     public let usesVisualFixtures: Bool
     private let initialSection: FitnessSection
     private let initialNutritionEntryPoint: FitnessNutritionEntryPoint?
@@ -599,8 +603,13 @@ public struct FitnessView: View {
         detailEntryPointUsesParentScroll ? 6 : 14
     }
 
+    private var resolvedSnapshot: FitnessSnapshot {
+        snapshotProvider?(selectedDate) ?? snapshot
+    }
+
     public init(
         snapshot: FitnessSnapshot = .unavailable,
+        snapshotProvider: ((Date) -> FitnessSnapshot)? = nil,
         initialSection: FitnessSection = .today,
         initialNutritionEntryPoint: FitnessNutritionEntryPoint? = nil,
         initialFitnessEntryPoint: FitnessWidgetEntryPoint? = nil,
@@ -613,6 +622,7 @@ public struct FitnessView: View {
             sourceIsDemo: snapshot.source.status == .demo
         )
         self.snapshot = snapshot
+        self.snapshotProvider = snapshotProvider
         self.usesVisualFixtures = usesVisualFixtures
         self.initialSection = initialSection
         self.initialNutritionEntryPoint = initialNutritionEntryPoint
@@ -637,9 +647,9 @@ public struct FitnessView: View {
     public var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                FitnessHeader(selectedDate: $selectedDate, source: snapshot.source, onSourceTap: { showingSourceGate = true })
+                FitnessHeader(selectedDate: $selectedDate, source: resolvedSnapshot.source, onSourceTap: { showingSourceGate = true })
                 FitnessSectionPicker(selection: $selectedSection)
-                if usesVisualFixtures || snapshot.source.status == .demo {
+                if usesVisualFixtures || resolvedSnapshot.source.status == .demo {
                     FitnessFixtureBanner()
                 }
 
@@ -655,7 +665,7 @@ public struct FitnessView: View {
                         ) {
                             FitnessSectionContent(
                                 section: selectedSection,
-                                snapshot: snapshot,
+                                snapshot: resolvedSnapshot,
                                 selectedDate: $selectedDate,
                                 nutritionEntryPoint: initialNutritionEntryPoint,
                                 fitnessEntryPoint: initialFitnessEntryPoint,
@@ -692,7 +702,7 @@ public struct FitnessView: View {
             }
         }
         .sheet(isPresented: $showingSourceGate) {
-            FitnessSourceGateSheet(source: snapshot.source)
+            FitnessSourceGateSheet(source: resolvedSnapshot.source)
                 .presentationDetents([.medium])
         }
         .accessibilityIdentifier("fitness-view")

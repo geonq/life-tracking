@@ -48,6 +48,9 @@ struct LifeOSApp: App {
     @StateObject private var financeCoordinator: FinanceCoordinator
     @StateObject private var clipperCoordinator: ClipperCoordinator
     @StateObject private var healthKitController: HealthKitIntegrationController
+#if os(iOS)
+    @StateObject private var healthKitFitnessRepository: HealthKitFitnessRepository
+#endif
     @State private var selection: LifeOSAppTab = .home
     @State private var showingUsage = false
     @State private var requestingNewCalendarEvent = false
@@ -85,11 +88,18 @@ struct LifeOSApp: App {
             )
         )
         let promptCompleted = !enabled && UserDefaults.standard.bool(forKey: Self.healthReadPromptCompletedKey)
+#if os(iOS)
+        let healthKitClient: HealthKitProductionClient? = enabled ? nil : HealthKitProductionClient()
         _healthKitController = StateObject(wrappedValue: HealthKitIntegrationController(
-            client: enabled ? nil : HealthKitProductionClient(),
+            client: healthKitClient,
             usesVisualFixtures: enabled,
             initialExplicitRequestCompleted: promptCompleted
         ))
+        _healthKitFitnessRepository = StateObject(wrappedValue: HealthKitFitnessRepository(
+            client: healthKitClient,
+            usesVisualFixtures: enabled
+        ))
+#endif
     }
 
     private var forcedColorScheme: ColorScheme? {
@@ -133,6 +143,7 @@ struct LifeOSApp: App {
                 case .fitness:
                 FitnessView(
                     snapshot: usesVisualFixtures ? .demo : .unavailable,
+                    snapshotProvider: fitnessSnapshotProvider,
                     initialSection: selectedModuleRoute?.fitnessSection ?? .today,
                     initialNutritionEntryPoint: selectedModuleRoute?.nutritionEntryPoint,
                     initialFitnessEntryPoint: selectedModuleRoute?.fitnessEntryPoint,
@@ -186,6 +197,7 @@ struct LifeOSApp: App {
                     await financeCoordinator.refresh()
                     await clipperCoordinator.refresh()
                     await healthKitController.refreshStatus()
+                    await healthKitFitnessRepository.refresh()
                 }
             }
             .onAppear {
@@ -195,7 +207,10 @@ struct LifeOSApp: App {
                 switch phase {
                 case .active:
                     healthKitController.appActive()
-                    Task { await healthKitController.refreshStatus() }
+                    Task { @MainActor in
+                        await healthKitController.refreshStatus()
+                        await healthKitFitnessRepository.refresh()
+                    }
                 case .inactive:
                     healthKitController.appInactive()
                 case .background:
@@ -204,8 +219,27 @@ struct LifeOSApp: App {
                     healthKitController.applicationDidEnterBackground()
                 }
             }
+#if os(iOS)
+            .onChange(of: healthKitController.snapshot.lastObserverCompletion) { _, completion in
+                guard !usesVisualFixtures, completion != nil else { return }
+                Task { @MainActor in
+                    await healthKitFitnessRepository.refresh()
+                }
+            }
+#endif
         }
     }
+
+#if os(iOS)
+    private var fitnessSnapshotProvider: ((Date) -> FitnessSnapshot)? {
+        guard !usesVisualFixtures else { return nil }
+        let repository = healthKitFitnessRepository
+        return { date in
+            guard let projection = repository.projection else { return .unavailable }
+            return HealthKitFitnessComposition.snapshot(from: projection, selectedDate: date)
+        }
+    }
+#endif
 
     private var tabContentTransition: AnyTransition {
         let offset = CGFloat(tabTransitionDirection * 18)
