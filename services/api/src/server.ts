@@ -10,6 +10,7 @@ import { constantTimeEqual, ingestClaudeStatusline, validClaudeContentType, MAX_
 import { financeConnectors } from './finance-connectors.js';
 import { readIngestSecretFile } from './ingest-secret.js';
 import { createConfiguredOpenFoodFactsClient, type OpenFoodFactsClient } from './open-food-facts.js';
+import { CALENDAR_MAX_BYTES, CalendarStore, CalendarStoreError, type CalendarResource, type CalendarStoreErrorCode } from './calendar-store.js';
 
 function usageStorePath(): string | undefined {
   const configured = process.env.USAGE_STORE_PATH;
@@ -17,7 +18,14 @@ function usageStorePath(): string | undefined {
   return resolve(configured ?? 'usage-history.jsonl');
 }
 const history = () => new UsageHistory(usageStorePath() ?? resolve('usage-history.jsonl'));
+const defaultCalendarStore = new CalendarStore();
 const json = (res: ServerResponse, status: number, value: unknown) => { res.statusCode = status; res.end(JSON.stringify(value)); };
+const calendarResource = (res: ServerResponse, status: number, resource: CalendarResource, replay = false) => {
+  res.statusCode = status;
+  res.setHeader('etag', resource.etag);
+  if (replay) res.setHeader('x-lifeos-idempotent-replay', 'true');
+  res.end(resource.body);
+};
 async function readClaudeSecretFile(pathValue: string): Promise<string | undefined> {
   return readIngestSecretFile(pathValue);
 }
@@ -89,11 +97,21 @@ const unavailableFinanceSummary = () => {
   });
 };
 const loopback = (req: IncomingMessage) => req.socket.remoteAddress === '127.0.0.1' || req.socket.remoteAddress === '::1';
-async function body(req: IncomingMessage): Promise<string> {
-  if (Number(req.headers['content-length'] || 0) > MAX_BODY_BYTES) throw new Error('body_too_large');
-  let result = '';
-  for await (const chunk of req) { result += String(chunk); if (Buffer.byteLength(result) > MAX_BODY_BYTES) throw new Error('body_too_large'); }
-  return result;
+async function body(req: IncomingMessage, maximumBytes = MAX_BODY_BYTES): Promise<string> {
+  const declared = req.headers['content-length'];
+  if (declared !== undefined) {
+    const value = typeof declared === 'string' ? Number(declared) : Number.NaN;
+    if (!Number.isSafeInteger(value) || value < 0 || value > maximumBytes) throw new Error('body_too_large');
+  }
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of req) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+    total += bytes.byteLength;
+    if (total > maximumBytes) throw new Error('body_too_large');
+    chunks.push(bytes);
+  }
+  return Buffer.concat(chunks).toString('utf8');
 }
 async function ingest(req: IncomingMessage, res: ServerResponse) {
   if (!loopback(req)) return json(res, 403, { error: 'loopback_only' });
@@ -181,13 +199,66 @@ async function lookupBarcode(req: IncomingMessage, res: ServerResponse, client: 
   }
 }
 
+function singleHeader(req: IncomingMessage, name: string): string | undefined {
+  const value = req.headers[name.toLowerCase()];
+  return typeof value === 'string' ? value : undefined;
+}
+
+function calendarError(res: ServerResponse, store: CalendarStore, error: unknown) {
+  const code: CalendarStoreErrorCode = error instanceof CalendarStoreError
+    ? error.code
+    : error instanceof Error && error.message === 'body_too_large' ? 'body_too_large' : 'invalid_resource';
+  const status: Record<string, number> = {
+    body_too_large: 413,
+    invalid_json: 400,
+    invalid_resource: 400,
+    missing_if_match: 428,
+    invalid_if_match: 400,
+    stale_revision: 412,
+    missing_idempotency_key: 400,
+    invalid_idempotency_key: 400,
+    idempotency_key_reuse: 409,
+    idempotency_store_full: 503,
+  };
+  // Revision/identity failures return the authoritative bytes and ETag. This
+  // lets the client merge truth without ever treating an error as permission
+  // to blindly overwrite the current resource.
+  if (code === 'missing_if_match' || code === 'invalid_if_match' || code === 'stale_revision'
+      || code === 'missing_idempotency_key' || code === 'invalid_idempotency_key'
+      || code === 'idempotency_key_reuse' || code === 'idempotency_store_full') {
+    return calendarResource(res, status[code] ?? 400, store.get());
+  }
+  return json(res, status[code] ?? 400, { error: code });
+}
+
+async function calendar(req: IncomingMessage, res: ServerResponse, store: CalendarStore) {
+  if (req.method === 'GET') return calendarResource(res, 200, store.get());
+  if (req.method !== 'PUT') return json(res, 405, { error: 'calendar_method_not_allowed' });
+  if (singleHeader(req, 'content-type') !== 'application/json') return json(res, 415, { error: 'content_type' });
+
+  let payload: string;
+  try {
+    payload = await body(req, CALENDAR_MAX_BYTES);
+  } catch (error) {
+    return calendarError(res, store, error);
+  }
+  try {
+    const outcome = store.put(singleHeader(req, 'if-match'), singleHeader(req, 'idempotency-key'), payload);
+    return calendarResource(res, 200, outcome.resource, outcome.kind === 'replay');
+  } catch (error) {
+    return calendarError(res, store, error);
+  }
+}
+
 export async function app(
   req: IncomingMessage,
   res: ServerResponse,
   readLive: typeof readCodexLive = readCodexLive,
   barcodeClient?: OpenFoodFactsClient,
+  calendarStore?: CalendarStore,
 ) {
   const configuredBarcodeClient = barcodeClient ?? createConfiguredOpenFoodFactsClient();
+  const configuredCalendarStore = calendarStore ?? defaultCalendarStore;
   res.setHeader('content-type', 'application/json'); res.setHeader('cache-control', 'no-store');
   if (req.method === 'POST' && (req.url === '/api/usage/claude-ingest' || req.url === '/api/claude/statusline')) {
     if (process.env.CLAUDE_INGEST_ENABLED !== 'true' && process.env.CLAUDE_STATUSLINE_ENABLED !== 'true') return json(res, 404, { error: 'disabled' });
@@ -196,6 +267,9 @@ export async function app(
   if (req.method === 'POST' && req.url === '/api/usage/codex-ingest') {
     if (!codexIngestEnabled()) return json(res, 404, { error: 'disabled' });
     return ingestCodex(req, res);
+  }
+  if (req.url === '/api/calendar' || req.url === '/calendar') {
+    return calendar(req, res, configuredCalendarStore);
   }
   if (req.method !== 'GET') return json(res, 405, { error: 'read_only_api' });
   if (req.url?.startsWith('/api/nutrition/barcode/') || req.url?.startsWith('/nutrition/barcode/')) {
@@ -272,9 +346,10 @@ export async function app(
 export function createApiServer(
   readLive: typeof readCodexLive = readCodexLive,
   barcodeClient?: OpenFoodFactsClient,
+  calendarStore: CalendarStore = new CalendarStore(),
 ) {
   const configuredBarcodeClient = barcodeClient ?? createConfiguredOpenFoodFactsClient();
-  return createServer((req, res) => app(req, res, readLive, configuredBarcodeClient));
+  return createServer((req, res) => app(req, res, readLive, configuredBarcodeClient, calendarStore));
 }
 
 export type ApiRuntime = {
@@ -296,12 +371,13 @@ export type StartApiServerOptions = {
   port?: number;
   readLive?: typeof readCodexLive;
   runtime?: ApiRuntime;
+  calendarStore?: CalendarStore;
 };
 
 /** Validate, bind only to loopback, and install one idempotent graceful shutdown path. */
 export async function startApiServer(options: StartApiServerOptions = {}): Promise<StartedApiServer> {
   if (!(await validateStartupConfiguration())) throw new Error('startup_configuration_invalid');
-  const server = createApiServer(options.readLive ?? readCodexLive);
+  const server = createApiServer(options.readLive ?? readCodexLive, undefined, options.calendarStore);
   const port = options.port ?? Number(process.env.PORT || 8787);
   try {
     await new Promise<void>((resolveListen, rejectListen) => {

@@ -10,6 +10,24 @@ public enum TailscaleSyncError: Error, Equatable, Sendable {
     case responseTooLarge
 }
 
+public enum CalendarSyncError: Error, Equatable, Sendable {
+    case missingIfMatch
+    case missingETag
+    case malformedETag
+    case invalidIdempotencyKey
+    case calendarConflict(data: Data, etag: String)
+}
+
+public struct CalendarRemoteResource: Equatable, Sendable {
+    public let data: Data
+    public let etag: String
+
+    public init(data: Data, etag: String) {
+        self.data = data
+        self.etag = etag
+    }
+}
+
 /// `URLSessionWebSocketTask` on this toolchain never delivers its handshake or `receive()`
 /// completions -- not even a failure -- unless the owning `URLSession` has an actual
 /// `URLSessionWebSocketDelegate` attached. Verified by isolated reproduction: identical
@@ -33,10 +51,10 @@ final class StrictSyncSessionDelegate: NSObject, URLSessionWebSocketDelegate, UR
 /// This compatibility path remains required until the gateway enforces Tailscale node
 /// identity and its negative peer tests pass.
 public actor TailscaleSyncClient {
-    public static let serverURLDefaultsKey = "LifeOS.Sync.ServerURL"
-    public static let approvedHostsInfoPlistKey = "LIFEOS_SYNC_APPROVED_HOSTS"
-    public static let bearerKeychainService = "com.hermes.lifeos.sync"
-    public static let bearerKeychainAccount = "transitional-gateway-bearer-v1"
+    static let serverURLDefaultsKey = "LifeOS.Sync.ServerURL"
+    static let approvedHostsInfoPlistKey = "LIFEOS_SYNC_APPROVED_HOSTS"
+    static let bearerKeychainService = "com.hermes.lifeos.sync"
+    static let bearerKeychainAccount = "transitional-gateway-bearer-v1"
 
     private let session: URLSession
     private let defaults: UserDefaults
@@ -48,13 +66,20 @@ public actor TailscaleSyncClient {
 
     private static let backoffSteps: [UInt64] = [2, 5, 15, 30] // seconds, capped
     private static let maximumReadOnlyResponseBytes = 1_048_576
+    static let maximumCalendarResourceBytes = 256 * 1024
+    static let calendarTimeout: TimeInterval = 8
 
-    public init(defaults: UserDefaults = .standard) {
+    public init(
+        defaults: UserDefaults = .standard
+    ) {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.urlCache = nil
         configuration.httpCookieStorage = nil
         configuration.httpShouldSetCookies = false
+        configuration.timeoutIntervalForRequest = Self.calendarTimeout
+        configuration.timeoutIntervalForResource = Self.calendarTimeout
+        configuration.waitsForConnectivity = false
         self.session = URLSession(configuration: configuration,
                                   delegate: StrictSyncSessionDelegate(),
                                   delegateQueue: nil)
@@ -63,8 +88,8 @@ public actor TailscaleSyncClient {
     }
 
     public var isConfigured: Bool {
-        Self.validatedServerURL(serverURLString, approvedHosts: approvedHosts) != nil
-            && Self.readBearerFromKeychain() != nil
+        guard Self.validatedServerURL(serverURLString, approvedHosts: approvedHosts) != nil else { return false }
+        return Self.readBearerFromKeychain() != nil
     }
 
     private var serverURLString: String {
@@ -84,7 +109,7 @@ public actor TailscaleSyncClient {
         return bearer
     }
 
-    public static func configuredApprovedHosts(bundle: Bundle = .main) -> Set<String> {
+    static func configuredApprovedHosts(bundle: Bundle = .main) -> Set<String> {
         guard let raw = bundle.object(forInfoDictionaryKey: approvedHostsInfoPlistKey) as? String,
               !raw.contains("$(") else { return [] }
         return Set(raw.split(separator: ",").compactMap { value in
@@ -95,7 +120,7 @@ public actor TailscaleSyncClient {
         })
     }
 
-    public static func validatedServerURL(_ rawValue: String, approvedHosts: Set<String>) -> URL? {
+    static func validatedServerURL(_ rawValue: String, approvedHosts: Set<String>) -> URL? {
         guard let components = URLComponents(string: rawValue),
               components.scheme?.lowercased() == "https",
               components.user == nil, components.password == nil,
@@ -107,7 +132,7 @@ public actor TailscaleSyncClient {
         return components.url
     }
 
-    public static func validatedBearer(_ rawValue: String?) -> String? {
+    static func validatedBearer(_ rawValue: String?) -> String? {
         guard let rawValue else { return nil }
         let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let placeholders = ["replace-me", "changeme", "token", "your-token", "[redacted]"]
@@ -117,6 +142,22 @@ public actor TailscaleSyncClient {
               value.rangeOfCharacter(from: .whitespacesAndNewlines) == nil,
               !value.contains("$("), !value.contains("${") else { return nil }
         return value
+    }
+
+    /// ETags are treated as opaque strong quoted values. Weak tags, lists,
+    /// escaped quotes, controls, and unquoted values fail closed.
+    static func validatedCalendarETag(_ rawValue: String?) -> String? {
+        guard let rawValue, rawValue.count >= 3, rawValue.first == "\"", rawValue.last == "\"",
+              rawValue.unicodeScalars.dropFirst().dropLast().allSatisfy({
+                  $0.value >= 0x21 && $0.value <= 0x7E && $0.value != 0x22 && $0.value != 0x5C
+              }) else { return nil }
+        return rawValue
+    }
+
+    static func validatedCalendarIdempotencyKey(_ rawValue: String?) -> String? {
+        guard let rawValue, (1...128).contains(rawValue.utf8.count),
+              rawValue.unicodeScalars.allSatisfy({ (0x21...0x7E).contains($0.value) }) else { return nil }
+        return rawValue
     }
 
     /// A fixed, read-only lookup. The app never creates, updates, deletes, logs, or
@@ -144,6 +185,24 @@ public actor TailscaleSyncClient {
         return request
     }
 
+    nonisolated static func conditionalCalendarRequest(
+        url: URL,
+        bearer: String,
+        body: Data,
+        ifMatch: String,
+        idempotencyKey: String
+    ) -> URLRequest? {
+        guard let etag = validatedCalendarETag(ifMatch),
+              let key = validatedCalendarIdempotencyKey(idempotencyKey),
+              var request = authenticatedRequest(url: url, bearer: bearer) else { return nil }
+        request.httpMethod = "PUT"
+        request.httpBody = body
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(etag, forHTTPHeaderField: "If-Match")
+        request.setValue(key, forHTTPHeaderField: "Idempotency-Key")
+        return request
+    }
+
     nonisolated static func contentLengthIsAllowed(_ rawValue: String?, maximumBytes: Int) -> Bool {
         guard let rawValue else { return true }
         guard let count = Int(rawValue), count >= 0 else { return false }
@@ -157,23 +216,99 @@ public actor TailscaleSyncClient {
         return request
     }
 
+    private func calendarRequest(url: URL) throws -> URLRequest {
+        try request(url: url)
+    }
+
     // MARK: - Calendar
 
     public func fetchCalendar() async throws -> Data {
-        let url = try baseURL().appendingPathComponent("calendar")
-        let (data, response) = try await session.data(for: try request(url: url))
-        try Self.checkHTTPStatus(response)
-        return data
+        try await fetchCalendarResource().data
     }
 
-    public func pushCalendar(_ data: Data) async throws {
+    public func fetchCalendarResource() async throws -> CalendarRemoteResource {
         let url = try baseURL().appendingPathComponent("calendar")
-        var request = try request(url: url)
-        request.httpMethod = "PUT"
-        request.httpBody = data
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let (_, response) = try await session.data(for: request)
-        try Self.checkHTTPStatus(response)
+        let (data, response) = try await calendarRequest(try calendarRequest(url: url))
+        return try Self.parseCalendarFetchResponse(data: data, response: response)
+    }
+
+    /// Kept as a compatibility trap for old callers: Calendar PUT is never
+    /// allowed without both an authoritative ETag and stable idempotency key.
+    public func pushCalendar(_ data: Data) async throws {
+        throw CalendarSyncError.missingIfMatch
+    }
+
+    @discardableResult
+    public func pushCalendar(_ data: Data, ifMatch: String, idempotencyKey: String) async throws -> CalendarRemoteResource {
+        guard Self.validatedCalendarETag(ifMatch) != nil else { throw CalendarSyncError.malformedETag }
+        guard Self.validatedCalendarIdempotencyKey(idempotencyKey) != nil else { throw CalendarSyncError.invalidIdempotencyKey }
+        guard data.count <= Self.maximumCalendarResourceBytes, Self.isCalendarJSON(data) else {
+            throw data.count > Self.maximumCalendarResourceBytes ? TailscaleSyncError.responseTooLarge : TailscaleSyncError.invalidResponse
+        }
+        let url = try baseURL().appendingPathComponent("calendar")
+        let bearer = try bearer()
+        guard let request = Self.conditionalCalendarRequest(
+            url: url, bearer: bearer, body: data, ifMatch: ifMatch, idempotencyKey: idempotencyKey
+        ) else { throw TailscaleSyncError.notConfigured }
+        let (responseData, response) = try await calendarRequest(request)
+        return try Self.parseCalendarPushResponse(data: responseData, response: response)
+    }
+
+    /// Parses a successful Calendar GET without performing I/O. Kept internal so
+    /// tests can prove the response boundary without introducing a production
+    /// transport/credential injection seam.
+    nonisolated static func parseCalendarFetchResponse(data: Data, response: HTTPURLResponse) throws -> CalendarRemoteResource {
+        guard data.count <= maximumCalendarResourceBytes else { throw TailscaleSyncError.responseTooLarge }
+        try checkHTTPStatus(response)
+        guard let etag = validatedCalendarETag(response.value(forHTTPHeaderField: "ETag")) else {
+            throw response.value(forHTTPHeaderField: "ETag") == nil ? CalendarSyncError.missingETag : CalendarSyncError.malformedETag
+        }
+        guard isCalendarJSON(data) else { throw TailscaleSyncError.invalidResponse }
+        return CalendarRemoteResource(data: data, etag: etag)
+    }
+
+    /// Parses a Calendar PUT result without performing I/O. Conflict responses
+    /// must carry authoritative valid truth; ordinary non-2xx responses are
+    /// surfaced as HTTP errors even when they intentionally have no ETag/body.
+    nonisolated static func parseCalendarPushResponse(data: Data, response: HTTPURLResponse) throws -> CalendarRemoteResource {
+        if response.statusCode == 412 || response.statusCode == 428 {
+            guard data.count <= maximumCalendarResourceBytes else { throw TailscaleSyncError.responseTooLarge }
+            let rawETag = response.value(forHTTPHeaderField: "ETag")
+            guard let etag = validatedCalendarETag(rawETag) else {
+                throw rawETag == nil ? CalendarSyncError.missingETag : CalendarSyncError.malformedETag
+            }
+            guard isCalendarJSON(data) else { throw TailscaleSyncError.invalidResponse }
+            throw CalendarSyncError.calendarConflict(data: data, etag: etag)
+        }
+
+        try checkHTTPStatus(response)
+        guard data.count <= maximumCalendarResourceBytes else { throw TailscaleSyncError.responseTooLarge }
+        let rawETag = response.value(forHTTPHeaderField: "ETag")
+        guard let etag = validatedCalendarETag(rawETag) else {
+            throw rawETag == nil ? CalendarSyncError.missingETag : CalendarSyncError.malformedETag
+        }
+        guard isCalendarJSON(data) else { throw TailscaleSyncError.invalidResponse }
+        return CalendarRemoteResource(data: data, etag: etag)
+    }
+
+    private func calendarRequest(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        let (bytes, response) = try await session.bytes(for: request)
+        guard let http = response as? HTTPURLResponse else { throw TailscaleSyncError.invalidResponse }
+        let declaredLength = http.value(forHTTPHeaderField: "Content-Length")
+        guard Self.contentLengthIsAllowed(declaredLength, maximumBytes: Self.maximumCalendarResourceBytes) else {
+            throw TailscaleSyncError.responseTooLarge
+        }
+        let data = try await Self.collectBounded(bytes, maximumBytes: Self.maximumCalendarResourceBytes)
+        return (data, http)
+    }
+
+    nonisolated private static func isCalendarJSON(_ data: Data) -> Bool {
+        guard data.count <= maximumCalendarResourceBytes,
+              let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let schemaVersion = value["schemaVersion"] as? Int,
+              schemaVersion == 1,
+              value["items"] is [Any] else { return false }
+        return true
     }
 
     // MARK: - Tax documents (bonus; mechanical GET/POST parity with calendar)
