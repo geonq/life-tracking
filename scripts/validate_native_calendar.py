@@ -226,6 +226,14 @@ def validate_lane_manifest() -> None:
         "--expected-commit \"$expected_commit\"" not in workflow,
         "native workflow must not pass HEAD/PR SHA as an implicit evidence override",
     )
+    automatic_lane_json = '{"include":[{"lane":"ios-logic"},{"lane":"ios-ui"},{"lane":"mac-logic"},{"lane":"widgets"}]}'
+    manual_lane_json = '{"include":[{"lane":"ios-logic"},{"lane":"ios-ui"},{"lane":"mac-logic"},{"lane":"mac-ui"},{"lane":"widgets"}]}'
+    require(automatic_lane_json in workflow, "native workflow automatic matrix drifted")
+    require(manual_lane_json in workflow, "native workflow manual matrix must retain Mac UI")
+    require(
+        "matrix: ${{ fromJSON(needs.classify.outputs.lanes) }}" in workflow,
+        "native workflow must consume the classified lane matrix",
+    )
     for lane_id, scheme in expected_lane_ids.items():
         lane = manifest_lanes[lane_id]
         source_lane = LANES[scheme]
@@ -242,7 +250,6 @@ def validate_lane_manifest() -> None:
             require(lane["result_path"] == f"lifeos-{lane_id}.xcresult", f"{lane_id} result path drifted")
             require(lane["log_path"] == f"lifeos-{lane_id}-xcodebuild.log", f"{lane_id} log path drifted")
             require(lane["derived_data_path"] == f"lifeos-derived-{lane_id}", f"{lane_id} DerivedData path drifted")
-            require(f"- lane: {lane_id}" in workflow, f"native workflow is missing {lane_id}")
         else:
             require(lane["result_path"] == f"{scheme}.xcresult", f"{lane_id} result path drifted")
             require(lane["log_path"] == f"{scheme}-xcodebuild.log", f"{lane_id} log path drifted")

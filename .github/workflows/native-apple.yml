@@ -2,7 +2,10 @@ name: Native Apple validation
 
 on:
   push:
+    branches:
+      - main
     paths:
+      - "docs/**"
       - "ios/**"
       - "scripts/validate_native_calendar.py"
       - "scripts/validate_acceptance_registry.py"
@@ -14,10 +17,11 @@ on:
       - "scripts/validate_apple_on_mac.sh"
       - "scripts/run_prerelease_lanes.sh"
       - "scripts/tests/**"
-      - "docs/LIFEOS_ACCEPTANCE_REGISTRY.md"
       - ".github/workflows/native-apple.yml"
   pull_request:
+    types: [opened, synchronize, reopened]
     paths:
+      - "docs/**"
       - "ios/**"
       - "scripts/validate_native_calendar.py"
       - "scripts/validate_acceptance_registry.py"
@@ -29,7 +33,6 @@ on:
       - "scripts/validate_apple_on_mac.sh"
       - "scripts/run_prerelease_lanes.sh"
       - "scripts/tests/**"
-      - "docs/LIFEOS_ACCEPTANCE_REGISTRY.md"
       - ".github/workflows/native-apple.yml"
   workflow_dispatch:
     inputs:
@@ -55,19 +58,105 @@ env:
   XCODEGEN_URL: "https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip"
 
 jobs:
+  classify:
+    name: Classify native changes
+    runs-on: ubuntu-latest
+    outputs:
+      native: ${{ steps.changes.outputs.native }}
+      lanes: ${{ steps.changes.outputs.lanes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect native matrix paths
+        id: changes
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.event.after }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "native=true" >> "$GITHUB_OUTPUT"
+            echo 'lanes={"include":[{"lane":"ios-logic"},{"lane":"ios-ui"},{"lane":"mac-logic"},{"lane":"mac-ui"},{"lane":"widgets"}]}' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          changed="$RUNNER_TEMP/native-apple-changed-files.txt"
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            if [[ "$ACTION" == "synchronize" && "$BEFORE_SHA" =~ ^[0-9a-f]{40}$ && ! "$BEFORE_SHA" =~ ^0+$ ]] \
+              && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null \
+              && [[ "$AFTER_SHA" =~ ^[0-9a-f]{40}$ ]] \
+              && git cat-file -e "${AFTER_SHA}^{commit}" 2>/dev/null; then
+              # A synchronize event carries the previous head. Diff only the
+              # newly pushed commits; base->head would replay old native work.
+              git diff --name-only "$BEFORE_SHA" "$AFTER_SHA" > "$changed"
+            else
+              # opened/reopened has no prior head to compare, so classify the
+              # complete PR once from its base to its current head.
+              git diff --name-only "$BASE_SHA" "$HEAD_SHA" > "$changed"
+            fi
+          elif [[ "$BEFORE_SHA" =~ ^0+$ ]]; then
+            git ls-tree -r --name-only "$WORKFLOW_SHA" > "$changed"
+          else
+            git diff --name-only "$BEFORE_SHA" "$WORKFLOW_SHA" > "$changed"
+          fi
+
+          native=false
+          while IFS= read -r path; do
+            case "$path" in
+              ios/*|\
+              scripts/lane_manifest.py|\
+              scripts/native_lane_manifest.json|\
+              scripts/validate_apple_on_mac.sh|\
+              scripts/run_prerelease_lanes.sh)
+                native=true
+                ;;
+            esac
+          done < "$changed"
+
+          echo "native=$native" >> "$GITHUB_OUTPUT"
+          echo 'lanes={"include":[{"lane":"ios-logic"},{"lane":"ios-ui"},{"lane":"mac-logic"},{"lane":"widgets"}]}' >> "$GITHUB_OUTPUT"
+
+  contract-check:
+    name: Registry and source contracts
+    needs: classify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run cheap deterministic checks
+        run: |
+          set -euo pipefail
+          python3 -B -m unittest discover -s scripts/tests -p 'test_*.py' -v
+          bash -n scripts/run_prerelease_lanes.sh
+          bash -n scripts/validate_apple_on_mac.sh
+          python3 -B scripts/validate_acceptance_registry.py
+          python3 -B scripts/validate_native_calendar.py
+          python3 -B scripts/validate_native_release.py --mode development
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.final_acceptance }}" == "true" ]]; then
+            python3 -B scripts/validate_acceptance_registry.py --score
+          fi
+
   apple-lanes:
     name: ${{ matrix.lane }}
+    needs: [classify, contract-check]
+    if: needs.classify.outputs.native == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: macos-15
     timeout-minutes: 35
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - lane: ios-logic
-          - lane: ios-ui
-          - lane: mac-logic
-          - lane: mac-ui
-          - lane: widgets
+      matrix: ${{ fromJSON(needs.classify.outputs.lanes) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -104,22 +193,6 @@ jobs:
           python3 -B scripts/lane_manifest.py \
             --lane "${{ matrix.lane }}" \
             --github-output "$GITHUB_OUTPUT"
-
-      - name: Run focused source checks
-        run: |
-          set -euo pipefail
-          python3 -B -m unittest discover -s scripts/tests -p 'test_*.py' -v
-          bash -n scripts/run_prerelease_lanes.sh
-          bash -n scripts/validate_apple_on_mac.sh
-          python3 -B scripts/validate_native_calendar.py
-          # Normal CI binds the frozen registry to tracked HEAD and each row to
-          # its evidence E commit. Do not pass HEAD as an evidence override;
-          # --expected-commit remains an explicit local audit mode.
-          python3 -B scripts/validate_acceptance_registry.py
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.final_acceptance }}" == "true" ]]; then
-            python3 -B scripts/validate_acceptance_registry.py --score
-          fi
-          python3 -B scripts/validate_native_release.py --mode development
 
       - name: Generate authoritative Xcode project
         run: |
