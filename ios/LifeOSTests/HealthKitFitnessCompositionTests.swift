@@ -45,11 +45,12 @@ final class HealthKitFitnessCompositionTests: XCTestCase {
         stage: HealthKitSleepStage,
         start: Date,
         end: Date,
-        provenance: HealthKitProvenance? = nil
+        provenance: HealthKitProvenance? = nil,
+        uuid: UUID = UUID()
     ) throws -> HealthKitObservation {
         try HealthKitObservation(
             metric: .sleep,
-            identity: HealthKitSampleIdentity(uuid: UUID()),
+            identity: HealthKitSampleIdentity(uuid: uuid),
             value: .sleep(try HealthKitSleepValue(stage: stage, timeZoneIdentifier: "Europe/Berlin")),
             startDate: start,
             endDate: end,
@@ -464,5 +465,195 @@ final class HealthKitFitnessCompositionTests: XCTestCase {
         XCTAssertTrue(conflictEnergy.evidence.isUnavailable)
         XCTAssertNil(conflictSteps.metric.value)
         XCTAssertNil(conflictEnergy.metric.value)
+    }
+
+    func testSelectedSleepDayKeepsAdjacentNightsSeparateAndEmptyDayUnavailable() throws {
+        let day12 = try XCTUnwrap(calendar.date(from: DateComponents(year: 2023, month: 11, day: 12)))
+        let day13 = try XCTUnwrap(calendar.date(byAdding: .day, value: 1, to: day12))
+        let day14 = try XCTUnwrap(calendar.date(byAdding: .day, value: 2, to: day12))
+        let nightOneStart = try XCTUnwrap(calendar.date(byAdding: .hour, value: 22, to: day12))
+        let nightOneEnd = try XCTUnwrap(calendar.date(byAdding: .hour, value: 7, to: day13))
+        let nightTwoStart = try XCTUnwrap(calendar.date(byAdding: .hour, value: 22, to: day13))
+        let nightTwoEnd = try XCTUnwrap(calendar.date(byAdding: .hour, value: 7, to: day14))
+        let first = try sleep(
+            stage: .asleepCore,
+            start: nightOneStart,
+            end: nightOneEnd,
+            provenance: try provenance(bundle: "com.example.first-night")
+        )
+        let second = try sleep(
+            stage: .asleepREM,
+            start: nightTwoStart,
+            end: nightTwoEnd,
+            provenance: try provenance(bundle: "com.example.second-night")
+        )
+        let retained = projection(
+            states: [try state(metric: .sleep, observations: [first, second])],
+            start: day12,
+            end: now.addingTimeInterval(1)
+        )
+
+        let firstDay = HealthKitFitnessComposition.compose(
+            projection: retained,
+            selectedDate: day13.addingTimeInterval(12 * 3_600)
+        )
+        XCTAssertEqual(firstDay.sleepState, .observed)
+        XCTAssertEqual(firstDay.snapshot.sleepDetail.night.start, nightOneStart)
+        XCTAssertEqual(firstDay.snapshot.sleepDetail.night.end, nightOneEnd)
+        XCTAssertEqual(firstDay.snapshot.sleepDetail.night.stageSamples.map(\.stage), [.core])
+        XCTAssertTrue(firstDay.evidence[.sleep]?.source.contains("first-night") == true)
+        XCTAssertFalse(firstDay.evidence[.sleep]?.source.contains("second-night") == true)
+
+        let secondDay = HealthKitFitnessComposition.compose(
+            projection: retained,
+            selectedDate: day14.addingTimeInterval(12 * 3_600)
+        )
+        XCTAssertEqual(secondDay.sleepState, .observed)
+        XCTAssertEqual(secondDay.snapshot.sleepDetail.night.start, nightTwoStart)
+        XCTAssertEqual(secondDay.snapshot.sleepDetail.night.end, nightTwoEnd)
+        XCTAssertEqual(secondDay.snapshot.sleepDetail.night.stageSamples.map(\.stage), [.rem])
+        XCTAssertTrue(secondDay.evidence[.sleep]?.source.contains("second-night") == true)
+        XCTAssertFalse(secondDay.evidence[.sleep]?.source.contains("first-night") == true)
+
+        let emptyDay = HealthKitFitnessComposition.compose(
+            projection: retained,
+            selectedDate: day12.addingTimeInterval(12 * 3_600)
+        )
+        XCTAssertEqual(emptyDay.sleepState, .unavailable)
+        XCTAssertNil(emptyDay.snapshot.sleepDetail.night.start)
+        XCTAssertNil(emptyDay.snapshot.sleepDetail.night.end)
+        XCTAssertTrue(emptyDay.snapshot.sleepDetail.night.stageSamples.isEmpty)
+        XCTAssertFalse(emptyDay.evidence[.sleep]?.source.contains("first-night") == true)
+        XCTAssertFalse(emptyDay.evidence[.sleep]?.source.contains("second-night") == true)
+    }
+
+    func testEmptySelectedSleepDayPreservesIndeterminateAndErrorStates() throws {
+        let selected = try XCTUnwrap(calendar.date(from: DateComponents(year: 2023, month: 11, day: 14, hour: 12)))
+        let indeterminate = HealthKitFitnessComposition.compose(
+            projection: projection(states: [try state(metric: .sleep, syncState: .readIndeterminate)]),
+            selectedDate: selected
+        )
+        XCTAssertEqual(indeterminate.sleepState, .readIndeterminate)
+        XCTAssertTrue(indeterminate.snapshot.sleepDetail.night.evidence.isUnavailable)
+
+        let failed = HealthKitFitnessComposition.compose(
+            projection: projection(states: [try state(metric: .sleep, syncState: .error)]),
+            selectedDate: selected
+        )
+        XCTAssertEqual(failed.sleepState, .error)
+        XCTAssertTrue(failed.snapshot.sleepDetail.night.evidence.isUnavailable)
+    }
+
+    func testInvalidSelectedDateFailsClosedWithoutCalendarBucketing() throws {
+        let invalid = Date(timeIntervalSinceReferenceDate: .nan)
+        let composition = HealthKitFitnessComposition.compose(
+            projection: projection(states: [try state(metric: .steps)]),
+            selectedDate: invalid
+        )
+        XCTAssertEqual(composition.metricStates[.steps], .unavailable)
+        XCTAssertEqual(composition.sleepState, .unavailable)
+        XCTAssertEqual(composition.workoutState, .unavailable)
+        XCTAssertTrue(composition.snapshot.workouts.isEmpty)
+        XCTAssertFalse(composition.snapshot.source.freshness.lowercased().contains("nan"))
+    }
+
+    func testSleepEndAtLocalDayBoundaryBelongsToFollowingDay() throws {
+        let day13 = try XCTUnwrap(calendar.date(from: DateComponents(year: 2023, month: 11, day: 13)))
+        let day14 = try XCTUnwrap(calendar.date(byAdding: .day, value: 1, to: day13))
+        let start = try XCTUnwrap(calendar.date(byAdding: .hour, value: 23, to: day13))
+        let boundarySample = try sleep(stage: .asleepCore, start: start, end: day14)
+        let retained = projection(
+            states: [try state(metric: .sleep, observations: [boundarySample])],
+            start: day13,
+            end: now.addingTimeInterval(1)
+        )
+
+        let priorDay = HealthKitFitnessComposition.compose(
+            projection: retained,
+            selectedDate: day13.addingTimeInterval(12 * 3_600)
+        )
+        XCTAssertEqual(priorDay.sleepState, .unavailable)
+        XCTAssertNil(priorDay.snapshot.sleepDetail.night.start)
+
+        let wakeDay = HealthKitFitnessComposition.compose(
+            projection: retained,
+            selectedDate: day14.addingTimeInterval(12 * 3_600)
+        )
+        XCTAssertEqual(wakeDay.sleepState, .observed)
+        XCTAssertEqual(wakeDay.snapshot.sleepDetail.night.start, start)
+        XCTAssertEqual(wakeDay.snapshot.sleepDetail.night.end, day14)
+        XCTAssertEqual(wakeDay.snapshot.sleepDetail.night.boundary?.name, "Selected sleep day (end-date bucket)")
+    }
+
+    func testSleepConflictOnlyPoisonsItsSelectedEndDateBucket() throws {
+        let day12 = try XCTUnwrap(calendar.date(from: DateComponents(year: 2023, month: 11, day: 12)))
+        let day13 = try XCTUnwrap(calendar.date(byAdding: .day, value: 1, to: day12))
+        let day14 = try XCTUnwrap(calendar.date(byAdding: .day, value: 2, to: day12))
+        let identity = UUID()
+        let conflictedStart = try XCTUnwrap(calendar.date(byAdding: .hour, value: 22, to: day12))
+        let conflictedEnd = try XCTUnwrap(calendar.date(byAdding: .hour, value: 6, to: day13))
+        let existing = try sleep(stage: .asleepCore, start: conflictedStart, end: conflictedEnd, uuid: identity)
+        let incoming = try sleep(stage: .asleepREM, start: conflictedStart, end: conflictedEnd, uuid: identity)
+        let conflict = HealthKitObservationConflict(
+            metric: .sleep,
+            identity: existing.identity,
+            existing: existing,
+            incoming: incoming
+        )
+        let cleanStart = try XCTUnwrap(calendar.date(byAdding: .hour, value: 22, to: day13))
+        let cleanEnd = try XCTUnwrap(calendar.date(byAdding: .hour, value: 7, to: day14))
+        let clean = try sleep(stage: .asleepDeep, start: cleanStart, end: cleanEnd)
+        let retained = projection(
+            states: [try state(metric: .sleep, observations: [existing, clean], conflicts: [conflict])],
+            start: day12,
+            end: now.addingTimeInterval(1)
+        )
+
+        let conflictedDay = HealthKitFitnessComposition.compose(
+            projection: retained,
+            selectedDate: day13.addingTimeInterval(12 * 3_600)
+        )
+        XCTAssertEqual(conflictedDay.sleepState, .conflict)
+        XCTAssertEqual(conflictedDay.snapshot.sleepDetail.night.state.label, "Conflict")
+        XCTAssertTrue(conflictedDay.snapshot.sleepDetail.night.evidence.isUnavailable)
+
+        let cleanDay = HealthKitFitnessComposition.compose(
+            projection: retained,
+            selectedDate: day14.addingTimeInterval(12 * 3_600)
+        )
+        XCTAssertEqual(cleanDay.sleepState, .observed)
+        XCTAssertEqual(cleanDay.snapshot.sleepDetail.night.start, cleanStart)
+        XCTAssertEqual(cleanDay.snapshot.sleepDetail.night.end, cleanEnd)
+        XCTAssertEqual(cleanDay.snapshot.sleepDetail.night.stageSamples.map(\.stage), [.deep])
+    }
+
+    func testAggregateFreshnessDoesNotLeakWorkoutFromAnotherSelectedDay() throws {
+        let day13 = try XCTUnwrap(calendar.date(from: DateComponents(year: 2023, month: 11, day: 13)))
+        let day14 = try XCTUnwrap(calendar.date(byAdding: .day, value: 1, to: day13))
+        let selectedObservation = try quantity(
+            metric: .steps,
+            value: 2_000,
+            at: try XCTUnwrap(calendar.date(byAdding: .hour, value: 9, to: day13))
+        )
+        let otherDayWorkout = try workout(
+            start: try XCTUnwrap(calendar.date(byAdding: .hour, value: 18, to: day14)),
+            duration: 1_800
+        )
+        let retained = projection(
+            states: [
+                try state(metric: .steps, observations: [selectedObservation]),
+                try state(metric: .workout, observations: [otherDayWorkout])
+            ],
+            start: day13,
+            end: now.addingTimeInterval(1)
+        )
+
+        let composition = HealthKitFitnessComposition.compose(
+            projection: retained,
+            selectedDate: day13.addingTimeInterval(12 * 3_600)
+        )
+        XCTAssertTrue(composition.snapshot.source.freshness.contains("2023-11-13"))
+        XCTAssertFalse(composition.snapshot.source.freshness.contains("2023-11-14"))
+        XCTAssertTrue(composition.snapshot.workouts.isEmpty)
     }
 }

@@ -165,6 +165,20 @@ public struct HealthKitFitnessComposition {
         let evidence: HealthKitFitnessCompositionEvidence
     }
 
+    /// Sleep is retained for the bounded projection window, but Fitness shows
+    /// one local calendar day at a time.  Keep the selected result together so
+    /// every downstream field (state, evidence, detail, and aggregate
+    /// provenance/freshness) uses the same end-date bucket.
+    private struct SelectedSleep {
+        let samples: [HealthKitFitnessSleepSample]
+        let conflicts: [HealthKitObservationConflict]
+        let state: SourceState
+        let reason: String?
+        let start: Date?
+        let end: Date?
+        let provenance: [HealthKitProvenance]
+    }
+
     private static let latestMetricIDs: [HealthKitMetricID] = [
         .restingHeartRate,
         .heartRateVariabilitySDNN,
@@ -186,12 +200,19 @@ public struct HealthKitFitnessComposition {
         let projectionWindow = safeProjectionWindow(for: projection)
         let windowDescription = describeProjectionWindow(projection, calendar: calendar)
         let selectedDayDescription = describeSelectedDay(selectedDate, calendar: calendar)
+        let selectedDateIsFinite = selectedDate.timeIntervalSinceReferenceDate.isFinite
+        let selectedSleep = selectSleep(
+            projection.sleep,
+            selectedDate: selectedDate,
+            selectedDateIsFinite: selectedDateIsFinite,
+            calendar: calendar
+        )
         let aggregateFreshness = aggregateFreshnessDescription(
             projection: projection,
             selectedDate: selectedDate,
+            selectedSleep: selectedSleep,
             calendar: calendar
         )
-        let selectedDateIsFinite = selectedDate.timeIntervalSinceReferenceDate.isFinite
 
         var metricStates: [HealthKitMetricID: SourceState] = [:]
         var evidence: [HealthKitMetricID: HealthKitFitnessCompositionEvidence] = [:]
@@ -283,12 +304,12 @@ public struct HealthKitFitnessComposition {
         evidence[.steps] = dailySteps.evidence
         evidence[.activeEnergy] = dailyEnergy.evidence
 
-        let sleepState = SourceState(projection.sleep.state)
+        let sleepState = selectedSleep.state
         let sleepEvidence = makeEvidence(
             state: sleepState,
-            provenances: projection.sleep.provenance,
-            window: windowDescription,
-            freshness: sleepFreshness(projection.sleep, calendar: calendar)
+            provenances: selectedSleep.provenance,
+            window: selectedDayDescription + " · " + windowDescription,
+            freshness: sleepFreshness(selectedSleep, calendar: calendar)
         )
         evidence[.sleep] = sleepEvidence
         metricStates[.sleep] = sleepState
@@ -321,6 +342,7 @@ public struct HealthKitFitnessComposition {
                 projection: projection,
                 selectedDate: selectedDate,
                 selectedDateIsFinite: selectedDateIsFinite,
+                selectedSleep: selectedSleep,
                 calendar: calendar
             ),
             window: windowDescription + " · " + selectedDayDescription,
@@ -377,8 +399,7 @@ public struct HealthKitFitnessComposition {
         )
 
         let sleepDetail = makeSleepDetail(
-            projection: projection.sleep,
-            state: sleepState,
+            selected: selectedSleep,
             evidence: sleepEvidence,
             timeZoneIdentifier: projection.bucketTimeZoneIdentifier
         )
@@ -577,13 +598,101 @@ public struct HealthKitFitnessComposition {
         )
     }
 
+    private static func selectSleep(
+        _ sleep: HealthKitFitnessSleepProjection,
+        selectedDate: Date,
+        selectedDateIsFinite: Bool,
+        calendar: Calendar
+    ) -> SelectedSleep {
+        guard selectedDateIsFinite,
+              let day = calendar.dateInterval(of: .day, for: selectedDate),
+              day.start.timeIntervalSinceReferenceDate.isFinite,
+              day.end.timeIntervalSinceReferenceDate.isFinite,
+              day.end > day.start else {
+            return SelectedSleep(
+                samples: [],
+                conflicts: [],
+                state: .unavailable,
+                reason: "Selected sleep day is invalid.",
+                start: nil,
+                end: nil,
+                provenance: []
+            )
+        }
+
+        func belongsToSelectedDay(_ endDate: Date) -> Bool {
+            endDate >= day.start && endDate < day.end
+        }
+
+        let samples = sleep.samples.filter { belongsToSelectedDay($0.endDate) }
+        let conflicts = sleep.conflicts.filter { conflict in
+            conflict.existing.metric == .sleep && conflict.incoming.metric == .sleep &&
+            (belongsToSelectedDay(conflict.existing.endDate) || belongsToSelectedDay(conflict.incoming.endDate))
+        }
+
+        let state: SourceState
+        if !conflicts.isEmpty {
+            // A selected revision conflict is terminal even if the enclosing
+            // projection reports a nominally synced state.
+            state = .conflict
+        } else {
+            switch sleep.syncState {
+            case .neverSynced:
+                state = .unavailable
+            case .syncing, .partial:
+                state = .partial
+            case .readIndeterminate:
+                state = .readIndeterminate
+            case .stale:
+                state = .stale
+            case .fullResyncRequired, .error:
+                state = .error
+            case .synced, .conflict:
+                // A raw conflict can exist elsewhere in the retained
+                // projection; it does not poison this selected day. A clean,
+                // empty selected bucket remains honestly unavailable.
+                state = samples.isEmpty ? .unavailable : .observed
+            }
+        }
+
+        let reason: String?
+        switch state {
+        case .unavailable:
+            reason = "No sleep sample ends in the selected day."
+        case .partial:
+            reason = sleep.reason ?? "Persisted HealthKit sleep observations are partial."
+        case .stale:
+            reason = sleep.reason ?? "Persisted HealthKit sleep observations are stale."
+        case .conflict:
+            reason = sleep.reason ?? "Selected HealthKit sleep observations contain a source conflict."
+        case .readIndeterminate:
+            reason = "HealthKit read access is indeterminate for sleep."
+        case .error:
+            reason = sleep.reason ?? "HealthKit sleep projection failed."
+        case .observed, .permissionRequired:
+            reason = nil
+        }
+
+        let provenance = samples.map(\.provenance) + conflicts.flatMap { conflict in
+            [conflict.existing.provenance, conflict.incoming.provenance]
+        }
+        return SelectedSleep(
+            samples: samples,
+            conflicts: conflicts,
+            state: state,
+            reason: reason,
+            start: samples.map(\.startDate).min(),
+            end: samples.map(\.endDate).max(),
+            provenance: provenance
+        )
+    }
+
     private static func makeSleepDetail(
-        projection: HealthKitFitnessSleepProjection,
-        state: SourceState,
+        selected: SelectedSleep,
         evidence: HealthKitFitnessCompositionEvidence,
         timeZoneIdentifier: String
     ) -> FitnessSleepDetail {
-        let knownStages = projection.samples.compactMap { sample -> FitnessSleepStageSample? in
+        let knownStages = selected.samples.compactMap { sample -> FitnessSleepStageSample? in
             guard let stage = fitnessSleepStage(for: sample.stage) else { return nil }
             return FitnessSleepStageSample(
                 id: sample.identity.stableKey,
@@ -592,33 +701,33 @@ public struct HealthKitFitnessComposition {
                 end: sample.endDate
             )
         }
-        let hasUnsupportedStage = projection.samples.contains { fitnessSleepStage(for: $0.stage) == nil }
+        let hasUnsupportedStage = selected.samples.contains { fitnessSleepStage(for: $0.stage) == nil }
         let nightState: FitnessSleepNight.State
-        switch state {
+        switch selected.state {
         case .observed:
             nightState = .observed
         case .partial:
-            nightState = .partial(reason: projection.reason ?? "The source supplied only part of this sleep night.")
+            nightState = .partial(reason: selected.reason ?? "The source supplied only part of this sleep night.")
         case .stale:
             nightState = .partial(reason: "The source sleep interval is stale; no freshness assumption is added.")
         case .conflict:
-            nightState = .conflict(reason: projection.reason ?? "Source sleep observations disagree for this night.")
+            nightState = .conflict(reason: selected.reason ?? "Source sleep observations disagree for this night.")
         case .readIndeterminate:
             nightState = .unavailable(reason: "HealthKit read access is indeterminate for sleep.")
         case .permissionRequired:
             nightState = .unavailable(reason: "HealthKit sleep permission state is not established.")
         case .error:
-            nightState = .unavailable(reason: projection.reason ?? "HealthKit sleep projection failed.")
+            nightState = .unavailable(reason: selected.reason ?? "HealthKit sleep projection failed.")
         case .unavailable:
-            nightState = .unavailable(reason: projection.reason ?? "No source sleep interval is available.")
+            nightState = .unavailable(reason: selected.reason ?? "No source sleep interval is available.")
         }
 
         let boundary = FitnessSleepDayBoundary(
-            name: "HealthKit projection calendar day",
+            name: "Selected sleep day (end-date bucket)",
             timeZone: timeZoneIdentifier
         )
         let sleepEvidenceState: FitnessSleepObservationEvidence.State
-        switch state {
+        switch selected.state {
         case .observed:
             sleepEvidenceState = .observed(
                 source: evidence.source,
@@ -648,8 +757,8 @@ public struct HealthKitFitnessComposition {
         // partial/conflict/unavailable downgrade.
         let initialNight = FitnessSleepNight(
             id: "healthkit-sleep-night",
-            start: projection.startDate,
-            end: projection.endDate,
+            start: selected.start,
+            end: selected.end,
             stageSamples: knownStages,
             boundary: boundary,
             evidence: FitnessSleepObservationEvidence(state: sleepEvidenceState),
@@ -689,7 +798,7 @@ public struct HealthKitFitnessComposition {
             title: "Sleep duration",
             unit: "",
             detail: metricDetail(
-                state: state,
+                state: selected.state,
                 evidence: evidence,
                 reason: hasUnsupportedStage
                     ? "Source sleep interval and stages retained; duration is unavailable because stage coverage is not fully named."
@@ -761,6 +870,7 @@ public struct HealthKitFitnessComposition {
         projection: HealthKitFitnessProjection,
         selectedDate: Date,
         selectedDateIsFinite: Bool,
+        selectedSleep: SelectedSleep,
         calendar: Calendar
     ) -> [HealthKitProvenance] {
         var result: [HealthKitProvenance] = []
@@ -772,7 +882,7 @@ public struct HealthKitFitnessComposition {
                 result.append(contentsOf: projection.dailyTotal(for: metricID, on: selectedDate)?.provenance ?? [])
             }
         }
-        result.append(contentsOf: projection.sleep.provenance)
+        result.append(contentsOf: selectedSleep.provenance)
         result.append(contentsOf: selectedWorkouts(projection.workouts, selectedDate: selectedDate, selectedDateIsFinite: selectedDateIsFinite, calendar: calendar).map(\.provenance))
         return result
     }
@@ -957,7 +1067,7 @@ public struct HealthKitFitnessComposition {
     }
 
     private static func sleepFreshness(
-        _ sleep: HealthKitFitnessSleepProjection,
+        _ sleep: SelectedSleep,
         calendar: Calendar
     ) -> String {
         freshnessDescription(
@@ -996,13 +1106,24 @@ public struct HealthKitFitnessComposition {
     private static func aggregateFreshnessDescription(
         projection: HealthKitFitnessProjection,
         selectedDate: Date,
+        selectedSleep: SelectedSleep,
         calendar: Calendar
     ) -> String {
+        let selectedDateIsFinite = selectedDate.timeIntervalSinceReferenceDate.isFinite
+        let selectedWorkoutObservations = selectedWorkouts(
+            projection.workouts,
+            selectedDate: selectedDate,
+            selectedDateIsFinite: selectedDateIsFinite,
+            calendar: calendar
+        )
+        let selectedDailyDates = selectedDateIsFinite
+            ? dailyMetricIDs.flatMap { projection.dailyTotal(for: $0, on: selectedDate)?.samples.map(\.endDate) ?? [] }
+            : []
         let committedDates = latestMetricIDs.compactMap { projection.metric($0).lastCommittedAt }
         let observedDates = latestMetricIDs.flatMap { projection.metric($0).observations.map(\.endDate) }
-            + dailyMetricIDs.flatMap { projection.dailyTotal(for: $0, on: selectedDate)?.samples.map(\.endDate) ?? [] }
-            + projection.sleep.samples.map(\.endDate)
-            + projection.workouts.map(\.endDate)
+            + selectedDailyDates
+            + selectedSleep.samples.map(\.endDate)
+            + selectedWorkoutObservations.map(\.endDate)
         return freshnessDescription(
             committed: committedDates.max(),
             observed: observedDates.max(),
