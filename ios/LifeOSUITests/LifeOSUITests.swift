@@ -181,6 +181,36 @@ final class LifeOSUITests: XCTestCase {
         capture("dark-settings")
     }
 
+    /// The Helio Settings surface is a truth/accessibility contract, not a
+    /// pixel fixture: the current build must expose the authority chain,
+    /// permission state, capability inventory, and explicit battery boundary.
+    func testHelioSettingsSurfaceExposesTruthfulStateAndAccessibility() throws {
+        XCTAssertTrue(app.buttons["More"].waitForExistence(timeout: 5))
+        app.buttons["More"].tap()
+        let settings = app.buttons["more-module-settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+        settings.tap()
+
+        let health = app.buttons["settings-category-health"]
+        XCTAssertTrue(health.waitForExistence(timeout: 5))
+        health.tap()
+        XCTAssertTrue(app.navigationBars["Health & Devices"].waitForExistence(timeout: 5))
+
+        XCTAssertTrue(app.descendants(matching: .any)["settings-health-authority-chain"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["settings-health-connection-permission"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["settings-health-capability-inventory"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["settings-health-device-management"].waitForExistence(timeout: 5))
+
+        let connection = app.descendants(matching: .any)["settings-status-current-connection"]
+        XCTAssertTrue(connection.waitForExistence(timeout: 5))
+        XCTAssertTrue(connection.label.localizedCaseInsensitiveContains("Not configured"))
+
+        let battery = app.descendants(matching: .any)["settings-status-battery"]
+        XCTAssertTrue(battery.waitForExistence(timeout: 5))
+        XCTAssertTrue(battery.label.localizedCaseInsensitiveContains("Unavailable"))
+        XCTAssertFalse(battery.label.localizedCaseInsensitiveContains("Observed"), "Unavailable battery must not be presented as observed")
+    }
+
     func testCalendarPagerCommitsThreeDayPageAndCancelsShortDrag() throws {
         let calendarTab = app.buttons["Calendar"]
         XCTAssertTrue(calendarTab.waitForExistence(timeout: 5))

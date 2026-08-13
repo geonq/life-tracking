@@ -275,69 +275,204 @@ private struct FinanceConnectionsSettingsView: View {
 }
 
 private struct HealthDevicesSettingsView: View {
+    private let snapshot = HelioDeviceSettingsSnapshot.current
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 SettingsIntro(
                     title: "Health & devices",
-                    message: "Health data follows one supported source chain so every metric keeps its device provenance."
+                    message: "Helio Strap is the sensor authority. LifeOS keeps the Zepp and Apple Health transport boundary visible until a reviewed adapter supplies real source evidence."
                 )
 
-                SettingsSection(title: "Supported source chain", icon: .health) {
+                SettingsSection(title: "Authority chain", icon: .health) {
                     VStack(alignment: .leading, spacing: 12) {
-                        Text("Helio Strap  →  Zepp  →  Apple Health / HealthKit")
+                        Text(snapshot.authorityChain.map(\.title).joined(separator: "  →  "))
                             .font(LifeOSFont.inter(15, weight: .semiBold))
                             .fixedSize(horizontal: false, vertical: true)
-                        Text("Helio Strap is the measuring device. Zepp and HealthKit provide transport and permissions; neither is presented as the sensor.")
+                        Text("Helio Strap measures. Zepp and Apple Health / HealthKit are transport and permission layers; neither is presented as the sensor.")
                             .font(LifeOSFont.inter(13))
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                             .fixedSize(horizontal: false, vertical: true)
-                        HStack(spacing: 8) {
-                            LifeOSIcon(.warning)
-                                .foregroundStyle(LifeOSTokens.warning)
-                                .frame(width: 16, height: 16)
-                            Text("Not connected")
-                                .font(LifeOSFont.inter(13, weight: .semiBold))
-                                .foregroundStyle(LifeOSTokens.warning)
-                        }
                     }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("settings-health-authority-chain")
                 }
 
-                SettingsSection(title: "Permission checkpoints", icon: .health) {
+                SettingsSection(title: "Connection & permission", icon: .health) {
                     VStack(spacing: 0) {
                         SettingsStatusRow(
-                            title: "Helio Strap",
-                            detail: "Primary sensor pairing is not available in this build",
-                            status: "Unavailable",
+                            title: "Current connection",
+                            detail: snapshot.connection.detail,
+                            status: snapshot.connection.title,
                             icon: .health,
-                            statusColor: LifeOSTokens.warning
+                            statusColor: connectionStatusColor(snapshot.connection)
                         )
                         Divider().padding(.leading, 38)
                         SettingsStatusRow(
-                            title: "Zepp",
-                            detail: "Transport/source permission is not available in this build",
-                            status: "Unavailable",
-                            icon: .refresh,
-                            statusColor: LifeOSTokens.warning
+                            title: "Health source permission",
+                            detail: snapshot.permission.detail,
+                            status: snapshot.permission.title,
+                            icon: .security,
+                            statusColor: permissionStatusColor(snapshot.permission)
                         )
-                        Divider().padding(.leading, 38)
+                    }
+                    .accessibilityIdentifier("settings-health-connection-permission")
+                }
+
+                SettingsSection(title: "Last successful sync", icon: .refresh) {
+                    if let sync = snapshot.lastSuccessfulSync {
                         SettingsStatusRow(
-                            title: "Apple Health / HealthKit",
-                            detail: "Read permissions have not been requested",
-                            status: "Permission needed",
-                            icon: .health,
+                            title: "Observed source sync",
+                            detail: sync.summary,
+                            status: sync.freshness.title,
+                            icon: sync.freshness == .fresh ? .verified : .warning,
+                            statusColor: syncStatusColor(sync)
+                        )
+                    } else {
+                        SettingsStatusRow(
+                            title: "Observed source sync",
+                            detail: "No successful sync has been observed by this build; no timestamp is available.",
+                            status: "Unavailable",
+                            icon: .warning,
                             statusColor: LifeOSTokens.warning
                         )
                     }
                 }
 
-                TruthfulSetupNote(text: "Device setup is unavailable until the reviewed source, permission, and security gates pass. Demo fitness values remain explicitly labeled and are not sensor readings.")
+                SettingsSection(title: "Metric capability inventory", icon: .health) {
+                    VStack(alignment: .leading, spacing: 16) {
+                        ForEach(HelioDeviceCapabilityGroup.allCases) { group in
+                            let capabilities = snapshot.capabilities.filter { $0.group == group }
+                            if !capabilities.isEmpty {
+                                VStack(alignment: .leading, spacing: 0) {
+                                    Text(group.title)
+                                        .font(LifeOSFont.inter(12, weight: .semiBold))
+                                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                                        .padding(.bottom, 4)
+                                    ForEach(capabilities) { capability in
+                                        SettingsStatusRow(
+                                            title: capability.title,
+                                            detail: "\(capability.sourcePath.title) · \(capability.detail)",
+                                            status: capability.statusTitle,
+                                            icon: capabilityStatusIcon(capability.status),
+                                            statusColor: capabilityStatusColor(capability.status)
+                                        )
+                                        if capability.id != capabilities.last?.id {
+                                            Divider().padding(.leading, 38)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .accessibilityIdentifier("settings-health-capability-inventory")
+                }
+
+                SettingsSection(title: "Device status & management", icon: .security) {
+                    VStack(spacing: 0) {
+                        SettingsStatusRow(
+                            title: "Battery",
+                            detail: snapshot.battery.detail,
+                            status: snapshot.battery.title,
+                            icon: batteryStatusIcon(snapshot.battery),
+                            statusColor: batteryStatusColor(snapshot.battery)
+                        )
+                        Divider().padding(.leading, 38)
+                        SettingsStatusRow(
+                            title: "Firmware",
+                            detail: snapshot.firmware.detail,
+                            status: snapshot.firmware.title,
+                            icon: .warning,
+                            statusColor: LifeOSTokens.warning
+                        )
+                        Divider().padding(.leading, 38)
+                        SettingsStatusRow(
+                            title: "Pairing, reboot & configuration",
+                            detail: snapshot.management.detail,
+                            status: snapshot.management.title,
+                            icon: .refresh,
+                            statusColor: LifeOSTokens.info
+                        )
+                    }
+                    .accessibilityIdentifier("settings-health-device-management")
+                }
+
+                TruthfulSetupNote(text: "No HealthKit entitlement/importer, CoreBluetooth scanner, battery API, firmware API, private BLE protocol, or verified Zepp URL scheme is claimed by this build. Demo fixtures remain separate from observed device data.")
             }
             .frame(maxWidth: 760, alignment: .leading)
             .padding(LifeOSTokens.pagePadding)
         }
         .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
         .navigationTitle("Health & Devices")
+    }
+
+    private func connectionStatusColor(_ connection: HelioDeviceConnection) -> Color {
+        switch connection.state {
+        case .observed:
+            return LifeOSTokens.success
+        case .conflict:
+            return LifeOSTokens.danger
+        case .externalZepp:
+            return LifeOSTokens.info
+        case .notConfigured, .permissionRequired, .availableUnverified, .partial, .stale, .unavailable:
+            return LifeOSTokens.warning
+        }
+    }
+
+    private func permissionStatusColor(_ permission: HelioDevicePermissionState) -> Color {
+        switch permission {
+        case .authorized:
+            return LifeOSTokens.success
+        case .denied, .revoked:
+            return LifeOSTokens.danger
+        case .notRequested, .permissionRequired, .pending, .unavailable:
+            return LifeOSTokens.warning
+        }
+    }
+
+    private func syncStatusColor(_ sync: HelioDeviceObservationProvenance) -> Color {
+        sync.freshness == .fresh ? LifeOSTokens.success : LifeOSTokens.warning
+    }
+
+    private func capabilityStatusColor(_ status: HelioDeviceCapabilityStatus) -> Color {
+        switch status {
+        case .observed:
+            return LifeOSTokens.success
+        case .externalZepp:
+            return LifeOSTokens.info
+        case .unverified, .unavailable:
+            return LifeOSTokens.warning
+        }
+    }
+
+    private func capabilityStatusIcon(_ status: HelioDeviceCapabilityStatus) -> LifeOSIconName {
+        switch status {
+        case .observed:
+            return .verified
+        case .externalZepp:
+            return .refresh
+        case .unverified, .unavailable:
+            return .warning
+        }
+    }
+
+    private func batteryStatusColor(_ status: HelioDeviceBatteryStatus) -> Color {
+        switch status {
+        case .unavailable:
+            return LifeOSTokens.warning
+        case .observed(let reading):
+            return reading.freshness == .fresh ? LifeOSTokens.success : LifeOSTokens.warning
+        }
+    }
+
+    private func batteryStatusIcon(_ status: HelioDeviceBatteryStatus) -> LifeOSIconName {
+        switch status {
+        case .unavailable:
+            return .warning
+        case .observed(let reading):
+            return reading.freshness == .fresh ? .verified : .warning
+        }
     }
 }
 
@@ -694,6 +829,7 @@ private struct SettingsStatusRow: View {
         .padding(.vertical, 10)
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("settings-status-\(accessibilityID)")
+        .accessibilityLabel(Text("\(title) · \(status)"))
         .accessibilityValue(Text("\(status). \(detail)"))
     }
 
