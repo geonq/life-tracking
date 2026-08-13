@@ -226,7 +226,7 @@ def validate_lane_manifest() -> None:
         "--expected-commit \"$expected_commit\"" not in workflow,
         "native workflow must not pass HEAD/PR SHA as an implicit evidence override",
     )
-    automatic_lane_json = '{"include":[{"lane":"ios-logic"},{"lane":"ios-ui"},{"lane":"mac-logic"},{"lane":"widgets"}]}'
+    automatic_lane_json = '{"include":[{"lane":"ios-logic"},{"lane":"mac-logic"},{"lane":"widgets"}]}'
     manual_lane_json = '{"include":[{"lane":"ios-logic"},{"lane":"ios-ui"},{"lane":"mac-logic"},{"lane":"mac-ui"},{"lane":"widgets"}]}'
     require(automatic_lane_json in workflow, "native workflow automatic matrix drifted")
     require(manual_lane_json in workflow, "native workflow manual matrix must retain Mac UI")

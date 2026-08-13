@@ -123,7 +123,11 @@ jobs:
           done < "$changed"
 
           echo "native=$native" >> "$GITHUB_OUTPUT"
-          echo 'lanes={"include":[{"lane":"ios-logic"},{"lane":"ios-ui"},{"lane":"mac-logic"},{"lane":"widgets"}]}' >> "$GITHUB_OUTPUT"
+          # Automatic PR validation stays deterministic and code-oriented.
+          # UI/snapshot lanes are explicit milestone evidence because running
+          # the whole suite per implementation push exceeded the hosted job
+          # ceiling and generated misleading failed-run notifications.
+          echo 'lanes={"include":[{"lane":"ios-logic"},{"lane":"mac-logic"},{"lane":"widgets"}]}' >> "$GITHUB_OUTPUT"
 
   contract-check:
     name: Registry and source contracts
