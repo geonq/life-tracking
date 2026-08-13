@@ -304,7 +304,21 @@ public struct HealthKitFitnessComposition {
         evidence[.steps] = dailySteps.evidence
         evidence[.activeEnergy] = dailyEnergy.evidence
 
-        let sleepState = selectedSleep.state
+        let rawSleepEvidence = makeEvidence(
+            state: selectedSleep.state,
+            provenances: selectedSleep.provenance,
+            window: selectedDayDescription + " · " + windowDescription,
+            freshness: sleepFreshness(selectedSleep, calendar: calendar)
+        )
+        let preliminarySleepDetail = makeSleepDetail(
+            selected: selectedSleep,
+            evidence: rawSleepEvidence,
+            timeZoneIdentifier: projection.bucketTimeZoneIdentifier
+        )
+        let sleepState = reconciledSleepState(
+            source: selectedSleep.state,
+            night: preliminarySleepDetail.night.state
+        )
         let sleepEvidence = makeEvidence(
             state: sleepState,
             provenances: selectedSleep.provenance,
@@ -687,6 +701,23 @@ public struct HealthKitFitnessComposition {
         )
     }
 
+    /// A nominally observed retained projection can still fail the sleep-night
+    /// domain validator because named stages are incomplete or inconsistent.
+    /// Keep the composition state aligned with that final validated truth,
+    /// while never weakening an upstream stale/error/indeterminate state.
+    private static func reconciledSleepState(
+        source: SourceState,
+        night: FitnessSleepNight.State
+    ) -> SourceState {
+        guard source == .observed else { return source }
+        switch night {
+        case .observed: return .observed
+        case .partial: return .partial
+        case .conflict: return .conflict
+        case .unavailable: return .unavailable
+        }
+    }
+
     private static func makeSleepDetail(
         selected: SelectedSleep,
         evidence: HealthKitFitnessCompositionEvidence,
@@ -790,22 +821,31 @@ public struct HealthKitFitnessComposition {
             state: initialNight.state
         )
 
-        // The projection's enclosing interval is not an asleep-duration
-        // claim: it may include in-bed, awake, and unclassified time. Keep
-        // Fitness duration unavailable until an explicit asleep-stage sum is
-        // accepted by the product contract.
-        let duration = unavailableMetric(
+        let effectiveState = reconciledSleepState(source: selected.state, night: night.state)
+        let sourceDerivedMetrics = sourceDerivedSleepMetrics(
+            selected: selected,
+            night: night,
+            evidence: evidence,
+            hasUnsupportedStage: hasUnsupportedStage
+        )
+        let duration = sourceDerivedMetrics?.duration ?? unavailableMetric(
             title: "Sleep duration",
             unit: "",
             detail: metricDetail(
-                state: selected.state,
+                state: effectiveState,
                 evidence: evidence,
                 reason: hasUnsupportedStage
-                    ? "Source sleep interval and stages retained; duration is unavailable because stage coverage is not fully named."
-                    : "Source sleep interval retained; LifeOS does not relabel the enclosing interval as asleep duration."
+                    ? "Source sleep interval and stages retained; derived totals are unavailable because every source stage is not named."
+                    : "Source sleep interval retained; derived totals require a complete, non-overlapping named stage timeline."
             ),
             hue: .violet,
             id: "sleep_duration"
+        )
+
+        let trendCards = makeSleepTrendCards(
+            duration: duration,
+            sourceDerivedMetrics: sourceDerivedMetrics,
+            evidence: evidence
         )
 
         return FitnessSleepDetail(
@@ -822,8 +862,116 @@ public struct HealthKitFitnessComposition {
             sleepNeed: .unavailable("Sleep need requires a configured target; no target is fabricated."),
             windDown: .unavailable("Wind-down requires a configured sleep schedule."),
             insights: [],
-            trends: []
+            trends: trendCards
         )
+    }
+
+    private struct SourceDerivedSleepMetrics {
+        let duration: FitnessMetric
+        let stages: [FitnessSleepStageSample.Stage: FitnessMetric]
+    }
+
+    /// Source-derived sleep totals are deliberately gated by the final
+    /// `FitnessSleepNight` validator.  The enclosing interval is not itself
+    /// asleep time: only the exact sums of named asleep stages are exposed.
+    /// In-bed, unspecified, and unknown source stages make the whole derived
+    /// set unavailable even when the remaining named samples appear to cover
+    /// the interval.
+    private static func sourceDerivedSleepMetrics(
+        selected: SelectedSleep,
+        night: FitnessSleepNight,
+        evidence: HealthKitFitnessCompositionEvidence,
+        hasUnsupportedStage: Bool
+    ) -> SourceDerivedSleepMetrics? {
+        guard selected.state == .observed,
+              case .observed = night.state,
+              case .observed = night.evidence.state,
+              !hasUnsupportedStage,
+              selected.samples.count == night.stageSamples.count else {
+            return nil
+        }
+
+        let durations = night.stageSamples.reduce(into: [FitnessSleepStageSample.Stage: Double]()) { result, sample in
+            result[sample.stage, default: 0] += sample.end.timeIntervalSince(sample.start)
+        }
+        guard durations.values.allSatisfy({ $0.isFinite && $0 >= 0 }) else { return nil }
+
+        let secondsByStage = durations.reduce(into: [FitnessSleepStageSample.Stage: Int]()) { result, entry in
+            result[entry.key] = Int(entry.value.rounded())
+        }
+        let asleepSeconds = [
+            FitnessSleepStageSample.Stage.core,
+            .deep,
+            .rem
+        ].reduce(0) { total, stage in total + (secondsByStage[stage] ?? 0) }
+        let detail = "Exact HealthKit interval sum · named stages · \(evidence.source) · \(evidence.provenance) · \(evidence.freshness)"
+        let duration = FitnessMetric(
+            id: "sleep_duration",
+            title: "Sleep duration",
+            value: formatDuration(seconds: asleepSeconds),
+            unit: "",
+            detail: detail,
+            quality: .observed,
+            hue: .violet
+        )
+        let stageDefinitions: [(FitnessSleepStageSample.Stage, FitnessSleepTrendID, String, LifeOSTokens.Hue)] = [
+            (.rem, .rem, "REM sleep", .teal),
+            (.deep, .deep, "Deep sleep", .blue),
+            (.core, .core, "Core sleep", .green),
+            (.awake, .awake, "Awake time", .orange)
+        ]
+        let stages = stageDefinitions.reduce(into: [FitnessSleepStageSample.Stage: FitnessMetric]()) { result, definition in
+            // Do not turn an absent stage into a fabricated zero. A zero is
+            // source-derived only when that stage has an explicit interval;
+            // a complete timeline can still legitimately omit a stage.
+            guard let seconds = secondsByStage[definition.0] else { return }
+            result[definition.0] = FitnessMetric(
+                id: "sleep_\(definition.1.rawValue)",
+                title: definition.2,
+                value: formatDuration(seconds: seconds),
+                unit: "",
+                detail: detail,
+                quality: .observed,
+                hue: definition.3
+            )
+        }
+        return SourceDerivedSleepMetrics(duration: duration, stages: stages)
+    }
+
+    private static func makeSleepTrendCards(
+        duration: FitnessMetric,
+        sourceDerivedMetrics: SourceDerivedSleepMetrics?,
+        evidence: HealthKitFitnessCompositionEvidence
+    ) -> [FitnessSleepTrendCard] {
+        let unavailable: (FitnessSleepTrendID) -> FitnessMetric = { id in
+            unavailableMetric(
+                title: id.title,
+                unit: "",
+                detail: "Unavailable · complete, non-overlapping named sleep stages are required.",
+                hue: .violet,
+                id: "sleep_\(id.rawValue)"
+            )
+        }
+        let metrics: [FitnessSleepTrendID: FitnessMetric] = [
+            .quality: unavailable(.quality),
+            .timeInBed: unavailable(.timeInBed),
+            .duration: duration,
+            .rem: sourceDerivedMetrics?.stages[.rem] ?? unavailable(.rem),
+            .deep: sourceDerivedMetrics?.stages[.deep] ?? unavailable(.deep),
+            .core: sourceDerivedMetrics?.stages[.core] ?? unavailable(.core),
+            .awake: sourceDerivedMetrics?.stages[.awake] ?? unavailable(.awake),
+            .heartRateDrop: unavailable(.heartRateDrop),
+            .sleepBalance: unavailable(.sleepBalance),
+            .wakeTime: unavailable(.wakeTime),
+            .sleepOnset: unavailable(.sleepOnset)
+        ]
+        return FitnessSleepTrendID.allCases.map { id in
+            let metric = metrics[id] ?? unavailable(id)
+            let cardEvidence: FitnessSourceEvidence? = sourceDerivedMetrics != nil && metric.quality == .observed
+                ? fitnessEvidence(evidence)
+                : nil
+            return FitnessSleepTrendCard(id: id, metric: metric, evidence: cardEvidence)
+        }
     }
 
     private static func makeWorkout(

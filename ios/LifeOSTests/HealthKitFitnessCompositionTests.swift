@@ -360,6 +360,12 @@ final class HealthKitFitnessCompositionTests: XCTestCase {
         XCTAssertNil(composition.snapshot.sleepDetail.duration.value)
         XCTAssertNil(composition.snapshot.sleepDetail.quality.value)
         XCTAssertEqual(composition.snapshot.sleepDetail.night.state, .partial(reason: "Stage samples do not cover the full observed sleep interval."))
+        XCTAssertEqual(composition.sleepState, .partial)
+        XCTAssertEqual(composition.evidence[.sleep]?.state, .partial)
+        XCTAssertTrue(composition.snapshot.sleepDetail.duration.detail.contains("Partial"))
+        XCTAssertEqual(composition.sleepState, .partial)
+        XCTAssertEqual(composition.evidence[.sleep]?.state, .partial)
+        XCTAssertNil(composition.snapshot.sleepDetail.trends.first(where: { $0.id == .rem })?.metric.value)
         if case .unavailable = composition.snapshot.sleepDetail.night.evidence.state {
             // The domain validator downgraded the night, so its evidence must
             // not continue to claim an observed sleep night.
@@ -386,6 +392,94 @@ final class HealthKitFitnessCompositionTests: XCTestCase {
         } else {
             XCTFail("A fully covered observed sleep night must retain observed evidence")
         }
+        let trends = composition.snapshot.sleepDetail.trends
+        XCTAssertEqual(composition.snapshot.sleepDetail.duration.value, "33 min 20s")
+        XCTAssertEqual(trends.first(where: { $0.id == .duration })?.metric.value, "33 min 20s")
+        XCTAssertEqual(trends.first(where: { $0.id == .rem })?.metric.value, "16 min 40s")
+        XCTAssertNil(trends.first(where: { $0.id == .deep })?.metric.value)
+        XCTAssertEqual(trends.first(where: { $0.id == .core })?.metric.value, "16 min 40s")
+        XCTAssertEqual(trends.first(where: { $0.id == .awake })?.metric.value, "6 min 40s")
+        XCTAssertEqual(trends.first(where: { $0.id == .rem })?.metric.quality, .observed)
+        XCTAssertTrue(trends.first(where: { $0.id == .rem })?.availableRanges.isEmpty == true)
+        XCTAssertTrue(trends.first(where: { $0.id == .rem })?.seriesByRange.isEmpty == true)
+        XCTAssertFalse(trends.first(where: { $0.id == .rem })?.evidence.isUnavailable == true)
+        XCTAssertNil(composition.snapshot.sleepDetail.timeInBed.value)
+        XCTAssertNil(trends.first(where: { $0.id == .quality })?.metric.value)
+    }
+
+    func testSleepDurationRoundsAfterSummingFractionalStageIntervals() throws {
+        let start = now.addingTimeInterval(-1.2)
+        let sleepSamples = [
+            try sleep(stage: .asleepCore, start: start, end: start.addingTimeInterval(0.6)),
+            try sleep(stage: .asleepREM, start: start.addingTimeInterval(0.6), end: now)
+        ]
+        let composition = HealthKitFitnessComposition.compose(
+            projection: projection(states: [try state(metric: .sleep, observations: sleepSamples)]),
+            selectedDate: now
+        )
+
+        XCTAssertEqual(composition.sleepState, .observed)
+        XCTAssertEqual(composition.snapshot.sleepDetail.duration.value, "2 s")
+        XCTAssertEqual(composition.snapshot.sleepDetail.trends.first(where: { $0.id == .core })?.metric.value, "1 s")
+        XCTAssertEqual(composition.snapshot.sleepDetail.trends.first(where: { $0.id == .rem })?.metric.value, "1 s")
+    }
+
+    func testSleepDurationUsesAbsoluteSecondsAcrossBerlinDSTFallback() throws {
+        let start = try XCTUnwrap(calendar.date(from: DateComponents(year: 2023, month: 10, day: 28, hour: 22)))
+        let end = try XCTUnwrap(calendar.date(from: DateComponents(year: 2023, month: 10, day: 29, hour: 7)))
+        XCTAssertEqual(end.timeIntervalSince(start), 10 * 3_600)
+        let sample = try sleep(stage: .asleepCore, start: start, end: end)
+        let retained = projection(
+            states: [try state(metric: .sleep, observations: [sample])],
+            start: start.addingTimeInterval(-60),
+            end: end.addingTimeInterval(60)
+        )
+        let selectedDate = try XCTUnwrap(calendar.date(from: DateComponents(year: 2023, month: 10, day: 29, hour: 12)))
+        let composition = HealthKitFitnessComposition.compose(
+            projection: retained,
+            selectedDate: selectedDate
+        )
+
+        XCTAssertEqual(composition.sleepState, .observed)
+        XCTAssertEqual(composition.snapshot.sleepDetail.night.end, end)
+        XCTAssertEqual(composition.snapshot.sleepDetail.night.boundary?.name, "Selected sleep day (end-date bucket)")
+        XCTAssertEqual(composition.snapshot.sleepDetail.duration.value, "10h 0m")
+        XCTAssertEqual(composition.snapshot.sleepDetail.trends.first(where: { $0.id == .core })?.metric.value, "10h 0m")
+    }
+
+    func testNonObservedSleepStatesKeepDerivedTotalsUnavailable() throws {
+        let start = now.addingTimeInterval(-2_400)
+        let sleepSamples = [
+            try sleep(stage: .asleepCore, start: start, end: start.addingTimeInterval(1_000)),
+            try sleep(stage: .awake, start: start.addingTimeInterval(1_000), end: start.addingTimeInterval(1_400)),
+            try sleep(stage: .asleepREM, start: start.addingTimeInterval(1_400), end: start.addingTimeInterval(2_400))
+        ]
+        for syncState in [HealthKitSyncState.partial, .stale] {
+            let composition = HealthKitFitnessComposition.compose(
+                projection: projection(states: [try state(metric: .sleep, observations: sleepSamples, syncState: syncState)]),
+                selectedDate: now
+            )
+            XCTAssertNil(composition.snapshot.sleepDetail.duration.value)
+            XCTAssertNil(composition.snapshot.sleepDetail.trends.first(where: { $0.id == .rem })?.metric.value)
+            XCTAssertTrue(composition.snapshot.sleepDetail.trends.first(where: { $0.id == .rem })?.evidence.isUnavailable == true)
+        }
+    }
+
+    func testSleepDurationReconcilesWithRoundedObservedStageTotals() throws {
+        let start = now.addingTimeInterval(-10)
+        let samples = [
+            try sleep(stage: .asleepCore, start: start, end: start.addingTimeInterval(0.6)),
+            try sleep(stage: .asleepREM, start: start.addingTimeInterval(0.6), end: start.addingTimeInterval(1.2))
+        ]
+        let composition = HealthKitFitnessComposition.compose(
+            projection: projection(states: [try state(metric: .sleep, observations: samples)]),
+            selectedDate: now
+        )
+        let trends = composition.snapshot.sleepDetail.trends
+        XCTAssertEqual(composition.snapshot.sleepDetail.duration.value, "2 s")
+        XCTAssertEqual(trends.first(where: { $0.id == .core })?.metric.value, "1 s")
+        XCTAssertEqual(trends.first(where: { $0.id == .rem })?.metric.value, "1 s")
+        XCTAssertNil(trends.first(where: { $0.id == .deep })?.metric.value)
     }
 
     func testWorkoutRetainsRawActivityFactsWithoutKindMappingOrLoad() throws {
@@ -501,6 +595,7 @@ final class HealthKitFitnessCompositionTests: XCTestCase {
         XCTAssertEqual(firstDay.snapshot.sleepDetail.night.start, nightOneStart)
         XCTAssertEqual(firstDay.snapshot.sleepDetail.night.end, nightOneEnd)
         XCTAssertEqual(firstDay.snapshot.sleepDetail.night.stageSamples.map(\.stage), [.core])
+        XCTAssertEqual(firstDay.snapshot.sleepDetail.duration.value, "9h 0m")
         XCTAssertTrue(firstDay.evidence[.sleep]?.source.contains("first-night") == true)
         XCTAssertFalse(firstDay.evidence[.sleep]?.source.contains("second-night") == true)
 
@@ -512,6 +607,7 @@ final class HealthKitFitnessCompositionTests: XCTestCase {
         XCTAssertEqual(secondDay.snapshot.sleepDetail.night.start, nightTwoStart)
         XCTAssertEqual(secondDay.snapshot.sleepDetail.night.end, nightTwoEnd)
         XCTAssertEqual(secondDay.snapshot.sleepDetail.night.stageSamples.map(\.stage), [.rem])
+        XCTAssertEqual(secondDay.snapshot.sleepDetail.duration.value, "9h 0m")
         XCTAssertTrue(secondDay.evidence[.sleep]?.source.contains("second-night") == true)
         XCTAssertFalse(secondDay.evidence[.sleep]?.source.contains("first-night") == true)
 
@@ -616,6 +712,8 @@ final class HealthKitFitnessCompositionTests: XCTestCase {
         XCTAssertEqual(conflictedDay.sleepState, .conflict)
         XCTAssertEqual(conflictedDay.snapshot.sleepDetail.night.state.label, "Conflict")
         XCTAssertTrue(conflictedDay.snapshot.sleepDetail.night.evidence.isUnavailable)
+        XCTAssertNil(conflictedDay.snapshot.sleepDetail.duration.value)
+        XCTAssertNil(conflictedDay.snapshot.sleepDetail.trends.first(where: { $0.id == .deep })?.metric.value)
 
         let cleanDay = HealthKitFitnessComposition.compose(
             projection: retained,
@@ -625,6 +723,7 @@ final class HealthKitFitnessCompositionTests: XCTestCase {
         XCTAssertEqual(cleanDay.snapshot.sleepDetail.night.start, cleanStart)
         XCTAssertEqual(cleanDay.snapshot.sleepDetail.night.end, cleanEnd)
         XCTAssertEqual(cleanDay.snapshot.sleepDetail.night.stageSamples.map(\.stage), [.deep])
+        XCTAssertEqual(cleanDay.snapshot.sleepDetail.duration.value, "9h 0m")
     }
 
     func testAggregateFreshnessDoesNotLeakWorkoutFromAnotherSelectedDay() throws {
