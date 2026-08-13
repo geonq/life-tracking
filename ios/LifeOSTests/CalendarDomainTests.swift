@@ -351,6 +351,7 @@ final class CalendarDomainTests: XCTestCase {
 
         if case .failure = result {} else { XCTFail("A store failure must not acknowledge a local commit") }
         XCTAssertEqual(coordinator.snapshot.items, [original])
+        XCTAssertFalse(coordinator.canUndo, "A failed local persistence must not create an undo token")
         XCTAssertNotNil(coordinator.errorMessage)
         try? FileManager.default.removeItem(at: blockingFile)
     }
@@ -368,6 +369,182 @@ final class CalendarDomainTests: XCTestCase {
         let loaded = try await coordinator.store.load()
         XCTAssertEqual(loaded.items, [updated])
         XCTAssertEqual(loaded.items.filter { $0.id == updated.id }.count, 1)
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    @MainActor
+    func testCoordinatorFixtureMutationIgnoresPreexistingDurableState() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let url = directory.appendingPathComponent("calendar.json")
+        let stale = try CalendarItem(title: "stale persisted event", start: base, end: base.addingTimeInterval(60), createdAt: base, updatedAt: base)
+        let fixture = try CalendarItem(title: "fixture event", start: base.addingTimeInterval(120), end: base.addingTimeInterval(180), createdAt: base, updatedAt: base)
+        let inserted = try CalendarItem(title: "fixture mutation", start: base.addingTimeInterval(240), end: base.addingTimeInterval(300), createdAt: base, updatedAt: base)
+
+        let existingStore = CalendarStore(url: url)
+        try await existingStore.save(CalendarSnapshot(items: [stale]))
+        let coordinator = CalendarCoordinator(
+            initialSnapshot: CalendarSnapshot(items: [fixture]),
+            usesVisualFixtures: true,
+            storeURL: url
+        )
+
+        let result = await coordinator.save(inserted)
+
+        XCTAssertEqual(result, .success)
+        let expected = CalendarSnapshot(items: [fixture, inserted])
+        XCTAssertEqual(coordinator.snapshot, expected)
+        let loaded = try await coordinator.store.load()
+        XCTAssertEqual(loaded, expected)
+        XCTAssertFalse(coordinator.snapshot.items.contains { $0.id == stale.id })
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    @MainActor
+    func testCoordinatorUndoRestoresExactPreMutationSnapshotOnce() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let url = directory.appendingPathComponent("calendar.json")
+        let original = try CalendarItem(
+            title: "before",
+            icon: "📅",
+            status: .inProgress,
+            start: base,
+            end: base.addingTimeInterval(90),
+            createdAt: base,
+            updatedAt: base.addingTimeInterval(10)
+        )
+        let sentRevisions = CalendarRevisionRecorder()
+        let coordinator = CalendarCoordinator(
+            initialSnapshot: CalendarSnapshot(items: [original]),
+            storeURL: url,
+            peerSend: { _, _, revision in sentRevisions.append(revision) }
+        )
+        let updated = try original.updating(
+            title: "after",
+            clearIcon: true,
+            status: .done,
+            start: base.addingTimeInterval(300),
+            end: base.addingTimeInterval(600),
+            at: base.addingTimeInterval(20)
+        )
+
+        let saveResult = await coordinator.save(updated)
+        XCTAssertEqual(saveResult, .success)
+        XCTAssertTrue(coordinator.canUndo)
+        XCTAssertEqual(sentRevisions.values.count, 1)
+        XCTAssertEqual(coordinator.snapshot, CalendarSnapshot(items: [updated]))
+
+        let undoResult = await coordinator.undoLastMutation()
+        XCTAssertEqual(undoResult, .success)
+        XCTAssertFalse(coordinator.canUndo, "A successful undo must consume the one-shot token")
+        XCTAssertEqual(coordinator.snapshot, CalendarSnapshot(items: [original]))
+        XCTAssertEqual(sentRevisions.values.count, 1, "Exact local undo must not propagate an older LWW snapshot to peers")
+        let restored = try await coordinator.store.load()
+        XCTAssertEqual(restored, CalendarSnapshot(items: [original]))
+
+        if case .success = await coordinator.undoLastMutation() {
+            XCTFail("Undo must not be reusable")
+        }
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    @MainActor
+    func testCoordinatorSuccessfulMutationReplacesPreviousUndoToken() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let url = directory.appendingPathComponent("calendar.json")
+        let first = try CalendarItem(title: "first", start: base, end: base.addingTimeInterval(60), createdAt: base, updatedAt: base)
+        let second = try CalendarItem(title: "second", start: base.addingTimeInterval(120), end: base.addingTimeInterval(180), createdAt: base, updatedAt: base.addingTimeInterval(1))
+        let coordinator = CalendarCoordinator(storeURL: url)
+
+        let firstResult = await coordinator.save(first)
+        let secondResult = await coordinator.save(second)
+        XCTAssertEqual(firstResult, .success)
+        XCTAssertEqual(secondResult, .success)
+        XCTAssertTrue(coordinator.canUndo)
+
+        // The latest token restores the snapshot immediately before `second`,
+        // leaving the first successful mutation intact.
+        let undoResult = await coordinator.undoLastMutation()
+        XCTAssertEqual(undoResult, .success)
+        XCTAssertFalse(coordinator.canUndo)
+        XCTAssertEqual(coordinator.snapshot, CalendarSnapshot(items: [first]))
+        let restored = try await coordinator.store.load()
+        XCTAssertEqual(restored, CalendarSnapshot(items: [first]))
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    @MainActor
+    func testCoordinatorRemoteMergeInvalidatesUndoToken() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let url = directory.appendingPathComponent("calendar.json")
+        let local = try CalendarItem(title: "local", start: base, end: base.addingTimeInterval(60), createdAt: base, updatedAt: base)
+        let remote = try CalendarItem(title: "remote", start: base.addingTimeInterval(120), end: base.addingTimeInterval(180), createdAt: base, updatedAt: base)
+        let coordinator = CalendarCoordinator(storeURL: url)
+
+        let saveResult = await coordinator.save(local)
+        XCTAssertEqual(saveResult, .success)
+        XCTAssertTrue(coordinator.canUndo)
+        let mergeResult = await coordinator.merge(CalendarSnapshot(items: [remote]))
+        XCTAssertEqual(mergeResult, .success)
+        XCTAssertFalse(coordinator.canUndo, "A successful remote merge must invalidate local undo")
+        XCTAssertEqual(Set(coordinator.snapshot.items.map(\.id)), Set([local.id, remote.id]))
+        if case .success = await coordinator.undoLastMutation() {
+            XCTFail("A remote merge must make the previous local undo unavailable")
+        }
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    @MainActor
+    func testCoordinatorFailedMutationPreservesPriorUndoToken() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let url = directory.appendingPathComponent("calendar.json")
+        let first = try CalendarItem(title: "first", start: base, end: base.addingTimeInterval(60), createdAt: base, updatedAt: base)
+        let failed = try first.updating(title: "failed", at: base.addingTimeInterval(1))
+        let coordinator = CalendarCoordinator(storeURL: url)
+
+        let firstResult = await coordinator.save(first)
+        XCTAssertEqual(firstResult, .success)
+        XCTAssertTrue(coordinator.canUndo)
+        try FileManager.default.removeItem(at: directory)
+        XCTAssertTrue(FileManager.default.createFile(atPath: directory.path, contents: Data()))
+
+        if case .success = await coordinator.save(failed) {
+            XCTFail("The regular-file parent must reject the second local save")
+        }
+        XCTAssertTrue(coordinator.canUndo, "A failed mutation must not replace a prior valid undo token")
+        XCTAssertEqual(coordinator.snapshot, CalendarSnapshot(items: [first]))
+
+        try? FileManager.default.removeItem(at: directory)
+        let undoResult = await coordinator.undoLastMutation()
+        XCTAssertEqual(undoResult, .success)
+        XCTAssertFalse(coordinator.canUndo)
+        XCTAssertTrue(coordinator.snapshot.items.isEmpty)
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    @MainActor
+    func testCoordinatorFailedUndoPreservesTokenAndPublishedSnapshot() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let url = directory.appendingPathComponent("calendar.json")
+        let item = try CalendarItem(title: "undo me", start: base, end: base.addingTimeInterval(60), createdAt: base, updatedAt: base)
+        let coordinator = CalendarCoordinator(storeURL: url)
+
+        let saveResult = await coordinator.save(item)
+        XCTAssertEqual(saveResult, .success)
+        XCTAssertTrue(coordinator.canUndo)
+        try FileManager.default.removeItem(at: directory)
+        XCTAssertTrue(FileManager.default.createFile(atPath: directory.path, contents: Data()))
+
+        if case .success = await coordinator.undoLastMutation() {
+            XCTFail("Undo must report a failed local persistence")
+        }
+        XCTAssertTrue(coordinator.canUndo, "A failed undo must remain retryable")
+        XCTAssertEqual(coordinator.snapshot, CalendarSnapshot(items: [item]))
+
+        try? FileManager.default.removeItem(at: directory)
+        let retryResult = await coordinator.retryLastSave()
+        XCTAssertEqual(retryResult, .success, "The existing persistence Retry action must retry a failed Undo")
+        XCTAssertFalse(coordinator.canUndo)
+        XCTAssertTrue(coordinator.snapshot.items.isEmpty)
         try? FileManager.default.removeItem(at: directory)
     }
 

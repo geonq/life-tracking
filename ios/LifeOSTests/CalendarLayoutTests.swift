@@ -359,9 +359,9 @@ final class CalendarLayoutTests: XCTestCase {
     }
 
     func testMonthCellPresentationLimitsEventsForCompactColumns() {
-        XCTAssertEqual(CalendarMonthCellPresentation.visibleEventLimit(isCompact: true), 1)
+        XCTAssertEqual(CalendarMonthCellPresentation.visibleEventLimit(isCompact: true), 3)
         XCTAssertEqual(CalendarMonthCellPresentation.visibleEventLimit(isCompact: false), 3)
-        XCTAssertEqual(CalendarMonthCellPresentation.overflowCount(total: 4, visible: 1), 3)
+        XCTAssertEqual(CalendarMonthCellPresentation.overflowCount(total: 4, visible: 3), 1)
         XCTAssertEqual(CalendarMonthCellPresentation.overflowCount(total: 2, visible: 3), 0)
     }
 

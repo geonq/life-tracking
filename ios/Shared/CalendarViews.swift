@@ -1761,8 +1761,12 @@ private struct CalendarInteractiveTimelineEvent: View {
         .simultaneousGesture(tapGesture)
         .highPriorityGesture(moveGesture)
 #else
-        .highPriorityGesture(tapGesture)
-        .simultaneousGesture(moveGesture)
+        // The sequenced long-press move must own an event-body drag before
+        // the surrounding vertical timeline/pager consumes it. A plain tap
+        // makes the long press fail and still reaches the simultaneous tap
+        // recognizer, preserving editor selection without starving moves.
+        .simultaneousGesture(tapGesture)
+        .highPriorityGesture(moveGesture)
 #endif
         .animation(reduceMotion ? nil : LifeOSMotion.primary, value: item.start)
         .accessibilityHidden(!isInteractionEnabled)
@@ -2431,6 +2435,11 @@ public struct CalendarMonthGrid: View {
                     .background(calendar.isDateInToday(day) ? CalendarEventVisuals.today : .clear, in: Circle())
             }
             .buttonStyle(.plain)
+            // Keep the day-cell target on the date control itself. Applying
+            // this identifier to the containing VStack makes SwiftUI replace
+            // every descendant event chip's identifier with the cell ID,
+            // which breaks direct manipulation and assistive navigation.
+            .accessibilityIdentifier("calendar-month-cell-\(calendarISODate(day))")
 
             if let holiday = dayHolidays.first {
                 if usesCompactCells {
@@ -2451,6 +2460,7 @@ public struct CalendarMonthGrid: View {
                 CalendarMonthEventChip(
                     item: item,
                     compact: usesCompactCells,
+                    calendar: calendar,
                     isGhost: renderState(item) == .destinationGhost,
                     isSourceOwner: renderState(item) == .sourceOwner,
                     onSelect: { if renderState(item) == .normal { onSelectItem(item) } },
@@ -2486,7 +2496,6 @@ public struct CalendarMonthGrid: View {
                 lineWidth: isMoveTarget ? 1.25 : 0.5
             )
         }
-        .accessibilityIdentifier("calendar-month-cell-\(calendarISODate(day))")
         .background {
             GeometryReader { proxy in
                 Color.clear.preference(
@@ -2636,6 +2645,7 @@ public struct CalendarMonthGrid: View {
 private struct CalendarMonthEventChip: View {
     let item: CalendarItem
     let compact: Bool
+    let calendar: Calendar
     let isGhost: Bool
     let isSourceOwner: Bool
     let onSelect: () -> Void
@@ -2689,8 +2699,10 @@ private struct CalendarMonthEventChip: View {
             "\(item.end.formatted(date: .omitted, time: .shortened))"
         )
         .accessibilityValue(
-            "\(item.start.formatted(date: .numeric, time: .shortened)) to " +
-            "\(item.end.formatted(date: .numeric, time: .shortened)); long press and drag to move"
+            "\(calendarISODate(item.start)), " +
+            "\(item.start.formatted(date: .omitted, time: .shortened)) to " +
+            "\(calendarISODate(item.end)), " +
+            "\(item.end.formatted(date: .omitted, time: .shortened)); long press and drag to move"
         )
         .accessibilityIdentifier("calendar-month-event-\(item.id.uuidString)")
         .accessibilityHint("Long press and drag to move this event between month days")
@@ -2710,6 +2722,11 @@ private struct CalendarMonthEventChip: View {
             }
         }
 #endif
+    }
+
+    private func calendarISODate(_ date: Date) -> String {
+        let parts = calendar.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
     }
 
     private var monthMoveGesture: some Gesture {

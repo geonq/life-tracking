@@ -212,7 +212,7 @@ final class LifeOSUITests: XCTestCase {
     func testCalendarMonthEventDragTargetsNextCell() throws {
         let calendarTab = app.buttons["Calendar"]
         XCTAssertTrue(tap(calendarTab, untilVisible: app.buttons["calendar-add"]))
-        app.buttons["Month"].tap()
+        selectCalendarMonthView()
 
         let source = app.descendants(matching: .any)["calendar-month-event-\(deterministicDeepWorkID)"]
         XCTAssertTrue(source.waitForExistence(timeout: 5), "Month view must expose the deterministic event chip")
@@ -243,7 +243,7 @@ final class LifeOSUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.buttons["Calendar"].waitForExistence(timeout: 8))
         XCTAssertTrue(tap(app.buttons["Calendar"], untilVisible: app.buttons["calendar-add"]))
-        app.buttons["Month"].tap()
+        selectCalendarMonthView()
         let persisted = app.descendants(matching: .any)["calendar-month-event-\(deterministicDeepWorkID)"]
         XCTAssertTrue(persisted.waitForExistence(timeout: 8), "The moved month event must survive relaunch")
         XCTAssertTrue((persisted.value as? String)?.contains(calendarISODate(targetDay)) == true,
@@ -253,7 +253,7 @@ final class LifeOSUITests: XCTestCase {
     func testCalendarMonthEventDropOutsideGridCancelsWithoutCommit() throws {
         let calendarTab = app.buttons["Calendar"]
         XCTAssertTrue(tap(calendarTab, untilVisible: app.buttons["calendar-add"]))
-        app.buttons["Month"].tap()
+        selectCalendarMonthView()
 
         let source = app.descendants(matching: .any)["calendar-month-event-\(deterministicDeepWorkID)"]
         XCTAssertTrue(source.waitForExistence(timeout: 5))
@@ -719,6 +719,14 @@ final class LifeOSUITests: XCTestCase {
             if target.waitForExistence(timeout: 5) { return true }
         }
         return false
+    }
+
+    private func selectCalendarMonthView() {
+        let picker = app.buttons["calendar-view-picker"]
+        let monthMenuItem = app.buttons["Month view"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 5), "Calendar must expose its view-mode picker")
+        XCTAssertTrue(tap(picker, untilVisible: monthMenuItem), "Calendar view menu must expose its Month view item")
+        monthMenuItem.tap()
     }
 
     /// Select the real top-level Fitness tab and prove that the app replaced

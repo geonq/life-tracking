@@ -448,6 +448,21 @@ public struct CalendarView: View {
 
                 Spacer(minLength: 4)
 
+                Button {
+                    Task { _ = await coordinator.undo() }
+                } label: {
+                    Image(systemName: "arrow.uturn.backward")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(coordinator.canUndo ? Color.primary : Color.secondary)
+                        .frame(width: 32, height: 32)
+                        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .disabled(!coordinator.canUndo)
+                .accessibilityLabel("Undo last calendar change")
+                .accessibilityHint("Restores the calendar before the most recent saved change")
+                .accessibilityIdentifier("calendar-undo")
+
                 Menu {
                     Button("Timeline") { setDisplayMode(.timeline) }
                     Button("Month view") { setDisplayMode(.month) }
@@ -494,6 +509,20 @@ public struct CalendarView: View {
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
+                    Button {
+                        Task { _ = await coordinator.undo() }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "arrow.uturn.backward")
+                            Text("Undo")
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(!coordinator.canUndo)
+                    .keyboardShortcut("z", modifiers: .command)
+                    .accessibilityLabel("Undo last calendar change")
+                    .accessibilityHint("Restores the calendar before the most recent saved change")
+                    .accessibilityIdentifier("calendar-undo")
                     Button("Today") { selectedDate = .now }
                         .buttonStyle(.bordered)
                     Button { move(by: -1) } label: {

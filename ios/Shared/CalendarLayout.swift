@@ -879,7 +879,10 @@ public enum CalendarDateRange {
 
 public enum CalendarMonthCellPresentation {
     public static func visibleEventLimit(isCompact: Bool) -> Int {
-        isCompact ? 1 : 3
+        // Compact cells use icon-only chips and have room for the same
+        // three-row stack. Showing only one made a successfully moved event
+        // disappear immediately behind “more” on busy days.
+        3
     }
 
     public static func overflowCount(total: Int, visible: Int) -> Int {

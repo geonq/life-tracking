@@ -69,7 +69,8 @@ struct LifeOSApp: App {
         ))
         _calendarCoordinator = StateObject(
             wrappedValue: CalendarCoordinator(
-                initialSnapshot: enabled ? CalendarVisualFixtures.snapshot() : CalendarSnapshot()
+                initialSnapshot: enabled ? CalendarVisualFixtures.snapshot() : CalendarSnapshot(),
+                usesVisualFixtures: enabled
             )
         )
     }
