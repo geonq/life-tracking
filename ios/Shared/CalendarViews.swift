@@ -8,6 +8,68 @@ import UIKit
 import AppKit
 #endif
 
+/// The SwiftUI coordinate space shared by the macOS timed-grid pointer and
+/// the native AppKit popover source view. Keeping this conversion pure makes
+/// the source frame independent of hosting-view origins and stale state.
+public enum CalendarEditorAnchorGeometry {
+    public static let coordinateSpaceName = "calendar-editor-anchor"
+    public static let sourceSize = CGSize(width: 1, height: 1)
+
+    /// Converts a gesture location in a local day-column view into the
+    /// one-point source frame used by the AppKit popover. Both inputs are
+    /// expressed in the same named SwiftUI coordinate space after the local
+    /// frame is applied; no window/hosting-origin fallback is valid here.
+    public static func sourceFrame(
+        forLocalPoint localPoint: CGPoint,
+        inNamedSpace localFrame: CGRect,
+        sourceSize: CGSize = CalendarEditorAnchorGeometry.sourceSize
+    ) -> CGRect? {
+        frame(
+            forLocalRect: CGRect(origin: localPoint, size: sourceSize),
+            inNamedSpace: localFrame
+        )
+    }
+
+    /// Converts a rendered local event/card rect into the enclosing named
+    /// calendar space. Unlike `sourceFrame(forLocalPoint:)`, this preserves
+    /// the complete event rect so an existing-event editor is attached to the
+    /// card the user clicked rather than to a fixed toolbar coordinate.
+    public static func frame(
+        forLocalRect localRect: CGRect,
+        inNamedSpace localFrame: CGRect
+    ) -> CGRect? {
+        guard localRect.minX.isFinite,
+              localRect.minY.isFinite,
+              localRect.width.isFinite,
+              localRect.height.isFinite,
+              localRect.width > 0,
+              localRect.height > 0,
+              localFrame.minX.isFinite,
+              localFrame.minY.isFinite,
+              localFrame.width.isFinite,
+              localFrame.height.isFinite,
+              localFrame.width > 0,
+              localFrame.height > 0 else {
+            return nil
+        }
+
+        return CGRect(
+            x: localFrame.minX + localRect.minX,
+            y: localFrame.minY + localRect.minY,
+            width: localRect.width,
+            height: localRect.height
+        )
+    }
+}
+
+#if os(macOS)
+public typealias CalendarTimedCreationAnchor = CGRect
+public typealias CalendarEventSelectionHandler = (CalendarItem, CGRect) -> Void
+#else
+public typealias CalendarTimedCreationAnchor = CGPoint
+public typealias CalendarEventSelectionHandler = (CalendarItem) -> Void
+#endif
+
 private struct CalendarEventMovePreview: Equatable {
     let item: CalendarItem
     let start: Date
@@ -370,14 +432,15 @@ public struct CalendarTimelineView: View {
     public let holidays: [CalendarHoliday]
     public let hourHeight: CGFloat
     public let calendar: Calendar
-    public let onSelect: (CalendarItem) -> Void
+    public let onSelect: CalendarEventSelectionHandler
     /// Deliberate empty-space creation and final event interval updates are
     /// emitted only after the gesture settles. The parent owns persistence.
     public let onCreate: ((Date) -> Void)?
-    /// macOS-only intentional empty-grid creation. The anchor is in the
-    /// CalendarView editor coordinate space so the parent can present the
-    /// inspector beside the actual click rather than centering a sheet.
-    public let onCreateTimedRange: ((Date, Date, CGPoint) -> Void)?
+    /// macOS-only intentional empty-grid creation. The source frame is in the
+    /// shared named CalendarEditorAnchorGeometry coordinate space so the
+    /// parent can present the inspector beside the actual click rather than
+    /// resolving through a hosting-view origin.
+    public let onCreateTimedRange: ((Date, Date, CalendarTimedCreationAnchor) -> Void)?
     public let timedCreationPreview: CalendarTimedCreationPreview?
     public let onUpdate: CalendarUpdateHandler?
     /// Called while the iOS pager is in flight so the compact header can track
@@ -404,9 +467,9 @@ public struct CalendarTimelineView: View {
 #endif
 
     public init(days: [Date], items: [CalendarItem], holidays: [CalendarHoliday] = [], hourHeight: CGFloat, calendar: Calendar = .current,
-                onSelect: @escaping (CalendarItem) -> Void,
+                onSelect: @escaping CalendarEventSelectionHandler,
                 onCreate: ((Date) -> Void)? = nil,
-                onCreateTimedRange: ((Date, Date, CGPoint) -> Void)? = nil,
+                onCreateTimedRange: ((Date, Date, CalendarTimedCreationAnchor) -> Void)? = nil,
                 timedCreationPreview: CalendarTimedCreationPreview? = nil,
                 onUpdate: CalendarUpdateHandler? = nil,
                 onPreviewDateChange: ((Date) -> Void)? = nil,
@@ -640,9 +703,9 @@ private struct CalendarPagedTimeline: View {
     let holidays: [CalendarHoliday]
     let hourHeight: CGFloat
     let calendar: Calendar
-    let onSelect: (CalendarItem) -> Void
+    let onSelect: CalendarEventSelectionHandler
     let onCreate: ((Date) -> Void)?
-    let onCreateTimedRange: ((Date, Date, CGPoint) -> Void)?
+    let onCreateTimedRange: ((Date, Date, CalendarTimedCreationAnchor) -> Void)?
     let timedCreationPreview: CalendarTimedCreationPreview?
     let onUpdate: CalendarUpdateHandler?
     let onPreviewDateChange: ((Date) -> Void)?
@@ -659,8 +722,8 @@ private struct CalendarPagedTimeline: View {
     @State private var pagerGestureGeneration = 0
 
     init(days: [Date], items: [CalendarItem], holidays: [CalendarHoliday], hourHeight: CGFloat,
-         calendar: Calendar, onSelect: @escaping (CalendarItem) -> Void,
-         onCreate: ((Date) -> Void)?, onCreateTimedRange: ((Date, Date, CGPoint) -> Void)?, onUpdate: CalendarUpdateHandler?,
+         calendar: Calendar, onSelect: @escaping CalendarEventSelectionHandler,
+         onCreate: ((Date) -> Void)?, onCreateTimedRange: ((Date, Date, CalendarTimedCreationAnchor) -> Void)?, onUpdate: CalendarUpdateHandler?,
          timedCreationPreview: CalendarTimedCreationPreview?,
          onPreviewDateChange: ((Date) -> Void)?, onCommitDateChange: ((Date) -> Void)?,
          monthNamespace: Namespace.ID?, monthExpanded: Bool, monthSelectedDate: Date?, reduceMotion: Bool,
@@ -908,9 +971,9 @@ private struct CalendarTimelinePage: View {
     let holidays: [CalendarHoliday]
     let hourHeight: CGFloat
     let calendar: Calendar
-    let onSelect: (CalendarItem) -> Void
+    let onSelect: CalendarEventSelectionHandler
     let onCreate: ((Date) -> Void)?
-    let onCreateTimedRange: ((Date, Date, CGPoint) -> Void)?
+    let onCreateTimedRange: ((Date, Date, CalendarTimedCreationAnchor) -> Void)?
     let timedCreationPreview: CalendarTimedCreationPreview?
     let onUpdate: CalendarUpdateHandler?
     let monthNamespace: Namespace.ID?
@@ -1123,9 +1186,9 @@ private struct CalendarDayTimeline: View {
     let items: [CalendarItem]
     let hourHeight: CGFloat
     let calendar: Calendar
-    let onSelect: (CalendarItem) -> Void
+    let onSelect: CalendarEventSelectionHandler
     let onCreate: ((Date) -> Void)?
-    let onCreateTimedRange: ((Date, Date, CGPoint) -> Void)?
+    let onCreateTimedRange: ((Date, Date, CalendarTimedCreationAnchor) -> Void)?
     let timedCreationPreview: CalendarTimedCreationPreview?
     let onUpdate: CalendarUpdateHandler?
     let monthNamespace: Namespace.ID?
@@ -1192,7 +1255,14 @@ private struct CalendarDayTimeline: View {
                     .accessibilityHidden(!isInteractionEnabled)
 
                 ForEach(renderedPlacements) { placement in
-                    eventLayer(placement: placement, item: placement.item, scale: scale, width: proxy.size.width, interactive: true)
+                    eventLayer(
+                        placement: placement,
+                        item: placement.item,
+                        scale: scale,
+                        width: proxy.size.width,
+                        namedSpaceFrame: proxy.frame(in: .named(CalendarEditorAnchorGeometry.coordinateSpaceName)),
+                        interactive: true
+                    )
                 }
 
                 if let preview = interactionSession.eventMovePreview,
@@ -1211,6 +1281,7 @@ private struct CalendarDayTimeline: View {
                         item: movedItem,
                         scale: scale,
                         width: proxy.size.width,
+                        namedSpaceFrame: proxy.frame(in: .named(CalendarEditorAnchorGeometry.coordinateSpaceName)),
                         interactive: false
                     )
                     .opacity(0.78)
@@ -1233,6 +1304,7 @@ private struct CalendarDayTimeline: View {
                         item: preview.item,
                         scale: scale,
                         width: proxy.size.width,
+                        namedSpaceFrame: proxy.frame(in: .named(CalendarEditorAnchorGeometry.coordinateSpaceName)),
                         interactive: true
                     )
                     // A cross-day source remains the gesture owner, but the
@@ -1287,6 +1359,7 @@ private struct CalendarDayTimeline: View {
         item: CalendarItem,
         scale: CalendarTimelineScale,
         width: CGFloat,
+        namedSpaceFrame: CGRect,
         interactive: Bool
     ) -> some View {
         let layerFrame = placement.layerFrame(containerWidth: Double(width), edgeInset: 1)
@@ -1297,12 +1370,29 @@ private struct CalendarDayTimeline: View {
             to: placement.visibleEnd,
             calendar: calendar
         ))
+        let renderedHeight = max(24, rawHeight - 2)
+        let eventRect = CGRect(
+            x: CGFloat(layerFrame.leading),
+            y: y + 1,
+            width: layerWidth,
+            height: renderedHeight
+        )
+#if os(macOS)
+        let selection: () -> Void = interactive ? {
+            guard let sourceFrame = CalendarEditorAnchorGeometry.frame(
+                forLocalRect: eventRect,
+                inNamedSpace: namedSpaceFrame
+            ) else { return }
+            onSelect(item, sourceFrame)
+        } : {}
+#else
         let selection: () -> Void = interactive ? { onSelect(item) } : {}
+#endif
         CalendarInteractiveTimelineEvent(
             item: item,
             compact: rawHeight < 44,
             narrow: layerWidth < 82,
-            availableHeight: max(24, rawHeight - 2),
+            availableHeight: renderedHeight,
             hidesSecondaryMetadata: placement.depth == 0 && placement.columnCount > 1,
             timeZone: calendar.timeZone,
             cornerRadii: placement.cornerRadii,
@@ -1450,7 +1540,8 @@ private struct CalendarDayTimeline: View {
                           calendar: calendar,
                           defaultDurationMinutes: CalendarInteractionLayout.mobileSelectionDurationMinutes
                       ) else { return }
-                onCreateTimedRange?(interval.start, interval.end, editorAnchor(for: value.location, in: proxy))
+                guard let sourceFrame = editorAnchorFrame(for: value.location, in: proxy) else { return }
+                onCreateTimedRange?(interval.start, interval.end, sourceFrame)
             }
     }
 
@@ -1474,13 +1565,16 @@ private struct CalendarDayTimeline: View {
                           hourHeight: Double(hourHeight),
                           calendar: calendar
                       ) else { return }
-                onCreateTimedRange?(interval.start, interval.end, editorAnchor(for: value.startLocation, in: proxy))
+                guard let sourceFrame = editorAnchorFrame(for: value.startLocation, in: proxy) else { return }
+                onCreateTimedRange?(interval.start, interval.end, sourceFrame)
             }
     }
 
-    private func editorAnchor(for location: CGPoint, in proxy: GeometryProxy) -> CGPoint {
-        let frame = proxy.frame(in: .named("calendar-editor-anchor"))
-        return CGPoint(x: frame.minX + location.x, y: frame.minY + location.y)
+    private func editorAnchorFrame(for location: CGPoint, in proxy: GeometryProxy) -> CGRect? {
+        CalendarEditorAnchorGeometry.sourceFrame(
+            forLocalPoint: location,
+            inNamedSpace: proxy.frame(in: .named(CalendarEditorAnchorGeometry.coordinateSpaceName))
+        )
     }
 #endif
 

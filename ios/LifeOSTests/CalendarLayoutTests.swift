@@ -716,6 +716,54 @@ final class CalendarLayoutTests: XCTestCase {
         XCTAssertEqual(interval.duration, 60 * 60, accuracy: 0.001)
     }
 
+    func testMacPointerCreationFixtureSnapsNoonToThirtyMinutes() throws {
+        let interval = try XCTUnwrap(CalendarInteractionLayout.creationInterval(
+            day: dayStart,
+            verticalStart: 12 * 60,
+            verticalEnd: 12 * 60,
+            hourHeight: 60,
+            calendar: calendar,
+            defaultDurationMinutes: CalendarInteractionLayout.mobileSelectionDurationMinutes
+        ))
+
+        XCTAssertEqual(calendar.component(.hour, from: interval.start), 12)
+        XCTAssertEqual(calendar.component(.minute, from: interval.start), 0)
+        XCTAssertEqual(calendar.component(.hour, from: interval.end), 12)
+        XCTAssertEqual(calendar.component(.minute, from: interval.end), 30)
+        XCTAssertEqual(interval.duration, 30 * 60, accuracy: 0.001)
+    }
+
+    func testEditorAnchorFrameUsesOneNamedSpaceWithoutHostingFallback() throws {
+        let dayColumnFrame = CGRect(x: 148.5, y: 236.25, width: 180, height: 1_296)
+        let source = try XCTUnwrap(CalendarEditorAnchorGeometry.sourceFrame(
+            forLocalPoint: CGPoint(x: 90, y: 648),
+            inNamedSpace: dayColumnFrame
+        ))
+
+        XCTAssertEqual(source.origin, CGPoint(x: 238.5, y: 884.25))
+        XCTAssertEqual(source.size, CalendarEditorAnchorGeometry.sourceSize)
+        XCTAssertNil(CalendarEditorAnchorGeometry.sourceFrame(
+            forLocalPoint: CGPoint(x: CGFloat.infinity, y: 0),
+            inNamedSpace: dayColumnFrame
+        ))
+    }
+
+    func testEventEditorAnchorPreservesRenderedCardRectInNamedSpace() throws {
+        let dayColumnFrame = CGRect(x: 148.5, y: 236.25, width: 180, height: 1_296)
+        let eventRect = CGRect(x: 2, y: 486, width: 86, height: 106)
+        let source = try XCTUnwrap(CalendarEditorAnchorGeometry.frame(
+            forLocalRect: eventRect,
+            inNamedSpace: dayColumnFrame
+        ))
+
+        XCTAssertEqual(source, CGRect(x: 150.5, y: 722.25, width: 86, height: 106))
+        XCTAssertEqual(source.size, eventRect.size)
+        XCTAssertNil(CalendarEditorAnchorGeometry.frame(
+            forLocalRect: CGRect(x: 2, y: 486, width: 0, height: 106),
+            inNamedSpace: dayColumnFrame
+        ))
+    }
+
     func testTimedCreationDragUses15MinuteSnappedDurationWithoutStealingSingleClick() throws {
         XCTAssertFalse(CalendarInteractionLayout.isIntentionalCreationDrag(
             verticalTranslation: 0,

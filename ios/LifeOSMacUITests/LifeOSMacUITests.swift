@@ -157,6 +157,45 @@ final class LifeOSMacUITests: XCTestCase {
         XCTAssertFalse(editor.waitForExistence(timeout: 2), "Closing the editor must dismiss the contextual popover")
     }
 
+    func testCalendarMacPointerEventClickAnchorsToEventRectWithOnePopover() throws {
+        openCalendar()
+        let earlyEvent = app.descendants(matching: .any)["calendar-event-10000000-0000-0000-0000-000000000001"]
+        let laterEvent = app.descendants(matching: .any)["calendar-event-10000000-0000-0000-0000-000000000003"]
+        XCTAssertTrue(earlyEvent.waitForExistence(timeout: 5))
+        XCTAssertTrue(laterEvent.waitForExistence(timeout: 5))
+
+        earlyEvent.click()
+        let firstEditor = app.popovers.firstMatch
+        XCTAssertTrue(firstEditor.waitForExistence(timeout: 5), "Clicking an existing event must open its contextual editor")
+        XCTAssertEqual(app.popovers.count, 1, "An event click must produce exactly one contextual popover")
+        let firstEditorFrame = firstEditor.frame
+        XCTAssertLessThan(
+            distance(from: earlyEvent.frame, to: firstEditorFrame),
+            48,
+            "The editor must stay adjacent to the clicked event's rendered rect"
+        )
+        app.descendants(matching: .any)["calendar-event-cancel"].tap()
+        XCTAssertFalse(firstEditor.waitForExistence(timeout: 2))
+
+        laterEvent.click()
+        let secondEditor = app.popovers.firstMatch
+        XCTAssertTrue(secondEditor.waitForExistence(timeout: 5), "A second event click must replace the first editor")
+        XCTAssertEqual(app.popovers.count, 1, "Replacing an event selection must not stack popovers")
+        let secondEditorFrame = secondEditor.frame
+        XCTAssertLessThan(
+            distance(from: laterEvent.frame, to: secondEditorFrame),
+            48,
+            "The editor must follow the second event's rendered rect"
+        )
+        XCTAssertGreaterThan(
+            hypot(firstEditorFrame.midX - secondEditorFrame.midX, firstEditorFrame.midY - secondEditorFrame.midY),
+            20,
+            "Different event rects must not collapse to the fixed toolbar anchor"
+        )
+        app.descendants(matching: .any)["calendar-event-cancel"].tap()
+        XCTAssertFalse(secondEditor.waitForExistence(timeout: 2))
+    }
+
     func testCalendarMacPointerDoubleClickCreatesAnchoredQuarterHourEditorWithoutDraft() throws {
         let today = Calendar.current.startOfDay(for: Date())
         let baselineFixtureIDs: Set<String>
@@ -221,9 +260,45 @@ final class LifeOSMacUITests: XCTestCase {
                       "The editor must retain the pointer's selected calendar day")
         capture("mac-calendar-pointer-double-click-editor")
 
+        let doubleClickGhost = app.descendants(matching: .any)["calendar-creation-range-ghost"]
+        XCTAssertTrue(doubleClickGhost.waitForExistence(timeout: 2),
+                      "A pointer-created editor must retain the selected range ghost until cancellation")
         app.descendants(matching: .any)["calendar-event-cancel"].tap()
         XCTAssertFalse(editor.waitForExistence(timeout: 2), "Cancelling the pointer-created editor must dismiss the contextual popover")
+        XCTAssertFalse(app.descendants(matching: .any)["calendar-creation-range-ghost"].exists,
+                       "Cancelling the pointer-created editor must clear the timed preview")
         XCTAssertEqual(calendarEventIdentifiers(), baselineFixtureIDs, "Cancelling must not mutate the in-memory fixture calendar")
+
+        // A vertical drag in empty timed space creates the selected interval
+        // and must use its actual start point as the contextual source rect.
+        let dragStartPoint = CGPoint(x: targetPoint.x, y: targetPoint.y - 27)
+        let dragEndPoint = CGPoint(x: targetPoint.x, y: targetPoint.y + 27)
+        let dragStart = emptyGrid.coordinate(withNormalizedOffset: CGVector(
+            dx: (dragStartPoint.x - timelineFrame.minX) / timelineFrame.width,
+            dy: (dragStartPoint.y - timelineFrame.minY) / timelineFrame.height
+        ))
+        let dragEnd = emptyGrid.coordinate(withNormalizedOffset: CGVector(
+            dx: (dragEndPoint.x - timelineFrame.minX) / timelineFrame.width,
+            dy: (dragEndPoint.y - timelineFrame.minY) / timelineFrame.height
+        ))
+        let dragAnchor = dragStart.screenPoint
+        dragStart.press(forDuration: 0.2, thenDragTo: dragEnd)
+
+        let dragEditor = app.popovers.firstMatch
+        XCTAssertTrue(dragEditor.waitForExistence(timeout: 5), "Dragging an empty range must open one contextual editor")
+        XCTAssertEqual(app.popovers.count, 1, "An empty-range drag must produce exactly one contextual popover")
+        XCTAssertLessThan(
+            distance(from: dragAnchor, to: dragEditor.frame),
+            48,
+            "The drag editor must remain adjacent to the range start pointer"
+        )
+        let dragGhost = app.descendants(matching: .any)["calendar-creation-range-ghost"]
+        XCTAssertTrue(dragGhost.waitForExistence(timeout: 2),
+                      "A dragged range must keep its ghost visible while the editor is open")
+        app.descendants(matching: .any)["calendar-event-cancel"].tap()
+        XCTAssertFalse(dragEditor.waitForExistence(timeout: 2))
+        XCTAssertFalse(dragGhost.exists, "Cancelling a dragged range must clear its ghost")
+        XCTAssertEqual(calendarEventIdentifiers(), baselineFixtureIDs, "Cancelling a dragged range must not mutate the fixture calendar")
 
         app.terminate()
         app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
@@ -231,6 +306,8 @@ final class LifeOSMacUITests: XCTestCase {
         openCalendar()
         XCTAssertEqual(calendarEventIdentifiers(), persistedBefore, "Cancelling must not persist a new calendar draft")
         XCTAssertFalse(app.popovers.firstMatch.exists)
+        XCTAssertFalse(app.descendants(matching: .any)["calendar-creation-range-ghost"].exists,
+                       "A cancelled pointer draft must not reappear after relaunch")
         capture("mac-calendar-pointer-double-click-cancelled")
     }
 
@@ -375,6 +452,12 @@ final class LifeOSMacUITests: XCTestCase {
     private func distance(from point: CGPoint, to rect: CGRect) -> CGFloat {
         let dx = max(rect.minX - point.x, 0, point.x - rect.maxX)
         let dy = max(rect.minY - point.y, 0, point.y - rect.maxY)
+        return hypot(dx, dy)
+    }
+
+    private func distance(from lhs: CGRect, to rhs: CGRect) -> CGFloat {
+        let dx = max(rhs.minX - lhs.maxX, 0, lhs.minX - rhs.maxX)
+        let dy = max(rhs.minY - lhs.maxY, 0, lhs.minY - rhs.maxY)
         return hypot(dx, dy)
     }
 

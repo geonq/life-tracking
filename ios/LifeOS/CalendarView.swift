@@ -28,11 +28,9 @@ private struct CalendarEditorPresentation: Identifiable {
 #if os(macOS)
 /// A concrete AppKit source view for the contextual editor popover.
 ///
-/// SwiftUI's `Color.clear` can be flattened out of the native view tree. When
-/// that happens, `.popover` falls back to the nearest hosting view's origin
-/// instead of using the positioned source rect. Keeping a real NSView at the
-/// pointer anchor makes AppKit's source geometry unambiguous while leaving
-/// presentation and dismissal owned by SwiftUI.
+/// Keeping a real NSView at the named-space source frame makes AppKit's source
+/// geometry unambiguous while leaving presentation and dismissal owned by
+/// SwiftUI. The source view has no implicit hosting-origin fallback.
 private struct CalendarPopoverAnchor: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
@@ -58,7 +56,10 @@ public struct CalendarView: View {
     @State private var editorPresentation: CalendarEditorPresentation?
     @State private var anchoredEditorPresentation: CalendarEditorPresentation?
     @State private var timedCreationPreview: CalendarTimedCreationPreview?
-    @State private var editorAnchorPoint: CGPoint = .zero
+#if os(macOS)
+    @State private var editorAnchorFrame: CGRect?
+    @State private var editorPresentationGeneration = 0
+#endif
     @State private var hourHeight: CGFloat = 54
     @State private var gestureStartHourHeight: CGFloat?
     @Binding private var requestNewEvent: Bool
@@ -144,6 +145,9 @@ public struct CalendarView: View {
         .onChange(of: anchoredEditorPresentation?.id) { _, presentationID in
             if presentationID == nil {
                 timedCreationPreview = nil
+#if os(macOS)
+                editorAnchorFrame = nil
+#endif
             }
         }
         .onChange(of: editorPresentation?.id) { _, presentationID in
@@ -327,7 +331,7 @@ public struct CalendarView: View {
                             holidays: visibleHolidays,
                             hourHeight: hourHeight,
                             calendar: calendar,
-                            onSelect: edit,
+                            onSelect: calendarEventSelectionHandler,
                             onCreate: create(at:),
                             onCreateTimedRange: createTimedRange(start:end:anchor:),
                             timedCreationPreview: timedCreationPreview,
@@ -379,26 +383,35 @@ public struct CalendarView: View {
         .background(LifeOSTokens.canvas)
         .animation(reduceMotion ? nil : LifeOSMotion.easeNavigate, value: displayMode)
         .animation(reduceMotion ? nil : LifeOSMotion.ease, value: selectedDate)
-        .coordinateSpace(name: "calendar-editor-anchor")
+        .coordinateSpace(name: CalendarEditorAnchorGeometry.coordinateSpaceName)
 #if os(macOS)
         .overlay(alignment: .topLeading) {
-            GeometryReader { _ in
-                ZStack(alignment: .topLeading) {
-                    CalendarPopoverAnchor()
-                        .frame(width: 1, height: 1)
-                        // Place the concrete AppKit source in the layout
-                        // itself. A SwiftUI position/offset is only a render
-                        // transform; AppKit can still resolve the transformed
-                        // source view at its untransformed origin when taking
-                        // a popover snapshot. Alignment guides change the
-                        // native view's actual frame.
-                        .alignmentGuide(.leading) { _ in -editorAnchorPoint.x }
-                        .alignmentGuide(.top) { _ in -editorAnchorPoint.y }
-                        .popover(item: $anchoredEditorPresentation, arrowEdge: .leading) { presentation in
-                            CalendarEditor(item: presentation.item, date: presentation.date, endDate: presentation.endDate, calendar: calendar, onSave: save, onDelete: delete, onRetry: retrySave)
-                                .frame(width: 540, height: 600)
-                        }
-                }
+            if let sourceFrame = editorAnchorFrame {
+                CalendarPopoverAnchor()
+                    .frame(width: sourceFrame.width, height: sourceFrame.height)
+                    // The source frame is already in the enclosing named
+                    // space. Alignment guides perform actual SwiftUI layout,
+                    // so AppKit receives the same frame rather than a render
+                    // offset or an old pointer position.
+                    .alignmentGuide(.leading) { _ in -sourceFrame.minX }
+                    .alignmentGuide(.top) { _ in -sourceFrame.minY }
+                    .popover(
+                        item: $anchoredEditorPresentation,
+                        attachmentAnchor: .rect(.bounds),
+                        arrowEdge: .leading
+                    ) { presentation in
+                        CalendarEditor(
+                            item: presentation.item,
+                            date: presentation.date,
+                            endDate: presentation.endDate,
+                            calendar: calendar,
+                            onSave: save,
+                            onDelete: delete,
+                            onRetry: retrySave,
+                            onCancel: cancelMacEditor
+                        )
+                        .frame(width: 540, height: 600)
+                    }
             }
         }
 #endif
@@ -704,31 +717,42 @@ public struct CalendarView: View {
 
     private func create() {
         let date = calendar.date(bySettingHour: 9, minute: 0, second: 0, of: selectedDate) ?? selectedDate
-        create(at: date, anchor: CGPoint(x: 300, y: 100))
-    }
-
-    private func create(at date: Date) {
-        create(at: date, anchor: CGPoint(x: 300, y: 100))
-    }
-
-    private func create(at date: Date, anchor: CGPoint) {
-        timedCreationPreview = nil
 #if os(macOS)
-        presentMacEditor(
-            CalendarEditorPresentation(item: nil, date: date),
-            anchor: anchor
-        )
+        create(at: date, sourceFrame: toolbarEditorSourceFrame)
 #else
-        editorPresentation = CalendarEditorPresentation(item: nil, date: date)
+        create(at: date, anchor: CGPoint(x: 300, y: 100))
 #endif
     }
 
-    private func createTimedRange(start: Date, end: Date, anchor: CGPoint) {
+    private func create(at date: Date) {
+#if os(macOS)
+        create(at: date, sourceFrame: toolbarEditorSourceFrame)
+#else
+        create(at: date, anchor: CGPoint(x: 300, y: 100))
+#endif
+    }
+
+#if os(macOS)
+    private func create(at date: Date, sourceFrame: CGRect) {
+        timedCreationPreview = nil
+        presentMacEditor(
+            CalendarEditorPresentation(item: nil, date: date),
+            sourceFrame: sourceFrame
+        )
+    }
+#else
+    private func create(at date: Date, anchor: CGPoint) {
+        timedCreationPreview = nil
+        editorPresentation = CalendarEditorPresentation(item: nil, date: date)
+    }
+#endif
+
+    private func createTimedRange(start: Date, end: Date, anchor: CalendarTimedCreationAnchor) {
         timedCreationPreview = CalendarTimedCreationPreview(day: start, start: start, end: end)
 #if os(macOS)
         presentMacEditor(
             CalendarEditorPresentation(item: nil, date: start, endDate: end),
-            anchor: anchor
+            sourceFrame: anchor
         )
 #else
         // Preserve the exact selected interval. The range ghost remains
@@ -737,12 +761,22 @@ public struct CalendarView: View {
 #endif
     }
 
+#if os(macOS)
+    private var calendarEventSelectionHandler: CalendarEventSelectionHandler {
+        { item, sourceFrame in edit(item, sourceFrame: sourceFrame) }
+    }
+#else
+    private var calendarEventSelectionHandler: CalendarEventSelectionHandler {
+        { item in edit(item) }
+    }
+#endif
+
     private func edit(_ item: CalendarItem) {
         timedCreationPreview = nil
 #if os(macOS)
         presentMacEditor(
             CalendarEditorPresentation(item: item, date: selectedDate),
-            anchor: CGPoint(x: 300, y: 100)
+            sourceFrame: toolbarEditorSourceFrame
         )
 #else
         editorPresentation = CalendarEditorPresentation(item: item, date: selectedDate)
@@ -750,15 +784,58 @@ public struct CalendarView: View {
     }
 
 #if os(macOS)
-    private func presentMacEditor(_ presentation: CalendarEditorPresentation, anchor: CGPoint) {
-        anchoredEditorPresentation = nil
-        editorAnchorPoint = anchor
-        // A native popover snapshots its source rect at presentation time.
-        // Yield one layout pass after moving that rect so AppKit attaches to
-        // the clicked day/time instead of CalendarView's top-left origin.
-        DispatchQueue.main.async {
-            anchoredEditorPresentation = presentation
+    /// Pointer-selected events carry their rendered card rect from the day
+    /// timeline. This path intentionally cannot fall back to the toolbar
+    /// anchor used by sidebar and command-palette entry points.
+    private func edit(_ item: CalendarItem, sourceFrame: CGRect) {
+        timedCreationPreview = nil
+        presentMacEditor(
+            CalendarEditorPresentation(item: item, date: selectedDate),
+            sourceFrame: sourceFrame
+        )
+    }
+
+    /// Toolbar/sidebar entry points use this explicit named-space frame. It
+    /// is a stable control anchor; pointer-created editors never use this
+    /// value.
+    private var toolbarEditorSourceFrame: CGRect {
+        // This is an explicit control anchor in the named CalendarView
+        // coordinate space. Pointer-created editors never use this value.
+        CGRect(x: 300, y: 100, width: 1, height: 1)
+    }
+
+    private func presentMacEditor(_ presentation: CalendarEditorPresentation, sourceFrame: CGRect) {
+        guard sourceFrame.minX.isFinite,
+              sourceFrame.minY.isFinite,
+              sourceFrame.width > 0,
+              sourceFrame.height > 0 else {
+            cancelMacEditor()
+            return
         }
+        editorPresentationGeneration += 1
+        let generation = editorPresentationGeneration
+        anchoredEditorPresentation = nil
+        editorAnchorFrame = nil
+        // A native popover snapshots its source rect at presentation time.
+        // Yield one layout pass after moving that named-space frame. Install
+        // the frame first, then present on the following turn so the observer
+        // that clears dismissed anchors cannot erase a replacement frame.
+        DispatchQueue.main.async {
+            guard editorPresentationGeneration == generation else { return }
+            editorAnchorFrame = sourceFrame
+            DispatchQueue.main.async {
+                guard editorPresentationGeneration == generation,
+                      editorAnchorFrame == sourceFrame else { return }
+                anchoredEditorPresentation = presentation
+            }
+        }
+    }
+
+    private func cancelMacEditor() {
+        editorPresentationGeneration += 1
+        anchoredEditorPresentation = nil
+        editorAnchorFrame = nil
+        timedCreationPreview = nil
     }
 #endif
 
@@ -917,6 +994,7 @@ struct CalendarEditor: View {
     let onSave: CalendarEditorMutationHandler
     let onDelete: CalendarEditorMutationHandler
     let onRetry: CalendarEditorRetryHandler
+    let onCancel: (() -> Void)?
 
     init(
         item: CalendarItem?,
@@ -925,13 +1003,15 @@ struct CalendarEditor: View {
         calendar: Calendar = .current,
         onSave: @escaping CalendarEditorMutationHandler,
         onDelete: @escaping CalendarEditorMutationHandler,
-        onRetry: @escaping CalendarEditorRetryHandler = { completion in completion(.failure("Retry is unavailable for this editor.")) }
+        onRetry: @escaping CalendarEditorRetryHandler = { completion in completion(.failure("Retry is unavailable for this editor.")) },
+        onCancel: (() -> Void)? = nil
     ) {
         existing = item
         self.calendar = calendar
         self.onSave = onSave
         self.onDelete = onDelete
         self.onRetry = onRetry
+        self.onCancel = onCancel
         _title = State(initialValue: item?.title ?? "")
         _icon = State(initialValue: item?.icon)
         _iconAsset = State(initialValue: item?.iconAsset)
@@ -1088,7 +1168,10 @@ struct CalendarEditor: View {
                 withAnimation(reduceMotion ? nil : LifeOSMotion.snappy) { isMoreHovered = hovering }
             }
 
-            Button { dismiss() } label: {
+            Button {
+                onCancel?()
+                dismiss()
+            } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 13, weight: .medium))
                     .frame(width: 28, height: 28)
