@@ -115,14 +115,14 @@ class AcceptanceRegistryTests(unittest.TestCase):
     def test_real_registry_is_valid_and_aliases_do_not_inflate_denominator(self):
         data, report = load_registry()
         self.assertEqual(report.errors, ())
-        # T0 intentionally keeps the registry UNFROZEN while rows are added;
-        # assert accounting against the loaded materialised data instead of a
-        # transient leaf count.
+        # T0 froze this denominator at a clean tracked HEAD. Future progress may
+        # change statuses/evidence, but never the leaf or alias accounting.
         self.assertEqual(report.leaf_count, len(data["rows"]))
         self.assertEqual(report.alias_count, len(data["aliases"]))
         self.assertGreater(report.leaf_count, 0)
         self.assertEqual(report.accepted_count, 0)
-        self.assertEqual(report.state, "UNFROZEN")
+        self.assertEqual(report.state, "FROZEN")
+        self.assertTrue(report.registry_blob_verified)
         self.assertEqual(report.leaf_count, 258)
         self.assertEqual(report.counts_by_workstream()["Calendar"]["leaves"], 13)
         self.assertEqual(report.counts_by_workstream()["Usage"]["leaves"], 18)
