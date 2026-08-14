@@ -5,6 +5,23 @@ import XCTest
 import HealthKit
 #endif
 
+private final class HealthKitAnchorReadCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    func increment() {
+        lock.lock()
+        value += 1
+        lock.unlock()
+    }
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
 final class HealthKitAnchorStoreTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_700_000_000)
 
@@ -42,6 +59,211 @@ final class HealthKitAnchorStoreTests: XCTestCase {
 #else
         return try HealthKitOpaqueAnchor(archivedData: Data([byte, 0x02, 0x03]))
 #endif
+    }
+
+    func testInitializationDefersEnvelopeReadUntilFirstSnapshot() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("healthkit-anchor-lazy-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let url = root.appendingPathComponent("anchors.json")
+        let sample = try observation()
+        let projection = try HealthKitMetricProjection(
+            metric: .water,
+            observations: [sample],
+            lastCommittedAt: now,
+            syncState: .synced
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(HealthKitAnchorStoreEnvelope(projections: [projection])).write(to: url)
+
+        let reads = HealthKitAnchorReadCounter()
+        let store = HealthKitAnchorStore(persistenceURL: url, now: now, dataReader: { url in
+            reads.increment()
+            return try Data(contentsOf: url)
+        })
+        XCTAssertEqual(reads.count, 0, "actor initialization must not read the envelope")
+
+        let state = await store.snapshot(for: .water)
+        XCTAssertEqual(reads.count, 1, "the first awaited operation must perform the one-shot read")
+        XCTAssertEqual(state.observations, [sample])
+        _ = await store.snapshot(for: .water)
+        XCTAssertEqual(reads.count, 1, "subsequent operations must reuse the loaded envelope")
+    }
+
+    func testConcurrentFirstAccessSharesOneEnvelopeRead() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("healthkit-anchor-concurrent-load-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let url = root.appendingPathComponent("anchors.json")
+        let sample = try observation()
+        let projection = try HealthKitMetricProjection(
+            metric: .water,
+            observations: [sample],
+            lastCommittedAt: now,
+            syncState: .synced
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(HealthKitAnchorStoreEnvelope(projections: [projection])).write(to: url)
+
+        let reads = HealthKitAnchorReadCounter()
+        let store = HealthKitAnchorStore(persistenceURL: url, now: now, dataReader: { url in
+            reads.increment()
+            return try Data(contentsOf: url)
+        })
+        let states = await withTaskGroup(of: HealthKitStoredMetricState.self, returning: [HealthKitStoredMetricState].self) { group in
+            for _ in 0..<8 {
+                group.addTask { await store.snapshot(for: .water) }
+            }
+            var values: [HealthKitStoredMetricState] = []
+            values.reserveCapacity(8)
+            for await state in group {
+                values.append(state)
+            }
+            return values
+        }
+
+        XCTAssertEqual(reads.count, 1, "concurrent first callers must share the actor-isolated load")
+        XCTAssertEqual(states.count, 8)
+        XCTAssertTrue(states.allSatisfy { $0.observations == [sample] })
+    }
+
+    func testProtectedLoadFailureIsDeferredAndNeverLooksLikeEmptyTruth() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("healthkit-anchor-protected-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let reads = HealthKitAnchorReadCounter()
+        let store = HealthKitAnchorStore(persistenceURL: url, now: now, dataReader: { _ in
+            reads.increment()
+            throw NSError(domain: "NSPOSIXErrorDomain", code: 13)
+        })
+        XCTAssertEqual(reads.count, 0)
+
+        let state = await store.snapshot(for: .water)
+        XCTAssertEqual(reads.count, 1)
+        XCTAssertEqual(state.syncState, .error)
+        let hasLoadFailure = await store.hasLoadFailure()
+        XCTAssertTrue(hasLoadFailure)
+        let loadFailureState = await store.loadFailureState()
+        XCTAssertEqual(loadFailureState, .protectedDataUnavailable)
+        XCTAssertEqual(reads.count, 1)
+
+        do {
+            _ = try await store.commit(
+                metric: .water,
+                observations: [],
+                tombstones: [],
+                sourceIndex: [:],
+                nextAnchor: nil,
+                syncState: .synced,
+                committedAt: now
+            )
+            XCTFail("protected load failure must block commit")
+        } catch let error as HealthKitAnchorStoreError {
+            XCTAssertEqual(error, .protectedDataUnavailable)
+        }
+        let quarantined = (try FileManager.default.contentsOfDirectory(atPath: url.deletingLastPathComponent().path))
+            .contains { $0.contains("quarantine") }
+        XCTAssertFalse(quarantined, "protected data must not be quarantined as malformed")
+    }
+
+    func testInjectedNoSuchFileForAbsentEnvelopeRemainsFirstLaunchEmpty() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("healthkit-anchor-missing-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let url = root.appendingPathComponent("anchors.json")
+        let reads = HealthKitAnchorReadCounter()
+        let store = HealthKitAnchorStore(persistenceURL: url, now: now, dataReader: { _ in
+            reads.increment()
+            throw NSError(domain: NSCocoaErrorDomain, code: CocoaError.fileReadNoSuchFile.rawValue)
+        })
+
+        let state = await store.snapshot(for: .water)
+        XCTAssertEqual(reads.count, 1)
+        XCTAssertEqual(state.syncState, .neverSynced)
+        let hasLoadFailure = await store.hasLoadFailure()
+        XCTAssertFalse(hasLoadFailure, "a genuinely absent optional envelope is first-launch state")
+
+        _ = try await store.commit(
+            metric: .water,
+            observations: [],
+            tombstones: [],
+            sourceIndex: [:],
+            nextAnchor: nil,
+            syncState: .synced,
+            committedAt: now
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path), "a genuinely absent envelope must allow its first durable create")
+    }
+
+    func testInjectedNoSuchFileThroughBlockingParentIsUnreadableFailure() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("healthkit-anchor-blocking-parent-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let blockingParent = root.appendingPathComponent("not-a-directory")
+        try Data("block".utf8).write(to: blockingParent)
+        let url = blockingParent.appendingPathComponent("anchors.json")
+        let store = HealthKitAnchorStore(persistenceURL: url, now: now, dataReader: { _ in
+            throw NSError(domain: NSCocoaErrorDomain, code: CocoaError.fileReadNoSuchFile.rawValue)
+        })
+
+        let state = await store.snapshot(for: .water)
+        XCTAssertEqual(state.syncState, .error, "ENOTDIR must not look like first-launch empty state")
+        let hasLoadFailure = await store.hasLoadFailure()
+        XCTAssertTrue(hasLoadFailure)
+        let loadFailureState = await store.loadFailureState()
+        XCTAssertEqual(loadFailureState, .unreadable)
+    }
+
+    func testInjectedNoSuchFileForDanglingSymlinkIsUnreadableFailure() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("healthkit-anchor-dangling-symlink-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let url = root.appendingPathComponent("anchors.json")
+        let missingTarget = root.appendingPathComponent("missing-target.json")
+        try FileManager.default.createSymbolicLink(at: url, withDestinationURL: missingTarget)
+        let store = HealthKitAnchorStore(persistenceURL: url, now: now, dataReader: { _ in
+            throw NSError(domain: NSCocoaErrorDomain, code: CocoaError.fileReadNoSuchFile.rawValue)
+        })
+
+        let state = await store.snapshot(for: .water)
+        XCTAssertEqual(state.syncState, .error, "a dangling symlink is not an optional missing envelope")
+        let hasLoadFailure = await store.hasLoadFailure()
+        XCTAssertTrue(hasLoadFailure)
+        let loadFailureState = await store.loadFailureState()
+        XCTAssertEqual(loadFailureState, .unreadable)
+    }
+
+    func testMissingLoadUsesExclusiveCreateWhenFileAppearsBeforeFirstCommit() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("healthkit-anchor-race-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let url = root.appendingPathComponent("anchors.json")
+        let store = HealthKitAnchorStore(persistenceURL: url, now: now, dataReader: { _ in
+            throw NSError(domain: NSCocoaErrorDomain, code: CocoaError.fileReadNoSuchFile.rawValue)
+        })
+        let initial = await store.snapshot(for: .water)
+        XCTAssertEqual(initial.syncState, .neverSynced)
+
+        let externalBytes = Data("external-writer".utf8)
+        try externalBytes.write(to: url)
+        do {
+            _ = try await store.commit(
+                metric: .water,
+                observations: [],
+                tombstones: [],
+                sourceIndex: [:],
+                nextAnchor: nil,
+                syncState: .synced,
+                committedAt: now
+            )
+            XCTFail("first persistence after a missing load must not overwrite a raced-in file")
+        } catch let error as HealthKitAnchorStoreError {
+            XCTAssertEqual(error, .persistenceFailed)
+        }
+        XCTAssertEqual(try Data(contentsOf: url), externalBytes)
+        let state = await store.snapshot(for: .water)
+        XCTAssertEqual(state.syncState, .neverSynced, "failed exclusive create must not advance in-memory truth")
     }
 
     func testCommitPersistsProjectionAndAnchorTogether() async throws {
@@ -92,7 +314,7 @@ final class HealthKitAnchorStoreTests: XCTestCase {
         let state = await store.snapshot(for: .water)
         XCTAssertTrue(state.observations.isEmpty)
         XCTAssertNil(state.anchor)
-        XCTAssertEqual(state.syncState, .neverSynced)
+        XCTAssertEqual(state.syncState, .error, "an unreadable existing path must not look like a first-launch empty store")
     }
 
     func testCorruptAnchorPreservesValidProjectionAndRequestsBoundedFullResync() async throws {
@@ -393,6 +615,7 @@ final class HealthKitAnchorStoreTests: XCTestCase {
         let state = await store.snapshot(for: .water)
         XCTAssertTrue(state.observations.isEmpty)
         XCTAssertNil(state.anchor)
+        XCTAssertEqual(state.syncState, .error, "an unreadable envelope must not look like a first-launch empty projection")
     }
 
     func testLoadFailureBlocksCommitUntilExplicitReset() async throws {

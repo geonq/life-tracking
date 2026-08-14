@@ -1,5 +1,9 @@
 import Foundation
 
+#if canImport(Darwin)
+import Darwin
+#endif
+
 public enum HealthKitAnchorStoreError: Error, Equatable, Sendable {
     case persistenceFailed
     case invalidMetric
@@ -256,8 +260,26 @@ public struct HealthKitStoredMetricState: Equatable, Sendable {
         self.syncState = .neverSynced
     }
 
+    private init(errorMetric: HealthKitMetricID) {
+        self.metric = errorMetric
+        self.observations = []
+        self.tombstones = []
+        self.sourceIndex = [:]
+        self.conflicts = []
+        self.quarantine = .empty
+        self.anchor = nil
+        self.anchorArchive = nil
+        self.lastCommittedAt = nil
+        self.lastObservedAt = nil
+        self.syncState = .error
+    }
+
     public static func empty(for metric: HealthKitMetricID) -> HealthKitStoredMetricState {
         HealthKitStoredMetricState(emptyMetric: metric)
+    }
+
+    fileprivate static func error(for metric: HealthKitMetricID) -> HealthKitStoredMetricState {
+        HealthKitStoredMetricState(errorMetric: metric)
     }
 }
 
@@ -266,59 +288,76 @@ public struct HealthKitStoredMetricState: Equatable, Sendable {
 /// anchor in one atomic envelope. If writing fails, the previous anchor and
 /// projection remain the only visible state.
 public actor HealthKitAnchorStore {
+    private enum PersistencePathEntry: Equatable {
+        case missing
+        case directory
+        case other
+        case inaccessible
+    }
+
     public let persistenceURL: URL?
 
+    private static let defaultDataReader: @Sendable (URL) throws -> Data = { url in
+        try Data(contentsOf: url)
+    }
+
+    private let fileManager: FileManager
+    private let now: Date
+    private let dataReader: @Sendable (URL) throws -> Data
     private var envelope: HealthKitAnchorStoreEnvelope
     private var loadFailure: Error?
     private var loadFailureKind: HealthKitAnchorStoreLoadFailure?
+    private var didLoad = false
+    private var needsExclusiveCreate = false
 
     public init(persistenceURL: URL?, fileManager: FileManager = .default, now: Date = .now) {
         self.persistenceURL = persistenceURL
+        self.fileManager = fileManager
+        self.now = now
+        self.dataReader = Self.defaultDataReader
         self.envelope = HealthKitAnchorStoreEnvelope()
         self.loadFailure = nil
         self.loadFailureKind = nil
-        if let persistenceURL {
-            do {
-                let data = try Data(contentsOf: persistenceURL)
-                let decoded = try Self.decodeEnvelope(data, now: now)
-                let repaired = try Self.markMalformedAnchors(decoded, now: now)
-                self.envelope = repaired.envelope
-                if repaired.hadMalformedAnchor {
-                    // Keep valid observations and preserve the raw malformed
-                    // archive, but durably mark the projection for a bounded
-                    // full resync. The quarantined copy is diagnostic only.
-                    Self.quarantine(url: persistenceURL, fileManager: fileManager, suffix: "anchor")
-                    do {
-                        try Self.persist(repaired.envelope, to: persistenceURL)
-                    } catch {
-                        self.loadFailure = HealthKitAnchorStoreError.persistenceFailed
-                        self.loadFailureKind = .unreadable
-                    }
-                }
-            } catch {
-                let failureKind = Self.classifyLoadFailure(error)
-                // An absent optional persistence file is the normal first
-                // launch state.  Every other read failure, including a
-                // protected/locked file whose path may not be visible to
-                // FileManager, remains a durable load failure.
-                if failureKind != .unreadable || fileManager.fileExists(atPath: persistenceURL.path) {
-                    self.loadFailure = HealthKitAnchorStoreError.loadFailure
-                    self.loadFailureKind = failureKind
-                    if failureKind == .malformedData {
-                        Self.quarantine(url: persistenceURL, fileManager: fileManager, suffix: "envelope")
-                    }
-                }
-            }
-        }
     }
 
-    public func hasLoadFailure() -> Bool { loadFailure != nil }
+    /// Injectable reader used by deterministic tests to prove that the
+    /// envelope is loaded once, and only after the first awaited operation.
+    /// Production callers use the public initializer above.
+    internal init(
+        persistenceURL: URL?,
+        fileManager: FileManager = .default,
+        now: Date = .now,
+        dataReader: @escaping @Sendable (URL) throws -> Data
+    ) {
+        self.persistenceURL = persistenceURL
+        self.fileManager = fileManager
+        self.now = now
+        self.dataReader = dataReader
+        self.envelope = HealthKitAnchorStoreEnvelope()
+        self.loadFailure = nil
+        self.loadFailureKind = nil
+    }
 
-    public func loadFailureState() -> HealthKitAnchorStoreLoadFailure? { loadFailureKind }
+    public func hasLoadFailure() -> Bool {
+        loadIfNeeded()
+        return loadFailure != nil
+    }
+
+    public func loadFailureState() -> HealthKitAnchorStoreLoadFailure? {
+        loadIfNeeded()
+        return loadFailureKind
+    }
 
     public func snapshot(for metric: HealthKitMetricID) -> HealthKitStoredMetricState {
+        loadIfNeeded()
         if let projection = envelope.projections.first(where: { $0.metric == metric }) {
             return HealthKitStoredMetricState(projection: projection)
+        }
+        if loadFailure != nil {
+            // A failed read must never masquerade as a first-launch empty
+            // projection.  Retain repaired projections above when a malformed
+            // anchor could be kept in memory but its repair write failed.
+            return .error(for: metric)
         }
         return .empty(for: metric)
     }
@@ -328,6 +367,7 @@ public actor HealthKitAnchorStore {
     /// silently treated as an empty truth or overwritten by a commit.
     @discardableResult
     public func resetAfterLoadFailure() throws -> Bool {
+        loadIfNeeded()
         guard loadFailure != nil else { throw HealthKitAnchorStoreError.invalidProjection }
         let next = HealthKitAnchorStoreEnvelope()
         try persist(next)
@@ -357,6 +397,7 @@ public actor HealthKitAnchorStore {
         expectedAnchorChecked: Bool = false,
         expectedState: HealthKitStoredMetricState? = nil
     ) throws -> HealthKitStoredMetricState {
+        loadIfNeeded()
         guard loadFailure == nil else {
             if loadFailureKind == .protectedDataUnavailable { throw HealthKitAnchorStoreError.protectedDataUnavailable }
             throw HealthKitAnchorStoreError.loadFailure
@@ -418,6 +459,7 @@ public actor HealthKitAnchorStore {
     /// The projection itself is retained; only the anchor is reset.
     @discardableResult
     public func clearAnchor(for metric: HealthKitMetricID, committedAt: Date) throws -> HealthKitStoredMetricState {
+        loadIfNeeded()
         guard loadFailure == nil else { throw HealthKitAnchorStoreError.loadFailure }
         let current = snapshot(for: metric)
         let projection = try HealthKitMetricProjection(
@@ -450,6 +492,7 @@ public actor HealthKitAnchorStore {
     /// explicitly accepted after that read.
     @discardableResult
     public func markFullResyncRequired(for metric: HealthKitMetricID, committedAt: Date) throws -> HealthKitStoredMetricState {
+        loadIfNeeded()
         guard loadFailure == nil else { throw HealthKitAnchorStoreError.loadFailure }
         let current = snapshot(for: metric)
         if current.anchorArchive != nil, let persistenceURL {
@@ -478,26 +521,93 @@ public actor HealthKitAnchorStore {
         return HealthKitStoredMetricState(projection: projection)
     }
 
+    /// Performs the one and only envelope read on the actor executor. Actor
+    /// serialization makes concurrent first callers wait for this same state
+    /// transition; a failure is retained and is never retried as an empty
+    /// envelope.
+    private func loadIfNeeded() {
+        guard !didLoad else { return }
+        didLoad = true
+        guard let persistenceURL else { return }
+
+        do {
+            let data = try dataReader(persistenceURL)
+            let decoded = try Self.decodeEnvelope(data, now: now)
+            let repaired = try Self.markMalformedAnchors(decoded, now: now)
+            envelope = repaired.envelope
+            if repaired.hadMalformedAnchor {
+                // Keep valid observations and preserve the raw malformed
+                // archive, but durably mark the projection for a bounded
+                // full resync. The quarantined copy is diagnostic only.
+                Self.quarantine(url: persistenceURL, fileManager: fileManager, suffix: "anchor")
+                do {
+                    try Self.persist(repaired.envelope, to: persistenceURL)
+                } catch {
+                    loadFailure = HealthKitAnchorStoreError.persistenceFailed
+                    loadFailureKind = .unreadable
+                }
+            }
+        } catch {
+            let failureKind = Self.classifyLoadFailure(error)
+            // An absent optional persistence file is the normal first launch
+            // state. Every other read failure, including a protected/locked
+            // file whose path may not be visible to FileManager, remains a
+            // durable load failure.
+            let isOptionalMissing = failureKind == .unreadable &&
+                Self.isOptionalMissingPersistenceFile(at: persistenceURL)
+            if isOptionalMissing {
+                needsExclusiveCreate = true
+            } else {
+                loadFailure = HealthKitAnchorStoreError.loadFailure
+                loadFailureKind = failureKind
+                if failureKind == .malformedData {
+                    Self.quarantine(url: persistenceURL, fileManager: fileManager, suffix: "envelope")
+                }
+            }
+        }
+    }
+
     private func persist(_ value: HealthKitAnchorStoreEnvelope) throws {
         guard let persistenceURL else { return }
-        try Self.persist(value, to: persistenceURL)
+        if needsExclusiveCreate {
+            try Self.persistWithoutOverwriting(value, to: persistenceURL)
+            needsExclusiveCreate = false
+        } else {
+            try Self.persist(value, to: persistenceURL)
+        }
     }
 
     private static func persist(_ value: HealthKitAnchorStoreEnvelope, to persistenceURL: URL) throws {
         do {
-            let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .iso8601
-            encoder.outputFormatting = [.sortedKeys]
-            let data = try encoder.encode(value)
-            guard data.count <= HealthKitSafetyLimits.maxEnvelopeBytes else {
-                throw HealthKitAnchorStoreError.persistenceFailed
-            }
+            let data = try encodedEnvelopeData(value)
             let directory = persistenceURL.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try data.write(to: persistenceURL, options: [.atomic, .completeFileProtection])
         } catch {
             throw HealthKitAnchorStoreError.persistenceFailed
         }
+    }
+
+    private static func persistWithoutOverwriting(_ value: HealthKitAnchorStoreEnvelope, to persistenceURL: URL) throws {
+        do {
+            let data = try encodedEnvelopeData(value)
+            let directory = persistenceURL.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try data.write(to: persistenceURL, options: [.withoutOverwriting, .completeFileProtection])
+        } catch {
+            throw HealthKitAnchorStoreError.persistenceFailed
+        }
+    }
+
+    private static func encodedEnvelopeData(_ value: HealthKitAnchorStoreEnvelope) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(value)
+        guard data.count <= HealthKitSafetyLimits.maxEnvelopeBytes else {
+            throw HealthKitAnchorStoreError.persistenceFailed
+        }
+        return data
     }
 
     private static func decodeEnvelope(_ data: Data, now: Date) throws -> HealthKitAnchorStoreEnvelope {
@@ -578,6 +688,48 @@ public actor HealthKitAnchorStore {
         try HealthKitSourceIndex.build(observations: observations)
     }
 
+    /// A no-such-file read is a normal first-launch result only when the
+    /// persistence leaf is absent and its path is otherwise traversable. A
+    /// regular-file parent (ENOTDIR), protected parent, or other invalid path
+    /// must remain a durable load failure instead of becoming an empty store.
+    private static func isOptionalMissingPersistenceFile(at url: URL) -> Bool {
+        guard noFollowPathEntry(at: url.path) == .missing else { return false }
+
+        var candidate = url.deletingLastPathComponent()
+        while true {
+            switch noFollowPathEntry(at: candidate.path) {
+            case .directory:
+                return true
+            case .missing:
+                break
+            case .other, .inaccessible:
+                return false
+            }
+
+            let ancestor = candidate.deletingLastPathComponent()
+            guard ancestor.path != candidate.path else { return false }
+            candidate = ancestor
+        }
+    }
+
+    private static func noFollowPathEntry(at path: String) -> PersistencePathEntry {
+#if canImport(Darwin)
+        var info = stat()
+        guard Darwin.lstat(path, &info) == 0 else {
+            return Darwin.errno == ENOENT ? .missing : .inaccessible
+        }
+        let mode = UInt32(info.st_mode)
+        if mode & UInt32(S_IFLNK) == UInt32(S_IFLNK) {
+            return .other
+        }
+        return mode & UInt32(S_IFMT) == UInt32(S_IFDIR) ? .directory : .other
+#else
+        // LifeOS ships on Apple platforms, where the no-follow lstat branch
+        // above is compiled. Be conservative on other platforms.
+        return .inaccessible
+#endif
+    }
+
     private static func classifyLoadFailure(_ error: Error) -> HealthKitAnchorStoreLoadFailure {
         let nsError = error as NSError
         if nsError.domain == NSCocoaErrorDomain {
@@ -594,10 +746,17 @@ public actor HealthKitAnchorStore {
                 break
             }
         }
-        if nsError.domain == "NSPOSIXErrorDomain", nsError.code == 1 || nsError.code == 13 {
-            // EPERM (1) and EACCES (13) are the protected-data/read-policy
-            // path on Darwin.  They must not be quarantined as corruption.
-            return .protectedDataUnavailable
+        if nsError.domain == "NSPOSIXErrorDomain" {
+            switch nsError.code {
+            case 1, 13:
+                // EPERM (1) and EACCES (13) are the protected-data/read-policy
+                // path on Darwin. They must not be quarantined as corruption.
+                return .protectedDataUnavailable
+            case 2:
+                return .unreadable // ENOENT
+            default:
+                break
+            }
         }
         return .malformedData
     }
