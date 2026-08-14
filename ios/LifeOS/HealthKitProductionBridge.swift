@@ -19,6 +19,11 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
     private let storedStateReader: StoredStateReader
 
     private var generation: UInt64 = 0
+    /// Durable evidence from the current startup session is carried into the
+    /// delayed pagination callback. The remainder runs as a fresh coordinator
+    /// call, so its result cannot otherwise know that an earlier page already
+    /// committed.
+    private var sessionHasDurableCommit = false
     private var reconciliationTask: Task<Void, Never>?
     private var reconciliationRemainderTask: Task<Void, Never>?
 
@@ -118,6 +123,7 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
 
         generation &+= 1
         let session = generation
+        sessionHasDurableCommit = false
         do {
             for metric in metrics {
                 try registerObserver(metric) { [weak self] completion in
@@ -141,7 +147,8 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
             guard !Task.isCancelled, self.generation == session else { return }
             let report = await self.reconcile(metrics)
             guard !Task.isCancelled, self.generation == session else { return }
-            onUpdate(Self.sanitizedReconciliationCompletion(report.completion))
+            onUpdate(Self.sanitizedReconciliationCompletion(report))
+            self.sessionHasDurableCommit = report.results.contains(where: \.hasDurableCommit)
 
             guard let reconcileRemainder = self.reconcileRemainder else { return }
             let pendingMetrics = report.results
@@ -162,15 +169,22 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
                 guard let self,
                       !Task.isCancelled,
                       self.generation == session else { return }
+                let priorDurableCommit = self.sessionHasDurableCommit
                 let remainder = await reconcileRemainder(pendingMetrics)
                 guard !Task.isCancelled, self.generation == session else { return }
-                onUpdate(Self.sanitizedReconciliationCompletion(remainder.completion))
+                onUpdate(Self.sanitizedReconciliationCompletion(
+                    remainder,
+                    hasPriorDurableCommit: priorDurableCommit
+                ))
+                self.sessionHasDurableCommit = priorDurableCommit ||
+                    remainder.results.contains(where: \.hasDurableCommit)
             }
         }
     }
 
     public func stopAllObservers() {
         generation &+= 1
+        sessionHasDurableCommit = false
         reconciliationTask?.cancel()
         reconciliationTask = nil
         reconciliationRemainderTask?.cancel()
@@ -286,8 +300,38 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
     ) -> HealthKitObserverCompletion {
         switch completion {
         case .success: .success
+        // A metric observer callback has no aggregate evidence that another
+        // metric committed. Never let an aggregate-only partial outcome leak
+        // through this per-metric seam as a durable refresh signal.
+        case .partialSuccess: .failure("HealthKit reconciliation failed")
         case .timedOut: .timedOut
         case .failure: .failure("HealthKit reconciliation failed")
+        }
+    }
+
+    /// Aggregate reconciliation may durably commit some metrics before a
+    /// sibling fails or times out.  Keep that durable-change signal visible to
+    /// the controller without turning the aggregate failure into an ordinary
+    /// success. Per-metric observer callbacks still use the completion-only
+    /// sanitizer above and therefore retain their existing semantics.
+    private static func sanitizedReconciliationCompletion(
+        _ report: HealthKitReconciliationReport,
+        hasPriorDurableCommit: Bool = false
+    ) -> HealthKitObserverCompletion {
+        let completion = report.completion
+        guard hasPriorDurableCommit || report.results.contains(where: \.hasDurableCommit) else {
+            return sanitizedReconciliationCompletion(completion)
+        }
+
+        switch completion {
+        case .success:
+            return .success
+        case .timedOut:
+            return .partialSuccess("HealthKit reconciliation timed out after a durable metric commit")
+        case .failure:
+            return .partialSuccess("HealthKit reconciliation partially failed after a durable metric commit")
+        case .partialSuccess:
+            return .partialSuccess("HealthKit reconciliation partially completed")
         }
     }
 }

@@ -1,5 +1,8 @@
 #if os(iOS)
 import XCTest
+#if canImport(HealthKit)
+import HealthKit
+#endif
 @testable import LifeOS
 
 @MainActor
@@ -231,6 +234,51 @@ final class HealthKitProductionBridgeTests: XCTestCase {
         XCTAssertEqual(updates, [.failure("HealthKit reconciliation failed")])
     }
 
+    func testMixedAggregateKeepsSanitizedFailureWhileReportingDurablePartialSuccess() async {
+        let client = try! makeCoordinatorBackedClient(failingMetrics: [.caffeine])
+
+        var updates: [HealthKitObserverCompletion] = []
+        client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { updates.append($0) }
+        await waitUntil { !updates.isEmpty }
+
+        XCTAssertEqual(
+            updates,
+            [.partialSuccess("HealthKit reconciliation partially failed after a durable metric commit")]
+        )
+        XCTAssertFalse(updates.description.contains("SECRET_PROVIDER_PAYLOAD"))
+    }
+
+    func testTimedOutAggregateWithDurableCommitIsPartialAndSanitized() async {
+        let client = try! makeCoordinatorBackedClient(delaysByMetric: [.caffeine: [300_000_000]])
+
+        var updates: [HealthKitObserverCompletion] = []
+        client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { updates.append($0) }
+        await waitUntil { !updates.isEmpty }
+
+        XCTAssertEqual(
+            updates,
+            [.partialSuccess("HealthKit reconciliation timed out after a durable metric commit")]
+        )
+    }
+
+    func testInitialDurablePageMakesLaterRemainderFailurePartial() async {
+        let client = try! makeCoordinatorBackedClient(
+            partialMetric: .water,
+            delaysByMetric: [.water: [0, 300_000_000]]
+        )
+
+        var updates: [HealthKitObserverCompletion] = []
+        client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { updates.append($0) }
+        await waitUntil { updates == [.success] }
+        try? await Task.sleep(nanoseconds: 2_100_000_000)
+        await waitUntil { updates.count == 2 }
+
+        XCTAssertEqual(
+            updates[1],
+            .partialSuccess("HealthKit reconciliation timed out after a durable metric commit")
+        )
+    }
+
     func testObserverCallbackErrorIsSanitized() async {
         let sentinel = "SECRET_PROVIDER_PAYLOAD"
         var observerUpdate: HealthKitProductionClient.ObserverUpdate?
@@ -244,6 +292,19 @@ final class HealthKitProductionBridgeTests: XCTestCase {
         XCTAssertFalse(updates.contains(.failure(sentinel)))
     }
 
+    func testObserverCallbackCannotTurnMetricPartialOutcomeIntoDurableRefresh() async {
+        var observerUpdate: HealthKitProductionClient.ObserverUpdate?
+        var updates: [HealthKitObserverCompletion] = []
+        let client = makeClient(register: { _, update in observerUpdate = update })
+
+        client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { updates.append($0) }
+        observerUpdate?(.partialSuccess("SECRET_PROVIDER_PAYLOAD"))
+        await waitUntil { updates.contains(.failure("HealthKit reconciliation failed")) }
+
+        XCTAssertFalse(updates.contains { if case .partialSuccess = $0 { return true } else { return false } })
+        XCTAssertFalse(updates.contains { if case .failure(let message) = $0 { return message.contains("SECRET_PROVIDER_PAYLOAD") } else { return false } })
+    }
+
     private func makeClient(
         availability: @escaping () -> HealthKitAuthorizationState = { .readIndeterminate },
         status: @escaping ([HealthKitMetricID]) async -> HealthKitAuthorizationReport = { _ in .init(state: .requestRequired) },
@@ -251,6 +312,7 @@ final class HealthKitProductionBridgeTests: XCTestCase {
         register: @escaping (HealthKitMetricID, @escaping HealthKitProductionClient.ObserverUpdate) throws -> Void = { _, _ in },
         stop: @escaping () -> Void = {},
         reconcile: @escaping ([HealthKitMetricID]) async -> HealthKitReconciliationReport = { _ in .init(results: []) },
+        reconcileRemainder: (([HealthKitMetricID]) async -> HealthKitReconciliationReport)? = nil,
         stateReader: @escaping HealthKitProductionClient.StoredStateReader = { metrics in
             metrics.map(HealthKitStoredMetricState.empty(for:))
         }
@@ -262,6 +324,7 @@ final class HealthKitProductionBridgeTests: XCTestCase {
             registerObserver: register,
             stopObservers: stop,
             reconcile: reconcile,
+            reconcileRemainder: reconcileRemainder,
             stateReader: stateReader
         )
     }
@@ -276,6 +339,103 @@ final class HealthKitProductionBridgeTests: XCTestCase {
             await Task.yield()
         }
         XCTFail("Timed out waiting for condition", file: file, line: line)
+    }
+
+    private func makeCoordinatorBackedClient(
+        partialMetric: HealthKitMetricID? = nil,
+        failingMetrics: Set<HealthKitMetricID> = [],
+        delaysByMetric: [HealthKitMetricID: [UInt64]] = [:]
+    ) throws -> HealthKitProductionClient {
+        let now = Date(timeIntervalSinceReferenceDate: 700_000_000)
+        var pages: [HealthKitMetricID: [HealthKitMetricSyncInput]] = [:]
+        for (index, metric) in HealthKitIntegrationController.supportedMetrics.enumerated() {
+            pages[metric] = [try bridgeTestInput(
+                metric: metric,
+                anchorByte: UInt8((index % 200) + 1),
+                queryCompletedAt: now,
+                partial: metric == partialMetric
+            )]
+        }
+        let fake = BridgeSequenceHealthKitClient(
+            pages: pages,
+            failingMetrics: failingMetrics,
+            delaysByMetric: delaysByMetric
+        )
+        let store = HealthKitAnchorStore(persistenceURL: nil)
+        let coordinator = HealthKitReconciliationCoordinator(
+            client: fake,
+            store: store,
+            timeout: 0.05,
+            now: { now }
+        )
+        return makeClient(
+            reconcile: { metrics in await coordinator.reconcileInitialPages(metrics: metrics) },
+            reconcileRemainder: { metrics in await coordinator.reconcile(metrics: metrics) }
+        )
+    }
+
+    private func bridgeTestInput(
+        metric: HealthKitMetricID,
+        anchorByte: UInt8,
+        queryCompletedAt: Date,
+        partial: Bool = false
+    ) throws -> HealthKitMetricSyncInput {
+        try HealthKitMetricSyncInput(
+            metric: metric,
+            additions: [],
+            deletions: [],
+            nextAnchor: try bridgeTestAnchor(anchorByte),
+            queryCompletedAt: queryCompletedAt,
+            partial: partial,
+            readability: .established
+        )
+    }
+
+    private func bridgeTestAnchor(_ byte: UInt8) throws -> HealthKitOpaqueAnchor {
+#if canImport(HealthKit)
+        let value = HKQueryAnchor(fromValue: Int(byte))
+        return try HealthKitOpaqueAnchor(
+            archivedData: NSKeyedArchiver.archivedData(withRootObject: value, requiringSecureCoding: true)
+        )
+#else
+        return try HealthKitOpaqueAnchor(archivedData: Data([byte]))
+#endif
+    }
+}
+
+private actor BridgeSequenceHealthKitClient: HealthKitReconciliationClient {
+    private var pages: [HealthKitMetricID: [HealthKitMetricSyncInput]]
+    private let failingMetrics: Set<HealthKitMetricID>
+    private let delaysByMetric: [HealthKitMetricID: [UInt64]]
+    private var callCounts: [HealthKitMetricID: Int] = [:]
+
+    init(
+        pages: [HealthKitMetricID: [HealthKitMetricSyncInput]],
+        failingMetrics: Set<HealthKitMetricID>,
+        delaysByMetric: [HealthKitMetricID: [UInt64]]
+    ) {
+        self.pages = pages
+        self.failingMetrics = failingMetrics
+        self.delaysByMetric = delaysByMetric
+    }
+
+    func changes(
+        for metric: HealthKitMetricID,
+        from anchor: HealthKitOpaqueAnchor?
+    ) async throws -> HealthKitMetricSyncInput {
+        let index = callCounts[metric, default: 0]
+        callCounts[metric] = index + 1
+        let delay = delaysByMetric[metric].flatMap { $0.indices.contains(index) ? $0[index] : nil } ?? 0
+        if delay > 0 {
+            try await Task.sleep(nanoseconds: delay)
+        }
+        if failingMetrics.contains(metric) {
+            throw HealthKitReconciliationFailure.client("SECRET_PROVIDER_PAYLOAD")
+        }
+        guard let metricPages = pages[metric], metricPages.indices.contains(index) else {
+            throw HealthKitReconciliationFailure.client("SECRET_PROVIDER_PAYLOAD")
+        }
+        return metricPages[index]
     }
 }
 #endif

@@ -294,6 +294,28 @@ final class HealthKitIntegrationTests: XCTestCase {
         XCTAssertEqual(controller.snapshot.lastObserverCompletion, .success)
     }
 
+    func testPartialObserverCompletionAdvancesSequenceAndPreservesError() async {
+        let client = RecordingHealthKitIntegrationClient()
+        client.statusResult = .init(state: .readIndeterminate)
+        let controller = HealthKitIntegrationController(client: client)
+
+        controller.appActive()
+        await controller.refreshStatus()
+        await waitUntil { client.callbacks.count == 1 }
+
+        client.callbacks[0](.partialSuccess("HealthKit reconciliation partially failed after a durable metric commit"))
+        await waitUntil { controller.snapshot.observerCompletionSequence == 1 }
+
+        XCTAssertEqual(
+            controller.snapshot.lastObserverCompletion,
+            .partialSuccess("HealthKit reconciliation partially failed after a durable metric commit")
+        )
+        XCTAssertEqual(
+            controller.snapshot.errorDescription,
+            "HealthKit reconciliation partially failed after a durable metric commit"
+        )
+    }
+
     func testFailureCannotMaskAcceptedSuccessSequence() async {
         let client = RecordingHealthKitIntegrationClient()
         client.statusResult = .init(state: .readIndeterminate)

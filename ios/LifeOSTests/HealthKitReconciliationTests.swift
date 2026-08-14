@@ -72,6 +72,8 @@ final class HealthKitReconciliationTests: XCTestCase {
         XCTAssertEqual(first.insertedCount, 1)
         XCTAssertEqual(second.insertedCount, 0)
         XCTAssertEqual(second.duplicateCount, 1)
+        XCTAssertEqual(first.durableCommitCount, 1)
+        XCTAssertEqual(second.durableCommitCount, 1, "A duplicate-only page still has a durable commit boundary")
         let state = await store.snapshot(for: .water)
         XCTAssertEqual(state.observations.count, 1)
     }
@@ -479,6 +481,92 @@ final class HealthKitReconciliationTests: XCTestCase {
         XCTAssertEqual(state.anchor, try testAnchor(2))
     }
 
+    func testPaginatedFailureRetainsPriorDurableCommitEvidence() async throws {
+        let first = try input(additions: [observation(uuid: UUID())], anchorByte: 1, partial: true)
+        let client = SequenceHealthKitClient(batches: [first])
+        let store = HealthKitAnchorStore(persistenceURL: nil)
+        let coordinator = HealthKitReconciliationCoordinator(client: client, store: store, now: { self.now })
+
+        let result = await coordinator.reconcile(metric: .water)
+
+        XCTAssertEqual(result.completion, .failure("No fake batch"))
+        XCTAssertEqual(result.durableCommitCount, 1)
+        XCTAssertTrue(result.hasDurableCommit)
+        XCTAssertEqual(
+            HealthKitReconciliationReport(results: [result]).completion,
+            .failure("No fake batch")
+        )
+    }
+
+    func testPaginatedTimeoutRetainsPriorDurableCommitEvidence() async throws {
+        let first = try input(additions: [observation(uuid: UUID())], anchorByte: 1, partial: true)
+        let client = SequenceHealthKitClient(batches: [first], delays: [0, 300_000_000])
+        let store = HealthKitAnchorStore(persistenceURL: nil)
+        let coordinator = HealthKitReconciliationCoordinator(
+            client: client,
+            store: store,
+            timeout: 0.05,
+            now: { self.now }
+        )
+
+        let result = await coordinator.reconcile(metric: .water)
+
+        XCTAssertEqual(result.completion, .timedOut)
+        XCTAssertEqual(result.durableCommitCount, 1)
+        XCTAssertTrue(result.hasDurableCommit)
+    }
+
+    func testAggregateFailsClosedForMalformedResultWithoutErrorDescription() {
+        let malformedSuccess = HealthKitMetricReconciliationResult(
+            metric: .water,
+            state: .error,
+            completion: .success
+        )
+        let malformedFailure = HealthKitMetricReconciliationResult(
+            metric: .heartRate,
+            state: .error,
+            completion: .failure("SECRET_PROVIDER_PAYLOAD")
+        )
+
+        XCTAssertEqual(
+            HealthKitReconciliationReport(results: [malformedSuccess]).completion,
+            .failure("HealthKit reconciliation failed")
+        )
+        XCTAssertEqual(
+            HealthKitReconciliationReport(results: [malformedFailure]).completion,
+            .failure("HealthKit reconciliation failed")
+        )
+
+        for invalidState: HealthKitSyncState in [.fullResyncRequired, .neverSynced, .syncing, .error] {
+            let invalidSuccess = HealthKitMetricReconciliationResult(
+                metric: .water,
+                state: invalidState,
+                completion: .success
+            )
+            XCTAssertEqual(
+                HealthKitReconciliationReport(results: [invalidSuccess]).completion,
+                .failure("HealthKit reconciliation failed"),
+                "\(invalidState.rawValue) must not be reported as aggregate success"
+            )
+        }
+    }
+
+    func testPublicDurableCountCannotForgeCommitEvidence() {
+        let forged = HealthKitMetricReconciliationResult(
+            metric: .water,
+            state: .error,
+            completion: .failure("SECRET_PROVIDER_PAYLOAD"),
+            durableCommitCount: 1
+        )
+
+        XCTAssertEqual(forged.durableCommitCount, 0)
+        XCTAssertFalse(forged.hasDurableCommit)
+        XCTAssertEqual(
+            HealthKitReconciliationReport(results: [forged]).completion,
+            .failure("HealthKit reconciliation failed")
+        )
+    }
+
     func testInitialReconciliationConsumesOnlyOneBoundedPage() async throws {
         let firstPage = try input(
             additions: (0..<4_000).map { index in
@@ -592,16 +680,23 @@ final class HealthKitReconciliationTests: XCTestCase {
 private actor SequenceHealthKitClient: HealthKitReconciliationClient {
     private var batches: [HealthKitMetricSyncInput]
     private let delayNanoseconds: UInt64
+    private var delays: [UInt64]
     private(set) var callCount = 0
 
-    init(batches: [HealthKitMetricSyncInput] = [], delayNanoseconds: UInt64 = 0) {
+    init(
+        batches: [HealthKitMetricSyncInput] = [],
+        delayNanoseconds: UInt64 = 0,
+        delays: [UInt64] = []
+    ) {
         self.batches = batches
         self.delayNanoseconds = delayNanoseconds
+        self.delays = delays
     }
 
     func changes(for metric: HealthKitMetricID, from anchor: HealthKitOpaqueAnchor?) async throws -> HealthKitMetricSyncInput {
         callCount += 1
-        if delayNanoseconds > 0 { try await Task.sleep(nanoseconds: delayNanoseconds) }
+        let delay = delays.isEmpty ? delayNanoseconds : delays.removeFirst()
+        if delay > 0 { try await Task.sleep(nanoseconds: delay) }
         guard let next = batches.isEmpty ? nil : batches.removeFirst() else {
             throw HealthKitReconciliationFailure.client("No fake batch")
         }

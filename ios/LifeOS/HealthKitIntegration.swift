@@ -16,11 +16,11 @@ public struct HealthKitIntegrationSnapshot: Equatable, Sendable {
     public let isRequestInFlight: Bool
     public let explicitRequestCompleted: Bool
     public let lastObserverCompletion: HealthKitObserverCompletion?
-    /// Monotonically identifies every accepted successful observer/
-    /// reconciliation update for the current controller lifetime. The
-    /// completion value itself is intentionally retained for diagnostics, but
-    /// `.success` is Equatable, so consumers that must react to every success
-    /// observe this sequence instead.
+    /// Monotonically identifies every accepted observer/reconciliation update
+    /// that durably changed at least one projection for the current controller
+    /// lifetime. The completion value itself is intentionally retained for
+    /// diagnostics, but `.success` is Equatable, so consumers that must react
+    /// to every durable update observe this sequence instead.
     public let observerCompletionSequence: UInt64
     public let errorDescription: String?
 
@@ -360,11 +360,17 @@ public final class HealthKitIntegrationController: ObservableObject {
     private func receiveObserverCompletion(_ completion: HealthKitObserverCompletion, generation token: UInt64) {
         guard token == generation, snapshot.lifecycle == .active else { return }
         let error: String?
-        if case .failure(let message) = completion { error = message } else { error = nil }
+        switch completion {
+        case .failure(let message), .partialSuccess(let message):
+            error = message
+        case .success, .timedOut:
+            error = nil
+        }
         let successSequence: UInt64?
-        if case .success = completion {
+        switch completion {
+        case .success, .partialSuccess:
             successSequence = snapshot.observerCompletionSequence &+ 1
-        } else {
+        case .failure, .timedOut:
             successSequence = nil
         }
         publish(

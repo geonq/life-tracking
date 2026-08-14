@@ -9,8 +9,29 @@ public enum HealthKitReconciliationFailure: Error, Equatable, Sendable {
 
 public enum HealthKitObserverCompletion: Equatable, Sendable {
     case success
+    /// At least one metric committed durable truth, but the aggregate
+    /// reconciliation also reported a failure or timeout.  This is distinct
+    /// from `.success`: consumers must keep the failure visible while still
+    /// refreshing projections that were durably advanced.
+    case partialSuccess(String)
     case failure(String)
     case timedOut
+}
+
+/// Only the reconciler in this file may mint durable-commit evidence.  The
+/// public result initializer remains source-compatible, but caller-supplied
+/// counts are deliberately ignored unless this fileprivate token is present.
+fileprivate enum HealthKitDurableCommitEvidence: Equatable {
+    case reconciler
+}
+
+fileprivate func isHealthKitSuccessfulSyncState(_ state: HealthKitSyncState) -> Bool {
+    switch state {
+    case .synced, .partial, .readIndeterminate, .stale, .conflict:
+        return true
+    case .neverSynced, .syncing, .fullResyncRequired, .error:
+        return false
+    }
 }
 
 public protocol HealthKitReconciliationClient: Sendable {
@@ -32,6 +53,14 @@ public struct HealthKitMetricReconciliationResult: Equatable, Sendable {
     public let needsContinuation: Bool
     public let errorDescription: String?
     public let completion: HealthKitObserverCompletion
+    /// Number of successful durable store commits represented by this result.
+    /// A final paginated failure may carry the count from earlier successful
+    /// pages. This counts commit boundaries, not inserted records: a valid
+    /// duplicate/no-op page still represents one successful persisted
+    /// projection/anchor decision. Zero is the fail-closed default for
+    /// externally constructed or malformed results.
+    public let durableCommitCount: Int
+    private let hasTrustedDurableCommitEvidence: Bool
 
     public init(
         metric: HealthKitMetricID,
@@ -44,7 +73,40 @@ public struct HealthKitMetricReconciliationResult: Equatable, Sendable {
         diagnosticDescription: String? = nil,
         needsContinuation: Bool = false,
         errorDescription: String? = nil,
-        completion: HealthKitObserverCompletion = .success
+        completion: HealthKitObserverCompletion = .success,
+        durableCommitCount: Int = 0
+    ) {
+        self.init(
+            metric: metric,
+            state: state,
+            insertedCount: insertedCount,
+            deletedCount: deletedCount,
+            duplicateCount: duplicateCount,
+            conflictCount: conflictCount,
+            quarantinedCount: quarantinedCount,
+            diagnosticDescription: diagnosticDescription,
+            needsContinuation: needsContinuation,
+            errorDescription: errorDescription,
+            completion: completion,
+            durableCommitCount: durableCommitCount,
+            evidence: nil
+        )
+    }
+
+    fileprivate init(
+        metric: HealthKitMetricID,
+        state: HealthKitSyncState,
+        insertedCount: Int = 0,
+        deletedCount: Int = 0,
+        duplicateCount: Int = 0,
+        conflictCount: Int = 0,
+        quarantinedCount: Int = 0,
+        diagnosticDescription: String? = nil,
+        needsContinuation: Bool = false,
+        errorDescription: String? = nil,
+        completion: HealthKitObserverCompletion = .success,
+        durableCommitCount: Int = 0,
+        evidence: HealthKitDurableCommitEvidence?
     ) {
         self.metric = metric
         self.state = state
@@ -57,10 +119,30 @@ public struct HealthKitMetricReconciliationResult: Equatable, Sendable {
         self.needsContinuation = needsContinuation
         self.errorDescription = errorDescription
         self.completion = completion
+        self.durableCommitCount = evidence == .reconciler ? max(0, durableCommitCount) : 0
+        self.hasTrustedDurableCommitEvidence = evidence == .reconciler
     }
 
     public var hasDurableCommit: Bool {
-        completion == .success && state != .error
+        hasTrustedDurableCommitEvidence && durableCommitCount > 0
+    }
+
+    fileprivate func withDurableCommitCount(_ count: Int) -> Self {
+        Self(
+            metric: metric,
+            state: state,
+            insertedCount: insertedCount,
+            deletedCount: deletedCount,
+            duplicateCount: duplicateCount,
+            conflictCount: conflictCount,
+            quarantinedCount: quarantinedCount,
+            diagnosticDescription: diagnosticDescription,
+            needsContinuation: needsContinuation,
+            errorDescription: errorDescription,
+            completion: completion,
+            durableCommitCount: count,
+            evidence: .reconciler
+        )
     }
 }
 
@@ -72,10 +154,33 @@ public struct HealthKitReconciliationReport: Equatable, Sendable {
     }
 
     public var completion: HealthKitObserverCompletion {
-        if results.contains(where: { $0.completion == .timedOut }) { return .timedOut }
-        if let error = results.compactMap(\.errorDescription).first { return .failure(error) }
+        var firstFailure: String?
+        var containsTimeout = false
+        for result in results {
+            switch result.completion {
+            case .success:
+                // `.success` with an error state or diagnostic error is an
+                // invalid result. Do not let malformed provider output look
+                // like a healthy aggregate.
+                if !isHealthKitSuccessfulSyncState(result.state) || result.errorDescription != nil {
+                    firstFailure = firstFailure ?? Self.internalFailureMessage
+                }
+            case .partialSuccess:
+                // Partial success is an aggregate-only outcome. A metric
+                // result carrying it is malformed and must fail closed.
+                firstFailure = firstFailure ?? Self.internalFailureMessage
+            case .failure:
+                firstFailure = firstFailure ?? result.errorDescription ?? Self.internalFailureMessage
+            case .timedOut:
+                containsTimeout = true
+            }
+        }
+        if containsTimeout { return .timedOut }
+        if let firstFailure { return .failure(firstFailure) }
         return .success
     }
+
+    private static let internalFailureMessage = "HealthKit reconciliation failed"
 }
 
 /// Bounded UUID/sync-identifier lookup used while merging one anchored page.
@@ -198,6 +303,7 @@ public actor HealthKitReconciliationCoordinator {
 
     public func reconcile(metric: HealthKitMetricID) async -> HealthKitMetricReconciliationResult {
         var result = await reconcilePage(metric: metric)
+        var durableCommitCount = result.durableCommitCount
         var pageCount = 1
         while result.needsContinuation,
               pageCount < Self.maxPaginationPages,
@@ -206,7 +312,8 @@ public actor HealthKitReconciliationCoordinator {
             let next = await reconcilePage(metric: metric)
             let after = await store.snapshot(for: metric)
             pageCount += 1
-            result = next
+            durableCommitCount += next.durableCommitCount
+            result = next.withDurableCommitCount(durableCommitCount)
             // A partial page without a new durable anchor cannot make
             // progress. Keep its explicit partial truth and wait for a
             // later foreground retry rather than spinning forever.
@@ -320,7 +427,9 @@ public actor HealthKitReconciliationCoordinator {
                 return HealthKitMetricReconciliationResult(
                     metric: metric,
                     state: .readIndeterminate,
-                    completion: .success
+                    completion: .success,
+                    durableCommitCount: 1,
+                    evidence: .reconciler
                 )
             } catch {
                 let message = "HealthKit indeterminate read state could not be persisted: \(error.localizedDescription)"
@@ -545,7 +654,9 @@ public actor HealthKitReconciliationCoordinator {
                 quarantinedCount: input.quarantineDiagnostics.reduce(0) { $0 + $1.count },
                 diagnosticDescription: input.quarantineDiagnostics.isEmpty ? nil : "Some HealthKit samples were quarantined; valid samples and the returned anchor were committed.",
                 needsContinuation: input.partial,
-                completion: .success
+                completion: .success,
+                durableCommitCount: 1,
+                evidence: .reconciler
             )
         } catch {
             let message = "HealthKit projection commit failed: \(error.localizedDescription)"
