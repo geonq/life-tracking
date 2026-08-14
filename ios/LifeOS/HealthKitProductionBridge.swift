@@ -145,7 +145,7 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
 
             guard let reconcileRemainder = self.reconcileRemainder else { return }
             let pendingMetrics = report.results
-                .filter { $0.state == .partial }
+                .filter { $0.needsContinuation }
                 .map(\.metric)
             guard !pendingMetrics.isEmpty else { return }
 

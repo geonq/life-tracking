@@ -122,6 +122,7 @@ public struct HealthKitFitnessMetricProjection: Equatable, Sendable {
     public let syncState: HealthKitSyncState
     public let reason: String?
     public let lastCommittedAt: Date?
+    public let lastObservedAt: Date?
     public let observations: [HealthKitFitnessQuantitySample]
     public let latest: HealthKitFitnessQuantitySample?
     public let tombstones: [HealthKitDeletionTombstone]
@@ -138,6 +139,7 @@ public struct HealthKitFitnessMetricProjection: Equatable, Sendable {
         syncState: HealthKitSyncState,
         reason: String?,
         lastCommittedAt: Date?,
+        lastObservedAt: Date?,
         observations: [HealthKitFitnessQuantitySample],
         latest: HealthKitFitnessQuantitySample?,
         tombstones: [HealthKitDeletionTombstone],
@@ -150,6 +152,7 @@ public struct HealthKitFitnessMetricProjection: Equatable, Sendable {
         self.syncState = syncState
         self.reason = reason
         self.lastCommittedAt = lastCommittedAt
+        self.lastObservedAt = lastObservedAt
         self.observations = observations
         self.latest = latest
         self.tombstones = tombstones
@@ -689,6 +692,7 @@ public struct HealthKitFitnessProjection: Equatable, Sendable {
             syncState: stored.syncState,
             reason: reason,
             lastCommittedAt: stored.lastCommittedAt,
+            lastObservedAt: stored.lastObservedAt,
             observations: samples,
             latest: latest,
             tombstones: sourceFilter == .all ? stored.tombstones : [],
@@ -705,6 +709,7 @@ public struct HealthKitFitnessProjection: Equatable, Sendable {
             syncState: .neverSynced,
             reason: "No persisted HealthKit state is available.",
             lastCommittedAt: nil,
+            lastObservedAt: nil,
             observations: [],
             latest: nil,
             tombstones: [],
@@ -721,6 +726,7 @@ public struct HealthKitFitnessProjection: Equatable, Sendable {
             syncState: .error,
             reason: reason,
             lastCommittedAt: nil,
+            lastObservedAt: nil,
             observations: [],
             latest: nil,
             tombstones: [],

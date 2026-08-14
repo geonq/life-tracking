@@ -222,6 +222,11 @@ public final class LifeOSHealthKitAdapter: @unchecked Sendable, HealthKitReconci
     /// page; the reconciliation coordinator owns draining those pages.
     public static let defaultQueryLimit = 500
 
+    private struct ObservationConversion {
+        let observations: [HealthKitObservation]
+        let quarantineDiagnostics: [HealthKitQuarantineDiagnostic]
+    }
+
     public let store: HKHealthStore
     private let evidenceRegistry: HealthKitHelioEvidenceRegistry
     private let queryLimit: Int
@@ -323,13 +328,26 @@ public final class LifeOSHealthKitAdapter: @unchecked Sendable, HealthKitReconci
         guard isHealthDataAvailable else { throw HealthKitAdapterError.unavailable }
         let type = try objectType(for: metric)
         let hkAnchor = try unarchive(anchor)
+        let queryStartedAt = Date()
+        // The first unanchored read is a bounded seed. Once HealthKit has
+        // issued an anchor, continuation queries intentionally use no date
+        // predicate: the anchor is the provider's change-log cursor and must
+        // continue to surface deletions/updates for retained objects even if
+        // their original sample date has crossed the rolling boundary.
+        let predicate: NSPredicate?
+        if anchor == nil {
+            let startDate = queryStartedAt.addingTimeInterval(-HealthKitSafetyLimits.healthObservationRetention)
+            predicate = HKQuery.predicateForSamples(withStart: startDate, end: nil, options: [])
+        } else {
+            predicate = nil
+        }
         let queryState = HealthKitAnchoredQueryState<HealthKitMetricSyncInput>(store: store)
         return try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation { continuation in
                 queryState.setContinuation(continuation)
                 let query = HKAnchoredObjectQuery(
                     type: type,
-                    predicate: nil,
+                    predicate: predicate,
                     anchor: hkAnchor,
                     limit: queryLimit
                 ) { [weak self, weak queryState] _, samples, deleted, newAnchor, error in
@@ -342,10 +360,12 @@ public final class LifeOSHealthKitAdapter: @unchecked Sendable, HealthKitReconci
                         queryState.finish(.failure(Self.map(error)))
                         return
                     }
+                    let queryCompletedAt = Date()
                     Task {
                         do {
-                            let additions = try self.observations(metric: metric, samples: samples ?? [])
-                            let deletions = try self.tombstones(metric: metric, deleted: deleted ?? [], deletedAt: .now)
+                            let conversion = self.observations(metric: metric, samples: samples ?? [], now: queryCompletedAt)
+                            let additions = conversion.observations
+                            let deletions = try self.tombstones(metric: metric, deleted: deleted ?? [], deletedAt: queryCompletedAt)
                             let objectCount = (samples?.count ?? 0) + (deleted?.count ?? 0)
                             let partial = objectCount >= self.queryLimit
                             // HealthKit defines this as the anchor to pass to
@@ -360,9 +380,10 @@ public final class LifeOSHealthKitAdapter: @unchecked Sendable, HealthKitReconci
                                 additions: additions,
                                 deletions: deletions,
                                 nextAnchor: nextAnchor,
-                                observedAt: .now,
+                                queryCompletedAt: queryCompletedAt,
                                 partial: partial,
-                                readability: readability
+                                readability: readability,
+                                quarantineDiagnostics: conversion.quarantineDiagnostics
                             )
                             queryState.finish(.success(input))
                         } catch {
@@ -562,47 +583,120 @@ public final class LifeOSHealthKitAdapter: @unchecked Sendable, HealthKitReconci
         }
     }
 
-    private func observations(metric: HealthKitMetricID, samples: [HKSample]) throws -> [HealthKitObservation] {
-        try samples.map { sample in
-            let identity = try sampleIdentity(for: sample)
-            let provenance = try provenance(for: sample)
-            let value: HealthKitObservationValue
-            switch metric {
-            case .sleep:
-                guard let category = sample as? HKCategorySample else { throw HealthKitAdapterError.invalidSample("Sleep sample is not a category sample") }
-                let timeZone = sample.metadata?[HKMetadataKeyTimeZone] as? String
-                value = .sleep(try HealthKitSleepValue(stage: HealthKitSleepStage(rawValue: category.value), timeZoneIdentifier: timeZone))
-            case .workout:
-                guard let workout = sample as? HKWorkout else { throw HealthKitAdapterError.invalidSample("Workout sample is not a workout") }
-                let energy: Double?
-                if let totalEnergyBurned = workout.totalEnergyBurned {
-                    energy = totalEnergyBurned.doubleValue(for: .kilocalorie())
-                } else {
-                    energy = nil
-                }
-                value = .workout(try HealthKitWorkoutValue(
-                    activityTypeRawValue: Int(workout.workoutActivityType.rawValue),
-                    durationSeconds: workout.duration,
-                    activeEnergyKilocalories: energy
-                ))
-            default:
-                guard let quantitySample = sample as? HKQuantitySample else { throw HealthKitAdapterError.invalidSample("Quantity sample is not a quantity sample") }
-                let quantity = try canonicalQuantity(metric: metric, sample: quantitySample)
-                value = .quantity(quantity)
+    private func observations(metric: HealthKitMetricID, samples: [HKSample], now: Date) -> ObservationConversion {
+        var observations: [HealthKitObservation] = []
+        observations.reserveCapacity(samples.count)
+        var counts: [String: (reason: HealthKitQuarantineReason, provenance: HealthKitSourceMatch, count: Int)] = [:]
+
+        func quarantine(_ sample: HKSample, error: Error) {
+            let provenanceMatch = (try? self.provenance(for: sample).helioMatch) ?? .unattributed
+            let reason = Self.quarantineReason(for: error)
+            let key = "\(reason.rawValue)|\(provenanceMatch.rawValue)"
+            if let current = counts[key] {
+                counts[key] = (current.reason, current.provenance, current.count + 1)
+            } else {
+                counts[key] = (reason, provenanceMatch, 1)
             }
+        }
+
+        for sample in samples {
             do {
-                return try HealthKitObservation(
-                    metric: metric,
-                    identity: identity,
-                    value: value,
-                    startDate: sample.startDate,
-                    endDate: sample.endDate,
-                    provenance: provenance,
-                    now: .now
-                )
+                let identity = try sampleIdentity(for: sample)
+                let provenance = try provenance(for: sample)
+                let value: HealthKitObservationValue
+                switch metric {
+                case .sleep:
+                    guard let category = sample as? HKCategorySample else {
+                        throw HealthKitAdapterError.invalidSample("Sleep sample is not a category sample")
+                    }
+                    let timeZone = sample.metadata?[HKMetadataKeyTimeZone] as? String
+                    value = .sleep(try HealthKitSleepValue(stage: HealthKitSleepStage(rawValue: category.value), timeZoneIdentifier: timeZone))
+                case .workout:
+                    guard let workout = sample as? HKWorkout else {
+                        throw HealthKitAdapterError.invalidSample("Workout sample is not a workout")
+                    }
+                    let energy: Double?
+                    if let totalEnergyBurned = workout.totalEnergyBurned {
+                        energy = totalEnergyBurned.doubleValue(for: .kilocalorie())
+                    } else {
+                        energy = nil
+                    }
+                    value = .workout(try HealthKitWorkoutValue(
+                        activityTypeRawValue: Int(workout.workoutActivityType.rawValue),
+                        durationSeconds: workout.duration,
+                        activeEnergyKilocalories: energy
+                    ))
+                default:
+                    guard let quantitySample = sample as? HKQuantitySample else {
+                        throw HealthKitAdapterError.invalidSample("Quantity sample is not a quantity sample")
+                    }
+                    let quantity = try canonicalQuantity(metric: metric, sample: quantitySample)
+                    value = .quantity(quantity)
+                }
+                do {
+                    let observation = try HealthKitObservation(
+                        metric: metric,
+                        identity: identity,
+                        value: value,
+                        startDate: sample.startDate,
+                        endDate: sample.endDate,
+                        provenance: provenance,
+                        now: now
+                    )
+                    observations.append(observation)
+                } catch {
+                    throw HealthKitAdapterError.invalidSample(String(describing: error))
+                }
             } catch {
-                throw HealthKitAdapterError.invalidSample(String(describing: error))
+                // One malformed provider object is quarantined, not allowed to
+                // discard valid siblings or strand the page anchor.
+                quarantine(sample, error: error)
             }
+        }
+
+        let diagnostics = counts.values.compactMap { item in
+            try? HealthKitQuarantineDiagnostic(
+                metric: metric,
+                reason: item.reason,
+                provenance: item.provenance,
+                count: item.count
+            )
+        }.sorted {
+            if $0.reason.rawValue != $1.reason.rawValue { return $0.reason.rawValue < $1.reason.rawValue }
+            return $0.provenance.rawValue < $1.provenance.rawValue
+        }
+        return ObservationConversion(observations: observations, quarantineDiagnostics: Array(diagnostics.prefix(HealthKitSafetyLimits.maxQuarantineDiagnostics)))
+    }
+
+    private static func quarantineReason(for error: Error) -> HealthKitQuarantineReason {
+        if let adapterError = error as? HealthKitAdapterError {
+            switch adapterError {
+            case .unsupportedMetric: return .unsupportedSampleType
+            case .invalidAnchor: return .conversionFailed
+            case .invalidSample(let detail):
+                let lower = detail.lowercased()
+                if lower.contains("sample is not") || lower.contains("not a category sample") || lower.contains("not a quantity sample") {
+                    return .unsupportedSampleType
+                }
+                if lower.contains("future") { return .futureObservation }
+                if lower.contains("interval") || lower.contains("date") { return .invalidInterval }
+                if lower.contains("identifier") || lower.contains("version") { return .invalidIdentity }
+                if lower.contains("quantity") || lower.contains("workout") || lower.contains("stage") || lower.contains("value") {
+                    return .invalidValue
+                }
+                if lower.contains("provenance") || lower.contains("source") { return .invalidProvenance }
+                return .conversionFailed
+            default:
+                return .conversionFailed
+            }
+        }
+        switch error as? HealthKitDomainError {
+        case .futureDate: return .futureObservation
+        case .invalidInterval: return .invalidInterval
+        case .invalidQuantity, .invalidWorkout, .invalidSleepStage: return .invalidValue
+        case .invalidRevision: return .invalidIdentity
+        case .invalidSourceMetadata: return .invalidProvenance
+        default: return .conversionFailed
         }
     }
 

@@ -98,6 +98,12 @@ public enum HealthKitSafetyLimits {
     public static let maxAnchorBytes = 1_048_576
     public static let maxAnchorArchiveCharacters = 1_398_104
     public static let maxEnvelopeBytes = 8 * 1_048_576
+    /// The HealthKit seed and durable projection share this rolling boundary.
+    /// The adapter applies it to the initial provider read; reconciliation
+    /// must preserve the same bounded policy at the durable commit boundary.
+    public static let healthObservationRetention: TimeInterval = 365 * 24 * 60 * 60
+    public static let maxQuarantineDiagnostics = 32
+    public static let maxQuarantineCount = 1_000_000
 }
 
 /// A canonical non-negative quantity.  HealthKit's quantity APIs perform the
@@ -1132,15 +1138,237 @@ public enum HealthKitReadability: String, Codable, CaseIterable, Sendable {
     case emptyIndeterminate = "empty_indeterminate"
 }
 
+/// A bounded, source-safe description of samples that could not cross the
+/// HealthKit conversion boundary.  It intentionally contains no UUID, source
+/// metadata, quantity, interval, or provider error text.
+public enum HealthKitQuarantineReason: String, Codable, CaseIterable, Sendable {
+    case invalidIdentity = "invalid_identity"
+    case invalidProvenance = "invalid_provenance"
+    case unsupportedSampleType = "unsupported_sample_type"
+    case invalidValue = "invalid_value"
+    case invalidInterval = "invalid_interval"
+    case futureObservation = "future_observation"
+    case conversionFailed = "conversion_failed"
+}
+
+public struct HealthKitQuarantineDiagnostic: Codable, Equatable, Hashable, Sendable {
+    public let metric: HealthKitMetricID
+    public let reason: HealthKitQuarantineReason
+    public let provenance: HealthKitSourceMatch
+    public let count: Int
+
+    public init(
+        metric: HealthKitMetricID,
+        reason: HealthKitQuarantineReason,
+        provenance: HealthKitSourceMatch,
+        count: Int = 1
+    ) throws {
+        guard count > 0, count <= HealthKitSafetyLimits.maxQuarantineCount else {
+            throw HealthKitDomainError.invalidQuantity
+        }
+        self.metric = metric
+        self.reason = reason
+        self.provenance = provenance
+        self.count = count
+    }
+
+    private enum CodingKeys: String, CodingKey { case metric, reason, provenance, count }
+
+    public init(from decoder: Decoder) throws {
+        try rejectUnknownLifeOSKeys(decoder, allowed: ["metric", "reason", "provenance", "count"])
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self = try HealthKitQuarantineDiagnostic(
+            metric: container.decode(HealthKitMetricID.self, forKey: .metric),
+            reason: container.decode(HealthKitQuarantineReason.self, forKey: .reason),
+            provenance: container.decode(HealthKitSourceMatch.self, forKey: .provenance),
+            count: container.decode(Int.self, forKey: .count)
+        )
+    }
+}
+
+/// Durable aggregate quarantine state.  Repeated poison samples are folded by
+/// metric/reason/provenance, so a provider cannot grow the app-private envelope
+/// one diagnostic record per sample.
+public struct HealthKitQuarantineState: Codable, Equatable, Sendable {
+    public let totalCount: Int
+    public let diagnostics: [HealthKitQuarantineDiagnostic]
+    public let lastQuarantinedAt: Date?
+
+    public static let empty = HealthKitQuarantineState(totalCount: 0, diagnostics: [], lastQuarantinedAt: nil)
+
+    public var isWithinSafetyBounds: Bool {
+        totalCount >= 0 &&
+        totalCount <= HealthKitSafetyLimits.maxQuarantineCount &&
+        diagnostics.count <= HealthKitSafetyLimits.maxQuarantineDiagnostics &&
+        diagnostics.allSatisfy { $0.count > 0 && $0.count <= HealthKitSafetyLimits.maxQuarantineCount } &&
+        diagnostics.reduce(0, { $0 + $1.count }) <= totalCount &&
+        (lastQuarantinedAt?.timeIntervalSinceReferenceDate.isFinite ?? true)
+    }
+
+    public init(
+        totalCount: Int = 0,
+        diagnostics: [HealthKitQuarantineDiagnostic] = [],
+        lastQuarantinedAt: Date? = nil
+    ) {
+        // This initializer is intentionally non-throwing for source/test
+        // ergonomics; all durable construction goes through `validated`.
+        self.totalCount = max(0, min(HealthKitSafetyLimits.maxQuarantineCount, totalCount))
+        self.diagnostics = Array(diagnostics.prefix(HealthKitSafetyLimits.maxQuarantineDiagnostics))
+        self.lastQuarantinedAt = lastQuarantinedAt
+    }
+
+    private init(validatingTotalCount totalCount: Int, diagnostics: [HealthKitQuarantineDiagnostic], lastQuarantinedAt: Date?) throws {
+        guard totalCount >= 0,
+              totalCount <= HealthKitSafetyLimits.maxQuarantineCount,
+              diagnostics.count <= HealthKitSafetyLimits.maxQuarantineDiagnostics,
+              diagnostics.allSatisfy({ $0.count > 0 && $0.count <= HealthKitSafetyLimits.maxQuarantineCount }),
+              diagnostics.reduce(0, { $0 + $1.count }) <= totalCount,
+              lastQuarantinedAt?.timeIntervalSinceReferenceDate.isFinite ?? true else {
+            throw HealthKitDomainError.invalidQuantity
+        }
+        self.totalCount = totalCount
+        self.diagnostics = diagnostics
+        self.lastQuarantinedAt = lastQuarantinedAt
+    }
+
+    private enum CodingKeys: String, CodingKey { case totalCount, diagnostics, lastQuarantinedAt }
+
+    public init(from decoder: Decoder) throws {
+        try rejectUnknownLifeOSKeys(decoder, allowed: ["totalCount", "diagnostics", "lastQuarantinedAt"])
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(
+            validatingTotalCount: container.decode(Int.self, forKey: .totalCount),
+            diagnostics: container.decode([HealthKitQuarantineDiagnostic].self, forKey: .diagnostics),
+            lastQuarantinedAt: decodeStrictOptional(Date.self, forKey: .lastQuarantinedAt, from: container)
+        )
+    }
+
+    /// Returns a bounded aggregate containing the supplied page diagnostics.
+    public func adding(_ incoming: [HealthKitQuarantineDiagnostic], at date: Date) throws -> Self {
+        guard date.timeIntervalSinceReferenceDate.isFinite,
+              incoming.count <= HealthKitSafetyLimits.maxQuarantineDiagnostics,
+              isWithinSafetyBounds else {
+            throw HealthKitDomainError.invalidQuantity
+        }
+
+        struct Key: Hashable {
+            let metric: HealthKitMetricID
+            let reason: HealthKitQuarantineReason
+            let provenance: HealthKitSourceMatch
+        }
+        func diagnosticKey(_ diagnostic: HealthKitQuarantineDiagnostic) -> Key {
+            Key(metric: diagnostic.metric, reason: diagnostic.reason, provenance: diagnostic.provenance)
+        }
+        func diagnosticSort(_ lhs: HealthKitQuarantineDiagnostic, _ rhs: HealthKitQuarantineDiagnostic) -> Bool {
+            if lhs.metric.rawValue != rhs.metric.rawValue { return lhs.metric.rawValue < rhs.metric.rawValue }
+            if lhs.reason.rawValue != rhs.reason.rawValue { return lhs.reason.rawValue < rhs.reason.rawValue }
+            return lhs.provenance.rawValue < rhs.provenance.rawValue
+        }
+
+        var counts: [Key: Int] = [:]
+        for diagnostic in diagnostics {
+            let key = diagnosticKey(diagnostic)
+            let next = counts[key, default: 0].addingReportingOverflow(diagnostic.count)
+            counts[key] = next.overflow
+                ? HealthKitSafetyLimits.maxQuarantineCount
+                : min(HealthKitSafetyLimits.maxQuarantineCount, next.partialValue)
+        }
+
+        // The lifetime budget is a saturation boundary, not a reason to fail
+        // the page. Allocate remaining capacity in canonical diagnostic order
+        // so equivalent provider pages produce identical durable state; any
+        // excess poison count is intentionally dropped after the anchor can
+        // still advance with valid siblings.
+        var remaining = HealthKitSafetyLimits.maxQuarantineCount - totalCount
+        for diagnostic in incoming.sorted(by: diagnosticSort) {
+            guard remaining > 0 else { break }
+            let accepted = min(diagnostic.count, remaining)
+            let key = diagnosticKey(diagnostic)
+            let next = counts[key, default: 0].addingReportingOverflow(accepted)
+            counts[key] = next.overflow
+                ? HealthKitSafetyLimits.maxQuarantineCount
+                : min(HealthKitSafetyLimits.maxQuarantineCount, next.partialValue)
+            remaining -= accepted
+        }
+
+        let merged = try counts
+            .map { key, count in
+                try HealthKitQuarantineDiagnostic(metric: key.metric, reason: key.reason, provenance: key.provenance, count: count)
+            }
+            .sorted {
+                if $0.metric.rawValue != $1.metric.rawValue { return $0.metric.rawValue < $1.metric.rawValue }
+                if $0.reason.rawValue != $1.reason.rawValue { return $0.reason.rawValue < $1.reason.rawValue }
+                return $0.provenance.rawValue < $1.provenance.rawValue
+            }
+        return try Self(
+            validatingTotalCount: totalCount + (HealthKitSafetyLimits.maxQuarantineCount - totalCount - remaining),
+            diagnostics: Array(merged.prefix(HealthKitSafetyLimits.maxQuarantineDiagnostics)),
+            lastQuarantinedAt: max(lastQuarantinedAt ?? date, date)
+        )
+    }
+}
+
 public struct HealthKitMetricSyncInput: Sendable {
     public let metric: HealthKitMetricID
     public let additions: [HealthKitObservation]
     public let deletions: [HealthKitDeletionTombstone]
     public let nextAnchor: HealthKitOpaqueAnchor?
-    public let observedAt: Date
+    /// The time the provider query completed.  This is not the time of the
+    /// newest source observation and must not be used as observation freshness.
+    public let queryCompletedAt: Date
+    /// Compatibility alias for the pre-integrity contract.
+    public var observedAt: Date { queryCompletedAt }
+    public let newestObservationAt: Date?
     public let partial: Bool
     public let readability: HealthKitReadability
+    public let quarantineDiagnostics: [HealthKitQuarantineDiagnostic]
 
+    public init(
+        metric: HealthKitMetricID,
+        additions: [HealthKitObservation],
+        deletions: [HealthKitDeletionTombstone],
+        nextAnchor: HealthKitOpaqueAnchor?,
+        queryCompletedAt: Date,
+        partial: Bool = false,
+        readability: HealthKitReadability? = nil,
+        newestObservationAt: Date? = nil,
+        quarantineDiagnostics: [HealthKitQuarantineDiagnostic] = []
+    ) throws {
+        guard queryCompletedAt.timeIntervalSinceReferenceDate.isFinite else { throw HealthKitDomainError.invalidDate("queryCompletedAt") }
+        guard additions.count <= HealthKitSafetyLimits.maxSyncBatchItems,
+              deletions.count <= HealthKitSafetyLimits.maxSyncBatchItems,
+              quarantineDiagnostics.count <= HealthKitSafetyLimits.maxQuarantineDiagnostics,
+              additions.count + deletions.count + quarantineDiagnostics.reduce(0, { $0 + $1.count }) <= HealthKitSafetyLimits.maxSyncBatchItems else {
+            throw HealthKitDomainError.invalidQuantity
+        }
+        guard additions.allSatisfy({ $0.metric == metric }) && deletions.allSatisfy({ $0.metric == metric }) else {
+            throw HealthKitDomainError.invalidQuantity
+        }
+        guard quarantineDiagnostics.allSatisfy({ $0.metric == metric }) else {
+            throw HealthKitDomainError.invalidQuantity
+        }
+        let derivedNewest = additions.map(\.endDate).max()
+        if let newestObservationAt {
+            guard newestObservationAt.timeIntervalSinceReferenceDate.isFinite,
+                  newestObservationAt <= queryCompletedAt.addingTimeInterval(HealthKitObservation.defaultFutureTolerance) else {
+                throw HealthKitDomainError.invalidDate("newestObservationAt")
+            }
+        }
+        self.metric = metric
+        self.additions = additions
+        self.deletions = deletions
+        self.nextAnchor = nextAnchor
+        self.queryCompletedAt = queryCompletedAt
+        self.newestObservationAt = [derivedNewest, newestObservationAt].compactMap { $0 }.max()
+        self.partial = partial
+        self.quarantineDiagnostics = quarantineDiagnostics
+        self.readability = readability ??
+            (additions.isEmpty && deletions.isEmpty && quarantineDiagnostics.isEmpty && nextAnchor == nil ? .emptyIndeterminate : .established)
+    }
+
+    /// Source-compatible initializer for callers that still use the old
+    /// `observedAt` label.  The value retains its corrected query-completion
+    /// meaning; actual observation time is derived from additions.
     public init(
         metric: HealthKitMetricID,
         additions: [HealthKitObservation],
@@ -1148,24 +1376,20 @@ public struct HealthKitMetricSyncInput: Sendable {
         nextAnchor: HealthKitOpaqueAnchor?,
         observedAt: Date,
         partial: Bool = false,
-        readability: HealthKitReadability? = nil
+        readability: HealthKitReadability? = nil,
+        newestObservationAt: Date? = nil,
+        quarantineDiagnostics: [HealthKitQuarantineDiagnostic] = []
     ) throws {
-        guard observedAt.timeIntervalSinceReferenceDate.isFinite else { throw HealthKitDomainError.invalidDate("observedAt") }
-        guard additions.count <= HealthKitSafetyLimits.maxSyncBatchItems,
-              deletions.count <= HealthKitSafetyLimits.maxSyncBatchItems,
-              additions.count + deletions.count <= HealthKitSafetyLimits.maxSyncBatchItems else {
-            throw HealthKitDomainError.invalidQuantity
-        }
-        guard additions.allSatisfy({ $0.metric == metric }) && deletions.allSatisfy({ $0.metric == metric }) else {
-            throw HealthKitDomainError.invalidQuantity
-        }
-        self.metric = metric
-        self.additions = additions
-        self.deletions = deletions
-        self.nextAnchor = nextAnchor
-        self.observedAt = observedAt
-        self.partial = partial
-        self.readability = readability ??
-            (additions.isEmpty && deletions.isEmpty && nextAnchor == nil ? .emptyIndeterminate : .established)
+        try self.init(
+            metric: metric,
+            additions: additions,
+            deletions: deletions,
+            nextAnchor: nextAnchor,
+            queryCompletedAt: observedAt,
+            partial: partial,
+            readability: readability,
+            newestObservationAt: newestObservationAt,
+            quarantineDiagnostics: quarantineDiagnostics
+        )
     }
 }

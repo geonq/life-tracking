@@ -24,6 +24,12 @@ public struct HealthKitMetricReconciliationResult: Equatable, Sendable {
     public let deletedCount: Int
     public let duplicateCount: Int
     public let conflictCount: Int
+    public let quarantinedCount: Int
+    /// A quarantine diagnostic is truthful partial data, not a failed durable
+    /// commit. Keep it separate from `errorDescription` so observer completion
+    /// remains successful after the anchor has advanced.
+    public let diagnosticDescription: String?
+    public let needsContinuation: Bool
     public let errorDescription: String?
     public let completion: HealthKitObserverCompletion
 
@@ -34,6 +40,9 @@ public struct HealthKitMetricReconciliationResult: Equatable, Sendable {
         deletedCount: Int = 0,
         duplicateCount: Int = 0,
         conflictCount: Int = 0,
+        quarantinedCount: Int = 0,
+        diagnosticDescription: String? = nil,
+        needsContinuation: Bool = false,
         errorDescription: String? = nil,
         completion: HealthKitObserverCompletion = .success
     ) {
@@ -43,6 +52,9 @@ public struct HealthKitMetricReconciliationResult: Equatable, Sendable {
         self.deletedCount = deletedCount
         self.duplicateCount = duplicateCount
         self.conflictCount = conflictCount
+        self.quarantinedCount = quarantinedCount
+        self.diagnosticDescription = diagnosticDescription
+        self.needsContinuation = needsContinuation
         self.errorDescription = errorDescription
         self.completion = completion
     }
@@ -187,7 +199,7 @@ public actor HealthKitReconciliationCoordinator {
     public func reconcile(metric: HealthKitMetricID) async -> HealthKitMetricReconciliationResult {
         var result = await reconcilePage(metric: metric)
         var pageCount = 1
-        while result.state == .partial,
+        while result.needsContinuation,
               pageCount < Self.maxPaginationPages,
               !Task.isCancelled {
             let before = await store.snapshot(for: metric)
@@ -268,20 +280,22 @@ public actor HealthKitReconciliationCoordinator {
         }
 
         let reconciliationNow = now()
-        let age = reconciliationNow.timeIntervalSince(input.observedAt)
+        let age = reconciliationNow.timeIntervalSince(input.queryCompletedAt)
         guard reconciliationNow.timeIntervalSinceReferenceDate.isFinite,
               age.isFinite,
               age >= 0 else {
-            return HealthKitMetricReconciliationResult(metric: metric, state: .error, errorDescription: "HealthKit batch has a future observedAt", completion: .failure("HealthKit batch has a future observedAt"))
+            return HealthKitMetricReconciliationResult(metric: metric, state: .error, errorDescription: "HealthKit batch has a future query completion time", completion: .failure("HealthKit batch has a future query completion time"))
         }
         guard input.additions.allSatisfy({ Self.isValidObservation($0, metric: metric, now: reconciliationNow) }),
-              input.deletions.allSatisfy({ Self.isValidDeletion($0, metric: metric, now: reconciliationNow) }) else {
+              input.deletions.allSatisfy({ Self.isValidDeletion($0, metric: metric, now: reconciliationNow) }),
+              input.quarantineDiagnostics.count <= HealthKitSafetyLimits.maxQuarantineDiagnostics,
+              input.quarantineDiagnostics.allSatisfy({ $0.metric == metric && $0.count > 0 }) else {
             let message = "HealthKit batch contains a future, non-finite, or non-canonical fact"
             return HealthKitMetricReconciliationResult(metric: metric, state: .error, errorDescription: message, completion: .failure(message))
         }
 
         let isAmbiguousEmptyRead = input.readability == .emptyIndeterminate &&
-            input.additions.isEmpty && input.deletions.isEmpty
+            input.additions.isEmpty && input.deletions.isEmpty && input.quarantineDiagnostics.isEmpty
         if isAmbiguousEmptyRead {
             // HealthKit deliberately does not reveal per-type read denial. An
             // empty first read is therefore not evidence of “no data” and
@@ -295,6 +309,7 @@ public actor HealthKitReconciliationCoordinator {
                     tombstones: current.tombstones,
                     sourceIndex: current.sourceIndex,
                     conflicts: current.conflicts,
+                    quarantine: current.quarantine,
                     nextAnchor: nil,
                     syncState: .readIndeterminate,
                     committedAt: reconciliationNow,
@@ -316,11 +331,21 @@ public actor HealthKitReconciliationCoordinator {
         var observations = current.observations
         var tombstones = current.tombstones
         var conflicts = current.conflicts
+        var quarantine = current.quarantine
         var inserted = 0
         var duplicates = 0
         var conflictCount = 0
         var observationIndex = HealthKitReconciliationIdentityIndex(observations: observations)
         var tombstoneIndex = HealthKitReconciliationIdentityIndex(tombstones: tombstones)
+
+        if !input.quarantineDiagnostics.isEmpty {
+            do {
+                quarantine = try quarantine.adding(input.quarantineDiagnostics, at: reconciliationNow)
+            } catch {
+                let message = "HealthKit quarantine diagnostic could not be persisted"
+                return HealthKitMetricReconciliationResult(metric: metric, state: .error, errorDescription: message, completion: .failure(message))
+            }
+        }
 
         for incoming in input.additions {
             guard incoming.metric == metric else {
@@ -471,9 +496,10 @@ public actor HealthKitReconciliationCoordinator {
         let syncState: HealthKitSyncState
         if hasConflict {
             syncState = .conflict
-        } else if input.partial {
+        } else if input.partial || !input.quarantineDiagnostics.isEmpty {
             syncState = .partial
-        } else if age > staleAfter {
+        } else if age > staleAfter ||
+                  (observations.map(\.endDate).max().map { reconciliationNow.timeIntervalSince($0) > staleAfter } ?? false) {
             syncState = .stale
         } else {
             syncState = .synced
@@ -494,6 +520,7 @@ public actor HealthKitReconciliationCoordinator {
                 tombstones: tombstones,
                 sourceIndex: sourceIndex,
                 conflicts: conflicts,
+                quarantine: quarantine,
                 nextAnchor: hasConflict ? nil : input.nextAnchor,
                 syncState: syncState,
                 committedAt: reconciliationNow,
@@ -508,6 +535,9 @@ public actor HealthKitReconciliationCoordinator {
                 deletedCount: input.deletions.count,
                 duplicateCount: duplicates,
                 conflictCount: conflictCount,
+                quarantinedCount: input.quarantineDiagnostics.reduce(0) { $0 + $1.count },
+                diagnosticDescription: input.quarantineDiagnostics.isEmpty ? nil : "Some HealthKit samples were quarantined; valid samples and the returned anchor were committed.",
+                needsContinuation: input.partial,
                 completion: .success
             )
         } catch {

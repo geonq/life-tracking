@@ -48,8 +48,10 @@ public struct HealthKitMetricProjection: Codable, Equatable, Sendable {
     public let tombstones: [HealthKitDeletionTombstone]
     public let sourceIndex: [String: HealthKitSourceMatch]
     public let conflicts: [HealthKitObservationConflict]
+    public let quarantine: HealthKitQuarantineState
     public let anchorArchive: String?
     public let lastCommittedAt: Date?
+    public let lastObservedAt: Date?
     public let syncState: HealthKitSyncState
 
     public init(
@@ -58,14 +60,17 @@ public struct HealthKitMetricProjection: Codable, Equatable, Sendable {
         tombstones: [HealthKitDeletionTombstone] = [],
         sourceIndex: [String: HealthKitSourceMatch] = [:],
         conflicts: [HealthKitObservationConflict] = [],
+        quarantine: HealthKitQuarantineState = .empty,
         anchorArchive: String? = nil,
         lastCommittedAt: Date? = nil,
+        lastObservedAt: Date? = nil,
         syncState: HealthKitSyncState = .neverSynced
     ) throws {
         guard observations.count <= HealthKitSafetyLimits.maxProjectionItems,
               tombstones.count <= HealthKitSafetyLimits.maxProjectionItems,
               sourceIndex.count <= HealthKitSafetyLimits.maxSourceIndexItems,
               conflicts.count <= HealthKitSafetyLimits.maxConflictItems,
+              quarantine.isWithinSafetyBounds,
               anchorArchive == nil || anchorArchive!.count <= HealthKitSafetyLimits.maxAnchorArchiveCharacters else {
             throw HealthKitAnchorStoreError.invalidProjection
         }
@@ -105,6 +110,13 @@ public struct HealthKitMetricProjection: Codable, Equatable, Sendable {
         } else {
             normalizedSyncState = syncState
         }
+        let derivedLastObservedAt = observations.map(\.endDate).max()
+        if let lastObservedAt {
+            guard lastObservedAt.timeIntervalSinceReferenceDate.isFinite,
+                  derivedLastObservedAt == lastObservedAt else {
+                throw HealthKitAnchorStoreError.invalidProjection
+            }
+        }
         if let lastCommittedAt {
             guard lastCommittedAt.timeIntervalSinceReferenceDate.isFinite else {
                 throw HealthKitAnchorStoreError.invalidProjection
@@ -119,8 +131,10 @@ public struct HealthKitMetricProjection: Codable, Equatable, Sendable {
         self.tombstones = tombstones
         self.sourceIndex = rebuiltSourceIndex
         self.conflicts = conflicts
+        self.quarantine = quarantine
         self.anchorArchive = anchorArchive
         self.lastCommittedAt = lastCommittedAt
+        self.lastObservedAt = derivedLastObservedAt
         self.syncState = normalizedSyncState
     }
 
@@ -142,19 +156,21 @@ public struct HealthKitMetricProjection: Codable, Equatable, Sendable {
     public var hasValidAnchor: Bool { decodedAnchor != nil }
 
     private enum CodingKeys: String, CodingKey {
-        case metric, observations, tombstones, sourceIndex, conflicts, anchorArchive, lastCommittedAt, syncState
+        case metric, observations, tombstones, sourceIndex, conflicts, quarantine, anchorArchive, lastCommittedAt, lastObservedAt, syncState
     }
 
     public init(from decoder: Decoder) throws {
-        try rejectUnknownLifeOSKeys(decoder, allowed: ["metric", "observations", "tombstones", "sourceIndex", "conflicts", "anchorArchive", "lastCommittedAt", "syncState"])
+        try rejectUnknownLifeOSKeys(decoder, allowed: ["metric", "observations", "tombstones", "sourceIndex", "conflicts", "quarantine", "anchorArchive", "lastCommittedAt", "lastObservedAt", "syncState"])
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let metric = try container.decode(HealthKitMetricID.self, forKey: .metric)
         let observations = try container.decode([HealthKitObservation].self, forKey: .observations)
         let tombstones = try container.decode([HealthKitDeletionTombstone].self, forKey: .tombstones)
         let sourceIndex = try container.decode([String: HealthKitSourceMatch].self, forKey: .sourceIndex)
         let conflicts = try container.decode([HealthKitObservationConflict].self, forKey: .conflicts)
+        let quarantine = try decodeStrictOptional(HealthKitQuarantineState.self, forKey: .quarantine, from: container) ?? .empty
         let anchorArchive = try decodeStrictOptional(String.self, forKey: .anchorArchive, from: container)
         let lastCommittedAt = try decodeStrictOptional(Date.self, forKey: .lastCommittedAt, from: container)
+        let lastObservedAt = try decodeStrictOptional(Date.self, forKey: .lastObservedAt, from: container)
         let syncState = try container.decode(HealthKitSyncState.self, forKey: .syncState)
 
         let projection = try HealthKitMetricProjection(
@@ -163,8 +179,10 @@ public struct HealthKitMetricProjection: Codable, Equatable, Sendable {
             tombstones: tombstones,
             sourceIndex: sourceIndex,
             conflicts: conflicts,
+            quarantine: quarantine,
             anchorArchive: anchorArchive,
             lastCommittedAt: lastCommittedAt,
+            lastObservedAt: lastObservedAt,
             syncState: syncState
         )
         guard projection.sourceIndex == sourceIndex else { throw HealthKitAnchorStoreError.invalidProjection }
@@ -203,9 +221,11 @@ public struct HealthKitStoredMetricState: Equatable, Sendable {
     public let tombstones: [HealthKitDeletionTombstone]
     public let sourceIndex: [String: HealthKitSourceMatch]
     public let conflicts: [HealthKitObservationConflict]
+    public let quarantine: HealthKitQuarantineState
     public let anchor: HealthKitOpaqueAnchor?
     public let anchorArchive: String?
     public let lastCommittedAt: Date?
+    public let lastObservedAt: Date?
     public let syncState: HealthKitSyncState
 
     public init(projection: HealthKitMetricProjection) {
@@ -214,9 +234,11 @@ public struct HealthKitStoredMetricState: Equatable, Sendable {
         self.tombstones = projection.tombstones
         self.sourceIndex = projection.sourceIndex
         self.conflicts = projection.conflicts
+        self.quarantine = projection.quarantine
         self.anchor = projection.decodedAnchor
         self.anchorArchive = projection.anchorArchive
         self.lastCommittedAt = projection.lastCommittedAt
+        self.lastObservedAt = projection.lastObservedAt
         self.syncState = projection.requiresFullResync ? .fullResyncRequired : projection.syncState
     }
 
@@ -226,9 +248,11 @@ public struct HealthKitStoredMetricState: Equatable, Sendable {
         self.tombstones = []
         self.sourceIndex = [:]
         self.conflicts = []
+        self.quarantine = .empty
         self.anchor = nil
         self.anchorArchive = nil
         self.lastCommittedAt = nil
+        self.lastObservedAt = nil
         self.syncState = .neverSynced
     }
 
@@ -325,6 +349,7 @@ public actor HealthKitAnchorStore {
         tombstones: [HealthKitDeletionTombstone],
         sourceIndex: [String: HealthKitSourceMatch],
         conflicts: [HealthKitObservationConflict] = [],
+        quarantine: HealthKitQuarantineState = .empty,
         nextAnchor: HealthKitOpaqueAnchor?,
         syncState: HealthKitSyncState,
         committedAt: Date,
@@ -342,6 +367,7 @@ public actor HealthKitAnchorStore {
               observations.count <= HealthKitSafetyLimits.maxProjectionItems,
               tombstones.count <= HealthKitSafetyLimits.maxProjectionItems,
               conflicts.count <= HealthKitSafetyLimits.maxConflictItems,
+              quarantine.isWithinSafetyBounds,
               committedAt.timeIntervalSinceReferenceDate.isFinite else {
             throw HealthKitAnchorStoreError.invalidProjection
         }
@@ -374,8 +400,10 @@ public actor HealthKitAnchorStore {
             tombstones: tombstones,
             sourceIndex: rebuiltSourceIndex,
             conflicts: conflicts,
+            quarantine: quarantine,
             anchorArchive: archive,
             lastCommittedAt: committedAt,
+            lastObservedAt: observations.map(\.endDate).max(),
             syncState: syncState
         )
         let projections = envelope.projections.filter { $0.metric != metric } + [projection]
@@ -398,8 +426,10 @@ public actor HealthKitAnchorStore {
             tombstones: current.tombstones,
             sourceIndex: current.sourceIndex,
             conflicts: current.conflicts,
+            quarantine: current.quarantine,
             anchorArchive: nil,
             lastCommittedAt: committedAt,
+            lastObservedAt: current.lastObservedAt,
             syncState: current.syncState == .conflict ||
                 !current.conflicts.isEmpty ||
                 current.sourceIndex.values.contains(.conflict) ? .conflict : .neverSynced
@@ -433,8 +463,10 @@ public actor HealthKitAnchorStore {
             tombstones: current.tombstones,
             sourceIndex: current.sourceIndex,
             conflicts: current.conflicts,
+            quarantine: current.quarantine,
             anchorArchive: envelope.projections.first(where: { $0.metric == metric })?.anchorArchive,
             lastCommittedAt: committedAt,
+            lastObservedAt: current.lastObservedAt,
             syncState: .fullResyncRequired
         )
         let nextEnvelope = HealthKitAnchorStoreEnvelope(
@@ -494,8 +526,10 @@ public actor HealthKitAnchorStore {
                 tombstones: projection.tombstones,
                 sourceIndex: projection.sourceIndex,
                 conflicts: projection.conflicts,
+                quarantine: projection.quarantine,
                 anchorArchive: projection.anchorArchive,
                 lastCommittedAt: projection.lastCommittedAt ?? now,
+                lastObservedAt: projection.lastObservedAt,
                 syncState: .fullResyncRequired
             ))
         }

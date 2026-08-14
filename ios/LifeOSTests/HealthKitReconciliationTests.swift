@@ -37,7 +37,8 @@ final class HealthKitReconciliationTests: XCTestCase {
         deletions: [HealthKitDeletionTombstone] = [],
         anchorByte: UInt8 = 1,
         observedAt: Date? = nil,
-        partial: Bool = false
+        partial: Bool = false,
+        quarantineDiagnostics: [HealthKitQuarantineDiagnostic] = []
     ) throws -> HealthKitMetricSyncInput {
         try HealthKitMetricSyncInput(
             metric: .water,
@@ -45,7 +46,8 @@ final class HealthKitReconciliationTests: XCTestCase {
             deletions: deletions,
             nextAnchor: try testAnchor(anchorByte),
             observedAt: observedAt ?? now,
-            partial: partial
+            partial: partial,
+            quarantineDiagnostics: quarantineDiagnostics
         )
     }
 
@@ -111,6 +113,49 @@ final class HealthKitReconciliationTests: XCTestCase {
         XCTAssertTrue(state.observations.isEmpty)
     }
 
+    func testAmbiguousEmptyReadPreservesExistingQuarantineState() async throws {
+        let diagnostic = try HealthKitQuarantineDiagnostic(
+            metric: .water,
+            reason: .invalidValue,
+            provenance: .unattributed
+        )
+        let quarantine = HealthKitQuarantineState(
+            totalCount: 1,
+            diagnostics: [diagnostic],
+            lastQuarantinedAt: now
+        )
+        let store = HealthKitAnchorStore(persistenceURL: nil)
+        _ = try await store.commit(
+            metric: .water,
+            observations: [],
+            tombstones: [],
+            sourceIndex: [:],
+            conflicts: [],
+            quarantine: quarantine,
+            nextAnchor: try testAnchor(8),
+            syncState: .partial,
+            committedAt: now
+        )
+        let client = SequenceHealthKitClient(batches: [
+            try HealthKitMetricSyncInput(
+                metric: .water,
+                additions: [],
+                deletions: [],
+                nextAnchor: try testAnchor(9),
+                queryCompletedAt: now,
+                readability: .emptyIndeterminate
+            )
+        ])
+        let coordinator = HealthKitReconciliationCoordinator(client: client, store: store, now: { self.now })
+
+        let result = await coordinator.reconcile(metric: .water)
+        let state = await store.snapshot(for: .water)
+
+        XCTAssertEqual(result.state, .readIndeterminate)
+        XCTAssertEqual(state.quarantine, quarantine)
+        XCTAssertEqual(state.anchor, try testAnchor(8))
+    }
+
     func testEstablishedEmptyReadAfterObservedDataCanPersistAnchorAndRemainNonZero() async throws {
         let sample = try observation(uuid: UUID(), value: 250)
         let client = SequenceHealthKitClient(batches: [
@@ -133,6 +178,154 @@ final class HealthKitReconciliationTests: XCTestCase {
         XCTAssertEqual(state.observations.count, 1)
         XCTAssertEqual(state.observations.first?.value, .quantity(try HealthKitQuantityValue(metric: .water, value: 250, unit: .milliliters)))
         XCTAssertEqual(state.anchor, try testAnchor(2))
+    }
+
+    func testPoisonSampleDiagnosticCommitsValidSiblingAndAdvancesAnchor() async throws {
+        let valid = try observation(uuid: UUID(), value: 250)
+        let diagnostic = try HealthKitQuarantineDiagnostic(
+            metric: .water,
+            reason: .invalidValue,
+            provenance: .unattributed
+        )
+        let client = SequenceHealthKitClient(batches: [
+            try input(
+                additions: [valid],
+                anchorByte: 4,
+                quarantineDiagnostics: [diagnostic]
+            )
+        ])
+        let store = HealthKitAnchorStore(persistenceURL: nil)
+        let coordinator = HealthKitReconciliationCoordinator(client: client, store: store, now: { self.now })
+
+        let result = await coordinator.reconcile(metric: .water)
+        let state = await store.snapshot(for: .water)
+
+        XCTAssertEqual(result.completion, .success)
+        XCTAssertEqual(result.state, .partial)
+        XCTAssertEqual(result.insertedCount, 1)
+        XCTAssertEqual(result.quarantinedCount, 1)
+        XCTAssertFalse(result.needsContinuation)
+        XCTAssertTrue(result.diagnosticDescription?.contains("quarantined") == true)
+        XCTAssertEqual(state.observations, [valid])
+        XCTAssertEqual(state.anchor, try testAnchor(4))
+        XCTAssertEqual(state.quarantine.totalCount, 1)
+        XCTAssertEqual(state.quarantine.diagnostics, [diagnostic])
+    }
+
+    func testQuarantineBudgetSaturatesWithoutBlockingValidSiblingOrAnchor() async throws {
+        let existingDiagnostic = try HealthKitQuarantineDiagnostic(
+            metric: .water,
+            reason: .invalidValue,
+            provenance: .unattributed,
+            count: HealthKitSafetyLimits.maxQuarantineCount
+        )
+        let quarantine = HealthKitQuarantineState(
+            totalCount: HealthKitSafetyLimits.maxQuarantineCount,
+            diagnostics: [existingDiagnostic],
+            lastQuarantinedAt: now
+        )
+        let store = HealthKitAnchorStore(persistenceURL: nil)
+        _ = try await store.commit(
+            metric: .water,
+            observations: [],
+            tombstones: [],
+            sourceIndex: [:],
+            conflicts: [],
+            quarantine: quarantine,
+            nextAnchor: try testAnchor(10),
+            syncState: .partial,
+            committedAt: now
+        )
+
+        let valid = try observation(uuid: UUID(), value: 250)
+        let incomingDiagnostic = try HealthKitQuarantineDiagnostic(
+            metric: .water,
+            reason: .futureObservation,
+            provenance: .unattributed,
+            count: 2
+        )
+        let client = SequenceHealthKitClient(batches: [
+            try input(
+                additions: [valid],
+                anchorByte: 11,
+                quarantineDiagnostics: [incomingDiagnostic]
+            )
+        ])
+        let coordinator = HealthKitReconciliationCoordinator(client: client, store: store, now: { self.now })
+
+        let result = await coordinator.reconcile(metric: .water)
+        let state = await store.snapshot(for: .water)
+        let callCount = await client.callCount
+
+        XCTAssertEqual(callCount, 1)
+        XCTAssertEqual(result.completion, .success)
+        XCTAssertEqual(result.insertedCount, 1)
+        XCTAssertEqual(result.quarantinedCount, 2)
+        XCTAssertFalse(result.needsContinuation)
+        XCTAssertEqual(state.observations, [valid])
+        XCTAssertEqual(state.anchor, try testAnchor(11))
+        XCTAssertEqual(state.quarantine.totalCount, HealthKitSafetyLimits.maxQuarantineCount)
+        XCTAssertEqual(state.quarantine.diagnostics, [existingDiagnostic])
+    }
+
+    func testAllPoisonPageAdvancesOnceWithoutContinuationLoop() async throws {
+        let diagnostic = try HealthKitQuarantineDiagnostic(
+            metric: .water,
+            reason: .futureObservation,
+            provenance: .unattributed,
+            count: 2
+        )
+        let client = SequenceHealthKitClient(batches: [
+            try input(
+                additions: [],
+                anchorByte: 5,
+                quarantineDiagnostics: [diagnostic]
+            )
+        ])
+        let store = HealthKitAnchorStore(persistenceURL: nil)
+        let coordinator = HealthKitReconciliationCoordinator(client: client, store: store, now: { self.now })
+
+        let result = await coordinator.reconcile(metric: .water)
+        let state = await store.snapshot(for: .water)
+        let callCount = await client.callCount
+
+        XCTAssertEqual(callCount, 1)
+        XCTAssertEqual(result.completion, .success)
+        XCTAssertEqual(result.state, .partial)
+        XCTAssertEqual(result.quarantinedCount, 2)
+        XCTAssertFalse(result.needsContinuation)
+        XCTAssertTrue(state.observations.isEmpty)
+        XCTAssertEqual(state.anchor, try testAnchor(5))
+        XCTAssertEqual(state.quarantine.totalCount, 2)
+    }
+
+    func testQueryCommitAndNewestObservationDatesRemainSeparate() async throws {
+        let observed = now.addingTimeInterval(-86_400)
+        let sample = try observation(uuid: UUID(), at: observed)
+        let client = SequenceHealthKitClient(batches: [
+            try input(additions: [sample], anchorByte: 6, observedAt: now),
+            try HealthKitMetricSyncInput(
+                metric: .water,
+                additions: [],
+                deletions: [],
+                nextAnchor: try testAnchor(7),
+                queryCompletedAt: now,
+                readability: .established
+            )
+        ])
+        let store = HealthKitAnchorStore(persistenceURL: nil)
+        let coordinator = HealthKitReconciliationCoordinator(client: client, store: store, now: { self.now })
+
+        _ = await coordinator.reconcile(metric: .water)
+        let first = await store.snapshot(for: .water)
+        _ = await coordinator.reconcile(metric: .water)
+        let second = await store.snapshot(for: .water)
+
+        XCTAssertEqual(first.lastCommittedAt, now)
+        XCTAssertEqual(first.lastObservedAt, observed)
+        XCTAssertEqual(second.lastCommittedAt, now)
+        XCTAssertEqual(second.lastObservedAt, observed)
+        XCTAssertEqual(second.anchor, try testAnchor(7))
     }
 
     func testNewUUIDHigherSyncRevisionSupersedesLowerRevisionWithoutDoubleCount() async throws {
