@@ -2769,26 +2769,9 @@ private struct CalendarTimelineEvent: View {
 
     private var eventAccessibilityLabel: String {
         let kindLabel = item.kind == .todo ? "To-do, \(item.status.label)" : item.status.label
-        let zoneSuffix = differsFromCurrentTimeZone ? ", authored in \(item.timeZoneIdentifier ?? "")" : ""
         return "\(item.icon ?? "No icon") \(item.title), \(kindLabel), " +
             "\(CalendarTimelineScale.localizedTimeLabel(for: item.start, calendar: displayCalendar)) to " +
-            "\(CalendarTimelineScale.localizedTimeLabel(for: item.end, calendar: displayCalendar))" + zoneSuffix
-    }
-
-    /// True only when the event carries an explicit authored zone that
-    /// disagrees with the zone this timeline is currently rendering in. A
-    /// floating event (`timeZoneIdentifier == nil`) never shows the badge.
-    private var differsFromCurrentTimeZone: Bool {
-        guard let stored = item.timeZoneIdentifier else { return false }
-        return stored != timeZone.identifier
-    }
-
-    /// A short, unobtrusive abbreviation for the stored zone, e.g. "GMT-5"
-    /// or "CET". Falls back to the trailing identifier component when the
-    /// system cannot resolve an abbreviation.
-    private var timeZoneAbbreviationLabel: String {
-        guard let stored = item.timeZoneIdentifier, let zone = TimeZone(identifier: stored) else { return "" }
-        return zone.abbreviation(for: item.start) ?? stored.components(separatedBy: "/").last ?? stored
+            "\(CalendarTimelineScale.localizedTimeLabel(for: item.end, calendar: displayCalendar))"
     }
 
     @ViewBuilder
@@ -2796,21 +2779,6 @@ private struct CalendarTimelineEvent: View {
         LifeOSIcon(item.status.iconName)
             .frame(width: 14, height: 14)
             .foregroundStyle(.white.opacity(0.78))
-    }
-
-    @ViewBuilder
-    private var timeZoneDifferenceBadge: some View {
-        if differsFromCurrentTimeZone {
-            HStack(spacing: 2) {
-                Image(systemName: "globe")
-                    .font(.system(size: 8, weight: .semibold))
-                Text(timeZoneAbbreviationLabel)
-                    .font(.caption2.monospacedDigit())
-                    .lineLimit(1)
-            }
-            .foregroundStyle(LifeOSTokens.tertiaryText)
-            .accessibilityHidden(true)
-        }
     }
 
     var body: some View {
@@ -2835,15 +2803,12 @@ private struct CalendarTimelineEvent: View {
                             .minimumScaleFactor(0.62)
                             .truncationMode(.tail)
                         if showsSecondaryMetadata {
-                            HStack(spacing: 4) {
-                                Text(eventTimeRangeLabel)
-                                    .font(.caption2.monospacedDigit())
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                    .minimumScaleFactor(0.70)
-                                    .allowsTightening(true)
-                                timeZoneDifferenceBadge
-                            }
+                            Text(eventTimeRangeLabel)
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.70)
+                                .allowsTightening(true)
                         }
                     }
                     Spacer(minLength: 0)
