@@ -62,6 +62,7 @@ public struct CalendarView: View {
 #endif
     @State private var hourHeight: CGFloat = 54
     @State private var gestureStartHourHeight: CGFloat?
+    @State private var routeIsActive = false
     @Binding private var requestNewEvent: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Namespace private var calendarMonthNamespace
@@ -158,6 +159,8 @@ public struct CalendarView: View {
                 timedCreationPreview = nil
             }
         }
+        .onAppear { routeIsActive = true }
+        .onDisappear { routeIsActive = false }
     }
 
 #if os(macOS)
@@ -257,6 +260,7 @@ public struct CalendarView: View {
 #else
     private var mobileLayout: some View {
         calendarContent
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .refreshable { await coordinator.manualRefresh() }
             .background(LifeOSTokens.canvas)
             .sheet(item: $editorPresentation) { presentation in
@@ -359,8 +363,14 @@ public struct CalendarView: View {
                             monthNamespace: reduceMotion ? nil : calendarMonthNamespace,
                             monthExpanded: monthExpanded,
                             monthSelectedDate: headerDate,
-                            reduceMotion: reduceMotion
+                            reduceMotion: reduceMotion,
+                            routeIsActive: routeIsActive
                         )
+                        // The timeline owns a finite internal vertical
+                        // ScrollView. Give it the remaining route height so
+                        // GeometryReader computes a real viewport instead of
+                        // laying the 24-hour content into a zero-height page.
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     }
 #if os(iOS)
                     .simultaneousGesture(

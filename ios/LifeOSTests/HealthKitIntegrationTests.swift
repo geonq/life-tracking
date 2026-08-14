@@ -57,6 +57,22 @@ final class HealthKitIntegrationTests: XCTestCase {
         await waitUntil { client.startCalls == 1 }
     }
 
+    func testLaunchStatusInstallsAuthorizedObserversBeforeSceneBecomesActive() async {
+        let client = RecordingHealthKitIntegrationClient()
+        client.statusResult = .init(state: .readIndeterminate)
+        let controller = HealthKitIntegrationController(client: client)
+
+        controller.applicationLaunched()
+        await waitUntil {
+            client.startCalls == 1 &&
+                controller.snapshot.backgroundDeliveryState == .enabled
+        }
+
+        XCTAssertFalse(controller.snapshot.isActive)
+        XCTAssertEqual(client.authorizationCalls, 0)
+        XCTAssertEqual(client.backgroundConfigurationCalls, 1)
+    }
+
     func testRequestRequiredRemainsGatedWithoutStartingObservers() async {
         let client = RecordingHealthKitIntegrationClient()
         client.statusResult = .init(state: .requestRequired)
@@ -227,7 +243,7 @@ final class HealthKitIntegrationTests: XCTestCase {
         XCTAssertEqual(client.authorizationCalls, 1)
     }
 
-    func testObserversAreActiveOnlyAndRestartAfterBackground() async {
+    func testObserversPersistAcrossBackgroundAndForegroundRefreshesAgain() async {
         let client = RecordingHealthKitIntegrationClient()
         client.authorizationResult = HealthKitAuthorizationReport(state: .requestRequired, promptCompleted: true)
         let controller = HealthKitIntegrationController(client: client)
@@ -243,12 +259,13 @@ final class HealthKitIntegrationTests: XCTestCase {
         XCTAssertEqual(client.startCalls, 1)
 
         controller.appInactive()
-        XCTAssertEqual(client.stopCalls, 1)
+        XCTAssertEqual(client.stopCalls, 0)
         XCTAssertFalse(controller.snapshot.isActive)
 
         controller.appActive()
         await waitUntil { client.startCalls == 2 }
         XCTAssertTrue(controller.snapshot.isActive)
+        XCTAssertEqual(client.backgroundConfigurationCalls, 1)
     }
 
     func testStaleObserverCompletionIsIgnoredAfterRestart() async {
@@ -387,7 +404,7 @@ final class HealthKitIntegrationTests: XCTestCase {
         XCTAssertEqual(controller.snapshot.observerCompletionSequence, 0)
     }
 
-    func testInactiveSystemSheetPreservesAuthorizationCompletionUntilActive() async {
+    func testInactiveSystemSheetCompletionInstallsBackgroundObserversImmediately() async {
         let client = RecordingHealthKitIntegrationClient()
         client.holdAuthorization = true
         let controller = HealthKitIntegrationController(client: client)
@@ -404,10 +421,11 @@ final class HealthKitIntegrationTests: XCTestCase {
         _ = await request.value
         XCTAssertTrue(controller.snapshot.explicitRequestCompleted)
         XCTAssertEqual(controller.snapshot.authorizationState, .readIndeterminate)
-        XCTAssertEqual(client.startCalls, 0)
+        await waitUntil { client.startCalls == 1 }
+        XCTAssertFalse(controller.snapshot.isActive)
 
         controller.appActive()
-        await waitUntil { client.startCalls == 1 }
+        await waitUntil { client.startCalls == 2 }
     }
 
     func testSuccessfulAuthorizationRetryClearsPriorError() async {
@@ -449,6 +467,45 @@ final class HealthKitIntegrationTests: XCTestCase {
         XCTAssertNil(controller.snapshot.lastObserverCompletion)
     }
 
+    func testRequestRequiredNeverRegistersOrConfiguresBackgroundDelivery() async {
+        let client = RecordingHealthKitIntegrationClient()
+        client.statusResult = .init(state: .requestRequired)
+        let controller = HealthKitIntegrationController(client: client)
+
+        controller.appActive()
+        await controller.refreshStatus()
+        await Task.yield()
+
+        XCTAssertEqual(client.startCalls, 0)
+        XCTAssertEqual(client.backgroundConfigurationCalls, 0)
+        XCTAssertEqual(controller.snapshot.backgroundDeliveryState, .notConfigured)
+    }
+
+    func testBackgroundDeliveryFailureIsReportedAndRetriedOnNextActivation() async {
+        let client = RecordingHealthKitIntegrationClient()
+        client.statusResult = .init(state: .readIndeterminate)
+        client.backgroundDeliveryResult = .failed(HealthKitIntegrationController.supportedMetrics)
+        let controller = HealthKitIntegrationController(client: client)
+
+        controller.appActive()
+        await controller.refreshStatus()
+        await waitUntil { controller.snapshot.backgroundDeliveryState == .failed }
+
+        XCTAssertEqual(
+            controller.snapshot.backgroundDeliveryErrorDescription,
+            "HealthKit background delivery could not be enabled"
+        )
+        XCTAssertEqual(client.backgroundConfigurationCalls, 1)
+
+        client.backgroundDeliveryResult = .enabled(HealthKitIntegrationController.supportedMetrics)
+        controller.appInactive()
+        controller.appActive()
+        await waitUntil { controller.snapshot.backgroundDeliveryState == .enabled }
+
+        XCTAssertEqual(client.backgroundConfigurationCalls, 2)
+        XCTAssertNil(controller.snapshot.backgroundDeliveryErrorDescription)
+    }
+
     func testDefaultPersistenceURLIsAppPrivateLifeOSProjectionPath() {
         let controller = HealthKitIntegrationController()
         let url = controller.persistenceURL
@@ -484,9 +541,13 @@ private final class RecordingHealthKitIntegrationClient: HealthKitIntegrationCli
     var availabilityCalls = 0
     var statusCalls = 0
     var authorizationCalls = 0
+    var backgroundConfigurationCalls = 0
     var startCalls = 0
     var stopCalls = 0
     var callbacks: [(HealthKitObserverCompletion) -> Void] = []
+    var backgroundDeliveryResult = HealthKitBackgroundDeliveryReport.enabled(
+        HealthKitIntegrationController.supportedMetrics
+    )
     private var authorizationContinuation: CheckedContinuation<HealthKitAuthorizationReport, Never>?
     private var statusContinuation: CheckedContinuation<HealthKitAuthorizationReport, Never>?
 
@@ -515,6 +576,14 @@ private final class RecordingHealthKitIntegrationClient: HealthKitIntegrationCli
             }
         }
         return authorizationResult
+    }
+
+    func configureBackgroundDelivery(
+        metrics: [HealthKitMetricID]
+    ) async -> HealthKitBackgroundDeliveryReport {
+        XCTAssertEqual(metrics, HealthKitIntegrationController.supportedMetrics)
+        backgroundConfigurationCalls += 1
+        return backgroundDeliveryResult
     }
 
     func startObservers(

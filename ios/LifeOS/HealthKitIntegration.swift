@@ -22,6 +22,8 @@ public struct HealthKitIntegrationSnapshot: Equatable, Sendable {
     /// diagnostics, but `.success` is Equatable, so consumers that must react
     /// to every durable update observe this sequence instead.
     public let observerCompletionSequence: UInt64
+    public let backgroundDeliveryState: HealthKitBackgroundDeliveryState
+    public let backgroundDeliveryErrorDescription: String?
     public let errorDescription: String?
 
     public init(
@@ -31,6 +33,8 @@ public struct HealthKitIntegrationSnapshot: Equatable, Sendable {
         explicitRequestCompleted: Bool = false,
         lastObserverCompletion: HealthKitObserverCompletion? = nil,
         observerCompletionSequence: UInt64 = 0,
+        backgroundDeliveryState: HealthKitBackgroundDeliveryState = .notConfigured,
+        backgroundDeliveryErrorDescription: String? = nil,
         errorDescription: String? = nil
     ) {
         self.authorizationState = authorizationState
@@ -39,6 +43,8 @@ public struct HealthKitIntegrationSnapshot: Equatable, Sendable {
         self.explicitRequestCompleted = explicitRequestCompleted
         self.lastObserverCompletion = lastObserverCompletion
         self.observerCompletionSequence = observerCompletionSequence
+        self.backgroundDeliveryState = backgroundDeliveryState
+        self.backgroundDeliveryErrorDescription = backgroundDeliveryErrorDescription
         self.errorDescription = errorDescription
     }
 
@@ -54,6 +60,9 @@ public protocol HealthKitIntegrationClient {
     func availabilityState() -> HealthKitAuthorizationState
     func requestStatus(for metrics: [HealthKitMetricID]) async -> HealthKitAuthorizationReport
     func requestReadAuthorization(for metrics: [HealthKitMetricID]) async -> HealthKitAuthorizationReport
+    func configureBackgroundDelivery(
+        metrics: [HealthKitMetricID]
+    ) async -> HealthKitBackgroundDeliveryReport
     func startObservers(
         metrics: [HealthKitMetricID],
         onUpdate: @escaping @Sendable (HealthKitObserverCompletion) -> Void
@@ -70,6 +79,7 @@ public struct HealthKitIntegrationClientClosures: HealthKitIntegrationClient {
     private let availability: () -> HealthKitAuthorizationState
     private let status: ([HealthKitMetricID]) async -> HealthKitAuthorizationReport
     private let request: ([HealthKitMetricID]) async -> HealthKitAuthorizationReport
+    private let configureBackground: ([HealthKitMetricID]) async -> HealthKitBackgroundDeliveryReport
     private let start: ObserverStarter
     private let stop: () -> Void
 
@@ -77,12 +87,16 @@ public struct HealthKitIntegrationClientClosures: HealthKitIntegrationClient {
         availability: @escaping () -> HealthKitAuthorizationState,
         status: @escaping ([HealthKitMetricID]) async -> HealthKitAuthorizationReport,
         request: @escaping ([HealthKitMetricID]) async -> HealthKitAuthorizationReport,
+        configureBackground: @escaping ([HealthKitMetricID]) async -> HealthKitBackgroundDeliveryReport = {
+            .enabled($0)
+        },
         start: @escaping ObserverStarter,
         stop: @escaping () -> Void
     ) {
         self.availability = availability
         self.status = status
         self.request = request
+        self.configureBackground = configureBackground
         self.start = start
         self.stop = stop
     }
@@ -97,6 +111,12 @@ public struct HealthKitIntegrationClientClosures: HealthKitIntegrationClient {
         await request(metrics)
     }
 
+    public func configureBackgroundDelivery(
+        metrics: [HealthKitMetricID]
+    ) async -> HealthKitBackgroundDeliveryReport {
+        await configureBackground(metrics)
+    }
+
     public func startObservers(
         metrics: [HealthKitMetricID],
         onUpdate: @escaping ObserverUpdate
@@ -109,8 +129,10 @@ public struct HealthKitIntegrationClientClosures: HealthKitIntegrationClient {
 
 /// iOS-only permission/lifecycle controller. It deliberately has no sample
 /// query in init or status refresh; reads begin only after HealthKit reports
-/// that a request is unnecessary or an explicit prompt has completed, and the
-/// app is in the foreground.
+/// that a request is unnecessary or an explicit prompt has completed. Once
+/// that gate opens, observers stay registered across scene backgrounding so
+/// HealthKit can reactivate the app. Foreground transitions still request a
+/// bounded refresh through the idempotent production bridge.
 @MainActor
 public final class HealthKitIntegrationController: ObservableObject {
     public static let supportedMetrics: [HealthKitMetricID] = HealthKitMetricID.allCases.filter {
@@ -132,8 +154,10 @@ public final class HealthKitIntegrationController: ObservableObject {
 
     private let client: (any HealthKitIntegrationClient)?
     private var generation: UInt64 = 0
+    private var observerCallbackOperationID: UInt64 = 0
     private var statusOperationID: UInt64 = 0
     private var requestOperationID: UInt64 = 0
+    private var backgroundDeliveryOperationID: UInt64 = 0
     private var explicitRequestCompleted = false
     /// Execution readiness comes from the current HealthKit availability/
     /// request result, not from the local prompt-history flag. HealthKit does
@@ -144,6 +168,7 @@ public final class HealthKitIntegrationController: ObservableObject {
     private var sessionStarted = false
     private var requestTask: Task<HealthKitAuthorizationReport, Never>?
     private var statusTask: Task<HealthKitAuthorizationReport, Never>?
+    private var backgroundDeliveryTask: Task<HealthKitBackgroundDeliveryReport, Never>?
 
     public init(
         client: (any HealthKitIntegrationClient)? = nil,
@@ -288,29 +313,38 @@ public final class HealthKitIntegrationController: ObservableObject {
         await requestReadAuthorization()
     }
 
-    /// Marks the app foregrounded. Repeated active notifications do not
-    /// create another observer/reconciliation session.
+    /// Called from the app initializer so an already-authorized installation
+    /// recreates its long-running observer queries during launch, including a
+    /// HealthKit background activation where no scene becomes active first.
+    /// The status call never prompts and no observer is installed while the
+    /// request status still requires authorization.
+    public func applicationLaunched() {
+        guard !usesVisualFixtures else { return }
+        Task { @MainActor [weak self] in
+            await self?.refreshStatus()
+        }
+    }
+
+    /// Marks the app foregrounded. A transition from inactive requests a fresh
+    /// bounded reconciliation while the production bridge keeps observer
+    /// registration idempotent.
     public func appActive() {
         guard snapshot.lifecycle != .active else { return }
-        generation &+= 1
-        statusOperationID &+= 1
         publish(lifecycle: .active, lastObserverCompletion: .replace(nil))
-        startSessionIfEligible()
+        startSessionIfEligible(refreshExisting: true)
     }
 
     public func applicationDidBecomeActive() { appActive() }
 
-    /// Stops foreground observation while preserving an in-flight permission
-    /// request. iOS makes a scene inactive while its system authorization
-    /// sheet is visible; treating that transition as background would discard
-    /// the user's response.
+    /// Scene inactivity is not observer teardown. HealthKit background
+    /// delivery requires the long-running observer queries to survive while
+    /// the app is inactive or suspended. Permission requests also remain valid
+    /// while the system sheet temporarily inactivates the scene.
     public func appInactive() {
-        generation &+= 1
+        observerCallbackOperationID &+= 1
         statusOperationID &+= 1
         statusTask?.cancel()
         statusTask = nil
-        sessionStarted = false
-        if !usesVisualFixtures { client?.stopAllObservers() }
         publish(lifecycle: .inactive, lastObserverCompletion: .replace(nil))
     }
 
@@ -318,32 +352,73 @@ public final class HealthKitIntegrationController: ObservableObject {
     /// late completion cannot mutate the background or a later session.
     public func applicationDidEnterBackground() {
         appInactive()
-        generation &+= 1
         requestOperationID &+= 1
         requestTask?.cancel()
         requestTask = nil
         publish(isRequestInFlight: false)
     }
 
-    private func startSessionIfEligible() {
+    private func startSessionIfEligible(refreshExisting: Bool = false) {
         guard !usesVisualFixtures,
-              snapshot.lifecycle == .active,
               executionAuthorizationReady,
               snapshot.authorizationState == .readIndeterminate,
-              !sessionStarted,
               let client else { return }
 
-        sessionStarted = true
+        guard !sessionStarted || (refreshExisting && snapshot.lifecycle == .active) else {
+            configureBackgroundDeliveryIfNeeded(client: client)
+            return
+        }
+
+        if !sessionStarted {
+            generation &+= 1
+            sessionStarted = true
+        }
         let token = generation
         let metrics = Self.supportedMetrics
-        // Registration is deliberately synchronous and bounded. This makes
-        // stop-on-inactive atomic: no ignored Task cancellation can register
-        // a stale observer after `stopAllObservers()` returns. Only observer
-        // reconciliation callbacks are asynchronous.
+        // Registration remains synchronous, and the production bridge makes
+        // repeated active refreshes idempotent at the HKObserverQuery layer.
+        observerCallbackOperationID &+= 1
+        let callbackOperation = observerCallbackOperationID
         client.startObservers(metrics: metrics) { [weak self] completion in
             Task { @MainActor [weak self] in
-                self?.receiveObserverCompletion(completion, generation: token)
+                self?.receiveObserverCompletion(
+                    completion,
+                    generation: token,
+                    callbackOperation: callbackOperation
+                )
             }
+        }
+        configureBackgroundDeliveryIfNeeded(client: client)
+    }
+
+    private func configureBackgroundDeliveryIfNeeded(
+        client: any HealthKitIntegrationClient
+    ) {
+        guard backgroundDeliveryTask == nil,
+              snapshot.backgroundDeliveryState != .enabled else { return }
+
+        let token = generation
+        let metrics = Self.supportedMetrics
+        publish(
+            backgroundDeliveryState: .enabling,
+            backgroundDeliveryErrorDescription: .replace(nil)
+        )
+        backgroundDeliveryOperationID &+= 1
+        let currentOperation = backgroundDeliveryOperationID
+        let task = Task { @MainActor in
+            await client.configureBackgroundDelivery(metrics: metrics)
+        }
+        backgroundDeliveryTask = task
+        Task { @MainActor [weak self] in
+            let report = await task.value
+            guard let self,
+                  currentOperation == self.backgroundDeliveryOperationID,
+                  token == self.generation else { return }
+            self.backgroundDeliveryTask = nil
+            self.publish(
+                backgroundDeliveryState: report.state,
+                backgroundDeliveryErrorDescription: .replace(report.errorDescription)
+            )
         }
     }
 
@@ -353,12 +428,22 @@ public final class HealthKitIntegrationController: ObservableObject {
     private func stopSessionIfRunning() {
         guard sessionStarted else { return }
         generation &+= 1
+        observerCallbackOperationID &+= 1
+        backgroundDeliveryOperationID &+= 1
         sessionStarted = false
+        backgroundDeliveryTask?.cancel()
+        backgroundDeliveryTask = nil
         client?.stopAllObservers()
     }
 
-    private func receiveObserverCompletion(_ completion: HealthKitObserverCompletion, generation token: UInt64) {
-        guard token == generation, snapshot.lifecycle == .active else { return }
+    private func receiveObserverCompletion(
+        _ completion: HealthKitObserverCompletion,
+        generation token: UInt64,
+        callbackOperation: UInt64
+    ) {
+        guard token == generation,
+              callbackOperation == observerCallbackOperationID,
+              snapshot.lifecycle == .active else { return }
         let error: String?
         switch completion {
         case .failure(let message), .partialSuccess(let message):
@@ -392,6 +477,8 @@ public final class HealthKitIntegrationController: ObservableObject {
         explicitRequestCompleted: Bool? = nil,
         lastObserverCompletion: OptionalReplacement<HealthKitObserverCompletion> = .preserve,
         observerCompletionSequence: UInt64? = nil,
+        backgroundDeliveryState: HealthKitBackgroundDeliveryState? = nil,
+        backgroundDeliveryErrorDescription: OptionalReplacement<String> = .preserve,
         errorDescription: OptionalReplacement<String> = .preserve
     ) {
         let old = snapshot
@@ -405,6 +492,11 @@ public final class HealthKitIntegrationController: ObservableObject {
         case .preserve: error = old.errorDescription
         case .replace(let value): error = value
         }
+        let backgroundError: String?
+        switch backgroundDeliveryErrorDescription {
+        case .preserve: backgroundError = old.backgroundDeliveryErrorDescription
+        case .replace(let value): backgroundError = value
+        }
         snapshot = HealthKitIntegrationSnapshot(
             authorizationState: authorizationState ?? old.authorizationState,
             lifecycle: lifecycle ?? old.lifecycle,
@@ -412,6 +504,8 @@ public final class HealthKitIntegrationController: ObservableObject {
             explicitRequestCompleted: explicitRequestCompleted ?? old.explicitRequestCompleted,
             lastObserverCompletion: observerCompletion,
             observerCompletionSequence: observerCompletionSequence ?? old.observerCompletionSequence,
+            backgroundDeliveryState: backgroundDeliveryState ?? old.backgroundDeliveryState,
+            backgroundDeliveryErrorDescription: backgroundError,
             errorDescription: error
         )
     }

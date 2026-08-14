@@ -58,6 +58,57 @@ public struct HealthKitAuthorizationReport: Equatable, Sendable {
     }
 }
 
+/// The cadence LifeOS asks HealthKit to use when activating the app for a
+/// supported sample type. This is a request to the system, not a delivery SLA:
+/// iOS may coalesce updates and enforces a minimum hourly cadence for types
+/// such as step count.
+public enum HealthKitBackgroundDeliveryCadence: String, Equatable, Sendable {
+    case immediate
+    case hourly
+}
+
+public enum HealthKitBackgroundDeliveryState: String, Equatable, Sendable {
+    case notConfigured
+    case enabling
+    case enabled
+    case partial
+    case failed
+}
+
+/// Sanitized result of configuring HealthKit activation. It carries metric
+/// identifiers only; provider errors and HealthKit payloads never cross the
+/// production bridge into UI state or logs.
+public struct HealthKitBackgroundDeliveryReport: Equatable, Sendable {
+    public let state: HealthKitBackgroundDeliveryState
+    public let enabledMetrics: [HealthKitMetricID]
+    public let failedMetrics: [HealthKitMetricID]
+    public let errorDescription: String?
+
+    public init(
+        state: HealthKitBackgroundDeliveryState,
+        enabledMetrics: [HealthKitMetricID] = [],
+        failedMetrics: [HealthKitMetricID] = [],
+        errorDescription: String? = nil
+    ) {
+        self.state = state
+        self.enabledMetrics = enabledMetrics
+        self.failedMetrics = failedMetrics
+        self.errorDescription = errorDescription
+    }
+
+    public static func enabled(_ metrics: [HealthKitMetricID]) -> Self {
+        Self(state: .enabled, enabledMetrics: metrics)
+    }
+
+    public static func failed(_ metrics: [HealthKitMetricID]) -> Self {
+        Self(
+            state: .failed,
+            failedMetrics: metrics,
+            errorDescription: "HealthKit background delivery could not be enabled"
+        )
+    }
+}
+
 #if os(iOS) && canImport(HealthKit)
 private final class HealthKitAnchoredQueryState<Value: Sendable>: @unchecked Sendable {
     private let lock = NSLock()
@@ -254,6 +305,25 @@ public final class LifeOSHealthKitAdapter: @unchecked Sendable, HealthKitReconci
         metric != .alcoholicBeverages
     }
 
+    /// High-volume physiological and cumulative signals use an hourly wake
+    /// request to bound energy/CPU cost. Discrete user-entered and episode
+    /// samples can request immediate activation. Both remain best-effort under
+    /// HealthKit's documented scheduling rules.
+    public static func backgroundDeliveryCadence(
+        for metric: HealthKitMetricID
+    ) -> HealthKitBackgroundDeliveryCadence? {
+        switch metric {
+        case .alcoholicBeverages:
+            return nil
+        case .water, .caffeine, .bodyMass, .bodyFatPercentage, .leanBodyMass,
+             .sleep, .workout:
+            return .immediate
+        case .heartRate, .restingHeartRate, .heartRateVariabilitySDNN,
+             .oxygenSaturation, .vo2Max, .activeEnergy, .steps, .respiratoryRate:
+            return .hourly
+        }
+    }
+
     public var isHealthDataAvailable: Bool {
         HKHealthStore.isHealthDataAvailable()
     }
@@ -311,6 +381,49 @@ public final class LifeOSHealthKitAdapter: @unchecked Sendable, HealthKitReconci
             }
             return HealthKitAuthorizationReport(state: state, promptCompleted: false, errorDescription: error.localizedDescription)
         }
+    }
+
+    /// Configures background activation only for the read types in LifeOS's
+    /// reviewed HealthKit contract. This does not request authorization and it
+    /// never asks HealthKit for write access.
+    public func configureBackgroundDelivery(
+        for metrics: [HealthKitMetricID]
+    ) async -> HealthKitBackgroundDeliveryReport {
+        guard isHealthDataAvailable else { return .failed(metrics) }
+
+        var enabled: [HealthKitMetricID] = []
+        var failed: [HealthKitMetricID] = []
+        enabled.reserveCapacity(metrics.count)
+        failed.reserveCapacity(metrics.count)
+
+        for metric in metrics {
+            guard let cadence = Self.backgroundDeliveryCadence(for: metric),
+                  let type = try? objectType(for: metric) else {
+                failed.append(metric)
+                continue
+            }
+            do {
+                try await store.enableBackgroundDelivery(
+                    for: type,
+                    frequency: cadence.healthKitFrequency
+                )
+                enabled.append(metric)
+            } catch {
+                failed.append(metric)
+            }
+        }
+
+        if failed.isEmpty {
+            return .enabled(enabled)
+        }
+        return HealthKitBackgroundDeliveryReport(
+            state: enabled.isEmpty ? .failed : .partial,
+            enabledMetrics: enabled,
+            failedMetrics: failed,
+            errorDescription: enabled.isEmpty
+                ? "HealthKit background delivery could not be enabled"
+                : "HealthKit background delivery is unavailable for some data types"
+        )
     }
 
     public func writeAuthorizationStatus(for metric: HealthKitMetricID) -> HealthKitAuthorizationState {
@@ -399,15 +512,15 @@ public final class LifeOSHealthKitAdapter: @unchecked Sendable, HealthKitReconci
         })
     }
 
-    /// Installs a background observer. The reconciler performs the anchored
-    /// read and durable commit before this completion is called. The gate in
-    /// HealthKitReconciliation guarantees the system callback is invoked once
-    /// even when the query fails or the client times out.
+    /// Installs a background observer. Each callback performs at most one
+    /// bounded page and durable commit before calling HealthKit's completion.
+    /// If more pages remain, they drain on a utility task after the system has
+    /// been released. The once-only gate still covers error/timeout races.
     @discardableResult
     public func startObserver(
         for metric: HealthKitMetricID,
         reconciler: HealthKitReconciliationCoordinator,
-        timeout: TimeInterval = 30,
+        timeout: TimeInterval = 10,
         completion: @escaping @Sendable (HealthKitObserverCompletion) -> Void
     ) throws -> HKObserverQuery {
         guard isHealthDataAvailable else { throw HealthKitAdapterError.unavailable }
@@ -433,9 +546,27 @@ public final class LifeOSHealthKitAdapter: @unchecked Sendable, HealthKitReconci
             let taskState = HealthKitObserverTaskState()
             let callbackID = UUID()
             let reconciliationTask = Task {
-                let result = await reconciler.reconcile(metric: metric)
+                let report = await reconciler.reconcileInitialPages(metrics: [metric])
                 queryState.unregisterCancellation(id: callbackID)
-                gate.finish(result.completion, completion: healthKitCompletion, report: completion)
+                gate.finish(report.completion, completion: healthKitCompletion, report: completion)
+
+                let pendingMetrics = report.results
+                    .filter(\.needsContinuation)
+                    .map(\.metric)
+                guard !pendingMetrics.isEmpty,
+                      !Task.isCancelled,
+                      queryState.beginCallback() else { return }
+
+                let remainderID = UUID()
+                let remainderTask = Task(priority: .utility) {
+                    let remainder = await reconciler.reconcile(metrics: pendingMetrics)
+                    queryState.unregisterCancellation(id: remainderID)
+                    guard !Task.isCancelled, queryState.beginCallback() else { return }
+                    completion(remainder.completion)
+                }
+                queryState.registerCancellation(id: remainderID) {
+                    remainderTask.cancel()
+                }
             }
             taskState.set(reconciliationTask)
             queryState.setTaskState(taskState)
@@ -806,6 +937,15 @@ public final class LifeOSHealthKitAdapter: @unchecked Sendable, HealthKitReconci
     }
 }
 
+private extension HealthKitBackgroundDeliveryCadence {
+    var healthKitFrequency: HKUpdateFrequency {
+        switch self {
+        case .immediate: .immediate
+        case .hourly: .hourly
+        }
+    }
+}
+
 #else
 
 /// macOS and non-iOS builds deliberately expose an unavailable adapter rather
@@ -817,10 +957,17 @@ public final class LifeOSHealthKitAdapter: @unchecked Sendable, HealthKitReconci
         metric != .alcoholicBeverages
     }
 
+    public static func backgroundDeliveryCadence(
+        for metric: HealthKitMetricID
+    ) -> HealthKitBackgroundDeliveryCadence? {
+        metric == .alcoholicBeverages ? nil : .hourly
+    }
+
     public var isHealthDataAvailable: Bool { false }
     public func availabilityState() -> HealthKitAuthorizationState { .unavailable }
     public func requestStatus(for metrics: [HealthKitMetricID]) async -> HealthKitAuthorizationReport { HealthKitAuthorizationReport(state: .unavailable) }
     public func requestReadAuthorization(for metrics: [HealthKitMetricID]) async -> HealthKitAuthorizationReport { HealthKitAuthorizationReport(state: .unavailable) }
+    public func configureBackgroundDelivery(for metrics: [HealthKitMetricID]) async -> HealthKitBackgroundDeliveryReport { .failed(metrics) }
     public func writeAuthorizationStatus(for metric: HealthKitMetricID) -> HealthKitAuthorizationState { .unavailable }
     public func changes(for metric: HealthKitMetricID, from anchor: HealthKitOpaqueAnchor?) async throws -> HealthKitMetricSyncInput { throw HealthKitAdapterError.unavailable }
 

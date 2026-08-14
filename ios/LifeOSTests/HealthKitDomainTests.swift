@@ -77,6 +77,20 @@ final class HealthKitDomainTests: XCTestCase {
         XCTAssertFalse(HealthKitMetricID.allCases.contains { $0.rawValue.localizedCaseInsensitiveContains("bac") })
     }
 
+    func testBackgroundDeliveryCadenceIsBoundedAndExcludesUnsupportedAlcohol() {
+        XCTAssertNil(LifeOSHealthKitAdapter.backgroundDeliveryCadence(for: .alcoholicBeverages))
+        XCTAssertEqual(LifeOSHealthKitAdapter.backgroundDeliveryCadence(for: .steps), .hourly)
+        XCTAssertEqual(LifeOSHealthKitAdapter.backgroundDeliveryCadence(for: .heartRate), .hourly)
+        XCTAssertEqual(LifeOSHealthKitAdapter.backgroundDeliveryCadence(for: .sleep), .immediate)
+        XCTAssertEqual(LifeOSHealthKitAdapter.backgroundDeliveryCadence(for: .workout), .immediate)
+        let supported = HealthKitMetricID.allCases.filter { $0 != .alcoholicBeverages }
+        XCTAssertTrue(
+            supported.allSatisfy {
+                LifeOSHealthKitAdapter.backgroundDeliveryCadence(for: $0) != nil
+            }
+        )
+    }
+
     func testSyncVersionIsUsedAndUUIDFallbackIsStable() throws {
         let sync = try HealthKitSampleRevision(syncVersion: 7)
         XCTAssertEqual(sync, .syncVersion(7))

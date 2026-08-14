@@ -12,6 +12,7 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
     private let availability: () -> HealthKitAuthorizationState
     private let status: ([HealthKitMetricID]) async -> HealthKitAuthorizationReport
     private let request: ([HealthKitMetricID]) async -> HealthKitAuthorizationReport
+    private let configureBackground: ([HealthKitMetricID]) async -> HealthKitBackgroundDeliveryReport
     private let registerObserver: (HealthKitMetricID, @escaping ObserverUpdate) throws -> Void
     private let stopObservers: () -> Void
     private let reconcile: ([HealthKitMetricID]) async -> HealthKitReconciliationReport
@@ -24,6 +25,11 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
     /// call, so its result cannot otherwise know that an earlier page already
     /// committed.
     private var sessionHasDurableCommit = false
+    private var observersRegistered = false
+    private var observerUpdate: ObserverUpdate?
+    private var cachedBackgroundDeliveryReport: HealthKitBackgroundDeliveryReport?
+    private var backgroundDeliveryTask: Task<HealthKitBackgroundDeliveryReport, Never>?
+    private var backgroundDeliveryOperationID: UInt64 = 0
     private var reconciliationTask: Task<Void, Never>?
     private var reconciliationRemainderTask: Task<Void, Never>?
 
@@ -37,6 +43,9 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
             availability: { adapter.availabilityState() },
             status: { metrics in await adapter.requestStatus(for: metrics) },
             request: { metrics in await adapter.requestReadAuthorization(for: metrics) },
+            configureBackground: { metrics in
+                await adapter.configureBackgroundDelivery(for: metrics)
+            },
             registerObserver: { metric, update in
                 _ = try adapter.startObserver(for: metric, reconciler: coordinator, completion: update)
             },
@@ -69,6 +78,9 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
         availability: @escaping () -> HealthKitAuthorizationState,
         status: @escaping ([HealthKitMetricID]) async -> HealthKitAuthorizationReport,
         request: @escaping ([HealthKitMetricID]) async -> HealthKitAuthorizationReport,
+        configureBackground: @escaping ([HealthKitMetricID]) async -> HealthKitBackgroundDeliveryReport = {
+            .enabled($0)
+        },
         registerObserver: @escaping (HealthKitMetricID, @escaping ObserverUpdate) throws -> Void,
         stopObservers: @escaping () -> Void,
         reconcile: @escaping ([HealthKitMetricID]) async -> HealthKitReconciliationReport,
@@ -78,6 +90,7 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
         self.availability = availability
         self.status = status
         self.request = request
+        self.configureBackground = configureBackground
         self.registerObserver = registerObserver
         self.stopObservers = stopObservers
         self.reconcile = reconcile
@@ -101,6 +114,38 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
         return Self.sanitizedAuthorizationReport(await request(metrics), operation: .request)
     }
 
+    public func configureBackgroundDelivery(
+        metrics: [HealthKitMetricID]
+    ) async -> HealthKitBackgroundDeliveryReport {
+        guard Self.isExactSupportedMetricSet(metrics) else {
+            return .failed(metrics)
+        }
+        if let cachedBackgroundDeliveryReport,
+           cachedBackgroundDeliveryReport.state == .enabled {
+            return cachedBackgroundDeliveryReport
+        }
+        if let backgroundDeliveryTask {
+            return await backgroundDeliveryTask.value
+        }
+
+        backgroundDeliveryOperationID &+= 1
+        let currentOperation = backgroundDeliveryOperationID
+        let task = Task { @MainActor in
+            await configureBackground(metrics)
+        }
+        backgroundDeliveryTask = task
+        let rawReport = await task.value
+        guard currentOperation == backgroundDeliveryOperationID else {
+            return .failed(metrics)
+        }
+        backgroundDeliveryTask = nil
+        let report = Self.sanitizedBackgroundDeliveryReport(rawReport, requested: metrics)
+        if report.state == .enabled {
+            cachedBackgroundDeliveryReport = report
+        }
+        return report
+    }
+
     /// Returns the bounded durable HealthKit projection in the caller's
     /// requested order. This is deliberately narrower than exposing the
     /// mutable actor store: only the exact app-supported, alcohol-free set can
@@ -115,39 +160,51 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
         metrics: [HealthKitMetricID],
         onUpdate: @escaping ObserverUpdate
     ) {
-        stopAllObservers()
         guard Self.isExactSupportedMetricSet(metrics) else {
             onUpdate(.failure("HealthKit metric configuration was rejected"))
             return
         }
 
-        generation &+= 1
-        let session = generation
-        sessionHasDurableCommit = false
-        do {
-            for metric in metrics {
-                try registerObserver(metric) { [weak self] completion in
-                    Task { @MainActor [weak self] in
-                        guard let self, self.generation == session else { return }
-                        onUpdate(Self.sanitizedReconciliationCompletion(completion))
+        observerUpdate = onUpdate
+        if !observersRegistered {
+            generation &+= 1
+            let registrationSession = generation
+            do {
+                for metric in metrics {
+                    try registerObserver(metric) { [weak self] completion in
+                        Task { @MainActor [weak self] in
+                            guard let self,
+                                  self.observersRegistered,
+                                  self.generation == registrationSession else { return }
+                            self.receiveRegisteredObserverCompletion(completion)
+                        }
                     }
                 }
+                observersRegistered = true
+            } catch {
+                // Registration is all-or-nothing. A partially installed
+                // observer set must never survive as an apparently connected
+                // source, and a later authorized activation may retry.
+                generation &+= 1
+                observersRegistered = false
+                observerUpdate = nil
+                stopObservers()
+                onUpdate(.failure(Self.sanitizedRegistrationFailure(error)))
+                return
             }
-        } catch {
-            // Registration is all-or-nothing. A partially installed observer
-            // set must never survive as an apparently connected source.
-            generation &+= 1
-            stopObservers()
-            onUpdate(.failure(Self.sanitizedRegistrationFailure(error)))
-            return
         }
 
+        let session = generation
+        sessionHasDurableCommit = false
+        reconciliationTask?.cancel()
+        reconciliationRemainderTask?.cancel()
+        reconciliationRemainderTask = nil
         reconciliationTask = Task { @MainActor [weak self] in
             guard let self else { return }
             guard !Task.isCancelled, self.generation == session else { return }
             let report = await self.reconcile(metrics)
             guard !Task.isCancelled, self.generation == session else { return }
-            onUpdate(Self.sanitizedReconciliationCompletion(report))
+            self.observerUpdate?(Self.sanitizedReconciliationCompletion(report))
             self.sessionHasDurableCommit = report.results.contains(where: \.hasDurableCommit)
 
             guard let reconcileRemainder = self.reconcileRemainder else { return }
@@ -172,7 +229,7 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
                 let priorDurableCommit = self.sessionHasDurableCommit
                 let remainder = await reconcileRemainder(pendingMetrics)
                 guard !Task.isCancelled, self.generation == session else { return }
-                onUpdate(Self.sanitizedReconciliationCompletion(
+                self.observerUpdate?(Self.sanitizedReconciliationCompletion(
                     remainder,
                     hasPriorDurableCommit: priorDurableCommit
                 ))
@@ -185,11 +242,37 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
     public func stopAllObservers() {
         generation &+= 1
         sessionHasDurableCommit = false
+        observersRegistered = false
+        observerUpdate = nil
+        backgroundDeliveryOperationID &+= 1
+        backgroundDeliveryTask?.cancel()
+        backgroundDeliveryTask = nil
         reconciliationTask?.cancel()
         reconciliationTask = nil
         reconciliationRemainderTask?.cancel()
         reconciliationRemainderTask = nil
         stopObservers()
+    }
+
+    private func receiveRegisteredObserverCompletion(
+        _ completion: HealthKitObserverCompletion
+    ) {
+        let update = observerUpdate
+        let sanitized = Self.sanitizedReconciliationCompletion(completion)
+        if case .timedOut = sanitized {
+            // The adapter tears down a timed-out HKObserverQuery. Invalidate
+            // the whole all-or-nothing set so the next foreground activation
+            // recreates every metric instead of trusting a partial set.
+            generation &+= 1
+            sessionHasDurableCommit = false
+            observersRegistered = false
+            reconciliationTask?.cancel()
+            reconciliationTask = nil
+            reconciliationRemainderTask?.cancel()
+            reconciliationRemainderTask = nil
+            stopObservers()
+        }
+        update?(sanitized)
     }
 
     private static func isExactSupportedMetricSet(_ metrics: [HealthKitMetricID]) -> Bool {
@@ -253,6 +336,37 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
         case .protectedDataUnavailable: "Health data is unavailable while the device is locked"
         default: "HealthKit observers could not start"
         }
+    }
+
+    private static func sanitizedBackgroundDeliveryReport(
+        _ report: HealthKitBackgroundDeliveryReport,
+        requested metrics: [HealthKitMetricID]
+    ) -> HealthKitBackgroundDeliveryReport {
+        let enabled = report.enabledMetrics
+        let failed = report.failedMetrics
+        let enabledSet = Set(enabled)
+        let failedSet = Set(failed)
+        let requestedSet = Set(metrics)
+        guard enabled.count == enabledSet.count,
+              failed.count == failedSet.count,
+              enabledSet.isDisjoint(with: failedSet),
+              enabledSet.union(failedSet) == requestedSet,
+              enabledSet.isSubset(of: requestedSet),
+              failedSet.isSubset(of: requestedSet) else {
+            return .failed(metrics)
+        }
+
+        if failed.isEmpty {
+            return .enabled(metrics)
+        }
+        return HealthKitBackgroundDeliveryReport(
+            state: enabled.isEmpty ? .failed : .partial,
+            enabledMetrics: metrics.filter(enabledSet.contains),
+            failedMetrics: metrics.filter(failedSet.contains),
+            errorDescription: enabled.isEmpty
+                ? "HealthKit background delivery could not be enabled"
+                : "HealthKit background delivery is unavailable for some data types"
+        )
     }
 
     private enum AuthorizationOperation {

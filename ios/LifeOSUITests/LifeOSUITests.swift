@@ -98,8 +98,9 @@ final class LifeOSUITests: XCTestCase {
         XCTAssertEqual(home.value as? String, "Selected")
     }
 
-    /// The custom bar is a safe-area inset, so each route must end above the
-    /// bar's live top edge rather than relying on a device-specific estimate.
+    /// The shell gives the custom bar its own physical bottom row, so each
+    /// route must end above the bar's live top edge rather than relying on a
+    /// device-specific estimate.
     /// Passive endpoint surfaces use frame containment; actual buttons also
     /// prove hittability. The boundary comes from live accessibility frames,
     /// so this remains valid across supported portrait phone sizes.
@@ -114,12 +115,37 @@ final class LifeOSUITests: XCTestCase {
 
         app.buttons["main-tab-calendar"].tap()
         XCTAssertTrue(app.descendants(matching: .any)["calendar-pager"].waitForExistence(timeout: 5))
+        let calendarVerticalScrolls = app.scrollViews.matching(identifier: "calendar-vertical-timeline-scroll")
+        let calendarVerticalScroll = calendarVerticalScrolls.firstMatch
+        XCTAssertTrue(calendarVerticalScroll.waitForExistence(timeout: 5))
+        XCTAssertEqual(
+            calendarVerticalScrolls.count,
+            1,
+            "Calendar must expose exactly one active vertical timeline ScrollView"
+        )
+        let calendarEndpointMatches = app.staticTexts.matching(identifier: "calendar-timeline-end")
+        XCTAssertTrue(calendarEndpointMatches.firstMatch.waitForExistence(timeout: 5))
+        XCTAssertEqual(
+            calendarEndpointMatches.count,
+            1,
+            "Calendar must expose exactly one active 24:00 endpoint"
+        )
+        attachCalendarDiagnostic(
+            "Calendar vertical scroll diagnostics",
+            "frame=\(String(describing: calendarVerticalScroll.frame))\n" +
+                "hittable=\(calendarVerticalScroll.isHittable) enabled=\(calendarVerticalScroll.isEnabled)\n" +
+                "value=\(String(describing: calendarVerticalScroll.value))\n" +
+                "endpoint=\(String(describing: calendarEndpointMatches.firstMatch.frame))"
+        )
+        waitForStableFrame(of: calendarEndpointMatches.firstMatch)
         // 24:00 is a passive label; its complete frame proves the finite
         // Calendar timeline still reaches the trailing endpoint.
         assertTrailingElementAboveTabBar(
             "calendar-timeline-end",
             route: "Calendar 24:00",
-            maxSwipes: 12
+            scrollView: calendarVerticalScroll,
+            maxSwipes: 12,
+            xFraction: 0.08
         )
 
         app.buttons["main-tab-finance"].tap()
@@ -171,6 +197,100 @@ final class LifeOSUITests: XCTestCase {
             "settings-provider-keys-disclaimer",
             route: "Settings provider-keys disclaimer",
             scrollView: app.scrollViews["settings-hub"]
+        )
+    }
+
+    /// The Calendar pager keeps five page views mounted, but only the center
+    /// page may own vertical scrolling. Prove one native swipe changes the
+    /// active 24:00 frame before the route-wide endpoint assertion runs.
+    func testCalendarVerticalTimelineSwipeMovesEndpoint() throws {
+        app.buttons["main-tab-calendar"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["calendar-pager"].waitForExistence(timeout: 5))
+
+        let scrollViews = app.scrollViews.matching(identifier: "calendar-vertical-timeline-scroll")
+        let scrollView = scrollViews.firstMatch
+        XCTAssertTrue(scrollView.waitForExistence(timeout: 5))
+        XCTAssertEqual(scrollViews.count, 1, "Only the active Calendar page may expose the vertical ScrollView")
+        XCTAssertTrue(
+            scrollView.isEnabled,
+            "Calendar vertical ScrollView must be enabled; frame=\(String(describing: scrollView.frame)), value=\(String(describing: scrollView.value))"
+        )
+        XCTAssertGreaterThan(scrollView.frame.width, 0, "Calendar vertical ScrollView must have a live width")
+        XCTAssertGreaterThan(scrollView.frame.height, 0, "Calendar vertical ScrollView must have a live height")
+
+        let visibleAllDayLanes = app.descendants(matching: .any)
+            .matching(identifier: "calendar-all-day-lane")
+            .allElementsBoundByIndex
+            .filter {
+                let intersection = $0.frame.intersection(app.windows.firstMatch.frame)
+                return !intersection.isNull && !intersection.isEmpty
+            }
+        XCTAssertEqual(visibleAllDayLanes.count, 1, "Only the active Calendar page may expose a visible all-day lane")
+        let allDayLane = try XCTUnwrap(visibleAllDayLanes.first)
+        XCTAssertLessThanOrEqual(
+            allDayLane.frame.height,
+            30,
+            "An empty/single-row all-day lane must stay the height of one compact hourly-style row"
+        )
+        XCTAssertEqual(allDayLane.value as? String, "0 events, 1 row")
+
+        let endpoint = app.staticTexts["calendar-timeline-end"]
+        XCTAssertTrue(endpoint.waitForExistence(timeout: 5))
+        XCTAssertEqual(
+            app.staticTexts.matching(identifier: "calendar-timeline-end").count,
+            1,
+            "Only the active Calendar page may expose the 24:00 endpoint"
+        )
+        attachCalendarDiagnostic(
+            "Focused Calendar vertical scroll state",
+            "frame=\(String(describing: scrollView.frame))\n" +
+                "hittable=\(scrollView.isHittable) enabled=\(scrollView.isEnabled)\n" +
+                "value=\(String(describing: scrollView.value))\n" +
+                "endpoint=\(String(describing: endpoint.frame))"
+        )
+        waitForStableFrame(of: endpoint)
+        let initialY = endpoint.frame.minY
+
+        // Exercise native vertical ownership directly over both interactive
+        // mutation surfaces while they are genuinely visible. Do not scroll
+        // them offscreen and then clamp a stale frame into empty timeline
+        // space, because that would not prove gesture arbitration.
+        let deterministicResizeIdentifier = "calendar-event-resize-\(deterministicDeepWorkID)"
+        let deterministicResize = visibleElement(identifier: deterministicResizeIdentifier)
+        XCTAssertTrue(
+            deterministicResize.waitForExistence(timeout: 5),
+            "The deterministic resize handle must be available for the over-handle vertical pan proof"
+        )
+        swipeUp(overIdentifier: deterministicResizeIdentifier, in: scrollView)
+
+        let moved = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in endpoint.frame.minY < initialY - 1 },
+            object: endpoint
+        )
+        XCTAssertEqual(
+            XCTWaiter().wait(for: [moved], timeout: 2),
+            .completed,
+            "A vertical drag inside Calendar's live ScrollView must move 24:00 upward; " +
+                "scroll=\(String(describing: scrollView.frame)), endpoint=\(String(describing: endpoint.frame))"
+        )
+
+        let afterResizeSwipeY = endpoint.frame.minY
+        let deterministicEventIdentifier = "calendar-event-\(deterministicDeepWorkID)"
+        let deterministicEvent = visibleElement(identifier: deterministicEventIdentifier)
+        XCTAssertTrue(
+            deterministicEvent.waitForExistence(timeout: 5),
+            "The deterministic event must be available for the over-card vertical pan proof"
+        )
+        swipeUp(overIdentifier: deterministicEventIdentifier, in: scrollView)
+        let movedAgain = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in endpoint.frame.minY < afterResizeSwipeY - 1 },
+            object: endpoint
+        )
+        XCTAssertEqual(
+            XCTWaiter().wait(for: [movedAgain], timeout: 2),
+            .completed,
+            "A second vertical drag must continue moving 24:00 upward; " +
+                "first=\(afterResizeSwipeY), endpoint=\(String(describing: endpoint.frame))"
         )
     }
 
@@ -323,19 +443,40 @@ final class LifeOSUITests: XCTestCase {
         XCTAssertTrue(header.waitForExistence(timeout: 5))
         let today = calendarISODate(Calendar.current.startOfDay(for: Date()))
         XCTAssertTrue(waitForCalendarHeaderValue(today, element: header), "Initial calendar header should expose today's fixture anchor")
+        XCTAssertTrue(
+            waitForCalendarPagerCommittedDate(today, element: pager),
+            "The pager must expose its committed page independently of the preview header"
+        )
 
         let anchor = Calendar.current.startOfDay(for: Date())
         let nextPage = calendarISODate(Calendar.current.date(byAdding: .day, value: 3, to: anchor)!)
         pager.swipeLeft()
+        XCTAssertTrue(
+            waitForCalendarPagerCommittedDate(nextPage, element: pager),
+            "A committed swipe must update the pager's settled page/content state"
+        )
         XCTAssertTrue(waitForCalendarHeaderValue(nextPage, element: header), "A committed swipe must advance exactly one 3-day page")
 
         // A short horizontal drag should not cross the pager's paging threshold.
         let shortDragStart = pager.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
         let shortDragTarget = pager.coordinate(withNormalizedOffset: CGVector(dx: 0.46, dy: 0.5))
         shortDragStart.press(forDuration: 0.1, thenDragTo: shortDragTarget)
+        XCTAssertTrue(
+            waitForCalendarPagerCommittedDate(nextPage, element: pager, timeout: 2),
+            "A cancelled short drag must preserve the committed pager content"
+        )
         XCTAssertTrue(waitForCalendarHeaderValue(nextPage, element: header, timeout: 2), "A cancelled short drag must not drift the committed date")
 
+        // A two-touch pinch belongs to the calendar's hour-spacing gesture;
+        // it must never be interpreted as a one-page horizontal commit.
+        pager.pinch(withScale: 1.12, velocity: 0.4)
+        XCTAssertTrue(
+            waitForCalendarPagerCommittedDate(nextPage, element: pager, timeout: 2),
+            "Pinch/two-touch input must not page the calendar"
+        )
+
         app.buttons["calendar-today"].tap()
+        XCTAssertTrue(waitForCalendarPagerCommittedDate(today, element: pager), "Today must restore committed pager content")
         XCTAssertTrue(waitForCalendarHeaderValue(today, element: header), "Today must return to the fixture anchor")
     }
 
@@ -564,9 +705,18 @@ final class LifeOSUITests: XCTestCase {
         attachCalendarDiagnostic("Calendar move before", "value=\(String(describing: valueBeforeMove))\nframe=\(String(describing: event.frame))")
         let moveBeforeRange = timeRangeMinutes(valueBeforeMove)
         let durationBefore = moveBeforeRange.map { ($0.end - $0.start + 24 * 60) % (24 * 60) }
+        let endpoint = app.staticTexts["calendar-timeline-end"]
+        XCTAssertTrue(endpoint.waitForExistence(timeout: 5), "Calendar must expose the active 24:00 endpoint before mutation")
+        waitForStableFrame(of: endpoint)
+        let endpointFrameBeforeMove = endpoint.frame
         let movePoint = exposedCoordinate(for: event)
         movePoint.press(forDuration: 0.65, thenDragTo: movePoint.withOffset(CGVector(dx: 0, dy: 32)))
         XCTAssertTrue(waitForValueChange(of: event, from: valueBeforeMove, timeout: 5), "The moved event must publish a changed snapshot")
+        XCTAssertLessThan(
+            abs(endpoint.frame.minY - endpointFrameBeforeMove.minY),
+            2,
+            "Once the long-press owns the event mutation, the timeline offset must remain frozen"
+        )
 
         let valueAfterMove = event.value as? String
         attachCalendarDiagnostic("Calendar move after", "value=\(String(describing: valueAfterMove))\nframe=\(String(describing: event.frame))")
@@ -1017,7 +1167,8 @@ final class LifeOSUITests: XCTestCase {
         route: String,
         scrollView: XCUIElement? = nil,
         maxSwipes: Int = 10,
-        requiresHittable: Bool = false
+        requiresHittable: Bool = false,
+        xFraction: CGFloat = 0.5
     ) {
         let target = app.descendants(matching: .any)[identifier]
         for attempt in 0...maxSwipes {
@@ -1029,8 +1180,8 @@ final class LifeOSUITests: XCTestCase {
                 return
             }
             guard attempt < maxSwipes else { break }
-            if let scrollView, scrollView.exists {
-                scrollView.swipeUp()
+            if let scrollView {
+                swipeUp(in: scrollView, xFraction: xFraction)
             } else {
                 swipeVerticalContent()
             }
@@ -1045,6 +1196,8 @@ final class LifeOSUITests: XCTestCase {
     private func assertTabBarFitsWindow() {
         let window = app.windows.firstMatch.frame
         let identifiers = ["home", "calendar", "finance", "fitness", "more"]
+        let tabButtons = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "main-tab-"))
+        XCTAssertEqual(tabButtons.count, identifiers.count, "Exactly one stable CompactTabBar may be mounted")
         let buttons = identifiers.map { app.buttons["main-tab-\($0)"] }
         for button in buttons {
             XCTAssertTrue(button.waitForExistence(timeout: 5), "Tab bar item \(button.identifier) must exist")
@@ -1059,6 +1212,69 @@ final class LifeOSUITests: XCTestCase {
         let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.78))
         let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.30))
         start.press(forDuration: 0.08, thenDragTo: end)
+    }
+
+    private func swipeUp(in scrollView: XCUIElement, xFraction: CGFloat = 0.5) {
+        let frame = scrollView.frame
+        let window = app.windows.firstMatch.frame
+        guard frame.width > 0, frame.height > 0, window.width > 0, window.height > 0 else { return }
+        let normalizedPoint: (CGPoint) -> CGVector = { point in
+            CGVector(
+                dx: (point.x - window.minX) / window.width,
+                dy: (point.y - window.minY) / window.height
+            )
+        }
+        let start = app.coordinate(withNormalizedOffset: normalizedPoint(
+            CGPoint(x: frame.minX + frame.width * xFraction, y: frame.minY + frame.height * 0.75)
+        ))
+        let end = app.coordinate(withNormalizedOffset: normalizedPoint(
+            CGPoint(x: frame.minX + frame.width * xFraction, y: frame.minY + frame.height * 0.25)
+        ))
+        start.press(forDuration: 0.1, thenDragTo: end)
+    }
+
+    private func swipeUp(overIdentifier identifier: String, in scrollView: XCUIElement) {
+        // Re-query immediately before the drag. A previous vertical pan can
+        // move the same event's AX frame, and a stale offscreen frame must
+        // never be clamped into an unrelated empty point in the timeline.
+        let event = visibleElement(identifier: identifier)
+        let frame = scrollView.frame
+        let eventFrame = event.frame
+        let window = app.windows.firstMatch.frame
+        let visibleFrame = eventFrame.intersection(frame).intersection(window)
+        XCTAssertFalse(visibleFrame.isNull || visibleFrame.isEmpty, "The over-scroll source must intersect the live timeline: \(identifier), frame=\(String(describing: eventFrame)), timeline=\(String(describing: frame))")
+        guard frame.width > 0, frame.height > 0, window.width > 0, window.height > 0,
+              !visibleFrame.isNull, !visibleFrame.isEmpty else { return }
+        let startY = visibleFrame.midY
+        // Keep the interactive source visible for the second arbitration
+        // probe while still moving far enough to exceed UIKit's pan threshold.
+        let endY = max(frame.minY + 24, startY - frame.height * 0.14)
+        let normalizedPoint: (CGPoint) -> CGVector = { point in
+            CGVector(
+                dx: (point.x - window.minX) / window.width,
+                dy: (point.y - window.minY) / window.height
+            )
+        }
+        let start = app.coordinate(withNormalizedOffset: normalizedPoint(CGPoint(x: visibleFrame.midX, y: startY)))
+        let end = app.coordinate(withNormalizedOffset: normalizedPoint(CGPoint(x: visibleFrame.midX, y: endY)))
+        start.press(forDuration: 0.1, thenDragTo: end)
+    }
+
+    private func waitForStableFrame(of element: XCUIElement) {
+        var previous = element.frame
+        var stableSamples = 0
+        let deadline = Date().addingTimeInterval(1)
+        while Date() < deadline, stableSamples < 3 {
+            Thread.sleep(forTimeInterval: 0.15)
+            let current = element.frame
+            if abs(current.minY - previous.minY) < 0.5,
+               abs(current.height - previous.height) < 0.5 {
+                stableSamples += 1
+            } else {
+                stableSamples = 0
+            }
+            previous = current
+        }
     }
 
     private var customTabBarTopY: CGFloat? {
@@ -1219,6 +1435,19 @@ final class LifeOSUITests: XCTestCase {
 
     private func waitForCalendarHeaderValue(_ expected: String, element: XCUIElement, timeout: TimeInterval = 5) -> Bool {
         let predicate = NSPredicate(format: "value == %@", expected)
+        let expectation = XCTNSPredicateExpectation(predicate: predicate, object: element)
+        return XCTWaiter().wait(for: [expectation], timeout: timeout) == .completed
+    }
+
+    private func waitForCalendarPagerCommittedDate(
+        _ expected: String,
+        element: XCUIElement,
+        timeout: TimeInterval = 5
+    ) -> Bool {
+        let predicate = NSPredicate { object, _ in
+            guard let element = object as? XCUIElement else { return false }
+            return (element.value as? String) == "Committed page \(expected)"
+        }
         let expectation = XCTNSPredicateExpectation(predicate: predicate, object: element)
         return XCTWaiter().wait(for: [expectation], timeout: timeout) == .completed
     }

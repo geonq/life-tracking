@@ -91,16 +91,18 @@ struct LifeOSApp: App {
         let promptCompleted = !enabled && UserDefaults.standard.bool(forKey: Self.healthReadPromptCompletedKey)
 #if os(iOS)
         let healthKitClient: HealthKitProductionClient? = enabled ? nil : HealthKitProductionClient()
-        _healthKitController = StateObject(wrappedValue: HealthKitIntegrationController(
+        let healthKitController = HealthKitIntegrationController(
             client: healthKitClient,
             usesVisualFixtures: enabled,
             initialExplicitRequestCompleted: promptCompleted
-        ))
+        )
+        _healthKitController = StateObject(wrappedValue: healthKitController)
         _healthKitFitnessRepository = StateObject(wrappedValue: HealthKitFitnessRepository(
             client: healthKitClient,
             usesVisualFixtures: enabled
         ))
         _homeFitnessSnapshot = State(initialValue: enabled ? .demo : .unavailable)
+        healthKitController.applicationLaunched()
 #endif
     }
 
@@ -211,7 +213,6 @@ struct LifeOSApp: App {
                     await usageCoordinator.refresh()
                     await financeCoordinator.refresh()
                     await clipperCoordinator.refresh()
-                    await healthKitController.refreshStatus()
                     await healthKitFitnessRepository.refresh()
                 }
             }

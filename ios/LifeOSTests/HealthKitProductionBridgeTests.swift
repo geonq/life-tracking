@@ -60,7 +60,7 @@ final class HealthKitProductionBridgeTests: XCTestCase {
 
         client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { updates.append($0) }
         XCTAssertEqual(updates, [.failure("HealthKit is unavailable on this device")])
-        XCTAssertEqual(stopCount, 2) // pre-start reset + partial-failure cleanup
+        XCTAssertEqual(stopCount, 1) // partial-failure cleanup
 
         shouldFail = false
         registered.removeAll()
@@ -87,7 +87,7 @@ final class HealthKitProductionBridgeTests: XCTestCase {
         await Task.yield()
 
         XCTAssertTrue(updates.isEmpty)
-        XCTAssertEqual(stopCount, 2)
+        XCTAssertEqual(stopCount, 1)
     }
 
     func testInvalidOrAlcoholMetricSetIsRejectedBeforeRegistration() {
@@ -305,10 +305,90 @@ final class HealthKitProductionBridgeTests: XCTestCase {
         XCTAssertFalse(updates.contains { if case .failure(let message) = $0 { return message.contains("SECRET_PROVIDER_PAYLOAD") } else { return false } })
     }
 
+    func testRepeatedStartKeepsOneObserverSetAndRefreshesAgain() async {
+        var registrations: [HealthKitMetricID] = []
+        var reconciliationCalls = 0
+        let client = makeClient(
+            register: { metric, _ in registrations.append(metric) },
+            reconcile: { _ in
+                reconciliationCalls += 1
+                return .init(results: [])
+            }
+        )
+
+        client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { _ in }
+        await waitUntil { reconciliationCalls == 1 }
+        client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { _ in }
+        await waitUntil { reconciliationCalls == 2 }
+
+        XCTAssertEqual(registrations, HealthKitIntegrationController.supportedMetrics)
+    }
+
+    func testTimedOutObserverInvalidatesPartialSetAndNextStartReinstallsAll() async {
+        var registrations: [HealthKitMetricID] = []
+        var observerCallbacks: [HealthKitProductionClient.ObserverUpdate] = []
+        var stopCount = 0
+        let client = makeClient(
+            register: { metric, callback in
+                registrations.append(metric)
+                observerCallbacks.append(callback)
+            },
+            stop: { stopCount += 1 }
+        )
+
+        client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { _ in }
+        observerCallbacks[0](.timedOut)
+        await waitUntil { stopCount == 1 }
+
+        XCTAssertEqual(stopCount, 1)
+        registrations.removeAll()
+        client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { _ in }
+
+        XCTAssertEqual(registrations, HealthKitIntegrationController.supportedMetrics)
+    }
+
+    func testBackgroundDeliveryConfigurationIsValidatedSanitizedAndCached() async {
+        var calls = 0
+        let metrics = HealthKitIntegrationController.supportedMetrics
+        let client = makeClient(configureBackground: { requested in
+            calls += 1
+            return .enabled(requested)
+        })
+
+        let first = await client.configureBackgroundDelivery(metrics: metrics)
+        let second = await client.configureBackgroundDelivery(metrics: metrics)
+
+        XCTAssertEqual(first, .enabled(metrics))
+        XCTAssertEqual(second, first)
+        XCTAssertEqual(calls, 1)
+    }
+
+    func testMalformedOrUnsupportedBackgroundDeliveryReportFailsClosed() async {
+        let metrics = HealthKitIntegrationController.supportedMetrics
+        var calls = 0
+        let client = makeClient(configureBackground: { _ in
+            calls += 1
+            return HealthKitBackgroundDeliveryReport(
+                state: .enabled,
+                enabledMetrics: [.alcoholicBeverages]
+            )
+        })
+
+        let malformed = await client.configureBackgroundDelivery(metrics: metrics)
+        let unsupported = await client.configureBackgroundDelivery(metrics: [.alcoholicBeverages])
+
+        XCTAssertEqual(malformed, .failed(metrics))
+        XCTAssertEqual(unsupported, .failed([.alcoholicBeverages]))
+        XCTAssertEqual(calls, 1)
+    }
+
     private func makeClient(
         availability: @escaping () -> HealthKitAuthorizationState = { .readIndeterminate },
         status: @escaping ([HealthKitMetricID]) async -> HealthKitAuthorizationReport = { _ in .init(state: .requestRequired) },
         request: @escaping ([HealthKitMetricID]) async -> HealthKitAuthorizationReport = { _ in .init(state: .readIndeterminate, promptCompleted: true) },
+        configureBackground: @escaping ([HealthKitMetricID]) async -> HealthKitBackgroundDeliveryReport = {
+            .enabled($0)
+        },
         register: @escaping (HealthKitMetricID, @escaping HealthKitProductionClient.ObserverUpdate) throws -> Void = { _, _ in },
         stop: @escaping () -> Void = {},
         reconcile: @escaping ([HealthKitMetricID]) async -> HealthKitReconciliationReport = { _ in .init(results: []) },
@@ -321,6 +401,7 @@ final class HealthKitProductionBridgeTests: XCTestCase {
             availability: availability,
             status: status,
             request: request,
+            configureBackground: configureBackground,
             registerObserver: register,
             stopObservers: stop,
             reconcile: reconcile,
@@ -331,12 +412,15 @@ final class HealthKitProductionBridgeTests: XCTestCase {
 
     private func waitUntil(
         _ predicate: @escaping @MainActor () -> Bool,
+        timeout: Duration = .seconds(2),
         file: StaticString = #filePath,
         line: UInt = #line
     ) async {
-        for _ in 0..<100 {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while clock.now < deadline {
             if predicate() { return }
-            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(1))
         }
         XCTFail("Timed out waiting for condition", file: file, line: line)
     }
