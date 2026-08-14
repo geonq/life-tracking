@@ -155,31 +155,171 @@ def named_yaml_block(section: str, name: str, indent: int = 2) -> str:
     return "\n".join(lines[start:end]) + "\n"
 
 
-def yaml_sequence(block: str, field: str, field_indent: int = 4) -> list[str]:
-    """Read an inline or indented YAML sequence from a target/scheme block."""
+def _split_inline_yaml_sequence(value: str, field: str) -> list[str]:
+    """Split a small YAML flow sequence without treating quoted commas as separators."""
 
-    lines = block.splitlines()
-    marker = f"{' ' * field_indent}{field}:"
-    start = next((index for index, line in enumerate(lines) if line.startswith(marker)), None)
-    require(start is not None, f"block missing {field}:")
-    line = lines[start]
-    inline = line.split(":", 1)[1].strip()
-    if inline:
-        require(inline.startswith("[") and inline.endswith("]"), f"{field} must be a YAML sequence")
-        return [value.strip().strip("'\"") for value in inline[1:-1].split(",") if value.strip()]
+    require(value.startswith("[") and value.endswith("]"), f"{field} must be a YAML sequence")
+    body = value[1:-1].strip()
+    if not body:
+        return []
 
     values: list[str] = []
-    for candidate in lines[start + 1 :]:
-        if candidate and len(candidate) - len(candidate.lstrip(" ")) <= field_indent:
-            break
-        stripped = candidate.strip()
-        if stripped.startswith("-"):
-            values.append(stripped[1:].strip().strip("'\""))
+    current: list[str] = []
+    quote: str | None = None
+    escaped = False
+    for character in body:
+        if quote:
+            current.append(character)
+            if escaped:
+                escaped = False
+            elif character == "\\" and quote == '"':
+                escaped = True
+            elif character == quote:
+                quote = None
+            continue
+        if character in "'\"":
+            quote = character
+            current.append(character)
+        elif character == ",":
+            item = "".join(current).strip()
+            require(item, f"{field} contains an empty sequence item")
+            values.append(item)
+            current = []
+        else:
+            current.append(character)
+    require(quote is None, f"{field} contains an unterminated quoted value")
+    item = "".join(current).strip()
+    require(item, f"{field} contains an empty sequence item")
+    values.append(item)
     return values
 
 
+def _yaml_sequence_entries(
+    block: str,
+    field: str,
+    field_indent: int = 4,
+) -> list[tuple[str, list[str]]]:
+    """Read sequence entries and their nested mapping lines from a small YAML block.
+
+    The validator intentionally does not depend on PyYAML.  This helper only
+    implements the subset used by ``project.yml`` and keeps nested lines
+    attached to their direct sequence item so callers can distinguish a source
+    mapping's ``excludes`` metadata from another source path.
+    """
+
+    lines = block.splitlines()
+    marker = f"{' ' * field_indent}{field}:"
+    start = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if line.startswith(marker)
+            and (len(line) == len(marker) or line[len(marker)].isspace())
+        ),
+        None,
+    )
+    require(start is not None, f"block missing {field}:")
+    line = lines[start]
+    inline = line[len(marker) :].strip()
+    if inline:
+        return [(value.strip().strip("'\""), []) for value in _split_inline_yaml_sequence(inline, field)]
+
+    entries: list[tuple[str, list[str]]] = []
+    sequence_indent: int | None = None
+    current: tuple[str, list[str]] | None = None
+    for candidate in lines[start + 1 :]:
+        stripped = candidate.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(candidate) - len(candidate.lstrip(" "))
+        if indent <= field_indent:
+            break
+        if sequence_indent is None:
+            require(stripped.startswith("-"), f"{field} must be a YAML sequence")
+            sequence_indent = indent
+        require(indent >= sequence_indent, f"{field} sequence indentation is malformed")
+        if indent == sequence_indent:
+            require(stripped.startswith("-"), f"{field} must contain YAML sequence items")
+            if current is not None:
+                entries.append(current)
+            current = (stripped[1:].strip(), [])
+        else:
+            require(current is not None, f"{field} has nested YAML without a sequence item")
+            current[1].append(stripped)
+    if current is not None:
+        entries.append(current)
+    return entries
+
+
+def yaml_sequence(block: str, field: str, field_indent: int = 4) -> list[str]:
+    """Read an inline or indented YAML sequence from a target/scheme block."""
+
+    # Preserve the helper's original scalar return contract.  Target source
+    # normalization uses the richer entries below so it can inspect mapping
+    # metadata before stripping it.
+    return [entry.strip().strip("'\"") for entry, _ in _yaml_sequence_entries(block, field, field_indent)]
+
+
+def _yaml_scalar(value: str, label: str) -> str:
+    """Return one non-empty scalar and reject collection/null spellings."""
+
+    value = value.strip()
+    require(value, f"{label} must not be empty")
+    if value[0] in "'\"" or value[-1] in "'\"":
+        require(len(value) >= 2 and value[0] == value[-1], f"{label} has mismatched quotes")
+        value = value[1:-1]
+    require(value not in {"", "~", "null", "Null", "NULL"}, f"{label} must be a path")
+    require(not (value.startswith("[") and value.endswith("]")), f"{label} must be a scalar path")
+    require(not (value.startswith("{") and value.endswith("}")), f"{label} must be a scalar path")
+    return value
+
+
+def _normalise_target_source(entry: str, nested: list[str], index: int) -> str:
+    """Normalize one XcodeGen source scalar or ``path`` mapping."""
+
+    label = f"sources item {index + 1}"
+    entry = entry.strip()
+    require(entry, f"{label} must not be empty")
+
+    # A quoted scalar is a path even when the path itself contains a colon.
+    if entry[0] in "'\"":
+        path = _yaml_scalar(entry, label)
+        require(not nested, f"{label} scalar cannot contain nested YAML")
+        return path
+
+    mapping = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)", entry)
+    if mapping:
+        key, raw_path = mapping.groups()
+        require(key == "path", f"{label} mapping must use path:")
+        path = _yaml_scalar(raw_path, f"{label} path")
+
+        # ``excludes`` is source metadata, not another source path.  Reject
+        # other direct mapping keys so a malformed/resources entry cannot be
+        # silently accepted as target membership.
+        nested_key: str | None = None
+        for child in nested:
+            child = child.strip()
+            if not child or child.startswith("#"):
+                continue
+            if child.startswith("-"):
+                require(nested_key == "excludes", f"{label} has a nested list outside excludes:")
+                continue
+            child_mapping = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)", child)
+            require(child_mapping is not None, f"{label} has malformed nested YAML")
+            nested_key, _ = child_mapping.groups()
+            require(nested_key == "excludes", f"{label} has unsupported mapping key {nested_key}:")
+        return path
+
+    require(":" not in entry, f"{label} must be a scalar path or path mapping")
+    require(not nested, f"{label} scalar cannot contain nested YAML")
+    return _yaml_scalar(entry, label)
+
+
 def target_sources(block: str) -> list[str]:
-    return yaml_sequence(block, "sources")
+    """Return canonical source paths, excluding mapping metadata such as ``excludes``."""
+
+    entries = _yaml_sequence_entries(block, "sources")
+    return [_normalise_target_source(entry, nested, index) for index, (entry, nested) in enumerate(entries)]
 
 
 def validate_lane_manifest() -> None:
