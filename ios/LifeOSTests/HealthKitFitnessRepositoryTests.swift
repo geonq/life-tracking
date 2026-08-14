@@ -111,7 +111,7 @@ final class HealthKitFitnessRepositoryTests: XCTestCase {
         XCTAssertLessThanOrEqual(projection.windowEnd.timeIntervalSince(projection.windowStart), HealthKitFitnessProjection.maximumWindow)
     }
 
-    func testOlderOverlappingRefreshCannotOverwriteNewerProjection() async {
+    func testOverlappingRefreshCancelsOldWorkerAndCannotPublishStaleProjection() async {
         let gate = ReadGate()
         let older = [storedState(metric: .bodyMass, syncState: .partial)]
         let newer = [storedState(metric: .bodyMass, syncState: .error)]
@@ -131,7 +131,28 @@ final class HealthKitFitnessRepositoryTests: XCTestCase {
 
         await gate.resume(position: 0, states: older)
         await first.value
+        // The first refresh may finish after the newer worker, but its
+        // canceled/stale result must never replace the published projection.
         XCTAssertEqual(repository.projection?.metric(.bodyMass).state, .error)
+    }
+
+    func testCanceledRefreshCannotPublishAProjection() async {
+        let gate = ReadGate()
+        let repository = HealthKitFitnessRepository(
+            testStateReader: { metrics in await gate.read(metrics) },
+            now: { self.now }
+        )
+
+        let refresh = Task { @MainActor in await repository.refresh() }
+        await waitUntil { await gate.count == 1 }
+        refresh.cancel()
+        await gate.resume(
+            position: 0,
+            states: [storedState(metric: .bodyMass, syncState: .synced)]
+        )
+
+        await refresh.value
+        XCTAssertNil(repository.projection)
     }
 
     private func storedState(

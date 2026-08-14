@@ -21,6 +21,7 @@ public final class HealthKitFitnessRepository: ObservableObject {
     private let now: () -> Date
     private let testStateReader: StateReader?
     private var generation: UInt64 = 0
+    private var projectionTask: Task<HealthKitFitnessProjection?, Never>?
 
     /// Production wiring. A missing client, including fixture mode, remains
     /// unavailable and never attempts a retained-store read.
@@ -35,6 +36,7 @@ public final class HealthKitFitnessRepository: ObservableObject {
         self.now = Date.init
         self.testStateReader = nil
         self.projection = nil
+        self.projectionTask = nil
     }
 
     /// Test-only reader seam. Production cannot use this initializer, and the
@@ -53,12 +55,14 @@ public final class HealthKitFitnessRepository: ObservableObject {
         self.now = now
         self.testStateReader = testStateReader
         self.projection = nil
+        self.projectionTask = nil
     }
 
     /// Reads retained states once and publishes a rolling, bounded projection.
     /// The actor-isolated bridge call may suspend; the generation token keeps
     /// an older overlapping response from replacing a newer projection.
     public func refresh() async {
+        projectionTask?.cancel()
         generation &+= 1
         let refreshGeneration = generation
 
@@ -82,12 +86,30 @@ public final class HealthKitFitnessRepository: ObservableObject {
             projection = nil
             return
         }
+        guard !Task.isCancelled else { return }
 
-        projection = HealthKitFitnessProjection(
-            states: states,
-            window: window,
-            calendar: calendar
+        // Projection is pure but can scan tens of thousands of retained
+        // observations. Keep that work off the MainActor so opening the app
+        // cannot turn durable HealthKit composition into a watchdog path.
+        let projectionCalendar = calendar
+        let task = Task.detached(priority: .utility) { [states, window, projectionCalendar] in
+            HealthKitFitnessProjection.makeCancellable(
+                states: states,
+                window: window,
+                calendar: projectionCalendar,
+                isCancelled: { Task.isCancelled }
+            )
+        }
+        projectionTask = task
+        let nextProjection = await withTaskCancellationHandler(
+            operation: { await task.value },
+            onCancel: { task.cancel() }
         )
+
+        guard refreshGeneration == generation else { return }
+        projectionTask = nil
+        guard !Task.isCancelled, let nextProjection else { return }
+        projection = nextProjection
     }
 
     private static func explicitCalendar(_ calendar: Calendar) -> Calendar {

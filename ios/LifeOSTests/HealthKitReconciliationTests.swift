@@ -284,6 +284,29 @@ final class HealthKitReconciliationTests: XCTestCase {
         XCTAssertEqual(state.anchor, try testAnchor(2))
     }
 
+    func testInitialReconciliationConsumesOnlyOneBoundedPage() async throws {
+        let firstPage = try input(
+            additions: (0..<4_000).map { index in
+                try observation(uuid: UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", index))!, value: Double(index + 1))
+            },
+            anchorByte: 1,
+            partial: true
+        )
+        let secondPage = try input(additions: [observation(uuid: UUID())], anchorByte: 2)
+        let client = SequenceHealthKitClient(batches: [firstPage, secondPage])
+        let store = HealthKitAnchorStore(persistenceURL: nil)
+        let coordinator = HealthKitReconciliationCoordinator(client: client, store: store, now: { self.now })
+
+        let report = await coordinator.reconcileInitialPages(metrics: [.water])
+        let state = await store.snapshot(for: .water)
+        let callCount = await client.callCount
+
+        XCTAssertEqual(report.results.map(\.state), [.partial])
+        XCTAssertEqual(callCount, 1)
+        XCTAssertEqual(state.observations.count, 4_000)
+        XCTAssertEqual(state.anchor, try testAnchor(1))
+    }
+
     func testFutureBatchIsRejectedWithoutChangingProjection() async throws {
         // The observation constructor rejects a future sample itself. A client
         // can still return a future batch timestamp, which reconciliation also

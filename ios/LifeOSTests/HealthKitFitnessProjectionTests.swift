@@ -1,6 +1,29 @@
 import XCTest
 @testable import LifeOS
 
+private final class ProjectionCancellationProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private let cancelAfter: Int
+    private var callCount = 0
+
+    init(cancelAfter: Int) {
+        self.cancelAfter = cancelAfter
+    }
+
+    func isCancelled() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        callCount += 1
+        return callCount >= cancelAfter
+    }
+
+    var checks: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return callCount
+    }
+}
+
 final class HealthKitFitnessProjectionTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_700_000_000)
 
@@ -363,6 +386,37 @@ final class HealthKitFitnessProjectionTests: XCTestCase {
         XCTAssertEqual(conflictingDay.conflicts.count, 1)
         XCTAssertEqual(conflictingProjection.metric(.water).state, .conflict)
         XCTAssertNil(conflictingProjection.metric(.water).latest)
+    }
+
+    func testLargeRetainedMetricUsesBoundedIdentityLookup() throws {
+        let observations = try (0..<8_000).map { index in
+            let uuid = try XCTUnwrap(UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", index)))
+            return try quantity(metric: .water, value: Double(index + 1), at: now.addingTimeInterval(-1), uuid: uuid)
+        }
+        let projection = HealthKitFitnessProjection(
+            states: [try state(metric: .water, observations: observations)],
+            window: window(now.addingTimeInterval(-60), now)
+        )
+
+        XCTAssertEqual(projection.metric(.water).observations.count, observations.count)
+        XCTAssertEqual(projection.dailyTotal(for: .water, on: now)?.samples.count, observations.count)
+    }
+
+    func testCancellableLargeProjectionStopsBeforePublishingAResult() throws {
+        let observations = try (0..<2_000).map { index in
+            let uuid = try XCTUnwrap(UUID(uuidString: String(format: "10000000-0000-0000-0000-%012d", index)))
+            return try quantity(metric: .water, value: Double(index + 1), at: now.addingTimeInterval(-1), uuid: uuid)
+        }
+        let probe = ProjectionCancellationProbe(cancelAfter: 4)
+
+        let projection = HealthKitFitnessProjection.makeCancellable(
+            states: [try state(metric: .water, observations: observations)],
+            window: window(now.addingTimeInterval(-60), now),
+            isCancelled: { probe.isCancelled() }
+        )
+
+        XCTAssertNil(projection)
+        XCTAssertGreaterThanOrEqual(probe.checks, 4)
     }
 
     func testConflictingDailyRevisionAcrossMidnightFailsClosedOnBothDays() throws {

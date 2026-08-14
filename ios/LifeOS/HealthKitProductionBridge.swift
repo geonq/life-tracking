@@ -15,10 +15,12 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
     private let registerObserver: (HealthKitMetricID, @escaping ObserverUpdate) throws -> Void
     private let stopObservers: () -> Void
     private let reconcile: ([HealthKitMetricID]) async -> HealthKitReconciliationReport
+    private let reconcileRemainder: (([HealthKitMetricID]) async -> HealthKitReconciliationReport)?
     private let storedStateReader: StoredStateReader
 
     private var generation: UInt64 = 0
     private var reconciliationTask: Task<Void, Never>?
+    private var reconciliationRemainderTask: Task<Void, Never>?
 
     public convenience init(persistenceURL: URL? = nil) {
         let adapter = LifeOSHealthKitAdapter()
@@ -34,7 +36,10 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
                 _ = try adapter.startObserver(for: metric, reconciler: coordinator, completion: update)
             },
             stopObservers: { adapter.stopAllObservers() },
-            reconcile: { metrics in await coordinator.reconcile(metrics: metrics) },
+            // Launch work is deliberately one bounded page per metric. Full
+            // pagination starts only after the first-frame handoff.
+            reconcile: { metrics in await coordinator.reconcileInitialPages(metrics: metrics) },
+            reconcileRemainder: { metrics in await coordinator.reconcile(metrics: metrics) },
             stateReader: { metrics in
                 // The reader and reconciler intentionally capture the same
                 // actor. A load failure must remain an error rather than
@@ -62,6 +67,7 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
         registerObserver: @escaping (HealthKitMetricID, @escaping ObserverUpdate) throws -> Void,
         stopObservers: @escaping () -> Void,
         reconcile: @escaping ([HealthKitMetricID]) async -> HealthKitReconciliationReport,
+        reconcileRemainder: (([HealthKitMetricID]) async -> HealthKitReconciliationReport)? = nil,
         stateReader: @escaping StoredStateReader
     ) {
         self.availability = availability
@@ -70,6 +76,7 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
         self.registerObserver = registerObserver
         self.stopObservers = stopObservers
         self.reconcile = reconcile
+        self.reconcileRemainder = reconcileRemainder
         self.storedStateReader = stateReader
     }
 
@@ -135,6 +142,30 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
             let report = await self.reconcile(metrics)
             guard !Task.isCancelled, self.generation == session else { return }
             onUpdate(Self.sanitizedReconciliationCompletion(report.completion))
+
+            guard let reconcileRemainder = self.reconcileRemainder else { return }
+            let pendingMetrics = report.results
+                .filter { $0.state == .partial }
+                .map(\.metric)
+            guard !pendingMetrics.isEmpty else { return }
+
+            // Yield the first frame and let the initial projection settle
+            // before draining historical pages. This preserves eventual
+            // pagination without putting the launch watchdog path back on the
+            // critical foreground sequence.
+            self.reconciliationRemainderTask = Task(priority: .utility) { @MainActor [weak self] in
+                do {
+                    try await Task.sleep(nanoseconds: 2_000_000_000)
+                } catch {
+                    return
+                }
+                guard let self,
+                      !Task.isCancelled,
+                      self.generation == session else { return }
+                let remainder = await reconcileRemainder(pendingMetrics)
+                guard !Task.isCancelled, self.generation == session else { return }
+                onUpdate(Self.sanitizedReconciliationCompletion(remainder.completion))
+            }
         }
     }
 
@@ -142,6 +173,8 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
         generation &+= 1
         reconciliationTask?.cancel()
         reconciliationTask = nil
+        reconciliationRemainderTask?.cancel()
+        reconciliationRemainderTask = nil
         stopObservers()
     }
 

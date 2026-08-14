@@ -253,13 +253,23 @@ public struct HealthKitSampleIdentity: Codable, Equatable, Hashable, Sendable {
         // A UUID is an alias even when both records also carry sync
         // identifiers.  HealthKit can revise metadata in place, so a
         // matching UUID must not be hidden by two different sync IDs.
-        if !aliasUUIDs.isDisjoint(with: other.aliasUUIDs) {
+        if sharesUUID(with: other) {
             return true
         }
         if let syncIdentifier, let otherIdentifier = other.syncIdentifier {
             return syncIdentifier == otherIdentifier
         }
         return false
+    }
+
+    /// Checks UUID alias overlap without materializing either alias set. This
+    /// is used by bounded reconciliation/projection hot paths where the old
+    /// `Set([uuid] + aliases)` allocation multiplied across thousands of
+    /// retained observations.
+    public func sharesUUID(with other: HealthKitSampleIdentity) -> Bool {
+        guard uuid != other.uuid else { return true }
+        guard !aliases.contains(other.uuid), !other.aliases.contains(uuid) else { return true }
+        return aliases.contains { other.aliases.contains($0) }
     }
 
     public var aliasUUIDs: Set<UUID> { Set([uuid] + aliases) }

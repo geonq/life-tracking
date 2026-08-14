@@ -366,6 +366,46 @@ public struct HealthKitFitnessProjection: Equatable, Sendable {
         sourceFilter: HealthKitFitnessSourceFilter = .all,
         calendar: Calendar = HealthKitFitnessProjection.defaultCalendar
     ) {
+        self = try! Self(
+            states: states,
+            window: window,
+            sourceFilter: sourceFilter,
+            calendar: calendar,
+            cancellationCheck: { false }
+        )
+    }
+
+    /// Builds a projection cooperatively for a cancellable background task.
+    /// The production repository uses this instead of allowing an old refresh
+    /// to keep constructing a large projection after a newer refresh starts.
+    internal static func makeCancellable(
+        states: [HealthKitStoredMetricState],
+        window: DateInterval,
+        sourceFilter: HealthKitFitnessSourceFilter = .all,
+        calendar: Calendar = HealthKitFitnessProjection.defaultCalendar,
+        isCancelled: @escaping @Sendable () -> Bool
+    ) -> Self? {
+        try? Self(
+            states: states,
+            window: window,
+            sourceFilter: sourceFilter,
+            calendar: calendar,
+            cancellationCheck: isCancelled
+        )
+    }
+
+    private init(
+        states: [HealthKitStoredMetricState],
+        window: DateInterval,
+        sourceFilter: HealthKitFitnessSourceFilter,
+        calendar: Calendar,
+        cancellationCheck: @escaping @Sendable () -> Bool
+    ) throws {
+        func checkCancellation() throws {
+            if cancellationCheck() { throw CancellationError() }
+        }
+
+        try checkCancellation()
         self.windowStart = window.start
         self.windowEnd = window.end
         self.bucketCalendarIdentifier = calendar.identifier
@@ -382,11 +422,17 @@ public struct HealthKitFitnessProjection: Equatable, Sendable {
         var metricMap: [HealthKitMetricID: HealthKitFitnessMetricProjection] = [:]
 
         for metric in projectedMetricIDs {
+            try checkCancellation()
             if let duplicate = normalized.duplicateMetrics.first(where: { $0 == metric }) {
                 metricMap[metric] = Self.invalidMetricProjection(metric: duplicate, reason: "Duplicate persisted HealthKit states disagree at the same commit time.")
             } else if let validWindow {
                 let stored = normalizedStates[metric] ?? .empty(for: metric)
-                metricMap[metric] = Self.metricProjection(stored: stored, window: validWindow, sourceFilter: sourceFilter)
+                metricMap[metric] = try Self.metricProjection(
+                    stored: stored,
+                    window: validWindow,
+                    sourceFilter: sourceFilter,
+                    cancellationCheck: cancellationCheck
+                )
             } else {
                 metricMap[metric] = Self.invalidMetricProjection(metric: metric, reason: "HealthKit projection input is outside its bounded window contract.")
             }
@@ -397,13 +443,15 @@ public struct HealthKitFitnessProjection: Equatable, Sendable {
         let bucketCalendar = Self.bucketCalendar(identifier: calendar.identifier, timeZoneIdentifier: calendar.timeZone.identifier)
         let days = validWindow.map { Self.days(in: $0, calendar: bucketCalendar) } ?? []
         for metric in canProject ? Self.dailyTotalMetricIDs : [] {
+            try checkCancellation()
             guard !normalized.duplicateMetrics.contains(metric) else { continue }
             let stored = normalizedStates[metric] ?? .empty(for: metric)
-            let selected = Self.quantitySelection(
+            let selected = try Self.quantitySelection(
                 from: stored,
                 window: validWindow!,
                 sourceFilter: sourceFilter,
-                intervalSemantics: .startsInWindow
+                intervalSemantics: .startsInWindow,
+                cancellationCheck: cancellationCheck
             )
             let selectedConflicts = Self.scopedConflicts(
                 from: stored,
@@ -413,6 +461,7 @@ public struct HealthKitFitnessProjection: Equatable, Sendable {
             ) + selected.duplicateConflicts
             let grouped = Dictionary(grouping: selected.observations) { bucketCalendar.startOfDay(for: $0.startDate) }
             for day in days {
+                try checkCancellation()
                 let ordered = (grouped[day] ?? []).sorted(by: Self.observationOrder)
                 // A conflicting revision can move a source sample across a
                 // local-day boundary. Both affected days must fail closed;
@@ -446,14 +495,31 @@ public struct HealthKitFitnessProjection: Equatable, Sendable {
         self.dailyTotals = totals
 
         let sleepStored = normalizedStates[.sleep] ?? .empty(for: .sleep)
-        self.sleep = validWindow.map { Self.sleepProjection(stored: sleepStored, window: $0, sourceFilter: sourceFilter) }
+        try checkCancellation()
+        self.sleep = try validWindow.map { try Self.sleepProjection(
+            stored: sleepStored,
+            window: $0,
+            sourceFilter: sourceFilter,
+            cancellationCheck: cancellationCheck
+        ) }
             ?? Self.invalidSleepProjection(reason: "HealthKit projection input is outside its bounded window contract.")
 
         let workoutStored = normalizedStates[.workout] ?? .empty(for: .workout)
         if let validWindow {
-            let workoutCandidates = workoutStored.observations
-                .filter { $0.metric == .workout && Self.overlaps($0, validWindow) && sourceFilter.matches($0.provenance) }
-            let workoutSelection = Self.deduplicate(workoutCandidates, metric: .workout)
+            var workoutCandidates: [HealthKitObservation] = []
+            workoutCandidates.reserveCapacity(workoutStored.observations.count)
+            for observation in workoutStored.observations {
+                try checkCancellation()
+                guard observation.metric == .workout,
+                      Self.overlaps(observation, validWindow),
+                      sourceFilter.matches(observation.provenance) else { continue }
+                workoutCandidates.append(observation)
+            }
+            let workoutSelection = try Self.deduplicate(
+                workoutCandidates,
+                metric: .workout,
+                cancellationCheck: cancellationCheck
+            )
             let workoutConflicts = Self.scopedConflicts(from: workoutStored, window: validWindow, sourceFilter: sourceFilter, intervalSemantics: .overlapsWindow) + workoutSelection.duplicateConflicts
             let workoutState = Self.scopedMetricState(stored: workoutStored, selected: workoutSelection.observations, conflicts: workoutConflicts)
             let workoutHasConflict = !workoutConflicts.isEmpty || Self.hasScopedSourceConflict(workoutSelection.observations)
@@ -488,6 +554,53 @@ public struct HealthKitFitnessProjection: Equatable, Sendable {
     private struct QuantitySelection {
         let observations: [HealthKitObservation]
         let duplicateConflicts: [HealthKitObservationConflict]
+    }
+
+    /// Identity lookup for projection deduplication. The previous
+    /// implementation scanned every retained observation and rebuilt two UUID
+    /// sets for every comparison. A retained store with thousands of samples
+    /// therefore turned a pure projection into an O(n²) MainActor workload.
+    private struct StableIdentityIndex {
+        private var uuidToIndices: [UUID: [Int]] = [:]
+        private var syncIdentifierToIndices: [String: [Int]] = [:]
+
+        mutating func append(_ observation: HealthKitObservation, index: Int) {
+            uuidToIndices[observation.identity.uuid, default: []].append(index)
+            for alias in observation.identity.aliases {
+                uuidToIndices[alias, default: []].append(index)
+            }
+            if let syncIdentifier = observation.identity.syncIdentifier {
+                syncIdentifierToIndices[syncIdentifier, default: []].append(index)
+            }
+        }
+
+        func firstMatch(for identity: HealthKitSampleIdentity) -> Int? {
+            var first: Int?
+            func consider(_ candidate: Int?) {
+                guard let candidate else { return }
+                if first == nil || candidate < first! { first = candidate }
+            }
+            consider(uuidToIndices[identity.uuid]?.first)
+            for alias in identity.aliases {
+                consider(uuidToIndices[alias]?.first)
+            }
+            if let syncIdentifier = identity.syncIdentifier {
+                consider(syncIdentifierToIndices[syncIdentifier]?.first)
+            }
+            return first
+        }
+
+        func matchingIndices(for identity: HealthKitSampleIdentity) -> [Int] {
+            var matches = Set<Int>()
+            matches.formUnion(uuidToIndices[identity.uuid] ?? [])
+            for alias in identity.aliases {
+                matches.formUnion(uuidToIndices[alias] ?? [])
+            }
+            if let syncIdentifier = identity.syncIdentifier {
+                matches.formUnion(syncIdentifierToIndices[syncIdentifier] ?? [])
+            }
+            return matches.sorted()
+        }
     }
 
     private static func inputIssues(
@@ -538,9 +651,17 @@ public struct HealthKitFitnessProjection: Equatable, Sendable {
     private static func metricProjection(
         stored: HealthKitStoredMetricState,
         window: DateInterval,
-        sourceFilter: HealthKitFitnessSourceFilter
-    ) -> HealthKitFitnessMetricProjection {
-        let selected = quantitySelection(from: stored, window: window, sourceFilter: sourceFilter, intervalSemantics: .startsInWindow)
+        sourceFilter: HealthKitFitnessSourceFilter,
+        cancellationCheck: @escaping @Sendable () -> Bool
+    ) throws -> HealthKitFitnessMetricProjection {
+        let selected = try quantitySelection(
+            from: stored,
+            window: window,
+            sourceFilter: sourceFilter,
+            intervalSemantics: .startsInWindow,
+            cancellationCheck: cancellationCheck
+        )
+        if cancellationCheck() { throw CancellationError() }
         let ordered = selected.observations.sorted(by: observationOrder)
         let scopedConflicts = scopedConflicts(
             from: stored,
@@ -711,34 +832,47 @@ public struct HealthKitFitnessProjection: Equatable, Sendable {
         from stored: HealthKitStoredMetricState,
         window: DateInterval,
         sourceFilter: HealthKitFitnessSourceFilter,
-        intervalSemantics: IntervalSemantics
-    ) -> QuantitySelection {
-        let candidates = stored.observations.filter { observation in
+        intervalSemantics: IntervalSemantics,
+        cancellationCheck: @escaping @Sendable () -> Bool
+    ) throws -> QuantitySelection {
+        var candidates: [HealthKitObservation] = []
+        candidates.reserveCapacity(stored.observations.count)
+        for observation in stored.observations {
+            if cancellationCheck() { throw CancellationError() }
             guard observation.metric == stored.metric,
-                  sourceFilter.matches(observation.provenance) else { return false }
+                  sourceFilter.matches(observation.provenance) else { continue }
             switch intervalSemantics {
             case .startsInWindow:
-                guard observation.startDate >= window.start && observation.startDate < window.end else { return false }
+                guard observation.startDate >= window.start && observation.startDate < window.end else { continue }
             case .overlapsWindow:
-                guard overlaps(observation, window) else { return false }
+                guard overlaps(observation, window) else { continue }
             }
-            return true
+            candidates.append(observation)
         }
-        return deduplicate(candidates, metric: stored.metric)
+        return try deduplicate(
+            candidates,
+            metric: stored.metric,
+            cancellationCheck: cancellationCheck
+        )
     }
 
     private static func deduplicate(
         _ candidates: [HealthKitObservation],
-        metric: HealthKitMetricID
-    ) -> QuantitySelection {
+        metric: HealthKitMetricID,
+        cancellationCheck: @escaping @Sendable () -> Bool
+    ) throws -> QuantitySelection {
         var retained: [HealthKitObservation] = []
         var duplicateConflicts: [HealthKitObservationConflict] = []
         var conflictKeys = Set<String>()
+        var identityIndex = StableIdentityIndex()
         for candidate in candidates.sorted(by: observationOrder) {
-            guard let existingIndex = retained.firstIndex(where: { $0.identity.matchesStableIdentity(candidate.identity) }) else {
+            if cancellationCheck() { throw CancellationError() }
+            guard let existingIndex = identityIndex.firstMatch(for: candidate.identity) else {
                 retained.append(candidate)
+                identityIndex.append(candidate, index: retained.count - 1)
                 continue
             }
+            let matchingIndices = identityIndex.matchingIndices(for: candidate.identity)
             let existing = retained[existingIndex]
             if existing == candidate { continue }
             let key = existing.identity.stableKey
@@ -751,7 +885,13 @@ public struct HealthKitFitnessProjection: Equatable, Sendable {
                 ))
                 conflictKeys.insert(key)
             }
-            if !retained.contains(candidate) { retained.append(candidate) }
+            // Exact equality implies stable-identity equality, so compare only
+            // the indexed collision set instead of retaining a second full
+            // fingerprint/object copy for every candidate.
+            if !matchingIndices.contains(where: { retained[$0] == candidate }) {
+                retained.append(candidate)
+                identityIndex.append(candidate, index: retained.count - 1)
+            }
         }
         return QuantitySelection(observations: retained, duplicateConflicts: duplicateConflicts)
     }
@@ -790,11 +930,24 @@ public struct HealthKitFitnessProjection: Equatable, Sendable {
     private static func sleepProjection(
         stored: HealthKitStoredMetricState,
         window: DateInterval,
-        sourceFilter: HealthKitFitnessSourceFilter
-    ) -> HealthKitFitnessSleepProjection {
-        let candidates = stored.observations
-            .filter { $0.metric == .sleep && overlaps($0, window) && sourceFilter.matches($0.provenance) }
-        let selection = deduplicate(candidates, metric: .sleep)
+        sourceFilter: HealthKitFitnessSourceFilter,
+        cancellationCheck: @escaping @Sendable () -> Bool
+    ) throws -> HealthKitFitnessSleepProjection {
+        var candidates: [HealthKitObservation] = []
+        candidates.reserveCapacity(stored.observations.count)
+        for observation in stored.observations {
+            if cancellationCheck() { throw CancellationError() }
+            guard observation.metric == .sleep,
+                  overlaps(observation, window),
+                  sourceFilter.matches(observation.provenance) else { continue }
+            candidates.append(observation)
+        }
+        let selection = try deduplicate(
+            candidates,
+            metric: .sleep,
+            cancellationCheck: cancellationCheck
+        )
+        if cancellationCheck() { throw CancellationError() }
         let scopedConflicts = scopedConflicts(from: stored, window: window, sourceFilter: sourceFilter, intervalSemantics: .overlapsWindow) + selection.duplicateConflicts
         let scopedState = scopedMetricState(stored: stored, selected: selection.observations, conflicts: scopedConflicts)
         let persistedState = sourceFilter == .all ? metricState(for: stored) : scopedState

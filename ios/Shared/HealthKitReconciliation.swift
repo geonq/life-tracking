@@ -66,6 +66,64 @@ public struct HealthKitReconciliationReport: Equatable, Sendable {
     }
 }
 
+/// Bounded UUID/sync-identifier lookup used while merging one anchored page.
+/// Matching against every retained observation made a large retained store an
+/// O(n²) reconciliation workload and repeatedly allocated alias UUID sets.
+private struct HealthKitReconciliationIdentityIndex {
+    private var uuidToIndices: [UUID: [Int]] = [:]
+    private var syncIdentifierToIndices: [String: [Int]] = [:]
+
+    init(observations: [HealthKitObservation]) {
+        for (index, observation) in observations.enumerated() {
+            append(observation.identity, index: index)
+        }
+    }
+
+    init(tombstones: [HealthKitDeletionTombstone]) {
+        for (index, tombstone) in tombstones.enumerated() {
+            append(tombstone.identity, index: index)
+        }
+    }
+
+    mutating func append(_ identity: HealthKitSampleIdentity, index: Int) {
+        uuidToIndices[identity.uuid, default: []].append(index)
+        for alias in identity.aliases {
+            uuidToIndices[alias, default: []].append(index)
+        }
+        if let syncIdentifier = identity.syncIdentifier {
+            syncIdentifierToIndices[syncIdentifier, default: []].append(index)
+        }
+    }
+
+    func firstMatch(for identity: HealthKitSampleIdentity) -> Int? {
+        var first: Int?
+        func consider(_ indices: [Int]?) {
+            guard let indices, let candidate = indices.first else { return }
+            if first == nil || candidate < first! { first = candidate }
+        }
+        consider(uuidToIndices[identity.uuid])
+        for alias in identity.aliases {
+            consider(uuidToIndices[alias])
+        }
+        if let syncIdentifier = identity.syncIdentifier {
+            consider(syncIdentifierToIndices[syncIdentifier])
+        }
+        return first
+    }
+
+    func matchingIndices(for identity: HealthKitSampleIdentity) -> [Int] {
+        var matches = Set<Int>()
+        matches.formUnion(uuidToIndices[identity.uuid] ?? [])
+        for alias in identity.aliases {
+            matches.formUnion(uuidToIndices[alias] ?? [])
+        }
+        if let syncIdentifier = identity.syncIdentifier {
+            matches.formUnion(syncIdentifierToIndices[syncIdentifier] ?? [])
+        }
+        return matches.sorted()
+    }
+}
+
 /// The only object allowed to move a HealthKit anchor forward. It first asks
 /// the adapter for a bounded anchored batch, merges it idempotently, and then
 /// asks the actor-isolated store to atomically persist projection, tombstones,
@@ -108,6 +166,20 @@ public actor HealthKitReconciliationCoordinator {
         var results: [HealthKitMetricReconciliationResult] = []
         for metric in metrics {
             results.append(await reconcile(metric: metric))
+        }
+        return HealthKitReconciliationReport(results: results)
+    }
+
+    /// Startup only consumes one bounded page per metric. A foreground launch
+    /// must not drain an entire historical HealthKit store before the first
+    /// frame; partial truth remains durable and a delayed production
+    /// continuation, observer, or manual run can continue from the advanced
+    /// anchor.
+    internal func reconcileInitialPages(metrics: [HealthKitMetricID]) async -> HealthKitReconciliationReport {
+        var results: [HealthKitMetricReconciliationResult] = []
+        results.reserveCapacity(metrics.count)
+        for metric in metrics {
+            results.append(await reconcilePage(metric: metric))
         }
         return HealthKitReconciliationReport(results: results)
     }
@@ -247,23 +319,22 @@ public actor HealthKitReconciliationCoordinator {
         var inserted = 0
         var duplicates = 0
         var conflictCount = 0
+        var observationIndex = HealthKitReconciliationIdentityIndex(observations: observations)
+        var tombstoneIndex = HealthKitReconciliationIdentityIndex(tombstones: tombstones)
 
         for incoming in input.additions {
             guard incoming.metric == metric else {
                 return HealthKitMetricReconciliationResult(metric: metric, state: .error, errorDescription: "Addition metric mismatch", completion: .failure("Addition metric mismatch"))
             }
-            if tombstones.contains(where: {
-                !$0.identity.aliasUUIDs.isDisjoint(with: incoming.identity.aliasUUIDs) ||
-                $0.identity.matchesStableIdentity(incoming.identity)
-            }) {
+            if tombstoneIndex.firstMatch(for: incoming.identity) != nil {
                 // A deleted stable identity remains tombstoned even if an
                 // anchored replay delivers its old sample again.
                 duplicates += 1
                 continue
             }
-            if let index = observations.firstIndex(where: { $0.identity.matchesStableIdentity(incoming.identity) }) {
+            if let index = observationIndex.firstMatch(for: incoming.identity) {
                 let existing = observations[index]
-                let sharesUUID = !existing.identity.aliasUUIDs.isDisjoint(with: incoming.identity.aliasUUIDs)
+                let sharesUUID = existing.identity.sharesUUID(with: incoming.identity)
                 let hasDifferentSyncIdentifiers = existing.identity.syncIdentifier != nil &&
                     incoming.identity.syncIdentifier != nil &&
                     existing.identity.syncIdentifier != incoming.identity.syncIdentifier
@@ -288,6 +359,7 @@ public actor HealthKitReconciliationCoordinator {
                                     provenance: existing.provenance,
                                     now: reconciliationNow
                                 )
+                                observationIndex.append(observations[index].identity, index: index)
                             } catch {
                                 let message = "HealthKit observation alias merge failed validation"
                                 return HealthKitMetricReconciliationResult(metric: metric, state: .error, errorDescription: message, completion: .failure(message))
@@ -311,6 +383,7 @@ public actor HealthKitReconciliationCoordinator {
                             provenance: incoming.provenance,
                             now: reconciliationNow
                         )
+                        observationIndex.append(observations[index].identity, index: index)
                     } catch {
                         let message = "HealthKit observation revision replacement failed validation"
                         return HealthKitMetricReconciliationResult(metric: metric, state: .error, errorDescription: message, completion: .failure(message))
@@ -324,14 +397,18 @@ public actor HealthKitReconciliationCoordinator {
                 continue
             }
             observations.append(incoming)
+            observationIndex.append(incoming.identity, index: observations.count - 1)
             inserted += 1
         }
 
+        var activeObservationIndices = Set(observations.indices)
         for deletion in input.deletions {
             guard deletion.metric == metric else {
                 return HealthKitMetricReconciliationResult(metric: metric, state: .error, errorDescription: "Deletion metric mismatch", completion: .failure("Deletion metric mismatch"))
             }
-            let matching = observations.filter { $0.identity.aliasUUIDs.intersection(deletion.identity.aliasUUIDs).isEmpty == false || $0.identity.matchesStableIdentity(deletion.identity) }
+            let matching = observationIndex.matchingIndices(for: deletion.identity)
+                .filter { activeObservationIndices.contains($0) }
+                .compactMap { observations[$0] }
             var normalizedIdentity = matching.reduce(deletion.identity) { result, observation in
                 result.withMergedAliases(from: observation.identity)
             }
@@ -353,13 +430,13 @@ public actor HealthKitReconciliationCoordinator {
                     normalizedIdentity = HealthKitSampleIdentity(
                         uuid: normalizedIdentity.uuid,
                         syncIdentifier: normalizedIdentity.syncIdentifier,
-                        aliases: Array(normalizedIdentity.aliasUUIDs.subtracting([normalizedIdentity.uuid])),
+                        aliases: normalizedIdentity.aliases,
                         revision: revision
                     )
                 } else {
                     normalizedIdentity = HealthKitSampleIdentity(
                         uuid: normalizedIdentity.uuid,
-                        aliases: Array(normalizedIdentity.aliasUUIDs.subtracting([normalizedIdentity.uuid]))
+                        aliases: normalizedIdentity.aliases
                     )
                 }
             }
@@ -370,14 +447,20 @@ public actor HealthKitReconciliationCoordinator {
                 let message = "Deletion tombstone validation failed"
                 return HealthKitMetricReconciliationResult(metric: metric, state: .error, errorDescription: message, completion: .failure(message))
             }
-            if !tombstones.contains(where: { $0.identity.matchesStableIdentity(normalizedDeletion.identity) }) {
+            if tombstoneIndex.firstMatch(for: normalizedDeletion.identity) == nil {
                 tombstones.append(normalizedDeletion)
+                tombstoneIndex.append(normalizedDeletion.identity, index: tombstones.count - 1)
             }
-            let before = observations.count
-            observations.removeAll { observation in
-                !observation.identity.aliasUUIDs.intersection(normalizedIdentity.aliasUUIDs).isEmpty || observation.identity.matchesStableIdentity(normalizedIdentity)
+            let removed = observationIndex.matchingIndices(for: normalizedIdentity)
+                .filter { activeObservationIndices.remove($0) != nil }
+                .count
+            inserted = max(0, inserted - removed)
+        }
+
+        if activeObservationIndices.count != observations.count {
+            observations = observations.enumerated().compactMap { index, observation in
+                activeObservationIndices.contains(index) ? observation : nil
             }
-            inserted = max(0, inserted - (before - observations.count))
         }
 
         if Task.isCancelled {
