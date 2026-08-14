@@ -321,8 +321,10 @@ final class HealthKitReconciliationTests: XCTestCase {
         _ = await coordinator.reconcile(metric: .water)
         let second = await store.snapshot(for: .water)
 
+        XCTAssertEqual(first.syncState, .synced, "a fresh successful query must remain synced even when its sample is sparse/old")
         XCTAssertEqual(first.lastCommittedAt, now)
         XCTAssertEqual(first.lastObservedAt, observed)
+        XCTAssertEqual(first.observations.first?.endDate, observed, "the source observation date remains available as evidence")
         XCTAssertEqual(second.lastCommittedAt, now)
         XCTAssertEqual(second.lastObservedAt, observed)
         XCTAssertEqual(second.anchor, try testAnchor(7))

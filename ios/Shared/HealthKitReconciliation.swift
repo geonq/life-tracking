@@ -498,8 +498,15 @@ public actor HealthKitReconciliationCoordinator {
             syncState = .conflict
         } else if input.partial || !input.quarantineDiagnostics.isEmpty {
             syncState = .partial
-        } else if age > staleAfter ||
-                  (observations.map(\.endDate).max().map { reconciliationNow.timeIntervalSince($0) > staleAfter } ?? false) {
+        } else if age > staleAfter {
+            // Freshness describes the successful provider query, not the age
+            // of the newest available sample in that page. HealthKit commonly returns
+            // sparse, slowly-changing observations (for example body mass or
+            // a manually logged water sample); a fresh anchored query that
+            // surfaces one of those observations is still a successful sync.
+            // Keep each observation's end date/provenance intact for UI and
+            // downstream calculations, but do not relabel the whole sync as
+            // stale merely because the source fact is old.
             syncState = .stale
         } else {
             syncState = .synced
