@@ -86,7 +86,7 @@ public enum LifeOSModule: String, CaseIterable, Hashable, Identifiable, Sendable
     /// modules use the honest shell below until their data contracts land.
     public var hasWorkingView: Bool {
         switch self {
-        case .home, .calendar, .finance, .fitness, .tax, .aiUsage, .settings, .tasks: true
+        case .home, .calendar, .finance, .fitness, .tax, .aiUsage, .settings: true
         default: false
         }
     }
@@ -105,6 +105,8 @@ public enum LifeOSModule: String, CaseIterable, Hashable, Identifiable, Sendable
             "Business data is not connected yet. No revenue, expense, or invoice values are shown."
         case .documents:
             "The shared document library is not connected yet. Existing tax-document storage remains available under Tax."
+        case .tasks:
+            "Tasks are not implemented yet. Calendar events continue to work independently."
         case .grocery:
             "Grocery lists are not implemented yet."
         case .shopping:
@@ -134,13 +136,13 @@ public extension LifeOSModule {
     /// for backwards-compatible deep links, but unfinished modules must not
     /// become accidental product navigation.
     static let macPrimaryModules: [LifeOSModule] = [
-        .home, .calendar, .tasks, .finance, .fitness, .tax, .settings
+        .home, .calendar, .finance, .fitness, .tax, .settings
     ]
 
     /// The iOS More destination is intentionally small: infrequent, useful
     /// destinations only. Usage is opened from the Home usage card/detail.
     static let moreGroups: [LifeOSModuleGroup] = [
-        .init(title: "More", modules: [.tasks, .tax, .settings])
+        .init(title: "More", modules: [.tax, .settings])
     ]
 }
 
@@ -156,7 +158,7 @@ public extension LifeOSDeepLink {
              .fitnessTemperature, .fitnessSleepDuration, .fitnessNutrition, .fitnessNutritionGoals, .fitnessNutritionImport,
              .fitnessNutritionCamera, .fitnessNutritionBarcode, .fitnessNutritionAIProposal,
              .fitnessNutritionSearch, .fitnessNetEnergy, .fitnessStress, .fitnessEnergyReserve: .fitness
-        case .tasks: .tasks
+        case .tasks: .calendar
         case .settings: .settings
         }
     }
