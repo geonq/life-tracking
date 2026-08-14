@@ -8,6 +8,12 @@ public struct CalendarWidgetEntry: TimelineEntry {
     public let storageAvailable: Bool
     public let isPreview: Bool
 
+    public enum SharingCopy {
+        public static let title = "Widget sharing unavailable"
+        public static let detail = "A provisioned App Group is required. Open LifeOS for the local calendar."
+        public static let accessibility = "Widget sharing unavailable. A provisioned App Group is required. Open LifeOS for the local calendar."
+    }
+
     public init(date: Date = .now, snapshot: CalendarSnapshot, storageAvailable: Bool = true, isPreview: Bool = false) {
         self.date = date
         self.snapshot = snapshot
@@ -59,7 +65,7 @@ public struct CalendarWidgetProvider: TimelineProvider {
     }
 
     private func load(completion: @escaping (CalendarWidgetEntry) -> Void) {
-        guard let identifier = Bundle.main.object(forInfoDictionaryKey: "APP_GROUP_IDENTIFIER") as? String else {
+        guard let identifier = AppGroupConfiguration.identifier(bundle: .main) else {
             completion(CalendarWidgetEntry(snapshot: CalendarSnapshot(), storageAvailable: false))
             return
         }
@@ -228,10 +234,10 @@ public struct CalendarWidgetView: View {
 
     private var unavailableView: some View {
         VStack(alignment: .leading, spacing: 7) {
-            Text("Calendar unavailable")
+            Text(CalendarWidgetEntry.SharingCopy.title)
                 .font(.system(size: 16, weight: .bold))
                 .foregroundStyle(primaryForeground)
-            Text("Open LifeOS to reconnect shared calendar storage.")
+            Text(CalendarWidgetEntry.SharingCopy.detail)
                 .font(.system(size: 11))
                 .foregroundStyle(secondaryForeground)
                 .fixedSize(horizontal: false, vertical: true)
@@ -376,7 +382,7 @@ public struct CalendarWidgetView: View {
 
     private var accessibilitySummary: String {
         if !entry.storageAvailable && !entry.isPreview {
-            return "Calendar unavailable. Open LifeOS to reconnect."
+            return CalendarWidgetEntry.SharingCopy.accessibility
         }
         if agendaEvents.isEmpty {
             return "Calendar. No events today. Create event button available."

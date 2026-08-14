@@ -1,5 +1,8 @@
 import Foundation
 import Combine
+#if canImport(WidgetKit)
+import WidgetKit
+#endif
 
 public enum CalendarLocalSaveResult: Equatable, Sendable {
     case success
@@ -11,6 +14,17 @@ public typealias CalendarUpdateCompletion = (CalendarLocalSaveResult) -> Void
 // asynchronous local save, so the handler contract must permit that escape.
 public typealias CalendarUpdateHandler = (CalendarItem, Date, Date, @escaping CalendarUpdateCompletion) -> Void
 
+private enum CalendarWidgetTimelineReloader {
+    static func reload() {
+#if canImport(WidgetKit)
+        // Reload only the calendar kinds. This is a one-way app-to-widget
+        // notification; widget timeline reads never call back into this path.
+        WidgetCenter.shared.reloadTimelines(ofKind: "LifeOSCalendarWidget")
+        WidgetCenter.shared.reloadTimelines(ofKind: "LifeOSNextEventWidget")
+#endif
+    }
+}
+
 @available(iOS 17.0, macOS 14.0, *)
 @MainActor
 public final class CalendarCoordinator: ObservableObject {
@@ -21,6 +35,7 @@ public final class CalendarCoordinator: ObservableObject {
     @Published public private(set) var errorMessage: String?
     @Published public private(set) var isLoaded = false
     @Published public private(set) var canUndo = false
+    @Published public private(set) var sharedStorageAvailable = false
 
     public let store: CalendarStore
     public let senderID: String
@@ -89,19 +104,20 @@ public final class CalendarCoordinator: ObservableObject {
     ) {
         snapshot = initialSnapshot
         self.usesVisualFixtures = usesVisualFixtures
-        let group = bundle.object(forInfoDictionaryKey: "APP_GROUP_IDENTIFIER") as? String
-        let selected: (URL, String) = {
+        let selected: (URL, String, Bool) = {
             if let storeURL {
-                return (storeURL, "Injected local store")
+                return (storeURL, "Injected local store", false)
             }
-            if let group, let url = try? CalendarStoreURL.appGroupURL(identifier: group, fileManager: fileManager) {
-                return (url, "App Group")
+            if let group = AppGroupConfiguration.identifier(bundle: bundle),
+               let url = try? CalendarStoreURL.appGroupURL(identifier: group, fileManager: fileManager) {
+                return (url, "App Group", true)
             }
             let url = storeURL ?? CalendarStoreURL.localURL(fileManager: fileManager)
-            return (url, "Local Application Support (this app only)")
+            return (url, "Local Application Support (this app only)", false)
         }()
         store = CalendarStore(url: selected.0, fileManager: fileManager, beforeMutation: storeMutationHook)
         storageDescription = selected.1
+        sharedStorageAvailable = selected.2
         let defaults = UserDefaults.standard
         let key = "LifeOS.Calendar.senderID"
         if let existing = defaults.string(forKey: key), !existing.isEmpty { senderID = existing }
@@ -138,6 +154,7 @@ public final class CalendarCoordinator: ObservableObject {
             snapshot = loaded
             isLoaded = true
             if pendingFailedMutation == nil { errorMessage = nil }
+            requestWidgetTimelineReloadIfNeeded()
         }
         catch { errorMessage = "Unable to load calendar: \(error.localizedDescription)"; isLoaded = true }
     }
@@ -261,6 +278,7 @@ public final class CalendarCoordinator: ObservableObject {
             // commit. A later MainActor task cannot alter what is delivered.
             let committedRevision = revision
             sendPeer(snapshot: committedSnapshot, revision: committedRevision)
+            requestWidgetTimelineReloadIfNeeded()
         } catch {
             let message = "Unable to save calendar: \(error.localizedDescription)"
             errorMessage = message
@@ -293,6 +311,7 @@ public final class CalendarCoordinator: ObservableObject {
             revision += 1
             UserDefaults.standard.set(revision, forKey: "LifeOS.Calendar.revision")
             if pendingFailedMutation == nil { errorMessage = nil }
+            requestWidgetTimelineReloadIfNeeded()
             return .success
         } catch {
             let message = "Unable to undo calendar mutation: \(error.localizedDescription)"
@@ -309,11 +328,17 @@ public final class CalendarCoordinator: ObservableObject {
         do {
             let merged = try await store.merge(remote)
             await publishRemoteMerge(merged, startedAt: generation, remoteRevision: remoteRevision)
+            requestWidgetTimelineReloadIfNeeded()
             return .success
         } catch {
             errorMessage = "Unable to merge calendar: \(error.localizedDescription)"
             return .failure(errorMessage ?? "Unable to merge calendar.")
         }
+    }
+
+    private func requestWidgetTimelineReloadIfNeeded() {
+        guard sharedStorageAvailable else { return }
+        CalendarWidgetTimelineReloader.reload()
     }
 
     private func sendPeer(snapshot: CalendarSnapshot, revision: Int) {

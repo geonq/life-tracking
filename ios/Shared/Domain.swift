@@ -437,8 +437,21 @@ public enum AppGroupConfiguration {
 
     public static func validatedIdentifier(_ rawValue: String?) -> String? {
         guard let value = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines),
-              value.hasPrefix("group."), value.count > 6,
-              !value.contains("$("), !value.contains(placeholder) else { return nil }
+              value.hasPrefix("group."),
+              !value.contains("$("),
+              !value.contains(placeholder) else { return nil }
+
+        // App Group identifiers are provisioned values, not arbitrary paths or
+        // build-setting expressions. Keep this check deliberately small and
+        // provider-neutral, but reject values that could otherwise reach
+        // FileManager.containerURL as malformed identifiers.
+        let suffix = value.dropFirst("group.".count)
+        guard !suffix.isEmpty,
+              suffix.split(separator: ".", omittingEmptySubsequences: false).allSatisfy({ component in
+                  !component.isEmpty && component.allSatisfy { character in
+                      character.isLetter || character.isNumber || character == "-" || character == "_"
+                  }
+              }) else { return nil }
         return value
     }
 

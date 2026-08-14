@@ -157,11 +157,11 @@ public struct NextEventWidgetView: View {
 
     private var unavailableContent: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Calendar unavailable")
+            Text(CalendarWidgetEntry.SharingCopy.title)
                 .font(.system(size: 15, weight: .bold))
                 .foregroundStyle(primaryForeground)
                 .lineLimit(2)
-            Text("Open LifeOS to reconnect.")
+            Text(CalendarWidgetEntry.SharingCopy.detail)
                 .font(.system(size: 11))
                 .foregroundStyle(secondaryForeground)
                 .fixedSize(horizontal: false, vertical: true)
@@ -187,11 +187,11 @@ public struct NextEventWidgetView: View {
     private var accessoryUnavailableContent: some View {
         HStack(alignment: .top, spacing: 6) {
             VStack(alignment: .leading, spacing: 1) {
-                Text("Calendar unavailable")
+                Text(CalendarWidgetEntry.SharingCopy.title)
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(primaryForeground)
                     .lineLimit(1)
-                Text("Open LifeOS to reconnect")
+                Text(CalendarWidgetEntry.SharingCopy.detail)
                     .font(.system(size: 9))
                     .foregroundStyle(secondaryForeground)
                     .lineLimit(1)
@@ -219,7 +219,7 @@ public struct NextEventWidgetView: View {
 
     private var accessibilitySummary: String {
         if !entry.storageAvailable && !entry.isPreview {
-            return "Calendar unavailable. Open LifeOS to reconnect."
+            return CalendarWidgetEntry.SharingCopy.accessibility
         }
         guard let nextEvent else {
             return "No upcoming calendar events."

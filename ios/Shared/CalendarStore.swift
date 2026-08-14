@@ -13,9 +13,10 @@ public enum CalendarStoreURL {
     }
 
     public static func appGroupURL(identifier: String, fileName: String = "calendar.json", fileManager: FileManager = .default) throws -> URL {
-        let value = identifier.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard value.hasPrefix("group."), !value.contains("$("), !value.contains("REPLACE_WITH"), !value.contains(" "),
-              let url = fileManager.containerURL(forSecurityApplicationGroupIdentifier: value) else { throw CalendarStoreError.invalidAppGroupIdentifier }
+        guard let value = AppGroupConfiguration.validatedIdentifier(identifier),
+              let url = fileManager.containerURL(forSecurityApplicationGroupIdentifier: value) else {
+            throw CalendarStoreError.invalidAppGroupIdentifier
+        }
         return url.appendingPathComponent(fileName, isDirectory: false)
     }
 }

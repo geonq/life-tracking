@@ -808,6 +808,14 @@ final class LifeOSWidgetSnapshotTests: XCTestCase {
         )
     }
 
+    func testCalendarWidgetSharingUnavailableIsNotCalendarDisconnectedOrEmpty() {
+        XCTAssertTrue(calendarEmptyEntry.storageAvailable)
+        XCTAssertFalse(calendarUnavailableEntry.storageAvailable)
+        XCTAssertTrue(CalendarWidgetEntry.SharingCopy.detail.contains("provisioned App Group"))
+        XCTAssertTrue(CalendarWidgetEntry.SharingCopy.detail.contains("Open LifeOS"))
+        XCTAssertFalse(CalendarWidgetEntry.SharingCopy.accessibility.localizedCaseInsensitiveContains("disconnected"))
+    }
+
     func testNextEventSmallDemoSnapshot() {
         render(
             NextEventWidgetView(entry: calendarDemoEntry),

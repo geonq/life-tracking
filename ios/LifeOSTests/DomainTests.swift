@@ -79,6 +79,21 @@ final class DomainTests: XCTestCase {
         XCTAssertNil(SharedSnapshotStore.url(appGroupIdentifier: "$(APP_GROUP_IDENTIFIER)"))
     }
 
+    func testAppGroupStoreRejectsMalformedIdentifiersBeforeContainerLookup() {
+        for value in [
+            "group.",
+            "group.com.example lifeos",
+            "group.com.example/lifeos",
+            "group.com..example",
+            "group.com.example.$(APP_GROUP_IDENTIFIER)"
+        ] {
+            XCTAssertNil(AppGroupConfiguration.validatedIdentifier(value), value)
+            XCTAssertThrowsError(try CalendarStoreURL.appGroupURL(identifier: value), value) { error in
+                XCTAssertEqual(error as? CalendarStoreError, .invalidAppGroupIdentifier)
+            }
+        }
+    }
+
     func testCalendarDeepLinkDistinguishesBrowseAndNewEvent() throws {
         XCTAssertEqual(LifeOSDeepLink(url: try XCTUnwrap(URL(string: "lifeos://calendar"))), .calendar)
         XCTAssertEqual(LifeOSDeepLink(url: try XCTUnwrap(URL(string: "lifeos://calendar/new"))), .newCalendarEvent)
