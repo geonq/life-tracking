@@ -113,71 +113,66 @@ struct LifeOSApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ZStack(alignment: .topLeading) {
-                switch selection {
-                case .home:
-                OverviewView(
-                    snapshot: usesVisualFixtures
-                        ? DemoDataProvider.overview
-                        : OverviewSnapshot.production(clipper: clipperCoordinator.snapshot),
-                    usageSnapshots: usesVisualFixtures ? DemoDataProvider.providers : usageCoordinator.providers,
-                    usageAnalytics: usesVisualFixtures ? DemoUsageAnalytics.snapshots : usageCoordinator.analytics,
-                    usageState: usesVisualFixtures ? .demo : usageCoordinator.state,
-                    refreshAction: usesVisualFixtures ? nil : {
-                        await calendarCoordinator.manualRefresh()
-                        await usageCoordinator.refresh()
-                        await financeCoordinator.refresh()
-                        await clipperCoordinator.refresh()
-                    },
-                    clipperRefreshAction: usesVisualFixtures ? nil : { await clipperCoordinator.refresh() },
-                    clipperState: usesVisualFixtures ? .demo : clipperCoordinator.state,
-                    fitnessSnapshot: usesVisualFixtures ? .demo : homeFitnessSnapshot,
-                    financeSummary: usesVisualFixtures ? nil : financeCoordinator.summary,
-                    financeState: usesVisualFixtures ? .demo : financeCoordinator.state,
-                    openDestination: navigate,
-                    showingUsage: $showingUsage
-                )
-                case .calendar:
-                CalendarView(coordinator: calendarCoordinator, requestNewEvent: $requestingNewCalendarEvent)
-                case .finance:
-                FinanceView(
-                    summary: financeCoordinator.summary,
-                    usesVisualFixtures: usesVisualFixtures,
-                    initialDetail: financeDetailRoute
-                )
-                case .fitness:
-                FitnessView(
-                    snapshot: usesVisualFixtures ? .demo : .unavailable,
-                    snapshotProvider: fitnessSnapshotProvider,
-                    initialSection: selectedModuleRoute?.fitnessSection ?? .today,
-                    initialNutritionEntryPoint: selectedModuleRoute?.nutritionEntryPoint,
-                    initialFitnessEntryPoint: selectedModuleRoute?.fitnessEntryPoint,
-                    usesVisualFixtures: usesVisualFixtures,
-                    onSourceReview: { navigate(.settings) }
-                )
-                case .more:
-                LifeOSMoreModulesView(
-                    initialModule: secondaryModuleRoute,
-                    initialRoute: selectedModuleRoute,
-                    usesVisualFixtures: usesVisualFixtures,
-                    destinationForModule: moreDestination
-                )
+            VStack(alignment: .leading, spacing: 0) {
+                ZStack(alignment: .topLeading) {
+                    switch selection {
+                    case .home:
+                        OverviewView(
+                            snapshot: usesVisualFixtures
+                                ? DemoDataProvider.overview
+                                : OverviewSnapshot.production(clipper: clipperCoordinator.snapshot),
+                            usageSnapshots: usesVisualFixtures ? DemoDataProvider.providers : usageCoordinator.providers,
+                            usageAnalytics: usesVisualFixtures ? DemoUsageAnalytics.snapshots : usageCoordinator.analytics,
+                            usageState: usesVisualFixtures ? .demo : usageCoordinator.state,
+                            refreshAction: usesVisualFixtures ? nil : {
+                                await calendarCoordinator.manualRefresh()
+                                await usageCoordinator.refresh()
+                                await financeCoordinator.refresh()
+                                await clipperCoordinator.refresh()
+                            },
+                            clipperRefreshAction: usesVisualFixtures ? nil : { await clipperCoordinator.refresh() },
+                            clipperState: usesVisualFixtures ? .demo : clipperCoordinator.state,
+                            fitnessSnapshot: usesVisualFixtures ? .demo : homeFitnessSnapshot,
+                            financeSummary: usesVisualFixtures ? nil : financeCoordinator.summary,
+                            financeState: usesVisualFixtures ? .demo : financeCoordinator.state,
+                            openDestination: navigate,
+                            showingUsage: $showingUsage
+                        )
+                    case .calendar:
+                        CalendarView(coordinator: calendarCoordinator, requestNewEvent: $requestingNewCalendarEvent)
+                    case .finance:
+                        FinanceView(
+                            summary: financeCoordinator.summary,
+                            usesVisualFixtures: usesVisualFixtures,
+                            initialDetail: financeDetailRoute
+                        )
+                    case .fitness:
+                        FitnessView(
+                            snapshot: usesVisualFixtures ? .demo : .unavailable,
+                            snapshotProvider: fitnessSnapshotProvider,
+                            initialSection: selectedModuleRoute?.fitnessSection ?? .today,
+                            initialNutritionEntryPoint: selectedModuleRoute?.nutritionEntryPoint,
+                            initialFitnessEntryPoint: selectedModuleRoute?.fitnessEntryPoint,
+                            usesVisualFixtures: usesVisualFixtures,
+                            onSourceReview: { navigate(.settings) }
+                        )
+                    case .more:
+                        LifeOSMoreModulesView(
+                            initialModule: secondaryModuleRoute,
+                            initialRoute: selectedModuleRoute,
+                            usesVisualFixtures: usesVisualFixtures,
+                            destinationForModule: moreDestination
+                        )
+                    }
                 }
-            }
-            // The shell owns the full canvas. Without an explicit flexible
-            // frame, a destination's ideal size can become the ZStack's
-            // layout size while it is transitioning, which in turn gives
-            // ScrollViews and Calendar's finite timed viewport a stale bottom
-            // boundary. The background belongs to this shell so every route,
-            // including pushed More destinations, fills the window.
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
-            // The small offset keeps the transition directional without moving a
-            // complete screen in from off-canvas like a stock push navigation.
-            .id(selection)
-            .transition(reduceMotion ? .opacity : tabContentTransition)
-            .animation(reduceMotion ? LifeOSMotion.ease : LifeOSMotion.primary, value: selection)
-            .safeAreaInset(edge: .bottom, spacing: 0) {
+                // Only route content participates in the tab transition. The
+                // bar remains a single stable sibling, so an animated route
+                // change cannot briefly install two bars or move its inset.
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .id(selection)
+                .transition(reduceMotion ? .opacity : tabContentTransition)
+                .animation(reduceMotion ? LifeOSMotion.ease : LifeOSMotion.primary, value: selection)
+
                 if !showingUsage {
                     CompactTabBar(selection: $selection) { tab in
                         updateTabDirection(for: tab)
@@ -188,9 +183,15 @@ struct LifeOSApp: App {
                         showingUsage = false
                         requestingNewCalendarEvent = false
                     }
-                        .transition(reduceMotion ? .identity : .move(edge: .bottom).combined(with: .opacity))
+                    .background {
+                        Rectangle()
+                            .fill(.ultraThinMaterial)
+                            .ignoresSafeArea(edges: .bottom)
+                    }
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
             .tint(LifeOSTokens.accent)
             .preferredColorScheme(forcedColorScheme)
             .animation(reduceMotion ? nil : LifeOSMotion.ease, value: calendarCoordinator.snapshot.items.count)
