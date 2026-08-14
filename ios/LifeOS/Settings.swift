@@ -1,5 +1,81 @@
 import SwiftUI
 
+struct RetainedHealthDataSettings: Equatable, Sendable {
+    enum Status: Equatable, Sendable {
+        case unavailable
+        case observed
+        case partial
+        case stale
+        case conflict
+        case readIndeterminate
+        case error
+    }
+
+    let status: Status
+    let sampleCount: Int
+    let categoryCount: Int
+    let confirmedHelioCategoryCount: Int
+    let latestObservation: Date?
+
+    init(
+        status: Status,
+        sampleCount: Int,
+        categoryCount: Int,
+        confirmedHelioCategoryCount: Int,
+        latestObservation: Date?
+    ) {
+        self.status = status
+        self.sampleCount = sampleCount
+        self.categoryCount = categoryCount
+        self.confirmedHelioCategoryCount = confirmedHelioCategoryCount
+        self.latestObservation = latestObservation
+    }
+
+    static let unavailable = RetainedHealthDataSettings(
+        status: .unavailable,
+        sampleCount: 0,
+        categoryCount: 0,
+        confirmedHelioCategoryCount: 0,
+        latestObservation: nil
+    )
+
+    var title: String {
+        switch status {
+        case .unavailable: "Unavailable"
+        case .observed: "Observed · retained"
+        case .partial: "Partial retention"
+        case .stale: "Stale retained data"
+        case .conflict: "Conflicting source records"
+        case .readIndeterminate: "Read result indeterminate"
+        case .error: "Health data read error"
+        }
+    }
+
+    var detail: String {
+        switch status {
+        case .unavailable:
+            "No HealthKit observations have been retained yet."
+        case .observed:
+            "Health data is retained locally from an observed HealthKit read; this does not claim device connection."
+        case .partial:
+            "Some HealthKit observations are retained locally; coverage is incomplete."
+        case .stale:
+            "Retained HealthKit data is present but its freshness needs review."
+        case .conflict:
+            "Conflicting HealthKit source records are retained; no single value is presented as authoritative."
+        case .readIndeterminate:
+            "Apple Health read completed, but access and an empty result cannot be distinguished."
+        case .error:
+            "A HealthKit read could not be interpreted; no device connection is claimed."
+        }
+    }
+
+    var latestObservationLabel: String {
+        guard let latestObservation else { return "No retained observation yet" }
+        return latestObservation.formatted(date: .abbreviated, time: .shortened)
+    }
+}
+
 struct HealthReadAccessSettings: Equatable, Sendable {
     enum State: Equatable, Sendable {
         case unavailable
@@ -83,6 +159,7 @@ struct HealthReadAccessSettings: Equatable, Sendable {
 struct SettingsView: View {
     private let healthReadAccess: HealthReadAccessSettings
     private let requestHealthReadAccess: (@MainActor () async -> Void)?
+    private let retainedHealthData: RetainedHealthDataSettings
 
     private var categories: [SettingsCategory] {
         [
@@ -96,10 +173,12 @@ struct SettingsView: View {
 
     init(
         healthReadAccess: HealthReadAccessSettings = .platformDefault,
-        requestHealthReadAccess: (@MainActor () async -> Void)? = nil
+        requestHealthReadAccess: (@MainActor () async -> Void)? = nil,
+        retainedHealthData: RetainedHealthDataSettings = .unavailable
     ) {
         self.healthReadAccess = healthReadAccess
         self.requestHealthReadAccess = requestHealthReadAccess
+        self.retainedHealthData = retainedHealthData
     }
 
     var body: some View {
@@ -135,7 +214,8 @@ struct SettingsView: View {
                         NavigationLink {
                             HealthDevicesSettingsView(
                                 healthReadAccess: healthReadAccess,
-                                requestHealthReadAccess: requestHealthReadAccess
+                                requestHealthReadAccess: requestHealthReadAccess,
+                                retainedHealthData: retainedHealthData
                             )
                         } label: {
                             SettingsHubCard(category: categories[2])
@@ -293,7 +373,7 @@ private struct SettingsHubCard: View {
     }
 }
 
-private struct ProviderConnectionsSettingsView: View {
+struct ProviderConnectionsSettingsView: View {
     private let providers = ["Codex", "Claude", "GLM", "DeepSeek", "Google AI Studio"]
 
     var body: some View {
@@ -383,6 +463,7 @@ private struct HealthDevicesSettingsView: View {
     private let snapshot = HelioDeviceSettingsSnapshot.current
     let healthReadAccess: HealthReadAccessSettings
     let requestHealthReadAccess: (@MainActor () async -> Void)?
+    let retainedHealthData: RetainedHealthDataSettings
 
     var body: some View {
         ScrollView {
@@ -454,24 +535,33 @@ private struct HealthDevicesSettingsView: View {
                     .accessibilityIdentifier("settings-health-connection-permission")
                 }
 
-                SettingsSection(title: "Last successful sync", icon: .refresh) {
-                    if let sync = snapshot.lastSuccessfulSync {
+                SettingsSection(title: "Retained Health data", icon: .refresh) {
+                    VStack(spacing: 0) {
                         SettingsStatusRow(
-                            title: "Observed source sync",
-                            detail: sync.summary,
-                            status: sync.freshness.title,
-                            icon: sync.freshness == .fresh ? .verified : .warning,
-                            statusColor: syncStatusColor(sync)
+                            title: "Retained observations",
+                            detail: "\(retainedHealthData.sampleCount) retained observations across \(retainedHealthData.categoryCount) HealthKit categories",
+                            status: retainedHealthData.title,
+                            icon: retainedHealthDataIcon,
+                            statusColor: retainedHealthDataStatusColor
                         )
-                    } else {
+                        Divider().padding(.leading, 38)
                         SettingsStatusRow(
-                            title: "Observed source sync",
-                            detail: "No successful sync has been observed by this build; no timestamp is available.",
-                            status: "Unavailable",
-                            icon: .warning,
-                            statusColor: LifeOSTokens.warning
+                            title: "Latest retained observation",
+                            detail: retainedHealthData.detail,
+                            status: retainedHealthData.latestObservationLabel,
+                            icon: retainedHealthDataIcon,
+                            statusColor: retainedHealthDataStatusColor
+                        )
+                        Divider().padding(.leading, 38)
+                        SettingsStatusRow(
+                            title: "Confirmed Helio categories",
+                            detail: "Source-confirmed categories only; this is not a device sync or battery claim.",
+                            status: "\(retainedHealthData.confirmedHelioCategoryCount)",
+                            icon: .health,
+                            statusColor: retainedHealthData.confirmedHelioCategoryCount > 0 ? LifeOSTokens.info : LifeOSTokens.warning
                         )
                     }
+                    .accessibilityIdentifier("settings-health-retained-data")
                 }
 
                 SettingsSection(title: "Metric capability inventory", icon: .health) {
@@ -576,8 +666,30 @@ private struct HealthDevicesSettingsView: View {
         }
     }
 
-    private func syncStatusColor(_ sync: HelioDeviceObservationProvenance) -> Color {
-        sync.freshness == .fresh ? LifeOSTokens.success : LifeOSTokens.warning
+    private var retainedHealthDataStatusColor: Color {
+        switch retainedHealthData.status {
+        case .observed:
+            return LifeOSTokens.success
+        case .partial, .stale:
+            return LifeOSTokens.warning
+        case .conflict, .error:
+            return LifeOSTokens.danger
+        case .readIndeterminate:
+            return LifeOSTokens.info
+        case .unavailable:
+            return LifeOSTokens.warning
+        }
+    }
+
+    private var retainedHealthDataIcon: LifeOSIconName {
+        switch retainedHealthData.status {
+        case .observed:
+            return .verified
+        case .readIndeterminate:
+            return .refresh
+        case .partial, .stale, .conflict, .error, .unavailable:
+            return .warning
+        }
     }
 
     private func capabilityStatusColor(_ status: HelioDeviceCapabilityStatus) -> Color {

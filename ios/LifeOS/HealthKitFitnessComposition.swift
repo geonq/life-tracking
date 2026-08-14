@@ -1335,4 +1335,122 @@ public struct HealthKitFitnessComposition {
         return formatter.string(from: date)
     }
 }
+
+/// Projects retained HealthKit facts into the small settings model without
+/// treating an unavailable side-channel as evidence that retained data is
+/// absent. This is deliberately app-only: the shared settings surface does
+/// not need to know about HealthKit projection internals.
+extension RetainedHealthDataSettings {
+    static func from(projection: HealthKitFitnessProjection) -> Self {
+        struct Category {
+            let sampleCount: Int
+            let states: [HealthKitMetricState]
+            let provenances: [HealthKitProvenance]
+            let endDates: [Date]
+        }
+
+        var categories: [Category] = []
+        var emptyStates: [HealthKitMetricState] = []
+
+        for metric in projection.metrics.values where metric.metric.isQuantity && metric.metric.canonicalUnit != nil {
+            if metric.observations.isEmpty {
+                emptyStates.append(metric.state)
+                if projection.sourceFilter == .all {
+                    emptyStates.append(metric.persistedState)
+                }
+            } else {
+                categories.append(Category(
+                    sampleCount: metric.observations.count,
+                    states: [metric.state],
+                    provenances: metric.observations.map(\.provenance),
+                    endDates: metric.observations.map(\.endDate)
+                ))
+            }
+        }
+
+        if projection.sleep.samples.isEmpty {
+            emptyStates.append(projection.sleep.state)
+            if projection.sourceFilter == .all {
+                emptyStates.append(projection.sleep.persistedState)
+            }
+        } else {
+            categories.append(Category(
+                sampleCount: projection.sleep.samples.count,
+                states: [projection.sleep.state],
+                provenances: projection.sleep.samples.map(\.provenance),
+                endDates: projection.sleep.samples.map(\.endDate)
+            ))
+        }
+
+        if !projection.workouts.isEmpty {
+            categories.append(Category(
+                sampleCount: projection.workouts.count,
+                states: projection.workouts.map(\.state),
+                provenances: projection.workouts.map(\.provenance),
+                endDates: projection.workouts.map(\.endDate)
+            ))
+        } else if let workoutMetric = projection.metrics[.workout] {
+            // Workout facts have a dedicated typed projection, but an empty
+            // workout projection still carries a durable state that must not
+            // disappear from the settings summary.
+            emptyStates.append(workoutMetric.state)
+            if projection.sourceFilter == .all {
+                emptyStates.append(workoutMetric.persistedState)
+            }
+        }
+
+        let sampleCount = categories.reduce(0) { $0 + $1.sampleCount }
+        let confirmedCategoryCount = categories.reduce(into: 0) { result, category in
+            guard !category.provenances.isEmpty,
+                  category.provenances.allSatisfy({ $0.helioMatch == .confirmed }) else { return }
+            result += 1
+        }
+        let latestObservation = categories
+            .flatMap(\.endDates)
+            .filter { $0.timeIntervalSinceReferenceDate.isFinite }
+            .max()
+
+        let status: Status
+        if !projection.issues.isEmpty {
+            status = .error
+        } else if sampleCount > 0 {
+            status = resolvedStatus(for: categories.flatMap(\.states), hasSamples: true)
+        } else {
+            status = resolvedStatus(for: emptyStates, hasSamples: false)
+        }
+
+        return Self(
+            status: status,
+            sampleCount: sampleCount,
+            categoryCount: categories.count,
+            confirmedHelioCategoryCount: confirmedCategoryCount,
+            latestObservation: latestObservation
+        )
+    }
+
+    private static func resolvedStatus(
+        for states: [HealthKitMetricState],
+        hasSamples: Bool
+    ) -> Status {
+        if states.contains(.error) {
+            return .error
+        }
+        if states.contains(.conflict) {
+            return .conflict
+        }
+        if states.contains(.readIndeterminate) {
+            return .readIndeterminate
+        }
+        if states.contains(.stale) {
+            return .stale
+        }
+        if states.contains(.partial) {
+            return .partial
+        }
+        if states.contains(.unavailable) || states.contains(.permissionRequired) {
+            return .unavailable
+        }
+        return hasSamples ? .observed : .unavailable
+    }
+}
 #endif

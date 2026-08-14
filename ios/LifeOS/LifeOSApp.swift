@@ -239,6 +239,12 @@ struct LifeOSApp: App {
             return HealthKitFitnessComposition.snapshot(from: projection, selectedDate: date)
         }
     }
+
+    private var retainedHealthDataSettings: RetainedHealthDataSettings {
+        guard !usesVisualFixtures,
+              let projection = healthKitFitnessRepository.projection else { return .unavailable }
+        return RetainedHealthDataSettings.from(projection: projection)
+    }
 #endif
 
     private var tabContentTransition: AnyTransition {
@@ -332,7 +338,8 @@ struct LifeOSApp: App {
         case .settings:
             return AnyView(SettingsView(
                 healthReadAccess: healthReadAccessSettings,
-                requestHealthReadAccess: usesVisualFixtures ? nil : requestHealthReadAccess
+                requestHealthReadAccess: usesVisualFixtures ? nil : requestHealthReadAccess,
+                retainedHealthData: retainedHealthDataSettings
             ))
         default:
             return AnyView(LifeOSModuleLandingView(

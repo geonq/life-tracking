@@ -222,7 +222,7 @@ struct UsageView: View {
             .accessibilityLabel("Refresh usage data")
 
             NavigationLink {
-                SettingsView()
+                ProviderConnectionsSettingsView()
             } label: {
                 LifeOSIcon(.settings)
                     .frame(width: 14, height: 14)

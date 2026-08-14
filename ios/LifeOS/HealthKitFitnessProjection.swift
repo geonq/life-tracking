@@ -796,8 +796,9 @@ public struct HealthKitFitnessProjection: Equatable, Sendable {
             .filter { $0.metric == .sleep && overlaps($0, window) && sourceFilter.matches($0.provenance) }
         let selection = deduplicate(candidates, metric: .sleep)
         let scopedConflicts = scopedConflicts(from: stored, window: window, sourceFilter: sourceFilter, intervalSemantics: .overlapsWindow) + selection.duplicateConflicts
-        let persistedState = scopedMetricState(stored: stored, selected: selection.observations, conflicts: scopedConflicts)
-        let state = effectiveState(persistedState, hasSelection: !selection.observations.isEmpty)
+        let scopedState = scopedMetricState(stored: stored, selected: selection.observations, conflicts: scopedConflicts)
+        let persistedState = sourceFilter == .all ? metricState(for: stored) : scopedState
+        let state = effectiveState(scopedState, hasSelection: !selection.observations.isEmpty)
         let selected = selection.observations
             .compactMap { try? HealthKitFitnessSleepSample(observation: $0, state: state) }
             .sorted { lhs, rhs in

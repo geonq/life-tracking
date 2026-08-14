@@ -755,4 +755,207 @@ final class HealthKitFitnessCompositionTests: XCTestCase {
         XCTAssertFalse(composition.snapshot.source.freshness.contains("2023-11-14"))
         XCTAssertTrue(composition.snapshot.workouts.isEmpty)
     }
+
+    func testRetainedHealthDataSettingsCountsSamplesCategoriesAndConfirmedHelio() throws {
+        let confirmedEnd = now
+        let otherEnd = now.addingTimeInterval(-60)
+        let settings = RetainedHealthDataSettings.from(
+            projection: projection(states: [
+                try state(metric: .restingHeartRate, observations: [
+                    try quantity(metric: .restingHeartRate, value: 52, at: now, provenance: try helioProvenance())
+                ]),
+                try state(metric: .steps, observations: [
+                    try quantity(metric: .steps, value: 2_000, at: otherEnd)
+                ])
+            ])
+        )
+
+        XCTAssertEqual(settings.status, .observed)
+        XCTAssertEqual(settings.sampleCount, 2)
+        XCTAssertEqual(settings.categoryCount, 2)
+        XCTAssertEqual(settings.confirmedHelioCategoryCount, 1)
+        XCTAssertEqual(settings.latestObservation, confirmedEnd)
+    }
+
+    func testRetainedHealthDataSettingsEmptyPreservesReadIndeterminate() throws {
+        let settings = RetainedHealthDataSettings.from(
+            projection: projection(states: [try state(metric: .bodyMass, syncState: .readIndeterminate)])
+        )
+
+        XCTAssertEqual(settings.status, .readIndeterminate)
+        XCTAssertEqual(settings.sampleCount, 0)
+        XCTAssertEqual(settings.categoryCount, 0)
+        XCTAssertNil(settings.latestObservation)
+    }
+
+    func testRetainedHealthDataSettingsPrioritizesConflictAndPartialOnlyWhenContributing() throws {
+        let sample = try quantity(metric: .bodyMass, value: 72, at: now)
+        let changed = try quantity(metric: .bodyMass, value: 73, at: now, uuid: sample.identity.uuid)
+        let conflict = HealthKitObservationConflict(
+            metric: .bodyMass,
+            identity: sample.identity,
+            existing: sample,
+            incoming: changed
+        )
+        let conflicted = RetainedHealthDataSettings.from(
+            projection: projection(states: [try state(
+                metric: .bodyMass,
+                observations: [sample],
+                conflicts: [conflict]
+            )])
+        )
+        XCTAssertEqual(conflicted.status, .conflict)
+        XCTAssertEqual(conflicted.sampleCount, 1)
+
+        let partial = RetainedHealthDataSettings.from(
+            projection: projection(states: [try state(
+                metric: .steps,
+                observations: [try quantity(metric: .steps, value: 1_000, at: now)],
+                syncState: .partial
+            )])
+        )
+        XCTAssertEqual(partial.status, .partial)
+        XCTAssertEqual(partial.sampleCount, 1)
+
+        let retainedButUnavailable = RetainedHealthDataSettings.from(
+            projection: projection(states: [try state(
+                metric: .steps,
+                observations: [try quantity(metric: .steps, value: 250, at: now)],
+                syncState: .neverSynced
+            )])
+        )
+        XCTAssertEqual(retainedButUnavailable.status, .unavailable)
+
+        let indeterminate = RetainedHealthDataSettings.from(
+            projection: projection(states: [try state(
+                metric: .steps,
+                observations: [try quantity(metric: .steps, value: 500, at: now)],
+                syncState: .readIndeterminate
+            )])
+        )
+        XCTAssertEqual(indeterminate.status, .readIndeterminate)
+    }
+
+    func testRetainedHealthDataSettingsPreservesEmptyWorkoutStates() throws {
+        let cases: [(HealthKitSyncState, RetainedHealthDataSettings.Status)] = [
+            (.error, .error),
+            (.conflict, .conflict),
+            (.readIndeterminate, .readIndeterminate),
+            (.stale, .stale),
+            (.partial, .partial),
+            (.neverSynced, .unavailable)
+        ]
+
+        for (syncState, expected) in cases {
+            let settings = RetainedHealthDataSettings.from(
+                projection: projection(states: [try state(metric: .workout, syncState: syncState)])
+            )
+            XCTAssertEqual(settings.status, expected, "Unexpected workout state for \(syncState)")
+            XCTAssertEqual(settings.sampleCount, 0)
+            XCTAssertEqual(settings.categoryCount, 0)
+        }
+    }
+
+    func testRetainedHealthDataSettingsUsesUnfilteredPersistedQuantityConflictWhenWindowIsEmpty() throws {
+        let existing = try quantity(metric: .bodyMass, value: 72, at: now)
+        let incoming = try quantity(metric: .bodyMass, value: 73, at: now, uuid: existing.identity.uuid)
+        let conflict = HealthKitObservationConflict(
+            metric: .bodyMass,
+            identity: existing.identity,
+            existing: existing,
+            incoming: incoming
+        )
+        let retained = projection(
+            states: [try state(metric: .bodyMass, observations: [existing], conflicts: [conflict])],
+            start: now.addingTimeInterval(-2 * 86_400),
+            end: now.addingTimeInterval(-86_400)
+        )
+
+        XCTAssertTrue(retained.metric(.bodyMass).observations.isEmpty)
+        XCTAssertEqual(retained.metric(.bodyMass).state, .unavailable)
+        XCTAssertEqual(retained.metric(.bodyMass).persistedState, .conflict)
+        XCTAssertEqual(RetainedHealthDataSettings.from(projection: retained).status, .conflict)
+    }
+
+    func testRetainedHealthDataSettingsKeepsEmptySleepConflictScopedToItsProjection() throws {
+        let start = now.addingTimeInterval(-2 * 86_400)
+        let end = now.addingTimeInterval(-86_400)
+        let existing = try sleep(
+            stage: .asleepCore,
+            start: now.addingTimeInterval(-3_600),
+            end: now.addingTimeInterval(-1_800)
+        )
+        let incoming = try sleep(
+            stage: .asleepREM,
+            start: now.addingTimeInterval(-3_600),
+            end: now.addingTimeInterval(-1_800),
+            uuid: existing.identity.uuid
+        )
+        let conflict = HealthKitObservationConflict(
+            metric: .sleep,
+            identity: existing.identity,
+            existing: existing,
+            incoming: incoming
+        )
+        let retained = projection(
+            states: [try state(metric: .sleep, observations: [existing], conflicts: [conflict])],
+            start: start,
+            end: end
+        )
+
+        XCTAssertTrue(retained.sleep.samples.isEmpty)
+        XCTAssertEqual(retained.sleep.state, .unavailable)
+        XCTAssertEqual(retained.sleep.persistedState, .conflict)
+        XCTAssertEqual(RetainedHealthDataSettings.from(projection: retained).status, .conflict)
+    }
+
+    func testRetainedHealthDataSettingsDoesNotLeakFilteredSleepConflict() throws {
+        let existing = try sleep(
+            stage: .asleepCore,
+            start: now.addingTimeInterval(-3_600),
+            end: now.addingTimeInterval(-1_800)
+        )
+        let incoming = try sleep(
+            stage: .asleepREM,
+            start: now.addingTimeInterval(-3_600),
+            end: now.addingTimeInterval(-1_800),
+            uuid: existing.identity.uuid
+        )
+        let conflict = HealthKitObservationConflict(
+            metric: .sleep,
+            identity: existing.identity,
+            existing: existing,
+            incoming: incoming
+        )
+        let retained = HealthKitFitnessProjection(
+            states: [try state(metric: .sleep, observations: [existing], conflicts: [conflict])],
+            window: DateInterval(
+                start: now.addingTimeInterval(-2 * 86_400),
+                end: now.addingTimeInterval(-86_400)
+            ),
+            sourceFilter: .exact(bundleIdentifier: "com.other.source"),
+            calendar: calendar
+        )
+
+        XCTAssertTrue(retained.sleep.samples.isEmpty)
+        XCTAssertEqual(retained.sleep.state, .unavailable)
+        XCTAssertEqual(retained.sleep.persistedState, .unavailable)
+        XCTAssertEqual(RetainedHealthDataSettings.from(projection: retained).status, .unavailable)
+    }
+
+    func testRetainedHealthDataSettingsInvalidProjectionIsError() {
+        let invalid = HealthKitFitnessProjection(
+            states: [HealthKitStoredMetricState.empty(for: .bodyMass)],
+            window: DateInterval(
+                start: now.addingTimeInterval(-HealthKitFitnessProjection.maximumWindow - 1),
+                end: now
+            ),
+            calendar: calendar
+        )
+
+        let settings = RetainedHealthDataSettings.from(projection: invalid)
+        XCTAssertEqual(settings.status, .error)
+        XCTAssertEqual(settings.sampleCount, 0)
+        XCTAssertEqual(settings.categoryCount, 0)
+    }
 }
