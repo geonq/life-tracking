@@ -158,6 +158,359 @@ final class LifeOSWidgetSnapshotTests: XCTestCase {
         )
     }
 
+    func testUsageChartStateIsPartialWhenProviderSummaryIsMissing() {
+        let provider = makeUsageProvider(windows: [
+            UsageWindow(id: "5h", label: "5-hour", durationMinutes: 300)
+        ])
+
+        let state = UsageWidgetData.chartState(for: makeUsageSnapshot(providers: [provider]))
+
+        XCTAssertEqual(state, .partial)
+        XCTAssertFalse(state.rendersSeries)
+        XCTAssertTrue(state.accessibilityLabel().contains("partial"))
+    }
+
+    func testUsageProviderSelectionIgnoresUnavailableAndEstimatedUsedValues() {
+        let unavailable = makeUsageProvider(
+            provider: .codex,
+            quality: .unavailable,
+            connector: .unavailable,
+            projected: 0.92
+        )
+        let estimated = makeUsageProvider(
+            provider: .glm,
+            quality: .estimated,
+            projected: 0.88
+        )
+        let observed = makeUsageProvider(provider: .claude, quality: .observed, projected: 0.72)
+        let snapshot = makeUsageSnapshot(providers: [unavailable, estimated, observed])
+
+        let providers = UsageWidgetData.providers(from: snapshot)
+
+        XCTAssertEqual(providers.map(\.id), [.claude])
+        XCTAssertEqual(UsageWidgetData.leading(from: providers)?.id, .claude)
+        XCTAssertTrue(UsageWidgetData.providersForDisplay(from: snapshot).isEmpty)
+        XCTAssertEqual(UsageWidgetData.chartState(for: snapshot), .partial)
+
+        let estimatedOnly = makeUsageSnapshot(providers: [estimated])
+        XCTAssertTrue(UsageWidgetData.providers(from: estimatedOnly).isEmpty)
+        XCTAssertEqual(UsageWidgetData.chartState(for: estimatedOnly), .partial)
+
+        let unavailableOnly = makeUsageSnapshot(providers: [unavailable])
+        XCTAssertTrue(UsageWidgetData.providers(from: unavailableOnly).isEmpty)
+        XCTAssertEqual(UsageWidgetData.chartState(for: unavailableOnly), .unavailable)
+    }
+
+    func testUsageChartStateIsUnavailableWithoutProviders() {
+        let state = UsageWidgetData.chartState(for: WidgetSnapshot.unavailable(at: fixedUsageDate))
+
+        XCTAssertEqual(state, .unavailable)
+        XCTAssertFalse(state.rendersSeries)
+        XCTAssertTrue(state.accessibilityLabel().contains("unavailable"))
+        XCTAssertTrue(state.accessibilityLabel().contains("not live"))
+
+        let unavailableProvider = makeUsageProvider(
+            quality: .unavailable,
+            connector: .unavailable,
+            projected: 0.72
+        )
+        XCTAssertEqual(
+            UsageWidgetData.chartState(for: makeUsageSnapshot(providers: [unavailableProvider], quality: .unavailable)),
+            .unavailable
+        )
+    }
+
+    func testUsageChartStateOnlyPlotsObservedOrDemoProviderWithProjection() {
+        let observed = makeUsageProvider(quality: .observed, projected: 0.72)
+        let demo = makeUsageProvider(provider: .claude, quality: .demo, projected: 0.68)
+        let estimated = makeUsageProvider(provider: .glm, quality: .estimated, projected: 0.64)
+
+        XCTAssertEqual(
+            UsageWidgetData.chartState(for: makeUsageSnapshot(providers: [observed])),
+            .observed
+        )
+        XCTAssertTrue(UsageWidgetData.isLive(for: makeUsageSnapshot(providers: [observed])))
+        XCTAssertEqual(
+            UsageWidgetData.chartState(for: makeUsageSnapshot(providers: [demo], quality: .demo)),
+            .demo
+        )
+        XCTAssertFalse(
+            UsageWidgetData.isLive(for: makeUsageSnapshot(providers: [demo], quality: .demo))
+        )
+        XCTAssertEqual(
+            UsageWidgetData.chartState(for: makeUsageSnapshot(providers: [estimated])),
+            .partial
+        )
+        XCTAssertEqual(
+            UsageWidgetData.chartState(for: makeUsageSnapshot(providers: [], quality: .demo)),
+            .unavailable
+        )
+    }
+
+    func testUsageChartStateTreatsMissingProjectionAsPartialInsteadOfFlatTrend() {
+        let provider = makeUsageProvider(quality: .observed, projected: nil)
+
+        let state = UsageWidgetData.chartState(for: makeUsageSnapshot(providers: [provider]))
+
+        XCTAssertEqual(state, .partial)
+        XCTAssertFalse(state.rendersSeries)
+        XCTAssertEqual(state.title, "Partial trend")
+        XCTAssertFalse(UsageWidgetData.isLive(for: makeUsageSnapshot(providers: [provider])))
+
+        let invalidProjection = makeUsageProvider(quality: .observed, projected: .nan)
+        XCTAssertEqual(
+            UsageWidgetData.chartState(for: makeUsageSnapshot(providers: [invalidProjection])),
+            .partial
+        )
+    }
+
+    func testUsageChartStateFailsClosedForAggregateProviderQualityMismatches() {
+        let observed = makeUsageProvider(quality: .observed, projected: 0.72)
+        let demo = makeUsageProvider(provider: .claude, quality: .demo, projected: 0.68)
+
+        let aggregateEstimated = makeUsageSnapshot(providers: [observed], quality: .estimated)
+        XCTAssertEqual(UsageWidgetData.chartState(for: aggregateEstimated), .partial)
+        XCTAssertFalse(UsageWidgetData.isLive(for: aggregateEstimated))
+
+        let aggregateUnavailable = makeUsageSnapshot(providers: [observed], quality: .unavailable)
+        XCTAssertEqual(UsageWidgetData.chartState(for: aggregateUnavailable), .unavailable)
+        XCTAssertFalse(UsageWidgetData.isLive(for: aggregateUnavailable))
+
+        let demoProviderInObservedSnapshot = makeUsageSnapshot(providers: [demo], quality: .observed)
+        XCTAssertEqual(UsageWidgetData.chartState(for: demoProviderInObservedSnapshot), .partial)
+        XCTAssertFalse(UsageWidgetData.isLive(for: demoProviderInObservedSnapshot))
+        XCTAssertTrue(UsageWidgetData.hasDemoSource(in: demoProviderInObservedSnapshot))
+
+        let observedProviderInDemoSnapshot = makeUsageSnapshot(providers: [observed], quality: .demo)
+        XCTAssertEqual(UsageWidgetData.chartState(for: observedProviderInDemoSnapshot), .partial)
+        XCTAssertFalse(UsageWidgetData.isLive(for: observedProviderInDemoSnapshot))
+        XCTAssertTrue(UsageWidgetData.hasDemoSource(in: observedProviderInDemoSnapshot))
+    }
+
+    func testUsageConnectorDisclosureNeverImpliedLiveForRetainedOrBlockedValues() {
+        let cases: [(ConnectorState, UsageWidgetConnectorDisclosure, Bool)] = [
+            (.healthy, .live, true),
+            (.refreshDue, .refreshDue, true),
+            (.rateLimited, .rateLimited, true),
+            (.reauthRequired, .reconnect, false),
+            (.revoked, .reconnect, false),
+            (.disabled, .unavailable, false),
+            (.unavailable, .unavailable, false),
+            (.error, .unavailable, false)
+        ]
+
+        for (connector, expectedDisclosure, keepsValues) in cases {
+            let provider = makeUsageProvider(connector: connector, projected: 0.72)
+            let snapshot = makeUsageSnapshot(
+                providers: [provider],
+                connector: connector == .unavailable ? .unavailable : connector
+            )
+            let disclosure = UsageWidgetData.connectorDisclosure(for: snapshot)
+
+            XCTAssertEqual(disclosure, expectedDisclosure, "Unexpected disclosure for \(connector)")
+            XCTAssertEqual(
+                UsageWidgetData.providersForDisplay(from: snapshot).isEmpty,
+                !keepsValues,
+                "Unexpected retained-value policy for \(connector)"
+            )
+            XCTAssertEqual(
+                UsageWidgetData.providers(from: snapshot).isEmpty,
+                !keepsValues,
+                "Provider model must fail closed for \(connector)"
+            )
+            XCTAssertEqual(UsageWidgetData.isLive(for: snapshot), connector == .healthy)
+            if connector != .healthy {
+                XCTAssertTrue(disclosure.accessibilityLabel.contains("not live"))
+            }
+        }
+    }
+
+    func testUsageFreshnessDisclosureKeepsRetainedValuesButOnlyFreshIsLive() {
+        let reference = fixedUsageDate
+        let freshSnapshot = makeUsageSnapshot(
+            providers: [makeUsageProvider(observedAt: reference)],
+            updatedAt: reference,
+            freshness: .fresh
+        )
+        XCTAssertEqual(
+            UsageWidgetData.connectorDisclosure(for: freshSnapshot, at: reference),
+            .live
+        )
+        XCTAssertTrue(UsageWidgetData.isLive(for: freshSnapshot, at: reference))
+
+        let agingSnapshot = makeUsageSnapshot(
+            providers: [makeUsageProvider(observedAt: reference.addingTimeInterval(-8 * 60))],
+            updatedAt: reference,
+            freshness: .fresh
+        )
+        let agingDisclosure = UsageWidgetData.connectorDisclosure(for: agingSnapshot, at: reference)
+        XCTAssertEqual(agingDisclosure, .aging)
+        XCTAssertFalse(UsageWidgetData.providersForDisplay(from: agingSnapshot, at: reference).isEmpty)
+        XCTAssertEqual(UsageWidgetData.chartState(for: agingSnapshot, at: reference), .observed)
+        XCTAssertFalse(UsageWidgetData.isLive(for: agingSnapshot, at: reference))
+        XCTAssertTrue(agingDisclosure.retainedFooter.contains("aging"))
+        XCTAssertTrue(agingDisclosure.accessibilityLabel.contains("not live"))
+
+        let staleSnapshot = makeUsageSnapshot(
+            providers: [makeUsageProvider(observedAt: reference.addingTimeInterval(-16 * 60))],
+            updatedAt: reference,
+            freshness: .fresh
+        )
+        let staleDisclosure = UsageWidgetData.connectorDisclosure(for: staleSnapshot, at: reference)
+        XCTAssertEqual(staleDisclosure, .stale)
+        XCTAssertFalse(UsageWidgetData.providersForDisplay(from: staleSnapshot, at: reference).isEmpty)
+        XCTAssertFalse(UsageWidgetData.isLive(for: staleSnapshot, at: reference))
+        XCTAssertTrue(staleDisclosure.retainedFooter.contains("stale"))
+        XCTAssertTrue(staleDisclosure.accessibilityLabel.contains("not live"))
+
+        let explicitStaleSnapshot = makeUsageSnapshot(
+            providers: [makeUsageProvider(observedAt: reference)],
+            updatedAt: reference,
+            freshness: .stale
+        )
+        XCTAssertEqual(
+            UsageWidgetData.connectorDisclosure(for: explicitStaleSnapshot, at: reference),
+            .stale
+        )
+        XCTAssertFalse(UsageWidgetData.providersForDisplay(from: explicitStaleSnapshot, at: reference).isEmpty)
+        XCTAssertFalse(UsageWidgetData.isLive(for: explicitStaleSnapshot, at: reference))
+    }
+
+    func testUsageFreshSecondaryPreventsAggregateLiveDisclosure() {
+        let reference = fixedUsageDate
+        let freshLead = makeUsageProvider(
+            provider: .claude,
+            used: 0.60,
+            observedAt: reference
+        )
+        let staleSecondary = makeUsageProvider(
+            provider: .codex,
+            used: 0.30,
+            observedAt: reference.addingTimeInterval(-16 * 60)
+        )
+        let snapshot = makeUsageSnapshot(
+            providers: [freshLead, staleSecondary],
+            updatedAt: reference,
+            freshness: .fresh
+        )
+
+        let providers = UsageWidgetData.providersForDisplay(from: snapshot, at: reference)
+        XCTAssertEqual(UsageWidgetData.leading(from: providers)?.id, .claude)
+        XCTAssertEqual(
+            UsageWidgetData.connectorDisclosure(for: snapshot, lead: UsageWidgetData.leading(from: providers), at: reference),
+            .stale
+        )
+        XCTAssertFalse(UsageWidgetData.isLive(for: snapshot, at: reference))
+        XCTAssertTrue(UsageWidgetConnectorDisclosure.stale.accessibilityLabel.contains("not live"))
+    }
+
+    func testUsageAccessoryDisplayStateDistinguishesLiveRetainedAndEmpty() {
+        XCTAssertEqual(
+            UsageWidgetAccessoryDisplayState.resolve(hasValue: true, disclosure: .live),
+            .live
+        )
+        XCTAssertEqual(
+            UsageWidgetAccessoryDisplayState.resolve(hasValue: true, disclosure: .stale),
+            .retained(.stale)
+        )
+        XCTAssertEqual(
+            UsageWidgetAccessoryDisplayState.resolve(hasValue: true, disclosure: .rateLimited),
+            .retained(.rateLimited)
+        )
+        XCTAssertEqual(
+            UsageWidgetAccessoryDisplayState.resolve(hasValue: false, disclosure: .stale),
+            .empty
+        )
+        XCTAssertEqual(
+            UsageWidgetAccessoryDisplayState.resolve(hasValue: true, disclosure: .reconnect),
+            .empty
+        )
+    }
+
+    func testAccessoryDisplayFailsClosedForDemoAndKeepsLiveObservedData() {
+        let demo = makeUsageProvider(quality: .demo, projected: 0.68)
+        let demoSnapshot = makeUsageSnapshot(providers: [demo], quality: .demo)
+
+        XCTAssertTrue(UsageWidgetData.providersForDisplay(from: demoSnapshot).isEmpty == false)
+        XCTAssertTrue(UsageWidgetData.providersForDisplay(from: demoSnapshot, allowDemo: false).isEmpty)
+        XCTAssertTrue(UsageWidgetData.hasDemoSource(in: demoSnapshot))
+        XCTAssertFalse(UsageWidgetData.isLive(for: demoSnapshot))
+        XCTAssertTrue(UsageWidgetChartState.demo.accessibilityLabel().contains("preview"))
+        XCTAssertTrue(UsageWidgetChartState.demo.accessibilityLabel().contains("not live"))
+
+        let observed = makeUsageProvider(quality: .observed, projected: 0.72)
+        let observedSnapshot = makeUsageSnapshot(providers: [observed])
+        XCTAssertFalse(UsageWidgetData.providersForDisplay(from: observedSnapshot, allowDemo: false).isEmpty)
+        XCTAssertTrue(UsageWidgetData.isLive(for: observedSnapshot))
+    }
+
+    private var fixedUsageDate: Date {
+        Date(timeIntervalSince1970: 1_785_283_200)
+    }
+
+    private func makeUsageProvider(
+        provider: Provider = .codex,
+        quality: DataQuality = .observed,
+        connector: ConnectorState = .healthy,
+        used: Double = 0.42,
+        projected: Double? = 0.72,
+        windows: [UsageWindow]? = nil,
+        observedAt: Date? = nil
+    ) -> ProviderSnapshot {
+        let resolvedObservedAt = observedAt ?? fixedUsageDate
+        let provenance = Provenance(
+            source: "deterministic widget test",
+            observedAt: resolvedObservedAt,
+            quality: quality,
+            connector: connector
+        )
+        let resolvedWindows = windows ?? [
+            UsageWindow(
+                id: "5h",
+                label: "5-hour",
+                limit: 1,
+                used: used,
+                projection: projected.map { Projection(percentAtReset: $0) },
+                durationMinutes: 300,
+                provenance: provenance
+            )
+        ]
+        return ProviderSnapshot(
+            provider: provider,
+            accountLabel: "Test \(provider.displayName) account",
+            windows: resolvedWindows,
+            provenance: provenance
+        )
+    }
+
+    private func makeUsageSnapshot(
+        providers: [ProviderSnapshot],
+        quality: DataQuality = .observed,
+        connector: ConnectorState? = nil,
+        updatedAt: Date? = nil,
+        freshness: Freshness? = nil
+    ) -> WidgetSnapshot {
+        let resolvedConnector = connector ?? (quality == .unavailable ? .unavailable : .healthy)
+        let resolvedUpdatedAt = updatedAt ?? fixedUsageDate
+        let provenance = Provenance(
+            source: "deterministic widget test",
+            observedAt: fixedUsageDate,
+            quality: quality,
+            connector: resolvedConnector
+        )
+        return WidgetSnapshot(
+            providers: providers,
+            codexStatus: "Test",
+            clipperSignal: "Unavailable",
+            healthSignal: "Unavailable",
+            financeSignal: "Unavailable",
+            updatedAt: resolvedUpdatedAt,
+            freshness: freshness ?? (resolvedConnector == .healthy ? .fresh : .unavailable),
+            warning: nil,
+            provenance: provenance
+        )
+    }
+
     func testFutureModuleSnapshots() {
         let entry = unavailableFutureEntry
 
