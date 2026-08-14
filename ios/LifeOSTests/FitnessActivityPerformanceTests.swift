@@ -3,6 +3,136 @@ import XCTest
 @testable import LifeOS
 
 final class FitnessActivityPerformanceTests: XCTestCase {
+    func testFitnessDateNavigationKeepsLocalDayAcrossBerlinSpringForward() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "Europe/Berlin"))
+        let beforeTransition = try XCTUnwrap(calendar.date(from: DateComponents(
+            year: 2026, month: 3, day: 28, hour: 12
+        )))
+
+        let nextDay = FitnessDateNavigation.addingDays(1, to: beforeTransition, calendar: calendar)
+
+        XCTAssertEqual(calendar.component(.day, from: nextDay), 29)
+        XCTAssertEqual(calendar.component(.hour, from: nextDay), 12)
+        XCTAssertEqual(nextDay.timeIntervalSince(beforeTransition), 23 * 60 * 60, accuracy: 0.5)
+    }
+
+    func testFitnessDateNavigationKeepsLocalDayAcrossBerlinFallBack() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "Europe/Berlin"))
+        let beforeTransition = try XCTUnwrap(calendar.date(from: DateComponents(
+            year: 2026, month: 10, day: 24, hour: 12
+        )))
+
+        let nextDay = FitnessDateNavigation.addingDays(1, to: beforeTransition, calendar: calendar)
+
+        XCTAssertEqual(calendar.component(.day, from: nextDay), 25)
+        XCTAssertEqual(calendar.component(.hour, from: nextDay), 12)
+        XCTAssertEqual(nextDay.timeIntervalSince(beforeTransition), 25 * 60 * 60, accuracy: 0.5)
+    }
+
+    func testFitnessDateNavigationFallsBackToTheOriginalDateAtCalendarBounds() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let original = Date(timeIntervalSince1970: 0)
+
+        XCTAssertEqual(
+            FitnessDateNavigation.addingDays(Int.max, to: original, calendar: calendar),
+            original
+        )
+    }
+
+    func testFitnessSectionRevealPolicyPreservesVisibleUserSelections() {
+        XCTAssertFalse(
+            FitnessSectionRevealPolicy.shouldReveal(
+                selection: .journal,
+                visibleSectionIDs: [FitnessSection.journal.id],
+                userInitiated: true
+            )
+        )
+        XCTAssertFalse(
+            FitnessSectionRevealPolicy.shouldReveal(
+                selection: .journal,
+                visibleSectionIDs: [FitnessSection.journal.id],
+                userInitiated: false
+            )
+        )
+        XCTAssertTrue(
+            FitnessSectionRevealPolicy.shouldReveal(
+                selection: .settings,
+                visibleSectionIDs: [FitnessSection.today.id],
+                userInitiated: false
+            )
+        )
+    }
+
+    func testFitnessSectionRevealStateWaitsForLayoutAndRejectsStaleRequests() {
+        let request = FitnessSectionRevealRequest(
+            section: .settings,
+            generation: 7,
+            isInitialAppearance: true
+        )
+
+        XCTAssertEqual(
+            FitnessSectionRevealState.action(
+                for: request,
+                currentSelection: .settings,
+                currentGeneration: 7,
+                visibleSectionIDs: [],
+                layoutReady: false
+            ),
+            .waitForLayout
+        )
+        XCTAssertEqual(
+            FitnessSectionRevealState.action(
+                for: request,
+                currentSelection: .settings,
+                currentGeneration: 7,
+                visibleSectionIDs: [FitnessSection.settings.id],
+                layoutReady: true
+            ),
+            .clear
+        )
+        XCTAssertEqual(
+            FitnessSectionRevealState.action(
+                for: request,
+                currentSelection: .settings,
+                currentGeneration: 7,
+                visibleSectionIDs: [FitnessSection.today.id],
+                layoutReady: true
+            ),
+            .reveal
+        )
+        XCTAssertEqual(
+            FitnessSectionRevealState.action(
+                for: request,
+                currentSelection: .settings,
+                currentGeneration: 8,
+                visibleSectionIDs: [FitnessSection.today.id],
+                layoutReady: true
+            ),
+            .clear
+        )
+    }
+
+    func testFitnessNavigationSourceKeepsStripAndDateControlsAccessible() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("LifeOS/Modules/Fitness/FitnessView.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        XCTAssertTrue(source.contains("ScrollView(.horizontal, showsIndicators: false)"))
+        XCTAssertFalse(source.contains("ScrollView(.horizontal, showsIndicators: true)"))
+        XCTAssertTrue(source.contains("accessibilityLabel(\"Previous day\")"))
+        XCTAssertTrue(source.contains("accessibilityLabel(\"Next day\")"))
+        XCTAssertTrue(source.contains("accessibilityIdentifier(\"fitness-date-previous-day\")"))
+        XCTAssertTrue(source.contains("accessibilityIdentifier(\"fitness-date-next-day\")"))
+        XCTAssertTrue(source.contains("accessibilityIdentifier(\"fitness-date-picker\")"))
+        XCTAssertTrue(source.contains("FitnessSectionRevealState.action"))
+        XCTAssertTrue(source.contains("FitnessDateNavigation.addingDays"))
+    }
+
     func testActivityDayCarriesExplicitObservedDemoAndUnavailableState() {
         let date = Date(timeIntervalSince1970: 1_754_000_000)
         let observed = FitnessActivityDay(

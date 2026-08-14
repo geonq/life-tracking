@@ -528,6 +528,65 @@ public enum FitnessSection: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+/// Calendar-day stepping for the Fitness date header. Calendar arithmetic is
+/// intentionally used instead of adding 24 hours so a day remains a local
+/// calendar day when the selected timezone crosses a DST transition.
+enum FitnessDateNavigation {
+    static func addingDays(_ days: Int, to date: Date, calendar: Calendar = .current) -> Date {
+        calendar.date(byAdding: .day, value: days, to: date) ?? date
+    }
+}
+
+/// The section strip should only move when a route change would otherwise hide
+/// the selected section. A normal tap is already visible and must preserve the
+/// user's horizontal offset; initial and deep-linked routes may request reveal.
+enum FitnessSectionRevealPolicy {
+    static func shouldReveal(
+        selection: FitnessSection,
+        visibleSectionIDs: Set<String>,
+        userInitiated: Bool
+    ) -> Bool {
+        guard !userInitiated else { return false }
+        // Initial and deep-linked routes use the same post-layout rule: an
+        // already visible section needs no scroll, avoiding a first-layout
+        // nudge when the selected tab is already on screen.
+        return !visibleSectionIDs.contains(selection.id)
+    }
+}
+
+struct FitnessSectionRevealRequest: Equatable {
+    let section: FitnessSection
+    let generation: Int
+    let isInitialAppearance: Bool
+}
+
+enum FitnessSectionRevealAction: Equatable {
+    case waitForLayout
+    case clear
+    case reveal
+}
+
+enum FitnessSectionRevealState {
+    static func action(
+        for request: FitnessSectionRevealRequest,
+        currentSelection: FitnessSection,
+        currentGeneration: Int,
+        visibleSectionIDs: Set<String>,
+        layoutReady: Bool
+    ) -> FitnessSectionRevealAction {
+        guard request.generation == currentGeneration,
+              request.section == currentSelection else {
+            return .clear
+        }
+        guard layoutReady else { return .waitForLayout }
+        return FitnessSectionRevealPolicy.shouldReveal(
+            selection: request.section,
+            visibleSectionIDs: visibleSectionIDs,
+            userInitiated: false
+        ) ? .reveal : .clear
+    }
+}
+
 public enum FitnessHealthMetric: String, Hashable, Sendable {
     case respiration
     case heartRate
@@ -791,6 +850,21 @@ private struct FitnessHeader: View {
                 LifeOSIcon(.calendar)
                     .foregroundStyle(LifeOSTokens.accent)
                     .frame(width: 15, height: 15)
+
+                Button {
+                    shiftDate(by: -1)
+                } label: {
+                    LifeOSIcon(.chevronLeft)
+                        .frame(width: 16, height: 16)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(LifeOSTokens.accent)
+                .accessibilityLabel("Previous day")
+                .accessibilityHint("Show the previous calendar day")
+                .accessibilityIdentifier("fitness-date-previous-day")
+
                 Button {
                     showingDatePicker = true
                 } label: {
@@ -798,15 +872,31 @@ private struct FitnessHeader: View {
                         .font(LifeOSFont.inter(12, weight: .semiBold))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
+                        .frame(minHeight: 44, alignment: .leading)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Selected date")
                 .accessibilityValue(selectedDate.fitnessHeaderDateLabel)
                 .accessibilityIdentifier("fitness-date-picker")
+
+                Button {
+                    shiftDate(by: 1)
+                } label: {
+                    LifeOSIcon(.chevronRight)
+                        .frame(width: 16, height: 16)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(LifeOSTokens.accent)
+                .accessibilityLabel("Next day")
+                .accessibilityHint("Show the next calendar day")
+                .accessibilityIdentifier("fitness-date-next-day")
+
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, 8)
+            .padding(.vertical, 4)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(LifeOSTokens.surface.opacity(0.68), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
@@ -838,10 +928,21 @@ private struct FitnessHeader: View {
             .presentationDetents([.medium])
         }
     }
+
+    private func shiftDate(by days: Int) {
+        selectedDate = FitnessDateNavigation.addingDays(days, to: selectedDate)
+    }
 }
 
 private struct FitnessSectionPicker: View {
     @Binding var selection: FitnessSection
+    @State private var visibleSectionIDs = Set<String>()
+    @State private var pendingUserSelection: FitnessSection?
+    @State private var hasRequestedInitialReveal = false
+    @State private var revealGeneration = 0
+    @State private var pendingReveal: FitnessSectionRevealRequest?
+    @State private var scheduledRevealGeneration: Int?
+    @State private var sectionLayoutReady = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -857,19 +958,42 @@ private struct FitnessSectionPicker: View {
             }
 #else
             ScrollViewReader { scrollProxy in
-                ScrollView(.horizontal, showsIndicators: true) {
+                ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 7) {
                         sectionButtons()
                     }
                     .padding(.horizontal, 16)
                     .padding(.bottom, 2)
                 }
+                .coordinateSpace(name: "fitness-section-picker")
+                .onPreferenceChange(FitnessSectionFramePreferenceKey.self) { frames in
+                    let viewport = CGRect(x: 0, y: 0, width: proxy.size.width, height: 46)
+                    let currentVisibleSectionIDs = Set(frames.compactMap { id, frame in
+                        frame.intersects(viewport) ? id : nil
+                    })
+                    visibleSectionIDs = currentVisibleSectionIDs
+                    sectionLayoutReady = !frames.isEmpty
+                    reconcilePendingReveal(
+                        using: scrollProxy,
+                        visibleSectionIDs: currentVisibleSectionIDs,
+                        layoutReady: !frames.isEmpty
+                    )
+                }
                 .onAppear {
-                    revealSelection(selection, using: scrollProxy, animated: false)
+                    guard !hasRequestedInitialReveal else { return }
+                    hasRequestedInitialReveal = true
+                    queueReveal(for: selection, isInitialAppearance: true)
+                    schedulePendingReveal(using: scrollProxy)
                 }
                 .onChange(of: selection) { oldSection, newSection in
                     guard oldSection != newSection else { return }
-                    revealSelection(newSection, using: scrollProxy, animated: true)
+                    if pendingUserSelection == newSection {
+                        pendingUserSelection = nil
+                        invalidatePendingReveal()
+                        return
+                    }
+                    queueReveal(for: newSection, isInitialAppearance: false)
+                    schedulePendingReveal(using: scrollProxy)
                 }
             }
 #endif
@@ -925,9 +1049,7 @@ private struct FitnessSectionPicker: View {
     private func sectionButtons() -> some View {
         ForEach(FitnessSection.allCases) { section in
             Button {
-                withAnimation(LifeOSMotion.reduceMotion ? nil : LifeOSMotion.snappy) {
-                    selection = section
-                }
+                select(section)
             } label: {
                 HStack(spacing: 6) {
                     LifeOSIcon(section.icon).frame(width: 15, height: 15)
@@ -942,8 +1064,86 @@ private struct FitnessSectionPicker: View {
                 .overlay(Capsule().stroke(selection == section ? LifeOSTokens.accent.opacity(0.30) : LifeOSTokens.quietBorder, lineWidth: 0.75))
             }
             .buttonStyle(.plain)
+            .background(GeometryReader { geometry in
+                Color.clear.preference(
+                    key: FitnessSectionFramePreferenceKey.self,
+                    value: [section.id: geometry.frame(in: .named("fitness-section-picker"))]
+                )
+            })
             .id(section.id)
             .accessibilityAddTraits(selection == section ? .isSelected : [])
+        }
+    }
+
+    private func select(_ section: FitnessSection) {
+        guard selection != section else {
+            invalidatePendingReveal()
+            return
+        }
+        invalidatePendingReveal()
+        pendingUserSelection = section
+        withAnimation(LifeOSMotion.reduceMotion ? nil : LifeOSMotion.snappy) {
+            selection = section
+        }
+    }
+
+    private func queueReveal(for section: FitnessSection, isInitialAppearance: Bool) {
+        revealGeneration += 1
+        pendingReveal = FitnessSectionRevealRequest(
+            section: section,
+            generation: revealGeneration,
+            isInitialAppearance: isInitialAppearance
+        )
+        scheduledRevealGeneration = nil
+    }
+
+    private func invalidatePendingReveal() {
+        revealGeneration += 1
+        pendingReveal = nil
+        scheduledRevealGeneration = nil
+    }
+
+    /// Reveal only against the latest measured section frames. The next
+    /// run-loop callback is bounded to this request generation; if a user tap
+    /// or a newer route replaces it, the stale callback becomes a no-op.
+    private func schedulePendingReveal(using proxy: ScrollViewProxy) {
+        guard let request = pendingReveal,
+              scheduledRevealGeneration != request.generation else { return }
+        scheduledRevealGeneration = request.generation
+        let generation = request.generation
+        DispatchQueue.main.async {
+            guard pendingReveal?.generation == generation else { return }
+            scheduledRevealGeneration = nil
+            reconcilePendingReveal(
+                using: proxy,
+                visibleSectionIDs: visibleSectionIDs,
+                layoutReady: sectionLayoutReady
+            )
+        }
+    }
+
+    private func reconcilePendingReveal(
+        using proxy: ScrollViewProxy,
+        visibleSectionIDs: Set<String>,
+        layoutReady: Bool
+    ) {
+        guard let request = pendingReveal else { return }
+        switch FitnessSectionRevealState.action(
+            for: request,
+            currentSelection: selection,
+            currentGeneration: revealGeneration,
+            visibleSectionIDs: visibleSectionIDs,
+            layoutReady: layoutReady
+        ) {
+        case .waitForLayout:
+            return
+        case .clear:
+            pendingReveal = nil
+            scheduledRevealGeneration = nil
+        case .reveal:
+            pendingReveal = nil
+            scheduledRevealGeneration = nil
+            revealSelection(request.section, using: proxy, animated: !request.isInitialAppearance)
         }
     }
 
@@ -968,6 +1168,14 @@ private struct FitnessSectionPicker: View {
         }
     }
 
+}
+
+private struct FitnessSectionFramePreferenceKey: PreferenceKey {
+    static var defaultValue: [String: CGRect] = [:]
+
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, next in next })
+    }
 }
 
 private struct FitnessFixtureBanner: View {
