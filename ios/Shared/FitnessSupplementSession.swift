@@ -114,6 +114,15 @@ public struct FitnessSupplement: Identifiable, Equatable, Sendable {
         self.adherence90 = adherence90
     }
 
+    private static let demoTimeZoneIdentifier: String = {
+        let candidate = "Europe/Berlin"
+        guard SupplementValidation.isIANATimeZone(candidate),
+              TimeZone(identifier: candidate) != nil else {
+            return "UTC"
+        }
+        return candidate
+    }()
+
     public static let demo: [FitnessSupplement] = {
         let now = Date.now
         return [
@@ -127,7 +136,7 @@ public struct FitnessSupplement: Identifiable, Equatable, Sendable {
                 servingUnit: "capsule",
                 userDose: "1 capsule",
                 timing: "Before lunch",
-                timeZoneIdentifier: TimeZone.current.identifier,
+                timeZoneIdentifier: demoTimeZoneIdentifier,
                 reminderStatus: .permissionRequired,
                 stockUnits: 18,
                 reorderThreshold: 10,
@@ -150,7 +159,7 @@ public struct FitnessSupplement: Identifiable, Equatable, Sendable {
                 userDose: "2 softgels",
                 inventoryUnitsPerDose: 2,
                 timing: "With breakfast",
-                timeZoneIdentifier: TimeZone.current.identifier,
+                timeZoneIdentifier: demoTimeZoneIdentifier,
                 reminderStatus: .localOnly,
                 stockUnits: 4,
                 reorderThreshold: 8,

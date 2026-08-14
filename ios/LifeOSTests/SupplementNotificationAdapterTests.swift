@@ -485,7 +485,11 @@ final class SupplementNotificationAdapterTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(started), 0.3)
         XCTAssertEqual(callbacks, 1)
         XCTAssertEqual(output, .failure(.operationTimedOut))
-        XCTAssertEqual(center.addedRequests.count, 1)
+        XCTAssertLessThanOrEqual(
+            center.addedRequests.count,
+            1,
+            "the shared deadline may expire before the first add starts; at most one add may be in flight"
+        )
     }
 
     func testFiniteOutOfRangeTokenDateIsRejectedWithoutIntegerTrap() {

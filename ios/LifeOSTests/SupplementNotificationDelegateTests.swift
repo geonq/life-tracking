@@ -229,7 +229,11 @@ final class SupplementNotificationDelegateTests: XCTestCase {
                 $0.id == fixture.targetOccurrenceID
             })
         )
-        let firstActionNow = occurrence.scheduledFor.addingTimeInterval(1)
+        // The current occurrence fired before the fixture's base observation
+        // time.  Keep the action at/after that base time so the persisted
+        // envelope is observed coherently while the replay still exercises
+        // the post-grace idempotency path below.
+        let firstActionNow = max(now, occurrence.scheduledFor.addingTimeInterval(1))
         let delegate = SupplementNotificationDelegate(
             store: fixture.store,
             nowProvider: { firstActionNow }
@@ -292,7 +296,9 @@ final class SupplementNotificationDelegateTests: XCTestCase {
     }
 
     func testNewPlannedActionsBeforeExpectedFireDateAreRejected() throws {
-        let fixture = try makeFixture()
+        // Materialize the selected day before its 11:30 occurrence so the
+        // store envelope is valid at the deliberate pre-fire observation.
+        let fixture = try makeFixture(materializationNow: localDate(on: now, hour: 10, minute: 0))
         defer { fixture.cleanup() }
         let occurrence = try XCTUnwrap(
             try fixture.store.load(now: now)?.snapshot.occurrences.first(where: {
@@ -540,7 +546,22 @@ final class SupplementNotificationDelegateTests: XCTestCase {
         return userInfo
     }
 
-    private func makeFixture() throws -> Fixture {
+    private func localDate(on anchor: Date, hour: Int, minute: Int) throws -> Date {
+        var calendar = Calendar(identifier: .gregorian)
+        let timeZone = try XCTUnwrap(TimeZone(identifier: "Europe/Berlin"))
+        calendar.timeZone = timeZone
+        var components = calendar.dateComponents([.year, .month, .day], from: anchor)
+        components.calendar = calendar
+        components.timeZone = timeZone
+        components.hour = hour
+        components.minute = minute
+        components.second = 0
+        components.nanosecond = 0
+        return try XCTUnwrap(calendar.date(from: components))
+    }
+
+    private func makeFixture(materializationNow: Date? = nil) throws -> Fixture {
+        let materializationNow = materializationNow ?? now
         let rootURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("lifeos-notification-delegate-\(UUID().uuidString)", isDirectory: true)
         let url = rootURL
@@ -560,35 +581,31 @@ final class SupplementNotificationDelegateTests: XCTestCase {
             stockUnits: 10,
             reorderThreshold: 2
         )
-        _ = try FitnessSupplementSession(
+        let session = try FitnessSupplementSession(
             supplements: [record],
             selectedDate: now,
             store: store,
-            now: now
+            now: materializationNow
         )
-        let state = try XCTUnwrap(try store.load(now: now))
-        let plan = try SupplementNotificationPlanner(
-            now: now,
-            lookAheadDays: SupplementNotificationPlanner.defaultLookAheadDays
-        ).plan(
-            plans: state.snapshot.plans,
-            occurrences: state.snapshot.occurrences,
-            now: now
-        )
-        let intent = try XCTUnwrap(plan.intents.first)
+        // Accepted-action fixtures must represent the occurrence that is
+        // materialized for the selected/current day.  The planner intentionally
+        // emits only future notification intents, so taking its first intent
+        // here would pair a future fire date with the fixture's base `now` and
+        // make every accepted action fail the real pre-fire guard.
+        let occurrence = try XCTUnwrap(session.occurrence(for: record.id))
         let token = try SupplementNotificationActionToken.make(
-            occurrenceID: intent.occurrenceIdentifier,
-            fireDate: intent.fireDate
+            occurrenceID: occurrence.id,
+            fireDate: occurrence.scheduledFor
         )
         return Fixture(
             store: store,
             userInfo: [
-                SupplementNotificationActionIdentifier.planIDKey: intent.planID,
-                SupplementNotificationActionIdentifier.occurrenceIDKey: intent.occurrenceIdentifier,
+                SupplementNotificationActionIdentifier.planIDKey: record.id,
+                SupplementNotificationActionIdentifier.occurrenceIDKey: occurrence.id,
                 SupplementNotificationActionIdentifier.actionTokenKey: token,
                 SupplementNotificationActionIdentifier.generationKey: token,
                 SupplementNotificationActionIdentifier.fireDateKey:
-                    SupplementNotificationActionToken.wireDate(intent.fireDate),
+                    SupplementNotificationActionToken.wireDate(occurrence.scheduledFor),
             ],
             rootURL: rootURL
         )
