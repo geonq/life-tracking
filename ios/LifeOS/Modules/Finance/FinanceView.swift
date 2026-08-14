@@ -1,5 +1,8 @@
 import Foundation
 import SwiftUI
+#if os(iOS)
+import UIKit
+#endif
 
 /// Public route values used by callers that open a specific Finance detail.
 public enum FinanceDetailRoute: String, CaseIterable, Hashable, Sendable {
@@ -578,7 +581,8 @@ enum FinanceChartGestureAxis: Equatable {
 
 enum FinanceChartGestureClassifier {
     /// Translation must clear this distance before a touch is considered a directional
-    /// drag. Below it, the end location is treated as a tap/select rather than a pan.
+    /// drag. Below it, the recognizer remains unresolved and the separate tap path
+    /// handles point selection.
     static let directionThreshold: CGFloat = 8
 
     /// A direction needs a modest 15% dominance over the other axis. Near-diagonal
@@ -605,6 +609,116 @@ enum FinanceChartGestureClassifier {
     }
 }
 
+#if os(iOS)
+/// UIKit's directional failure decision is important here: SwiftUI's child
+/// `DragGesture` can still starve the enclosing `UIScrollView` even when marked
+/// simultaneous. This recognizer fails before beginning for vertical movement,
+/// so the ancestor's native pan recognizer receives the same touch sequence.
+private struct FinanceDirectionalScrubOverlay: UIViewRepresentable {
+    let onTap: (CGFloat) -> Void
+    let onChanged: (CGFloat) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onTap: onTap, onChanged: onChanged)
+    }
+
+    func makeUIView(context: Context) -> FinanceDirectionalScrubView {
+        let view = FinanceDirectionalScrubView()
+        view.backgroundColor = .clear
+        view.isUserInteractionEnabled = true
+
+        let pan = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePan(_:)))
+        pan.delegate = context.coordinator
+        pan.cancelsTouchesInView = false
+        view.scrubPan = pan
+        view.addGestureRecognizer(pan)
+
+        let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap(_:)))
+        tap.delegate = context.coordinator
+        tap.cancelsTouchesInView = false
+        view.addGestureRecognizer(tap)
+        return view
+    }
+
+    func updateUIView(_ view: FinanceDirectionalScrubView, context: Context) {
+        context.coordinator.onTap = onTap
+        context.coordinator.onChanged = onChanged
+        view.installScrollFailureRelationshipIfNeeded()
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var onTap: (CGFloat) -> Void
+        var onChanged: (CGFloat) -> Void
+
+        init(onTap: @escaping (CGFloat) -> Void, onChanged: @escaping (CGFloat) -> Void) {
+            self.onTap = onTap
+            self.onChanged = onChanged
+        }
+
+        @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
+            guard let view = recognizer.view else { return }
+            onTap(recognizer.location(in: view).x)
+        }
+
+        @objc func handlePan(_ recognizer: UIPanGestureRecognizer) {
+            guard let view = recognizer.view else { return }
+            guard recognizer.state == .began || recognizer.state == .changed else { return }
+            onChanged(recognizer.location(in: view).x)
+        }
+
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            // The same delegate owns the tap recognizer; it should always be
+            // allowed to begin. Directional arbitration applies only to the pan.
+            guard let pan = gestureRecognizer as? UIPanGestureRecognizer,
+                  let view = pan.view else { return true }
+            let translation = pan.translation(in: view)
+            return FinanceChartGestureClassifier.axis(
+                for: CGSize(width: translation.x, height: translation.y)
+            ) == .horizontal
+        }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            // The explicit failure relationship below makes horizontal scrubbing
+            // win when the ancestor is a UIScrollView. Keep the fallback permissive
+            // for SwiftUI wrappers that do not expose that relationship in time;
+            // vertical motion still fails this recognizer before it begins.
+            otherGestureRecognizer.view is UIScrollView
+        }
+    }
+}
+
+private final class FinanceDirectionalScrubView: UIView {
+    weak var scrubPan: UIPanGestureRecognizer?
+    private weak var attachedScrollView: UIScrollView?
+
+    override func didMoveToSuperview() {
+        super.didMoveToSuperview()
+        installScrollFailureRelationshipIfNeeded()
+    }
+
+    func installScrollFailureRelationshipIfNeeded() {
+        guard let scrubPan else { return }
+
+        var ancestor = superview
+        while let current = ancestor {
+            if let scrollView = current as? UIScrollView {
+                guard attachedScrollView !== scrollView else { return }
+                // The native scroll waits for direction arbitration. A vertical
+                // gesture makes scrubPan fail at 8pt, then the scroll can begin;
+                // a horizontal gesture starts scrubPan and leaves the parent failed.
+                scrollView.panGestureRecognizer.require(toFail: scrubPan)
+                attachedScrollView = scrollView
+                return
+            }
+            ancestor = current.superview
+        }
+    }
+}
+#endif
+
 private struct FinanceLineChart: View {
     let points: [FinanceChartPoint]
     let accent: LifeOSTokens.Hue
@@ -613,7 +727,6 @@ private struct FinanceLineChart: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var drawn: CGFloat = 0
-    @State private var gestureAxis: FinanceChartGestureAxis = .undecided
     @FocusState private var chartIsFocused: Bool
 
     var body: some View {
@@ -678,54 +791,31 @@ private struct FinanceLineChart: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .contentShape(Rectangle())
-            // Keep this recognizer simultaneous with the ancestor ScrollView. A plain
-            // child `.gesture` wins the touch sequence and leaves the Finance route
-            // stuck above the Accounts card on iPhone. Directional filtering below
-            // ensures only horizontal scrubs reach chart selection.
+#if os(iOS)
+            // SwiftUI DragGesture competes with the UIKit-backed ScrollView even
+            // when attached through simultaneousGesture. A small UIKit recognizer
+            // below fails before beginning for vertical/ambiguous movement, leaving
+            // the native route scroll in charge; it begins only for horizontal scrub.
+            .overlay(alignment: .topLeading) {
+                FinanceDirectionalScrubOverlay(
+                    onTap: { x in updateSelection(at: x, in: size) },
+                    onChanged: { x in updateSelection(at: x, in: size) }
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .accessibilityHidden(true)
+            }
+#else
             .simultaneousGesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
-                        let candidate = FinanceChartGestureClassifier.axis(for: value.translation)
-                        switch gestureAxis {
-                        case .undecided:
-                            switch candidate {
-                            case .horizontal:
-                                gestureAxis = .horizontal
-                                updateSelection(at: value.location.x, in: size)
-                            case .vertical:
-                                gestureAxis = .vertical
-                            case .undecided, .ambiguous:
-                                // Stay unresolved until the direction is clear. This
-                                // preserves a tap and allows a diagonal gesture to
-                                // resolve naturally without selection churn.
-                                break
-                            }
-                        case .horizontal:
-                            updateSelection(at: value.location.x, in: size)
-                        case .vertical, .ambiguous:
-                            break
+                        let index = nearestIndex(for: value.location.x, in: size)
+                        if selectedPoint != index {
+                            ScrubBubble<EmptyView>.snapHaptic()
                         }
-                    }
-                    .onEnded { value in
-                        let resolvedAxis: FinanceChartGestureAxis = {
-                            switch gestureAxis {
-                            case .horizontal, .vertical: gestureAxis
-                            case .undecided, .ambiguous:
-                                FinanceChartGestureClassifier.axis(for: value.translation)
-                            }
-                        }()
-
-                        switch resolvedAxis {
-                        case .undecided, .horizontal:
-                            // A zero-distance drag is the chart's tap/select path. A
-                            // horizontal scrub also commits its final nearest point.
-                            updateSelection(at: value.location.x, in: size)
-                        case .vertical, .ambiguous:
-                            break
-                        }
-                        gestureAxis = .undecided
+                        selectedPoint = index
                     }
             )
+#endif
             .focusable(true)
             .focused($chartIsFocused)
 #if os(macOS)
