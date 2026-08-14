@@ -286,6 +286,9 @@ struct LifeOSMacRootView: View {
                 usesVisualFixtures: usesVisualFixtures
             )
             .transition(reduceMotion ? .identity : .opacity)
+        case .tasks:
+            TasksView(usesVisualFixtures: usesVisualFixtures)
+                .transition(reduceMotion ? .identity : .opacity)
         case .tax:
             TaxDocumentsView()
                 .transition(reduceMotion ? .identity : .opacity)

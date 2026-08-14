@@ -321,10 +321,10 @@ struct LifeOSApp: App {
             showingUsage = false
             selectTab(.fitness)
         case .tasks:
+            // Tasks lives in the More screen alongside Tax and Settings,
+            // matching the other secondary modules below.
             showingUsage = false
-            // Tasks has no standalone product surface yet; keep old links
-            // useful by landing on the calendar where time-based work lives.
-            selectTab(.calendar)
+            selectTab(.more)
         case .tax, .settings:
             // More remains the only iOS entry point for secondary modules.
             // Their existing views are pushed by `moreDestination`.
@@ -340,7 +340,7 @@ struct LifeOSApp: App {
 
     private var secondaryModuleRoute: LifeOSModule? {
         switch selectedModuleRoute?.module {
-        case .tax, .settings: selectedModuleRoute?.module
+        case .tasks, .tax, .settings: selectedModuleRoute?.module
         default: nil
         }
     }
@@ -364,6 +364,8 @@ struct LifeOSApp: App {
                     refreshAction: usesVisualFixtures ? nil : { await usageCoordinator.refresh() }
                 )
             )
+        case .tasks:
+            return AnyView(TasksView(usesVisualFixtures: usesVisualFixtures))
         case .tax:
             return AnyView(TaxDocumentsView())
         case .settings:

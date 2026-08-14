@@ -75,3 +75,8 @@ artifacts/
 # project.yml, and plist/entitlements files.
 !ios/LifeOS/Modules/Finance/
 !ios/LifeOS/Modules/Finance/FinanceView.swift
+# core.ignorecase makes the `tasks/` coordination rule above also match this
+# product module directory on a case-insensitive filesystem; carve it back
+# out the same way Finance/ already needed.
+!ios/LifeOS/Modules/Tasks/
+!ios/LifeOS/Modules/Tasks/TasksView.swift
