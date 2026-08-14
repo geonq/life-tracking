@@ -229,8 +229,8 @@ struct LifeOSApp: App {
             .onChange(of: healthKitFitnessRepository.projection, initial: true) { _, projection in
                 updateHomeFitnessSnapshot(from: projection)
             }
-            .onChange(of: healthKitController.snapshot.lastObserverCompletion) { _, completion in
-                guard !usesVisualFixtures, completion != nil else { return }
+            .onChange(of: healthKitController.snapshot.observerCompletionSequence) { _, _ in
+                guard !usesVisualFixtures else { return }
                 Task { @MainActor in
                     await healthKitFitnessRepository.refresh()
                 }

@@ -28,6 +28,7 @@ final class HealthKitIntegrationTests: XCTestCase {
 
     func testPersistedPromptCompletionRestoresIndeterminateTruthAndStartsWhenActive() async {
         let client = RecordingHealthKitIntegrationClient()
+        client.statusResult = .init(state: .readIndeterminate)
         let controller = HealthKitIntegrationController(
             client: client,
             initialExplicitRequestCompleted: true
@@ -38,7 +39,35 @@ final class HealthKitIntegrationTests: XCTestCase {
         XCTAssertEqual(client.startCalls, 0)
 
         controller.appActive()
+        XCTAssertEqual(client.startCalls, 0)
+        await controller.refreshStatus()
         await waitUntil { client.startCalls == 1 }
+    }
+
+    func testRequestNotNeededStartsIngestionWithoutPromptHistory() async {
+        let client = RecordingHealthKitIntegrationClient()
+        client.statusResult = .init(state: .readIndeterminate)
+        let controller = HealthKitIntegrationController(client: client)
+
+        controller.appActive()
+        await controller.refreshStatus()
+
+        XCTAssertFalse(controller.snapshot.explicitRequestCompleted)
+        XCTAssertEqual(controller.snapshot.authorizationState, .readIndeterminate)
+        await waitUntil { client.startCalls == 1 }
+    }
+
+    func testRequestRequiredRemainsGatedWithoutStartingObservers() async {
+        let client = RecordingHealthKitIntegrationClient()
+        client.statusResult = .init(state: .requestRequired)
+        let controller = HealthKitIntegrationController(client: client)
+
+        controller.appActive()
+        await controller.refreshStatus()
+
+        XCTAssertEqual(controller.snapshot.authorizationState, .requestRequired)
+        XCTAssertEqual(client.startCalls, 0)
+        XCTAssertEqual(client.callbacks.count, 0)
     }
 
     func testPersistedPromptDoesNotHideDeviceLevelRestriction() async {
@@ -58,12 +87,14 @@ final class HealthKitIntegrationTests: XCTestCase {
 
     func testPersistedPromptStopsActiveObserversWhenStatusBecomesTerminal() async {
         let client = RecordingHealthKitIntegrationClient()
+        client.statusResult = .init(state: .readIndeterminate)
         let controller = HealthKitIntegrationController(
             client: client,
             initialExplicitRequestCompleted: true
         )
 
         controller.appActive()
+        await controller.refreshStatus()
         await waitUntil { client.startCalls == 1 }
 
         client.availabilityResult = .restricted
@@ -76,12 +107,14 @@ final class HealthKitIntegrationTests: XCTestCase {
 
     func testPersistedPromptRestartsObserversAfterTerminalStatusRecovers() async {
         let client = RecordingHealthKitIntegrationClient()
+        client.statusResult = .init(state: .readIndeterminate)
         let controller = HealthKitIntegrationController(
             client: client,
             initialExplicitRequestCompleted: true
         )
 
         controller.appActive()
+        await controller.refreshStatus()
         await waitUntil { client.startCalls == 1 }
 
         client.availabilityResult = .restricted
@@ -98,7 +131,7 @@ final class HealthKitIntegrationTests: XCTestCase {
         XCTAssertEqual(client.stopCalls, 1)
     }
 
-    func testPersistedPromptStillRejectsFalseRequestRequiredDowngrade() async {
+    func testPersistedPromptCannotOverrideRequestRequiredStatus() async {
         let client = RecordingHealthKitIntegrationClient()
         client.statusResult = .init(state: .requestRequired)
         let controller = HealthKitIntegrationController(
@@ -108,8 +141,9 @@ final class HealthKitIntegrationTests: XCTestCase {
 
         await controller.refreshStatus()
 
-        XCTAssertEqual(controller.snapshot.authorizationState, .readIndeterminate)
+        XCTAssertEqual(controller.snapshot.authorizationState, .requestRequired)
         XCTAssertTrue(controller.snapshot.explicitRequestCompleted)
+        XCTAssertEqual(client.startCalls, 0)
     }
 
     func testFixtureModeIgnoresPersistedPromptCompletion() {
@@ -235,10 +269,78 @@ final class HealthKitIntegrationTests: XCTestCase {
         oldCallback(.success)
         await Task.yield()
         XCTAssertNil(controller.snapshot.lastObserverCompletion)
+        XCTAssertEqual(controller.snapshot.observerCompletionSequence, 0)
 
         currentCallback(.failure("current session"))
         await Task.yield()
         XCTAssertEqual(controller.snapshot.lastObserverCompletion, .failure("current session"))
+        XCTAssertEqual(controller.snapshot.observerCompletionSequence, 0)
+    }
+
+    func testConsecutiveSuccessfulObserverCompletionsAdvanceSequence() async {
+        let client = RecordingHealthKitIntegrationClient()
+        client.statusResult = .init(state: .readIndeterminate)
+        let controller = HealthKitIntegrationController(client: client)
+
+        controller.appActive()
+        await controller.refreshStatus()
+        await waitUntil { client.callbacks.count == 1 }
+
+        client.callbacks[0](.success)
+        await waitUntil { controller.snapshot.observerCompletionSequence == 1 }
+        client.callbacks[0](.success)
+        await waitUntil { controller.snapshot.observerCompletionSequence == 2 }
+
+        XCTAssertEqual(controller.snapshot.lastObserverCompletion, .success)
+    }
+
+    func testFailureCannotMaskAcceptedSuccessSequence() async {
+        let client = RecordingHealthKitIntegrationClient()
+        client.statusResult = .init(state: .readIndeterminate)
+        let controller = HealthKitIntegrationController(client: client)
+
+        controller.appActive()
+        await controller.refreshStatus()
+        await waitUntil { client.callbacks.count == 1 }
+
+        // Deliver both completions before yielding to model SwiftUI observing
+        // the published snapshot after a success has already been followed by
+        // a failure. The success signal must remain observable exactly once.
+        client.callbacks[0](.success)
+        client.callbacks[0](.failure("late observer failure"))
+        await waitUntil {
+            controller.snapshot.lastObserverCompletion == .failure("late observer failure")
+        }
+
+        XCTAssertEqual(controller.snapshot.observerCompletionSequence, 1)
+    }
+
+    func testAuthorizationInvalidatesSuspendedPrePromptStatus() async {
+        let client = RecordingHealthKitIntegrationClient()
+        client.holdStatus = true
+        client.statusResult = .init(state: .requestRequired)
+        client.authorizationResult = .init(state: .requestRequired, promptCompleted: true)
+        let controller = HealthKitIntegrationController(client: client)
+        controller.appActive()
+
+        let status = Task { @MainActor in await controller.refreshStatus() }
+        await waitUntil { client.statusCalls == 1 }
+
+        let authorization = Task { @MainActor in await controller.requestReadAuthorization() }
+        await waitUntil { client.authorizationCalls == 1 }
+        let authorizationResult = await authorization.value
+        XCTAssertEqual(authorizationResult.state, .readIndeterminate)
+        XCTAssertEqual(controller.snapshot.authorizationState, .readIndeterminate)
+        XCTAssertEqual(client.startCalls, 1)
+
+        client.finishStatus(.init(state: .requestRequired))
+        _ = await status.value
+        await Task.yield()
+
+        XCTAssertEqual(controller.snapshot.authorizationState, .readIndeterminate)
+        XCTAssertTrue(controller.snapshot.explicitRequestCompleted)
+        XCTAssertEqual(client.startCalls, 1)
+        XCTAssertEqual(client.stopCalls, 0)
     }
 
     func testStaleAuthorizationCompletionIsIgnoredAfterBackground() async {
@@ -260,6 +362,7 @@ final class HealthKitIntegrationTests: XCTestCase {
         XCTAssertEqual(controller.snapshot.authorizationState, .notRequested)
         XCTAssertFalse(controller.snapshot.explicitRequestCompleted)
         XCTAssertEqual(client.startCalls, 0)
+        XCTAssertEqual(controller.snapshot.observerCompletionSequence, 0)
     }
 
     func testInactiveSystemSheetPreservesAuthorizationCompletionUntilActive() async {
@@ -354,6 +457,7 @@ private final class RecordingHealthKitIntegrationClient: HealthKitIntegrationCli
     var availabilityResult: HealthKitAuthorizationState = .readIndeterminate
     var statusResult: HealthKitAuthorizationReport = .init(state: .requestRequired)
     var authorizationResult: HealthKitAuthorizationReport = .init(state: .requestRequired)
+    var holdStatus = false
     var holdAuthorization = false
     var availabilityCalls = 0
     var statusCalls = 0
@@ -362,6 +466,7 @@ private final class RecordingHealthKitIntegrationClient: HealthKitIntegrationCli
     var stopCalls = 0
     var callbacks: [(HealthKitObserverCompletion) -> Void] = []
     private var authorizationContinuation: CheckedContinuation<HealthKitAuthorizationReport, Never>?
+    private var statusContinuation: CheckedContinuation<HealthKitAuthorizationReport, Never>?
 
     func availabilityState() -> HealthKitAuthorizationState {
         availabilityCalls += 1
@@ -371,6 +476,11 @@ private final class RecordingHealthKitIntegrationClient: HealthKitIntegrationCli
     func requestStatus(for metrics: [HealthKitMetricID]) async -> HealthKitAuthorizationReport {
         XCTAssertEqual(metrics, HealthKitIntegrationController.supportedMetrics)
         statusCalls += 1
+        if holdStatus {
+            return await withCheckedContinuation { continuation in
+                statusContinuation = continuation
+            }
+        }
         return statusResult
     }
 
@@ -399,6 +509,11 @@ private final class RecordingHealthKitIntegrationClient: HealthKitIntegrationCli
     func finishAuthorization(_ result: HealthKitAuthorizationReport) {
         authorizationContinuation?.resume(returning: result)
         authorizationContinuation = nil
+    }
+
+    func finishStatus(_ result: HealthKitAuthorizationReport) {
+        statusContinuation?.resume(returning: result)
+        statusContinuation = nil
     }
 }
 #endif

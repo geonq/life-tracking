@@ -16,6 +16,12 @@ public struct HealthKitIntegrationSnapshot: Equatable, Sendable {
     public let isRequestInFlight: Bool
     public let explicitRequestCompleted: Bool
     public let lastObserverCompletion: HealthKitObserverCompletion?
+    /// Monotonically identifies every accepted successful observer/
+    /// reconciliation update for the current controller lifetime. The
+    /// completion value itself is intentionally retained for diagnostics, but
+    /// `.success` is Equatable, so consumers that must react to every success
+    /// observe this sequence instead.
+    public let observerCompletionSequence: UInt64
     public let errorDescription: String?
 
     public init(
@@ -24,6 +30,7 @@ public struct HealthKitIntegrationSnapshot: Equatable, Sendable {
         isRequestInFlight: Bool = false,
         explicitRequestCompleted: Bool = false,
         lastObserverCompletion: HealthKitObserverCompletion? = nil,
+        observerCompletionSequence: UInt64 = 0,
         errorDescription: String? = nil
     ) {
         self.authorizationState = authorizationState
@@ -31,6 +38,7 @@ public struct HealthKitIntegrationSnapshot: Equatable, Sendable {
         self.isRequestInFlight = isRequestInFlight
         self.explicitRequestCompleted = explicitRequestCompleted
         self.lastObserverCompletion = lastObserverCompletion
+        self.observerCompletionSequence = observerCompletionSequence
         self.errorDescription = errorDescription
     }
 
@@ -100,8 +108,9 @@ public struct HealthKitIntegrationClientClosures: HealthKitIntegrationClient {
 }
 
 /// iOS-only permission/lifecycle controller. It deliberately has no sample
-/// query in init or status refresh; reads begin only after an explicit prompt
-/// has completed and the app is in the foreground.
+/// query in init or status refresh; reads begin only after HealthKit reports
+/// that a request is unnecessary or an explicit prompt has completed, and the
+/// app is in the foreground.
 @MainActor
 public final class HealthKitIntegrationController: ObservableObject {
     public static let supportedMetrics: [HealthKitMetricID] = HealthKitMetricID.allCases.filter {
@@ -126,6 +135,12 @@ public final class HealthKitIntegrationController: ObservableObject {
     private var statusOperationID: UInt64 = 0
     private var requestOperationID: UInt64 = 0
     private var explicitRequestCompleted = false
+    /// Execution readiness comes from the current HealthKit availability/
+    /// request result, not from the local prompt-history flag. HealthKit does
+    /// not disclose per-type read denial, so `.readIndeterminate` remains the
+    /// truthful state for allowed reads; an empty result is not treated as a
+    /// denial.
+    private var executionAuthorizationReady = false
     private var sessionStarted = false
     private var requestTask: Task<HealthKitAuthorizationReport, Never>?
     private var statusTask: Task<HealthKitAuthorizationReport, Never>?
@@ -140,6 +155,7 @@ public final class HealthKitIntegrationController: ObservableObject {
         self.usesVisualFixtures = usesVisualFixtures
         self.persistenceURL = persistenceURL ?? Self.defaultPersistenceURL
         self.explicitRequestCompleted = usesVisualFixtures ? false : initialExplicitRequestCompleted
+        self.executionAuthorizationReady = false
         self.snapshot = HealthKitIntegrationSnapshot(
             authorizationState: initialExplicitRequestCompleted && !usesVisualFixtures
                 ? .readIndeterminate
@@ -171,32 +187,39 @@ public final class HealthKitIntegrationController: ObservableObject {
         let report = await task.value
         guard token == generation, currentOperation == statusOperationID else { return }
         statusTask = nil
-        // A status check started before a completed explicit request cannot
-        // downgrade that result back to “request required.” Device-level
-        // terminal states still replace the optimistic history flag: a prior
-        // prompt is not proof that HealthKit remains available or readable.
-        if explicitRequestCompleted {
-            switch report.state {
-            case .unavailable, .restricted, .protectedDataUnavailable, .revoked, .error:
-                stopSessionIfRunning()
-                publish(
-                    authorizationState: report.state,
-                    lastObserverCompletion: .replace(nil),
-                    errorDescription: .replace(report.errorDescription)
-                )
-            case .readIndeterminate:
-                publish(
-                    authorizationState: .readIndeterminate,
-                    errorDescription: .replace(report.errorDescription)
-                )
-                startSessionIfEligible()
-            case .notRequested, .requestRequired, .requestPending,
-                 .writeNotDetermined, .writeAuthorized, .writeDenied:
-                break
-            }
-            return
+        switch report.state {
+        case .unavailable, .restricted, .protectedDataUnavailable, .revoked, .error:
+            executionAuthorizationReady = false
+            stopSessionIfRunning()
+            publish(
+                authorizationState: report.state,
+                lastObserverCompletion: .replace(nil),
+                errorDescription: .replace(report.errorDescription)
+            )
+        case .readIndeterminate:
+            // `.readIndeterminate` is the only truthful read state HealthKit
+            // exposes. It includes the request-status `.unnecessary` result:
+            // no prompt is needed, but read authorization is still not
+            // observable per type. Starting observers here is therefore safe
+            // and independent of local prompt history.
+            executionAuthorizationReady = true
+            publish(
+                authorizationState: .readIndeterminate,
+                errorDescription: .replace(report.errorDescription)
+            )
+            startSessionIfEligible()
+        case .notRequested, .requestRequired, .requestPending,
+             .writeNotDetermined, .writeAuthorized, .writeDenied:
+            // A request-required/pending result is a hard execution gate. Do
+            // not issue HealthKit reads merely because a prior local prompt
+            // was recorded as completed.
+            executionAuthorizationReady = false
+            stopSessionIfRunning()
+            publish(
+                authorizationState: report.state,
+                errorDescription: .replace(report.errorDescription)
+            )
         }
-        publish(authorizationState: report.state, errorDescription: .replace(report.errorDescription))
     }
 
     public func refreshAuthorizationStatus() async { await refreshStatus() }
@@ -211,6 +234,13 @@ public final class HealthKitIntegrationController: ObservableObject {
         }
         if let requestTask { return Self.normalizedPromptReport(await requestTask.value) }
 
+        // A status request can be suspended while the system permission sheet
+        // is presented. Invalidate it before starting the new authorization
+        // operation so a late pre-prompt `.requestRequired` result cannot
+        // overwrite the completed prompt's `.readIndeterminate` state.
+        statusOperationID &+= 1
+        statusTask?.cancel()
+        statusTask = nil
         requestOperationID &+= 1
         let currentOperation = requestOperationID
         let metrics = Self.supportedMetrics
@@ -225,6 +255,19 @@ public final class HealthKitIntegrationController: ObservableObject {
         guard currentOperation == requestOperationID else { return normalized }
         requestTask = nil
         if report.promptCompleted == true { explicitRequestCompleted = true }
+        switch normalized.state {
+        case .readIndeterminate:
+            // A completed system sheet is an explicit HealthKit signal that
+            // reads may begin. A failed/incomplete request keeps the previous
+            // readiness only when an earlier status/request already allowed
+            // reads; it cannot create readiness from a local history flag.
+            executionAuthorizationReady = executionAuthorizationReady || report.promptCompleted == true
+        case .unavailable, .restricted, .protectedDataUnavailable, .revoked, .error,
+             .notRequested, .requestRequired, .requestPending,
+             .writeNotDetermined, .writeAuthorized, .writeDenied:
+            executionAuthorizationReady = false
+            stopSessionIfRunning()
+        }
         publish(
             authorizationState: normalized.state,
             isRequestInFlight: false,
@@ -285,7 +328,7 @@ public final class HealthKitIntegrationController: ObservableObject {
     private func startSessionIfEligible() {
         guard !usesVisualFixtures,
               snapshot.lifecycle == .active,
-              explicitRequestCompleted,
+              executionAuthorizationReady,
               snapshot.authorizationState == .readIndeterminate,
               !sessionStarted,
               let client else { return }
@@ -318,7 +361,17 @@ public final class HealthKitIntegrationController: ObservableObject {
         guard token == generation, snapshot.lifecycle == .active else { return }
         let error: String?
         if case .failure(let message) = completion { error = message } else { error = nil }
-        publish(lastObserverCompletion: .replace(completion), errorDescription: .replace(error))
+        let successSequence: UInt64?
+        if case .success = completion {
+            successSequence = snapshot.observerCompletionSequence &+ 1
+        } else {
+            successSequence = nil
+        }
+        publish(
+            lastObserverCompletion: .replace(completion),
+            observerCompletionSequence: successSequence,
+            errorDescription: .replace(error)
+        )
     }
 
     private enum OptionalReplacement<Value> {
@@ -332,6 +385,7 @@ public final class HealthKitIntegrationController: ObservableObject {
         isRequestInFlight: Bool? = nil,
         explicitRequestCompleted: Bool? = nil,
         lastObserverCompletion: OptionalReplacement<HealthKitObserverCompletion> = .preserve,
+        observerCompletionSequence: UInt64? = nil,
         errorDescription: OptionalReplacement<String> = .preserve
     ) {
         let old = snapshot
@@ -351,6 +405,7 @@ public final class HealthKitIntegrationController: ObservableObject {
             isRequestInFlight: isRequestInFlight ?? old.isRequestInFlight,
             explicitRequestCompleted: explicitRequestCompleted ?? old.explicitRequestCompleted,
             lastObserverCompletion: observerCompletion,
+            observerCompletionSequence: observerCompletionSequence ?? old.observerCompletionSequence,
             errorDescription: error
         )
     }
