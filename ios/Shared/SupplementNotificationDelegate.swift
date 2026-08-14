@@ -29,6 +29,10 @@ public final class SupplementNotificationDelegate: NSObject, UNUserNotificationC
         case ignored
         case rejected
         case durableOnly
+        /// The action is durable, but the adapter truthfully reported that
+        /// no pending request could be scheduled (for example, permission was
+        /// denied, unresolved, or otherwise not schedulable).
+        case durableNotScheduled
         case durableAndReconciled
         case durableReconcileFailed
     }
@@ -194,9 +198,14 @@ public final class SupplementNotificationDelegate: NSObject, UNUserNotificationC
                 guard gate.claim() else { return }
                 switch result {
                 case .success(let reconciliation):
-                    self?.setActionOutcome(reconciliation.pendingOutcome == .partialFailure
-                        ? .durableReconcileFailed
-                        : .durableAndReconciled)
+                    switch reconciliation.pendingOutcome {
+                    case .notScheduled:
+                        self?.setActionOutcome(.durableNotScheduled)
+                    case .partialFailure:
+                        self?.setActionOutcome(.durableReconcileFailed)
+                    case .unchanged, .reconciled:
+                        self?.setActionOutcome(.durableAndReconciled)
+                    }
                 case .failure:
                     self?.setActionOutcome(.durableReconcileFailed)
                 }
@@ -307,6 +316,7 @@ public final class SupplementNotificationDelegate: NSObject, UNUserNotificationC
             throw SupplementValidationError.invalidAction("terminal or stale occurrence")
         }
         let expected = try expectedFireDate(for: occurrence)
+        try validateActionFreshness(expectedFireDate: expected, now: now)
         try validateToken(envelope, occurrenceID: occurrence.id, expectedFireDate: expected)
         if occurrence.state == .planned {
             guard isScheduleActive(plan.schedule, at: expected) else {
@@ -369,6 +379,10 @@ public final class SupplementNotificationDelegate: NSObject, UNUserNotificationC
                 throw SupplementValidationError.invalidAction("notification plan is not actionable")
             }
             let expectedFireDate = try expectedFireDate(for: occurrence)
+            // Keep this after the receipt lookup above.  An exact replay is
+            // still idempotent even after the occurrence has aged out; only a
+            // new action is subject to the expected-fire freshness window.
+            try validateActionFreshness(expectedFireDate: expectedFireDate, now: now)
             try validateToken(envelope, occurrenceID: occurrence.id, expectedFireDate: expectedFireDate)
             if occurrence.state == .planned {
                 guard isScheduleActive(plan.schedule, at: expectedFireDate) else {
@@ -467,6 +481,32 @@ public final class SupplementNotificationDelegate: NSObject, UNUserNotificationC
               envelope.generation == expectedToken,
               envelope.fireDate == SupplementNotificationActionToken.wireDate(expectedFireDate) else {
             throw SupplementValidationError.invalidAction("stale notification generation")
+        }
+    }
+
+    /// Reconciliation normally materializes this transition at launch or
+    /// foreground.  The notification delegate is also an independent action
+    /// boundary, though, and can run while an already-open process has not
+    /// foregrounded since a reminder became stale.  Reject a new action before
+    /// its expected fire date or once the same grace window used by
+    /// reconciliation has elapsed.  The expected date is the original
+    /// schedule for Planned and the explicit snooze target for Snoozed.
+    private func validateActionFreshness(
+        expectedFireDate: Date,
+        now: Date
+    ) throws {
+        guard now.timeIntervalSinceReferenceDate.isFinite,
+              expectedFireDate.timeIntervalSinceReferenceDate.isFinite else {
+            throw SupplementValidationError.invalidTimestamp("notification.now")
+        }
+        guard now >= expectedFireDate else {
+            throw SupplementValidationError.invalidAction(
+                "notification action is before expected fire date"
+            )
+        }
+        guard now.timeIntervalSince(expectedFireDate) <
+                FitnessSupplementSession.plannedOccurrenceGraceInterval else {
+            throw SupplementValidationError.invalidAction("notification occurrence is stale")
         }
     }
 
