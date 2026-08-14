@@ -306,25 +306,42 @@ public struct CalendarView: View {
                 switch displayMode {
                 case .timeline:
                     VStack(spacing: 0) {
-                        if monthExpanded {
-                            CalendarExpandedMonthGrid(
-                                month: headerDate,
-                                selectedDate: selectedDate,
-                                selectedRange: timelineDays,
-                                calendar: calendar,
-                                namespace: reduceMotion ? nil : calendarMonthNamespace,
-                                reduceMotion: reduceMotion,
-                                onSelectDate: selectExpandedDate
-                            )
-                            .transition(
-                                reduceMotion
-                                    ? .opacity
-                                    : .asymmetric(
-                                        insertion: .move(edge: .top).combined(with: .opacity),
-                                        removal: .move(edge: .top).combined(with: .opacity)
-                                    )
-                            )
-                        }
+                        CalendarExpandedMonthGrid(
+                            month: headerDate,
+                            selectedDate: headerDate,
+                            selectedRange: CalendarDateRange.days(
+                                containing: headerDate,
+                                count: timelineDays.count,
+                                calendar: calendar
+                            ),
+                            calendar: calendar,
+                            namespace: reduceMotion ? nil : calendarMonthNamespace,
+                            isSource: monthExpanded,
+                            reduceMotion: reduceMotion,
+                            onSelectDate: selectExpandedDate
+                        )
+                        // Notion grows the month panel in place below the
+                        // header. Keeping its layout alive at zero height lets
+                        // the selected cell's matched geometry morph while
+                        // the day grid below follows the same height change.
+                        .frame(maxWidth: .infinity)
+                        .frame(
+                            height: monthExpanded ? CalendarExpandedMonthGrid.preferredHeight : 0,
+                            alignment: .top
+                        )
+                        .clipped()
+                        .opacity(monthExpanded ? 1 : 0)
+                        // Reduced motion keeps the matched-geometry namespace
+                        // disabled, but still gives the month panel a short,
+                        // opacity-led cross-fade instead of an abrupt reveal.
+                        .animation(
+                            reduceMotion
+                                ? .easeInOut(duration: CalendarInteractionLayout.reducedMotionMonthCrossfadeDuration)
+                                : LifeOSMotion.heroMorph,
+                            value: monthExpanded
+                        )
+                        .allowsHitTesting(monthExpanded)
+                        .accessibilityHidden(!monthExpanded)
                         CalendarTimelineView(
                             days: timelineDays,
                             items: visibleItems,
@@ -341,7 +358,7 @@ public struct CalendarView: View {
                             onCommitDateChange: commitPreviewDate,
                             monthNamespace: reduceMotion ? nil : calendarMonthNamespace,
                             monthExpanded: monthExpanded,
-                            monthSelectedDate: selectedDate,
+                            monthSelectedDate: headerDate,
                             reduceMotion: reduceMotion
                         )
                     }
@@ -383,7 +400,6 @@ public struct CalendarView: View {
         }
         .background(LifeOSTokens.canvas)
         .animation(reduceMotion ? nil : LifeOSMotion.easeNavigate, value: displayMode)
-        .animation(reduceMotion ? nil : LifeOSMotion.ease, value: selectedDate)
         .coordinateSpace(name: CalendarEditorAnchorGeometry.coordinateSpaceName)
 #if os(macOS)
         .overlay(alignment: .topLeading) {
@@ -427,15 +443,17 @@ public struct CalendarView: View {
                         Text(headerDate, format: .dateTime.month(.wide))
                             .font(LifeOSFont.headerLarge(20))
                             .lineLimit(1)
-                            .contentTransition(.opacity)
                         LifeOSIcon(.chevronRight)
                             .rotationEffect(.degrees(monthExpanded ? -90 : 90))
                             .frame(width: 12, height: 12)
                     }
                     .foregroundStyle(.primary)
-                    .padding(.horizontal, 10)
+                    .padding(.horizontal, monthExpanded ? 10 : 0)
                     .frame(height: 38)
-                    .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .background(
+                        monthExpanded ? Color.primary.opacity(0.08) : .clear,
+                        in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    )
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(monthExpanded ? "Collapse month" : "Expand month")
@@ -445,7 +463,6 @@ public struct CalendarView: View {
                 Text("Week \(calendar.component(.weekOfYear, from: headerDate))")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
-                    .contentTransition(.numericText())
 
                 Spacer(minLength: 4)
 
@@ -677,9 +694,10 @@ public struct CalendarView: View {
 
     private func toggleMonthExpansion() {
         let update = { monthExpanded.toggle() }
-        if reduceMotion {
-            update()
-        } else {
+        switch CalendarInteractionLayout.monthExpansionMotionPolicy(reduceMotion: reduceMotion) {
+        case .opacityCrossfade(let duration):
+            withAnimation(.easeInOut(duration: duration), update)
+        case .matchedGeometryMorph:
             withAnimation(LifeOSMotion.heroMorph, update)
         }
     }
@@ -693,7 +711,10 @@ public struct CalendarView: View {
         // During a pager drag only the compact header moves. Keeping the
         // selected date settled avoids rebuilding the three virtual pages
         // under the user's finger.
-        headerDate = calendar.startOfDay(for: date)
+        // Preserve the live projection's time component so month/week labels
+        // cross their boundaries in the same frame as the day columns. The
+        // timeline remains anchored to selectedDate until the settle commit.
+        headerDate = date
     }
 
     private func commitPreviewDate(_ date: Date) {
@@ -1029,7 +1050,6 @@ struct CalendarEditor: View {
     @State private var isCloseHovered = false
     @State private var isIconHovered = false
     @State private var isScheduleHovered = false
-    @State private var isCalendarHovered = false
     @State private var isStatusHovered = false
     let existing: CalendarItem?
     let calendar: Calendar
@@ -1269,8 +1289,6 @@ struct CalendarEditor: View {
             Divider().padding(.vertical, 12)
             editorSchedule
             Divider().padding(.vertical, 12)
-            editorCalendarRow
-            Divider().padding(.vertical, 12)
             editorStatusRow
 #if os(iOS)
             if let existing {
@@ -1290,7 +1308,7 @@ struct CalendarEditor: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel(hasIcon ? "Change event icon" : "Add event icon")
-            .accessibilityHint("Choose an emoji, system icon, or reusable custom icon")
+            .accessibilityHint("Choose an emoji or reusable custom icon")
             .accessibilityValue(hasIcon ? "Selected" : "No icon")
             .accessibilityIdentifier("calendar-event-icon-button")
 #if os(macOS)
@@ -1477,35 +1495,6 @@ struct CalendarEditor: View {
         .contentShape(Rectangle())
         .onHover { hovering in
             withAnimation(reduceMotion ? nil : LifeOSMotion.ease) { isScheduleHovered = hovering }
-        }
-#endif
-    }
-
-    private var editorCalendarRow: some View {
-        HStack(spacing: 10) {
-            RoundedRectangle(cornerRadius: 4, style: .continuous)
-                .fill(LifeOSTokens.Hue.green.base)
-                .frame(width: 16, height: 16)
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Calendar")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-                Text("Day planner")
-                    .font(.system(size: 13, weight: .semibold))
-            }
-            Spacer(minLength: 0)
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Calendar category, Day planner")
-        .accessibilityIdentifier("calendar-event-category")
-#if os(macOS)
-        .background(
-            isCalendarHovered ? Color.primary.opacity(0.025) : .clear,
-            in: RoundedRectangle(cornerRadius: 9, style: .continuous)
-        )
-        .contentShape(Rectangle())
-        .onHover { hovering in
-            withAnimation(reduceMotion ? nil : LifeOSMotion.ease) { isCalendarHovered = hovering }
         }
 #endif
     }
@@ -1931,7 +1920,7 @@ private struct CalendarEditorIcon: View {
     }
 }
 
-enum CalendarIconPickerTab: Hashable { case emojis, icons }
+enum CalendarIconPickerTab: Hashable { case emojis }
 
 struct CalendarEmojiEntry: Identifiable, Hashable {
     let emoji: String
@@ -2878,7 +2867,6 @@ struct CalendarIconPicker: View {
     @State private var customIcons: [CalendarReusableIcon]
     @State private var recentIcons: [CalendarIconRecent]
     @State private var showingCustomIconSheet = false
-    @State private var appleEmojiInput = ""
 
     init(
         icon: Binding<String?>,
@@ -2894,7 +2882,12 @@ struct CalendarIconPicker: View {
         let fixtureIcons = ProcessInfo.processInfo.arguments.contains("-LifeOSCalendarIconLibraryFixture")
             ? [CalendarVisualFixtures.reusableIcon].compactMap { $0 }
             : []
-        _tab = State(initialValue: initialTab == "icons" ? .icons : .emojis)
+        // The picker intentionally has one surface: Apple's broad emoji
+        // catalog plus reusable custom emoji/icon artwork. Keep the old
+        // initialTab parameter source-compatible for callers that persisted
+        // an earlier tab choice, but never expose the removed system-icons
+        // tab again.
+        _tab = State(initialValue: .emojis)
         _customIcons = State(initialValue: customIcons ?? (storedIcons.isEmpty ? fixtureIcons : storedIcons))
         _recentIcons = State(initialValue: CalendarIconRecents.load())
     }
@@ -2905,7 +2898,6 @@ struct CalendarIconPicker: View {
                 VStack(alignment: .leading, spacing: 18) {
                     HStack(spacing: 0) {
                         pickerTab(.emojis, title: "Emojis", identifier: "calendar-icon-picker-emojis")
-                        pickerTab(.icons, title: "Icons", identifier: "calendar-icon-picker-icons")
                         Spacer()
                         Button { resetIcon() } label: {
                             Image(systemName: "circle.slash")
@@ -2923,8 +2915,6 @@ struct CalendarIconPicker: View {
 
                     if tab == .emojis {
                         emojiContent
-                    } else {
-                        iconContent
                     }
                 }
                 .padding(18)
@@ -2978,7 +2968,6 @@ struct CalendarIconPicker: View {
     private var emojiContent: some View {
         VStack(alignment: .leading, spacing: 16) {
             searchField(placeholder: "Search emojis")
-            appleEmojiEntry
             recentContent
             customIconRow(identifier: "calendar-emoji-custom-icon-row")
 
@@ -3001,15 +2990,6 @@ struct CalendarIconPicker: View {
                 .accessibilityLabel("Remove icon")
                 .accessibilityIdentifier("calendar-icon-no-icon")
             }
-
-            Text("Curated catalog · \(CalendarEmojiCatalog.curatedCount) searchable emoji")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("calendar-emoji-curated-catalog")
-            Text("This is a local curated catalog, not Apple's complete installed emoji list. Use the field above for any emoji available from the system keyboard.")
-                .font(.system(size: 11, weight: .regular))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
 
             ForEach(filteredEmojiGroups, id: \.0) { group in
                 VStack(alignment: .leading, spacing: 9) {
@@ -3078,44 +3058,39 @@ struct CalendarIconPicker: View {
         }
     }
 
-    /// The uploaded-icon library is shared by both picker tabs. Keeping the
-    /// same row in Emojis makes custom uploads discoverable from the native
-    /// emoji/picker flow without creating a second persistence path.
+    /// Custom emoji/icon artwork lives in the same tile grid as the native
+    /// emoji catalog. There is no separate system-symbol tab: custom art and
+    /// the Add New tile keep the same footprint as ordinary emoji choices.
     private func customIconRow(identifier: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Custom")
+            Text("Custom icons")
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier(identifier)
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 12) {
-                    Button { showingCustomIconSheet = true } label: {
-                        ZStack {
-                            Circle().stroke(Color.primary.opacity(0.25), lineWidth: 1)
-                            LifeOSIcon(.add).frame(width: 22, height: 22)
-                        }
-                        .frame(width: 58, height: 58)
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 40), spacing: 5)], spacing: 5) {
+                Button { showingCustomIconSheet = true } label: {
+                    LifeOSIcon(.add)
+                        .font(.system(size: 18, weight: .semibold))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 38)
+                        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Add custom icon")
+                .accessibilityIdentifier("calendar-icon-custom-add")
+
+                ForEach(filteredCustomIcons) { reusableIcon in
+                    Button { selectCustom(reusableIcon) } label: {
+                        CalendarReusableIconImage(asset: reusableIcon.asset)
+                            .padding(5)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 38)
+                            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Add custom icon")
-                    .accessibilityIdentifier("calendar-icon-custom-add")
-
-                    ForEach(filteredCustomIcons) { reusableIcon in
-                        Button { selectCustom(reusableIcon) } label: {
-                            VStack(spacing: 4) {
-                                CalendarReusableIconImage(asset: reusableIcon.asset)
-                                    .frame(width: 58, height: 58)
-                                Text(reusableIcon.name)
-                                    .font(.caption2)
-                                    .lineLimit(1)
-                                    .frame(width: 64)
-                            }
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Use custom icon \(reusableIcon.name)")
-                        .accessibilityIdentifier("calendar-icon-custom-\(reusableIcon.id)")
-                    }
+                    .accessibilityLabel("Use custom icon \(reusableIcon.name)")
+                    .accessibilityIdentifier("calendar-icon-custom-\(reusableIcon.id)")
                 }
             }
         }
@@ -3143,57 +3118,17 @@ struct CalendarIconPicker: View {
         .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
-    private var appleEmojiEntry: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Any Apple emoji")
-                .font(.system(size: 16, weight: .semibold))
-            HStack(spacing: 8) {
-                TextField("Paste one emoji from the system keyboard", text: $appleEmojiInput)
-                    .textFieldStyle(.plain)
-#if os(iOS)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled(true)
-#endif
-                    .accessibilityLabel("Any Apple emoji")
-                    .accessibilityIdentifier("calendar-any-apple-emoji-field")
-                Button("Use") {
-                    guard let value = CalendarEmojiValidation.validated(appleEmojiInput) else { return }
-                    selectEmoji(value)
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(CalendarEmojiValidation.validated(appleEmojiInput) == nil)
-                .accessibilityIdentifier("calendar-any-apple-emoji-apply")
-            }
-            .padding(.horizontal, 12)
-            .frame(minHeight: 40)
-            .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            if CalendarEmojiValidation.validated(appleEmojiInput) == nil && !appleEmojiInput.isEmpty {
-                Text("Enter exactly one emoji grapheme.")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-            }
-#if os(macOS)
-            Button {
-                NSApplication.shared.orderFrontCharacterPalette(nil)
-            } label: {
-                Label("Open Character Viewer", systemImage: "character.cursor.ibeam")
-            }
-            .buttonStyle(.bordered)
-            .accessibilityIdentifier("calendar-open-character-viewer")
-#endif
-        }
-    }
-
     @ViewBuilder
     private var recentContent: some View {
-        if !recentIcons.isEmpty && query.isEmpty {
+        let visibleRecents = recentIcons.filter { $0.kind != .symbol }
+        if !visibleRecents.isEmpty && query.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Recent")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.secondary)
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
-                        ForEach(recentIcons) { recent in
+                        ForEach(visibleRecents) { recent in
                             Button { selectRecent(recent) } label: {
                                 recentIconView(recent)
                                     .frame(width: 44, height: 44)

@@ -23,6 +23,16 @@ final class CalendarLayoutTests: XCTestCase {
         )
         XCTAssertEqual(
             CalendarInteractionLayout.pagerPageDelta(
+                translation: -180,
+                predictedTranslation: -650,
+                pageWidth: 390,
+                maximumPages: 2
+            ),
+            1,
+            "A standard one-page swipe must not skip to a second window"
+        )
+        XCTAssertEqual(
+            CalendarInteractionLayout.pagerPageDelta(
                 translation: 110,
                 predictedTranslation: 920,
                 pageWidth: 390,
@@ -38,6 +48,251 @@ final class CalendarLayoutTests: XCTestCase {
                 maximumPages: 2
             ),
             2
+        )
+    }
+
+    func testPagerSettleProjectionCarriesBoundedReleaseVelocityWithoutSkippingNormalSwipe() {
+        let leftSwipe = CalendarInteractionLayout.pagerSettleProjection(
+            translation: -180,
+            predictedTranslation: -650,
+            pageWidth: 390,
+            maximumPages: 2
+        )
+        XCTAssertEqual(leftSwipe.pageDelta, 1)
+        XCTAssertEqual(leftSwipe.normalizedVelocity, (-650.0 + 180.0) / 390.0, accuracy: 0.0001)
+
+        let rightSwipe = CalendarInteractionLayout.pagerSettleProjection(
+            translation: 180,
+            predictedTranslation: 920,
+            pageWidth: 390,
+            maximumPages: 2
+        )
+        XCTAssertEqual(rightSwipe.pageDelta, -2)
+        XCTAssertEqual(rightSwipe.normalizedVelocity, (920.0 - 180.0) / 390.0, accuracy: 0.0001)
+
+        let highVelocity = CalendarInteractionLayout.pagerSettleProjection(
+            translation: -110,
+            predictedTranslation: -1_900,
+            pageWidth: 390,
+            maximumPages: 2
+        )
+        XCTAssertEqual(highVelocity.pageDelta, 2)
+        XCTAssertEqual(abs(highVelocity.normalizedVelocity), 3, accuracy: 0.0001)
+
+        let shortDrag = CalendarInteractionLayout.pagerSettleProjection(
+            translation: -40,
+            predictedTranslation: -55,
+            pageWidth: 390,
+            maximumPages: 2
+        )
+        XCTAssertEqual(shortDrag, .init(pageDelta: 0, normalizedVelocity: 0))
+    }
+
+    func testReducedMotionMonthExpansionUsesShortOpacityCrossfade() {
+        switch CalendarInteractionLayout.monthExpansionMotionPolicy(reduceMotion: true) {
+        case .opacityCrossfade(let duration):
+            XCTAssertEqual(duration, CalendarInteractionLayout.reducedMotionMonthCrossfadeDuration)
+            XCTAssertLessThan(duration, 0.25)
+        case .matchedGeometryMorph:
+            XCTFail("Reduced motion must not use matched geometry")
+        }
+
+        switch CalendarInteractionLayout.monthExpansionMotionPolicy(reduceMotion: false) {
+        case .opacityCrossfade:
+            XCTFail("Full motion should retain the matched geometry morph")
+        case .matchedGeometryMorph:
+            break
+        }
+    }
+
+    func testPagerPreviewDateTracksFractionalDayAcrossVisibleWindow() throws {
+        let anchor = DateComponents(calendar: calendar, year: 2026, month: 7, day: 31).date!
+        let halfPage = CalendarInteractionLayout.pagerPreviewDate(
+            pageAnchor: anchor,
+            horizontalOffset: -195,
+            pageWidth: 390,
+            dayCount: 3,
+            calendar: calendar
+        )
+        let halfComponents = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: halfPage)
+        XCTAssertEqual(halfComponents.year, 2026)
+        XCTAssertEqual(halfComponents.month, 8)
+        XCTAssertEqual(halfComponents.day, 1)
+        XCTAssertEqual(halfComponents.hour, 12)
+        XCTAssertEqual(halfComponents.minute, 0)
+
+        let nextPage = CalendarInteractionLayout.pagerPreviewDate(
+            pageAnchor: anchor,
+            horizontalOffset: -390,
+            pageWidth: 390,
+            dayCount: 3,
+            calendar: calendar
+        )
+        XCTAssertEqual(calendar.startOfDay(for: nextPage), calendar.date(byAdding: .day, value: 3, to: anchor))
+    }
+
+    func testPagerPreviewHeaderCallbacksAreBoundaryBounded() throws {
+        let anchor = DateComponents(calendar: calendar, year: 2026, month: 7, day: 31).date!
+        let midday = calendar.date(byAdding: .hour, value: 12, to: anchor)!
+        let nextDay = calendar.date(byAdding: .day, value: 1, to: anchor)!
+        let sequence = [anchor, midday, anchor.addingTimeInterval(23 * 60 * 60), nextDay]
+
+        let callbackDates = sequence.dropFirst().filter { candidate in
+            CalendarInteractionLayout.pagerPreviewBoundaryChanged(
+                from: anchor,
+                to: candidate,
+                calendar: calendar
+            )
+        }
+        XCTAssertEqual(callbackDates.count, 1, "Fractional same-day pager frames must not rebuild the parent header")
+        XCTAssertEqual(
+            CalendarInteractionLayout.pagerPreviewBoundary(for: anchor, calendar: calendar),
+            CalendarInteractionLayout.pagerPreviewBoundary(for: midday, calendar: calendar)
+        )
+        XCTAssertNotEqual(
+            CalendarInteractionLayout.pagerPreviewBoundary(for: anchor, calendar: calendar),
+            CalendarInteractionLayout.pagerPreviewBoundary(for: nextDay, calendar: calendar)
+        )
+    }
+
+    func testPagerEndDuringSettlePreservesSettleUnlessEventOwnsGesture() {
+        XCTAssertEqual(
+            CalendarInteractionLayout.pagerEndDisposition(
+                hasPendingSettle: true,
+                eventMutationActive: false,
+                hasProvisionalEventPreview: false,
+                horizontalDragActive: false
+            ),
+            .preservePendingSettle
+        )
+        XCTAssertEqual(
+            CalendarInteractionLayout.pagerEndDisposition(
+                hasPendingSettle: true,
+                eventMutationActive: true,
+                hasProvisionalEventPreview: false,
+                horizontalDragActive: false
+            ),
+            .resetForEventOwnership
+        )
+        XCTAssertEqual(
+            CalendarInteractionLayout.pagerEndDisposition(
+                hasPendingSettle: false,
+                eventMutationActive: false,
+                hasProvisionalEventPreview: false,
+                horizontalDragActive: true
+            ),
+            .settleHorizontalPage
+        )
+    }
+
+    func testTimelineContentHasReachable24HourEndpointWithoutChangingCreationAxis() throws {
+        let day = dayStart
+        let axisHeight = CalendarInteractionLayout.timelineHeight(
+            days: [day],
+            hourHeight: 54,
+            calendar: calendar
+        )
+        XCTAssertEqual(axisHeight, 24 * 54)
+        XCTAssertEqual(
+            CalendarInteractionLayout.timelineContentHeight(
+                days: [day],
+                hourHeight: 54,
+                calendar: calendar
+            ),
+            axisHeight + CalendarInteractionLayout.timelineBottomInset
+        )
+        XCTAssertEqual(
+            CalendarInteractionLayout.timelineHourLabel(
+                minute: 1_440,
+                dayMinutes: 1_440,
+                date: nil,
+                calendar: calendar
+            ),
+            "24:00"
+        )
+        let twentyThree = calendar.date(byAdding: .hour, value: 23, to: day)
+        XCTAssertEqual(
+            CalendarInteractionLayout.timelineHourLabel(
+                minute: 1_380,
+                dayMinutes: 1_440,
+                date: twentyThree,
+                calendar: calendar
+            ),
+            "23:00"
+        )
+        let created = try XCTUnwrap(CalendarInteractionLayout.creationDate(
+            day: day,
+            verticalOffset: axisHeight,
+            hourHeight: 54,
+            calendar: calendar
+        ))
+        XCTAssertLessThan(created, calendar.date(byAdding: .day, value: 1, to: day)!)
+    }
+
+    func testAllDayLayoutKeepsEmptyLaneCompactAndStacksOnlyOverlaps() throws {
+        let anchor = DateComponents(calendar: calendar, year: 2026, month: 7, day: 31).date!
+        let day1 = calendar.date(byAdding: .day, value: 1, to: anchor)!
+        let day2 = calendar.date(byAdding: .day, value: 2, to: anchor)!
+        let day3 = calendar.date(byAdding: .day, value: 3, to: anchor)!
+        let days = [anchor, day1, day2]
+
+        XCTAssertEqual(
+            CalendarAllDayLayout.height(items: [], days: days, calendar: calendar),
+            CalendarAllDayLayout.rowHeight
+        )
+
+        let first = try CalendarItem(title: "First", start: anchor, end: day1)
+        let adjacent = try CalendarItem(title: "Adjacent", start: day1, end: day2)
+        let overlapping = try CalendarItem(title: "Overlapping", start: anchor, end: day3)
+        let timedStart = calendar.date(bySettingHour: 9, minute: 0, second: 0, of: anchor)!
+        let timedEnd = calendar.date(byAdding: .hour, value: 1, to: timedStart)!
+        let timed = try CalendarItem(title: "Timed", start: timedStart, end: timedEnd)
+
+        let placements = CalendarAllDayLayout.placements(
+            items: [first, adjacent, overlapping, timed],
+            days: days,
+            calendar: calendar
+        )
+        let byTitle = Dictionary(uniqueKeysWithValues: placements.map { ($0.item.title, $0) })
+        XCTAssertEqual(byTitle["First"]?.row, 0)
+        XCTAssertEqual(byTitle["Adjacent"]?.row, 0, "Adjacent all-day ranges should reuse a row")
+        XCTAssertEqual(byTitle["Overlapping"]?.row, 1)
+        XCTAssertEqual(byTitle["First"]?.firstDayIndex, 0)
+        XCTAssertEqual(byTitle["Adjacent"]?.firstDayIndex, 1)
+        XCTAssertEqual(byTitle["Overlapping"]?.firstDayIndex, 0)
+        XCTAssertEqual(byTitle["First"]?.dayCount, 1)
+        XCTAssertEqual(byTitle["Adjacent"]?.dayCount, 1)
+        XCTAssertEqual(byTitle["Overlapping"]?.dayCount, 3)
+        XCTAssertEqual(
+            CalendarAllDayLayout.height(items: [first, adjacent, overlapping], days: days, calendar: calendar),
+            CalendarAllDayLayout.rowHeight * 2 + CalendarAllDayLayout.rowSpacing
+        )
+    }
+
+    func testTimedViewportLeavesFullDayContentScrollableInsideFinitePage() {
+        XCTAssertEqual(
+            CalendarInteractionLayout.timedViewportHeight(
+                containerHeight: 800,
+                dayHeaderHeight: 58,
+                allDayHeight: 26
+            ),
+            716
+        )
+        XCTAssertEqual(
+            CalendarInteractionLayout.timedViewportHeight(
+                containerHeight: 60,
+                dayHeaderHeight: 58,
+                allDayHeight: 54
+            ),
+            1
+        )
+        XCTAssertEqual(
+            CalendarInteractionLayout.timedViewportHeight(
+                containerHeight: .infinity,
+                dayHeaderHeight: 58,
+                allDayHeight: 26
+            ),
+            1
         )
     }
 

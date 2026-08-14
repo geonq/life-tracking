@@ -240,6 +240,102 @@ public enum CalendarOverlapLayout {
     }
 }
 
+/// Pure geometry for the sticky all-day lane above the timed grid. All-day
+/// items occupy one contiguous day range; overlapping ranges are assigned to
+/// the first free row so an empty/one-item lane stays one normal row tall.
+/// Keeping this separate from SwiftUI makes the lane height and stacking
+/// deterministic across iPhone sizes and gives the interaction tests a model
+/// contract to exercise without rendering a view.
+public enum CalendarAllDayLayout {
+    public static let rowHeight: Double = 26
+    public static let rowSpacing: Double = 2
+    public static let minimumRows = 1
+
+    public struct Placement: Equatable, Identifiable, Sendable {
+        public let item: CalendarItem
+        public let row: Int
+        public let firstDayIndex: Int
+        public let dayCount: Int
+
+        public var id: UUID { item.id }
+
+        fileprivate init(item: CalendarItem, row: Int, firstDayIndex: Int, dayCount: Int) {
+            self.item = item
+            self.row = row
+            self.firstDayIndex = firstDayIndex
+            self.dayCount = dayCount
+        }
+    }
+
+    public static func isAllDay(_ item: CalendarItem, calendar: Calendar) -> Bool {
+        let start = calendar.startOfDay(for: item.start)
+        let end = calendar.startOfDay(for: item.end)
+        return item.start == start && item.end == end && end > start
+    }
+
+    public static func placements(
+        items: [CalendarItem],
+        days: [Date],
+        calendar: Calendar
+    ) -> [Placement] {
+        guard !days.isEmpty else { return [] }
+        let dayStarts = days.map { calendar.startOfDay(for: $0) }
+        let dayEnds = dayStarts.map { calendar.date(byAdding: .day, value: 1, to: $0) ?? $0 }
+        var rowEnds: [Int] = []
+        var result: [Placement] = []
+
+        let allDayItems = items
+            .filter { !$0.isDeleted && isAllDay($0, calendar: calendar) }
+            .sorted {
+                if $0.start != $1.start { return $0.start < $1.start }
+                if $0.end != $1.end { return $0.end < $1.end }
+                return $0.id.uuidString < $1.id.uuidString
+            }
+
+        for item in allDayItems {
+            let visibleIndices = days.indices.filter { index in
+                item.start < dayEnds[index] && item.end > dayStarts[index]
+            }
+            guard let first = visibleIndices.first, let last = visibleIndices.last else { continue }
+            let endExclusive = last + 1
+            let row: Int
+            if let available = rowEnds.firstIndex(where: { $0 <= first }) {
+                row = available
+                rowEnds[available] = endExclusive
+            } else {
+                row = rowEnds.count
+                rowEnds.append(endExclusive)
+            }
+            result.append(
+                Placement(
+                    item: item,
+                    row: row,
+                    firstDayIndex: first,
+                    dayCount: endExclusive - first
+                )
+            )
+        }
+        return result
+    }
+
+    public static func rowCount(
+        items: [CalendarItem],
+        days: [Date],
+        calendar: Calendar
+    ) -> Int {
+        max(minimumRows, (placements(items: items, days: days, calendar: calendar).map(\.row).max() ?? -1) + 1)
+    }
+
+    public static func height(
+        items: [CalendarItem],
+        days: [Date],
+        calendar: Calendar
+    ) -> Double {
+        let rows = rowCount(items: items, days: days, calendar: calendar)
+        return Double(rows) * rowHeight + Double(max(0, rows - 1)) * rowSpacing
+    }
+}
+
 public enum CalendarEventResizeEdge: Sendable {
     case start
     case end
@@ -503,10 +599,98 @@ public enum CalendarInteractionLayout {
     public static let snapIntervalMinutes = 15
     public static let minimumDurationMinutes = 15
     public static let creationDurationMinutes = 60
+    /// Space after the final 24:00 mark so the endpoint remains visible when
+    /// the finite timed viewport is scrolled all the way to the bottom. This
+    /// is display-only; creation and event math continue to use `timelineHeight`.
+    public static let timelineBottomInset: Double = 24
     /// The short range shown while a mobile time selection is being held.
     /// The editor receives the actual dragged interval; this is only the
     /// initial ghost before the finger expresses a longer/shorter range.
     public static let mobileSelectionDurationMinutes = 30
+
+    /// The reduced-motion month transition still communicates the panel
+    /// change, but does so with a short opacity cross-fade rather than the
+    /// matched-geometry height morph used by the full-motion path.
+    public enum MonthExpansionMotionPolicy: Equatable, Sendable {
+        case opacityCrossfade(duration: Double)
+        case matchedGeometryMorph
+    }
+
+    public static let reducedMotionMonthCrossfadeDuration: Double = 0.16
+
+    public static func monthExpansionMotionPolicy(
+        reduceMotion: Bool
+    ) -> MonthExpansionMotionPolicy {
+        reduceMotion
+            ? .opacityCrossfade(duration: reducedMotionMonthCrossfadeDuration)
+            : .matchedGeometryMorph
+    }
+
+    /// The result of projecting a pager release. `normalizedVelocity` uses
+    /// the pager's offset coordinate: negative means the finger released
+    /// toward later dates (left), positive means earlier dates (right).
+    /// Keeping the value bounded avoids an unusually large predicted
+    /// translation producing an unstable spring.
+    public struct PagerSettleProjection: Equatable, Sendable {
+        public let pageDelta: Int
+        public let normalizedVelocity: Double
+
+        public init(pageDelta: Int, normalizedVelocity: Double) {
+            self.pageDelta = pageDelta
+            self.normalizedVelocity = normalizedVelocity
+        }
+    }
+
+    /// Resolves a horizontal pager release into a bounded number of virtual
+    /// pages and a normalized release velocity for a spring settle. The
+    /// predicted translation carries the native fling projection while the
+    /// committed translation remains the fallback for a slow drag.
+    public static func pagerSettleProjection(
+        translation: Double,
+        predictedTranslation: Double,
+        pageWidth: Double,
+        maximumPages: Int = 2
+    ) -> PagerSettleProjection {
+        guard translation.isFinite,
+              predictedTranslation.isFinite,
+              pageWidth.isFinite,
+              pageWidth > 0,
+              maximumPages > 0 else {
+            return PagerSettleProjection(pageDelta: 0, normalizedVelocity: 0)
+        }
+
+        let threshold = max(70, pageWidth * 0.20)
+        guard abs(translation) >= threshold || abs(predictedTranslation) >= threshold else {
+            return PagerSettleProjection(pageDelta: 0, normalizedVelocity: 0)
+        }
+
+        let projected = abs(predictedTranslation) >= threshold ? predictedTranslation : translation
+        var pages = Int((-projected / pageWidth).rounded())
+        if pages == 0 {
+            pages = translation < 0 ? 1 : -1
+        }
+        // A normal UIKit/XCTest swipe often predicts between 1.5 and 1.7
+        // widths even though the user's intent is one page. Reserve the
+        // two-page settle for a clearly longer/high-velocity projection.
+        if abs(pages) > 1, abs(projected) / pageWidth < 1.75 {
+            pages = pages < 0 ? -1 : 1
+        }
+        let boundedPages = max(-maximumPages, min(maximumPages, pages))
+        // DragGesture exposes the release's projected endpoint rather than a
+        // velocity scalar. The extension beyond the committed translation is
+        // the deterministic velocity proxy; slow drags fall back to their
+        // committed displacement.
+        let releaseDisplacement = abs(predictedTranslation) >= threshold
+            ? predictedTranslation - translation
+            : translation
+        let velocity = boundedPages == 0
+            ? 0
+            : max(-3, min(3, releaseDisplacement / pageWidth))
+        return PagerSettleProjection(
+            pageDelta: boundedPages,
+            normalizedVelocity: velocity
+        )
+    }
 
     /// Resolves a horizontal pager release into a bounded number of virtual
     /// pages. `predictedTranslation` carries the native fling velocity, while
@@ -520,23 +704,113 @@ public enum CalendarInteractionLayout {
         pageWidth: Double,
         maximumPages: Int = 2
     ) -> Int {
-        guard translation.isFinite,
-              predictedTranslation.isFinite,
+        pagerSettleProjection(
+            translation: translation,
+            predictedTranslation: predictedTranslation,
+            pageWidth: pageWidth,
+            maximumPages: maximumPages
+        ).pageDelta
+    }
+
+    /// Projects the date under a native-width pager while the page is still
+    /// moving. A horizontal offset of `-pageWidth` means that the next page is
+    /// centred, so the header advances by the complete visible day window.
+    /// The result deliberately keeps its fractional time component: callers
+    /// can update month/week labels at the exact boundary instead of waiting
+    /// for a settled page or quantising the preview to midnight.
+    public static func pagerPreviewDate(
+        pageAnchor: Date,
+        horizontalOffset: Double,
+        pageWidth: Double,
+        dayCount: Int,
+        calendar: Calendar
+    ) -> Date {
+        guard horizontalOffset.isFinite,
               pageWidth.isFinite,
               pageWidth > 0,
-              maximumPages > 0 else { return 0 }
+              dayCount > 0 else { return pageAnchor }
 
-        let threshold = max(70, pageWidth * 0.20)
-        guard abs(translation) >= threshold || abs(predictedTranslation) >= threshold else {
-            return 0
-        }
+        let projectedDays = -horizontalOffset / pageWidth * Double(dayCount)
+        guard projectedDays.isFinite else { return pageAnchor }
 
-        let projected = abs(predictedTranslation) >= threshold ? predictedTranslation : translation
-        var pages = Int((-projected / pageWidth).rounded())
-        if pages == 0 {
-            pages = translation < 0 ? 1 : -1
+        let wholeDays = Int(projectedDays.rounded(.towardZero))
+        let wholeDayAnchor = calendar.date(byAdding: .day, value: wholeDays, to: pageAnchor) ?? pageAnchor
+        let fractionalDay = projectedDays - Double(wholeDays)
+        guard abs(fractionalDay) > 0.0001,
+              let interval = dayInterval(containing: wholeDayAnchor, calendar: calendar) else {
+            return wholeDayAnchor
         }
-        return max(-maximumPages, min(maximumPages, pages))
+        let minutes = calendarMinutes(from: interval.start, to: interval.end, calendar: calendar)
+        return calendar.date(
+            byAdding: .minute,
+            value: Int((fractionalDay * Double(minutes)).rounded()),
+            to: wholeDayAnchor
+        ) ?? wholeDayAnchor
+    }
+
+    /// The calendar components that affect the parent header while the page
+    /// strip is moving. The strip may still project a fractional Date every
+    /// frame, but the parent only needs to rebuild when one of these semantic
+    /// boundaries changes.
+    public struct PagerPreviewBoundary: Equatable, Sendable {
+        public let year: Int
+        public let month: Int
+        public let day: Int
+        public let weekOfYear: Int
+        public let weekYear: Int
+
+        fileprivate init(calendar: Calendar, date: Date) {
+            year = calendar.component(.year, from: date)
+            month = calendar.component(.month, from: date)
+            day = calendar.component(.day, from: date)
+            weekOfYear = calendar.component(.weekOfYear, from: date)
+            weekYear = calendar.component(.yearForWeekOfYear, from: date)
+        }
+    }
+
+    public static func pagerPreviewBoundary(
+        for date: Date,
+        calendar: Calendar
+    ) -> PagerPreviewBoundary {
+        PagerPreviewBoundary(calendar: calendar, date: date)
+    }
+
+    public static func pagerPreviewBoundaryChanged(
+        from previous: Date?,
+        to candidate: Date,
+        calendar: Calendar
+    ) -> Bool {
+        guard let previous else { return true }
+        return pagerPreviewBoundary(for: previous, calendar: calendar) !=
+            pagerPreviewBoundary(for: candidate, calendar: calendar)
+    }
+
+    /// Decides what an ended drag is allowed to do. A vertical/non-owned
+    /// gesture arriving while a pager settle is pending must leave that settle
+    /// intact; only event ownership is allowed to cancel it.
+    public enum PagerEndDisposition: Equatable, Sendable {
+        case preservePendingSettle
+        case resetForEventOwnership
+        case settleHorizontalPage
+        case cancelNonOwnedDrag
+    }
+
+    public static func pagerEndDisposition(
+        hasPendingSettle: Bool,
+        eventMutationActive: Bool,
+        hasProvisionalEventPreview: Bool,
+        horizontalDragActive: Bool
+    ) -> PagerEndDisposition {
+        if eventMutationActive || hasProvisionalEventPreview {
+            return .resetForEventOwnership
+        }
+        if hasPendingSettle {
+            return .preservePendingSettle
+        }
+        if horizontalDragActive {
+            return .settleHorizontalPage
+        }
+        return .cancelNonOwnedDrag
     }
 
     /// Resolves the direction of the iOS 17 fallback drag without claiming
@@ -604,6 +878,40 @@ public enum CalendarInteractionLayout {
         _ = days
         _ = calendar
         return hourHeight * 24
+    }
+
+    /// Scroll content height for the timed grid. The axis itself still ends
+    /// at exactly 24 hours; the extra inset is only a reachable visual buffer
+    /// for the final label/boundary.
+    public static func timelineContentHeight(days: [Date], hourHeight: Double, calendar: Calendar) -> Double {
+        timelineHeight(days: days, hourHeight: hourHeight, calendar: calendar) + timelineBottomInset
+    }
+
+    public static func timelineHourLabel(
+        minute: Int,
+        dayMinutes: Int,
+        date: Date?,
+        calendar: Calendar
+    ) -> String {
+        guard minute >= dayMinutes else {
+            guard let date else { return "" }
+            return String(format: "%02d:00", calendar.component(.hour, from: date))
+        }
+        return "24:00"
+    }
+
+    /// Returns the finite viewport reserved for the timed ScrollView. The
+    /// full 00:00–24:00 content is intentionally larger than this value and
+    /// must be scrolled inside it rather than expanding the page off-screen.
+    public static func timedViewportHeight(
+        containerHeight: Double,
+        dayHeaderHeight: Double,
+        allDayHeight: Double
+    ) -> Double {
+        guard containerHeight.isFinite,
+              dayHeaderHeight.isFinite,
+              allDayHeight.isFinite else { return 1 }
+        return max(1, containerHeight - max(0, dayHeaderHeight) - max(0, allDayHeight))
     }
 
     public static func provisionalRenderState(

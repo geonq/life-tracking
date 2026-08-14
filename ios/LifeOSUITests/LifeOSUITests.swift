@@ -623,21 +623,22 @@ final class LifeOSUITests: XCTestCase {
         let picker = app.descendants(matching: .any)["calendar-icon-picker"]
         XCTAssertTrue(picker.waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["calendar-icon-picker-emojis"].waitForExistence(timeout: 5))
-        app.buttons["calendar-icon-picker-icons"].tap()
+        XCTAssertFalse(app.buttons["calendar-icon-picker-icons"].exists, "The picker must not expose a system Icons tab")
         XCTAssertTrue(app.buttons["calendar-icon-custom-add"].waitForExistence(timeout: 5))
-        capture("\(appearance)-calendar-event-icons-tab")
+        XCTAssertFalse(app.descendants(matching: .any)["calendar-any-apple-emoji-field"].exists,
+                       "The picker must not expose a redundant Any Apple emoji field")
+        capture("\(appearance)-calendar-event-emoji-custom-surface")
         app.buttons["calendar-icon-custom-add"].tap()
         XCTAssertTrue(app.buttons["calendar-icon-upload"].waitForExistence(timeout: 5))
         capture("\(appearance)-calendar-event-custom-icon-sheet")
         app.buttons["calendar-icon-cancel"].tap()
         XCTAssertTrue(picker.waitForExistence(timeout: 5))
-        app.buttons["calendar-icon-picker-emojis"].tap()
         let emojiSearch = app.descendants(matching: .any)["calendar-icon-search"]
         XCTAssertTrue(emojiSearch.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.descendants(matching: .any)["calendar-any-apple-emoji-field"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.descendants(matching: .any)["calendar-emoji-curated-catalog"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.descendants(matching: .any)["calendar-emoji-curated-catalog"].exists,
+                       "The picker must not expose a curated-catalog disclaimer")
         XCTAssertTrue(app.descendants(matching: .any)["calendar-emoji-category-People"].waitForExistence(timeout: 5))
-        capture("\(appearance)-calendar-event-emoji-tab-any-apple")
+        capture("\(appearance)-calendar-event-emoji-custom-search")
         app.buttons["calendar-icon-no-icon"].tap()
         XCTAssertTrue(app.buttons["calendar-event-icon-button"].waitForExistence(timeout: 5), "Remove icon should close the picker")
         capture("\(appearance)-calendar-event-editor-no-icon")
@@ -653,12 +654,17 @@ final class LifeOSUITests: XCTestCase {
         tapVisible(visibleElement(identifier: "calendar-event-\(deterministicDeepWorkID)"))
         XCTAssertTrue(app.buttons["calendar-event-icon-button"].waitForExistence(timeout: 5))
         app.buttons["calendar-event-icon-button"].tap()
-        app.buttons["calendar-icon-picker-icons"].tap()
+        XCTAssertTrue(app.buttons["calendar-icon-picker-emojis"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["calendar-icon-picker-icons"].exists, "The picker must not expose a system Icons tab")
         XCTAssertTrue(app.buttons["Use custom icon Fixture mark"].waitForExistence(timeout: 5))
-        capture("dark-calendar-event-icons-populated-custom")
-        app.buttons["calendar-icon-picker-emojis"].tap()
         XCTAssertTrue(app.descendants(matching: .any)["calendar-emoji-custom-icon-row"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["Use custom icon Fixture mark"].waitForExistence(timeout: 5))
+        let customTile = app.buttons["Use custom icon Fixture mark"]
+        let emojiTile = app.buttons["calendar-emoji-😀"]
+        XCTAssertTrue(emojiTile.waitForExistence(timeout: 5), "The custom tile must share the emoji selection surface")
+        XCTAssertEqual(customTile.frame.width, emojiTile.frame.width, accuracy: 1.0)
+        XCTAssertEqual(customTile.frame.height, emojiTile.frame.height, accuracy: 1.0)
+        capture("dark-calendar-event-emoji-custom")
     }
 
     /// Focused visual evidence for the matrix-driven Nutrition surface. The

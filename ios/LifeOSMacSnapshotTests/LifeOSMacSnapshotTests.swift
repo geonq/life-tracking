@@ -142,10 +142,10 @@ final class LifeOSMacSnapshotTests: XCTestCase {
                     icon: .constant(nil),
                     systemIconName: .constant(nil),
                     iconAsset: .constant(nil),
-                    initialTab: "icons",
+                    initialTab: "emojis",
                     customIcons: [reusable]
                 ),
-                named: "CalendarIconPicker-Icons-Custom-\(suffix)",
+                named: "CalendarIconPicker-Emoji-Custom-\(suffix)",
                 colorScheme: scheme
             )
             render(

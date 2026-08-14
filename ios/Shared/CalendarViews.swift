@@ -542,7 +542,14 @@ public struct CalendarTimelineView: View {
             ScrollView(.horizontal) {
                 VStack(spacing: 0) {
                     dayHeader(width: contentWidth)
-                    CalendarAllDayRow(days: days, calendar: calendar, timeGutter: timeGutter, width: contentWidth)
+                    CalendarAllDayRow(
+                        days: days,
+                        items: items,
+                        calendar: calendar,
+                        timeGutter: timeGutter,
+                        width: contentWidth,
+                        onSelect: nil
+                    )
                     ScrollViewReader { scrollProxy in
                         ScrollView(.vertical) {
                             HStack(alignment: .top, spacing: 0) {
@@ -702,87 +709,32 @@ public struct CalendarTimelineView: View {
 }
 
 #if os(iOS)
-/// Reports the live horizontal position of the small virtual page window.
-/// Native `ScrollView` paging owns tracking, velocity, deceleration, and the
-/// settle transaction; this preference is only for the compact header's live
-/// date projection while the finger is between pages.
+/// Reports the live horizontal position of the centred page in the virtual
+/// strip. The page itself moves under the finger; reading its geometry also
+/// gives us the same projection while a settle animation is returning to the
+/// current page or completing a fling.
 private struct CalendarPagerOffsetPreferenceKey: PreferenceKey {
-    static var defaultValue: [Int: CGFloat] = [:]
+    static var defaultValue: CGFloat = 0
 
-    static func reduce(value: inout [Int: CGFloat], nextValue: () -> [Int: CGFloat]) {
-        value.merge(nextValue(), uniquingKeysWith: { _, next in next })
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
     }
 }
 
-/// Scroll phase became public with the iOS 18 SDK while this app continues to
-/// deploy to iOS 17. On newer systems the native phase is the source of truth
-/// for settling; on iOS 17 the pager falls back to the geometry's exact page
-/// alignment rather than treating every binding update as a settled page.
-private struct CalendarPagerScrollPhaseModifier: ViewModifier {
-    let action: (_ beganScrolling: Bool, _ becameIdle: Bool) -> Void
-    @State private var fallbackDragState = CalendarPagerDragState()
-    @State private var fallbackDragAxisIsHorizontal: Bool?
-    @GestureState private var fallbackGestureIsActive = false
-
-    @ViewBuilder
-    func body(content: Content) -> some View {
-        if #available(iOS 18.0, *) {
-            content.onScrollPhaseChange { oldPhase, newPhase in
-                action(!oldPhase.isScrolling && newPhase.isScrolling, newPhase == .idle)
-            }
-        } else {
-            content
-                // iOS 17 has no public ScrollPhase. Observe only the
-                // horizontal direction and do so simultaneously, leaving
-                // native paging and the timeline's event gestures in charge
-                // of their own recognizers. A GestureState reset covers
-                // cancellation paths where onEnded is not delivered.
-                .simultaneousGesture(
-                    DragGesture(minimumDistance: 4, coordinateSpace: .local)
-                        .updating($fallbackGestureIsActive) { _, isActive, _ in
-                            isActive = true
-                        }
-                        .onChanged { value in
-                            if fallbackDragAxisIsHorizontal == nil {
-                                let isHorizontal = CalendarInteractionLayout.isHorizontalPagerDrag(
-                                    horizontalTranslation: Double(value.translation.width),
-                                    verticalTranslation: Double(value.translation.height)
-                                )
-                                fallbackDragAxisIsHorizontal = isHorizontal
-                                guard isHorizontal else { return }
-                            }
-                            guard fallbackDragAxisIsHorizontal == true else { return }
-                            if fallbackDragState.beginHorizontalDrag() {
-                                action(true, false)
-                            }
-                        }
-                        .onEnded { _ in
-                            finishFallbackDrag()
-                        }
-                )
-                .onChange(of: fallbackGestureIsActive) { _, isActive in
-                    guard !isActive else { return }
-                    // DragGesture can be cancelled by the native scroll view
-                    // or by another higher-priority recognizer.
-                    finishFallbackDrag()
-                }
-        }
-    }
-
-    private func finishFallbackDrag() {
-        let didEnd = fallbackDragState.end()
-        fallbackDragAxisIsHorizontal = nil
-        if didEnd {
-            action(false, true)
-        }
-    }
+private struct CalendarPagerPendingSettle: Equatable {
+    let generation: Int
+    let pageDelta: Int
+    let targetOffset: CGFloat
+    let nextAnchor: Date
+    let normalizedVelocity: Double
 }
 
-/// A native iOS 17 paged scroll strip. Five adjacent pages are materialized so
-/// a fast fling can land more than one window away; after native paging settles
-/// the selected page is folded back into the middle without a second animation.
-/// Every page contains its own day headers and timed grid, so the two cannot
-/// drift apart during a swipe.
+/// A virtual iPhone pager with direct finger tracking. The five-page strip is
+/// deliberately kept mounted so the previous/next day windows remain visible
+/// for the entire drag. Release uses the predicted translation (native UIKit's
+/// velocity projection) to choose one or two windows, then recentres only after
+/// the strip has visibly arrived at that page. A short drag settles back to the
+/// exact current page, including the header projection.
 private struct CalendarPagedTimeline: View {
     let days: [Date]
     let items: [CalendarItem]
@@ -803,14 +755,12 @@ private struct CalendarPagedTimeline: View {
     let reduceMotion: Bool
     let interactionSession: CalendarInteractionSession
     @State private var pageAnchor: Date
-    @State private var lastPreviewDate: Date?
-    @State private var selectedPageID: Int? = 0
+    @State private var lastPreviewCallbackDate: Date?
+    @State private var horizontalDragOffset: CGFloat = 0
+    @State private var horizontalDragActive = false
+    @State private var pagerDragAxisIsHorizontal: Bool?
     @State private var pagerGeneration = 0
-    @State private var pendingPageID: Int?
-    @State private var pendingPageGeneration: Int?
-    @State private var recenterGeneration: Int?
-    @State private var pagerScrollPhaseIsIdle = true
-    @State private var pagerGeometryIsSettled = true
+    @State private var pendingSettle: CalendarPagerPendingSettle?
 
     init(days: [Date], items: [CalendarItem], holidays: [CalendarHoliday], hourHeight: CGFloat,
          calendar: Calendar, onSelect: @escaping CalendarEventSelectionHandler,
@@ -846,8 +796,8 @@ private struct CalendarPagedTimeline: View {
 
     var body: some View {
         GeometryReader { viewport in
-            ScrollView(.horizontal) {
-                LazyHStack(spacing: 0) {
+            ZStack(alignment: .leading) {
+                HStack(spacing: 0) {
                     ForEach(pageOffsets, id: \.self) { offset in
                         CalendarTimelinePage(
                             days: pageDays(offset: offset),
@@ -866,63 +816,41 @@ private struct CalendarPagedTimeline: View {
                             monthSelectedDate: monthSelectedDate,
                             reduceMotion: reduceMotion,
                             isInteractionEnabled: offset == 0,
+                            isVerticalScrollEnabled: offset == 0 &&
+                                pendingSettle == nil,
                             interactionSession: interactionSession
                         )
                         .frame(width: viewport.size.width)
                         .background {
-                            GeometryReader { page in
-                                Color.clear.preference(
-                                    key: CalendarPagerOffsetPreferenceKey.self,
-                                    value: [offset: page.frame(in: .named("calendar-horizontal-pager")).minX]
-                                )
+                            if offset == 0 {
+                                GeometryReader { page in
+                                    Color.clear.preference(
+                                        key: CalendarPagerOffsetPreferenceKey.self,
+                                        value: page.frame(in: .named("calendar-horizontal-pager")).minX
+                                    )
+                                }
                             }
                         }
                         .accessibilityElement(children: offset == 0 ? .contain : .ignore)
                         .accessibilityHidden(offset != 0)
-                        .id(offset)
+                        // Adjacent pages are visual only while the central
+                        // page owns vertical scrolling and event mutations.
+                        // This prevents a newly exposed neighbour from
+                        // stealing a vertical pan mid-swipe.
+                        .allowsHitTesting(offset == 0)
                     }
                 }
-                .scrollTargetLayout()
+                .frame(width: viewport.size.width * CGFloat(pageOffsets.count), alignment: .leading)
+                .offset(x: -viewport.size.width * 2 + horizontalDragOffset)
+                .frame(width: viewport.size.width, alignment: .leading)
             }
-            .scrollTargetBehavior(.paging)
-            .scrollPosition(id: $selectedPageID, anchor: .center)
-            .scrollIndicators(.hidden)
-            .transaction { transaction in
-                guard reduceMotion else { return }
-                // Native finger tracking remains enabled, but SwiftUI must
-                // not add an animation to page-window updates or recentering.
-                transaction.animation = nil
-                transaction.disablesAnimations = true
-            }
+            .frame(width: viewport.size.width)
+            .clipped()
+            .contentShape(Rectangle())
+            .simultaneousGesture(pagerDragGesture(width: viewport.size.width))
             .coordinateSpace(name: "calendar-horizontal-pager")
-            .scrollDisabled(!CalendarGestureArbitration.parentHorizontalScrollEnabled(
-                eventMutationActive: interactionSession.eventMoveActive,
-                hasProvisionalPreview: interactionSession.eventMovePreview != nil
-            ))
-            .onPreferenceChange(CalendarPagerOffsetPreferenceKey.self) { offsets in
-                updatePreviewDate(offsets: offsets, width: viewport.size.width)
-            }
-            .modifier(CalendarPagerScrollPhaseModifier { beganScrolling, becameIdle in
-                handlePagerScrollPhase(beganScrolling: beganScrolling, becameIdle: becameIdle)
-            })
-            .onChange(of: selectedPageID) { _, pageID in
-                guard let pageID else {
-                    pendingPageID = nil
-                    pendingPageGeneration = nil
-                    return
-                }
-                guard pageID != 0 else {
-                    // The middle-page write is our own recenter transaction.
-                    // A stale binding update must never be interpreted as a
-                    // second user page commit.
-                    pendingPageID = nil
-                    pendingPageGeneration = nil
-                    return
-                }
-                guard recenterGeneration != pagerGeneration else { return }
-                pendingPageID = pageID
-                pendingPageGeneration = pagerGeneration
-                commitPendingPageIfReady()
+            .onPreferenceChange(CalendarPagerOffsetPreferenceKey.self) { offset in
+                updatePreviewDate(offset: offset, width: viewport.size.width)
             }
             .onChange(of: days.first) { _, firstDay in
                 guard let firstDay else { return }
@@ -934,12 +862,11 @@ private struct CalendarPagedTimeline: View {
                 withTransaction(transaction) {
                     pagerGeneration += 1
                     pageAnchor = nextAnchor
-                    lastPreviewDate = nextAnchor
-                    pendingPageID = nil
-                    pendingPageGeneration = nil
-                    recenterGeneration = pagerGeneration
-                    pagerGeometryIsSettled = true
-                    selectedPageID = 0
+                    lastPreviewCallbackDate = nextAnchor
+                    horizontalDragOffset = 0
+                    horizontalDragActive = false
+                    pagerDragAxisIsHorizontal = nil
+                    pendingSettle = nil
                 }
             }
             .onChange(of: interactionSession.eventMoveActive) { _, isActive in
@@ -967,22 +894,22 @@ private struct CalendarPagedTimeline: View {
     }
 
     private func resetPagerForEventOwnership() {
-        let wasPreviewing = lastPreviewDate.map { !calendar.isDate($0, inSameDayAs: pageAnchor) } ?? false
-        lastPreviewDate = pageAnchor
+        let wasPreviewing = horizontalDragActive || abs(horizontalDragOffset) > 0.5 ||
+            (lastPreviewCallbackDate.map { !calendar.isDate($0, inSameDayAs: pageAnchor) } ?? false)
         pagerGeneration += 1
-        pendingPageID = nil
-        pendingPageGeneration = nil
-        recenterGeneration = pagerGeneration
-        pagerGeometryIsSettled = false
+        pendingSettle = nil
+        horizontalDragActive = false
+        pagerDragAxisIsHorizontal = nil
+        lastPreviewCallbackDate = pageAnchor
         var transaction = Transaction()
         transaction.animation = nil
         transaction.disablesAnimations = true
         withTransaction(transaction) {
-            selectedPageID = 0
+            horizontalDragOffset = 0
         }
-        // Restore the compact header even if the native pager had already
-        // previewed a neighboring page but its final callback was in flight.
-        if wasPreviewing || onPreviewDateChange != nil {
+        // Restore the compact header even if an event long-press wins while
+        // the pager is still settling. The event owns the horizontal axis.
+        if wasPreviewing {
             onPreviewDateChange?(CalendarGestureArbitration.headerDateAfterEventOwnership(
                 settledPage: pageAnchor,
                 calendar: calendar
@@ -990,106 +917,184 @@ private struct CalendarPagedTimeline: View {
         }
     }
 
-    private func handlePagerScrollPhase(beganScrolling: Bool, becameIdle: Bool) {
-        if beganScrolling {
-            pagerGeneration += 1
-            pagerScrollPhaseIsIdle = false
-            pagerGeometryIsSettled = false
-            pendingPageID = nil
-            pendingPageGeneration = nil
-        }
-        if becameIdle {
-            pagerScrollPhaseIsIdle = true
-            commitPendingPageIfReady()
-        }
-    }
+    private func pagerDragGesture(width: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 8, coordinateSpace: .local)
+            .onChanged { value in
+                guard pendingSettle == nil,
+                      !interactionSession.eventMoveActive,
+                      interactionSession.eventMovePreview == nil,
+                      width > 0 else {
+                    if interactionSession.eventMoveActive || interactionSession.eventMovePreview != nil {
+                        resetPagerForEventOwnership()
+                    }
+                    return
+                }
 
-    private func commitPendingPageIfReady() {
-        guard pagerScrollPhaseIsIdle,
-              pagerGeometryIsSettled,
-              let pageID = pendingPageID,
-              pageID != 0,
-              pendingPageGeneration == pagerGeneration,
-              recenterGeneration != pagerGeneration else { return }
-        pendingPageID = nil
-        pendingPageGeneration = nil
-        commitSettledPage(pageID, generation: pagerGeneration)
-    }
-
-    private func commitSettledPage(_ pageID: Int, generation: Int) {
-        guard generation == pagerGeneration,
-              pagerScrollPhaseIsIdle,
-              pagerGeometryIsSettled,
-              recenterGeneration != generation else { return }
-        guard pageID != 0,
-              let nextAnchor = calendar.date(byAdding: .day, value: pageID * dayCount, to: pageAnchor) else {
-            if pageID == 0, let lastPreviewDate,
-               !calendar.isDate(lastPreviewDate, inSameDayAs: pageAnchor) {
-                self.lastPreviewDate = pageAnchor
-                onPreviewDateChange?(pageAnchor)
+                if pagerDragAxisIsHorizontal == nil {
+                    let horizontal = CalendarInteractionLayout.isHorizontalPagerDrag(
+                        horizontalTranslation: Double(value.translation.width),
+                        verticalTranslation: Double(value.translation.height)
+                    )
+                    // Lock the first meaningful axis. Once a vertical drag
+                    // has been handed to the nested ScrollView, a later
+                    // diagonal sample must not steal it for the pager.
+                    guard max(abs(value.translation.width), abs(value.translation.height)) >= 4 else {
+                        return
+                    }
+                    pagerDragAxisIsHorizontal = horizontal
+                }
+                guard pagerDragAxisIsHorizontal == true else { return }
+                if !horizontalDragActive {
+                    horizontalDragActive = true
+                    pagerGeneration += 1
+                }
+                guard horizontalDragActive else { return }
+                horizontalDragOffset = max(-width * 2, min(width * 2, value.translation.width))
             }
-            return
-        }
+            .onEnded { value in
+                switch CalendarInteractionLayout.pagerEndDisposition(
+                    hasPendingSettle: pendingSettle != nil,
+                    eventMutationActive: interactionSession.eventMoveActive,
+                    hasProvisionalEventPreview: interactionSession.eventMovePreview != nil,
+                    horizontalDragActive: horizontalDragActive
+                ) {
+                case .resetForEventOwnership:
+                    resetPagerForEventOwnership()
+                    return
+                case .preservePendingSettle:
+                    // A nested vertical/non-owned gesture may still deliver
+                    // an end callback while the pager is animating. It must
+                    // not cancel or restart the pending settle.
+                    return
+                case .cancelNonOwnedDrag:
+                    pagerDragAxisIsHorizontal = nil
+                    return
+                case .settleHorizontalPage:
+                    guard width > 0 else {
+                        pagerDragAxisIsHorizontal = nil
+                        return
+                    }
+                }
 
-        // Native paging has already completed its finger-tracked settle. Fold
-        // the selected page back to the center without an async delay or a
-        // second visible animation; the next gesture starts from this anchor.
-        // Reduce Motion explicitly takes this instant path as well.
-        recenterGeneration = generation
-        pagerGeometryIsSettled = false
+                horizontalDragActive = false
+                pagerDragAxisIsHorizontal = nil
+                let projection = CalendarInteractionLayout.pagerSettleProjection(
+                    translation: Double(value.translation.width),
+                    predictedTranslation: Double(value.predictedEndTranslation.width),
+                    pageWidth: Double(width),
+                    maximumPages: 2
+                )
+                let pageDelta = projection.pageDelta
+                let nextAnchor = calendar.date(byAdding: .day, value: pageDelta * dayCount, to: pageAnchor) ?? pageAnchor
+                beginSettle(
+                    pageDelta: pageDelta,
+                    targetOffset: pageDelta == 0 ? 0 : -width * CGFloat(pageDelta),
+                    nextAnchor: nextAnchor,
+                    normalizedVelocity: projection.normalizedVelocity
+                )
+            }
+    }
+
+    private func beginSettle(
+        pageDelta: Int,
+        targetOffset: CGFloat,
+        nextAnchor: Date,
+        normalizedVelocity: Double
+    ) {
+        pagerGeneration += 1
+        let settle = CalendarPagerPendingSettle(
+            generation: pagerGeneration,
+            pageDelta: pageDelta,
+            targetOffset: targetOffset,
+            nextAnchor: nextAnchor,
+            normalizedVelocity: normalizedVelocity
+        )
+        pendingSettle = settle
+        if reduceMotion {
+            var transaction = Transaction()
+            transaction.animation = nil
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                horizontalDragOffset = targetOffset
+            }
+            completeSettle(settle)
+        } else {
+            // The explicit target keeps the adjacent pages visible until the
+            // finger's projected destination is reached. The geometry callback
+            // below completes the recenter at the exact final frame, while the
+            // short fallback covers a dropped preference update on iOS 17.
+            // Carry the release projection into a bounded interpolating
+            // spring so a fast fling arrives with native-like momentum while
+            // a slow drag settles without overshoot. The pure projection is
+            // in the same coordinate system as the horizontal offset.
+            let initialVelocity = max(-3, min(3, settle.normalizedVelocity))
+            let animation = Animation.interpolatingSpring(
+                mass: 1,
+                stiffness: 240,
+                damping: 30,
+                initialVelocity: initialVelocity
+            )
+            withAnimation(animation) {
+                horizontalDragOffset = targetOffset
+            }
+            let generation = settle.generation
+            // The spring's bounded initial velocity can take a few extra
+            // frames to converge; keep this only as a dropped-preference
+            // safety net, after the normal visual settle has completed.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.42) {
+                guard let pendingSettle, pendingSettle.generation == generation else { return }
+                completeSettle(pendingSettle)
+            }
+        }
+    }
+
+    private func updatePreviewDate(offset: CGFloat, width: CGFloat) {
+        guard width > 0, width.isFinite, offset.isFinite else { return }
+        let candidate = CalendarInteractionLayout.pagerPreviewDate(
+            pageAnchor: pageAnchor,
+            horizontalOffset: Double(offset),
+            pageWidth: Double(width),
+            dayCount: dayCount,
+            calendar: calendar
+        )
+        // The adjacent strip stays finger-tracked by its offset. Only
+        // semantic day/month/week boundary changes cross into the parent
+        // header, avoiding a state write and five mounted timeline rebuilds
+        // for every 1/120-second geometry sample.
+        if CalendarInteractionLayout.pagerPreviewBoundaryChanged(
+            from: lastPreviewCallbackDate,
+            to: candidate,
+            calendar: calendar
+        ) {
+            lastPreviewCallbackDate = candidate
+            onPreviewDateChange?(candidate)
+        }
+        guard let settle = pendingSettle,
+              abs(offset - settle.targetOffset) <= max(0.75, width * 0.002) else { return }
+        completeSettle(settle)
+    }
+
+    private func completeSettle(_ settle: CalendarPagerPendingSettle) {
+        guard pendingSettle?.generation == settle.generation,
+              pagerGeneration == settle.generation else { return }
+        pendingSettle = nil
+
         var transaction = Transaction()
         transaction.animation = nil
         transaction.disablesAnimations = true
         withTransaction(transaction) {
-            pageAnchor = calendar.startOfDay(for: nextAnchor)
-            lastPreviewDate = pageAnchor
-            pendingPageID = nil
-            pendingPageGeneration = nil
-            selectedPageID = 0
+            horizontalDragOffset = 0
+            pageAnchor = calendar.startOfDay(for: settle.nextAnchor)
+        }
+        if settle.pageDelta == 0 {
+            // A cancelled short drag may finish between geometry callbacks;
+            // explicitly restore the committed header rather than leaving a
+            // fractional in-flight preview behind.
+            onPreviewDateChange?(pageAnchor)
+            return
         }
         onPreviewDateChange?(pageAnchor)
         onCommitDateChange?(pageAnchor)
-    }
-
-    private func updatePreviewDate(offsets: [Int: CGFloat], width: CGFloat) {
-        guard width > 0, width.isFinite,
-              let closest = offsets.min(by: { abs($0.value) < abs($1.value) }),
-              closest.value.isFinite else { return }
-        pagerGeometryIsSettled = abs(closest.value) <= max(0.5, width * 0.002)
-        if !pagerGeometryIsSettled, recenterGeneration == pagerGeneration {
-            // iOS 17 has no public scroll-phase callback. A real displacement
-            // is the generation boundary that releases our recenter guard;
-            // stale binding writes at the centered geometry remain ignored.
-            recenterGeneration = nil
-            if let selectedPageID, selectedPageID != 0 {
-                pendingPageID = selectedPageID
-                pendingPageGeneration = pagerGeneration
-            }
-        }
-        let pageStart = calendar.date(byAdding: .day, value: closest.key * dayCount, to: pageAnchor) ?? pageAnchor
-        let fractionalDays = -Double(closest.value / width) * Double(dayCount)
-        let candidate = dateByFractionalDays(fractionalDays, from: pageStart)
-        let day = calendar.startOfDay(for: candidate)
-        if lastPreviewDate.map({ !calendar.isDate($0, inSameDayAs: day) }) ?? true {
-            lastPreviewDate = day
-            onPreviewDateChange?(day)
-        }
-        if pagerGeometryIsSettled {
-            commitPendingPageIfReady()
-        }
-    }
-
-    private func dateByFractionalDays(_ value: Double, from date: Date) -> Date {
-        guard value.isFinite else { return date }
-        let whole = Int(value.rounded(.towardZero))
-        let anchor = calendar.date(byAdding: .day, value: whole, to: date) ?? date
-        let fractional = value - Double(whole)
-        guard abs(fractional) > 0.0001,
-              let interval = CalendarInteractionLayout.dayInterval(containing: anchor, calendar: calendar) else {
-            return anchor
-        }
-        let minutes = CalendarInteractionLayout.calendarMinutes(from: interval.start, to: interval.end, calendar: calendar)
-        return calendar.date(byAdding: .minute, value: Int((fractional * Double(minutes)).rounded()), to: anchor) ?? anchor
     }
 }
 
@@ -1110,8 +1115,10 @@ private struct CalendarTimelinePage: View {
     let monthSelectedDate: Date?
     let reduceMotion: Bool
     let isInteractionEnabled: Bool
+    let isVerticalScrollEnabled: Bool
     let interactionSession: CalendarInteractionSession
     private let timeGutter: CGFloat = 52
+    private let dayHeaderHeight: CGFloat = 58
 
     var body: some View {
         GeometryReader { viewport in
@@ -1121,14 +1128,37 @@ private struct CalendarTimelinePage: View {
                 hourHeight: Double(hourHeight),
                 calendar: calendar
             ))
+            let timelineContentHeight = CGFloat(CalendarInteractionLayout.timelineContentHeight(
+                days: days,
+                hourHeight: Double(hourHeight),
+                calendar: calendar
+            ))
+            let allDayRowHeight = CGFloat(
+                CalendarAllDayLayout.height(items: items, days: days, calendar: calendar)
+            )
+            let timedViewportHeight = CGFloat(CalendarInteractionLayout.timedViewportHeight(
+                containerHeight: Double(viewport.size.height),
+                dayHeaderHeight: Double(dayHeaderHeight),
+                allDayHeight: Double(allDayRowHeight)
+            ))
             VStack(spacing: 0) {
                 dayHeader(width: contentWidth)
-                CalendarAllDayRow(days: days, calendar: calendar, timeGutter: timeGutter, width: contentWidth)
+                CalendarAllDayRow(
+                    days: days,
+                    items: items,
+                    calendar: calendar,
+                    timeGutter: timeGutter,
+                    width: contentWidth,
+                    onSelect: { item in onSelect(item) }
+                )
                 ScrollViewReader { scrollProxy in
-                        ScrollView(.vertical) {
-                            ZStack(alignment: .topLeading) {
-                                HStack(alignment: .top, spacing: 0) {
-                                hourLabels(timelineHeight: timelineHeight)
+                    ScrollView(.vertical) {
+                        ZStack(alignment: .topLeading) {
+                            HStack(alignment: .top, spacing: 0) {
+                                hourLabels(
+                                    timelineHeight: timelineHeight,
+                                    contentHeight: timelineContentHeight
+                                )
                                     .frame(width: timeGutter)
                                 ForEach(days, id: \.self) { day in
                                     CalendarDayTimeline(
@@ -1151,14 +1181,14 @@ private struct CalendarTimelinePage: View {
                                         )
                                         .frame(width: max(1, (contentWidth - timeGutter) / CGFloat(max(days.count, 1))))
                                 }
-                                CalendarTimelineHourAnchors(
-                                    hourHeight: hourHeight,
-                                    totalHeight: timelineHeight
-                                )
+                                    CalendarTimelineHourAnchors(
+                                        hourHeight: hourHeight,
+                                        totalHeight: timelineHeight
+                                    )
                                 .frame(width: 1, height: timelineHeight, alignment: .top)
                                 .allowsHitTesting(false)
                             }
-                            .frame(width: contentWidth, alignment: .leading)
+                            .frame(width: contentWidth, height: timelineContentHeight, alignment: .leading)
                             .overlay {
                                 CalendarNowLine(
                                     days: days,
@@ -1170,21 +1200,29 @@ private struct CalendarTimelinePage: View {
                                 )
                             }
                         }
-                        .frame(height: timelineHeight)
-                        .overlay {
-                            Color.clear
-                                .accessibilityElement(children: .ignore)
-                                .accessibilityLabel("Active calendar timeline viewport")
-                                .accessibilityIdentifier("calendar-vertical-timeline")
-                                .accessibilityHidden(!isInteractionEnabled)
-                                .allowsHitTesting(false)
-                        }
+                        .frame(width: contentWidth, height: timelineContentHeight, alignment: .topLeading)
                     }
+                    // The outer pager's axis lock owns horizontal movement
+                    // while the finger is down; disabling this ScrollView at
+                    // that instant would cancel the same DragGesture that is
+                    // tracking the finger. Once a page is settling, this
+                    // explicit state disables the center vertical scroll.
+                    .scrollDisabled(!isVerticalScrollEnabled)
                     .task(id: days.first) {
                         scrollProxy.scrollTo(
                             CalendarTimelineScrollAnchor.id(for: initialVisibleHour),
                             anchor: .top
                         )
+                    }
+                    .frame(height: timedViewportHeight)
+                    .coordinateSpace(name: "calendar-timeline-viewport")
+                    .overlay {
+                        Color.clear
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityLabel("Active calendar timeline viewport")
+                            .accessibilityIdentifier("calendar-vertical-timeline")
+                            .accessibilityHidden(!isInteractionEnabled)
+                            .allowsHitTesting(false)
                     }
                 }
             }
@@ -1224,19 +1262,25 @@ private struct CalendarTimelinePage: View {
         .overlay(alignment: .bottom) { Rectangle().fill(Color.primary.opacity(0.10)).frame(height: 1) }
     }
 
-    private func hourLabels(timelineHeight: CGFloat) -> some View {
+    private func hourLabels(timelineHeight: CGFloat, contentHeight: CGFloat) -> some View {
         let scale = CalendarInteractionLayout.timelineScale(
             day: days.first ?? .now,
             hourHeight: Double(hourHeight),
             calendar: calendar
         )
-        let marks = Array(stride(from: 0, to: scale?.dayMinutes ?? 1_440, by: 60))
+        let dayMinutes = scale?.dayMinutes ?? 1_440
+        let marks = Array(stride(from: 0, through: dayMinutes, by: 60))
         return ZStack(alignment: .topTrailing) {
             ForEach(marks, id: \.self) { minute in
                 let date = scale.flatMap {
                     $0.date(for: Double(minute) / 60 * Double(hourHeight), calendar: calendar, snappingTo: 1)
                 }
-                Text(date.map { String(format: "%02d:00", calendar.component(.hour, from: $0)) } ?? "")
+                Text(CalendarInteractionLayout.timelineHourLabel(
+                    minute: minute,
+                    dayMinutes: dayMinutes,
+                    date: date,
+                    calendar: calendar
+                ))
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .topTrailing)
@@ -1245,7 +1289,7 @@ private struct CalendarTimelinePage: View {
                     .id(minute / 60)
             }
         }
-        .frame(height: timelineHeight)
+        .frame(height: contentHeight)
     }
 
     private var initialVisibleHour: Int {
@@ -1287,27 +1331,123 @@ private struct CalendarTimelineHourAnchors: View {
 #endif
 
 private struct CalendarAllDayRow: View {
+    static let minimumHeight = CGFloat(CalendarAllDayLayout.rowHeight)
+
     let days: [Date]
+    let items: [CalendarItem]
     let calendar: Calendar
     let timeGutter: CGFloat
     let width: CGFloat
+    let onSelect: ((CalendarItem) -> Void)?
+
+    private var placements: [CalendarAllDayLayout.Placement] {
+        CalendarAllDayLayout.placements(items: items, days: days, calendar: calendar)
+    }
+
+    private var laneHeight: CGFloat {
+        CGFloat(CalendarAllDayLayout.height(items: items, days: days, calendar: calendar))
+    }
+
+    private var rowCount: Int {
+        CalendarAllDayLayout.rowCount(items: items, days: days, calendar: calendar)
+    }
+
+    private var accessibilitySummary: String {
+        let eventWord = placements.count == 1 ? "event" : "events"
+        let rowWord = rowCount == 1 ? "row" : "rows"
+        return "\(placements.count) \(eventWord), \(rowCount) \(rowWord)"
+    }
 
     var body: some View {
         HStack(spacing: 0) {
             Text("All-day")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-                .frame(width: timeGutter - 8, alignment: .trailing)
+                .frame(width: timeGutter - 8, height: laneHeight, alignment: .trailing)
                 .padding(.trailing, 8)
-            ForEach(days, id: \.self) { day in
-                Color.clear
-                    .frame(width: max(1, (width - timeGutter) / CGFloat(max(days.count, 1))), height: 26)
-                    .overlay(alignment: .trailing) { Rectangle().fill(Color.primary.opacity(0.08)).frame(width: 1) }
+            ZStack(alignment: .topLeading) {
+                ForEach(days.indices, id: \.self) { index in
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.08))
+                        .frame(width: 1, height: laneHeight)
+                        .offset(x: CGFloat(index + 1) * dayWidth - 1)
+                }
+                ForEach(placements) { placement in
+                    CalendarAllDayEventChip(
+                        item: placement.item,
+                        calendar: calendar,
+                        action: onSelect.map { handler in { handler(placement.item) } }
+                    )
+                    .frame(
+                        width: max(1, dayWidth * CGFloat(placement.dayCount) - 2),
+                        height: Self.minimumHeight - 4,
+                        alignment: .leading
+                    )
+                    .offset(
+                        x: CGFloat(placement.firstDayIndex) * dayWidth + 1,
+                        y: CGFloat(placement.row) * (Self.minimumHeight + CGFloat(CalendarAllDayLayout.rowSpacing)) + 2
+                    )
+                }
             }
+            .frame(width: max(0, width - timeGutter), height: laneHeight, alignment: .topLeading)
         }
-        .frame(width: width, height: 26, alignment: .leading)
+        .frame(width: width, height: laneHeight, alignment: .leading)
         .background(LifeOSTokens.canvas)
         .overlay(alignment: .bottom) { Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 1) }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("All-day events")
+        .accessibilityIdentifier("calendar-all-day-lane")
+        .accessibilityValue(accessibilitySummary)
+    }
+
+    private var dayWidth: CGFloat {
+        max(1, (width - timeGutter) / CGFloat(max(days.count, 1)))
+    }
+}
+
+private struct CalendarAllDayEventChip: View {
+    let item: CalendarItem
+    let calendar: Calendar
+    let action: (() -> Void)?
+
+    @ViewBuilder
+    var body: some View {
+        if let action {
+            Button(action: action) {
+                label
+            }
+            .buttonStyle(.plain)
+        } else {
+            label
+        }
+    }
+
+    private var label: some View {
+        HStack(spacing: 4) {
+            RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                .fill(CalendarEventVisuals.accent)
+                .frame(width: 3)
+            Text(item.title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 5)
+        .background(CalendarEventVisuals.accent.opacity(0.13), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(item.title), all day")
+        .accessibilityValue(
+            "\(calendarISODate(item.start)) to \(calendarISODate(item.end))"
+        )
+        .accessibilityIdentifier("calendar-all-day-event-\(item.id.uuidString)")
+    }
+
+    private func calendarISODate(_ date: Date) -> String {
+        let parts = calendar.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
     }
 }
 
@@ -1334,14 +1474,18 @@ private struct CalendarDayTimeline: View {
         return calendar.dateInterval(of: .day, for: start) ?? DateInterval(start: start, end: start)
     }
 
+    private var timedItems: [CalendarItem] {
+        items.filter { !CalendarAllDayLayout.isAllDay($0, calendar: calendar) }
+    }
+
     private var basePlacements: [CalendarEventPlacement] {
-        CalendarOverlapLayout.layout(items: items, interval: interval)
+        CalendarOverlapLayout.layout(items: timedItems, interval: interval)
     }
 
     private var provisionalPlacements: [CalendarEventPlacement] {
         guard let preview = interactionSession.eventMovePreview else { return basePlacements }
         return CalendarOverlapLayout.layoutWithProvisionalMove(
-            items: items,
+            items: timedItems,
             movingItemID: preview.item.id,
             provisionalStart: preview.start,
             provisionalEnd: preview.end,
@@ -2922,11 +3066,15 @@ private struct CalendarMonthEventChip: View {
 /// keeps the week-number gutter visible: that small bit of structure is what
 /// makes the selected three-day window legible while the user swipes below it.
 public struct CalendarExpandedMonthGrid: View {
+    /// Stable mobile panel height for the six-week reference grid.
+    public static let preferredHeight: CGFloat = 364
+
     public let month: Date
     public let selectedDate: Date
     public let selectedRange: [Date]
     public let calendar: Calendar
     public let namespace: Namespace.ID?
+    public let isSource: Bool
     public let reduceMotion: Bool
     public let onSelectDate: (Date) -> Void
 
@@ -2936,6 +3084,7 @@ public struct CalendarExpandedMonthGrid: View {
         selectedRange: [Date],
         calendar: Calendar = .current,
         namespace: Namespace.ID? = nil,
+        isSource: Bool = true,
         reduceMotion: Bool = false,
         onSelectDate: @escaping (Date) -> Void
     ) {
@@ -2944,6 +3093,7 @@ public struct CalendarExpandedMonthGrid: View {
         self.selectedRange = selectedRange
         self.calendar = calendar
         self.namespace = namespace
+        self.isSource = isSource
         self.reduceMotion = reduceMotion
         self.onSelectDate = onSelectDate
     }
@@ -2964,20 +3114,20 @@ public struct CalendarExpandedMonthGrid: View {
 
     public var body: some View {
         LazyVGrid(columns: columns, spacing: 0) {
-            Color.clear.frame(height: 20)
+            Color.clear.frame(height: 24)
             ForEach(Array(weekdaySymbols.enumerated()), id: \.offset) { _, symbol in
                 Text(symbol)
                     .font(.caption.weight(.medium))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity)
-                    .frame(height: 20)
+                    .frame(height: 24)
             }
 
             ForEach(Array(days.chunked(into: 7).enumerated()), id: \.offset) { _, week in
                 Text(weekNumber(for: week.first))
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, minHeight: 36)
+                    .frame(maxWidth: .infinity, minHeight: 54)
                 // Date is the stable identity. Using the weekday index here
                 // repeated IDs 0...6 for every row in the LazyVGrid; SwiftUI
                 // then dropped most/all day cells on device while leaving
@@ -2996,6 +3146,7 @@ public struct CalendarExpandedMonthGrid: View {
                         isRangeEnd: endsRange,
                         calendar: calendar,
                         namespace: namespace,
+                        isSource: isSource,
                         reduceMotion: reduceMotion,
                         action: { onSelectDate(day) }
                     )
@@ -3004,6 +3155,7 @@ public struct CalendarExpandedMonthGrid: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+        .frame(height: Self.preferredHeight, alignment: .top)
         .background(LifeOSTokens.canvas)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Expanded month calendar")
@@ -3025,6 +3177,7 @@ private struct CalendarExpandedDateCell: View {
     let isRangeEnd: Bool
     let calendar: Calendar
     let namespace: Namespace.ID?
+    let isSource: Bool
     let reduceMotion: Bool
     let action: () -> Void
 
@@ -3055,13 +3208,13 @@ private struct CalendarExpandedDateCell: View {
                         in: namespace,
                         properties: .frame,
                         anchor: .center,
-                        isSource: true
+                        isSource: isSource
                     )
                 } else {
                     label
                 }
             }
-            .frame(maxWidth: .infinity, minHeight: 36)
+            .frame(maxWidth: .infinity, minHeight: 54)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
