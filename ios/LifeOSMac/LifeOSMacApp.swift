@@ -260,6 +260,8 @@ struct LifeOSMacRootView: View {
                     },
                     clipperRefreshAction: usesVisualFixtures ? nil : { await clipperCoordinator.refresh() },
                     clipperState: usesVisualFixtures ? .demo : clipperCoordinator.state,
+                    financeSummary: usesVisualFixtures ? nil : financeCoordinator.summary,
+                    financeState: usesVisualFixtures ? .demo : financeCoordinator.state,
                     openDestination: navigate,
                     showingUsage: $showingUsage
                 )

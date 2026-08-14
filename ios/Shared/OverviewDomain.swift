@@ -168,6 +168,167 @@ public extension OverviewSection {
     }
 }
 
+/// A small, provider-neutral point used by Home's compact trend charts. The
+/// projection helpers below only transform observations already present in a
+/// coordinator snapshot; they never create a second point to make a chart fit.
+public struct OverviewChartPoint: Identifiable, Equatable, Sendable {
+    public let date: Date
+    public let value: Double
+
+    public var id: Date { date }
+
+    public init(date: Date, value: Double) {
+        self.date = date
+        self.value = value
+    }
+}
+
+public enum OverviewChartAxisLabelMode: String, Equatable, Sendable {
+    case time
+    case day
+}
+
+public enum OverviewChartAxis {
+    /// Use clock labels for a sub-day window and calendar-day labels once the
+    /// series spans a day or more. This keeps the compact Home chart from
+    /// repeating the same weekday/day label for every short-window point.
+    public static func labelMode(for points: [OverviewChartPoint]) -> OverviewChartAxisLabelMode {
+        guard let first = points.first?.date, let last = points.last?.date,
+              last.timeIntervalSince(first) < 24 * 60 * 60 else {
+            return .day
+        }
+        return .time
+    }
+}
+
+public enum OverviewUsageTrendPresentation {
+    public static func label(for quality: DataQuality?) -> String {
+        switch quality {
+        case .observed: return "Observed trend"
+        case .demo: return "Demo fixture · not live"
+        case .estimated: return "Estimated activity"
+        case .unavailable, nil: return "History unavailable"
+        }
+    }
+
+    public static func isRenderable(for quality: DataQuality?) -> Bool {
+        quality != nil && quality != .unavailable
+    }
+}
+
+public enum OverviewClipperTrendMetric: String, CaseIterable, Equatable, Sendable {
+    case views
+    case subscribers
+    case revenue
+
+    public var title: String {
+        switch self {
+        case .views: "Views"
+        case .subscribers: "Subscribers"
+        case .revenue: "Revenue"
+        }
+    }
+
+    public var unit: String {
+        switch self {
+        case .views, .subscribers: ""
+        case .revenue: "EUR cents"
+        }
+    }
+}
+
+public struct OverviewClipperTrend: Equatable, Sendable {
+    public let metric: OverviewClipperTrendMetric
+    public let points: [OverviewChartPoint]
+
+    public init(metric: OverviewClipperTrendMetric, points: [OverviewChartPoint]) {
+        self.metric = metric
+        self.points = points
+    }
+}
+
+/// Pure, source-driven chart projections for the Home cards. Keeping this in
+/// the shared domain makes the "no fabricated history" rule testable without
+/// instantiating SwiftUI or a coordinator.
+public enum OverviewChartProjection {
+    /// Converts observed hourly usage activity to a remaining-percent series.
+    /// The optional window bounds the series to the same window as the lead
+    /// provider ring. A single observation is retained for truthful empty-state
+    /// messaging, but callers should render a trend only when there are at
+    /// least two points.
+    public static func usageRemaining(
+        from analytics: UsageAnalyticsSnapshot,
+        window: UsageWindow? = nil
+    ) -> [OverviewChartPoint] {
+        let lowerBound: Date?
+        if let resetAt = window?.resetAt, let durationMinutes = window?.durationMinutes {
+            lowerBound = resetAt.addingTimeInterval(-Double(durationMinutes) * 60)
+        } else {
+            lowerBound = nil
+        }
+        let upperBound = window?.resetAt
+
+        // Preserve source order while collapsing duplicates so the last
+        // source occurrence wins deterministically, then sort for Chart.
+        var latestByDate = [Date: UsageActivityPoint]()
+        for point in analytics.activity {
+            guard lowerBound.map({ point.date >= $0 }) ?? true,
+                  upperBound.map({ point.date <= $0 }) ?? true else { continue }
+            latestByDate[point.date] = point
+        }
+        return latestByDate.values
+            .sorted { $0.date < $1.date }
+            .map { point in
+                OverviewChartPoint(
+                    date: point.date,
+                    value: min(max(1 - point.usedPercent, 0), 1)
+                )
+            }
+    }
+
+    /// Selects the most useful observed Clipper trend deterministically:
+    /// views first, then subscribers, then revenue. A metric is eligible only
+    /// when at least two dated observations exist, so a single current value
+    /// cannot masquerade as a trend.
+    public static func preferredClipperTrend(
+        from trends: [ClipperTrendPoint]
+    ) -> OverviewClipperTrend? {
+        for metric in OverviewClipperTrendMetric.allCases {
+            var byDate = [Date: Double]()
+            // Preserve source order while collapsing duplicates so the last
+            // source occurrence wins deterministically, then sort for Chart.
+            for trend in trends {
+                guard let value = value(for: metric, in: trend.metrics), value.isFinite else {
+                    byDate.removeValue(forKey: trend.at)
+                    continue
+                }
+                byDate[trend.at] = value
+            }
+            let points = byDate.keys.sorted().compactMap { date -> OverviewChartPoint? in
+                guard let value = byDate[date] else { return nil }
+                return OverviewChartPoint(date: date, value: value)
+            }
+            guard points.count >= 2 else { continue }
+            return OverviewClipperTrend(metric: metric, points: points)
+        }
+        return nil
+    }
+
+    private static func value(for metric: OverviewClipperTrendMetric, in metrics: ClipperMetricSet) -> Double? {
+        switch metric {
+        case .views:
+            guard metrics.views.availability == .observed, let value = metrics.views.value else { return nil }
+            return Double(value)
+        case .subscribers:
+            guard metrics.subscribers.availability == .observed, let value = metrics.subscribers.value else { return nil }
+            return Double(value)
+        case .revenue:
+            guard metrics.revenue.availability == .observed, let value = metrics.revenue.amountCents else { return nil }
+            return Double(value)
+        }
+    }
+}
+
 public extension OverviewSnapshot {
     static func production(clipper: ClipperSnapshot, at date: Date = .now) -> OverviewSnapshot {
         let unavailable = OverviewSnapshot.unavailable(at: date)

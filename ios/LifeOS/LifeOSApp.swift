@@ -50,6 +50,7 @@ struct LifeOSApp: App {
     @StateObject private var healthKitController: HealthKitIntegrationController
 #if os(iOS)
     @StateObject private var healthKitFitnessRepository: HealthKitFitnessRepository
+    @State private var homeFitnessSnapshot: FitnessSnapshot
 #endif
     @State private var selection: LifeOSAppTab = .home
     @State private var showingUsage = false
@@ -99,6 +100,7 @@ struct LifeOSApp: App {
             client: healthKitClient,
             usesVisualFixtures: enabled
         ))
+        _homeFitnessSnapshot = State(initialValue: enabled ? .demo : .unavailable)
 #endif
     }
 
@@ -129,6 +131,9 @@ struct LifeOSApp: App {
                     },
                     clipperRefreshAction: usesVisualFixtures ? nil : { await clipperCoordinator.refresh() },
                     clipperState: usesVisualFixtures ? .demo : clipperCoordinator.state,
+                    fitnessSnapshot: usesVisualFixtures ? .demo : homeFitnessSnapshot,
+                    financeSummary: usesVisualFixtures ? nil : financeCoordinator.summary,
+                    financeState: usesVisualFixtures ? .demo : financeCoordinator.state,
                     openDestination: navigate,
                     showingUsage: $showingUsage
                 )
@@ -221,6 +226,9 @@ struct LifeOSApp: App {
                 }
             }
 #if os(iOS)
+            .onChange(of: healthKitFitnessRepository.projection, initial: true) { _, projection in
+                updateHomeFitnessSnapshot(from: projection)
+            }
             .onChange(of: healthKitController.snapshot.lastObserverCompletion) { _, completion in
                 guard !usesVisualFixtures, completion != nil else { return }
                 Task { @MainActor in
@@ -232,6 +240,18 @@ struct LifeOSApp: App {
     }
 
 #if os(iOS)
+    private func updateHomeFitnessSnapshot(from projection: HealthKitFitnessProjection?) {
+        guard !usesVisualFixtures else {
+            homeFitnessSnapshot = .demo
+            return
+        }
+        guard let projection else {
+            homeFitnessSnapshot = .unavailable
+            return
+        }
+        homeFitnessSnapshot = HealthKitFitnessComposition.snapshot(from: projection, selectedDate: .now)
+    }
+
     private var fitnessSnapshotProvider: ((Date) -> FitnessSnapshot)? {
         guard !usesVisualFixtures else { return nil }
         let repository = healthKitFitnessRepository

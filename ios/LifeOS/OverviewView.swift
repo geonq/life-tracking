@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import Charts
 
 struct OverviewView: View {
     private let snapshot: OverviewSnapshot
@@ -9,6 +10,9 @@ struct OverviewView: View {
     private let refreshAction: (() async -> Void)?
     private let clipperRefreshAction: (() async -> Void)?
     private let clipperState: ClipperLoadState
+    private let fitnessSnapshot: FitnessSnapshot
+    private let financeSummary: FinanceSummary?
+    private let financeState: FinanceLoadState
     private let openDestination: ((LifeOSDeepLink) -> Void)?
     @Binding private var showingUsage: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -28,6 +32,9 @@ struct OverviewView: View {
         refreshAction: (() async -> Void)? = nil,
         clipperRefreshAction: (() async -> Void)? = nil,
         clipperState: ClipperLoadState = .unavailable,
+        fitnessSnapshot: FitnessSnapshot = .unavailable,
+        financeSummary: FinanceSummary? = nil,
+        financeState: FinanceLoadState = .unavailable,
         openDestination: ((LifeOSDeepLink) -> Void)? = nil,
         showingUsage: Binding<Bool> = .constant(false)
     ) {
@@ -38,6 +45,9 @@ struct OverviewView: View {
         self.refreshAction = refreshAction
         self.clipperRefreshAction = clipperRefreshAction
         self.clipperState = clipperState
+        self.fitnessSnapshot = fitnessSnapshot
+        self.financeSummary = financeSummary
+        self.financeState = financeState
         self.openDestination = openDestination
         _showingUsage = showingUsage
     }
@@ -181,12 +191,34 @@ struct OverviewView: View {
 
     private var snapshotStatusLabel: String {
         let qualities = visibleSections.map(\.provenance.quality)
-        if qualities.allSatisfy({ $0 == .demo }) { return "DEMO FIXTURES · NOT LIVE DATA" }
-        if qualities.allSatisfy({ $0 == .unavailable }) { return "DATA UNAVAILABLE" }
-        if clipperState == .stale || visibleSections.contains(where: { $0.provenance.quality == .observed && $0.provenance.connector == .refreshDue }) {
-            return "STALE DATA · REFRESH REQUIRED"
-        }
-        return "CONNECTED DATA"
+        return OverviewHomeStatusPolicy.snapshotStatusLabel(
+            qualities: qualities,
+            healthState: fitnessSnapshot.source.status,
+            healthIntegrityIssue: healthIntegrityStatusPresent,
+            financeState: financeState,
+            financeHasObservedValue: financeSummary.map(Self.financeSummaryHasObservedValue) ?? false,
+            clipperState: clipperState,
+            hasRefreshDueSection: visibleSections.contains {
+                $0.provenance.quality == .observed && $0.provenance.connector == .refreshDue
+            }
+        )
+    }
+
+    private var healthIntegrityStatusPresent: Bool {
+        OverviewHomeStatusPolicy.healthIntegrityStatus(
+            source: fitnessSnapshot.source,
+            hasObservedMetrics: fitnessSnapshot.healthMonitor.contains {
+                $0.value != nil && $0.quality == .observed
+            } || fitnessSnapshot.loadDetail.trendCards.contains {
+                $0.metric.value != nil && $0.metric.quality == .observed
+            }
+        ) != nil
+    }
+
+    private static func financeSummaryHasObservedValue(_ summary: FinanceSummary) -> Bool {
+        [summary.monthlyIncome, summary.fixedCosts, summary.discretionaryBuffer,
+         summary.spent, summary.savingsGoal, summary.saved]
+            .contains { $0.availability == .observed && $0.amountCents != nil }
     }
 
     private var header: some View {
@@ -225,7 +257,8 @@ struct OverviewView: View {
     private var statusBadge: some View {
         let isDemo = snapshotStatusLabel.hasPrefix("DEMO")
         let isStale = snapshotStatusLabel.hasPrefix("STALE")
-        let color = isDemo || isStale ? LifeOSTokens.warning : LifeOSTokens.accent
+        let needsReview = snapshotStatusLabel.hasPrefix("PARTIAL")
+        let color = isDemo || isStale || needsReview ? LifeOSTokens.warning : LifeOSTokens.accent
         return Text(snapshotStatusLabel)
             .font(LifeOSFont.inter(9, weight: .semiBold))
             .tracking(0.45)
@@ -244,7 +277,15 @@ struct OverviewView: View {
                     showingUsage = true
                 } label: {
                     matchedSource(
-                        OverviewMetricCard(section: section, featured: featured, usageSnapshots: usageSnapshots),
+                        OverviewMetricCard(
+                            section: section,
+                            featured: featured,
+                            usageSnapshots: usageSnapshots,
+                            usageAnalytics: usageAnalytics,
+                            fitnessSnapshot: fitnessSnapshot,
+                            financeSummary: financeSummary,
+                            financeState: financeState
+                        ),
                         id: section.kind.rawValue
                     )
                 }
@@ -253,7 +294,15 @@ struct OverviewView: View {
                 .accessibilityHint("Opens detailed Usage analytics")
             } else {
                 matchedSource(
-                    OverviewMetricCard(section: section, featured: featured, usageSnapshots: usageSnapshots),
+                    OverviewMetricCard(
+                        section: section,
+                        featured: featured,
+                        usageSnapshots: usageSnapshots,
+                        usageAnalytics: usageAnalytics,
+                        fitnessSnapshot: fitnessSnapshot,
+                        financeSummary: financeSummary,
+                        financeState: financeState
+                    ),
                     id: section.kind.rawValue
                 )
             }
@@ -268,7 +317,15 @@ struct OverviewView: View {
                 }
             } label: {
                 matchedSource(
-                    OverviewMetricCard(section: section, usageSnapshots: usageSnapshots, clipperState: clipperState),
+                    OverviewMetricCard(
+                        section: section,
+                        usageSnapshots: usageSnapshots,
+                        clipperState: clipperState,
+                        clipperSnapshot: snapshot.clipperSnapshot,
+                        fitnessSnapshot: fitnessSnapshot,
+                        financeSummary: financeSummary,
+                        financeState: financeState
+                    ),
                     id: section.kind.rawValue
                 )
             }
@@ -279,7 +336,13 @@ struct OverviewView: View {
             if openDestination != nil {
                 Button { openDestination?(.fitness) } label: {
                     matchedSource(
-                        OverviewMetricCard(section: section, usageSnapshots: usageSnapshots),
+                        OverviewMetricCard(
+                            section: section,
+                            usageSnapshots: usageSnapshots,
+                            fitnessSnapshot: fitnessSnapshot,
+                            financeSummary: financeSummary,
+                            financeState: financeState
+                        ),
                         id: section.kind.rawValue
                     )
                 }
@@ -288,7 +351,13 @@ struct OverviewView: View {
                 .accessibilityHint("Opens Fitness")
             } else {
                 matchedSource(
-                    OverviewMetricCard(section: section, usageSnapshots: usageSnapshots),
+                    OverviewMetricCard(
+                        section: section,
+                        usageSnapshots: usageSnapshots,
+                        fitnessSnapshot: fitnessSnapshot,
+                        financeSummary: financeSummary,
+                        financeState: financeState
+                    ),
                     id: section.kind.rawValue
                 )
             }
@@ -296,7 +365,13 @@ struct OverviewView: View {
             if openDestination != nil {
                 Button { openDestination?(.finance) } label: {
                     matchedSource(
-                        OverviewMetricCard(section: section, usageSnapshots: usageSnapshots),
+                        OverviewMetricCard(
+                            section: section,
+                            usageSnapshots: usageSnapshots,
+                            fitnessSnapshot: fitnessSnapshot,
+                            financeSummary: financeSummary,
+                            financeState: financeState
+                        ),
                         id: section.kind.rawValue
                     )
                 }
@@ -305,7 +380,13 @@ struct OverviewView: View {
                 .accessibilityHint("Opens Finance")
             } else {
                 matchedSource(
-                    OverviewMetricCard(section: section, usageSnapshots: usageSnapshots),
+                    OverviewMetricCard(
+                        section: section,
+                        usageSnapshots: usageSnapshots,
+                        fitnessSnapshot: fitnessSnapshot,
+                        financeSummary: financeSummary,
+                        financeState: financeState
+                    ),
                     id: section.kind.rawValue
                 )
             }
@@ -322,20 +403,119 @@ struct OverviewView: View {
     }
 }
 
+/// Pure presentation policy for Home's source badges. Keeping the section
+/// scope explicit prevents a HealthKit/Finance warning from tinting another
+/// card, while the integrity-status helper preserves HealthKit's detailed
+/// source wording when displayable observations coexist with a partial,
+/// conflicted, or errored composition.
+enum OverviewHomeStatusPolicy {
+    static func isWarning(
+        section: OverviewSectionKind,
+        quality: DataQuality,
+        connector: ConnectorState,
+        sectionState: OverviewSectionState,
+        clipperState: ClipperLoadState,
+        healthState: FitnessSourceState.Status,
+        healthIntegrityIssue: Bool,
+        financeState: FinanceLoadState
+    ) -> Bool {
+        switch section {
+        case .llm:
+            return quality == .demo || connector == .refreshDue || sectionState == .partial
+        case .clipper:
+            return quality == .demo || connector == .refreshDue || sectionState == .partial || clipperState == .stale
+        case .health:
+            return quality == .demo
+                || healthState == .demo
+                || healthState == .stale
+                || healthState == .permissionRequired
+                || healthIntegrityIssue
+        case .finance:
+            return quality == .demo || financeState == .demo || financeState == .stale
+        }
+    }
+
+    static func healthIntegrityStatus(
+        source: FitnessSourceState,
+        hasObservedMetrics: Bool
+    ) -> String? {
+        guard source.status == .unavailable, hasObservedMetrics else { return nil }
+        let combined = "\(source.title) · \(source.detail)"
+        guard ["Partial", "Conflict", "Error"].contains(where: {
+            combined.range(of: $0, options: .caseInsensitive) != nil
+        }) else { return nil }
+        return combined
+    }
+
+    static func snapshotStatusLabel(
+        qualities: [DataQuality],
+        healthState: FitnessSourceState.Status,
+        healthIntegrityIssue: Bool,
+        financeState: FinanceLoadState,
+        financeHasObservedValue: Bool,
+        clipperState: ClipperLoadState,
+        hasRefreshDueSection: Bool
+    ) -> String {
+        if qualities.allSatisfy({ $0 == .demo }) { return "DEMO FIXTURES · NOT LIVE DATA" }
+        if healthState == .stale || financeState == .stale {
+            return "STALE DATA · REFRESH REQUIRED"
+        }
+        if healthIntegrityIssue {
+            return "PARTIAL DATA · REVIEW SOURCE"
+        }
+        let healthConnected = healthState == .connected || healthState == .stale
+        if qualities.allSatisfy({ $0 == .unavailable })
+            && !healthConnected
+            && !financeHasObservedValue {
+            return "DATA UNAVAILABLE"
+        }
+        if clipperState == .stale || hasRefreshDueSection {
+            return "STALE DATA · REFRESH REQUIRED"
+        }
+        return "CONNECTED DATA"
+    }
+}
+
+enum OverviewCurrencyFormatter {
+    static func eur(cents: Int, locale: Locale = .current) -> String {
+        let formatter = NumberFormatter()
+        formatter.locale = locale
+        formatter.numberStyle = .currency
+        formatter.currencyCode = "EUR"
+        formatter.maximumFractionDigits = 2
+        formatter.minimumFractionDigits = 2
+        let amount = Decimal(cents) / Decimal(100)
+        return formatter.string(from: NSDecimalNumber(decimal: amount)) ?? "—"
+    }
+}
+
 private struct OverviewMetricCard: View {
     let section: OverviewSection
     let featured: Bool
     let usageSnapshots: [ProviderSnapshot]
+    let usageAnalytics: [UsageAnalyticsSnapshot]
     let clipperState: ClipperLoadState
+    let clipperSnapshot: ClipperSnapshot?
+    let fitnessSnapshot: FitnessSnapshot
+    let financeSummary: FinanceSummary?
+    let financeState: FinanceLoadState
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
 
     init(section: OverviewSection, featured: Bool = false, usageSnapshots: [ProviderSnapshot] = [],
-         clipperState: ClipperLoadState = .unavailable) {
+         usageAnalytics: [UsageAnalyticsSnapshot] = [],
+         clipperState: ClipperLoadState = .unavailable, clipperSnapshot: ClipperSnapshot? = nil,
+         fitnessSnapshot: FitnessSnapshot = .unavailable, financeSummary: FinanceSummary? = nil,
+         financeState: FinanceLoadState = .unavailable) {
         self.section = section
         self.featured = featured
         self.usageSnapshots = usageSnapshots
+        self.usageAnalytics = usageAnalytics
         self.clipperState = clipperState
+        self.clipperSnapshot = clipperSnapshot
+        self.fitnessSnapshot = fitnessSnapshot
+        self.financeSummary = financeSummary
+        self.financeState = financeState
     }
 
     private var title: String {
@@ -357,6 +537,30 @@ private struct OverviewMetricCard: View {
     }
 
     private var sourceStatus: String {
+        if section.kind == .health {
+            if let integrityStatus = OverviewHomeStatusPolicy.healthIntegrityStatus(
+                source: fitnessSnapshot.source,
+                hasObservedMetrics: !homeHealthMetrics.isEmpty
+            ) {
+                return integrityStatus
+            }
+            switch fitnessSnapshot.source.status {
+            case .demo: return "Demo fixture · not live"
+            case .connected: return "Observed · \(fitnessSnapshot.source.title)"
+            case .stale: return "Stale · \(fitnessSnapshot.source.title) · refresh required"
+            case .permissionRequired: return "Permission needed · HealthKit"
+            case .unavailable: break
+            }
+        }
+        if section.kind == .finance {
+            switch financeState {
+            case .demo: return "Demo fixture · not live"
+            case .stale: return "Stale · Finance source · refresh required"
+            case .observed where financeSummaryHasObservedValue: return "Observed · Finance source"
+            case .loading: return "Loading · Finance source"
+            case .unavailable, .observed: break
+            }
+        }
         return switch section.provenance.quality {
         case .demo: "Demo fixture · not live"
         case .unavailable:
@@ -381,10 +585,35 @@ private struct OverviewMetricCard: View {
     }
 
     private var sourceStatusColor: Color {
-        if section.provenance.quality == .demo || section.provenance.connector == .refreshDue || clipperState == .stale || section.state == .partial {
+        let healthIntegrityIssue = healthIntegrityStatusPresent
+        if OverviewHomeStatusPolicy.isWarning(
+            section: section.kind,
+            quality: section.provenance.quality,
+            connector: section.provenance.connector,
+            sectionState: section.state,
+            clipperState: clipperState,
+            healthState: fitnessSnapshot.source.status,
+            healthIntegrityIssue: healthIntegrityIssue,
+            financeState: financeState
+        ) {
             return LifeOSTokens.warning
         }
         return LifeOSTokens.tertiaryText
+    }
+
+    private var healthIntegrityStatusPresent: Bool {
+        OverviewHomeStatusPolicy.healthIntegrityStatus(
+            source: fitnessSnapshot.source,
+            hasObservedMetrics: !homeHealthMetrics.isEmpty
+        ) != nil
+    }
+
+    private var financeSummaryHasObservedValue: Bool {
+        guard let financeSummary else { return false }
+        return [financeSummary.monthlyIncome, financeSummary.fixedCosts,
+                financeSummary.discretionaryBuffer, financeSummary.spent,
+                financeSummary.savingsGoal, financeSummary.saved]
+            .contains { $0.availability == .observed && $0.amountCents != nil }
     }
 
     private var sectionIcon: LifeOSIconName {
@@ -397,7 +626,7 @@ private struct OverviewMetricCard: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: featured ? 18 : 14) {
+        VStack(alignment: .leading, spacing: featured ? 10 : 9) {
             HStack(spacing: 12) {
                 LifeOSIcon(sectionIcon)
                     .foregroundStyle(.secondary)
@@ -413,7 +642,7 @@ private struct OverviewMetricCard: View {
                     Text(description)
                         .font(LifeOSFont.inter(12.5, weight: .regular))
                         .foregroundStyle(LifeOSTokens.tertiaryText)
-                        .lineLimit(2)
+                        .lineLimit(featured ? 1 : 2)
                 }
                 Spacer(minLength: 8)
                 LifeOSIcon(.chevronRight)
@@ -424,7 +653,7 @@ private struct OverviewMetricCard: View {
             Text(sourceStatus)
                 .font(LifeOSFont.inter(10.5, weight: .medium))
                 .foregroundStyle(sourceStatusColor)
-                .lineLimit(1)
+                .lineLimit(section.kind == .health && healthIntegrityStatusPresent ? 2 : 1)
                 .minimumScaleFactor(0.78)
 
             if featured && section.kind == .llm {
@@ -433,10 +662,10 @@ private struct OverviewMetricCard: View {
                 supportingBody
             }
         }
-        .padding(.horizontal, featured ? 24 : 20)
-        .padding(.vertical, featured ? 20 : 18)
+        .padding(.horizontal, featured ? 16 : 16)
+        .padding(.vertical, featured ? 14 : 14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .frame(minHeight: featured ? 238 : 264, alignment: .topLeading)
+        .frame(minHeight: featured ? 190 : 188, alignment: .topLeading)
         .background(cardBackground, in: cardShape)
         .overlay(cardShape.stroke(hovering ? Color.primary.opacity(0.18) : LifeOSTokens.quietBorder, lineWidth: 0.75))
         .contentShape(cardShape)
@@ -463,88 +692,107 @@ private struct OverviewMetricCard: View {
 
     @ViewBuilder
     private var usageBody: some View {
-        ViewThatFits(in: .horizontal) {
-            wideUsageBody
-            compactUsageBody
-        }
-    }
-
-    private var wideUsageBody: some View {
-        HStack(alignment: .center, spacing: 22) {
-            UsageLeadRing(snapshot: leadUsageSnapshot)
-            usageSummaryAndProviderRings
-        }
-        .frame(minWidth: 670, alignment: .leading)
-    }
-
-    private var compactUsageBody: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .center, spacing: 16) {
-                UsageLeadRing(snapshot: leadUsageSnapshot)
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(leadUsageSnapshot?.provider.displayName ?? "Usage")
-                        .font(LifeOSFont.spaceGrotesk(15, weight: .medium))
-                    Text(leadUsageSnapshot == nil ? "No provider observations are connected." : "Current provider window")
-                        .font(LifeOSFont.inter(12, weight: .regular))
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
-                        .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(leadUsageSnapshot?.provider.displayName ?? "Usage")
+                    .font(LifeOSFont.spaceGrotesk(14, weight: .medium))
+                if let remaining = leadUsageSnapshot?.smallestObservedWindow?.usedPercent.map({ 1 - $0 }) {
+                    Text("\(Int((remaining * 100).rounded()))% remaining")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(LifeOSTokens.Series.actual)
+                        .monospacedDigit()
                 }
+                Spacer(minLength: 4)
+                Text(usageTrendLabel)
+                    .font(.caption2)
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
             }
-            LazyVGrid(
-                columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())],
-                alignment: .leading,
-                spacing: 10
-            ) {
+
+            if usageTrendPoints.count >= 2 {
+                OverviewAreaChart(
+                    title: "Usage remaining",
+                    subtitle: leadUsageSnapshot?.smallestObservedWindow?.label ?? "Observed activity",
+                    points: usageTrendPoints,
+                    tint: LifeOSTokens.Series.actual,
+                    valueLabel: { "\(Int(($0 * 100).rounded()))%" }
+                )
+                .frame(height: 82)
+            } else {
+                OverviewChartUnavailable(detail: usageChartDetail)
+                    .frame(minHeight: 54)
+            }
+
+            HStack(spacing: 8) {
                 ForEach(Provider.allCases, id: \.self) { provider in
                     UsageMiniRing(provider: provider, snapshot: usageSnapshots.first { $0.provider == provider })
                 }
             }
         }
-    }
-
-    private var usageSummaryAndProviderRings: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(leadUsageSnapshot?.provider.displayName ?? "Usage")
-                .font(LifeOSFont.spaceGrotesk(15, weight: .medium))
-            Text(leadUsageSnapshot == nil ? "No provider observations are connected." : "Current provider window")
-                .font(LifeOSFont.inter(12, weight: .regular))
-                .foregroundStyle(LifeOSTokens.tertiaryText)
-                .fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: 10) {
-                ForEach(Provider.allCases, id: \.self) { provider in
-                    UsageMiniRing(provider: provider, snapshot: usageSnapshots.first { $0.provider == provider })
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @ViewBuilder
     private var supportingBody: some View {
         switch section.kind {
         case .clipper:
-            HStack(spacing: 14) {
-                ValueMetric(value: metricValue(containing: "Views"), label: "Views today")
-                ValueMetric(value: metricValue(containing: "Subscribers"), label: "Subscribers")
-                ValueMetric(value: metricValue(containing: "Revenue"), label: "Revenue")
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(spacing: 12) {
+                    ValueMetric(value: clipperHomeMetricValue(containing: "Views"), label: "Views today")
+                    ValueMetric(value: clipperHomeMetricValue(containing: "Subscribers"), label: "Subscribers")
+                    ValueMetric(value: clipperHomeMetricValue(containing: "Revenue"), label: "Revenue")
+                }
+                if let clipperTrend {
+                    OverviewAreaChart(
+                        title: "\(clipperTrend.metric.title) trend",
+                        subtitle: "Observed history",
+                        points: clipperTrend.points,
+                        tint: LifeOSTokens.info,
+                        valueLabel: { clipperTrend.metric == .revenue ? overviewCurrency(cents: Int($0.rounded())) : Int($0.rounded()).formatted() }
+                    )
+                    .frame(height: 78)
+                } else {
+                    OverviewChartUnavailable(detail: clipperChartDetail)
+                        .frame(minHeight: 48)
+                }
             }
         case .health:
-            HStack(alignment: .center, spacing: 16) {
-                HealthSleepRing(value: percentValue(containing: "Sleep"))
-                VStack(alignment: .leading, spacing: 9) {
-                    ValueMetric(value: metricValue(containing: "heart"), label: "Resting HR")
-                    ValueMetric(value: metricValue(containing: "Steps"), label: "Steps")
+            VStack(alignment: .leading, spacing: 7) {
+                if !homeHealthMetrics.isEmpty {
+                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 8) {
+                        ForEach(homeHealthMetrics) { metric in
+                            ValueMetric(value: fitnessDisplayValue(metric), label: metric.title)
+                        }
+                    }
+                    Text(fitnessSnapshot.source.freshness)
+                        .font(.caption2)
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                } else if section.provenance.quality == .demo {
+                    overviewFallbackMetrics
+                } else {
+                    OverviewChartUnavailable(detail: fitnessSnapshot.source.detail)
+                        .frame(minHeight: 58)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
         case .finance:
-            HStack(alignment: .center, spacing: 18) {
-                VStack(alignment: .leading, spacing: 10) {
-                    ValueMetric(value: metricValue(containing: "Savings"), label: "Savings goal")
-                    ValueMetric(value: metricValue(containing: "budget"), label: "Monthly budget")
+            VStack(alignment: .leading, spacing: 7) {
+                if !financeOverviewMetrics.isEmpty {
+                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 8) {
+                        ForEach(financeOverviewMetrics) { metric in
+                            ValueMetric(value: metric.value, label: metric.label)
+                        }
+                    }
+                    Text(financeState == .stale ? "Stale source · refresh required" : "Observed finance summary")
+                        .font(.caption2)
+                        .foregroundStyle(financeState == .stale ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                } else if section.provenance.quality == .demo {
+                    overviewFallbackMetrics
+                } else {
+                    OverviewChartUnavailable(detail: "Finance summary is not connected.")
+                        .frame(minHeight: 58)
                 }
-                OverviewUnavailableTrack(label: "History", detail: "Not connected")
-                    .frame(maxWidth: .infinity)
             }
         case .llm:
             EmptyView()
@@ -555,46 +803,217 @@ private struct OverviewMetricCard: View {
         usageSnapshots.first(where: { $0.smallestObservedWindow != nil }) ?? usageSnapshots.first
     }
 
+    private var leadUsageAnalytics: UsageAnalyticsSnapshot? {
+        guard let lead = leadUsageSnapshot, let window = lead.smallestObservedWindow else { return nil }
+        return UsageAnalyticsResolver.matching(snapshot: lead, candidates: usageAnalytics, windowID: window.id)
+    }
+
+    private var usageTrendPoints: [OverviewChartPoint] {
+        guard let analytics = leadUsageAnalytics,
+              OverviewUsageTrendPresentation.isRenderable(for: analytics.provenance.quality) else { return [] }
+        return OverviewChartProjection.usageRemaining(from: analytics, window: leadUsageSnapshot?.smallestObservedWindow)
+    }
+
+    private var usageTrendLabel: String {
+        OverviewUsageTrendPresentation.label(for: leadUsageAnalytics?.provenance.quality)
+    }
+
+    private var usageChartDetail: String {
+        guard leadUsageSnapshot != nil else { return "No provider observations are connected." }
+        guard leadUsageAnalytics != nil else { return "Usage history is unavailable for this provider window." }
+        return "Not enough observed history for a trend."
+    }
+
+    private var clipperTrend: OverviewClipperTrend? {
+        guard let clipperSnapshot, clipperSnapshot.availability == .observed else { return nil }
+        return OverviewChartProjection.preferredClipperTrend(from: clipperSnapshot.trends ?? [])
+    }
+
+    private var clipperChartDetail: String {
+        if section.provenance.quality == .demo { return "DEMO fixture · no trend history supplied." }
+        if clipperSnapshot?.availability == .observed { return "Not enough observed trend points for a chart." }
+        return "Trend history is unavailable until the Clipper connector supplies it."
+    }
+
+    private var homeHealthMetrics: [FitnessMetric] {
+        var candidates = fitnessSnapshot.healthMonitor
+        candidates.append(contentsOf: fitnessSnapshot.loadDetail.trendCards.compactMap { card in
+            switch card.id {
+            case .steps, .totalEnergy: card.metric
+            default: nil
+            }
+        })
+        var seen = Set<String>()
+        return candidates.filter { metric in
+            guard metric.value != nil, metric.quality == .observed else { return false }
+            return seen.insert(metric.id).inserted
+        }.prefix(4).map { $0 }
+    }
+
+    private var financeOverviewMetrics: [OverviewDisplayMetric] {
+        guard let financeSummary else { return [] }
+        let candidates: [(String, FinanceAmountMetric?)] = [
+            ("Spent", financeSummary.spent),
+            ("Saved", financeSummary.saved),
+            ("Income", financeSummary.monthlyIncome),
+            ("Buffer", financeSummary.discretionaryBuffer)
+        ]
+        return candidates.compactMap { label, metric in
+            guard let metric, metric.availability == .observed, let cents = metric.amountCents else { return nil }
+            return OverviewDisplayMetric(label: label, value: overviewCurrency(cents: cents))
+        }
+    }
+
+    private var overviewFallbackMetrics: some View {
+        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 8) {
+            ForEach(section.metrics.filter { $0.value != nil }) { metric in
+                ValueMetric(value: metric.displayValue, label: metric.label)
+            }
+        }
+    }
+
     private func metricValue(containing needle: String) -> String? {
         section.metric(containing: needle)?.displayValue
     }
 
-    private func percentValue(containing needle: String) -> Double? {
-        guard let raw = section.metric(containing: needle)?.value,
-              let number = Double(raw.replacingOccurrences(of: "%", with: "")) else { return nil }
-        return min(max(number / 100, 0), 1)
+    private func clipperHomeMetricValue(containing needle: String) -> String? {
+        guard needle.localizedCaseInsensitiveCompare("Revenue") == .orderedSame else {
+            return metricValue(containing: needle)
+        }
+        if let revenue = clipperSnapshot?.metrics?.revenue,
+           revenue.availability == .observed,
+           let amountCents = revenue.amountCents {
+            return OverviewCurrencyFormatter.eur(cents: amountCents)
+        }
+        return metricValue(containing: needle)
+    }
+
+    private func fitnessDisplayValue(_ metric: FitnessMetric) -> String? {
+        guard let value = metric.value else { return nil }
+        return metric.unit.isEmpty ? value : "\(value) \(metric.unit)"
+    }
+
+    private func overviewCurrency(cents: Int) -> String {
+        OverviewCurrencyFormatter.eur(cents: cents)
     }
 }
 
-private struct UsageLeadRing: View {
-    let snapshot: ProviderSnapshot?
+private struct OverviewDisplayMetric: Identifiable {
+    let label: String
+    let value: String
 
-    private var remaining: Double? {
-        snapshot?.smallestObservedWindow?.usedPercent.map { 1 - $0 }
+    var id: String { label }
+}
+
+private struct OverviewAreaChart: View {
+    let title: String
+    let subtitle: String
+    let points: [OverviewChartPoint]
+    let tint: Color
+    let valueLabel: (Double) -> String
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var yDomain: ClosedRange<Double> {
+        let values = points.map(\.value)
+        guard let minimum = values.min(), let maximum = values.max() else { return 0...1 }
+        guard maximum > minimum else {
+            let padding = max(abs(maximum) * 0.12, 1)
+            return max(0, minimum - padding)...maximum + padding
+        }
+        let padding = max((maximum - minimum) * 0.16, abs(maximum) * 0.02)
+        return max(0, minimum - padding)...maximum + padding
     }
 
     var body: some View {
-        GlowRing(progress: remaining ?? 0, hue: .blue, diameter: 142, lineWidth: 12) {
-            VStack(spacing: 2) {
-                if let remaining {
-                    Text("\(Int((remaining * 100).rounded()))")
-                        .font(.system(size: 32, weight: .bold, design: .rounded))
-                        .monospacedDigit()
-                        .numericTransition()
-                    Text("% left")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
-                } else {
-                    Text("—")
-                        .font(.system(size: 34, weight: .bold, design: .rounded))
-                    Text("Not connected")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .firstTextBaseline, spacing: 7) {
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                Text(subtitle)
+                    .font(.caption2)
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+                Spacer(minLength: 4)
+            }
+
+            Chart(points) { point in
+                AreaMark(
+                    x: .value("Time", point.date),
+                    y: .value(title, point.value)
+                )
+                .foregroundStyle(areaGradient)
+                .interpolationMethod(.catmullRom)
+
+                LineMark(
+                    x: .value("Time", point.date),
+                    y: .value(title, point.value)
+                )
+                .foregroundStyle(tint)
+                .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                .interpolationMethod(.catmullRom)
+            }
+            .chartYScale(domain: yDomain)
+            .chartYAxis {
+                AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { value in
+                    AxisGridLine().foregroundStyle(LifeOSTokens.chartGrid)
+                    AxisValueLabel {
+                        if let number = value.as(Double.self) {
+                            Text(valueLabel(number))
+                        }
+                    }
                 }
             }
+            .chartXAxis {
+                AxisMarks(values: .automatic(desiredCount: min(points.count, 3))) { value in
+                    AxisValueLabel {
+                        if let date = value.as(Date.self) {
+                            switch OverviewChartAxis.labelMode(for: points) {
+                            case .time:
+                                Text(date, format: .dateTime.hour().minute())
+                            case .day:
+                                Text(date, format: .dateTime.weekday(.abbreviated).day())
+                            }
+                        }
+                    }
+                }
+            }
+            .chartPlotStyle { plot in
+                plot.background(Color.clear)
+            }
+            .transaction { transaction in
+                if reduceMotion { transaction.animation = nil }
+            }
         }
-        .accessibilityLabel(snapshot?.provider.displayName ?? "Usage")
-        .accessibilityValue(remaining.map { "\(Int(($0 * 100).rounded())) percent remaining" } ?? "Not connected")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(title) area chart")
+        .accessibilityValue(points.last.map { valueLabel($0.value) } ?? "No observations")
+    }
+
+    private var areaGradient: LinearGradient {
+        LinearGradient(
+            colors: [tint.opacity(0.22), tint.opacity(0.02)],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+    }
+}
+
+private struct OverviewChartUnavailable: View {
+    let detail: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("Trend unavailable")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(LifeOSTokens.tertiaryText)
+            Text(detail)
+                .font(.caption2)
+                .foregroundStyle(LifeOSTokens.tertiaryText)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -626,25 +1045,6 @@ private struct UsageMiniRing: View {
     }
 }
 
-private struct HealthSleepRing: View {
-    let value: Double?
-
-    var body: some View {
-        GlowRing(progress: value ?? 0, hue: .green, diameter: 86, lineWidth: 8) {
-            VStack(spacing: 1) {
-                Text(value.map { "\(Int(($0 * 100).rounded()))" } ?? "—")
-                    .font(.system(size: 21, weight: .bold, design: .rounded))
-                    .monospacedDigit()
-                Text(value == nil ? "Not connected" : "% sleep")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
-            }
-        }
-        .accessibilityLabel("Sleep quality")
-        .accessibilityValue(value.map { "\(Int(($0 * 100).rounded())) percent" } ?? "Not connected")
-    }
-}
-
 private struct ValueMetric: View {
     let value: String?
     let label: String
@@ -659,32 +1059,6 @@ private struct ValueMetric: View {
                 .font(.system(size: 10.5, weight: .medium))
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .lineLimit(1)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .combine)
-    }
-}
-
-private struct OverviewUnavailableTrack: View {
-    let label: String
-    let detail: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(label)
-                    .font(.system(size: 10.5, weight: .medium))
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
-                Spacer(minLength: 4)
-                Text("—")
-                    .font(.system(size: 14, weight: .semibold, design: .rounded))
-            }
-            Capsule()
-                .fill(Color.primary.opacity(0.08))
-                .frame(height: 5)
-            Text(detail)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(LifeOSTokens.tertiaryText)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
