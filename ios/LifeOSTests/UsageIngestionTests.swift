@@ -467,21 +467,19 @@ final class UsageIngestionTests: XCTestCase {
         XCTAssertEqual(settings.readiness, .stale)
     }
 
-    func testSettingsReadinessNeverRendersHostOrBearerAndSeparatesLocalGates() {
+    func testSettingsReadinessNeverRendersHostAndSeparatesLocalGates() {
         let approvedHosts: Set<String> = ["lifeos-server.example.ts.net"]
-        let missingBearer = SyncSettingsReadiness.resolve(
+        let ready = SyncSettingsReadiness.resolve(
             serverURL: "https://lifeos-server.example.ts.net",
-            approvedHosts: approvedHosts,
-            bearerAvailable: false
+            approvedHosts: approvedHosts
         )
-        XCTAssertEqual(missingBearer.urlState, .valid)
-        XCTAssertFalse(missingBearer.canAttemptConnection)
-        XCTAssertEqual(missingBearer.title, "Keychain bearer missing")
+        XCTAssertEqual(ready.urlState, .valid)
+        XCTAssertTrue(ready.canAttemptConnection)
+        XCTAssertEqual(ready.title, "Ready for Tailscale identity preflight")
 
         let invalidURL = SyncSettingsReadiness.resolve(
             serverURL: "https://private-secret.invalid/path?token=must-not-render",
-            approvedHosts: approvedHosts,
-            bearerAvailable: true
+            approvedHosts: approvedHosts
         )
         XCTAssertEqual(invalidURL.urlState, .invalid)
         XCTAssertFalse(invalidURL.canAttemptConnection)
@@ -490,8 +488,7 @@ final class UsageIngestionTests: XCTestCase {
 
         let noSignedHost = SyncSettingsReadiness.resolve(
             serverURL: "",
-            approvedHosts: [],
-            bearerAvailable: false
+            approvedHosts: []
         )
         XCTAssertEqual(noSignedHost.title, "Approved signed host missing")
     }

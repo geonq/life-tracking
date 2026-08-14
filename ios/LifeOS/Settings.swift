@@ -493,31 +493,27 @@ enum SyncSettingsURLState: String, Equatable, Sendable {
 struct SyncSettingsReadiness: Equatable, Sendable {
     let approvedHostConfigured: Bool
     let urlState: SyncSettingsURLState
-    let bearerAvailable: Bool
 
     static func resolve(
         serverURL: String,
-        approvedHosts: Set<String>,
-        bearerAvailable: Bool
+        approvedHosts: Set<String>
     ) -> Self {
-        let trimmed = serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let urlState: SyncSettingsURLState
-        if trimmed.isEmpty {
+        if serverURL.isEmpty {
             urlState = .missing
-        } else if TailscaleSyncClient.validatedServerURL(trimmed, approvedHosts: approvedHosts) != nil {
+        } else if TailscaleSyncClient.validatedServerURL(serverURL, approvedHosts: approvedHosts) != nil {
             urlState = .valid
         } else {
             urlState = .invalid
         }
         return Self(
             approvedHostConfigured: !approvedHosts.isEmpty,
-            urlState: urlState,
-            bearerAvailable: bearerAvailable
+            urlState: urlState
         )
     }
 
     var canAttemptConnection: Bool {
-        approvedHostConfigured && urlState == .valid && bearerAvailable
+        approvedHostConfigured && urlState == .valid
     }
 
     var title: String {
@@ -526,7 +522,7 @@ struct SyncSettingsReadiness: Equatable, Sendable {
         case .missing: return "Server URL missing"
         case .invalid: return "Server URL rejected"
         case .valid:
-            return bearerAvailable ? "Ready for read-only preflight" : "Keychain bearer missing"
+            return "Ready for Tailscale identity preflight"
         }
     }
 }
@@ -631,7 +627,7 @@ struct SettingsView: View {
             .init(id: "providers", title: "AI providers", subtitle: "Codex, Claude, GLM, DeepSeek, Google AI Studio", readiness: .providers(usageSettings.readiness), icon: .assistant),
             .init(id: "finance", title: "Bank connections", subtitle: "Sparkasse, Revolut Personal / Business, Trade Republic, and consent", readiness: .finance(financeSettings.readiness), icon: .bankConnections),
             .init(id: "health", title: "Health & devices", subtitle: "Helio → Zepp → Apple Health / HealthKit", readiness: .healthRead(healthReadAccess.state), icon: .health),
-            .init(id: "sync", title: "Sync & storage", subtitle: "Windows authority, server URL, and local data", readiness: .identityPending, icon: .refresh),
+            .init(id: "sync", title: "Sync & storage", subtitle: "Tailscale device identity, Windows authority, and local data", readiness: .identityPending, icon: .refresh),
             .init(id: "privacy", title: "Privacy & security", subtitle: "Local safeguards, signing, and unresolved server gates", readiness: .localSafeguards, icon: .security)
         ]
     }
@@ -1127,7 +1123,7 @@ private struct FinanceConnectionsSettingsView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Open secure Sync setup")
                                 .font(LifeOSFont.inter(13, weight: .semiBold))
-                            Text("Review the signed host, URL validation, and read-only Keychain authorization gate.")
+                            Text("Review the signed host, URL validation, and Tailscale device-identity gateway.")
                                 .font(LifeOSFont.inter(12))
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -1507,8 +1503,7 @@ private struct SyncStorageSettingsView: View {
     private var localReadiness: SyncSettingsReadiness {
         SyncSettingsReadiness.resolve(
             serverURL: syncServerURL,
-            approvedHosts: TailscaleSyncClient.configuredApprovedHosts(),
-            bearerAvailable: TailscaleSyncClient.readBearerFromKeychain() != nil
+            approvedHosts: TailscaleSyncClient.configuredApprovedHosts()
         )
     }
 
@@ -1517,7 +1512,7 @@ private struct SyncStorageSettingsView: View {
             VStack(alignment: .leading, spacing: 18) {
                 SettingsIntro(
                     title: "Sync & storage",
-                    message: "Keep the existing Tailscale server configuration reachable while making its trust boundary clear."
+                    message: "The loopback-only Windows gateway enforces Tailscale device identity through Tailscale Serve. LifeOS sends no bearer or token."
                 )
 
                 SettingsSection(title: "Tailscale sync", icon: .security) {
@@ -1536,7 +1531,7 @@ private struct SyncStorageSettingsView: View {
                             .font(LifeOSFont.inter(12))
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                             .fixedSize(horizontal: false, vertical: true)
-                        Text("Transitional bearer is read-only from Keychain; identity migration is pending. LifeOS exposes no token editor.")
+                        Text("Tailscale Serve supplies the device identity to the loopback-only gateway. LifeOS never stores or edits a bearer or token.")
                             .font(LifeOSFont.inter(12))
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                             .fixedSize(horizontal: false, vertical: true)
@@ -1580,7 +1575,7 @@ private struct SyncStorageSettingsView: View {
                             .accessibilityIdentifier("settings-sync-connection-result")
                         }
 
-                        Text("This sends one authenticated, read-only request to the approved Windows gateway. It does not change or reveal credentials.")
+                        Text("This sends one read-only request to the approved Windows gateway. The loopback-only gateway verifies Tailscale device identity; LifeOS sends no bearer or Tailscale identity headers.")
                             .font(LifeOSFont.inter(11))
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                             .fixedSize(horizontal: false, vertical: true)
@@ -1599,18 +1594,18 @@ private struct SyncStorageSettingsView: View {
                         Divider().padding(.leading, 38)
                         SettingsStatusRow(
                             title: "Server URL validation",
-                            detail: "The URL must be HTTPS, host-allowlisted, and free of paths, query, or fragment data.",
+                            detail: "The URL must be HTTPS on an approved .ts.net host, use port 443 or 8420, and have no path, query, or fragment data.",
                             status: localReadiness.urlState.title,
                             icon: .documents,
                             statusColor: localReadiness.urlState == .valid ? LifeOSTokens.success : LifeOSTokens.warning
                         )
                         Divider().padding(.leading, 38)
                         SettingsStatusRow(
-                            title: "Keychain authorization",
-                            detail: "The exact transitional bearer is read-only and never displayed, copied, or edited here.",
-                            status: localReadiness.bearerAvailable ? "Present · hidden" : "Missing",
+                            title: "Tailscale device identity",
+                            detail: "The loopback-only Windows gateway enforces identity through Tailscale Serve; LifeOS does not mint or send identity headers.",
+                            status: localReadiness.canAttemptConnection ? "Gateway enforced" : "Configuration required",
                             icon: .security,
-                            statusColor: localReadiness.bearerAvailable ? LifeOSTokens.success : LifeOSTokens.warning
+                            statusColor: localReadiness.canAttemptConnection ? LifeOSTokens.success : LifeOSTokens.warning
                         )
                     }
                 }
@@ -1619,7 +1614,7 @@ private struct SyncStorageSettingsView: View {
                     VStack(spacing: 0) {
                         SettingsStatusRow(
                             title: "Windows server",
-                            detail: "Authoritative store; secure deployment gate is still pending",
+                            detail: "Authoritative store behind the loopback-only gateway; secure deployment gate is still pending",
                             status: "Pending",
                             icon: .security,
                             statusColor: LifeOSTokens.warning
@@ -1627,15 +1622,15 @@ private struct SyncStorageSettingsView: View {
                         Divider().padding(.leading, 38)
                         SettingsStatusRow(
                             title: "Device identity",
-                            detail: "Transitional read-only bearer remains in Keychain",
-                            status: "Migration pending",
+                            detail: "Tailscale device identity is enforced by the loopback-only gateway; no bearer or token is stored here",
+                            status: "Gateway enforced",
                             icon: .security,
-                            statusColor: LifeOSTokens.warning
+                            statusColor: LifeOSTokens.success
                         )
                         Divider().padding(.leading, 38)
                         SettingsStatusRow(
                             title: "Local records",
-                            detail: "Remain local until an authenticated sync path succeeds",
+                            detail: "Remain local until a Tailscale-identity-verified sync path succeeds",
                             status: "Local first",
                             icon: .documents,
                             statusColor: LifeOSTokens.success
@@ -1644,7 +1639,7 @@ private struct SyncStorageSettingsView: View {
                 }
 
                 SettingsSection(title: "Local storage", icon: .documents) {
-                    Text("Calendar, tax documents, and app preferences remain on this device unless an explicitly configured, authenticated sync path is available.")
+                    Text("Calendar, tax documents, and app preferences remain on this device unless an explicitly configured, Tailscale-identity-verified sync path is available.")
                         .font(LifeOSFont.inter(13))
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1704,7 +1699,7 @@ private struct SyncStorageSettingsView: View {
         switch state {
         case .reachable: "Windows gateway reachable"
         case .configurationRequired: "Secure configuration required"
-        case .authenticationRejected: "Authorization rejected"
+        case .authenticationRejected: "Tailscale device identity rejected"
         case .serverUnavailable: "Windows gateway unavailable"
         case .networkUnavailable: "Tailscale network unavailable"
         case .invalidResponse: "Gateway response rejected"
@@ -1714,11 +1709,11 @@ private struct SyncStorageSettingsView: View {
     private func connectionPreflightDetail(_ state: TailscaleConnectionPreflightState) -> String {
         switch state {
         case .reachable:
-            "The approved gateway accepted the read-only request. This does not prove that every provider is connected."
+            "The approved gateway accepted the read-only request with Tailscale device identity. This does not prove that every provider is connected."
         case .configurationRequired:
-            "The signed approved-host configuration, server URL, or transitional Keychain authorization is missing or invalid."
+            "The signed approved-host configuration or HTTPS server URL is missing or invalid."
         case .authenticationRejected:
-            "The gateway is reachable, but it did not authorize this device request. No credential was changed."
+            "The gateway is reachable, but it rejected this device's Tailscale identity. No credential was changed."
         case .serverUnavailable:
             "The approved gateway returned a temporary server or rate-limit failure. Try again after checking the Windows services."
         case .networkUnavailable:
@@ -1799,7 +1794,7 @@ private struct PrivacySecuritySettingsView: View {
                 }
 
                 SettingsSection(title: "Data boundary", icon: .documents) {
-                    Text("Calendar items and local-first nutrition records stay on this device until an explicitly configured, authenticated sync path succeeds. Finance, Fitness, and Usage remain unavailable when their reviewed sources are not connected.")
+                    Text("Calendar items and local-first nutrition records stay on this device until an explicitly configured, Tailscale-identity-verified sync path succeeds. Finance, Fitness, and Usage remain unavailable when their reviewed sources are not connected.")
                         .font(LifeOSFont.inter(13))
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)

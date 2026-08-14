@@ -126,10 +126,18 @@ final class TailscaleSyncClientSecurityTests: XCTestCase {
 
     private func preflightRequest() throws -> URLRequest {
         let url = URL(string: "https://lifeos.example-tailnet.ts.net:8420/usage")!
-        return try XCTUnwrap(TailscaleSyncClient.authenticatedRequest(
-            url: url,
-            bearer: String(repeating: "p", count: 32)
-        ))
+        return TailscaleSyncClient.gatewayRequest(url: url)
+    }
+
+    private func assertNoCredentialHeaders(_ request: URLRequest, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"), file: file, line: line)
+        for field in [
+            "Tailscale-User-Login",
+            "Tailscale-User-Name",
+            "Tailscale-User-Profile-Picture"
+        ] {
+            XCTAssertNil(request.value(forHTTPHeaderField: field), "unexpected \(field)", file: file, line: line)
+        }
     }
 
     private func preflightSession() -> URLSession {
@@ -155,15 +163,39 @@ final class TailscaleSyncClientSecurityTests: XCTestCase {
             "https://lifeos.example-tailnet.ts.net?redirect=https://example.com",
             "https://lifeos.example-tailnet.ts.net#fragment",
             "https://lifeos.example-tailnet.ts.net:9443",
+            "https://lifeos.example-tailnet.ts.net:80",
+            "https://lifeos.example-tailnet.ts.net.",
+            "https://lifeos..example-tailnet.ts.net",
+            "https://lifeos.example_tailnet.ts.net",
+            "https://lifeos.example-tailnet.ts.net/\n",
+            " https://lifeos.example-tailnet.ts.net",
         ] {
             XCTAssertNil(TailscaleSyncClient.validatedServerURL(value, approvedHosts: approved), value)
         }
         XCTAssertNil(TailscaleSyncClient.validatedServerURL("https://other.example-tailnet.ts.net:8420", approvedHosts: approved))
     }
 
-    func testEveryGatewayPathBuildsOnlyAnAuthenticatedRequest() throws {
+    func testReadinessRequiresOnlySignedHostAndValidatedURL() {
+        let approved: Set<String> = ["lifeos.example-tailnet.ts.net"]
+        let ready = SyncSettingsReadiness.resolve(
+            serverURL: "https://lifeos.example-tailnet.ts.net:8420",
+            approvedHosts: approved
+        )
+        XCTAssertTrue(ready.approvedHostConfigured)
+        XCTAssertEqual(ready.urlState, .valid)
+        XCTAssertTrue(ready.canAttemptConnection)
+        XCTAssertEqual(ready.title, "Ready for Tailscale identity preflight")
+
+        let invalid = SyncSettingsReadiness.resolve(
+            serverURL: "https://other.example-tailnet.ts.net:8420",
+            approvedHosts: approved
+        )
+        XCTAssertEqual(invalid.urlState, .invalid)
+        XCTAssertFalse(invalid.canAttemptConnection)
+    }
+
+    func testEveryGatewayRESTAndWebSocketRequestSendsNoCredentialHeaders() throws {
         let base = URL(string: "https://lifeos.example-tailnet.ts.net:8420")!
-        let bearer = String(repeating: "a", count: 32)
         let urls = [
             base.appendingPathComponent("calendar"),
             base.appendingPathComponent("documents"),
@@ -174,23 +206,10 @@ final class TailscaleSyncClientSecurityTests: XCTestCase {
             URL(string: "wss://lifeos.example-tailnet.ts.net:8420/ws")!,
         ]
         for url in urls {
-            let request = try XCTUnwrap(TailscaleSyncClient.authenticatedRequest(url: url, bearer: bearer))
-            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer \(bearer)")
+            let request = TailscaleSyncClient.gatewayRequest(url: url)
+            XCTAssertEqual(request.httpMethod, "GET")
+            assertNoCredentialHeaders(request)
         }
-    }
-
-    func testBearerValidationAndWebSocketRequestFailClosed() {
-        XCTAssertNil(TailscaleSyncClient.validatedBearer(nil))
-        XCTAssertNil(TailscaleSyncClient.validatedBearer("token"))
-        XCTAssertNil(TailscaleSyncClient.validatedBearer(String(repeating: "a", count: 31)))
-        XCTAssertNil(TailscaleSyncClient.validatedBearer(String(repeating: "a", count: 32) + "\n"))
-        XCTAssertNil(TailscaleSyncClient.validatedBearer(String(repeating: "a", count: 513)))
-        let valid = String(repeating: "b", count: 32)
-        XCTAssertEqual(TailscaleSyncClient.validatedBearer(valid), valid)
-        let socketURL = URL(string: "wss://lifeos.example-tailnet.ts.net/ws")!
-        let request = TailscaleSyncClient.authenticatedRequest(url: socketURL, bearer: valid)
-        XCTAssertEqual(request?.value(forHTTPHeaderField: "Authorization"), "Bearer \(valid)")
-        XCTAssertNil(TailscaleSyncClient.authenticatedRequest(url: socketURL, bearer: "invalid"))
     }
 
     func testBoundedCollectorRejectsBeforeAccumulatingPastLimit() async {
@@ -252,10 +271,7 @@ final class TailscaleSyncClientSecurityTests: XCTestCase {
         XCTAssertEqual(request.url?.path, "/usage")
         XCTAssertEqual(request.httpMethod, "GET")
         XCTAssertNil(request.httpBody)
-        let authorization = try XCTUnwrap(request.value(forHTTPHeaderField: "Authorization"))
-        XCTAssertTrue(authorization.hasPrefix("Bearer "))
-        XCTAssertEqual(authorization.utf8.count, "Bearer ".utf8.count + 32)
-        XCTAssertFalse(String(describing: result).contains(String(repeating: "p", count: 32)))
+        assertNoCredentialHeaders(request)
         XCTAssertTrue(snapshot.bodyWasDelivered, "successful response body must be consumed")
         XCTAssertEqual(defaults.string(forKey: "sentinel"), "unchanged")
         XCTAssertNil(defaults.object(forKey: TailscaleSyncClient.serverURLDefaultsKey))
@@ -417,7 +433,6 @@ final class TailscaleSyncClientSecurityTests: XCTestCase {
         let url = URL(string: "https://lifeos.example-tailnet.ts.net/calendar")!
         let request = try XCTUnwrap(TailscaleSyncClient.conditionalCalendarRequest(
             url: url,
-            bearer: String(repeating: "a", count: 32),
             body: calendarJSON,
             ifMatch: #""calendar-v1-r1-stale""#,
             idempotencyKey: "calendar-replay-1"
@@ -427,6 +442,7 @@ final class TailscaleSyncClientSecurityTests: XCTestCase {
         XCTAssertEqual(request.value(forHTTPHeaderField: "Idempotency-Key"), "calendar-replay-1")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
         XCTAssertEqual(request.httpBody, calendarJSON)
+        assertNoCredentialHeaders(request)
         do {
             _ = try TailscaleSyncClient.parseCalendarPushResponse(
                 data: calendarJSON,
