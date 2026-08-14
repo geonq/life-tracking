@@ -308,6 +308,10 @@ public struct CalendarWidgetView: View {
             Text(calendar.component(.day, from: day).description)
                 .font(.system(size: 10, weight: isToday ? .bold : .regular, design: .rounded))
                 .foregroundStyle(textColor)
+                // In accented/tinted mode the system renders unmarked views in the
+                // default (white) group. Keep the white today square in that group,
+                // but put its glyph in the accent group so it remains distinguishable.
+                .widgetAccentable(usesTransparentTreatment && isToday)
         }
         .frame(width: dayCellSize, height: dayCellSize)
         .accessibilityLabel(day.formatted(.dateTime.locale(formatLocale).month().day()) + (isToday ? ", today" : ""))
@@ -325,12 +329,11 @@ public struct CalendarWidgetView: View {
             .lineLimit(1)
 
             if agendaEvents.isEmpty {
-                Spacer(minLength: 0)
                 Text("No events today")
                     .font(.system(size: 12))
                     .foregroundStyle(secondaryForeground)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                Spacer(minLength: 0)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 5)
             } else {
                 VStack(alignment: .leading, spacing: 5) {
                     ForEach(agendaEvents) { item in
@@ -376,6 +379,10 @@ public struct CalendarWidgetView: View {
                 .font(.system(size: 30, weight: .light))
                 .foregroundStyle(usesTransparentTreatment ? Color.lifeOSBlack : Color.white)
                 .offset(y: -1)
+                // The circle intentionally stays in the default group (white in
+                // clear/tinted mode); the glyph is accentable so it cannot disappear
+                // into that fill.
+                .widgetAccentable(usesTransparentTreatment)
         }
         .frame(width: 34, height: 34)
     }
