@@ -552,7 +552,7 @@ struct AppGroupSettingsSnapshot: Equatable, Sendable {
         guard let rawIdentifier, !rawIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return Self(state: .unavailable)
         }
-        if rawIdentifier.contains("$(") || rawIdentifier.contains(AppGroupConfiguration.placeholder) {
+        if rawIdentifier.contains("$(") {
             return Self(state: .placeholder)
         }
         guard AppGroupConfiguration.validatedIdentifier(rawIdentifier) != nil,
@@ -579,7 +579,7 @@ struct AppGroupSettingsSnapshot: Equatable, Sendable {
         case .configured:
             return "The team-configured shared container is available to the app/widget pair."
         case .placeholder:
-            return "The bundle still carries the placeholder App Group; shared widget storage is not provisioned."
+            return "The App Group build setting is unresolved; shared widget storage is not provisioned."
         case .unavailable:
             return "No usable shared App Group container is available in this build."
         }

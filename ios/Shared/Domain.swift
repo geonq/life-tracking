@@ -433,13 +433,19 @@ public enum CapabilityState: Equatable, Sendable { case blocked(String) }
 
 public enum AppGroupConfiguration {
     public static let infoPlistKey = "APP_GROUP_IDENTIFIER"
-    public static let placeholder = "REPLACE_WITH_TEAM_CONFIGURED_ID"
+    /// The checked-in source marker is accepted only by Debug/Personal-Team
+    /// development builds. Release validation still requires a real
+    /// team-registered identifier before distribution.
+    public static let releasePlaceholder = "REPLACE_WITH_TEAM_CONFIGURED_ID"
 
     public static func validatedIdentifier(_ rawValue: String?) -> String? {
         guard let value = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines),
               value.hasPrefix("group."),
-              !value.contains("$("),
-              !value.contains(placeholder) else { return nil }
+              !value.contains("$(") else { return nil }
+
+#if !DEBUG
+        guard !value.contains(releasePlaceholder) else { return nil }
+#endif
 
         // App Group identifiers are provisioned values, not arbitrary paths or
         // build-setting expressions. Keep this check deliberately small and

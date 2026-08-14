@@ -74,9 +74,14 @@ final class DomainTests: XCTestCase {
         XCTAssertEqual(DemoUsageAnalytics.snapshots.first?.provenance.observedAt, DemoDataProvider.observedAt)
     }
 
-    func testAppGroupStoreFailsClosedForPlaceholder() {
+    func testAppGroupStoreDevelopmentIdentifierFollowsBuildGate() {
         XCTAssertNil(AppGroupConfiguration.validatedIdentifier("$(APP_GROUP_IDENTIFIER)"))
-        XCTAssertNil(SharedSnapshotStore.url(appGroupIdentifier: "$(APP_GROUP_IDENTIFIER)"))
+        let developmentIdentifier = "group.com.hermes.lifeos.\(AppGroupConfiguration.releasePlaceholder)"
+#if DEBUG
+        XCTAssertEqual(AppGroupConfiguration.validatedIdentifier(developmentIdentifier), developmentIdentifier)
+#else
+        XCTAssertNil(AppGroupConfiguration.validatedIdentifier(developmentIdentifier))
+#endif
     }
 
     func testAppGroupStoreRejectsMalformedIdentifiersBeforeContainerLookup() {

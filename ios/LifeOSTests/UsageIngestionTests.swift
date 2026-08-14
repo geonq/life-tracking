@@ -511,6 +511,23 @@ final class UsageIngestionTests: XCTestCase {
             ).state,
             .configured
         )
+#if DEBUG
+        XCTAssertEqual(
+            AppGroupSettingsSnapshot.resolve(
+                rawIdentifier: "group.com.hermes.lifeos.\(AppGroupConfiguration.releasePlaceholder)",
+                sharedContainerAvailable: true
+            ).state,
+            .configured
+        )
+#else
+        XCTAssertEqual(
+            AppGroupSettingsSnapshot.resolve(
+                rawIdentifier: "group.com.hermes.lifeos.\(AppGroupConfiguration.releasePlaceholder)",
+                sharedContainerAvailable: true
+            ).state,
+            .unavailable
+        )
+#endif
         XCTAssertEqual(
             AppGroupSettingsSnapshot.resolve(
                 rawIdentifier: nil,

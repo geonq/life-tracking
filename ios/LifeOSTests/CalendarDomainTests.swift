@@ -49,6 +49,19 @@ private final class CalendarRevisionRecorder: @unchecked Sendable {
     }
 }
 
+private final class AppGroupTestFileManager: FileManager {
+    let groupURL: URL
+
+    init(groupURL: URL) {
+        self.groupURL = groupURL
+        super.init()
+    }
+
+    override func containerURL(forSecurityApplicationGroupIdentifier groupIdentifier: String) -> URL? {
+        groupURL
+    }
+}
+
 final class CalendarDomainTests: XCTestCase {
     private let base = Date(timeIntervalSince1970: 1_700_000_000)
 
@@ -717,5 +730,35 @@ final class CalendarDomainTests: XCTestCase {
         let baseURL = FileManager.default.temporaryDirectory.appendingPathComponent("LifeOSTest", isDirectory: true)
         XCTAssertEqual(CalendarStoreURL.localURL(baseDirectory: baseURL).path,
                        baseURL.appendingPathComponent("calendar.json").path)
+    }
+
+    @MainActor
+    func testDevelopmentAppGroupPublishesAndReadsTheSameCalendarStorePath() async throws {
+#if DEBUG
+        let groupURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: groupURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: groupURL) }
+
+        let identifier = "group.com.hermes.lifeos.\(AppGroupConfiguration.releasePlaceholder)"
+        let fileManager = AppGroupTestFileManager(groupURL: groupURL)
+        let appURL = try CalendarStoreURL.appGroupURL(identifier: identifier, fileManager: fileManager)
+        let widgetURL = try CalendarStoreURL.appGroupURL(identifier: identifier, fileManager: fileManager)
+        XCTAssertEqual(appURL, widgetURL)
+
+        let item = try CalendarItem(
+            title: "Shared",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: base
+        )
+        try await CalendarStore(url: appURL, fileManager: fileManager).save(CalendarSnapshot(items: [item]))
+        let widgetSnapshot = try await CalendarStore(url: widgetURL, fileManager: fileManager).load()
+        XCTAssertEqual(widgetSnapshot.items, [item])
+#else
+        let identifier = "group.com.hermes.lifeos.\(AppGroupConfiguration.releasePlaceholder)"
+        XCTAssertNil(AppGroupConfiguration.validatedIdentifier(identifier))
+#endif
     }
 }
