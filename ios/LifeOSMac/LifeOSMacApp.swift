@@ -71,7 +71,10 @@ struct LifeOSMacApp: App {
         }
 
         Settings {
-            SettingsView()
+            SettingsView(
+                usageCoordinator: usageCoordinator,
+                financeCoordinator: financeCoordinator
+            )
                 .frame(minWidth: 520, minHeight: 360)
                 .tint(LifeOSTokens.accent)
         }
@@ -293,7 +296,12 @@ struct LifeOSMacRootView: View {
             )
             .transition(reduceMotion ? .identity : .opacity)
         case .settings:
-            NavigationStack { SettingsView() }
+            NavigationStack {
+                SettingsView(
+                    usageCoordinator: usageCoordinator,
+                    financeCoordinator: financeCoordinator
+                )
+            }
                 .transition(reduceMotion ? .identity : .opacity)
         default:
             LifeOSModuleLandingView(

@@ -358,6 +358,211 @@ final class UsageIngestionTests: XCTestCase {
                                     quality: .observed, connector: .refreshDue)
         XCTAssertEqual(provenance.freshness(now: observedAt), .stale)
     }
+
+    func testSettingsProviderMappingKeepsObservedPartialStaleAndUnavailableDistinct() {
+        let now = Date.now
+        let observedProvenance = Provenance(
+            source: "https://evil.example/provider?bearer=must-not-render",
+            observedAt: now.addingTimeInterval(-30),
+            quality: .observed,
+            connector: .healthy
+        )
+        let unavailableWindowProvenance = Provenance(
+            source: "claude-no-observation",
+            observedAt: now,
+            quality: .unavailable,
+            connector: .unavailable
+        )
+        let observed = ProviderSnapshot(
+            provider: .codex,
+            accountLabel: "Codex",
+            windows: [
+                UsageWindow(
+                    id: "five_hour",
+                    label: "5-hour",
+                    limit: 1,
+                    used: 0.2,
+                    durationMinutes: 300,
+                    provenance: observedProvenance
+                )
+            ],
+            provenance: observedProvenance
+        )
+        let partialProvenance = Provenance(
+            source: "raw-error-body: https://evil.example/claude?token=must-not-render",
+            observedAt: now.addingTimeInterval(-30),
+            quality: .observed,
+            connector: .healthy
+        )
+        let partial = ProviderSnapshot(
+            provider: .claude,
+            accountLabel: "Claude",
+            windows: [
+                UsageWindow(
+                    id: "five_hour",
+                    label: "5-hour",
+                    limit: 1,
+                    used: 0.3,
+                    durationMinutes: 300,
+                    provenance: partialProvenance
+                ),
+                UsageWindow(
+                    id: "seven_day",
+                    label: "7-day",
+                    durationMinutes: 10_080,
+                    provenance: unavailableWindowProvenance
+                )
+            ],
+            provenance: partialProvenance
+        )
+        let staleProvenance = Provenance(
+            source: "secret-source://glm-cache",
+            observedAt: now.addingTimeInterval(-20 * 60),
+            quality: .observed,
+            connector: .refreshDue
+        )
+        let stale = ProviderSnapshot(
+            provider: .glm,
+            accountLabel: "GLM",
+            windows: [
+                UsageWindow(
+                    id: "five_hour",
+                    label: "5-hour",
+                    limit: 1,
+                    used: 0.4,
+                    durationMinutes: 300,
+                    provenance: staleProvenance
+                )
+            ],
+            provenance: staleProvenance
+        )
+        let settings = UsageSettingsSnapshot(
+            state: .observed,
+            providerSnapshots: [observed, partial, stale],
+            connectorStates: [
+                .codex: .healthy,
+                .claude: .healthy,
+                .glm: .refreshDue,
+                .deepseek: .reauthRequired
+            ],
+            lastUpdated: now,
+            errorMessage: nil,
+            now: now
+        )
+
+        XCTAssertEqual(settings.providers.first { $0.provider == .codex }?.state, .observed)
+        XCTAssertEqual(
+            settings.providers.first { $0.provider == .codex }?.source,
+            "Windows Hermes · Codex observation"
+        )
+        XCTAssertEqual(
+            settings.providers.first { $0.provider == .claude }?.source,
+            "Windows Hermes · Claude observation"
+        )
+        XCTAssertEqual(settings.providers.first { $0.provider == .claude }?.state, .partial)
+        XCTAssertEqual(settings.providers.first { $0.provider == .glm }?.state, .stale)
+        XCTAssertEqual(settings.providers.first { $0.provider == .deepseek }?.state, .unavailable)
+        XCTAssertTrue(settings.providers.allSatisfy { !$0.source.contains("evil.example") })
+        XCTAssertTrue(settings.providers.allSatisfy { !$0.source.contains("token") })
+        XCTAssertEqual(settings.readiness, .stale)
+    }
+
+    func testSettingsReadinessNeverRendersHostOrBearerAndSeparatesLocalGates() {
+        let approvedHosts: Set<String> = ["lifeos-server.example.ts.net"]
+        let missingBearer = SyncSettingsReadiness.resolve(
+            serverURL: "https://lifeos-server.example.ts.net",
+            approvedHosts: approvedHosts,
+            bearerAvailable: false
+        )
+        XCTAssertEqual(missingBearer.urlState, .valid)
+        XCTAssertFalse(missingBearer.canAttemptConnection)
+        XCTAssertEqual(missingBearer.title, "Keychain bearer missing")
+
+        let invalidURL = SyncSettingsReadiness.resolve(
+            serverURL: "https://private-secret.invalid/path?token=must-not-render",
+            approvedHosts: approvedHosts,
+            bearerAvailable: true
+        )
+        XCTAssertEqual(invalidURL.urlState, .invalid)
+        XCTAssertFalse(invalidURL.canAttemptConnection)
+        XCTAssertFalse(String(describing: invalidURL).contains("private-secret.invalid"))
+        XCTAssertFalse(String(describing: invalidURL).contains("must-not-render"))
+
+        let noSignedHost = SyncSettingsReadiness.resolve(
+            serverURL: "",
+            approvedHosts: [],
+            bearerAvailable: false
+        )
+        XCTAssertEqual(noSignedHost.title, "Approved signed host missing")
+    }
+
+    func testSettingsPrivacyMappingDistinguishesAppGroupGates() {
+        XCTAssertEqual(
+            AppGroupSettingsSnapshot.resolve(
+                rawIdentifier: "$(APP_GROUP_IDENTIFIER)",
+                sharedContainerAvailable: false
+            ).state,
+            .placeholder
+        )
+        XCTAssertEqual(
+            AppGroupSettingsSnapshot.resolve(
+                rawIdentifier: "group.com.hermes.lifeos.team",
+                sharedContainerAvailable: true
+            ).state,
+            .configured
+        )
+        XCTAssertEqual(
+            AppGroupSettingsSnapshot.resolve(
+                rawIdentifier: nil,
+                sharedContainerAvailable: false
+            ).state,
+            .unavailable
+        )
+    }
+
+    func testSettingsFinanceMappingUsesSummaryProvenanceWithoutBankInference() throws {
+        let now = Date.now
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let timestamp = formatter.string(from: now.addingTimeInterval(-30))
+        let metric: [String: Any] = [
+            "availability": "observed",
+            "amountCents": 100_000,
+            "provenance": [
+                "source": "raw-error-body: https://evil.example/finance?token=must-not-render",
+                "observedAt": timestamp,
+                "freshness": "fresh",
+                "quality": "observed",
+                "connectorState": "healthy"
+            ]
+        ]
+        let payload: [String: Any] = [
+            "generatedAt": formatter.string(from: now),
+            "currency": "EUR",
+            "monthlyIncome": metric,
+            "fixedCosts": metric,
+            "discretionaryBuffer": metric,
+            "spent": metric,
+            "savingsGoal": metric,
+            "saved": metric
+        ]
+        let summary = try FinanceSummary.decode(
+            JSONSerialization.data(withJSONObject: payload),
+            now: now
+        )
+        let settings = FinanceSettingsSnapshot(
+            state: .observed,
+            summary: summary,
+            now: now
+        )
+
+        XCTAssertEqual(settings.readiness, .observed)
+        XCTAssertEqual(settings.observedSources, ["Windows finance gateway observation"])
+        XCTAssertNil(settings.transactionsAvailability)
+        XCTAssertTrue(settings.transactionDetail.contains("does not expose"))
+        XCTAssertFalse(settings.summaryDetail.contains("evil.example"))
+        XCTAssertFalse(settings.summaryDetail.contains("must-not-render"))
+    }
 }
 
 private actor RefreshLock {

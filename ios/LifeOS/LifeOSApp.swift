@@ -338,12 +338,16 @@ struct LifeOSApp: App {
         case .settings:
 #if os(iOS)
             return AnyView(HealthKitSettingsDestination(
+                usageCoordinator: usageCoordinator,
+                financeCoordinator: financeCoordinator,
                 healthKitController: healthKitController,
                 healthKitFitnessRepository: healthKitFitnessRepository,
                 requestHealthReadAccess: usesVisualFixtures ? nil : requestHealthReadAccess
             ))
 #else
             return AnyView(SettingsView(
+                usageCoordinator: usageCoordinator,
+                financeCoordinator: financeCoordinator,
                 healthReadAccess: healthReadAccessSettings,
                 requestHealthReadAccess: usesVisualFixtures ? nil : requestHealthReadAccess,
                 retainedHealthData: retainedHealthDataSettings
@@ -377,15 +381,21 @@ struct LifeOSApp: App {
 /// a destination opened during that window from retaining the initial
 /// `.unavailable` value after reconciliation has published durable state.
 private struct HealthKitSettingsDestination: View {
+    @ObservedObject private var usageCoordinator: UsageCoordinator
+    @ObservedObject private var financeCoordinator: FinanceCoordinator
     @ObservedObject private var healthKitController: HealthKitIntegrationController
     @ObservedObject private var healthKitFitnessRepository: HealthKitFitnessRepository
     private let requestHealthReadAccess: (@MainActor () async -> Void)?
 
     init(
+        usageCoordinator: UsageCoordinator,
+        financeCoordinator: FinanceCoordinator,
         healthKitController: HealthKitIntegrationController,
         healthKitFitnessRepository: HealthKitFitnessRepository,
         requestHealthReadAccess: (@MainActor () async -> Void)?
     ) {
+        _usageCoordinator = ObservedObject(wrappedValue: usageCoordinator)
+        _financeCoordinator = ObservedObject(wrappedValue: financeCoordinator)
         _healthKitController = ObservedObject(wrappedValue: healthKitController)
         _healthKitFitnessRepository = ObservedObject(wrappedValue: healthKitFitnessRepository)
         self.requestHealthReadAccess = requestHealthReadAccess
@@ -393,6 +403,8 @@ private struct HealthKitSettingsDestination: View {
 
     var body: some View {
         SettingsView(
+            usageCoordinator: usageCoordinator,
+            financeCoordinator: financeCoordinator,
             healthReadAccess: HealthReadAccessSettings.from(snapshot: healthKitController.snapshot),
             requestHealthReadAccess: requestHealthReadAccess,
             retainedHealthData: retainedHealthData,

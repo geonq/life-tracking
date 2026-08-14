@@ -181,10 +181,426 @@ extension HealthReadAccessSettings {
 }
 #endif
 
+private let settingsFinanceSourceLabel = "Windows finance gateway observation"
+private let settingsFinanceTransactionSourceLabel = "Windows finance transaction observation"
+
+private func settingsProviderSourceLabel(_ provider: Provider) -> String {
+    "Windows Hermes · \(provider.displayName) observation"
+}
+
+enum SettingsProviderConnectionState: String, Equatable, Sendable {
+    case observed
+    case partial
+    case stale
+    case unavailable
+
+    var title: String {
+        switch self {
+        case .observed: "Observed"
+        case .partial: "Partial"
+        case .stale: "Stale"
+        case .unavailable: "Unavailable"
+        }
+    }
+}
+
+struct ProviderConnectionSettings: Identifiable, Equatable, Sendable {
+    let provider: Provider
+    let state: SettingsProviderConnectionState
+    let freshness: Freshness
+    let connector: ConnectorState
+    let source: String
+    let observedAt: Date?
+
+    var id: String { provider.rawValue }
+
+    static func resolve(
+        provider: Provider,
+        snapshot: ProviderSnapshot?,
+        connector: ConnectorState?,
+        now: Date,
+        staleAfter: TimeInterval
+    ) -> Self {
+        guard let snapshot else {
+            return Self(
+                provider: provider,
+                state: .unavailable,
+                freshness: .unavailable,
+                connector: connector ?? .unavailable,
+                source: "No validated provider observation",
+                observedAt: nil
+            )
+        }
+
+        let resolvedConnector = connector ?? snapshot.provenance.connector
+        let hasObservedProvider = snapshot.provenance.quality == .observed
+        let freshness = hasObservedProvider
+            ? snapshot.provenance.freshness(now: now, staleAfter: staleAfter)
+            : .unavailable
+        let hasIncompleteWindow = snapshot.windows.isEmpty || snapshot.windows.contains { window in
+            guard let provenance = window.provenance else { return true }
+            return provenance.quality != .observed || window.usedPercent == nil
+        }
+
+        let resolvedState: SettingsProviderConnectionState
+        if !hasObservedProvider {
+            resolvedState = .unavailable
+        } else if freshness == .stale || freshness == .unavailable
+                    || ![.healthy, .refreshDue].contains(resolvedConnector) {
+            // A retained observation with a broken/revoked connector is stale,
+            // not a new connected observation. It remains useful context without
+            // implying that a provider can currently be queried.
+            resolvedState = .stale
+        } else if hasIncompleteWindow {
+            resolvedState = .partial
+        } else {
+            resolvedState = .observed
+        }
+
+        return Self(
+            provider: provider,
+            state: resolvedState,
+            freshness: freshness,
+            connector: resolvedConnector,
+            source: settingsProviderSourceLabel(provider),
+            observedAt: hasObservedProvider ? snapshot.provenance.observedAt : nil
+        )
+    }
+
+    var sourceDetail: String {
+        source
+    }
+}
+
+enum UsageSettingsHubReadiness: String, Equatable, Sendable {
+    case observed
+    case partial
+    case stale
+    case loading
+    case unavailable
+
+    var title: String {
+        switch self {
+        case .observed: "Observed"
+        case .partial: "Partial observations"
+        case .stale: "Stale observations"
+        case .loading: "Refreshing"
+        case .unavailable: "Unavailable"
+        }
+    }
+}
+
+struct UsageSettingsSnapshot: Equatable, Sendable {
+    let state: UsageLoadState
+    let providers: [ProviderConnectionSettings]
+    let lastUpdated: Date?
+    let errorMessage: String?
+
+    init(
+        state: UsageLoadState,
+        providerSnapshots: [ProviderSnapshot],
+        connectorStates: [Provider: ConnectorState],
+        lastUpdated: Date?,
+        errorMessage: String?,
+        now: Date = .now,
+        staleAfter: TimeInterval = 15 * 60
+    ) {
+        let snapshots = Dictionary(uniqueKeysWithValues: providerSnapshots.map { ($0.provider, $0) })
+        providers = Provider.allCases.map { provider in
+            ProviderConnectionSettings.resolve(
+                provider: provider,
+                snapshot: snapshots[provider],
+                connector: connectorStates[provider],
+                now: now,
+                staleAfter: staleAfter
+            )
+        }
+        self.state = state
+        self.lastUpdated = lastUpdated
+        self.errorMessage = errorMessage
+    }
+
+    static let unavailable = UsageSettingsSnapshot(
+        state: .unavailable,
+        providerSnapshots: [],
+        connectorStates: [:],
+        lastUpdated: nil,
+        errorMessage: nil
+    )
+
+    var readiness: UsageSettingsHubReadiness {
+        if state == .loading { return .loading }
+        if state == .stale || providers.contains(where: { $0.state == .stale }) { return .stale }
+        if providers.contains(where: { $0.state == .partial }) { return .partial }
+        if providers.contains(where: { $0.state == .observed }) { return .observed }
+        return .unavailable
+    }
+
+    var isRefreshing: Bool { state == .loading }
+
+    var readinessDetail: String {
+        let observedCount = providers.filter { $0.state != .unavailable }.count
+        guard observedCount > 0 else {
+            return "No validated provider observations are available from the configured usage source."
+        }
+        return "\(observedCount) of \(providers.count) providers have retained observations; each row keeps its own freshness and source."
+    }
+}
+
+enum FinanceSettingsReadiness: String, Equatable, Sendable {
+    case observed
+    case stale
+    case loading
+    case demo
+    case unavailable
+
+    var title: String {
+        switch self {
+        case .observed: "Observed"
+        case .stale: "Stale"
+        case .loading: "Refreshing"
+        case .demo: "Demo only · not live"
+        case .unavailable: "Unavailable"
+        }
+    }
+}
+
+struct FinanceSettingsSnapshot: Equatable, Sendable {
+    let state: FinanceLoadState
+    let readiness: FinanceSettingsReadiness
+    let generatedAt: Date?
+    let observedSources: [String]
+    let freshness: FinancePayloadFreshness
+    let transactionsAvailability: FinanceMetricAvailability?
+    let transactionSource: String?
+
+    init(
+        state: FinanceLoadState,
+        summary: FinanceSummary?,
+        now: Date = .now,
+        staleAfter: TimeInterval = 15 * 60
+    ) {
+        self.state = state
+        generatedAt = summary?.generatedAt
+
+        var provenances: [FinancePayloadProvenance] = []
+        var sourceLabels: [String] = []
+        if let summary {
+            let metrics = [
+                summary.monthlyIncome,
+                summary.fixedCosts,
+                summary.discretionaryBuffer,
+                summary.spent,
+                summary.savingsGoal,
+                summary.saved
+            ]
+            let observedMetrics = metrics.compactMap {
+                $0.availability == .observed ? $0.provenance : nil
+            }
+            provenances.append(contentsOf: observedMetrics)
+            if !observedMetrics.isEmpty {
+                sourceLabels.append(settingsFinanceSourceLabel)
+            }
+            if let transactions = summary.transactions,
+               transactions.availability == .observed {
+                provenances.append(transactions.provenance)
+                sourceLabels.append(settingsFinanceTransactionSourceLabel)
+            }
+        }
+
+        observedSources = Array(Set(sourceLabels)).sorted()
+        transactionsAvailability = summary?.transactions?.availability
+        transactionSource = summary?.transactions?.availability == .observed
+            ? settingsFinanceTransactionSourceLabel
+            : nil
+        if provenances.contains(where: { $0.freshness == .stale }) {
+            freshness = .stale
+        } else if provenances.contains(where: {
+            $0.freshness == .fresh
+                && now.timeIntervalSince($0.observedAt) < staleAfter
+        }) {
+            freshness = .fresh
+        } else {
+            freshness = .unknown
+        }
+
+        switch state {
+        case .demo: readiness = .demo
+        case .loading: readiness = .loading
+        case .stale: readiness = .stale
+        case .observed: readiness = .observed
+        case .unavailable: readiness = .unavailable
+        }
+    }
+
+    static let unavailable = FinanceSettingsSnapshot(state: .unavailable, summary: nil)
+
+    var isRefreshing: Bool { state == .loading }
+
+    var summaryDetail: String {
+        switch readiness {
+        case .observed:
+            let source = observedSources.isEmpty ? "Finance source" : observedSources.joined(separator: " · ")
+            let freshnessDetail = freshness == .fresh ? "Fresh" : "Source freshness needs review"
+            return "\(source) · \(freshnessDetail)"
+        case .stale:
+            let source = observedSources.isEmpty ? "Last finance source" : observedSources.joined(separator: " · ")
+            return "\(source) · refresh required before treating this as current"
+        case .loading:
+            return "Fetching the finance summary only; no account settings are changed."
+        case .demo:
+            return "Demo fixture only; no bank observation or account connection is implied."
+        case .unavailable:
+            return "No validated finance observation is available from the configured source."
+        }
+    }
+
+    var transactionTitle: String {
+        switch transactionsAvailability {
+        case .observed: "Observed"
+        case .unavailable: "Unavailable"
+        case nil: "Not exposed"
+        }
+    }
+
+    var transactionDetail: String {
+        switch transactionsAvailability {
+        case .observed:
+            let source = transactionSource ?? "Finance source"
+            return "\(source) · transaction observations are source-backed"
+        case .unavailable:
+            return "The finance API reported no transaction observation; this is not an empty ledger."
+        case nil:
+            return "The current finance summary API does not expose transaction observations."
+        }
+    }
+}
+
+enum SyncSettingsURLState: String, Equatable, Sendable {
+    case missing
+    case valid
+    case invalid
+
+    var title: String {
+        switch self {
+        case .missing: "Missing"
+        case .valid: "Valid approved URL"
+        case .invalid: "Rejected"
+        }
+    }
+}
+
+struct SyncSettingsReadiness: Equatable, Sendable {
+    let approvedHostConfigured: Bool
+    let urlState: SyncSettingsURLState
+    let bearerAvailable: Bool
+
+    static func resolve(
+        serverURL: String,
+        approvedHosts: Set<String>,
+        bearerAvailable: Bool
+    ) -> Self {
+        let trimmed = serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let urlState: SyncSettingsURLState
+        if trimmed.isEmpty {
+            urlState = .missing
+        } else if TailscaleSyncClient.validatedServerURL(trimmed, approvedHosts: approvedHosts) != nil {
+            urlState = .valid
+        } else {
+            urlState = .invalid
+        }
+        return Self(
+            approvedHostConfigured: !approvedHosts.isEmpty,
+            urlState: urlState,
+            bearerAvailable: bearerAvailable
+        )
+    }
+
+    var canAttemptConnection: Bool {
+        approvedHostConfigured && urlState == .valid && bearerAvailable
+    }
+
+    var title: String {
+        if !approvedHostConfigured { return "Approved signed host missing" }
+        switch urlState {
+        case .missing: return "Server URL missing"
+        case .invalid: return "Server URL rejected"
+        case .valid:
+            return bearerAvailable ? "Ready for read-only preflight" : "Keychain bearer missing"
+        }
+    }
+}
+
+enum AppGroupSettingsState: String, Equatable, Sendable {
+    case configured
+    case placeholder
+    case unavailable
+
+    var title: String {
+        switch self {
+        case .configured: "Configured"
+        case .placeholder: "Placeholder"
+        case .unavailable: "Unavailable"
+        }
+    }
+}
+
+struct AppGroupSettingsSnapshot: Equatable, Sendable {
+    let state: AppGroupSettingsState
+
+    static func resolve(rawIdentifier: String?, sharedContainerAvailable: Bool) -> Self {
+        guard let rawIdentifier, !rawIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return Self(state: .unavailable)
+        }
+        if rawIdentifier.contains("$(") || rawIdentifier.contains(AppGroupConfiguration.placeholder) {
+            return Self(state: .placeholder)
+        }
+        guard AppGroupConfiguration.validatedIdentifier(rawIdentifier) != nil,
+              sharedContainerAvailable else {
+            return Self(state: .unavailable)
+        }
+        return Self(state: .configured)
+    }
+
+    static func current(
+        bundle: Bundle = .main,
+        fileManager: FileManager = .default
+    ) -> Self {
+        let raw = bundle.object(forInfoDictionaryKey: AppGroupConfiguration.infoPlistKey) as? String
+        let identifier = AppGroupConfiguration.validatedIdentifier(raw)
+        let sharedContainerAvailable = identifier.map {
+            fileManager.containerURL(forSecurityApplicationGroupIdentifier: $0) != nil
+        } ?? false
+        return resolve(rawIdentifier: raw, sharedContainerAvailable: sharedContainerAvailable)
+    }
+
+    var detail: String {
+        switch state {
+        case .configured:
+            return "The team-configured shared container is available to the app/widget pair."
+        case .placeholder:
+            return "The bundle still carries the placeholder App Group; shared widget storage is not provisioned."
+        case .unavailable:
+            return "No usable shared App Group container is available in this build."
+        }
+    }
+
+    var widgetGateDetail: String {
+        switch state {
+        case .configured:
+            return "Calendar widget shared storage is configured; this does not certify calendar sync or event provenance."
+        case .placeholder, .unavailable:
+            return "Calendar widget shared storage is blocked until a team-owned App Group is configured and provisioned."
+        }
+    }
+}
+
 /// Settings is for infrequent setup and trust decisions. Product data views
 /// stay focused; connections, credentials status, and device permissions live
 /// here instead of becoming extra primary destinations.
 struct SettingsView: View {
+    @ObservedObject private var usageCoordinator: UsageCoordinator
+    @ObservedObject private var financeCoordinator: FinanceCoordinator
     private let healthReadAccess: HealthReadAccessSettings
     private let requestHealthReadAccess: (@MainActor () async -> Void)?
     private let retainedHealthData: RetainedHealthDataSettings
@@ -193,10 +609,27 @@ struct SettingsView: View {
     private let healthKitFitnessRepository: HealthKitFitnessRepository
 #endif
 
+    private var usageSettings: UsageSettingsSnapshot {
+        UsageSettingsSnapshot(
+            state: usageCoordinator.state,
+            providerSnapshots: usageCoordinator.providers,
+            connectorStates: usageCoordinator.connectorStates,
+            lastUpdated: usageCoordinator.lastUpdated,
+            errorMessage: usageCoordinator.errorMessage
+        )
+    }
+
+    private var financeSettings: FinanceSettingsSnapshot {
+        FinanceSettingsSnapshot(
+            state: financeCoordinator.state,
+            summary: financeCoordinator.summary
+        )
+    }
+
     private var categories: [SettingsCategory] {
         [
-            .init(id: "providers", title: "AI providers", subtitle: "Codex, Claude, GLM, DeepSeek, Google AI Studio", readiness: .serverGatePending, icon: .assistant),
-            .init(id: "finance", title: "Bank connections", subtitle: "Sparkasse, Revolut Personal / Business, Trade Republic, and consent", readiness: .consentRequired, icon: .bankConnections),
+            .init(id: "providers", title: "AI providers", subtitle: "Codex, Claude, GLM, DeepSeek, Google AI Studio", readiness: .providers(usageSettings.readiness), icon: .assistant),
+            .init(id: "finance", title: "Bank connections", subtitle: "Sparkasse, Revolut Personal / Business, Trade Republic, and consent", readiness: .finance(financeSettings.readiness), icon: .bankConnections),
             .init(id: "health", title: "Health & devices", subtitle: "Helio → Zepp → Apple Health / HealthKit", readiness: .healthRead(healthReadAccess.state), icon: .health),
             .init(id: "sync", title: "Sync & storage", subtitle: "Windows authority, server URL, and local data", readiness: .identityPending, icon: .refresh),
             .init(id: "privacy", title: "Privacy & security", subtitle: "Local safeguards, signing, and unresolved server gates", readiness: .localSafeguards, icon: .security)
@@ -205,12 +638,16 @@ struct SettingsView: View {
 
     #if os(iOS)
     init(
+        usageCoordinator: UsageCoordinator,
+        financeCoordinator: FinanceCoordinator,
         healthReadAccess: HealthReadAccessSettings,
         requestHealthReadAccess: (@MainActor () async -> Void)?,
         retainedHealthData: RetainedHealthDataSettings,
         healthKitController: HealthKitIntegrationController,
         healthKitFitnessRepository: HealthKitFitnessRepository
     ) {
+        _usageCoordinator = ObservedObject(wrappedValue: usageCoordinator)
+        _financeCoordinator = ObservedObject(wrappedValue: financeCoordinator)
         self.healthReadAccess = healthReadAccess
         self.requestHealthReadAccess = requestHealthReadAccess
         self.retainedHealthData = retainedHealthData
@@ -219,10 +656,14 @@ struct SettingsView: View {
     }
     #else
     init(
+        usageCoordinator: UsageCoordinator,
+        financeCoordinator: FinanceCoordinator,
         healthReadAccess: HealthReadAccessSettings = .platformDefault,
         requestHealthReadAccess: (@MainActor () async -> Void)? = nil,
         retainedHealthData: RetainedHealthDataSettings = .unavailable
     ) {
+        _usageCoordinator = ObservedObject(wrappedValue: usageCoordinator)
+        _financeCoordinator = ObservedObject(wrappedValue: financeCoordinator)
         self.healthReadAccess = healthReadAccess
         self.requestHealthReadAccess = requestHealthReadAccess
         self.retainedHealthData = retainedHealthData
@@ -244,7 +685,10 @@ struct SettingsView: View {
 
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 390, maximum: 600), spacing: 12)], spacing: 12) {
                         NavigationLink {
-                            ProviderConnectionsSettingsView()
+                            ProviderConnectionsSettingsView(
+                                snapshot: usageSettings,
+                                refreshAction: { await usageCoordinator.refresh() }
+                            )
                         } label: {
                             SettingsHubCard(category: categories[0])
                         }
@@ -252,7 +696,10 @@ struct SettingsView: View {
                         .accessibilityIdentifier("settings-category-providers")
 
                         NavigationLink {
-                            FinanceConnectionsSettingsView()
+                            FinanceConnectionsSettingsView(
+                                snapshot: financeSettings,
+                                refreshAction: { await financeCoordinator.refresh() }
+                            )
                         } label: {
                             SettingsHubCard(category: categories[1])
                         }
@@ -321,6 +768,8 @@ private struct SettingsCategory: Identifiable {
 }
 
 private enum SettingsReadiness: Equatable {
+    case providers(UsageSettingsHubReadiness)
+    case finance(FinanceSettingsReadiness)
     case serverGatePending
     case consentRequired
     case healthRead(HealthReadAccessSettings.State)
@@ -329,6 +778,8 @@ private enum SettingsReadiness: Equatable {
 
     var title: String {
         switch self {
+        case .providers(let readiness): readiness.title
+        case .finance(let readiness): readiness.title
         case .serverGatePending: "Server gate pending"
         case .consentRequired: "Consent required"
         case .healthRead(let state):
@@ -348,6 +799,15 @@ private enum SettingsReadiness: Equatable {
 
     var color: Color {
         switch self {
+        case .providers(.observed), .finance(.observed):
+            LifeOSTokens.success
+        case .providers(.partial):
+            LifeOSTokens.info
+        case .providers(.loading), .providers(.stale),
+             .providers(.unavailable),
+             .finance(.loading), .finance(.stale),
+             .finance(.demo), .finance(.unavailable):
+            LifeOSTokens.warning
         case .healthRead(.readIndeterminate):
             LifeOSTokens.info
         case .localSafeguards, .serverGatePending, .consentRequired, .healthRead,
@@ -432,7 +892,16 @@ private struct SettingsHubCard: View {
 }
 
 struct ProviderConnectionsSettingsView: View {
-    private let providers = ["Codex", "Claude", "GLM", "DeepSeek", "Google AI Studio"]
+    let snapshot: UsageSettingsSnapshot
+    let refreshAction: (() async -> Void)?
+
+    init(
+        snapshot: UsageSettingsSnapshot = .unavailable,
+        refreshAction: (() async -> Void)? = nil
+    ) {
+        self.snapshot = snapshot
+        self.refreshAction = refreshAction
+    }
 
     var body: some View {
         ScrollView {
@@ -444,32 +913,64 @@ struct ProviderConnectionsSettingsView: View {
 
                 SettingsSection(title: "Provider status", icon: .assistant) {
                     VStack(spacing: 0) {
-                        ForEach(providers, id: \.self) { provider in
+                        ForEach(snapshot.providers) { provider in
                             SettingsStatusRow(
-                                title: provider,
-                                detail: "No client key entry · Windows source pending",
-                                status: "Unavailable",
+                                title: provider.provider.displayName,
+                                detail: providerDetail(provider),
+                                status: provider.state.title,
                                 icon: .usage,
-                                statusColor: LifeOSTokens.warning
+                                statusColor: providerColor(provider.state)
                             )
-                            if provider != providers.last {
+                            if provider.id != snapshot.providers.last?.id {
                                 Divider().padding(.leading, 38)
                             }
                         }
                     }
                 }
 
-                SettingsSection(title: "Usage boundary", icon: .usage) {
-                    SettingsStatusRow(
-                        title: "Home → Usage",
-                        detail: "The single destination for provider activity and projections",
-                        status: "When synced",
-                        icon: .overview,
-                        statusColor: LifeOSTokens.tertiaryText
-                    )
+                SettingsSection(title: "Usage source", icon: .usage) {
+                    VStack(spacing: 0) {
+                        SettingsStatusRow(
+                            title: "Usage hub",
+                            detail: snapshot.readinessDetail,
+                            status: snapshot.readiness.title,
+                            icon: .overview,
+                            statusColor: hubColor
+                        )
+                        if let lastUpdated = snapshot.lastUpdated {
+                            Divider().padding(.leading, 38)
+                            SettingsStatusRow(
+                                title: "Latest source update",
+                                detail: "Coordinator timestamp; provider rows retain their own observation timestamps.",
+                                status: lastUpdated.formatted(date: .abbreviated, time: .shortened),
+                                icon: .refresh,
+                                statusColor: LifeOSTokens.tertiaryText
+                            )
+                        }
+                    }
                 }
 
-                TruthfulSetupNote(text: "Provider setup is unavailable until the secure Windows server and required security gates pass. There is intentionally no paste, reveal, or copy path for raw keys.")
+                if let refreshAction {
+                    Button {
+                        Task { await refreshAction() }
+                    } label: {
+                        HStack(spacing: 8) {
+                            if snapshot.isRefreshing {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                LifeOSIcon(.refresh).frame(width: 15, height: 15)
+                            }
+                            Text(snapshot.isRefreshing ? "Refreshing provider usage…" : "Refresh provider usage")
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(LifeOSTokens.accent)
+                    .disabled(snapshot.isRefreshing)
+                    .accessibilityIdentifier("settings-provider-refresh")
+                }
+
+                TruthfulSetupNote(text: "Provider rows reflect only UsageCoordinator observations and connector state. Provider keys remain on the Windows Hermes server; there is no paste, reveal, or copy path for raw keys.")
             }
             .frame(maxWidth: 760, alignment: .leading)
             .padding(LifeOSTokens.pagePadding)
@@ -477,10 +978,78 @@ struct ProviderConnectionsSettingsView: View {
         .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
         .navigationTitle("AI & Providers")
     }
+
+    private func providerDetail(_ provider: ProviderConnectionSettings) -> String {
+        let source = "Source: \(provider.sourceDetail)"
+        let freshness = "Freshness: \(freshnessTitle(provider.freshness))"
+        let connector = "Connector: \(connectorTitle(provider.connector))"
+        switch provider.state {
+        case .observed:
+            return "\(source) · \(freshness) · \(connector)"
+        case .partial:
+            return "\(source) · \(freshness) · some windows are unavailable"
+        case .stale:
+            return "\(source) · last observed \(observedAtLabel(provider.observedAt)) · \(connector)"
+        case .unavailable:
+            return "\(source) · no current observation"
+        }
+    }
+
+    private func observedAtLabel(_ date: Date?) -> String {
+        date?.formatted(date: .abbreviated, time: .shortened) ?? "time unavailable"
+    }
+
+    private func freshnessTitle(_ freshness: Freshness) -> String {
+        switch freshness {
+        case .fresh: "Fresh"
+        case .aging: "Aging"
+        case .stale: "Stale"
+        case .unavailable: "Unavailable"
+        }
+    }
+
+    private func connectorTitle(_ connector: ConnectorState) -> String {
+        switch connector {
+        case .healthy: "Healthy"
+        case .refreshDue: "Refresh due"
+        case .reauthRequired: "Re-auth required"
+        case .revoked: "Revoked"
+        case .rateLimited: "Rate limited"
+        case .unavailable: "Unavailable"
+        case .disabled: "Disabled"
+        case .error: "Error"
+        }
+    }
+
+    private func providerColor(_ state: SettingsProviderConnectionState) -> Color {
+        switch state {
+        case .observed: LifeOSTokens.success
+        case .partial: LifeOSTokens.info
+        case .stale, .unavailable: LifeOSTokens.warning
+        }
+    }
+
+    private var hubColor: Color {
+        switch snapshot.readiness {
+        case .observed: LifeOSTokens.success
+        case .partial: LifeOSTokens.info
+        case .loading, .stale, .unavailable: LifeOSTokens.warning
+        }
+    }
 }
 
 private struct FinanceConnectionsSettingsView: View {
-    private let connections = ["Sparkasse", "Revolut Personal", "Revolut Business", "Trade Republic"]
+    let snapshot: FinanceSettingsSnapshot
+    let refreshAction: (() async -> Void)?
+    private let catalog = FinanceConnectorCatalog.defaults
+
+    init(
+        snapshot: FinanceSettingsSnapshot = .unavailable,
+        refreshAction: (() async -> Void)? = nil
+    ) {
+        self.snapshot = snapshot
+        self.refreshAction = refreshAction
+    }
 
     var body: some View {
         ScrollView {
@@ -490,30 +1059,120 @@ private struct FinanceConnectionsSettingsView: View {
                     message: "Connectors are disabled by default. Explicit consent and the reviewed Windows gateway are required before account observations can appear."
                 )
 
+                SettingsSection(title: "Finance source", icon: .finance) {
+                    VStack(spacing: 0) {
+                            SettingsStatusRow(
+                                title: "Finance summary",
+                                detail: snapshot.summaryDetail,
+                                status: snapshot.readiness.title,
+                                icon: .finance,
+                                statusColor: summaryColor
+                            )
+                            Divider().padding(.leading, 38)
+                            SettingsStatusRow(
+                                title: "Transaction observations",
+                                detail: snapshot.transactionDetail,
+                                status: snapshot.transactionTitle,
+                                icon: .documents,
+                                statusColor: snapshot.transactionsAvailability == .observed
+                                    ? LifeOSTokens.success
+                                    : LifeOSTokens.warning
+                            )
+                    }
+                }
+
+                if let refreshAction {
+                    Button {
+                        Task { await refreshAction() }
+                    } label: {
+                        HStack(spacing: 8) {
+                            if snapshot.isRefreshing {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                LifeOSIcon(.refresh).frame(width: 15, height: 15)
+                            }
+                            Text(snapshot.isRefreshing ? "Refreshing finance summary…" : "Refresh finance summary")
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(LifeOSTokens.accent)
+                    .disabled(snapshot.isRefreshing)
+                    .accessibilityIdentifier("settings-finance-refresh")
+                }
+
                 SettingsSection(title: "Connection catalog", icon: .bankConnections) {
                     VStack(spacing: 0) {
-                        ForEach(connections, id: \.self) { connection in
+                        ForEach(catalog) { descriptor in
                             SettingsStatusRow(
-                                title: connection,
-                                detail: "Consent + reviewed Windows connector required",
-                                status: "Unavailable",
+                                title: descriptor.displayName,
+                                detail: "\(accessMethodTitle(descriptor.accessMethod)) · \(descriptor.recommendation)",
+                                status: gateTitle(descriptor.risk),
                                 icon: .finance,
                                 statusColor: LifeOSTokens.warning
                             )
-                            if connection != connections.last {
+                            if descriptor.id != catalog.last?.id {
                                 Divider().padding(.leading, 38)
                             }
                         }
                     }
                 }
 
-                TruthfulSetupNote(text: "Secrets stay on the Windows server; LifeOS does not request, enter, or store bank credentials on this device. No bank transaction data is fabricated while connectors are unavailable.")
+                NavigationLink {
+                    SyncStorageSettingsView()
+                } label: {
+                    HStack(spacing: 8) {
+                        LifeOSIcon(.security).frame(width: 16, height: 16)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Open secure Sync setup")
+                                .font(LifeOSFont.inter(13, weight: .semiBold))
+                            Text("Review the signed host, URL validation, and read-only Keychain authorization gate.")
+                                .font(LifeOSFont.inter(12))
+                                .foregroundStyle(LifeOSTokens.tertiaryText)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: 8)
+                        LifeOSIcon(.chevronRight).frame(width: 14, height: 14)
+                    }
+                    .foregroundStyle(.primary)
+                    .padding(14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(LifeOSTokens.surface, in: LifeOSTokens.cardShape)
+                    .overlay(LifeOSTokens.cardShape.stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("settings-finance-open-sync")
+
+                TruthfulSetupNote(text: "The catalog names the exact external gate; it does not claim that a bank is connected. Secrets and consent flows remain outside this client, and no bank transaction data is fabricated.")
             }
             .frame(maxWidth: 760, alignment: .leading)
             .padding(LifeOSTokens.pagePadding)
         }
         .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
         .navigationTitle("Bank & Finance")
+    }
+
+    private var summaryColor: Color {
+        switch snapshot.readiness {
+        case .observed: LifeOSTokens.success
+        case .loading, .stale, .demo, .unavailable: LifeOSTokens.warning
+        }
+    }
+
+    private func accessMethodTitle(_ method: FinanceAccessMethod) -> String {
+        switch method {
+        case .officialOAuth: "Official OAuth"
+        case .regulatedOpenBanking: "Regulated open banking"
+        case .manualImport: "Manual import"
+        }
+    }
+
+    private func gateTitle(_ risk: FinanceConnectorRisk) -> String {
+        switch risk {
+        case .consentRequired: "External consent required"
+        case .accountEligibilityRequired: "Eligibility + OAuth required"
+        case .manualImportOnly: "Manual import only"
+        }
     }
 }
 
@@ -839,11 +1498,18 @@ private struct SyncStorageSettingsView: View {
     private let syncClient = TailscaleSyncClient()
     @AppStorage(TailscaleSyncClient.serverURLDefaultsKey) private var syncServerURL = ""
     @AppStorage("LifeOS.Sync.LastSuccess") private var lastSyncTimestamp: Double = 0
-    @State private var syncIsConfigured = false
     @State private var connectionPreflight: TailscaleConnectionPreflightState?
     @State private var isCheckingConnection = false
     @State private var connectionPreflightTask: Task<Void, Never>?
     @State private var connectionPreflightGeneration = 0
+
+    private var localReadiness: SyncSettingsReadiness {
+        SyncSettingsReadiness.resolve(
+            serverURL: syncServerURL,
+            approvedHosts: TailscaleSyncClient.configuredApprovedHosts(),
+            bearerAvailable: TailscaleSyncClient.readBearerFromKeychain() != nil
+        )
+    }
 
     var body: some View {
         ScrollView {
@@ -855,20 +1521,27 @@ private struct SyncStorageSettingsView: View {
 
                 SettingsSection(title: "Tailscale sync", icon: .security) {
                     VStack(alignment: .leading, spacing: 8) {
-                        TextField("Server URL (e.g. https://lifeos-server.example.ts.net)", text: $syncServerURL)
+                        SecureField("Replace saved server URL", text: $syncServerURL)
                             .textFieldStyle(.roundedBorder)
 #if os(iOS)
                             .textInputAutocapitalization(.never)
                             .keyboardType(.URL)
 #endif
                             .autocorrectionDisabled()
+                            .privacySensitive()
+                            .accessibilityLabel("Saved server URL replacement")
+                            .accessibilityValue(localReadiness.urlState.title)
+                        Text("The saved URL stays hidden. Enter a replacement here; only its approved or rejected state is shown.")
+                            .font(LifeOSFont.inter(12))
+                            .foregroundStyle(LifeOSTokens.tertiaryText)
+                            .fixedSize(horizontal: false, vertical: true)
                         Text("Transitional bearer is read-only from Keychain; identity migration is pending. LifeOS exposes no token editor.")
                             .font(LifeOSFont.inter(12))
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                             .fixedSize(horizontal: false, vertical: true)
                         Text(syncStatusLabel)
                             .font(LifeOSFont.inter(12, weight: .semiBold))
-                            .foregroundStyle(LifeOSTokens.tertiaryText)
+                            .foregroundStyle(localReadiness.canAttemptConnection ? LifeOSTokens.success : LifeOSTokens.warning)
                         Button {
                             runConnectionPreflight()
                         } label: {
@@ -884,7 +1557,7 @@ private struct SyncStorageSettingsView: View {
                             }
                         }
                         .buttonStyle(.borderedProminent)
-                        .disabled(isCheckingConnection)
+                        .disabled(isCheckingConnection || !localReadiness.canAttemptConnection)
                         .accessibilityIdentifier("settings-sync-check-connection")
 
                         if let connectionPreflight {
@@ -910,6 +1583,34 @@ private struct SyncStorageSettingsView: View {
                             .font(LifeOSFont.inter(11))
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                             .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                SettingsSection(title: "Local readiness", icon: .verified) {
+                    VStack(spacing: 0) {
+                        SettingsStatusRow(
+                            title: "Approved signed host",
+                            detail: "Release configuration is checked without displaying the approved hostname.",
+                            status: localReadiness.approvedHostConfigured ? "Configured" : "Missing",
+                            icon: .security,
+                            statusColor: localReadiness.approvedHostConfigured ? LifeOSTokens.success : LifeOSTokens.warning
+                        )
+                        Divider().padding(.leading, 38)
+                        SettingsStatusRow(
+                            title: "Server URL validation",
+                            detail: "The URL must be HTTPS, host-allowlisted, and free of paths, query, or fragment data.",
+                            status: localReadiness.urlState.title,
+                            icon: .documents,
+                            statusColor: localReadiness.urlState == .valid ? LifeOSTokens.success : LifeOSTokens.warning
+                        )
+                        Divider().padding(.leading, 38)
+                        SettingsStatusRow(
+                            title: "Keychain authorization",
+                            detail: "The exact transitional bearer is read-only and never displayed, copied, or edited here.",
+                            status: localReadiness.bearerAvailable ? "Present · hidden" : "Missing",
+                            icon: .security,
+                            statusColor: localReadiness.bearerAvailable ? LifeOSTokens.success : LifeOSTokens.warning
+                        )
                     }
                 }
 
@@ -956,7 +1657,6 @@ private struct SyncStorageSettingsView: View {
         .task(id: syncServerURL) {
             cancelConnectionPreflight()
             connectionPreflight = nil
-            syncIsConfigured = await syncClient.isConfigured
         }
         .onDisappear {
             cancelConnectionPreflight()
@@ -964,7 +1664,7 @@ private struct SyncStorageSettingsView: View {
     }
 
     private func runConnectionPreflight() {
-        guard !isCheckingConnection else { return }
+        guard !isCheckingConnection, localReadiness.canAttemptConnection else { return }
         connectionPreflightTask?.cancel()
         connectionPreflightGeneration &+= 1
         let generation = connectionPreflightGeneration
@@ -985,11 +1685,9 @@ private struct SyncStorageSettingsView: View {
                   syncServerURL == requestedServerURL,
                   let result else { return }
 
-            let configured = await client.isConfigured
             guard !Task.isCancelled,
                   connectionPreflightGeneration == generation,
                   syncServerURL == requestedServerURL else { return }
-            syncIsConfigured = configured
             connectionPreflight = result
         }
     }
@@ -1034,15 +1732,15 @@ private struct SyncStorageSettingsView: View {
     }
 
     private var syncStatusLabel: String {
-        guard syncIsConfigured else { return "Not configured" }
-        guard lastSyncTimestamp > 0 else { return "Configured · not yet synced" }
+        guard lastSyncTimestamp > 0 else { return localReadiness.title }
         let date = Date(timeIntervalSince1970: lastSyncTimestamp)
-        return "Last synced \(date.formatted(date: .abbreviated, time: .shortened))"
+        return "Last successful local sync \(date.formatted(date: .abbreviated, time: .shortened)) · \(localReadiness.title)"
     }
 }
 
 private struct PrivacySecuritySettingsView: View {
     private let signing = SigningStatus.current()
+    private let appGroup = AppGroupSettingsSnapshot.current()
 
     var body: some View {
         ScrollView {
@@ -1060,6 +1758,16 @@ private struct PrivacySecuritySettingsView: View {
                             status: "Active",
                             icon: .verified,
                             statusColor: LifeOSTokens.success
+                        )
+                        Divider().padding(.leading, 38)
+                        SettingsStatusRow(
+                            title: "App Group shared storage",
+                            detail: appGroup.detail,
+                            status: appGroup.state.title,
+                            icon: appGroup.state == .configured ? .verified : .warning,
+                            statusColor: appGroup.state == .configured
+                                ? LifeOSTokens.success
+                                : LifeOSTokens.warning
                         )
                         Divider().padding(.leading, 38)
                         SettingsStatusRow(
@@ -1082,6 +1790,13 @@ private struct PrivacySecuritySettingsView: View {
 
                 TruthfulSetupNote(text: "Local safeguards do not certify the remote server. Do not connect provider or bank accounts until the Windows deployment, disk-encryption, and device-identity gates have been reviewed.")
 
+                SettingsSection(title: "Calendar widget storage", icon: .calendar) {
+                    Text(appGroup.widgetGateDetail)
+                        .font(LifeOSFont.inter(13))
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
                 SettingsSection(title: "Data boundary", icon: .documents) {
                     Text("Calendar items and local-first nutrition records stay on this device until an explicitly configured, authenticated sync path succeeds. Finance, Fitness, and Usage remain unavailable when their reviewed sources are not connected.")
                         .font(LifeOSFont.inter(13))
@@ -1090,17 +1805,13 @@ private struct PrivacySecuritySettingsView: View {
                 }
 
                 SettingsSection(title: "Signing", icon: signingIcon) {
-                    HStack(spacing: 8) {
-                        LifeOSIcon(signingIcon).frame(width: 16, height: 16)
-                        Text(signingLabel)
-                    }
-                    .font(LifeOSFont.inter(13, weight: .semiBold))
-                    .foregroundStyle(signingColor)
-                    .fixedSize(horizontal: false, vertical: true)
-                    Text(signing.guidance)
-                        .font(LifeOSFont.inter(13))
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
-                        .fixedSize(horizontal: false, vertical: true)
+                    SettingsStatusRow(
+                        title: "Code signing",
+                        detail: "\(signingModeLabel) · \(signing.guidance)",
+                        status: signingLabel,
+                        icon: signingIcon,
+                        statusColor: signingColor
+                    )
                     Text("Automatic self-signing is unavailable by Apple platform design.")
                         .font(LifeOSFont.inter(12))
                         .foregroundStyle(LifeOSTokens.tertiaryText)
@@ -1125,6 +1836,15 @@ private struct PrivacySecuritySettingsView: View {
             return "Signing: \(days) day\(days == 1 ? "" : "s") remaining"
         case .unknown:
             return "Signing expiration unavailable"
+        }
+    }
+
+    private var signingModeLabel: String {
+        switch signing.mode {
+        case .personalTeam: "Personal Team"
+        case .developerProgram: "Apple Developer Program"
+        case .sideloaded: "Sideloaded profile"
+        case .unknown: "Signing mode unavailable"
         }
     }
 
