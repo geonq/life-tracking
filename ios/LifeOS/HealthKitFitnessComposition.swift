@@ -165,6 +165,18 @@ public struct HealthKitFitnessComposition {
         let evidence: HealthKitFitnessCompositionEvidence
     }
 
+    /// The projection's `latest` is latest in the retained rolling window,
+    /// not latest at the date the user is viewing. Keep the selected cutoff,
+    /// observations, freshness, and state together so every latest consumer
+    /// uses the same half-open local-day boundary.
+    private struct SelectedLatestMetric {
+        let state: SourceState
+        let reason: String?
+        let observations: [HealthKitFitnessQuantitySample]
+        let latest: HealthKitFitnessQuantitySample?
+        let committedAt: Date?
+    }
+
     /// Sleep is retained for the bounded projection window, but Fitness shows
     /// one local calendar day at a time.  Keep the selected result together so
     /// every downstream field (state, evidence, detail, and aggregate
@@ -201,6 +213,7 @@ public struct HealthKitFitnessComposition {
         let windowDescription = describeProjectionWindow(projection, calendar: calendar)
         let selectedDayDescription = describeSelectedDay(selectedDate, calendar: calendar)
         let selectedDateIsFinite = selectedDate.timeIntervalSinceReferenceDate.isFinite
+        let selectedDay = selectedDateIsFinite ? calendar.dateInterval(of: .day, for: selectedDate) : nil
         let selectedSleep = selectSleep(
             projection.sleep,
             selectedDate: selectedDate,
@@ -211,6 +224,7 @@ public struct HealthKitFitnessComposition {
             projection: projection,
             selectedDate: selectedDate,
             selectedSleep: selectedSleep,
+            selectedDay: selectedDay,
             calendar: calendar
         )
 
@@ -223,22 +237,25 @@ public struct HealthKitFitnessComposition {
             unit: String,
             hue: LifeOSTokens.Hue
         ) -> MetricMapping {
-            let projectionMetric = projection.metric(metricID)
-            let state = SourceState(projectionMetric.state)
-            let provenance = projectionMetric.latest.map { [$0.provenance] } ?? projectionMetric.observations.map(\.provenance)
+            let selected = selectLatestMetric(
+                projection.metric(metricID),
+                selectedDay: selectedDay
+            )
+            let state = selected.state
+            let provenance = selected.latest.map { [$0.provenance] } ?? selected.observations.map(\.provenance)
             let fieldEvidence = makeEvidence(
                 state: state,
                 provenances: provenance,
                 window: windowDescription,
-                freshness: latestMetricFreshness(projectionMetric, calendar: calendar)
+                freshness: latestMetricFreshness(selected, calendar: calendar)
             )
             let detail = metricDetail(
                 state: state,
                 evidence: fieldEvidence,
-                reason: projectionMetric.reason
+                reason: selected.reason
             )
             guard selectedValueIsDisplayable(state),
-                  let value = projectionMetric.value,
+                  let value = selected.latest?.quantity,
                   value.metric == metricID else {
                 return MetricMapping(
                     metricID: metricID,
@@ -357,6 +374,7 @@ public struct HealthKitFitnessComposition {
                 selectedDate: selectedDate,
                 selectedDateIsFinite: selectedDateIsFinite,
                 selectedSleep: selectedSleep,
+                selectedDay: selectedDay,
                 calendar: calendar
             ),
             window: windowDescription + " · " + selectedDayDescription,
@@ -409,7 +427,8 @@ public struct HealthKitFitnessComposition {
 
         let biology = makeBiologySnapshot(
             projection: projection,
-            evidence: evidence
+            evidence: evidence,
+            selectedDay: selectedDay
         )
 
         let sleepDetail = makeSleepDetail(
@@ -538,7 +557,8 @@ public struct HealthKitFitnessComposition {
 
     private static func makeBiologySnapshot(
         projection: HealthKitFitnessProjection,
-        evidence: [HealthKitMetricID: HealthKitFitnessCompositionEvidence]
+        evidence: [HealthKitMetricID: HealthKitFitnessCompositionEvidence],
+        selectedDay: DateInterval?
     ) -> FitnessBiologySnapshot {
         let directMappings: [(HealthKitMetricID, FitnessBiologyMetricID)] = [
             (.bodyMass, .weight),
@@ -548,7 +568,10 @@ public struct HealthKitFitnessComposition {
         ]
         let directMetrics = directMappings.map { metricID, biologyID in
             makeBiologyMetric(
-                projection: projection.metric(metricID),
+                selected: selectLatestMetric(
+                    projection.metric(metricID),
+                    selectedDay: selectedDay
+                ),
                 metricID: metricID,
                 biologyID: biologyID,
                 evidence: evidence[metricID]
@@ -564,18 +587,18 @@ public struct HealthKitFitnessComposition {
     }
 
     private static func makeBiologyMetric(
-        projection: HealthKitFitnessMetricProjection,
+        selected: SelectedLatestMetric,
         metricID: HealthKitMetricID,
         biologyID: FitnessBiologyMetricID,
         evidence: HealthKitFitnessCompositionEvidence?
     ) -> FitnessBiologyMetric {
-        let state = SourceState(projection.state)
+        let state = selected.state
         guard state == .observed,
-              let latest = projection.latest,
+              let latest = selected.latest,
               latest.quantity.metric == metricID else {
             return .unavailable(
                 biologyID,
-                reason: projection.reason ?? "Unavailable · \(biologyID.title) is not an observed direct HealthKit value."
+                reason: selected.reason ?? "Unavailable · \(biologyID.title) is not an observed direct HealthKit value."
             )
         }
 
@@ -587,7 +610,7 @@ public struct HealthKitFitnessComposition {
             window: "Projection window",
             freshness: "Freshness unavailable"
         )
-        let samples = projection.observations.compactMap { sample in
+        let samples = selected.observations.compactMap { sample in
             FitnessBiologySample(date: sample.startDate, value: sample.quantity.value)
         }
         guard let currentSample = FitnessBiologySample(date: latest.startDate, value: latest.quantity.value),
@@ -609,6 +632,73 @@ public struct HealthKitFitnessComposition {
                 provenance: sourceEvidence.provenance,
                 samples: samples
             )
+        )
+    }
+
+    /// Select a latest metric as of the end of the selected local day. The
+    /// retained projection is intentionally rolling, so its `latest` may be
+    /// newer than the historical day being displayed. A sample exactly at
+    /// the local day end belongs to the following half-open day and is also
+    /// excluded.
+    private static func selectLatestMetric(
+        _ metric: HealthKitFitnessMetricProjection,
+        selectedDay: DateInterval?
+    ) -> SelectedLatestMetric {
+        guard let selectedDay,
+              selectedDay.start.timeIntervalSinceReferenceDate.isFinite,
+              selectedDay.end.timeIntervalSinceReferenceDate.isFinite,
+              selectedDay.end > selectedDay.start else {
+            return SelectedLatestMetric(
+                state: .unavailable,
+                reason: "Selected metric day is invalid.",
+                observations: [],
+                latest: nil,
+                committedAt: nil
+            )
+        }
+
+        let observations = metric.observations.filter { sample in
+            sample.endDate.timeIntervalSinceReferenceDate.isFinite
+                && sample.endDate < selectedDay.end
+        }
+        let latest = observations.last
+        let hasSelectedConflict = metric.conflicts.contains { conflict in
+            [conflict.existing.endDate, conflict.incoming.endDate].contains { date in
+                date.timeIntervalSinceReferenceDate.isFinite && date < selectedDay.end
+            }
+        }
+        let state: SourceState
+        let reason: String?
+        if hasSelectedConflict {
+            state = .conflict
+            reason = "Selected HealthKit observations contain a source conflict."
+        } else if observations.isEmpty {
+            if metric.observations.isEmpty, metric.conflicts.isEmpty {
+                state = SourceState(metric.state)
+                reason = metric.reason
+            } else {
+                state = .unavailable
+                reason = "No \(metric.metric.rawValue) observation exists by the selected day."
+            }
+        } else {
+            switch metric.state {
+            case .conflict, .error:
+                // These global states can be caused by a later conflict or a
+                // current sync failure. They must not poison a historical
+                // observation that is valid for this selected day.
+                state = .observed
+                reason = nil
+            default:
+                state = SourceState(metric.state)
+                reason = metric.reason
+            }
+        }
+        return SelectedLatestMetric(
+            state: state,
+            reason: reason,
+            observations: observations,
+            latest: latest,
+            committedAt: metric.lastCommittedAt
         )
     }
 
@@ -1019,11 +1109,15 @@ public struct HealthKitFitnessComposition {
         selectedDate: Date,
         selectedDateIsFinite: Bool,
         selectedSleep: SelectedSleep,
+        selectedDay: DateInterval?,
         calendar: Calendar
     ) -> [HealthKitProvenance] {
         var result: [HealthKitProvenance] = []
         for metricID in latestMetricIDs {
-            result.append(contentsOf: projection.metric(metricID).observations.map(\.provenance))
+            result.append(contentsOf: selectLatestMetric(
+                projection.metric(metricID),
+                selectedDay: selectedDay
+            ).observations.map(\.provenance))
         }
         if selectedDateIsFinite {
             for metricID in dailyMetricIDs {
@@ -1193,11 +1287,11 @@ public struct HealthKitFitnessComposition {
     }
 
     private static func latestMetricFreshness(
-        _ metric: HealthKitFitnessMetricProjection,
+        _ metric: SelectedLatestMetric,
         calendar: Calendar
     ) -> String {
         freshnessDescription(
-            committed: metric.lastCommittedAt,
+            committed: metric.committedAt,
             observed: metric.observations.map(\.endDate).max(),
             calendar: calendar
         )
@@ -1255,6 +1349,7 @@ public struct HealthKitFitnessComposition {
         projection: HealthKitFitnessProjection,
         selectedDate: Date,
         selectedSleep: SelectedSleep,
+        selectedDay: DateInterval?,
         calendar: Calendar
     ) -> String {
         let selectedDateIsFinite = selectedDate.timeIntervalSinceReferenceDate.isFinite
@@ -1267,8 +1362,11 @@ public struct HealthKitFitnessComposition {
         let selectedDailyDates = selectedDateIsFinite
             ? dailyMetricIDs.flatMap { projection.dailyTotal(for: $0, on: selectedDate)?.samples.map(\.endDate) ?? [] }
             : []
-        let committedDates = latestMetricIDs.compactMap { projection.metric($0).lastCommittedAt }
-        let observedDates = latestMetricIDs.flatMap { projection.metric($0).observations.map(\.endDate) }
+        let selectedLatestMetrics = latestMetricIDs.map {
+            selectLatestMetric(projection.metric($0), selectedDay: selectedDay)
+        }
+        let committedDates = selectedLatestMetrics.compactMap(\.committedAt)
+        let observedDates = selectedLatestMetrics.flatMap { $0.observations.map(\.endDate) }
             + selectedDailyDates
             + selectedSleep.samples.map(\.endDate)
             + selectedWorkoutObservations.map(\.endDate)

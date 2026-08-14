@@ -207,6 +207,12 @@ final class HealthKitFitnessCompositionTests: XCTestCase {
         )
         XCTAssertEqual(indeterminate.metricStates[.bodyMass], .readIndeterminate)
 
+        let emptyError = HealthKitFitnessComposition.compose(
+            projection: projection(states: [try state(metric: .bodyMass, syncState: .error)]),
+            selectedDate: now
+        )
+        XCTAssertEqual(emptyError.metricStates[.bodyMass], .error)
+
         let invalid = HealthKitFitnessComposition.compose(
             projection: HealthKitFitnessProjection(
                 states: [HealthKitStoredMetricState.empty(for: .bodyMass)],
@@ -318,6 +324,206 @@ final class HealthKitFitnessCompositionTests: XCTestCase {
         } else {
             XCTFail("Biological age must remain gated")
         }
+    }
+
+    func testHistoricalLatestMetricsUseOnlySamplesBeforeSelectedLocalDayEnd() throws {
+        let dayStart = calendar.date(from: DateComponents(year: 2023, month: 11, day: 13))!
+        let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart)!
+        let selected = dayStart.addingTimeInterval(12 * 60 * 60)
+        let oldDate = dayStart.addingTimeInterval(10 * 60 * 60)
+        let oldProvenance = try provenance(bundle: "com.example.health")
+        let futureProvenance = try provenance(bundle: "com.future.health")
+        let expected: [(HealthKitMetricID, Double)] = [
+            (.restingHeartRate, 54),
+            (.heartRateVariabilitySDNN, 42),
+            (.respiratoryRate, 16),
+            (.oxygenSaturation, 98.2),
+            (.bodyMass, 72.4),
+            (.bodyFatPercentage, 18.2),
+            (.leanBodyMass, 59.1),
+            (.vo2Max, 44.2)
+        ]
+        let states = try expected.map { metric, value in
+            try state(
+                metric: metric,
+                observations: [
+                    try quantity(metric: metric, value: value, at: oldDate, provenance: oldProvenance),
+                    try quantity(metric: metric, value: value + 100, at: dayEnd, provenance: futureProvenance)
+                ],
+                committedAt: oldDate
+            )
+        }
+        let composition = HealthKitFitnessComposition.compose(
+            projection: projection(
+                states: states,
+                start: dayStart.addingTimeInterval(-86_400),
+                end: dayEnd.addingTimeInterval(86_400)
+            ),
+            selectedDate: selected
+        )
+
+        let cardValues: [(String, String)] = [
+            ("Resting heart rate", "54"),
+            ("HRV", "42"),
+            ("Respiration", "16"),
+            ("Blood oxygen", "98.2"),
+            ("Weight", "72.4"),
+            ("Body fat", "18.2"),
+            ("Lean mass", "59.1"),
+            ("VO₂ max", "44.2")
+        ]
+        for (title, value) in cardValues {
+            let card = composition.snapshot.healthMonitor.first(where: { $0.title == title })
+                ?? composition.snapshot.bodyMetrics.first(where: { $0.title == title })
+            XCTAssertEqual(card?.value, value, "Expected historical value for \(title)")
+        }
+
+        let biologyValues: [(FitnessBiologyMetricID, Double)] = [
+            (.weight, 72.4),
+            (.bodyFat, 18.2),
+            (.fatFreeMass, 59.1),
+            (.vo2Max, 44.2)
+        ]
+        for (id, value) in biologyValues {
+            let metric = try XCTUnwrap(composition.snapshot.biology.metrics.first(where: { $0.id == id }))
+            guard case .observed(let current, _, _, let sampleCount, _, _, _, let samples) = metric.state else {
+                return XCTFail("Expected observed historical biology metric for \(id)")
+            }
+            XCTAssertEqual(current, value)
+            XCTAssertEqual(sampleCount, 1)
+            XCTAssertEqual(samples.count, 1)
+            XCTAssertTrue(samples.allSatisfy { $0.date < dayEnd })
+        }
+
+        for (metric, _) in expected {
+            let fieldEvidence = try XCTUnwrap(composition.evidence[metric])
+            XCTAssertFalse(fieldEvidence.freshness.contains("2023-11-14"), "Future freshness leaked for \(metric)")
+            XCTAssertFalse(fieldEvidence.source.contains("com.future.health"), "Future provenance leaked for \(metric)")
+        }
+        XCTAssertFalse(composition.snapshot.source.freshness.contains("2023-11-14"))
+        XCTAssertFalse(composition.snapshot.source.detail.contains("com.future.health"))
+    }
+
+    func testFutureOnlyLatestMetricsRemainUnavailable() throws {
+        let dayStart = calendar.date(from: DateComponents(year: 2023, month: 11, day: 13))!
+        let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart)!
+        let selected = dayStart.addingTimeInterval(12 * 60 * 60)
+        let futureProvenance = try provenance(bundle: "com.future.health")
+        let metricIDs: [HealthKitMetricID] = [
+            .restingHeartRate,
+            .heartRateVariabilitySDNN,
+            .respiratoryRate,
+            .oxygenSaturation,
+            .bodyMass,
+            .bodyFatPercentage,
+            .leanBodyMass,
+            .vo2Max
+        ]
+        let states = try metricIDs.map { metric in
+            try state(
+                metric: metric,
+                observations: [try quantity(metric: metric, value: 100, at: dayEnd, provenance: futureProvenance)]
+            )
+        }
+        let composition = HealthKitFitnessComposition.compose(
+            projection: projection(
+                states: states,
+                start: dayStart,
+                end: dayEnd.addingTimeInterval(86_400)
+            ),
+            selectedDate: selected
+        )
+
+        for metric in metricIDs {
+            XCTAssertEqual(composition.metricStates[metric], .unavailable, "Future-only state leaked for \(metric)")
+            XCTAssertEqual(composition.evidence[metric]?.state, .unavailable)
+            XCTAssertFalse(composition.evidence[metric]?.freshness.contains("Observed through 2023-11-14") == true)
+        }
+        for title in ["Resting heart rate", "HRV", "Respiration", "Blood oxygen", "Weight", "Body fat", "Lean mass", "VO₂ max"] {
+            let card = composition.snapshot.healthMonitor.first(where: { $0.title == title })
+                ?? composition.snapshot.bodyMetrics.first(where: { $0.title == title })
+            XCTAssertNil(card?.value, "Future-only value displayed for \(title)")
+        }
+        for id in [FitnessBiologyMetricID.weight, .bodyFat, .fatFreeMass, .vo2Max] {
+            XCTAssertNil(composition.snapshot.biology.metrics.first(where: { $0.id == id })?.currentValue)
+        }
+        XCTAssertFalse(composition.snapshot.source.freshness.contains("Observed through 2023-11-14"))
+        XCTAssertFalse(composition.snapshot.source.detail.contains("com.future.health"))
+    }
+
+    func testHistoricalLatestStateIgnoresFutureConflictAndGlobalErrorButKeepsSelectedConflict() throws {
+        let dayStart = calendar.date(from: DateComponents(year: 2023, month: 11, day: 13))!
+        let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart)!
+        let selected = dayStart.addingTimeInterval(12 * 60 * 60)
+        let oldDate = dayStart.addingTimeInterval(10 * 60 * 60)
+        let old = try quantity(metric: .bodyMass, value: 72, at: oldDate)
+
+        func makeProjection(_ state: HealthKitStoredMetricState) -> HealthKitFitnessProjection {
+            projection(
+                states: [state],
+                start: dayStart.addingTimeInterval(-86_400),
+                end: dayEnd.addingTimeInterval(86_400)
+            )
+        }
+
+        func assertHistoricalObserved(_ composition: HealthKitFitnessComposition) {
+            XCTAssertEqual(composition.metricStates[.bodyMass], .observed)
+            XCTAssertEqual(composition.evidence[.bodyMass]?.state, .observed)
+            XCTAssertEqual(composition.sourceState, .observed)
+            XCTAssertEqual(composition.snapshot.source.status, .connected)
+            XCTAssertEqual(composition.snapshot.bodyMetrics.first(where: { $0.title == "Weight" })?.value, "72")
+            XCTAssertEqual(composition.snapshot.biology.metrics.first(where: { $0.id == .weight })?.currentValue, 72)
+        }
+
+        let futureIdentity = UUID()
+        let futureExisting = try quantity(metric: .bodyMass, value: 73, at: dayEnd, uuid: futureIdentity)
+        let futureIncoming = try quantity(metric: .bodyMass, value: 74, at: dayEnd, uuid: futureIdentity)
+        let futureConflict = HealthKitObservationConflict(
+            metric: .bodyMass,
+            identity: futureExisting.identity,
+            existing: futureExisting,
+            incoming: futureIncoming
+        )
+        let futureConflictComposition = HealthKitFitnessComposition.compose(
+            projection: makeProjection(try state(metric: .bodyMass, observations: [old], conflicts: [futureConflict], committedAt: oldDate)),
+            selectedDate: selected
+        )
+        assertHistoricalObserved(futureConflictComposition)
+
+        let futureConflictOnlyComposition = HealthKitFitnessComposition.compose(
+            projection: makeProjection(try state(metric: .bodyMass, conflicts: [futureConflict], committedAt: oldDate)),
+            selectedDate: selected
+        )
+        XCTAssertEqual(futureConflictOnlyComposition.metricStates[.bodyMass], .unavailable)
+        XCTAssertEqual(futureConflictOnlyComposition.evidence[.bodyMass]?.state, .unavailable)
+        XCTAssertEqual(futureConflictOnlyComposition.sourceState, .unavailable)
+        XCTAssertNil(futureConflictOnlyComposition.snapshot.bodyMetrics.first(where: { $0.title == "Weight" })?.value)
+        XCTAssertNil(futureConflictOnlyComposition.snapshot.biology.metrics.first(where: { $0.id == .weight })?.currentValue)
+
+        let globalErrorComposition = HealthKitFitnessComposition.compose(
+            projection: makeProjection(try state(metric: .bodyMass, observations: [old], syncState: .error, committedAt: oldDate)),
+            selectedDate: selected
+        )
+        assertHistoricalObserved(globalErrorComposition)
+
+        let selectedIdentity = UUID()
+        let selectedExisting = try quantity(metric: .bodyMass, value: 73, at: oldDate, uuid: selectedIdentity)
+        let selectedIncoming = try quantity(metric: .bodyMass, value: 74, at: oldDate, uuid: selectedIdentity)
+        let selectedConflict = HealthKitObservationConflict(
+            metric: .bodyMass,
+            identity: selectedExisting.identity,
+            existing: selectedExisting,
+            incoming: selectedIncoming
+        )
+        let selectedConflictComposition = HealthKitFitnessComposition.compose(
+            projection: makeProjection(try state(metric: .bodyMass, observations: [old], conflicts: [selectedConflict], committedAt: oldDate)),
+            selectedDate: selected
+        )
+        XCTAssertEqual(selectedConflictComposition.metricStates[.bodyMass], .conflict)
+        XCTAssertEqual(selectedConflictComposition.evidence[.bodyMass]?.state, .conflict)
+        XCTAssertEqual(selectedConflictComposition.sourceState, .conflict)
+        XCTAssertNil(selectedConflictComposition.snapshot.bodyMetrics.first(where: { $0.title == "Weight" })?.value)
+        XCTAssertNil(selectedConflictComposition.snapshot.biology.metrics.first(where: { $0.id == .weight })?.currentValue)
     }
 
     func testHelioLabelRequiresConfirmedCanonicalProvenance() throws {
