@@ -253,6 +253,7 @@ function calendarError(res: ServerResponse, store: CalendarStore, error: unknown
 }
 
 async function calendar(req: IncomingMessage, res: ServerResponse, store: CalendarStore) {
+  if (!loopback(req)) return json(res, 403, { error: 'loopback_only' });
   if (req.method === 'GET') return calendarResource(res, 200, store.get());
   if (req.method !== 'PUT') return json(res, 405, { error: 'calendar_method_not_allowed' });
   if (singleHeader(req, 'content-type') !== 'application/json') return json(res, 415, { error: 'content_type' });

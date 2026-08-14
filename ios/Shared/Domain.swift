@@ -481,7 +481,11 @@ public enum SharedSnapshotStore {
     public static func write(_ snapshot: WidgetSnapshot, fileManager: FileManager = .default,
                              appGroupIdentifier: String? = AppGroupConfiguration.identifier()) throws {
         guard let target = url(fileManager: fileManager, appGroupIdentifier: appGroupIdentifier) else { throw StoreError.unavailableContainer }
+#if os(iOS)
+        try JSONEncoder.lifeOS.encode(snapshot).write(to: target, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+#else
         try JSONEncoder.lifeOS.encode(snapshot).write(to: target, options: .atomic)
+#endif
     }
 
     public static func read(fileManager: FileManager = .default,

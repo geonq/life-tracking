@@ -52,7 +52,11 @@ public actor CalendarStore {
         let directory = url.deletingLastPathComponent()
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         let temporary = directory.appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString).tmp")
+#if os(iOS)
+        try data.write(to: temporary, options: [.atomic, .completeFileProtection])
+#else
         try data.write(to: temporary, options: .atomic)
+#endif
         if fileManager.fileExists(atPath: url.path) { _ = try fileManager.replaceItemAt(url, withItemAt: temporary) } else { try fileManager.moveItem(at: temporary, to: url) }
         cached = snapshot; return snapshot
     }
