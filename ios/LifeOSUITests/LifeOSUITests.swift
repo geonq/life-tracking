@@ -96,6 +96,28 @@ final class LifeOSUITests: XCTestCase {
         XCTAssertEqual(home.value as? String, "Selected")
     }
 
+    func testFitnessSourceReviewDismissesSheetAndReachesHealthSettings() throws {
+        openFitnessRouteAndAssertTodaySurface()
+
+        let sourceStatus = app.buttons["Health source status"]
+        XCTAssertTrue(sourceStatus.waitForExistence(timeout: 5), "Fitness must expose the source status action")
+        sourceStatus.tap()
+
+        let sourceGate = app.descendants(matching: .any)["fitness-health-source-gate"]
+        XCTAssertTrue(sourceGate.waitForExistence(timeout: 5), "The source explainer must open")
+        let review = app.buttons["fitness-source-review"]
+        XCTAssertTrue(review.waitForExistence(timeout: 5), "The source explainer action must be exposed")
+        review.tap()
+
+        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 8), "Source review must leave Fitness for the app Settings workflow")
+        XCTAssertFalse(sourceGate.waitForExistence(timeout: 1), "Source review must dismiss the source explainer")
+        let healthCategory = app.buttons["settings-category-health"]
+        XCTAssertTrue(healthCategory.waitForExistence(timeout: 5), "Settings must expose the substantive Health & devices category")
+        healthCategory.tap()
+        XCTAssertTrue(app.navigationBars["Health & Devices"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["settings-health-connection-permission"].waitForExistence(timeout: 5))
+    }
+
     /// Rendered iPhone evidence for the typed IMG_0402–IMG_0404 sleep tranche.
     /// This deliberately enters through the real Today card instead of a
     /// test-only detail initializer, then records the timeline and lower

@@ -147,7 +147,8 @@ struct LifeOSApp: App {
                     initialSection: selectedModuleRoute?.fitnessSection ?? .today,
                     initialNutritionEntryPoint: selectedModuleRoute?.nutritionEntryPoint,
                     initialFitnessEntryPoint: selectedModuleRoute?.fitnessEntryPoint,
-                    usesVisualFixtures: usesVisualFixtures
+                    usesVisualFixtures: usesVisualFixtures,
+                    onSourceReview: { navigate(.settings) }
                 )
                 case .more:
                 LifeOSMoreModulesView(

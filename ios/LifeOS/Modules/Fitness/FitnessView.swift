@@ -1,5 +1,9 @@
 import SwiftUI
 
+#if os(iOS)
+import UIKit
+#endif
+
 // MARK: - Fitness data contracts
 
 /// The Fitness surface deliberately accepts a snapshot instead of reaching into
@@ -587,13 +591,23 @@ public struct FitnessView: View {
     /// macOS callers.
     public let snapshotProvider: ((Date) -> FitnessSnapshot)?
     public let usesVisualFixtures: Bool
+    /// The app shell owns the substantive Health permission/settings route.
+    /// Fitness only dismisses its source explainer and asks the shell to take
+    /// that action; it never constructs another HealthKit client or store.
+    private let onSourceReview: (() -> Void)?
     private let initialSection: FitnessSection
     private let initialNutritionEntryPoint: FitnessNutritionEntryPoint?
     private let initialFitnessEntryPoint: FitnessWidgetEntryPoint?
     @State private var selectedSection: FitnessSection
     @State private var selectedDate: Date
     @State private var showingSourceGate = false
+    @State private var reviewSourceAfterDismiss = false
     @StateObject private var journalStore: FitnessJournalStore
+
+    @Environment(\.openURL) private var openURL
+#if os(macOS)
+    @Environment(\.openSettings) private var openSettings
+#endif
 
     private var detailEntryPointUsesParentScroll: Bool {
         initialFitnessEntryPoint?.coreRoute != nil
@@ -615,6 +629,7 @@ public struct FitnessView: View {
         initialFitnessEntryPoint: FitnessWidgetEntryPoint? = nil,
         selectedDate: Date = .now,
         usesVisualFixtures: Bool = false,
+        onSourceReview: (() -> Void)? = nil,
         journalStore: FitnessJournalStore? = nil
     ) {
         let fixtureMode = FitnessJournalFixturePolicy.isFixtureMode(
@@ -624,6 +639,7 @@ public struct FitnessView: View {
         self.snapshot = snapshot
         self.snapshotProvider = snapshotProvider
         self.usesVisualFixtures = usesVisualFixtures
+        self.onSourceReview = onSourceReview
         self.initialSection = initialSection
         self.initialNutritionEntryPoint = initialNutritionEntryPoint
         self.initialFitnessEntryPoint = initialFitnessEntryPoint
@@ -701,11 +717,37 @@ public struct FitnessView: View {
                 }
             }
         }
-        .sheet(isPresented: $showingSourceGate) {
-            FitnessSourceGateSheet(source: resolvedSnapshot.source)
+        .sheet(isPresented: $showingSourceGate, onDismiss: {
+            guard reviewSourceAfterDismiss else { return }
+            reviewSourceAfterDismiss = false
+            performSourceReview()
+        }) {
+            FitnessSourceGateSheet(source: resolvedSnapshot.source, onSourceTap: {
+                reviewSourceAfterDismiss = true
+                showingSourceGate = false
+            })
                 .presentationDetents([.medium])
         }
         .accessibilityIdentifier("fitness-view")
+    }
+
+    /// Keep all Health setup decisions in the app shell. When a standalone
+    /// Fitness preview has no shell callback, the source explainer still
+    /// dismisses; a production iPhone fallback opens only Apple's public app
+    /// settings URL (never a private Health URL scheme).
+    private func performSourceReview() {
+        if let onSourceReview {
+            onSourceReview()
+            return
+        }
+#if os(iOS)
+        guard !usesVisualFixtures,
+              let settingsURL = URL(string: UIApplication.openSettingsURLString) else { return }
+        openURL(settingsURL)
+#elseif os(macOS)
+        guard !usesVisualFixtures else { return }
+        openSettings()
+#endif
     }
 }
 
@@ -3234,6 +3276,7 @@ private struct FitnessSourceGateCard: View {
                 .font(LifeOSFont.inter(12, weight: .semiBold))
                 .buttonStyle(.borderedProminent)
                 .tint(LifeOSTokens.accent)
+                .accessibilityIdentifier("fitness-source-review")
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -5209,13 +5252,14 @@ private struct FitnessSettingsView: View {
 
 private struct FitnessSourceGateSheet: View {
     let source: FitnessSourceState
+    let onSourceTap: () -> Void
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    FitnessSourceGateCard(source: source, onSourceTap: {})
+                    FitnessSourceGateCard(source: source, onSourceTap: onSourceTap)
                         .padding(.top, 8)
                     FitnessCard {
                         VStack(alignment: .leading, spacing: 8) {
