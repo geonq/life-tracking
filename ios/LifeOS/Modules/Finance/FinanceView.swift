@@ -563,6 +563,48 @@ private struct FinanceUnavailableChart: View {
     }
 }
 
+/// The chart is embedded in the Finance route's vertical `ScrollView`. A chart drag
+/// must therefore be classified before it changes the selected point: a primarily
+/// vertical gesture belongs to the parent scroll view, while a primarily horizontal
+/// gesture belongs to chart scrubbing. Keeping this classifier independent of SwiftUI
+/// makes the boundary easy to regression-test without relying on simulator gesture
+/// timing.
+enum FinanceChartGestureAxis: Equatable {
+    case undecided
+    case horizontal
+    case vertical
+    case ambiguous
+}
+
+enum FinanceChartGestureClassifier {
+    /// Translation must clear this distance before a touch is considered a directional
+    /// drag. Below it, the end location is treated as a tap/select rather than a pan.
+    static let directionThreshold: CGFloat = 8
+
+    /// A direction needs a modest 15% dominance over the other axis. Near-diagonal
+    /// movement remains ambiguous so it cannot churn chart selection while a user is
+    /// trying to move the surrounding page.
+    static let dominanceRatio: CGFloat = 1.15
+
+    static func axis(
+        for translation: CGSize,
+        threshold: CGFloat = FinanceChartGestureClassifier.directionThreshold,
+        dominanceRatio: CGFloat = FinanceChartGestureClassifier.dominanceRatio
+    ) -> FinanceChartGestureAxis {
+        let horizontal = abs(translation.width)
+        let vertical = abs(translation.height)
+        guard max(horizontal, vertical) >= threshold else { return .undecided }
+
+        if horizontal >= vertical * dominanceRatio {
+            return .horizontal
+        }
+        if vertical >= horizontal * dominanceRatio {
+            return .vertical
+        }
+        return .ambiguous
+    }
+}
+
 private struct FinanceLineChart: View {
     let points: [FinanceChartPoint]
     let accent: LifeOSTokens.Hue
@@ -571,6 +613,7 @@ private struct FinanceLineChart: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var drawn: CGFloat = 0
+    @State private var gestureAxis: FinanceChartGestureAxis = .undecided
     @FocusState private var chartIsFocused: Bool
 
     var body: some View {
@@ -635,14 +678,52 @@ private struct FinanceLineChart: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .contentShape(Rectangle())
-            .gesture(
+            // Keep this recognizer simultaneous with the ancestor ScrollView. A plain
+            // child `.gesture` wins the touch sequence and leaves the Finance route
+            // stuck above the Accounts card on iPhone. Directional filtering below
+            // ensures only horizontal scrubs reach chart selection.
+            .simultaneousGesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
-                        let index = nearestIndex(for: value.location.x, in: size)
-                        if selectedPoint != index {
-                            ScrubBubble<EmptyView>.snapHaptic()
+                        let candidate = FinanceChartGestureClassifier.axis(for: value.translation)
+                        switch gestureAxis {
+                        case .undecided:
+                            switch candidate {
+                            case .horizontal:
+                                gestureAxis = .horizontal
+                                updateSelection(at: value.location.x, in: size)
+                            case .vertical:
+                                gestureAxis = .vertical
+                            case .undecided, .ambiguous:
+                                // Stay unresolved until the direction is clear. This
+                                // preserves a tap and allows a diagonal gesture to
+                                // resolve naturally without selection churn.
+                                break
+                            }
+                        case .horizontal:
+                            updateSelection(at: value.location.x, in: size)
+                        case .vertical, .ambiguous:
+                            break
                         }
-                        selectedPoint = index
+                    }
+                    .onEnded { value in
+                        let resolvedAxis: FinanceChartGestureAxis = {
+                            switch gestureAxis {
+                            case .horizontal, .vertical: gestureAxis
+                            case .undecided, .ambiguous:
+                                FinanceChartGestureClassifier.axis(for: value.translation)
+                            }
+                        }()
+
+                        switch resolvedAxis {
+                        case .undecided, .horizontal:
+                            // A zero-distance drag is the chart's tap/select path. A
+                            // horizontal scrub also commits its final nearest point.
+                            updateSelection(at: value.location.x, in: size)
+                        case .vertical, .ambiguous:
+                            break
+                        }
+                        gestureAxis = .undecided
                     }
             )
             .focusable(true)
@@ -703,6 +784,14 @@ private struct FinanceLineChart: View {
         let width = max(size.width - horizontalInset * 2, 1)
         let fraction = min(max((x - horizontalInset) / width, 0), 1)
         return min(max(Int((fraction * CGFloat(points.count - 1)).rounded()), 0), points.count - 1)
+    }
+
+    private func updateSelection(at x: CGFloat, in size: CGSize) {
+        let index = nearestIndex(for: x, in: size)
+        if selectedPoint != index {
+            ScrubBubble<EmptyView>.snapHaptic()
+        }
+        selectedPoint = index
     }
 }
 

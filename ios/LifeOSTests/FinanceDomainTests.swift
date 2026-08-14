@@ -2,6 +2,43 @@ import XCTest
 @testable import LifeOS
 
 final class FinanceDomainTests: XCTestCase {
+    func testFinanceChartGestureClassifierWaitsForDirectionalThreshold() {
+        XCTAssertEqual(
+            FinanceChartGestureClassifier.axis(for: CGSize(width: 7.9, height: 0)),
+            .undecided
+        )
+        XCTAssertEqual(
+            FinanceChartGestureClassifier.axis(for: CGSize(width: 8, height: 0)),
+            .horizontal
+        )
+        XCTAssertEqual(
+            FinanceChartGestureClassifier.axis(for: CGSize(width: 0, height: -8)),
+            .vertical
+        )
+    }
+
+    func testFinanceChartGestureClassifierPrefersDominantAxis() {
+        XCTAssertEqual(
+            FinanceChartGestureClassifier.axis(for: CGSize(width: 32, height: 12)),
+            .horizontal
+        )
+        XCTAssertEqual(
+            FinanceChartGestureClassifier.axis(for: CGSize(width: 12, height: -32)),
+            .vertical
+        )
+    }
+
+    func testFinanceChartGestureClassifierLeavesNearDiagonalMovementAmbiguous() {
+        XCTAssertEqual(
+            FinanceChartGestureClassifier.axis(for: CGSize(width: 20, height: 19)),
+            .ambiguous
+        )
+        XCTAssertEqual(
+            FinanceChartGestureClassifier.axis(for: CGSize(width: -20, height: 20)),
+            .ambiguous
+        )
+    }
+
     func testSpendableBudgetUsesObservedPerMetricValues() throws {
         let summary = try decodeSummary(
             monthlyIncome: 300_000,
