@@ -189,6 +189,63 @@ final class CalendarDomainTests: XCTestCase {
         XCTAssertEqual(String(decoding: encoded, as: UTF8.self), #""aborted""#)
     }
 
+    func testCalendarItemKindRoundTripsAndLegacyPayloadDefaultsToEvent() throws {
+        let todo = try CalendarItem(
+            title: "Inbox",
+            kind: .todo,
+            status: .done,
+            start: base,
+            end: base.addingTimeInterval(900),
+            createdAt: base,
+            updatedAt: base
+        )
+        let encoded = try JSONEncoder().encode(todo)
+        XCTAssertEqual(try JSONDecoder().decode(CalendarItem.self, from: encoded).kind, .todo)
+
+        var legacyObject = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        legacyObject.removeValue(forKey: "kind")
+        let legacyData = try JSONSerialization.data(withJSONObject: legacyObject)
+        XCTAssertEqual(try JSONDecoder().decode(CalendarItem.self, from: legacyData).kind, .event)
+
+        let daily = try CalendarItem(
+            title: "Morning plan",
+            kind: .dailySchedule,
+            status: .inProgress,
+            start: base,
+            end: base.addingTimeInterval(1_800),
+            createdAt: base,
+            updatedAt: base
+        )
+        let dailyData = try JSONEncoder().encode(daily)
+        XCTAssertEqual(try JSONDecoder().decode(CalendarItem.self, from: dailyData).kind, .dailySchedule)
+        let dailyObject = try XCTUnwrap(JSONSerialization.jsonObject(with: dailyData) as? [String: Any])
+        XCTAssertEqual(dailyObject["kind"] as? String, "dailySchedule")
+
+        var snakeCasePeerObject = dailyObject
+        snakeCasePeerObject["kind"] = "daily_schedule"
+        let snakeCasePeerData = try JSONSerialization.data(withJSONObject: snakeCasePeerObject)
+        XCTAssertEqual(try JSONDecoder().decode(CalendarItem.self, from: snakeCasePeerData).kind, .dailySchedule)
+    }
+
+    func testTodoDoneToggleIsDurableAndLeavesKindAndIntervalUntouched() throws {
+        let todo = try CalendarItem(
+            title: "Ship",
+            kind: .todo,
+            start: base,
+            end: base.addingTimeInterval(1_200),
+            createdAt: base,
+            updatedAt: base
+        )
+        let completed = try todo.togglingDone(at: base.addingTimeInterval(1))
+        XCTAssertEqual(completed.status, .done)
+        XCTAssertEqual(completed.kind, .todo)
+        XCTAssertEqual(completed.start, todo.start)
+        XCTAssertEqual(completed.end, todo.end)
+        XCTAssertEqual(try completed.togglingDone(at: base.addingTimeInterval(2)).status, .planned)
+        let event = try CalendarItem(title: "Meeting", start: base, end: base.addingTimeInterval(60), createdAt: base, updatedAt: base)
+        XCTAssertEqual(try event.togglingDone(at: base.addingTimeInterval(1)), event)
+    }
+
     func testUpdatingCanExplicitlyRemoveIconAssetWhileOmissionPreservesIt() throws {
         let asset = try CalendarIconAsset(
             format: .png,

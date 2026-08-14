@@ -239,6 +239,27 @@ final class LifeOSUITests: XCTestCase {
         XCTAssertTrue(waitForCalendarHeaderValue(today, element: header), "Today must return to the fixture anchor")
     }
 
+    func testCalendarExpandedMonthRendersDateCells() throws {
+        let calendarTab = app.buttons["Calendar"]
+        let pager = app.descendants(matching: .any)["calendar-pager"]
+        XCTAssertTrue(tap(calendarTab, untilVisible: pager))
+
+        let monthToggle = app.buttons["calendar-month-toggle"]
+        XCTAssertTrue(monthToggle.waitForExistence(timeout: 5))
+        monthToggle.tap()
+
+        let todayID = "calendar-expanded-date-\(calendarISODate(Calendar.current.startOfDay(for: Date())))"
+        let todayCell = app.descendants(matching: .any)[todayID]
+        XCTAssertTrue(todayCell.waitForExistence(timeout: 5), "Expanded month must render the current date cell")
+
+        let monthStart = Calendar.current.dateInterval(of: .month, for: Date())?.start ?? Date()
+        let gridStart = Calendar.current.dateInterval(of: .weekOfYear, for: monthStart)?.start ?? monthStart
+        let firstGridCell = app.descendants(matching: .any)[
+            "calendar-expanded-date-\(calendarISODate(Calendar.current.startOfDay(for: gridStart)))"
+        ]
+        XCTAssertTrue(firstGridCell.waitForExistence(timeout: 5), "Expanded month must render leading out-of-month dates")
+    }
+
     func testCalendarMonthEventDragTargetsNextCell() throws {
         let calendarTab = app.buttons["Calendar"]
         XCTAssertTrue(tap(calendarTab, untilVisible: app.buttons["calendar-add"]))
@@ -302,7 +323,7 @@ final class LifeOSUITests: XCTestCase {
                        "A cancelled outside-grid drop must not report a successful move")
     }
 
-    func testCalendarDeliberateCreationOpensEditorAndPagerStillWorks() throws {
+    func testCalendarDoubleTapCreationOpensEditorAndPagerStillWorks() throws {
         let calendarTab = app.buttons["Calendar"]
         XCTAssertTrue(calendarTab.waitForExistence(timeout: 5))
         let pager = app.descendants(matching: .any)["calendar-pager"]
@@ -315,11 +336,11 @@ final class LifeOSUITests: XCTestCase {
         // The grid is taller than the visible vertical viewport. Use a point in
         // that viewport rather than a normalized point in the full-day child
         // frame; this avoids pressing an offscreen portion of the ScrollView.
-        let holdPoint = pager.coordinate(withNormalizedOffset: CGVector(dx: 0.28, dy: 0.76))
-        holdPoint.tap()
-        XCTAssertFalse(app.navigationBars["New event"].exists, "A casual empty-grid tap must not create an event")
-        holdPoint.press(forDuration: 0.7, thenDragTo: holdPoint)
-        XCTAssertTrue(app.navigationBars["New event"].waitForExistence(timeout: 5), "A deliberate empty-grid hold must open the existing editor")
+        let creationPoint = pager.coordinate(withNormalizedOffset: CGVector(dx: 0.28, dy: 0.76))
+        creationPoint.tap()
+        XCTAssertFalse(app.navigationBars["New event"].exists, "A single empty-grid tap must remain inert")
+        creationPoint.doubleTap()
+        XCTAssertTrue(app.navigationBars["New event"].waitForExistence(timeout: 5), "A double-tap on an empty grid must open the editor")
         XCTAssertTrue(app.descendants(matching: .any)["calendar-event-editor"].exists)
         let proposedStart = app.descendants(matching: .any)["calendar-event-start"]
         let proposedEnd = app.descendants(matching: .any)["calendar-event-end"]
@@ -344,7 +365,7 @@ final class LifeOSUITests: XCTestCase {
             XCTAssertEqual(
                 (endMinutes - startMinutes + 24 * 60) % (24 * 60),
                 30,
-                "A stationary deliberate hold must prefill the exact 30-minute Notion-style selection"
+                "A stationary double-tap must prefill the exact 30-minute Notion-style selection"
             )
         } else {
             XCTFail("Could not parse the proposed 30-minute start/end range from AX strings")
@@ -613,6 +634,9 @@ final class LifeOSUITests: XCTestCase {
         app.buttons["calendar-icon-picker-icons"].tap()
         XCTAssertTrue(app.buttons["Use custom icon Fixture mark"].waitForExistence(timeout: 5))
         capture("dark-calendar-event-icons-populated-custom")
+        app.buttons["calendar-icon-picker-emojis"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["calendar-emoji-custom-icon-row"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Use custom icon Fixture mark"].waitForExistence(timeout: 5))
     }
 
     /// Focused visual evidence for the matrix-driven Nutrition surface. The

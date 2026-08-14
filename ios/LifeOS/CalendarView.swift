@@ -336,6 +336,7 @@ public struct CalendarView: View {
                             onCreateTimedRange: createTimedRange(start:end:anchor:),
                             timedCreationPreview: timedCreationPreview,
                             onUpdate: update,
+                            onStatusUpdate: updateStatus,
                             onPreviewDateChange: previewDate,
                             onCommitDateChange: commitPreviewDate,
                             monthNamespace: reduceMotion ? nil : calendarMonthNamespace,
@@ -886,6 +887,17 @@ public struct CalendarView: View {
         }
     }
 
+    private func updateStatus(_ item: CalendarItem, status: CalendarProgress, completion: @escaping CalendarUpdateCompletion) {
+        guard item.kind == .todo,
+              let updated = try? item.updating(status: status, at: .now) else {
+            completion(.failure("Only to-do items have an interactive completion checkbox."))
+            return
+        }
+        Task { @MainActor in
+            completion(await coordinator.save(updated))
+        }
+    }
+
     private func delete(_ item: CalendarItem, completion: @escaping CalendarEditorCompletion) {
         Task { @MainActor in
             completion(await coordinator.delete(item))
@@ -998,6 +1010,7 @@ struct CalendarEditor: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var title: String
+    @State private var kind: CalendarItemKind
     @State private var icon: String?
     @State private var status: CalendarProgress
     @State private var start: Date
@@ -1042,6 +1055,7 @@ struct CalendarEditor: View {
         self.onRetry = onRetry
         self.onCancel = onCancel
         _title = State(initialValue: item?.title ?? "")
+        _kind = State(initialValue: item?.kind ?? .event)
         _icon = State(initialValue: item?.icon)
         _iconAsset = State(initialValue: item?.iconAsset)
         _systemIconName = State(initialValue: item?.systemIconName)
@@ -1251,6 +1265,8 @@ struct CalendarEditor: View {
         VStack(alignment: .leading, spacing: 0) {
             editorIdentity
             Divider().padding(.vertical, 12)
+            editorKindRow
+            Divider().padding(.vertical, 12)
             editorSchedule
             Divider().padding(.vertical, 12)
             editorCalendarRow
@@ -1295,6 +1311,43 @@ struct CalendarEditor: View {
 
     private var hasIcon: Bool {
         icon != nil || systemIconName != nil || iconAsset != nil
+    }
+
+    private var editorKindRow: some View {
+        HStack(spacing: 10) {
+            Image(systemName: kind == .todo ? "checkmark.square" : (kind == .dailySchedule ? "calendar.badge.clock" : "calendar"))
+                .frame(width: 16, height: 16)
+                .foregroundStyle(.secondary)
+            Text("Type")
+                .font(.system(size: 13, weight: .medium))
+            Spacer(minLength: 0)
+            Menu {
+                ForEach(CalendarItemKind.allCases, id: \.self) { candidate in
+                    Button {
+                        kind = candidate
+                        if candidate == .todo, status == .inProgress || status == .aborted {
+                            status = .planned
+                        }
+                    } label: {
+                        Label(candidate.label, systemImage: candidate == .todo ? "checkmark.square" : (candidate == .dailySchedule ? "calendar.badge.clock" : "calendar"))
+                    }
+                }
+            } label: {
+                HStack(spacing: 7) {
+                    Text(kind.label)
+                        .font(.system(size: 12, weight: .semibold))
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color.primary.opacity(0.07), in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Calendar item type, \(kind.label)")
+            .accessibilityIdentifier("calendar-item-kind-picker")
+        }
     }
 
     private var editorSchedule: some View {
@@ -1465,7 +1518,20 @@ struct CalendarEditor: View {
             Text("Status")
                 .font(.system(size: 13, weight: .medium))
             Spacer(minLength: 0)
-            CalendarEditorStatusPicker(progress: $status)
+            if kind == .todo {
+                Button {
+                    status = status == .done ? .planned : .done
+                } label: {
+                    Label(status == .done ? "Done" : "Mark done", systemImage: status == .done ? "checkmark.square.fill" : "square")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .accessibilityLabel(status == .done ? "To-do done" : "Mark to-do done")
+                .accessibilityValue(status.label)
+                .accessibilityIdentifier("calendar-todo-done-toggle")
+            } else {
+                CalendarEditorStatusPicker(progress: $status)
+            }
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("calendar-event-status")
@@ -1502,6 +1568,7 @@ struct CalendarEditor: View {
             let item = try CalendarItem(
                 id: existing?.id ?? UUID(),
                 title: title,
+                kind: kind,
                 icon: icon,
                 iconAsset: iconAsset,
                 systemIconName: systemIconName,
@@ -2913,6 +2980,7 @@ struct CalendarIconPicker: View {
             searchField(placeholder: "Search emojis")
             appleEmojiEntry
             recentContent
+            customIconRow(identifier: "calendar-emoji-custom-icon-row")
 
             HStack(spacing: 8) {
                 Button { shuffleEmoji() } label: {
@@ -2977,11 +3045,48 @@ struct CalendarIconPicker: View {
         VStack(alignment: .leading, spacing: 16) {
             searchField(placeholder: "Search icons")
             recentContent
+            customIconRow(identifier: "calendar-icon-custom-row")
 
+            Text("Apple system icons")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.secondary)
+            ForEach(filteredSystemIconGroups, id: \.0) { group in
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(group.0)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 52), spacing: 8)], spacing: 8) {
+                        ForEach(group.1) { choice in
+                            Button { selectSystemIcon(choice) } label: {
+                                Image(systemName: choice.systemName)
+                                    .font(.system(size: 20, weight: .medium))
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: 46)
+                                    .foregroundStyle(.primary)
+                                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                            .help(choice.keywords)
+                            .accessibilityLabel("Use \(choice.label) icon")
+                            .accessibilityHint("Press Return to select")
+                            .accessibilityIdentifier("calendar-system-icon-\(choice.label)")
+                        }
+                    }
+                }
+            }
+            if filteredSystemIconGroups.isEmpty { emptySearchState("No icons match \"\(query)\".") }
+        }
+    }
+
+    /// The uploaded-icon library is shared by both picker tabs. Keeping the
+    /// same row in Emojis makes custom uploads discoverable from the native
+    /// emoji/picker flow without creating a second persistence path.
+    private func customIconRow(identifier: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
             Text("Custom")
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(.secondary)
-                .accessibilityIdentifier("calendar-icon-custom-row")
+                .accessibilityIdentifier(identifier)
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 12) {
@@ -3013,35 +3118,6 @@ struct CalendarIconPicker: View {
                     }
                 }
             }
-
-            Text("Apple system icons")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(.secondary)
-            ForEach(filteredSystemIconGroups, id: \.0) { group in
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(group.0)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 52), spacing: 8)], spacing: 8) {
-                        ForEach(group.1) { choice in
-                            Button { selectSystemIcon(choice) } label: {
-                                Image(systemName: choice.systemName)
-                                    .font(.system(size: 20, weight: .medium))
-                                    .frame(maxWidth: .infinity)
-                                    .frame(height: 46)
-                                    .foregroundStyle(.primary)
-                                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                            }
-                            .buttonStyle(.plain)
-                            .help(choice.keywords)
-                            .accessibilityLabel("Use \(choice.label) icon")
-                            .accessibilityHint("Press Return to select")
-                            .accessibilityIdentifier("calendar-system-icon-\(choice.label)")
-                        }
-                    }
-                }
-            }
-            if filteredSystemIconGroups.isEmpty { emptySearchState("No icons match \"\(query)\".") }
         }
     }
 

@@ -41,6 +41,33 @@ final class CalendarLayoutTests: XCTestCase {
         )
     }
 
+    func testPagerFallbackDragStateBeginsOnceAndCleansUpOnEndOrCancel() {
+        var state = CalendarPagerDragState()
+        XCTAssertFalse(state.end())
+        XCTAssertTrue(state.beginHorizontalDrag())
+        XCTAssertFalse(state.beginHorizontalDrag())
+        XCTAssertTrue(state.end())
+        XCTAssertFalse(state.end())
+        XCTAssertTrue(state.beginHorizontalDrag())
+        XCTAssertTrue(state.cancel())
+        XCTAssertFalse(state.isActive)
+    }
+
+    func testPagerFallbackOnlyClaimsClearlyHorizontalMovement() {
+        XCTAssertTrue(CalendarInteractionLayout.isHorizontalPagerDrag(
+            horizontalTranslation: 5,
+            verticalTranslation: 1
+        ))
+        XCTAssertFalse(CalendarInteractionLayout.isHorizontalPagerDrag(
+            horizontalTranslation: 5,
+            verticalTranslation: 5
+        ))
+        XCTAssertFalse(CalendarInteractionLayout.isHorizontalPagerDrag(
+            horizontalTranslation: 1,
+            verticalTranslation: 12
+        ))
+    }
+
     func testMobileDefaultSelectionCreatesExactThirtyMinuteInterval() throws {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "Europe/Berlin")!
@@ -623,6 +650,11 @@ final class CalendarLayoutTests: XCTestCase {
         XCTAssertFalse(cleanup.eventMoveActive)
         XCTAssertFalse(cleanup.hasProvisionalPreview)
         XCTAssertEqual(cleanup.settledHeaderDate, calendar.startOfDay(for: settled))
+
+        let cancelled = CalendarGestureArbitration.cleanupAfterCancelledMutation(settledPage: settled, calendar: calendar)
+        XCTAssertFalse(cancelled.eventMoveActive)
+        XCTAssertFalse(cancelled.hasProvisionalPreview)
+        XCTAssertEqual(cancelled.settledHeaderDate, calendar.startOfDay(for: settled))
     }
 
     func testResizeClampsToMinimumFifteenMinutes() throws {
@@ -764,7 +796,9 @@ final class CalendarLayoutTests: XCTestCase {
         ))
     }
 
-    func testTimedCreationDragUses15MinuteSnappedDurationWithoutStealingSingleClick() throws {
+    func testMacTimedCreationDragUses15MinuteSnappedDurationWithoutStealingSingleClick() throws {
+        // This pure predicate remains coverage for the macOS range gesture;
+        // iOS deliberately has no empty-grid drag creation path.
         XCTAssertFalse(CalendarInteractionLayout.isIntentionalCreationDrag(
             verticalTranslation: 0,
             horizontalTranslation: 0
@@ -772,6 +806,10 @@ final class CalendarLayoutTests: XCTestCase {
         XCTAssertTrue(CalendarInteractionLayout.isIntentionalCreationDrag(
             verticalTranslation: 30,
             horizontalTranslation: 4
+        ))
+        XCTAssertFalse(CalendarInteractionLayout.isIntentionalCreationDrag(
+            verticalTranslation: 120,
+            horizontalTranslation: 80
         ))
 
         let interval = try XCTUnwrap(CalendarInteractionLayout.creationInterval(

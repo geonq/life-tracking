@@ -70,6 +70,11 @@ public typealias CalendarTimedCreationAnchor = CGPoint
 public typealias CalendarEventSelectionHandler = (CalendarItem) -> Void
 #endif
 
+/// Status-only mutations (currently the to-do checkbox) share the same local
+/// durability completion contract as move/resize updates while leaving the
+/// item's interval untouched.
+public typealias CalendarStatusUpdateHandler = (CalendarItem, CalendarProgress, @escaping CalendarUpdateCompletion) -> Void
+
 private struct CalendarEventMovePreview: Equatable {
     let item: CalendarItem
     let start: Date
@@ -84,6 +89,10 @@ private struct CalendarEventMovePreview: Equatable {
 private final class CalendarInteractionSession: ObservableObject {
     @Published var eventMoveActive = false
     @Published var eventMovePreview: CalendarEventMovePreview?
+    /// A status save owns the item's complete snapshot until its local
+    /// durability callback returns. This prevents a stale checkbox write from
+    /// racing a move/resize save and restoring the old interval.
+    @Published var statusMutationActive = false
 }
 
 #if os(macOS)
@@ -443,6 +452,7 @@ public struct CalendarTimelineView: View {
     public let onCreateTimedRange: ((Date, Date, CalendarTimedCreationAnchor) -> Void)?
     public let timedCreationPreview: CalendarTimedCreationPreview?
     public let onUpdate: CalendarUpdateHandler?
+    public let onStatusUpdate: CalendarStatusUpdateHandler?
     /// Called while the iOS pager is in flight so the compact header can track
     /// the date that is actually under the user's finger. It is intentionally
     /// separate from the settled date callback below.
@@ -472,6 +482,7 @@ public struct CalendarTimelineView: View {
                 onCreateTimedRange: ((Date, Date, CalendarTimedCreationAnchor) -> Void)? = nil,
                 timedCreationPreview: CalendarTimedCreationPreview? = nil,
                 onUpdate: CalendarUpdateHandler? = nil,
+                onStatusUpdate: CalendarStatusUpdateHandler? = nil,
                 onPreviewDateChange: ((Date) -> Void)? = nil,
                 onCommitDateChange: ((Date) -> Void)? = nil,
                 monthNamespace: Namespace.ID? = nil,
@@ -488,6 +499,7 @@ public struct CalendarTimelineView: View {
         self.onCreateTimedRange = onCreateTimedRange
         self.timedCreationPreview = timedCreationPreview
         self.onUpdate = onUpdate
+        self.onStatusUpdate = onStatusUpdate
         self.onPreviewDateChange = onPreviewDateChange
         self.onCommitDateChange = onCommitDateChange
         self.monthNamespace = monthNamespace
@@ -509,6 +521,7 @@ public struct CalendarTimelineView: View {
             onCreate: onCreate,
             onCreateTimedRange: onCreateTimedRange,
             onUpdate: onUpdate,
+            onStatusUpdate: onStatusUpdate,
             timedCreationPreview: timedCreationPreview,
             onPreviewDateChange: onPreviewDateChange,
             onCommitDateChange: onCommitDateChange,
@@ -546,6 +559,7 @@ public struct CalendarTimelineView: View {
                                         onCreateTimedRange: onCreateTimedRange,
                                         timedCreationPreview: timedCreationPreview,
                                         onUpdate: onUpdate,
+                                        onStatusUpdate: onStatusUpdate,
                                         monthNamespace: monthNamespace,
                                         monthExpanded: monthExpanded,
                                         monthSelectedDate: monthSelectedDate,
@@ -688,15 +702,87 @@ public struct CalendarTimelineView: View {
 }
 
 #if os(iOS)
-// The pager uses explicit offsets; no page-offset preference is needed. Five
-// materialized pages let a fast fling carry across a page boundary before the
-// strip is recentered, while still keeping the view virtualized.
+/// Reports the live horizontal position of the small virtual page window.
+/// Native `ScrollView` paging owns tracking, velocity, deceleration, and the
+/// settle transaction; this preference is only for the compact header's live
+/// date projection while the finger is between pages.
+private struct CalendarPagerOffsetPreferenceKey: PreferenceKey {
+    static var defaultValue: [Int: CGFloat] = [:]
 
-/// A deliberately small virtual strip. A page is the complete timed grid,
-/// including its day headers, so a swipe can never desynchronise headers and
-/// events. The strip is moved by an explicit horizontal drag and recentered
-/// after a committed page, avoiding nested-scroll-view arbitration and
-/// asynchronous target identity issues.
+    static func reduce(value: inout [Int: CGFloat], nextValue: () -> [Int: CGFloat]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, next in next })
+    }
+}
+
+/// Scroll phase became public with the iOS 18 SDK while this app continues to
+/// deploy to iOS 17. On newer systems the native phase is the source of truth
+/// for settling; on iOS 17 the pager falls back to the geometry's exact page
+/// alignment rather than treating every binding update as a settled page.
+private struct CalendarPagerScrollPhaseModifier: ViewModifier {
+    let action: (_ beganScrolling: Bool, _ becameIdle: Bool) -> Void
+    @State private var fallbackDragState = CalendarPagerDragState()
+    @State private var fallbackDragAxisIsHorizontal: Bool?
+    @GestureState private var fallbackGestureIsActive = false
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) {
+            content.onScrollPhaseChange { oldPhase, newPhase in
+                action(!oldPhase.isScrolling && newPhase.isScrolling, newPhase == .idle)
+            }
+        } else {
+            content
+                // iOS 17 has no public ScrollPhase. Observe only the
+                // horizontal direction and do so simultaneously, leaving
+                // native paging and the timeline's event gestures in charge
+                // of their own recognizers. A GestureState reset covers
+                // cancellation paths where onEnded is not delivered.
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 4, coordinateSpace: .local)
+                        .updating($fallbackGestureIsActive) { _, isActive, _ in
+                            isActive = true
+                        }
+                        .onChanged { value in
+                            if fallbackDragAxisIsHorizontal == nil {
+                                let isHorizontal = CalendarInteractionLayout.isHorizontalPagerDrag(
+                                    horizontalTranslation: Double(value.translation.width),
+                                    verticalTranslation: Double(value.translation.height)
+                                )
+                                fallbackDragAxisIsHorizontal = isHorizontal
+                                guard isHorizontal else { return }
+                            }
+                            guard fallbackDragAxisIsHorizontal == true else { return }
+                            if fallbackDragState.beginHorizontalDrag() {
+                                action(true, false)
+                            }
+                        }
+                        .onEnded { _ in
+                            finishFallbackDrag()
+                        }
+                )
+                .onChange(of: fallbackGestureIsActive) { _, isActive in
+                    guard !isActive else { return }
+                    // DragGesture can be cancelled by the native scroll view
+                    // or by another higher-priority recognizer.
+                    finishFallbackDrag()
+                }
+        }
+    }
+
+    private func finishFallbackDrag() {
+        let didEnd = fallbackDragState.end()
+        fallbackDragAxisIsHorizontal = nil
+        if didEnd {
+            action(false, true)
+        }
+    }
+}
+
+/// A native iOS 17 paged scroll strip. Five adjacent pages are materialized so
+/// a fast fling can land more than one window away; after native paging settles
+/// the selected page is folded back into the middle without a second animation.
+/// Every page contains its own day headers and timed grid, so the two cannot
+/// drift apart during a swipe.
 private struct CalendarPagedTimeline: View {
     let days: [Date]
     let items: [CalendarItem]
@@ -708,6 +794,7 @@ private struct CalendarPagedTimeline: View {
     let onCreateTimedRange: ((Date, Date, CalendarTimedCreationAnchor) -> Void)?
     let timedCreationPreview: CalendarTimedCreationPreview?
     let onUpdate: CalendarUpdateHandler?
+    let onStatusUpdate: CalendarStatusUpdateHandler?
     let onPreviewDateChange: ((Date) -> Void)?
     let onCommitDateChange: ((Date) -> Void)?
     let monthNamespace: Namespace.ID?
@@ -717,13 +804,18 @@ private struct CalendarPagedTimeline: View {
     let interactionSession: CalendarInteractionSession
     @State private var pageAnchor: Date
     @State private var lastPreviewDate: Date?
-    @State private var horizontalDragOffset: CGFloat = 0
-    @State private var horizontalDragActive = false
-    @State private var pagerGestureGeneration = 0
+    @State private var selectedPageID: Int? = 0
+    @State private var pagerGeneration = 0
+    @State private var pendingPageID: Int?
+    @State private var pendingPageGeneration: Int?
+    @State private var recenterGeneration: Int?
+    @State private var pagerScrollPhaseIsIdle = true
+    @State private var pagerGeometryIsSettled = true
 
     init(days: [Date], items: [CalendarItem], holidays: [CalendarHoliday], hourHeight: CGFloat,
          calendar: Calendar, onSelect: @escaping CalendarEventSelectionHandler,
          onCreate: ((Date) -> Void)?, onCreateTimedRange: ((Date, Date, CalendarTimedCreationAnchor) -> Void)?, onUpdate: CalendarUpdateHandler?,
+         onStatusUpdate: CalendarStatusUpdateHandler?,
          timedCreationPreview: CalendarTimedCreationPreview?,
          onPreviewDateChange: ((Date) -> Void)?, onCommitDateChange: ((Date) -> Void)?,
          monthNamespace: Namespace.ID?, monthExpanded: Bool, monthSelectedDate: Date?, reduceMotion: Bool,
@@ -738,6 +830,7 @@ private struct CalendarPagedTimeline: View {
         self.onCreateTimedRange = onCreateTimedRange
         self.timedCreationPreview = timedCreationPreview
         self.onUpdate = onUpdate
+        self.onStatusUpdate = onStatusUpdate
         self.onPreviewDateChange = onPreviewDateChange
         self.onCommitDateChange = onCommitDateChange
         self.monthNamespace = monthNamespace
@@ -749,12 +842,13 @@ private struct CalendarPagedTimeline: View {
     }
 
     private var dayCount: Int { max(1, days.count) }
+    private let pageOffsets = Array(-2...2)
 
     var body: some View {
         GeometryReader { viewport in
-            ZStack(alignment: .leading) {
-                HStack(spacing: 0) {
-                    ForEach(-2...2, id: \.self) { offset in
+            ScrollView(.horizontal) {
+                LazyHStack(spacing: 0) {
+                    ForEach(pageOffsets, id: \.self) { offset in
                         CalendarTimelinePage(
                             days: pageDays(offset: offset),
                             items: items,
@@ -766,6 +860,7 @@ private struct CalendarPagedTimeline: View {
                             onCreateTimedRange: onCreateTimedRange,
                             timedCreationPreview: timedCreationPreview,
                             onUpdate: onUpdate,
+                            onStatusUpdate: onStatusUpdate,
                             monthNamespace: monthNamespace,
                             monthExpanded: monthExpanded,
                             monthSelectedDate: monthSelectedDate,
@@ -774,18 +869,61 @@ private struct CalendarPagedTimeline: View {
                             interactionSession: interactionSession
                         )
                         .frame(width: viewport.size.width)
+                        .background {
+                            GeometryReader { page in
+                                Color.clear.preference(
+                                    key: CalendarPagerOffsetPreferenceKey.self,
+                                    value: [offset: page.frame(in: .named("calendar-horizontal-pager")).minX]
+                                )
+                            }
+                        }
                         .accessibilityElement(children: offset == 0 ? .contain : .ignore)
                         .accessibilityHidden(offset != 0)
+                        .id(offset)
                     }
                 }
-                .frame(width: viewport.size.width * 5, alignment: .leading)
-                .offset(x: -viewport.size.width * 2 + horizontalDragOffset)
-                .frame(width: viewport.size.width, alignment: .leading)
+                .scrollTargetLayout()
             }
-            .frame(width: viewport.size.width)
-            .clipped()
-            .contentShape(Rectangle())
-            .simultaneousGesture(pagerDragGesture(width: viewport.size.width))
+            .scrollTargetBehavior(.paging)
+            .scrollPosition(id: $selectedPageID, anchor: .center)
+            .scrollIndicators(.hidden)
+            .transaction { transaction in
+                guard reduceMotion else { return }
+                // Native finger tracking remains enabled, but SwiftUI must
+                // not add an animation to page-window updates or recentering.
+                transaction.animation = nil
+                transaction.disablesAnimations = true
+            }
+            .coordinateSpace(name: "calendar-horizontal-pager")
+            .scrollDisabled(!CalendarGestureArbitration.parentHorizontalScrollEnabled(
+                eventMutationActive: interactionSession.eventMoveActive,
+                hasProvisionalPreview: interactionSession.eventMovePreview != nil
+            ))
+            .onPreferenceChange(CalendarPagerOffsetPreferenceKey.self) { offsets in
+                updatePreviewDate(offsets: offsets, width: viewport.size.width)
+            }
+            .modifier(CalendarPagerScrollPhaseModifier { beganScrolling, becameIdle in
+                handlePagerScrollPhase(beganScrolling: beganScrolling, becameIdle: becameIdle)
+            })
+            .onChange(of: selectedPageID) { _, pageID in
+                guard let pageID else {
+                    pendingPageID = nil
+                    pendingPageGeneration = nil
+                    return
+                }
+                guard pageID != 0 else {
+                    // The middle-page write is our own recenter transaction.
+                    // A stale binding update must never be interpreted as a
+                    // second user page commit.
+                    pendingPageID = nil
+                    pendingPageGeneration = nil
+                    return
+                }
+                guard recenterGeneration != pagerGeneration else { return }
+                pendingPageID = pageID
+                pendingPageGeneration = pagerGeneration
+                commitPendingPageIfReady()
+            }
             .onChange(of: days.first) { _, firstDay in
                 guard let firstDay else { return }
                 let nextAnchor = calendar.startOfDay(for: firstDay)
@@ -793,12 +931,15 @@ private struct CalendarPagedTimeline: View {
                 var transaction = Transaction()
                 transaction.animation = nil
                 transaction.disablesAnimations = true
-                pagerGestureGeneration += 1
                 withTransaction(transaction) {
+                    pagerGeneration += 1
                     pageAnchor = nextAnchor
                     lastPreviewDate = nextAnchor
-                    horizontalDragOffset = 0
-                    horizontalDragActive = false
+                    pendingPageID = nil
+                    pendingPageGeneration = nil
+                    recenterGeneration = pagerGeneration
+                    pagerGeometryIsSettled = true
+                    selectedPageID = 0
                 }
             }
             .onChange(of: interactionSession.eventMoveActive) { _, isActive in
@@ -826,14 +967,21 @@ private struct CalendarPagedTimeline: View {
     }
 
     private func resetPagerForEventOwnership() {
-        let wasPreviewing = horizontalDragActive || horizontalDragOffset != 0 ||
-            (lastPreviewDate.map { !calendar.isDate($0, inSameDayAs: pageAnchor) } ?? false)
-        horizontalDragActive = false
-        horizontalDragOffset = 0
-        pagerGestureGeneration += 1
+        let wasPreviewing = lastPreviewDate.map { !calendar.isDate($0, inSameDayAs: pageAnchor) } ?? false
         lastPreviewDate = pageAnchor
-        // Restore the compact header even if the pager had already settled
-        // its offset but its final preview callback was still in flight.
+        pagerGeneration += 1
+        pendingPageID = nil
+        pendingPageGeneration = nil
+        recenterGeneration = pagerGeneration
+        pagerGeometryIsSettled = false
+        var transaction = Transaction()
+        transaction.animation = nil
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            selectedPageID = 0
+        }
+        // Restore the compact header even if the native pager had already
+        // previewed a neighboring page but its final callback was in flight.
         if wasPreviewing || onPreviewDateChange != nil {
             onPreviewDateChange?(CalendarGestureArbitration.headerDateAfterEventOwnership(
                 settledPage: pageAnchor,
@@ -842,113 +990,93 @@ private struct CalendarPagedTimeline: View {
         }
     }
 
-    private func pagerDragGesture(width: CGFloat) -> some Gesture {
-        DragGesture(minimumDistance: 8, coordinateSpace: .local)
-            .onChanged { value in
-                guard !interactionSession.eventMoveActive,
-                      interactionSession.eventMovePreview == nil else {
-                    resetPagerForEventOwnership()
-                    return
-                }
-                let translation = value.translation
-                if !horizontalDragActive {
-                    guard abs(translation.width) > abs(translation.height) else { return }
-                    horizontalDragActive = true
-                    pagerGestureGeneration += 1
-                }
-                guard horizontalDragActive, width > 0 else { return }
-                horizontalDragOffset = max(-width * 2, min(width * 2, translation.width))
-                let candidate = dateByFractionalDays(
-                    -Double(horizontalDragOffset / width) * Double(dayCount),
-                    from: pageAnchor
-                )
-                let day = calendar.startOfDay(for: candidate)
-                // The header is a live projection of the page under the
-                // finger. Do not wait for a day-boundary callback or settle;
-                // the month/week labels must follow a fast in-flight swipe.
-                lastPreviewDate = day
-                onPreviewDateChange?(day)
+    private func handlePagerScrollPhase(beganScrolling: Bool, becameIdle: Bool) {
+        if beganScrolling {
+            pagerGeneration += 1
+            pagerScrollPhaseIsIdle = false
+            pagerGeometryIsSettled = false
+            pendingPageID = nil
+            pendingPageGeneration = nil
+        }
+        if becameIdle {
+            pagerScrollPhaseIsIdle = true
+            commitPendingPageIfReady()
+        }
+    }
+
+    private func commitPendingPageIfReady() {
+        guard pagerScrollPhaseIsIdle,
+              pagerGeometryIsSettled,
+              let pageID = pendingPageID,
+              pageID != 0,
+              pendingPageGeneration == pagerGeneration,
+              recenterGeneration != pagerGeneration else { return }
+        pendingPageID = nil
+        pendingPageGeneration = nil
+        commitSettledPage(pageID, generation: pagerGeneration)
+    }
+
+    private func commitSettledPage(_ pageID: Int, generation: Int) {
+        guard generation == pagerGeneration,
+              pagerScrollPhaseIsIdle,
+              pagerGeometryIsSettled,
+              recenterGeneration != generation else { return }
+        guard pageID != 0,
+              let nextAnchor = calendar.date(byAdding: .day, value: pageID * dayCount, to: pageAnchor) else {
+            if pageID == 0, let lastPreviewDate,
+               !calendar.isDate(lastPreviewDate, inSameDayAs: pageAnchor) {
+                self.lastPreviewDate = pageAnchor
+                onPreviewDateChange?(pageAnchor)
             }
-            .onEnded { value in
-                guard !interactionSession.eventMoveActive,
-                      interactionSession.eventMovePreview == nil else {
-                    resetPagerForEventOwnership()
-                    return
-                }
-                guard horizontalDragActive, width > 0 else {
-                    horizontalDragActive = false
-                    horizontalDragOffset = 0
-                    return
-                }
+            return
+        }
 
-                horizontalDragActive = false
-                guard abs(value.translation.width) > abs(value.translation.height) else {
-                    horizontalDragActive = false
-                    if reduceMotion {
-                        horizontalDragOffset = 0
-                    } else {
-                        withAnimation(LifeOSMotion.pagerSettle) {
-                            horizontalDragOffset = 0
-                        }
-                    }
-                    let anchor = pageAnchor
-                    lastPreviewDate = anchor
-                    onPreviewDateChange?(anchor)
-                    return
-                }
+        // Native paging has already completed its finger-tracked settle. Fold
+        // the selected page back to the center without an async delay or a
+        // second visible animation; the next gesture starts from this anchor.
+        // Reduce Motion explicitly takes this instant path as well.
+        recenterGeneration = generation
+        pagerGeometryIsSettled = false
+        var transaction = Transaction()
+        transaction.animation = nil
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            pageAnchor = calendar.startOfDay(for: nextAnchor)
+            lastPreviewDate = pageAnchor
+            pendingPageID = nil
+            pendingPageGeneration = nil
+            selectedPageID = 0
+        }
+        onPreviewDateChange?(pageAnchor)
+        onCommitDateChange?(pageAnchor)
+    }
 
-                let pageDelta = CalendarInteractionLayout.pagerPageDelta(
-                    translation: Double(value.translation.width),
-                    predictedTranslation: Double(value.predictedEndTranslation.width),
-                    pageWidth: Double(width),
-                    maximumPages: 2
-                )
-
-                guard pageDelta != 0 else {
-                    if reduceMotion {
-                        horizontalDragOffset = 0
-                    } else {
-                        withAnimation(LifeOSMotion.pagerSettle) {
-                            horizontalDragOffset = 0
-                        }
-                    }
-                    let anchor = pageAnchor
-                    lastPreviewDate = anchor
-                    onPreviewDateChange?(anchor)
-                    return
-                }
-
-                let targetOffset = -width * CGFloat(pageDelta)
-                let nextAnchor = calendar.date(byAdding: .day, value: pageDelta * dayCount, to: pageAnchor) ?? pageAnchor
-                let commitGeneration = pagerGestureGeneration
-                if reduceMotion {
-                    var transaction = Transaction()
-                    transaction.animation = nil
-                    transaction.disablesAnimations = true
-                    withTransaction(transaction) {
-                        pageAnchor = nextAnchor
-                        lastPreviewDate = nextAnchor
-                        horizontalDragOffset = 0
-                    }
-                    onCommitDateChange?(nextAnchor)
-                } else {
-                    withAnimation(LifeOSMotion.pagerSettle) {
-                        horizontalDragOffset = targetOffset
-                    }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
-                        guard pagerGestureGeneration == commitGeneration else { return }
-                        var transaction = Transaction()
-                        transaction.animation = nil
-                        transaction.disablesAnimations = true
-                        withTransaction(transaction) {
-                            pageAnchor = nextAnchor
-                            lastPreviewDate = nextAnchor
-                            horizontalDragOffset = 0
-                        }
-                        onCommitDateChange?(nextAnchor)
-                    }
-                }
+    private func updatePreviewDate(offsets: [Int: CGFloat], width: CGFloat) {
+        guard width > 0, width.isFinite,
+              let closest = offsets.min(by: { abs($0.value) < abs($1.value) }),
+              closest.value.isFinite else { return }
+        pagerGeometryIsSettled = abs(closest.value) <= max(0.5, width * 0.002)
+        if !pagerGeometryIsSettled, recenterGeneration == pagerGeneration {
+            // iOS 17 has no public scroll-phase callback. A real displacement
+            // is the generation boundary that releases our recenter guard;
+            // stale binding writes at the centered geometry remain ignored.
+            recenterGeneration = nil
+            if let selectedPageID, selectedPageID != 0 {
+                pendingPageID = selectedPageID
+                pendingPageGeneration = pagerGeneration
             }
+        }
+        let pageStart = calendar.date(byAdding: .day, value: closest.key * dayCount, to: pageAnchor) ?? pageAnchor
+        let fractionalDays = -Double(closest.value / width) * Double(dayCount)
+        let candidate = dateByFractionalDays(fractionalDays, from: pageStart)
+        let day = calendar.startOfDay(for: candidate)
+        if lastPreviewDate.map({ !calendar.isDate($0, inSameDayAs: day) }) ?? true {
+            lastPreviewDate = day
+            onPreviewDateChange?(day)
+        }
+        if pagerGeometryIsSettled {
+            commitPendingPageIfReady()
+        }
     }
 
     private func dateByFractionalDays(_ value: Double, from date: Date) -> Date {
@@ -976,6 +1104,7 @@ private struct CalendarTimelinePage: View {
     let onCreateTimedRange: ((Date, Date, CalendarTimedCreationAnchor) -> Void)?
     let timedCreationPreview: CalendarTimedCreationPreview?
     let onUpdate: CalendarUpdateHandler?
+    let onStatusUpdate: CalendarStatusUpdateHandler?
     let monthNamespace: Namespace.ID?
     let monthExpanded: Bool
     let monthSelectedDate: Date?
@@ -1012,6 +1141,7 @@ private struct CalendarTimelinePage: View {
                                         onCreateTimedRange: onCreateTimedRange,
                                         timedCreationPreview: timedCreationPreview,
                                         onUpdate: onUpdate,
+                                        onStatusUpdate: onStatusUpdate,
                                     monthNamespace: monthNamespace,
                                     monthExpanded: monthExpanded,
                                     monthSelectedDate: monthSelectedDate,
@@ -1191,6 +1321,7 @@ private struct CalendarDayTimeline: View {
     let onCreateTimedRange: ((Date, Date, CalendarTimedCreationAnchor) -> Void)?
     let timedCreationPreview: CalendarTimedCreationPreview?
     let onUpdate: CalendarUpdateHandler?
+    let onStatusUpdate: CalendarStatusUpdateHandler?
     let monthNamespace: Namespace.ID?
     let monthExpanded: Bool
     let monthSelectedDate: Date?
@@ -1315,18 +1446,6 @@ private struct CalendarDayTimeline: View {
                     .zIndex(8)
                 }
 
-                if let creationPreview, let creationPreviewEnd {
-                    CalendarCreationRangeGhost(
-                        start: creationPreview,
-                        end: creationPreviewEnd,
-                        day: day,
-                        hourHeight: hourHeight,
-                        calendar: calendar
-                    )
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .zIndex(6)
-                }
-
                 if let timedPreview = timedCreationPreview,
                    calendar.isDate(timedPreview.day, inSameDayAs: day),
                    calendar.isDate(timedPreview.start, inSameDayAs: day) {
@@ -1399,12 +1518,14 @@ private struct CalendarDayTimeline: View {
             day: day,
             hourHeight: hourHeight,
             dayWidth: width,
+            eventWidth: layerWidth,
             calendar: calendar,
             reduceMotion: reduceMotion,
             isInteractionEnabled: interactive && isInteractionEnabled,
             interactionSession: interactionSession,
             onSelect: selection,
-            onUpdate: interactive ? onUpdate : nil
+            onUpdate: interactive ? onUpdate : nil,
+            onStatusUpdate: interactive ? onStatusUpdate : nil
         )
         .frame(width: layerWidth, alignment: .topLeading)
         .offset(x: CGFloat(layerFrame.leading), y: y + 1)
@@ -1413,118 +1534,24 @@ private struct CalendarDayTimeline: View {
         .allowsHitTesting(interactive && isInteractionEnabled)
     }
 
-    @State private var creationPreview: Date?
-    @State private var creationPreviewEnd: Date?
-    @State private var creationStartLocation: CGPoint?
-    @State private var creationLatestLocation: CGPoint?
-    @State private var creationRecognized = false
-    @State private var creationCancelled = false
-
-    /// Deliberate empty-space creation is one gesture contract. The sequenced
-    /// long press owns recognition and only then hands the same touch to the
-    /// zero-distance drag, so a tap/swipe can never reach the commit path. A
-    /// composed `onEnded` also gives release one deterministic callback instead
-    /// of racing independent drag/long-press callbacks.
+    /// iOS empty-space creation is intentionally a double tap. A single tap
+    /// and every ordinary vertical scroll remain inert; only the two-tap
+    /// recognizer creates a default timed range.
     private var creationGesture: some Gesture {
-        LongPressGesture(minimumDuration: 0.55, maximumDistance: 18)
-            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .local))
-            .onChanged { phase in
-                guard isInteractionEnabled else { return }
-
-                switch phase {
-                case .first(true):
-                    // Keep the recognizer alive while the hold is in flight.
-                    // No preview or mutation is armed in this phase.
-                    break
-                case .second(true, let drag?):
-                    creationLatestLocation = drag.location
-                    if !creationRecognized {
-                        creationRecognized = true
-                        creationStartLocation = drag.startLocation
-                        CalendarInteractionHaptics.grab()
-                    }
-
-                    // Once recognized, a dominant horizontal movement belongs
-                    // to the pager. It must cancel creation rather than let a
-                    // pager swipe accidentally create an event on release.
-                    let horizontal = abs(drag.translation.width)
-                    let vertical = abs(drag.translation.height)
-                    if horizontal > 18, horizontal > vertical {
-                        creationCancelled = true
-                        creationPreview = nil
-                        creationPreviewEnd = nil
-                    } else if !creationCancelled {
-                        updateCreationPreview(at: drag.location)
-                    }
-                default:
-                    break
-                }
+        SpatialTapGesture(count: 2, coordinateSpace: .local)
+            .onEnded { value in
+                guard isInteractionEnabled,
+                      let interval = CalendarInteractionLayout.creationInterval(
+                          day: day,
+                          verticalStart: Double(value.location.y),
+                          verticalEnd: Double(value.location.y),
+                          hourHeight: Double(hourHeight),
+                          calendar: calendar,
+                          defaultDurationMinutes: CalendarInteractionLayout.mobileSelectionDurationMinutes
+                      ) else { return }
+                CalendarInteractionHaptics.grab()
+                onCreateTimedRange?(interval.start, interval.end, .zero)
             }
-            .onEnded { phase in
-                guard isInteractionEnabled else {
-                    resetCreationState()
-                    return
-                }
-
-                // A successful hold may end without another drag sample. Use
-                // the last sequenced drag location in that case; the composed
-                // gesture still owns this single release callback.
-                var finalLocation = creationLatestLocation
-                if case .second(true, let drag?) = phase {
-                    creationLatestLocation = drag.location
-                    finalLocation = drag.location
-                    if !creationRecognized {
-                        creationRecognized = true
-                        creationStartLocation = drag.startLocation
-                    }
-                }
-                if creationRecognized, !creationCancelled, let finalLocation {
-                    updateCreationPreview(at: finalLocation)
-                }
-
-                let range = creationRecognized && !creationCancelled
-                    ? (creationPreview.flatMap { start in
-                        creationPreviewEnd.map { (start: start, end: $0) }
-                    })
-                    : nil
-                resetCreationState()
-                if let range {
-                    onCreateTimedRange?(range.start, range.end, .zero)
-                }
-            }
-    }
-
-    private func updateCreationPreview(at location: CGPoint) {
-        guard creationRecognized, !creationCancelled,
-              let startLocation = creationStartLocation,
-              let interval = CalendarInteractionLayout.creationInterval(
-                  day: day,
-                  verticalStart: Double(startLocation.y),
-                  verticalEnd: Double(location.y),
-                  hourHeight: Double(hourHeight),
-                  calendar: calendar,
-                  defaultDurationMinutes: CalendarInteractionLayout.mobileSelectionDurationMinutes
-              ) else {
-            creationPreview = nil
-            creationPreviewEnd = nil
-            return
-        }
-        if let creationPreview,
-           let creationPreviewEnd,
-           creationPreview != interval.start || creationPreviewEnd != interval.end {
-            CalendarInteractionHaptics.snap()
-        }
-        creationPreview = interval.start
-        creationPreviewEnd = interval.end
-    }
-
-    private func resetCreationState() {
-        creationPreview = nil
-        creationPreviewEnd = nil
-        creationStartLocation = nil
-        creationLatestLocation = nil
-        creationRecognized = false
-        creationCancelled = false
     }
 
 #if os(macOS)
@@ -1707,12 +1734,14 @@ private struct CalendarInteractiveTimelineEvent: View {
     let day: Date
     let hourHeight: CGFloat
     let dayWidth: CGFloat
+    let eventWidth: CGFloat
     let calendar: Calendar
     let reduceMotion: Bool
     let isInteractionEnabled: Bool
     let interactionSession: CalendarInteractionSession
     let onSelect: () -> Void
     let onUpdate: CalendarUpdateHandler?
+    let onStatusUpdate: CalendarStatusUpdateHandler?
 
     @State private var moveMinutes = 0
     @State private var moveDays = 0
@@ -1724,6 +1753,11 @@ private struct CalendarInteractiveTimelineEvent: View {
     @State private var suppressTap = false
     @State private var lastMoveSnap: Int?
     @State private var lastResizeSnap: Int?
+    /// Covers the interval between handing move/resize to the coordinator and
+    /// its local durability completion. Accessibility actions do not always
+    /// leave a provisional preview mounted, so this local flag is part of the
+    /// arbitration contract as well.
+    @State private var mutationCommitInFlight = false
 
     private var isInteracting: Bool { isMoving || isResizing }
     var body: some View {
@@ -1735,7 +1769,10 @@ private struct CalendarInteractiveTimelineEvent: View {
             hidesSecondaryMetadata: hidesSecondaryMetadata,
             timeZone: timeZone,
             cornerRadii: cornerRadii,
-            accessibilityID: eventAccessibilityID
+            accessibilityID: eventAccessibilityID,
+            // The card owns only selection/move rendering. The interactive
+            // Todo control is installed as an outer sibling below, after the
+            // card gestures, so the parent card cannot shield its hit test.
         )
         .frame(height: max(24, availableHeight + CGFloat(resizeMinutes) / 60 * hourHeight), alignment: .top)
         .accessibilityIdentifier(eventAccessibilityID)
@@ -1759,14 +1796,14 @@ private struct CalendarInteractiveTimelineEvent: View {
         .contentShape(Rectangle())
 #if os(macOS)
         .simultaneousGesture(tapGesture)
-        .highPriorityGesture(moveGesture)
+        .highPriorityGesture(moveGesture, including: .gesture)
 #else
         // The sequenced long-press move must own an event-body drag before
         // the surrounding vertical timeline/pager consumes it. A plain tap
         // makes the long press fail and still reaches the simultaneous tap
         // recognizer, preserving editor selection without starving moves.
         .simultaneousGesture(tapGesture)
-        .highPriorityGesture(moveGesture)
+        .highPriorityGesture(moveGesture, including: .gesture)
 #endif
         .animation(reduceMotion ? nil : LifeOSMotion.primary, value: item.start)
         .accessibilityHidden(!isInteractionEnabled)
@@ -1784,18 +1821,120 @@ private struct CalendarInteractiveTimelineEvent: View {
             }
         }
 #endif
+        .overlay(alignment: .topLeading) {
+            if showsTodoToggle {
+                todoToggleOverlay
+            }
+        }
+    }
+
+    private var showsTodoToggle: Bool {
+        isInteractionEnabled && item.kind == .todo && onStatusUpdate != nil
+    }
+
+    private var todoHitTargetHeight: CGFloat {
+        min(44, max(24, availableHeight))
+    }
+
+    private var todoHitTargetWidth: CGFloat {
+        min(44, max(0, eventWidth))
+    }
+
+    private var todoTapRect: CGRect {
+        CGRect(x: 0, y: 0, width: todoHitTargetWidth, height: todoHitTargetHeight)
+    }
+
+    private var todoGlyphSize: CGFloat {
+        min(18, todoHitTargetWidth, todoHitTargetHeight)
+    }
+
+    private var todoToggleOverlay: some View {
+        Button(action: toggleTodo) {
+            ZStack(alignment: .topLeading) {
+                Image(systemName: item.status == .done ? "checkmark.square.fill" : "square")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.86))
+                    .frame(width: todoGlyphSize, height: todoGlyphSize)
+            }
+            .frame(width: todoHitTargetWidth, height: todoHitTargetHeight, alignment: .center)
+        }
+        .buttonStyle(.plain)
+        .frame(width: todoHitTargetWidth, height: todoHitTargetHeight)
+        .contentShape(Rectangle())
+        .disabled(!canToggleTodo)
+        .accessibilityLabel(item.status == .done ? "Mark to-do incomplete" : "Mark to-do complete")
+        .accessibilityValue(canToggleTodo ? item.status.label : "Temporarily unavailable")
+        .accessibilityIdentifier("calendar-todo-toggle-\(item.id.uuidString)")
+        .zIndex(20)
+        // Physical taps are routed through the card's spatial recognizer;
+        // this stable Button remains the accessibility target without
+        // shielding that recognizer from the underlying event surface.
+        .allowsHitTesting(false)
+    }
+
+    private func toggleTodo() {
+        guard canToggleTodo, let onStatusUpdate else { return }
+        suppressTap = true
+        interactionSession.statusMutationActive = true
+        let nextStatus: CalendarProgress = item.status == .done ? .planned : .done
+        onStatusUpdate(item, nextStatus) { _ in
+            DispatchQueue.main.async {
+                interactionSession.statusMutationActive = false
+                // A tap can leave the sequenced long-press recognizer in its
+                // first phase while the status save is in flight. Recover the
+                // complete non-moving session after either save result so the
+                // persisted status cannot remain permanently unavailable.
+                clearEventMutationSession(resetTap: true)
+            }
+        }
+    }
+
+    private var canToggleTodo: Bool {
+        isInteractionEnabled &&
+            item.kind == .todo &&
+            onStatusUpdate != nil &&
+            !interactionSession.eventMoveActive &&
+            interactionSession.eventMovePreview == nil &&
+            !interactionSession.statusMutationActive &&
+            !mutationCommitInFlight
+    }
+
+    private func clearEventMutationSession(resetTap: Bool = false) {
+        let cleanup = CalendarGestureArbitration.cleanupAfterCancelledMutation(
+            settledPage: day,
+            calendar: calendar
+        )
+        interactionSession.eventMoveActive = cleanup.eventMoveActive
+        interactionSession.eventMovePreview = nil
+        if resetTap { suppressTap = false }
     }
 
     private var tapGesture: some Gesture {
-        TapGesture().onEnded {
-            guard !suppressTap, !isInteracting else { return }
+        SpatialTapGesture(coordinateSpace: .local).onEnded { value in
+            guard !suppressTap, !isInteracting, !mutationCommitInFlight else { return }
+            if showsTodoToggle, todoTapRect.contains(value.location) {
+                // LongPressGesture may have claimed the shared session in its
+                // first phase before this spatial tap wins. A plain Todo tap
+                // is not a move, so release that stale claim before the
+                // status guard evaluates.
+                clearEventMutationSession()
+                toggleTodo()
+                return
+            }
             // Let a control button finish its action before the card's tap
             // recognizer is allowed to select the event.  Two turns also
             // covers AppKit's Button/action delivery order on macOS.
             DispatchQueue.main.async {
-                guard !suppressTap, !isInteracting else { return }
+                guard !suppressTap, !isInteracting, !mutationCommitInFlight else { return }
                 DispatchQueue.main.async {
-                    guard !suppressTap, !isInteracting else { return }
+                    guard !suppressTap, !isInteracting, !mutationCommitInFlight else { return }
+                    // LongPressGesture can claim the shared session in its
+                    // first phase before a normal tap wins. If presentation
+                    // removes the sequenced gesture before onEnded, release
+                    // that non-moving claim before opening the editor. A
+                    // real move is already covered by isInteracting or
+                    // suppressTap and therefore cannot take this path.
+                    clearEventMutationSession()
                     onSelect()
                 }
             }
@@ -1906,6 +2045,8 @@ private struct CalendarInteractiveTimelineEvent: View {
             .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .local))
             .onChanged { phase in
                 if case .first(true) = phase {
+                    guard !interactionSession.statusMutationActive,
+                          !mutationCommitInFlight else { return }
                     // Claim the pointer before the hold threshold completes.
                     // This keeps the parent macOS horizontal ScrollView from
                     // consuming the first horizontal drag sample.
@@ -1941,8 +2082,7 @@ private struct CalendarInteractiveTimelineEvent: View {
             }
             .onEnded { _ in
                 guard isMoving else {
-                    interactionSession.eventMoveActive = false
-                    interactionSession.eventMovePreview = nil
+                    clearEventMutationSession(resetTap: true)
                     return
                 }
                 let minutes = moveMinutes
@@ -1960,6 +2100,8 @@ private struct CalendarInteractiveTimelineEvent: View {
             .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .local))
             .onChanged { phase in
                 if case .first(true) = phase {
+                    guard !interactionSession.statusMutationActive,
+                          !mutationCommitInFlight else { return }
                     // Resize is also an event-owned mutation: the parent
                     // horizontal timeline must yield while it is committed.
                     interactionSession.eventMoveActive = true
@@ -1983,7 +2125,7 @@ private struct CalendarInteractiveTimelineEvent: View {
             }
             .onEnded { _ in
                 guard isResizing else {
-                    interactionSession.eventMoveActive = false
+                    clearEventMutationSession(resetTap: true)
                     return
                 }
                 let minutes = resizeMinutes
@@ -1995,17 +2137,16 @@ private struct CalendarInteractiveTimelineEvent: View {
     }
 
     private func commitMove(dayDelta: Int = 0, minutes: Int = 0, resetTap: Bool = false, emitHaptic: Bool = true) {
+        guard !mutationCommitInFlight else { return }
         let interval = proposedMoveInterval(dayDelta: dayDelta, minutes: minutes)
         guard let interval else {
-            if resetTap { suppressTap = false }
-            interactionSession.eventMoveActive = false
-            interactionSession.eventMovePreview = nil
+            mutationCommitInFlight = false
+            clearEventMutationSession(resetTap: resetTap)
             return
         }
         if interval.start == item.start, interval.end == item.end {
-            if resetTap { suppressTap = false }
-            interactionSession.eventMoveActive = false
-            interactionSession.eventMovePreview = nil
+            mutationCommitInFlight = false
+            clearEventMutationSession(resetTap: resetTap)
             return
         }
         if emitHaptic, minutes != 0 || dayDelta != 0 { CalendarInteractionHaptics.snap() }
@@ -2013,6 +2154,7 @@ private struct CalendarInteractiveTimelineEvent: View {
             // Keep the owner and provisional render alive until the local save
             // completion. Both success and failure then take the same cleanup
             // path; a failed save re-renders the unchanged coordinator snapshot.
+            mutationCommitInFlight = true
             onUpdate(item, interval.start, interval.end) { _ in
                 // Local durability, whether success or failure, ends the
                 // provisional render. A failed save leaves the coordinator's
@@ -2021,14 +2163,15 @@ private struct CalendarInteractiveTimelineEvent: View {
                     settledPage: day,
                     calendar: calendar
                 )
+                mutationCommitInFlight = false
                 interactionSession.eventMovePreview = nil
                 interactionSession.eventMoveActive = cleanup.eventMoveActive
                 if resetTap { suppressTap = false }
             }
         }
         if onUpdate == nil {
-            interactionSession.eventMovePreview = nil
-            interactionSession.eventMoveActive = false
+            mutationCommitInFlight = false
+            clearEventMutationSession(resetTap: resetTap)
         }
         // A real update owns `suppressTap` and interaction cleanup above.
     }
@@ -2071,6 +2214,7 @@ private struct CalendarInteractiveTimelineEvent: View {
     }
 
     private func commitResize(minutes: Int, resetTap: Bool = false, emitHaptic: Bool = true) {
+        guard !mutationCommitInFlight else { return }
         let translation = Double(minutes) / 60 * Double(hourHeight)
         guard let interval = CalendarInteractionLayout.resizedInterval(
             item: item,
@@ -2080,20 +2224,27 @@ private struct CalendarInteractiveTimelineEvent: View {
             day: day,
             calendar: calendar
         ) else {
-            if resetTap { suppressTap = false }
+            // A resize can be cancelled by an invalid/clamped endpoint after
+            // the long-press already claimed the gesture. Always release the
+            // shared arbitration session on this path.
+            mutationCommitInFlight = false
+            clearEventMutationSession(resetTap: resetTap)
             return
         }
         if emitHaptic, minutes != 0 { CalendarInteractionHaptics.snap() }
         guard let onUpdate else {
-            interactionSession.eventMoveActive = false
-            if resetTap { suppressTap = false }
+            mutationCommitInFlight = false
+            clearEventMutationSession(resetTap: resetTap)
             return
         }
+        mutationCommitInFlight = true
         onUpdate(item, interval.start, interval.end) { _ in
             let cleanup = CalendarGestureArbitration.cleanupAfterCompletedMutation(
                 settledPage: day,
                 calendar: calendar
             )
+            mutationCommitInFlight = false
+            interactionSession.eventMovePreview = nil
             interactionSession.eventMoveActive = cleanup.eventMoveActive
             if resetTap { suppressTap = false }
         }
@@ -2205,18 +2356,25 @@ private struct CalendarTimelineEvent: View {
     }
 
     private var eventAccessibilityLabel: String {
-        return "\(item.icon ?? "No icon") \(item.title), \(item.status.label), " +
+        let kindLabel = item.kind == .todo ? "To-do, \(item.status.label)" : item.status.label
+        return "\(item.icon ?? "No icon") \(item.title), \(kindLabel), " +
             "\(CalendarTimelineScale.localizedTimeLabel(for: item.start, calendar: displayCalendar)) to " +
             "\(CalendarTimelineScale.localizedTimeLabel(for: item.end, calendar: displayCalendar))"
+    }
+
+    @ViewBuilder
+    private var leadingStatusControl: some View {
+        LifeOSIcon(item.status.iconName)
+            .frame(width: 14, height: 14)
+            .foregroundStyle(.white.opacity(0.78))
     }
 
     var body: some View {
         Group {
             if narrow {
                 HStack(spacing: 4) {
-                    LifeOSIcon(item.status.iconName)
-                        .frame(width: 12, height: 12)
-                        .foregroundStyle(.white.opacity(0.72))
+                    leadingStatusControl
+                        .frame(width: 14, height: 14)
                     Text(item.title)
                         .font(.caption.weight(.semibold))
                         .lineLimit(1)
@@ -2225,9 +2383,7 @@ private struct CalendarTimelineEvent: View {
                 }
             } else {
                 HStack(alignment: .top, spacing: 5) {
-                    LifeOSIcon(item.status.iconName)
-                        .frame(width: 14, height: 14)
-                        .foregroundStyle(.white.opacity(0.78))
+                    leadingStatusControl
                     VStack(alignment: .leading, spacing: 1) {
                         Text(item.title)
                             .font(.caption.weight(.semibold))
@@ -2273,6 +2429,8 @@ private struct CalendarTimelineEvent: View {
         )
         .opacity(isHovering ? CalendarEventVisuals.hoverOpacity : 1)
         .onHover { isHovering = $0 }
+        // The card has no interactive Todo child. Its checkbox is an outer
+        // sibling owned by CalendarInteractiveTimelineEvent.
         .accessibilityElement(children: .combine)
         .accessibilityLabel(eventAccessibilityLabel)
         .accessibilityHint("Hover or focus to reveal move and resize affordances")
@@ -2815,12 +2973,16 @@ public struct CalendarExpandedMonthGrid: View {
                     .frame(height: 20)
             }
 
-            ForEach(Array(days.chunked(into: 7).enumerated()), id: \.offset) { row, week in
+            ForEach(Array(days.chunked(into: 7).enumerated()), id: \.offset) { _, week in
                 Text(weekNumber(for: week.first))
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, minHeight: 36)
-                ForEach(Array(week.enumerated()), id: \.offset) { index, day in
+                // Date is the stable identity. Using the weekday index here
+                // repeated IDs 0...6 for every row in the LazyVGrid; SwiftUI
+                // then dropped most/all day cells on device while leaving
+                // the week-number gutter visible.
+                ForEach(Array(week.enumerated()), id: \.element) { index, day in
                     let inRange = selectedDays.contains(calendar.startOfDay(for: day))
                     let startsRange = inRange && (index == 0 || !selectedDays.contains(calendar.startOfDay(for: week[index - 1])))
                     let endsRange = inRange && (index == week.count - 1 || !selectedDays.contains(calendar.startOfDay(for: week[index + 1])))
@@ -2832,12 +2994,12 @@ public struct CalendarExpandedMonthGrid: View {
                         isInSelectedRange: inRange,
                         isRangeStart: startsRange,
                         isRangeEnd: endsRange,
+                        calendar: calendar,
                         namespace: namespace,
                         reduceMotion: reduceMotion,
                         action: { onSelectDate(day) }
                     )
                 }
-                .id(row)
             }
         }
         .padding(.horizontal, 12)
@@ -2861,6 +3023,7 @@ private struct CalendarExpandedDateCell: View {
     let isInSelectedRange: Bool
     let isRangeStart: Bool
     let isRangeEnd: Bool
+    let calendar: Calendar
     let namespace: Namespace.ID?
     let reduceMotion: Bool
     let action: () -> Void
@@ -2902,8 +3065,17 @@ private struct CalendarExpandedDateCell: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityIdentifier("calendar-expanded-date-\(calendarISODate(day))")
         .accessibilityLabel(day.formatted(.dateTime.weekday(.wide).month(.wide).day().year()))
         .accessibilityValue(isSelected ? "Selected" : (isInSelectedRange ? "Visible range" : ""))
+    }
+
+    private func calendarISODate(_ date: Date) -> String {
+        let components = calendar.dateComponents([.year, .month, .day], from: date)
+        guard let year = components.year,
+              let month = components.month,
+              let day = components.day else { return "" }
+        return String(format: "%04d-%02d-%02d", year, month, day)
     }
 }
 

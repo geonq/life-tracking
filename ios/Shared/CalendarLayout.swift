@@ -283,6 +283,43 @@ public enum CalendarGestureArbitration {
     public static func cleanupAfterCompletedMutation(settledPage: Date, calendar: Calendar) -> CompletedMutationCleanup {
         CompletedMutationCleanup(settledHeaderDate: headerDateAfterEventOwnership(settledPage: settledPage, calendar: calendar))
     }
+
+    /// Cancellation and validation failure use the same terminal state as a
+    /// completed mutation: no event owns the parent scroll and no provisional
+    /// preview remains mounted.
+    public static func cleanupAfterCancelledMutation(settledPage: Date, calendar: Calendar) -> CompletedMutationCleanup {
+        CompletedMutationCleanup(settledHeaderDate: headerDateAfterEventOwnership(settledPage: settledPage, calendar: calendar))
+    }
+}
+
+/// Small state machine for the iOS 17 pager fallback. Native scroll paging
+/// still owns the actual content offset; this state only records whether a
+/// horizontal finger drag currently owns the pager's settle gate.
+public struct CalendarPagerDragState: Equatable, Sendable {
+    public private(set) var isActive: Bool
+
+    public init(isActive: Bool = false) {
+        self.isActive = isActive
+    }
+
+    @discardableResult
+    public mutating func beginHorizontalDrag() -> Bool {
+        guard !isActive else { return false }
+        isActive = true
+        return true
+    }
+
+    @discardableResult
+    public mutating func end() -> Bool {
+        guard isActive else { return false }
+        isActive = false
+        return true
+    }
+
+    @discardableResult
+    public mutating func cancel() -> Bool {
+        end()
+    }
 }
 
 /// Render ownership for a month drag. The source owner remains mounted and
@@ -500,6 +537,21 @@ public enum CalendarInteractionLayout {
             pages = translation < 0 ? 1 : -1
         }
         return max(-maximumPages, min(maximumPages, pages))
+    }
+
+    /// Resolves the direction of the iOS 17 fallback drag without claiming
+    /// vertical timeline scrolling or event move/resize gestures.
+    public static func isHorizontalPagerDrag(
+        horizontalTranslation: Double,
+        verticalTranslation: Double,
+        minimumDistance: Double = 4
+    ) -> Bool {
+        guard horizontalTranslation.isFinite,
+              verticalTranslation.isFinite,
+              minimumDistance.isFinite,
+              minimumDistance >= 0 else { return false }
+        return abs(horizontalTranslation) >= minimumDistance &&
+            abs(horizontalTranslation) > abs(verticalTranslation)
     }
 
     /// The Mac empty-grid drag must be visibly intentional. A click or a

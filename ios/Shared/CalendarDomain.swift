@@ -30,6 +30,40 @@ public enum CalendarProgress: String, Codable, CaseIterable, Sendable {
     }
 }
 
+/// The durable kind of a calendar item.  `event` is the legacy/default kind:
+/// older calendar payloads did not carry a kind field and continue to decode
+/// as ordinary events.
+public enum CalendarItemKind: String, Codable, CaseIterable, Sendable {
+    case event
+    case todo
+    case dailySchedule
+
+    public init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        switch value {
+        case Self.event.rawValue:
+            self = .event
+        case Self.todo.rawValue:
+            self = .todo
+        case Self.dailySchedule.rawValue, "daily_schedule":
+            // Accept the snake-case spelling used by an early peer build.
+            self = .dailySchedule
+        default:
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: decoder.codingPath, debugDescription: "Unknown calendar item kind: \(value)")
+            )
+        }
+    }
+
+    public var label: String {
+        switch self {
+        case .event: "Event"
+        case .todo: "To-do"
+        case .dailySchedule: "Daily schedule"
+        }
+    }
+}
+
 public enum CalendarValidationError: Error, Equatable, Sendable {
     case blankTitle
     case invalidInterval
@@ -79,6 +113,7 @@ public enum CalendarSystemIconSupport {
 public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
     public let id: UUID
     public var title: String
+    public var kind: CalendarItemKind
     /// A missing value is a real no-icon choice, not an invisible placeholder
     /// glyph. `iconAsset` and `systemIconName` are alternate sources; the
     /// initializer enforces the precedence system symbol → custom asset → emoji.
@@ -95,12 +130,12 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
     public var isDeleted: Bool { deletedAt != nil }
     public var hasIcon: Bool { icon != nil || iconAsset != nil || systemIconName != nil }
 
-    public init(id: UUID = UUID(), title: String, icon: String? = nil, iconAsset: CalendarIconAsset? = nil,
+    public init(id: UUID = UUID(), title: String, kind: CalendarItemKind = .event, icon: String? = nil, iconAsset: CalendarIconAsset? = nil,
                 systemIconName: String? = nil, status: CalendarProgress = .planned,
                 start: Date, end: Date, createdAt: Date = .now, updatedAt: Date? = nil, deletedAt: Date? = nil) throws {
         guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw CalendarValidationError.blankTitle }
         guard end > start else { throw CalendarValidationError.invalidInterval }
-        self.id = id; self.title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.id = id; self.title = title.trimmingCharacters(in: .whitespacesAndNewlines); self.kind = kind
         let validatedSystemIconName = CalendarSystemIconSupport.validatedName(systemIconName)
         self.systemIconName = validatedSystemIconName
         // A payload can come from a newer peer with more than one source. Keep
@@ -116,7 +151,7 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, icon, iconAsset, systemIconName, status, start, end, createdAt, updatedAt, deletedAt
+        case id, title, kind, icon, iconAsset, systemIconName, status, start, end, createdAt, updatedAt, deletedAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -124,6 +159,7 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
         try self.init(
             id: container.decode(UUID.self, forKey: .id),
             title: container.decode(String.self, forKey: .title),
+            kind: container.decodeIfPresent(CalendarItemKind.self, forKey: .kind) ?? .event,
             // Legacy payloads contain a string; new payloads may omit or
             // encode null to represent a deliberate no-icon selection.
             icon: container.decodeIfPresent(String.self, forKey: .icon),
@@ -142,6 +178,7 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(id, forKey: .id)
         try container.encode(title, forKey: .title)
+        try container.encode(kind, forKey: .kind)
         // Encode nil explicitly. Decoding still accepts a missing legacy key.
         try container.encode(icon, forKey: .icon)
         try container.encodeIfPresent(iconAsset, forKey: .iconAsset)
@@ -161,6 +198,7 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
             icon ?? "",
             iconAsset?.deterministicKey ?? "",
             systemIconName ?? "",
+            kind.rawValue,
             status.rawValue,
             String(start.timeIntervalSince1970),
             String(end.timeIntervalSince1970),
@@ -172,16 +210,23 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
         try updating(status: status, at: at)
     }
 
-    public func updating(title: String? = nil, icon: String? = nil, clearIcon: Bool = false,
+    public func updating(kind: CalendarItemKind? = nil, title: String? = nil, icon: String? = nil, clearIcon: Bool = false,
                          iconAsset: CalendarIconAsset? = nil,
                          clearIconAsset: Bool = false, systemIconName: String? = nil,
                          clearSystemIconName: Bool = false, status: CalendarProgress? = nil,
                          start: Date? = nil, end: Date? = nil, at: Date) throws -> CalendarItem {
-        try CalendarItem(id: id, title: title ?? self.title, icon: clearIcon ? nil : (icon ?? self.icon),
+        try CalendarItem(id: id, title: title ?? self.title, kind: kind ?? self.kind, icon: clearIcon ? nil : (icon ?? self.icon),
                          iconAsset: clearIconAsset ? nil : (iconAsset ?? self.iconAsset),
                          systemIconName: clearSystemIconName ? nil : (systemIconName ?? self.systemIconName),
                          status: status ?? self.status,
                          start: start ?? self.start, end: end ?? self.end, createdAt: createdAt, updatedAt: at, deletedAt: deletedAt)
+    }
+
+    /// A to-do is complete when its durable progress is `.done`; toggling the
+    /// checkbox never changes its interval or kind.
+    public func togglingDone(at date: Date) throws -> CalendarItem {
+        guard kind == .todo else { return self }
+        return try updating(status: status == .done ? .planned : .done, at: date)
     }
 
     public func deleting(at: Date) -> CalendarItem {
