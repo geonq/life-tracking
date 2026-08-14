@@ -1,10 +1,25 @@
 # API security and adapter boundary
 
-The local API has two truthful modes. `/health`, `/api/overview`, and `/api/codex`
-serve explicitly labeled `Demo data` fixtures. `/api/codex/live` and the
-potentially-live `/api/usage` route use the bounded adapters; `/api/usage` is
-side-effect-free and reports live Codex observations plus any bounded Claude
-history that was explicitly ingested.
+The API has an explicit runtime truth gate. `NODE_ENV=production` (and an
+explicit `LIFEOS_API_MODE=production`) always selects production mode. In that
+mode `/health` stays a `200` readiness endpoint for the Windows supervisor and
+reports `{ "status": "ok", "mode": "production", "readiness": "ready" }`;
+it does not claim demo data. The fixture-only `/api/overview` and `/api/codex`
+routes return `503` with
+`{ "error": "unavailable", "code": "fixture_route_unavailable", "reason": "explicit_fixture_or_test_mode_required" }`.
+They never return fixture KPIs in production.
+
+Visual fixtures require the explicit `LIFEOS_API_MODE=fixture` setting. Test
+runs may use `NODE_ENV=test` (or `LIFEOS_API_MODE=test`). Unset,
+`NODE_ENV=development`, `staging`, and other non-test modes keep fixture routes
+closed; this prevents an arbitrary production-like environment from exposing
+sample data. `/api/codex/live` and the potentially-live `/api/usage` route use
+the bounded adapters; `/api/usage` is side-effect-free and reports live Codex
+observations plus any bounded Claude history that was explicitly ingested.
+
+Finance remains explicit and unavailable until an authorized connector exists:
+`/api/finance/summary` returns the typed unavailable summary and never fabricates
+amounts, including in production.
 
 The production listener binds to loopback (`127.0.0.1`). Claude statusline
 ingestion (`POST /api/usage/claude-ingest`, with the legacy alias

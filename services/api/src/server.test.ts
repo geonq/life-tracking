@@ -19,6 +19,15 @@ const postClaudePayload = (port: number, secret: string, payload: unknown) => ne
     response.on('end', () => resolve({ status: response.statusCode!, body: value })); });
   req.end(JSON.stringify(payload));
 });
+const listenApiServer = (server: ReturnType<typeof createApiServer>) => new Promise<void>((resolve, reject) => {
+  const onError = (error: Error) => { server.removeListener('error', onError); reject(error); };
+  server.once('error', onError);
+  server.listen(0, () => { server.removeListener('error', onError); resolve(); });
+});
+const closeApiServer = (server: ReturnType<typeof createApiServer>) => new Promise<void>(resolve => {
+  if (!server.listening) { resolve(); return; }
+  server.close(() => resolve());
+});
 
 describe('HTTP API', () => {
   it('ignores inline Claude secrets when no secret file is configured', async () => {
@@ -127,75 +136,143 @@ describe('HTTP API', () => {
     if (previousSecretFile === undefined) delete process.env.CLAUDE_INGEST_SECRET_FILE; else process.env.CLAUDE_INGEST_SECRET_FILE = previousSecretFile;
   });
   it('serves health, overview and codex, rejects methods and unknown paths', async () => {
-    const server = createApiServer(); await new Promise<void>(r => server.listen(0, r));
-    const address = server.address(); if (!address || typeof address === 'string') throw Error('no address');
-    const call = (path:string, method='GET') => new Promise<{status:number; body:any}>(resolve => { const req=request({port:address.port,path,method}, res=>{let b='';res.on('data',x=>b+=x);res.on('end',()=>resolve({status:res.statusCode!,body:JSON.parse(b)}))});req.end(); });
-    expect((await call('/health')).body.status).toBe('ok');
-    expect((await call('/api/overview')).body.label).toBe('Demo data');
-    expect((await call('/api/codex')).body.kind).toBe('codex');
+    const previousApiMode = process.env.LIFEOS_API_MODE;
+    let server: ReturnType<typeof createApiServer> | undefined;
+    try {
+      process.env.LIFEOS_API_MODE = 'test';
+      server = createApiServer(); await listenApiServer(server);
+      const address = server.address(); if (!address || typeof address === 'string') throw Error('no address');
+      const call = (path:string, method='GET') => new Promise<{status:number; body:any}>(resolve => { const req=request({port:address.port,path,method}, res=>{let b='';res.on('data',x=>b+=x);res.on('end',()=>resolve({status:res.statusCode!,body:JSON.parse(b)}))});req.end(); });
+      const health = await call('/health');
+      expect(health.body).toMatchObject({ status: 'ok', mode: 'test', readiness: 'ready' });
+      expect(health.body).not.toHaveProperty('demo');
+      expect((await call('/api/overview')).body.label).toBe('Demo data');
+      expect((await call('/api/codex')).body.kind).toBe('codex');
 
-    const usage = await call('/api/usage');
-    expect(usage.status).toBe(200);
-    expect(Object.keys(usage.body.connectors)).toEqual([
-      'codex', 'claude', 'glm', 'deepseek', 'google_ai_studio',
-    ]);
-    expect(usage.body.connectors.glm).toBe('unavailable');
-    expect(usage.body.connectors.deepseek).toBe('unavailable');
-    expect(usage.body.connectors.google_ai_studio).toBe('unavailable');
+      const usage = await call('/api/usage');
+      expect(usage.status).toBe(200);
+      expect(Object.keys(usage.body.connectors)).toEqual([
+        'codex', 'claude', 'glm', 'deepseek', 'google_ai_studio',
+      ]);
+      expect(usage.body.connectors.glm).toBe('unavailable');
+      expect(usage.body.connectors.deepseek).toBe('unavailable');
+      expect(usage.body.connectors.google_ai_studio).toBe('unavailable');
 
-    const finance = await call('/api/finance/connectors');
-    expect(finance.status).toBe(200);
-    expect(finance.body.connectors.map((connector: { id: string }) => connector.id)).toEqual([
-      'sparkasse',
-      'revolut_personal',
-      'revolut_business',
-      'trade_republic',
-    ]);
-    expect(finance.body.connectors.every((connector: { enabled: boolean }) => !connector.enabled)).toBe(true);
-    expect(finance.body.connectors.every((connector: { requiresExplicitOptIn: boolean }) => connector.requiresExplicitOptIn)).toBe(true);
-    expect(finance.body.connectors.filter((connector: { provider: string }) => connector.provider === 'GoCardless Bank Account Data')).toHaveLength(2);
-    expect(finance.body.connectors.filter((connector: { risk: string }) => connector.risk === 'consent_required')).toHaveLength(2);
-    expect(finance.body.connectors.find((connector: { id: string }) => connector.id === 'revolut_business')).toMatchObject({
-      accessMethod: 'official_oauth',
-      provider: 'Official Revolut Business API',
-      risk: 'account_eligibility_required',
-    });
-    expect(finance.body.connectors.find((connector: { id: string }) => connector.id === 'trade_republic')).toMatchObject({
-      accessMethod: 'manual_import',
-      provider: 'Manual CSV/PDF import',
-      risk: 'manual_import_only',
-    });
+      const finance = await call('/api/finance/connectors');
+      expect(finance.status).toBe(200);
+      expect(finance.body.connectors.map((connector: { id: string }) => connector.id)).toEqual([
+        'sparkasse',
+        'revolut_personal',
+        'revolut_business',
+        'trade_republic',
+      ]);
+      expect(finance.body.connectors.every((connector: { enabled: boolean }) => !connector.enabled)).toBe(true);
+      expect(finance.body.connectors.every((connector: { requiresExplicitOptIn: boolean }) => connector.requiresExplicitOptIn)).toBe(true);
+      expect(finance.body.connectors.filter((connector: { provider: string }) => connector.provider === 'GoCardless Bank Account Data')).toHaveLength(2);
+      expect(finance.body.connectors.filter((connector: { risk: string }) => connector.risk === 'consent_required')).toHaveLength(2);
+      expect(finance.body.connectors.find((connector: { id: string }) => connector.id === 'revolut_business')).toMatchObject({
+        accessMethod: 'official_oauth',
+        provider: 'Official Revolut Business API',
+        risk: 'account_eligibility_required',
+      });
+      expect(finance.body.connectors.find((connector: { id: string }) => connector.id === 'trade_republic')).toMatchObject({
+        accessMethod: 'manual_import',
+        provider: 'Manual CSV/PDF import',
+        risk: 'manual_import_only',
+      });
 
-    const financeSummary = await call('/api/finance/summary');
-    expect(financeSummary.status).toBe(200);
-    expect(financeSummary.body.currency).toBe('EUR');
-    for (const key of ['monthlyIncome', 'fixedCosts', 'discretionaryBuffer', 'spent', 'savingsGoal', 'saved']) {
-      expect(financeSummary.body[key]).toMatchObject({ availability: 'unavailable', provenance: { quality: 'unavailable', connectorState: 'unavailable' } });
-      expect(financeSummary.body[key]).not.toHaveProperty('amountCents');
+      const financeSummary = await call('/api/finance/summary');
+      expect(financeSummary.status).toBe(200);
+      expect(financeSummary.body.currency).toBe('EUR');
+      for (const key of ['monthlyIncome', 'fixedCosts', 'discretionaryBuffer', 'spent', 'savingsGoal', 'saved']) {
+        expect(financeSummary.body[key]).toMatchObject({ availability: 'unavailable', provenance: { quality: 'unavailable', connectorState: 'unavailable' } });
+        expect(financeSummary.body[key]).not.toHaveProperty('amountCents');
+      }
+      // A summary-only unavailable response must omit the transaction snapshot;
+      // an empty array would falsely claim that a connector observed an empty ledger.
+      expect(financeSummary.body).not.toHaveProperty('transactions');
+
+      const clipper = await call('/api/clipper/summary');
+      expect(clipper.status).toBe(200);
+      expect(clipper.body).toMatchObject({
+        schemaVersion: 1,
+        availability: 'unavailable',
+        currency: 'EUR',
+        provenance: {
+          source: 'no-authorized-clipper-source',
+          quality: 'unavailable',
+          freshness: 'unknown',
+          connectorState: 'unavailable',
+        },
+      });
+      expect(clipper.body).not.toHaveProperty('metrics');
+      expect(clipper.body).not.toHaveProperty('accounts');
+
+      expect((await call('/missing')).status).toBe(404);
+      expect((await call('/health','POST')).status).toBe(405);
+    } finally {
+      if (server) await closeApiServer(server);
+      if (previousApiMode === undefined) delete process.env.LIFEOS_API_MODE; else process.env.LIFEOS_API_MODE = previousApiMode;
     }
-    // A summary-only unavailable response must omit the transaction snapshot;
-    // an empty array would falsely claim that a connector observed an empty ledger.
-    expect(financeSummary.body).not.toHaveProperty('transactions');
+  });
 
-    const clipper = await call('/api/clipper/summary');
-    expect(clipper.status).toBe(200);
-    expect(clipper.body).toMatchObject({
-      schemaVersion: 1,
-      availability: 'unavailable',
-      currency: 'EUR',
-      provenance: {
-        source: 'no-authorized-clipper-source',
-        quality: 'unavailable',
-        freshness: 'unknown',
-        connectorState: 'unavailable',
-      },
-    });
-    expect(clipper.body).not.toHaveProperty('metrics');
-    expect(clipper.body).not.toHaveProperty('accounts');
+  it('fails closed for fixture routes in production and arbitrary non-test modes', async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousApiMode = process.env.LIFEOS_API_MODE;
+    let server: ReturnType<typeof createApiServer> | undefined;
+    try {
+      server = createApiServer(); await listenApiServer(server);
+      const address = server.address(); if (!address || typeof address === 'string') throw Error('no address');
+      const call = (path: string) => new Promise<{ status: number; body: any }>(resolve => {
+        const req = request({ port: address.port, path }, response => {
+          let value = ''; response.on('data', chunk => value += chunk);
+          response.on('end', () => resolve({ status: response.statusCode!, body: JSON.parse(value) }));
+        });
+        req.end();
+      });
+      const modes: Array<{ nodeEnv: string; apiMode?: string }> = [
+        { nodeEnv: 'production', apiMode: 'fixture' },
+        { nodeEnv: 'production', apiMode: 'test' },
+        { nodeEnv: 'production' },
+        { nodeEnv: 'development' },
+        { nodeEnv: 'staging' },
+      ];
+      for (const { nodeEnv, apiMode: configuredMode } of modes) {
+        process.env.NODE_ENV = nodeEnv;
+        if (configuredMode === undefined) delete process.env.LIFEOS_API_MODE; else process.env.LIFEOS_API_MODE = configuredMode;
+        const health = await call('/health');
+        expect(health.status).toBe(200);
+        expect(health.body).toMatchObject({ status: 'ok', mode: nodeEnv === 'production' ? 'production' : 'development', readiness: 'ready' });
+        expect(health.body).not.toHaveProperty('demo');
 
-    expect((await call('/missing')).status).toBe(404);
-    expect((await call('/health','POST')).status).toBe(405);
-    await new Promise(r=>server.close(r));
+        for (const path of ['/api/overview', '/api/codex']) {
+          const result = await call(path);
+          expect(result.status).toBe(503);
+          expect(result.body).toEqual({
+            error: 'unavailable',
+            code: 'fixture_route_unavailable',
+            reason: 'explicit_fixture_or_test_mode_required',
+          });
+          expect(JSON.stringify(result.body)).not.toContain('Demo data');
+        }
+      }
+
+      process.env.NODE_ENV = 'production';
+      delete process.env.LIFEOS_API_MODE;
+      const finance = await call('/api/finance/summary');
+      expect(finance.status).toBe(200);
+      expect(finance.body.monthlyIncome).toMatchObject({ availability: 'unavailable' });
+      expect(finance.body.monthlyIncome).not.toHaveProperty('amountCents');
+
+      process.env.NODE_ENV = 'development';
+      process.env.LIFEOS_API_MODE = 'fixture';
+      expect((await call('/api/overview')).status).toBe(200);
+      expect((await call('/api/codex')).status).toBe(200);
+    } finally {
+      if (server) await closeApiServer(server);
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = previousNodeEnv;
+      if (previousApiMode === undefined) delete process.env.LIFEOS_API_MODE; else process.env.LIFEOS_API_MODE = previousApiMode;
+    }
   });
 
   it('fails closed when Claude ingestion is enabled but no observation exists', async () => {

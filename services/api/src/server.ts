@@ -20,6 +20,27 @@ function usageStorePath(): string | undefined {
 const history = () => new UsageHistory(usageStorePath() ?? resolve('usage-history.jsonl'));
 const defaultCalendarStore = new CalendarStore();
 const json = (res: ServerResponse, status: number, value: unknown) => { res.statusCode = status; res.end(JSON.stringify(value)); };
+
+/**
+ * Fixture endpoints are an explicit opt-in surface. In particular, a
+ * production-like NODE_ENV (including values such as staging) must never
+ * make the visual fixtures look like a live API. Production always wins over
+ * the opt-in mode so a stale fixture flag cannot reopen them at deployment.
+ */
+export type ApiMode = 'production' | 'fixture' | 'test' | 'development';
+export function apiMode(): ApiMode {
+  const configured = process.env.LIFEOS_API_MODE?.trim().toLowerCase();
+  if (process.env.NODE_ENV === 'production' || configured === 'production') return 'production';
+  if (configured === 'fixture' || configured === 'fixtures') return 'fixture';
+  if (process.env.NODE_ENV === 'test' || configured === 'test') return 'test';
+  return 'development';
+}
+const fixtureRoutesEnabled = () => apiMode() === 'fixture' || apiMode() === 'test';
+const fixtureRouteUnavailable = (res: ServerResponse) => json(res, 503, {
+  error: 'unavailable',
+  code: 'fixture_route_unavailable',
+  reason: 'explicit_fixture_or_test_mode_required',
+});
 const calendarResource = (res: ServerResponse, status: number, resource: CalendarResource, replay = false) => {
   res.statusCode = status;
   res.setHeader('etag', resource.etag);
@@ -275,9 +296,20 @@ export async function app(
   if (req.url?.startsWith('/api/nutrition/barcode/') || req.url?.startsWith('/nutrition/barcode/')) {
     return lookupBarcode(req, res, configuredBarcodeClient);
   }
-  if (req.url === '/health') return json(res, 200, { status: 'ok', demo: true, service: 'iphone-life-os-api' });
-  if (req.url === '/api/overview') return json(res, 200, parseOverview(fixtures.overview));
-  if (req.url === '/api/codex') return json(res, 200, parseCodexFixture(fixtures.codex));
+  if (req.url === '/health') return json(res, 200, {
+    status: 'ok',
+    service: 'iphone-life-os-api',
+    mode: apiMode(),
+    readiness: 'ready',
+  });
+  if (req.url === '/api/overview') {
+    if (!fixtureRoutesEnabled()) return fixtureRouteUnavailable(res);
+    return json(res, 200, parseOverview(fixtures.overview));
+  }
+  if (req.url === '/api/codex') {
+    if (!fixtureRoutesEnabled()) return fixtureRouteUnavailable(res);
+    return json(res, 200, parseCodexFixture(fixtures.codex));
+  }
   if (req.url === '/api/codex/live') return json(res, 200, await readLive());
   if (req.url === '/api/finance/connectors') return json(res, 200, FinanceConnectorCatalog.parse({ connectors: financeConnectors }));
   if (req.url === '/api/finance/summary') return json(res, 200, unavailableFinanceSummary());
