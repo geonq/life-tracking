@@ -749,6 +749,7 @@ struct SettingsView: View {
                         .font(LifeOSFont.inter(12))
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("settings-provider-keys-disclaimer")
                 }
             }
         }

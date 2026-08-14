@@ -12,7 +12,9 @@ final class LifeOSUITests: XCTestCase {
         app.launchArguments = baseLaunchArguments + ["-LifeOSForceLightMode"]
         app.launch()
         dismissSystemPromptsIfPresent()
-        XCTAssertGreaterThan(app.windows.firstMatch.frame.width, 375, "App must use the full modern iPhone viewport")
+        let viewport = app.windows.firstMatch.frame
+        XCTAssertGreaterThan(viewport.width, 375, "Viewport must support the primary iPhone layout width")
+        XCTAssertGreaterThan(viewport.height, viewport.width, "Primary viewport assertions require portrait orientation")
     }
 
     func testPrimaryScreenshotsAndAccessibility() throws {
@@ -94,6 +96,82 @@ final class LifeOSUITests: XCTestCase {
         home.tap()
         XCTAssertTrue(app.scrollViews["overview-screen"].waitForExistence(timeout: 2))
         XCTAssertEqual(home.value as? String, "Selected")
+    }
+
+    /// The custom bar is a safe-area inset, so each route must end above the
+    /// bar's live top edge rather than relying on a device-specific estimate.
+    /// Passive endpoint surfaces use frame containment; actual buttons also
+    /// prove hittability. The boundary comes from live accessibility frames,
+    /// so this remains valid across supported portrait phone sizes.
+    func testPrimaryRoutesReachTrailingContentAboveCustomTabBar() throws {
+        assertTabBarFitsWindow()
+        assertTrailingElementAboveTabBar(
+            "overview-finance-link",
+            route: "Home link",
+            scrollView: app.scrollViews["overview-screen"],
+            requiresHittable: true
+        )
+
+        app.buttons["main-tab-calendar"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["calendar-pager"].waitForExistence(timeout: 5))
+        // 24:00 is a passive label; its complete frame proves the finite
+        // Calendar timeline still reaches the trailing endpoint.
+        assertTrailingElementAboveTabBar(
+            "calendar-timeline-end",
+            route: "Calendar 24:00",
+            maxSwipes: 12
+        )
+
+        app.buttons["main-tab-finance"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["finance-view"].waitForExistence(timeout: 5))
+        // The Accounts card is the final Finance surface and is passive.
+        assertTrailingElementAboveTabBar(
+            "finance-accounts",
+            route: "Finance final card",
+            scrollView: app.scrollViews["finance-view"]
+        )
+
+        app.buttons["main-tab-fitness"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["fitness-view"].waitForExistence(timeout: 5))
+        // Health Monitor is the last relevant NavigationLink; prove it while
+        // the route is at its natural top position before seeking the passive
+        // final surface below it.
+        assertTrailingElementAboveTabBar(
+            "fitness-core-health-monitor-card",
+            route: "Fitness final relevant button",
+            maxSwipes: 14,
+            requiresHittable: true
+        )
+        // Timeline is the final Fitness surface and is checked by complete
+        // frame containment rather than hittability.
+        assertTrailingElementAboveTabBar(
+            "fitness-core-timeline",
+            route: "Fitness final surface",
+            maxSwipes: 14
+        )
+
+        app.buttons["main-tab-more"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["more-modules-screen"].waitForExistence(timeout: 5))
+        assertTrailingElementAboveTabBar(
+            "more-module-settings",
+            route: "More Settings action",
+            scrollView: app.scrollViews["more-modules-screen"],
+            requiresHittable: true
+        )
+
+        app.buttons["more-module-settings"].tap()
+        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
+        assertTrailingElementAboveTabBar(
+            "settings-category-privacy",
+            route: "Settings final button",
+            scrollView: app.scrollViews["settings-hub"],
+            requiresHittable: true
+        )
+        assertTrailingElementAboveTabBar(
+            "settings-provider-keys-disclaimer",
+            route: "Settings provider-keys disclaimer",
+            scrollView: app.scrollViews["settings-hub"]
+        )
     }
 
     func testFitnessSourceReviewDismissesSheetAndReachesHealthSettings() throws {
@@ -908,7 +986,7 @@ final class LifeOSUITests: XCTestCase {
             if let card = candidates.first(where: { candidate in
                 let hasStrengthIdentity = candidate.identifier == "fitness-strength-volume-card"
                     || candidate.label.localizedCaseInsensitiveContains("Strength volume")
-                return hasStrengthIdentity && isSafelyVisibleAboveFitnessTabBar(candidate)
+                return hasStrengthIdentity && isSafelyVisibleAboveTabBar(candidate)
             }) {
                 return card
             }
@@ -925,17 +1003,78 @@ final class LifeOSUITests: XCTestCase {
 
     private func tapFitnessStrengthCard(_ element: XCUIElement) {
         XCTAssertTrue(
-            isSafelyVisibleAboveFitnessTabBar(element),
+            isSafelyVisibleAboveTabBar(element),
             "Strength volume card must be fully visible above the bottom tab bar before tapping"
         )
         element.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
     }
 
-    private func isSafelyVisibleAboveFitnessTabBar(_ element: XCUIElement) -> Bool {
+    /// Proves the element's complete accessibility frame is above the custom
+    /// bar. The requiresHittable flag is reserved for controls; passive
+    /// endpoint cards/labels intentionally use geometry only.
+    private func assertTrailingElementAboveTabBar(
+        _ identifier: String,
+        route: String,
+        scrollView: XCUIElement? = nil,
+        maxSwipes: Int = 10,
+        requiresHittable: Bool = false
+    ) {
+        let target = app.descendants(matching: .any)[identifier]
+        for attempt in 0...maxSwipes {
+            if target.waitForExistence(timeout: attempt == 0 ? 5 : 1),
+               isSafelyVisibleAboveTabBar(target) {
+                if requiresHittable {
+                    XCTAssertTrue(target.isHittable, "\(route) trailing element \(identifier) must be hittable")
+                }
+                return
+            }
+            guard attempt < maxSwipes else { break }
+            if let scrollView, scrollView.exists {
+                scrollView.swipeUp()
+            } else {
+                swipeVerticalContent()
+            }
+        }
+
+        XCTFail(
+            "\(route) trailing element \(identifier) must be fully above the live custom tab bar; " +
+                "target=\(String(describing: target.frame)), tabBarTop=\(String(describing: customTabBarTopY))"
+        )
+    }
+
+    private func assertTabBarFitsWindow() {
+        let window = app.windows.firstMatch.frame
+        let identifiers = ["home", "calendar", "finance", "fitness", "more"]
+        let buttons = identifiers.map { app.buttons["main-tab-\($0)"] }
+        for button in buttons {
+            XCTAssertTrue(button.waitForExistence(timeout: 5), "Tab bar item \(button.identifier) must exist")
+            let frame = button.frame
+            XCTAssertGreaterThan(frame.width, 0, "Tab bar item \(button.identifier) must have width")
+            XCTAssertGreaterThan(frame.height, 0, "Tab bar item \(button.identifier) must have height")
+            XCTAssertLessThanOrEqual(frame.maxY, window.maxY + 1, "Tab bar item \(button.identifier) is clipped by the window")
+        }
+    }
+
+    private func swipeVerticalContent() {
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.78))
+        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.30))
+        start.press(forDuration: 0.08, thenDragTo: end)
+    }
+
+    private var customTabBarTopY: CGFloat? {
+        let identifiers = ["home", "calendar", "finance", "fitness", "more"]
+        let frames = identifiers.compactMap { identifier -> CGRect? in
+            let frame = app.buttons["main-tab-\(identifier)"].frame
+            return frame.width > 0 && frame.height > 0 ? frame : nil
+        }
+        return frames.map(\.minY).min()
+    }
+
+    private func isSafelyVisibleAboveTabBar(_ element: XCUIElement) -> Bool {
         let window = app.windows.firstMatch.frame
         let frame = element.frame
-        let tabBarInset = min(104, max(84, window.height * 0.11))
-        let contentBottom = window.maxY - tabBarInset
+        guard let tabBarTopY = customTabBarTopY else { return false }
+        let contentBottom = min(window.maxY, tabBarTopY)
         return frame.width > 0 && frame.height > 0
             && frame.minX >= window.minX
             && frame.maxX <= window.maxX

@@ -113,7 +113,7 @@ struct LifeOSApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ZStack {
+            ZStack(alignment: .topLeading) {
                 switch selection {
                 case .home:
                 OverviewView(
@@ -164,6 +164,14 @@ struct LifeOSApp: App {
                 )
                 }
             }
+            // The shell owns the full canvas. Without an explicit flexible
+            // frame, a destination's ideal size can become the ZStack's
+            // layout size while it is transitioning, which in turn gives
+            // ScrollViews and Calendar's finite timed viewport a stale bottom
+            // boundary. The background belongs to this shell so every route,
+            // including pushed More destinations, fills the window.
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
             // The small offset keeps the transition directional without moving a
             // complete screen in from off-canvas like a stock push navigation.
             .id(selection)

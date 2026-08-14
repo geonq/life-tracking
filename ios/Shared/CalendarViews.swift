@@ -1287,6 +1287,11 @@ private struct CalendarTimelinePage: View {
                     .padding(.trailing, 8)
                     .offset(y: CGFloat(scale?.y(for: date ?? .now, calendar: calendar) ?? Double(minute) / 60 * Double(hourHeight)))
                     .id(minute / 60)
+                    // Keep the real 24:00 label as the UI probe for the
+                    // existing trailing endpoint. It does not add height or
+                    // alter the finite viewport; it only makes the endpoint
+                    // assertion independent of a device's pixel geometry.
+                    .accessibilityIdentifier(minute == dayMinutes ? "calendar-timeline-end" : "")
             }
         }
         .frame(height: contentHeight)
