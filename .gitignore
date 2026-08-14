@@ -75,3 +75,6 @@ artifacts/
 # project.yml, and plist/entitlements files.
 !ios/LifeOS/Modules/Finance/
 !ios/LifeOS/Modules/Finance/FinanceView.swift
+
+# Windows service-host deploy tree stays UNTRACKED until reviewed/approved (LIFEOS_95_EXECUTION_PLAN section 3/7)
+services/windows-service-host/deploy/
