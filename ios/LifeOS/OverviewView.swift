@@ -83,12 +83,15 @@ struct OverviewView: View {
             .navigationDestination(item: $selectedDetail) { destination in
                 switch destination {
                 case .clipper:
-                    ClipperAnalyticsView(
-                        section: clipperSection,
-                        snapshot: snapshot.clipperSnapshot,
-                        refreshAction: clipperRefreshAction,
-                        clipperState: clipperState,
-                        namespace: cardNamespace
+                    zoomTransitioned(
+                        ClipperAnalyticsView(
+                            section: clipperSection,
+                            snapshot: snapshot.clipperSnapshot,
+                            refreshAction: clipperRefreshAction,
+                            clipperState: clipperState,
+                            namespace: cardNamespace
+                        ),
+                        sourceID: OverviewSectionKind.clipper.rawValue
                     )
                 }
             }
@@ -316,15 +319,18 @@ struct OverviewView: View {
                     }
                 }
             } label: {
-                matchedSource(
-                    OverviewMetricCard(
-                        section: section,
-                        usageSnapshots: usageSnapshots,
-                        clipperState: clipperState,
-                        clipperSnapshot: snapshot.clipperSnapshot,
-                        fitnessSnapshot: fitnessSnapshot,
-                        financeSummary: financeSummary,
-                        financeState: financeState
+                zoomSource(
+                    matchedSource(
+                        OverviewMetricCard(
+                            section: section,
+                            usageSnapshots: usageSnapshots,
+                            clipperState: clipperState,
+                            clipperSnapshot: snapshot.clipperSnapshot,
+                            fitnessSnapshot: fitnessSnapshot,
+                            financeSummary: financeSummary,
+                            financeState: financeState
+                        ),
+                        id: section.kind.rawValue
                     ),
                     id: section.kind.rawValue
                 )
@@ -400,6 +406,44 @@ struct OverviewView: View {
         } else {
             content.matchedCard(id: id, in: cardNamespace)
         }
+    }
+
+    /// Tags the clipper card as the source of an iOS 18 zoom navigation transition.
+    /// `matchedGeometryEffect` (used by `matchedSource`/`matchedCard`) cannot animate across a
+    /// `navigationDestination` boundary, so the hero-morph into `ClipperAnalyticsView` needs the
+    /// dedicated `matchedTransitionSource` API instead. No-op on iOS 17 (falls back to a plain
+    /// push) and on macOS, where `NavigationTransition.zoom` is unavailable entirely.
+    @ViewBuilder
+    private func zoomSource<Content: View>(_ content: Content, id: String) -> some View {
+#if os(iOS)
+        if reduceMotion {
+            content
+        } else if #available(iOS 18.0, *) {
+            content.matchedTransitionSource(id: id, in: cardNamespace)
+        } else {
+            content
+        }
+#else
+        content
+#endif
+    }
+
+    /// Wraps a navigationDestination's content with the matching iOS 18 zoom transition. No-op
+    /// on iOS 17, where the destination keeps today's plain push behavior, and on macOS, where
+    /// `NavigationTransition.zoom` is unavailable entirely.
+    @ViewBuilder
+    private func zoomTransitioned<Content: View>(_ content: Content, sourceID: String) -> some View {
+#if os(iOS)
+        if reduceMotion {
+            content
+        } else if #available(iOS 18.0, *) {
+            content.navigationTransition(.zoom(sourceID: sourceID, in: cardNamespace))
+        } else {
+            content
+        }
+#else
+        content
+#endif
     }
 }
 

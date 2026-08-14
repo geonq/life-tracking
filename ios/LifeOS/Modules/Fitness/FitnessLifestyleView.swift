@@ -931,7 +931,7 @@ private struct FitnessLifestyleEntryEditor: View {
             (FitnessLifestyleTime.isValidTimeZoneIdentifier(currentTimeZone) ? currentTimeZone : "UTC")
         self.onSave = onSave
         _amountText = State(initialValue: initialEvent?.value.map { $0.formatted(.number.precision(.fractionLength(0...2))) } ?? defaultSettings.quickAmount.map { $0.formatted(.number.precision(.fractionLength(0...2))) } ?? "")
-        _unit = State(initialValue: initialEvent?.unit ?? defaultSettings.quickUnit ?? kind.defaultQuickAmount?.unit ?? kind.allowedUnits.first!)
+        _unit = State(initialValue: initialEvent?.unit ?? defaultSettings.quickUnit ?? kind.defaultQuickAmount?.unit ?? kind.defaultUnit)
         _occurredAt = State(initialValue: initialEvent?.occurredAt ?? selectedDate)
         _explicitNone = State(initialValue: initialEvent?.state == .explicitNone)
         _alcoholFree = State(initialValue: initialEvent?.state == .alcoholFree)
@@ -1100,7 +1100,7 @@ private struct FitnessLifestyleSettingsEditor: View {
         self.onSave = onSave
         _goalText = State(initialValue: initialSettings.goal.map { $0.formatted(.number.precision(.fractionLength(0...2))) } ?? "")
         _quickText = State(initialValue: initialSettings.quickAmount.map { $0.formatted(.number.precision(.fractionLength(0...2))) } ?? "")
-        _quickUnit = State(initialValue: initialSettings.quickUnit ?? kind.defaultQuickAmount?.unit ?? kind.allowedUnits.first!)
+        _quickUnit = State(initialValue: initialSettings.quickUnit ?? kind.defaultQuickAmount?.unit ?? kind.defaultUnit)
         _reminderEnabled = State(initialValue: initialSettings.reminderEnabled)
         _reminderContext = State(initialValue: initialSettings.reminderContext)
         _reminderFoldPolicy = State(initialValue: initialSettings.reminderFoldPolicy)

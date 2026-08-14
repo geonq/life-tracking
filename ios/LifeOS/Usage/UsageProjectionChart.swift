@@ -374,8 +374,8 @@ struct UsageProjectionChart: View {
                 action: pinRangeStart
             )
             HStack(spacing: 16) {
-                iconLabelButton(icon: .chevronLeft, label: "Zoom in") { changeZoom(by: 0.6) }
-                iconLabelButton(icon: .chevronRight, label: "Zoom out") { changeZoom(by: 1 / 0.6) }
+                iconLabelButton(icon: .zoomIn, label: "Zoom in") { changeZoom(by: 0.6) }
+                iconLabelButton(icon: .zoomOut, label: "Zoom out") { changeZoom(by: 1 / 0.6) }
             }
             metaRow(label: "Reset", value: resetText)
             metaRow(label: "Suggested pace", value: "Not enough data")

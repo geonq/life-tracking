@@ -40,6 +40,19 @@ public enum FitnessLifestyleKind: String, Codable, CaseIterable, Hashable, Senda
         case .alcohol: return [.standardDrinks]
         }
     }
+
+    /// A deterministic, always-valid unit for this kind — the canonical unit
+    /// entry pickers should preselect. Defined explicitly per case (rather
+    /// than derived from `allowedUnits.first`, whose `Set` iteration order is
+    /// not guaranteed) so a future kind cannot crash a caller that expects a
+    /// safe default even if `allowedUnits` were ever accidentally left empty.
+    public var defaultUnit: FitnessLifestyleUnit {
+        switch self {
+        case .hydration: return .milliliters
+        case .caffeine: return .milligrams
+        case .alcohol: return .standardDrinks
+        }
+    }
 }
 
 public enum FitnessLifestyleUnit: String, Codable, CaseIterable, Hashable, Sendable {

@@ -173,7 +173,7 @@ struct LifeOSApp: App {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .id(selection)
                 .transition(reduceMotion ? .opacity : tabContentTransition)
-                .animation(reduceMotion ? LifeOSMotion.ease : LifeOSMotion.primary, value: selection)
+                .animation(reduceMotion ? nil : LifeOSMotion.primary, value: selection)
 
                 if !showingUsage {
                     CompactTabBar(selection: $selection) { tab in

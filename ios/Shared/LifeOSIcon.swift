@@ -23,6 +23,8 @@ public enum LifeOSIconName: Sendable {
     case more
     case chevronLeft
     case chevronRight
+    case zoomIn
+    case zoomOut
     case views
     case subscribers
     case revenue
@@ -67,6 +69,8 @@ public enum LifeOSIconName: Sendable {
         case .more: .list
         case .chevronLeft: .navArrowLeft
         case .chevronRight: .navArrowRight
+        case .zoomIn: .zoomIn
+        case .zoomOut: .zoomOut
         case .views: .eye
         case .subscribers: .userPlus
         case .revenue: .handCash
