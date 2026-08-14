@@ -1048,7 +1048,12 @@ struct CalendarEditor: View {
     @State private var end: Date
     @State private var eventDate: Date
     @State private var allDay: Bool
+    /// The timed duration captured the moment all-day is switched on, so
+    /// switching it back off can restore a real span instead of the 24h
+    /// midnight-to-midnight interval all-day mode uses internally.
+    @State private var preToggleDuration: TimeInterval?
     @State private var showTimezone: Bool
+    @State private var timeZoneIdentifier: String?
     @State private var validationMessage: String?
     @State private var retryAvailable = false
     @State private var showingIconPicker = false
@@ -1097,7 +1102,11 @@ struct CalendarEditor: View {
         let startDay = calendar.startOfDay(for: roundedStart)
         let nextDay = calendar.date(byAdding: .day, value: 1, to: startDay)
         _allDay = State(initialValue: nextDay.map { item?.start == startDay && item?.end == $0 } ?? false)
-        _showTimezone = State(initialValue: false)
+        // An existing event shows the toggle on when it already carries an
+        // explicit zone. A new event starts with the toggle off; turning it
+        // on (or saving) stamps the device's current zone in commit().
+        _timeZoneIdentifier = State(initialValue: item?.timeZoneIdentifier)
+        _showTimezone = State(initialValue: item?.timeZoneIdentifier != nil)
     }
 
     var body: some View {
@@ -1154,12 +1163,26 @@ struct CalendarEditor: View {
         }
         .onChange(of: allDay) { _, enabled in
             if enabled {
+                preToggleDuration = end.timeIntervalSince(start)
                 setAllDayBounds(for: eventDate)
-            } else if calendar.startOfDay(for: start) == start,
-                      let nextDay = calendar.date(byAdding: .day, value: 1, to: start), end == nextDay {
-                start = calendar.date(bySettingHour: 9, minute: 0, second: 0, of: eventDate) ?? start
-                end = start.addingTimeInterval(3600)
+            } else {
+                // Whatever shape start/end are in while all-day was on (the
+                // pristine midnight span, or a stale value from a rapid
+                // toggle/date edit), turning all-day off must always restore
+                // a real timed span rather than risk leaving a 24h
+                // midnight-to-midnight interval on screen.
+                let isMidnightSpan = calendar.startOfDay(for: start) == start
+                    && calendar.date(byAdding: .day, value: 1, to: start) == end
+                if isMidnightSpan {
+                    let restoredDuration = preToggleDuration.map { max(60, $0) } ?? 3600
+                    start = calendar.date(bySettingHour: 9, minute: 0, second: 0, of: eventDate) ?? start
+                    end = start.addingTimeInterval(restoredDuration)
+                }
+                preToggleDuration = nil
             }
+        }
+        .onChange(of: showTimezone) { _, enabled in
+            timeZoneIdentifier = enabled ? (timeZoneIdentifier ?? TimeZone.current.identifier) : nil
         }
     }
 
@@ -1433,6 +1456,14 @@ struct CalendarEditor: View {
                         .labelsHidden()
                         .datePickerStyle(.compact)
                         .accessibilityIdentifier("calendar-event-start")
+                        // A real calendar keeps the prior duration when start
+                        // is dragged to or past end, instead of leaving Save
+                        // silently disabled behind an invalid `end <= start`.
+                        .onChange(of: start) { oldStart, newStart in
+                            guard newStart >= end else { return }
+                            let duration = max(60, end.timeIntervalSince(oldStart))
+                            end = newStart.addingTimeInterval(duration)
+                        }
                     LifeOSIcon(.chevronRight)
                         .frame(width: 12, height: 12)
                         .foregroundStyle(.secondary)
@@ -1480,18 +1511,20 @@ struct CalendarEditor: View {
                     .controlSize(.small)
                     .accessibilityIdentifier("calendar-event-timezone")
                 if showTimezone {
-                    Text(TimeZone.current.identifier)
+                    Text(timeZoneIdentifier ?? TimeZone.current.identifier)
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                        .accessibilityIdentifier("calendar-event-timezone-value")
                 }
 #endif
 #if os(macOS)
                 if showTimezone {
-                    Text(TimeZone.current.identifier)
+                    Text(timeZoneIdentifier ?? TimeZone.current.identifier)
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                        .accessibilityIdentifier("calendar-event-timezone-value")
                 }
 #endif
                 Spacer(minLength: 0)
@@ -1564,6 +1597,14 @@ struct CalendarEditor: View {
 
     private func commit() {
         do {
+            // A brand-new event always stores an explicit zone, even if the
+            // toggle was left off, so every freshly created event carries
+            // authored-zone metadata. Editing an existing event preserves
+            // whatever the toggle currently reflects (on: stored/current
+            // identifier, off: floating/nil).
+            let resolvedTimeZoneIdentifier = existing == nil
+                ? (timeZoneIdentifier ?? TimeZone.current.identifier)
+                : timeZoneIdentifier
             let item = try CalendarItem(
                 id: existing?.id ?? UUID(),
                 title: title,
@@ -1574,6 +1615,7 @@ struct CalendarEditor: View {
                 status: status,
                 start: start,
                 end: end,
+                timeZoneIdentifier: resolvedTimeZoneIdentifier,
                 createdAt: existing?.createdAt ?? .now,
                 updatedAt: .now,
                 deletedAt: existing?.deletedAt

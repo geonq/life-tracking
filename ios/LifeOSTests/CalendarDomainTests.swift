@@ -299,6 +299,38 @@ final class CalendarDomainTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(CalendarSnapshot.self, from: data), CalendarSnapshot(items: [item]))
     }
 
+    func testTimeZoneIdentifierDefaultsToFloatingAndRoundTripsExplicitValue() throws {
+        let floating = try CalendarItem(title: "floating", start: base, end: base.addingTimeInterval(60), createdAt: base, updatedAt: base)
+        XCTAssertNil(floating.timeZoneIdentifier)
+        let floatingEncoded = try JSONEncoder().encode(floating)
+        var floatingObject = try XCTUnwrap(JSONSerialization.jsonObject(with: floatingEncoded) as? [String: Any])
+        // A floating event must not write the key at all, so its blob stays
+        // identical to a pre-timezone-field snapshot.
+        XCTAssertNil(floatingObject["timeZoneIdentifier"])
+
+        let zoned = try CalendarItem(
+            title: "zoned",
+            start: base,
+            end: base.addingTimeInterval(60),
+            timeZoneIdentifier: "America/New_York",
+            createdAt: base,
+            updatedAt: base
+        )
+        XCTAssertEqual(zoned.timeZoneIdentifier, "America/New_York")
+        let zonedEncoded = try JSONEncoder().encode(zoned)
+        XCTAssertEqual(try JSONDecoder().decode(CalendarItem.self, from: zonedEncoded), zoned)
+
+        // A legacy payload predating this field must still decode to floating.
+        floatingObject.removeValue(forKey: "timeZoneIdentifier")
+        let legacyData = try JSONSerialization.data(withJSONObject: floatingObject)
+        XCTAssertNil(try JSONDecoder().decode(CalendarItem.self, from: legacyData).timeZoneIdentifier)
+
+        let updated = try floating.updating(timeZoneIdentifier: "Europe/Berlin", at: base.addingTimeInterval(1))
+        XCTAssertEqual(updated.timeZoneIdentifier, "Europe/Berlin")
+        let clearedAgain = try updated.updating(clearTimeZoneIdentifier: true, at: base.addingTimeInterval(2))
+        XCTAssertNil(clearedAgain.timeZoneIdentifier)
+    }
+
     func testSystemIconCodableAndLegacyPayloadCompatibility() throws {
         let item = try CalendarItem(
             title: "Native symbol",

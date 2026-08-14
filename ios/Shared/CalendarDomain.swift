@@ -123,6 +123,12 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
     public var status: CalendarProgress
     public var start: Date
     public var end: Date
+    /// The IANA identifier of the wall-clock zone the event was authored in.
+    /// `nil` means "floating" — no explicit zone was ever recorded, which is
+    /// also what every pre-existing stored snapshot decodes to. `start`/`end`
+    /// remain absolute instants regardless of this value; it is metadata used
+    /// only to show a "differs from this device" indicator.
+    public var timeZoneIdentifier: String?
     public let createdAt: Date
     public var updatedAt: Date
     public var deletedAt: Date?
@@ -132,7 +138,7 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
 
     public init(id: UUID = UUID(), title: String, kind: CalendarItemKind = .event, icon: String? = nil, iconAsset: CalendarIconAsset? = nil,
                 systemIconName: String? = nil, status: CalendarProgress = .planned,
-                start: Date, end: Date, createdAt: Date = .now, updatedAt: Date? = nil, deletedAt: Date? = nil) throws {
+                start: Date, end: Date, timeZoneIdentifier: String? = nil, createdAt: Date = .now, updatedAt: Date? = nil, deletedAt: Date? = nil) throws {
         guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw CalendarValidationError.blankTitle }
         guard end > start else { throw CalendarValidationError.invalidInterval }
         self.id = id; self.title = title.trimmingCharacters(in: .whitespacesAndNewlines); self.kind = kind
@@ -146,12 +152,14 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
         self.icon = validatedSystemIconName == nil && retainedAsset == nil
             ? CalendarEmojiValidation.validated(icon)
             : nil
-        self.status = status; self.start = start; self.end = end; self.createdAt = createdAt
+        self.status = status; self.start = start; self.end = end
+        self.timeZoneIdentifier = timeZoneIdentifier
+        self.createdAt = createdAt
         self.updatedAt = updatedAt ?? createdAt; self.deletedAt = deletedAt
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, kind, icon, iconAsset, systemIconName, status, start, end, createdAt, updatedAt, deletedAt
+        case id, title, kind, icon, iconAsset, systemIconName, status, start, end, timeZoneIdentifier, createdAt, updatedAt, deletedAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -168,6 +176,9 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
             status: container.decode(CalendarProgress.self, forKey: .status),
             start: container.decode(Date.self, forKey: .start),
             end: container.decode(Date.self, forKey: .end),
+            // Older stored snapshots never wrote this key; missing decodes to
+            // the floating default rather than failing.
+            timeZoneIdentifier: container.decodeIfPresent(String.self, forKey: .timeZoneIdentifier),
             createdAt: container.decode(Date.self, forKey: .createdAt),
             updatedAt: container.decode(Date.self, forKey: .updatedAt),
             deletedAt: container.decodeIfPresent(Date.self, forKey: .deletedAt)
@@ -186,6 +197,9 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
         try container.encode(status, forKey: .status)
         try container.encode(start, forKey: .start)
         try container.encode(end, forKey: .end)
+        // Only encode when non-nil so a floating event's blob stays identical
+        // to the pre-timezone-field shape.
+        try container.encodeIfPresent(timeZoneIdentifier, forKey: .timeZoneIdentifier)
         try container.encode(createdAt, forKey: .createdAt)
         try container.encode(updatedAt, forKey: .updatedAt)
         try container.encodeIfPresent(deletedAt, forKey: .deletedAt)
@@ -202,6 +216,7 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
             status.rawValue,
             String(start.timeIntervalSince1970),
             String(end.timeIntervalSince1970),
+            timeZoneIdentifier ?? "",
             String(deletedAt?.timeIntervalSince1970 ?? 0)
         ].joined(separator: "|")
     }
@@ -214,12 +229,15 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
                          iconAsset: CalendarIconAsset? = nil,
                          clearIconAsset: Bool = false, systemIconName: String? = nil,
                          clearSystemIconName: Bool = false, status: CalendarProgress? = nil,
-                         start: Date? = nil, end: Date? = nil, at: Date) throws -> CalendarItem {
+                         start: Date? = nil, end: Date? = nil, timeZoneIdentifier: String? = nil,
+                         clearTimeZoneIdentifier: Bool = false, at: Date) throws -> CalendarItem {
         try CalendarItem(id: id, title: title ?? self.title, kind: kind ?? self.kind, icon: clearIcon ? nil : (icon ?? self.icon),
                          iconAsset: clearIconAsset ? nil : (iconAsset ?? self.iconAsset),
                          systemIconName: clearSystemIconName ? nil : (systemIconName ?? self.systemIconName),
                          status: status ?? self.status,
-                         start: start ?? self.start, end: end ?? self.end, createdAt: createdAt, updatedAt: at, deletedAt: deletedAt)
+                         start: start ?? self.start, end: end ?? self.end,
+                         timeZoneIdentifier: clearTimeZoneIdentifier ? nil : (timeZoneIdentifier ?? self.timeZoneIdentifier),
+                         createdAt: createdAt, updatedAt: at, deletedAt: deletedAt)
     }
 
     /// A to-do is complete when its durable progress is `.done`; toggling the
