@@ -336,11 +336,19 @@ struct LifeOSApp: App {
         case .tax:
             return AnyView(TaxDocumentsView())
         case .settings:
+#if os(iOS)
+            return AnyView(HealthKitSettingsDestination(
+                healthKitController: healthKitController,
+                healthKitFitnessRepository: healthKitFitnessRepository,
+                requestHealthReadAccess: usesVisualFixtures ? nil : requestHealthReadAccess
+            ))
+#else
             return AnyView(SettingsView(
                 healthReadAccess: healthReadAccessSettings,
                 requestHealthReadAccess: usesVisualFixtures ? nil : requestHealthReadAccess,
                 retainedHealthData: retainedHealthDataSettings
             ))
+#endif
         default:
             return AnyView(LifeOSModuleLandingView(
                 module: module,
@@ -351,25 +359,7 @@ struct LifeOSApp: App {
     }
 
     private var healthReadAccessSettings: HealthReadAccessSettings {
-        let snapshot = healthKitController.snapshot
-        let state: HealthReadAccessSettings.State
-        if snapshot.isRequestInFlight {
-            state = .requestPending
-        } else {
-            switch snapshot.authorizationState {
-            case .unavailable: state = .unavailable
-            case .restricted, .revoked: state = .restricted
-            case .protectedDataUnavailable: state = .protectedDataUnavailable
-            case .notRequested: state = .notRequested
-            case .requestRequired: state = .requestRequired
-            case .requestPending: state = .requestPending
-            case .readIndeterminate: state = .readIndeterminate
-            case .error: state = .error
-            case .writeNotDetermined, .writeAuthorized, .writeDenied:
-                state = .error
-            }
-        }
-        return HealthReadAccessSettings(state: state, errorDescription: snapshot.errorDescription)
+        HealthReadAccessSettings.from(snapshot: healthKitController.snapshot)
     }
 
     @MainActor
@@ -380,6 +370,43 @@ struct LifeOSApp: App {
         }
     }
 }
+
+#if os(iOS)
+/// Settings is pushed by the More navigation stack while HealthKit startup is
+/// still asynchronous. Observing the controller and repository here prevents
+/// a destination opened during that window from retaining the initial
+/// `.unavailable` value after reconciliation has published durable state.
+private struct HealthKitSettingsDestination: View {
+    @ObservedObject private var healthKitController: HealthKitIntegrationController
+    @ObservedObject private var healthKitFitnessRepository: HealthKitFitnessRepository
+    private let requestHealthReadAccess: (@MainActor () async -> Void)?
+
+    init(
+        healthKitController: HealthKitIntegrationController,
+        healthKitFitnessRepository: HealthKitFitnessRepository,
+        requestHealthReadAccess: (@MainActor () async -> Void)?
+    ) {
+        _healthKitController = ObservedObject(wrappedValue: healthKitController)
+        _healthKitFitnessRepository = ObservedObject(wrappedValue: healthKitFitnessRepository)
+        self.requestHealthReadAccess = requestHealthReadAccess
+    }
+
+    var body: some View {
+        SettingsView(
+            healthReadAccess: HealthReadAccessSettings.from(snapshot: healthKitController.snapshot),
+            requestHealthReadAccess: requestHealthReadAccess,
+            retainedHealthData: retainedHealthData,
+            healthKitController: healthKitController,
+            healthKitFitnessRepository: healthKitFitnessRepository
+        )
+    }
+
+    private var retainedHealthData: RetainedHealthDataSettings {
+        guard let projection = healthKitFitnessRepository.projection else { return .unavailable }
+        return .from(projection: projection)
+    }
+}
+#endif
 
 private struct CompactTabBar: View {
     @Binding var selection: LifeOSAppTab

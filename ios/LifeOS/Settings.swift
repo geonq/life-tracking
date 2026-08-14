@@ -153,6 +153,34 @@ struct HealthReadAccessSettings: Equatable, Sendable {
     }
 }
 
+#if os(iOS)
+extension HealthReadAccessSettings {
+    /// Keeps the SwiftUI settings surface on the same privacy boundary as the
+    /// HealthKit controller: a completed request is still read-indeterminate,
+    /// never an inferred per-type read grant.
+    static func from(snapshot: HealthKitIntegrationSnapshot) -> Self {
+        let state: State
+        if snapshot.isRequestInFlight {
+            state = .requestPending
+        } else {
+            switch snapshot.authorizationState {
+            case .unavailable: state = .unavailable
+            case .restricted, .revoked: state = .restricted
+            case .protectedDataUnavailable: state = .protectedDataUnavailable
+            case .notRequested: state = .notRequested
+            case .requestRequired: state = .requestRequired
+            case .requestPending: state = .requestPending
+            case .readIndeterminate: state = .readIndeterminate
+            case .error: state = .error
+            case .writeNotDetermined, .writeAuthorized, .writeDenied:
+                state = .error
+            }
+        }
+        return Self(state: state, errorDescription: snapshot.errorDescription)
+    }
+}
+#endif
+
 /// Settings is for infrequent setup and trust decisions. Product data views
 /// stay focused; connections, credentials status, and device permissions live
 /// here instead of becoming extra primary destinations.
@@ -160,6 +188,10 @@ struct SettingsView: View {
     private let healthReadAccess: HealthReadAccessSettings
     private let requestHealthReadAccess: (@MainActor () async -> Void)?
     private let retainedHealthData: RetainedHealthDataSettings
+#if os(iOS)
+    private let healthKitController: HealthKitIntegrationController
+    private let healthKitFitnessRepository: HealthKitFitnessRepository
+#endif
 
     private var categories: [SettingsCategory] {
         [
@@ -171,6 +203,21 @@ struct SettingsView: View {
         ]
     }
 
+    #if os(iOS)
+    init(
+        healthReadAccess: HealthReadAccessSettings,
+        requestHealthReadAccess: (@MainActor () async -> Void)?,
+        retainedHealthData: RetainedHealthDataSettings,
+        healthKitController: HealthKitIntegrationController,
+        healthKitFitnessRepository: HealthKitFitnessRepository
+    ) {
+        self.healthReadAccess = healthReadAccess
+        self.requestHealthReadAccess = requestHealthReadAccess
+        self.retainedHealthData = retainedHealthData
+        self.healthKitController = healthKitController
+        self.healthKitFitnessRepository = healthKitFitnessRepository
+    }
+    #else
     init(
         healthReadAccess: HealthReadAccessSettings = .platformDefault,
         requestHealthReadAccess: (@MainActor () async -> Void)? = nil,
@@ -180,6 +227,7 @@ struct SettingsView: View {
         self.requestHealthReadAccess = requestHealthReadAccess
         self.retainedHealthData = retainedHealthData
     }
+    #endif
 
     var body: some View {
         ScrollView {
@@ -212,11 +260,21 @@ struct SettingsView: View {
                         .accessibilityIdentifier("settings-category-finance")
 
                         NavigationLink {
+#if os(iOS)
+                            HealthDevicesSettingsView(
+                                healthReadAccess: healthReadAccess,
+                                requestHealthReadAccess: requestHealthReadAccess,
+                                retainedHealthData: retainedHealthData,
+                                healthKitController: healthKitController,
+                                healthKitFitnessRepository: healthKitFitnessRepository
+                            )
+#else
                             HealthDevicesSettingsView(
                                 healthReadAccess: healthReadAccess,
                                 requestHealthReadAccess: requestHealthReadAccess,
                                 retainedHealthData: retainedHealthData
                             )
+#endif
                         } label: {
                             SettingsHubCard(category: categories[2])
                         }
@@ -464,6 +522,50 @@ private struct HealthDevicesSettingsView: View {
     let healthReadAccess: HealthReadAccessSettings
     let requestHealthReadAccess: (@MainActor () async -> Void)?
     let retainedHealthData: RetainedHealthDataSettings
+#if os(iOS)
+    @ObservedObject private var healthKitController: HealthKitIntegrationController
+    @ObservedObject private var healthKitFitnessRepository: HealthKitFitnessRepository
+#endif
+
+ #if os(iOS)
+    init(
+        healthReadAccess: HealthReadAccessSettings,
+        requestHealthReadAccess: (@MainActor () async -> Void)?,
+        retainedHealthData: RetainedHealthDataSettings,
+        healthKitController: HealthKitIntegrationController,
+        healthKitFitnessRepository: HealthKitFitnessRepository
+    ) {
+        self.healthReadAccess = healthReadAccess
+        self.requestHealthReadAccess = requestHealthReadAccess
+        self.retainedHealthData = retainedHealthData
+        _healthKitController = ObservedObject(wrappedValue: healthKitController)
+        _healthKitFitnessRepository = ObservedObject(wrappedValue: healthKitFitnessRepository)
+    }
+#else
+    init(
+        healthReadAccess: HealthReadAccessSettings,
+        requestHealthReadAccess: (@MainActor () async -> Void)?,
+        retainedHealthData: RetainedHealthDataSettings
+    ) {
+        self.healthReadAccess = healthReadAccess
+        self.requestHealthReadAccess = requestHealthReadAccess
+        self.retainedHealthData = retainedHealthData
+    }
+#endif
+
+#if os(iOS)
+    private var resolvedHealthReadAccess: HealthReadAccessSettings {
+        HealthReadAccessSettings.from(snapshot: healthKitController.snapshot)
+    }
+
+    private var resolvedRetainedHealthData: RetainedHealthDataSettings {
+        guard let projection = healthKitFitnessRepository.projection else { return .unavailable }
+        return .from(projection: projection)
+    }
+#else
+    private var resolvedHealthReadAccess: HealthReadAccessSettings { healthReadAccess }
+    private var resolvedRetainedHealthData: RetainedHealthDataSettings { retainedHealthData }
+#endif
 
     var body: some View {
         ScrollView {
@@ -491,8 +593,8 @@ private struct HealthDevicesSettingsView: View {
                     VStack(spacing: 0) {
                         SettingsStatusRow(
                             title: "Apple Health read access",
-                            detail: healthReadAccess.detail,
-                            status: healthReadAccess.title,
+                            detail: resolvedHealthReadAccess.detail,
+                            status: resolvedHealthReadAccess.title,
                             icon: .security,
                             statusColor: healthReadAccessStatusColor
                         )
@@ -502,16 +604,16 @@ private struct HealthDevicesSettingsView: View {
                                 Task { @MainActor in await requestHealthReadAccess() }
                             } label: {
                                 HStack(spacing: 8) {
-                                    if healthReadAccess.state == .requestPending {
+                                    if resolvedHealthReadAccess.state == .requestPending {
                                         ProgressView().controlSize(.small)
                                     }
-                                    Text(healthReadAccess.buttonTitle)
+                                    Text(resolvedHealthReadAccess.buttonTitle)
                                 }
                                 .frame(maxWidth: .infinity)
                             }
                             .buttonStyle(.borderedProminent)
                             .tint(LifeOSTokens.accent)
-                            .disabled(!healthReadAccess.allowsRequest)
+                            .disabled(!resolvedHealthReadAccess.allowsRequest)
                             .accessibilityIdentifier("settings-health-request-read-access")
                             .padding(.vertical, 10)
                         }
@@ -539,16 +641,16 @@ private struct HealthDevicesSettingsView: View {
                     VStack(spacing: 0) {
                         SettingsStatusRow(
                             title: "Retained observations",
-                            detail: "\(retainedHealthData.sampleCount) retained observations across \(retainedHealthData.categoryCount) HealthKit categories",
-                            status: retainedHealthData.title,
+                            detail: "\(resolvedRetainedHealthData.sampleCount) retained observations across \(resolvedRetainedHealthData.categoryCount) HealthKit categories",
+                            status: resolvedRetainedHealthData.title,
                             icon: retainedHealthDataIcon,
                             statusColor: retainedHealthDataStatusColor
                         )
                         Divider().padding(.leading, 38)
                         SettingsStatusRow(
                             title: "Latest retained observation",
-                            detail: retainedHealthData.detail,
-                            status: retainedHealthData.latestObservationLabel,
+                            detail: resolvedRetainedHealthData.detail,
+                            status: resolvedRetainedHealthData.latestObservationLabel,
                             icon: retainedHealthDataIcon,
                             statusColor: retainedHealthDataStatusColor
                         )
@@ -556,9 +658,9 @@ private struct HealthDevicesSettingsView: View {
                         SettingsStatusRow(
                             title: "Confirmed Helio categories",
                             detail: "Source-confirmed categories only; this is not a device sync or battery claim.",
-                            status: "\(retainedHealthData.confirmedHelioCategoryCount)",
+                            status: "\(resolvedRetainedHealthData.confirmedHelioCategoryCount)",
                             icon: .health,
-                            statusColor: retainedHealthData.confirmedHelioCategoryCount > 0 ? LifeOSTokens.info : LifeOSTokens.warning
+                            statusColor: resolvedRetainedHealthData.confirmedHelioCategoryCount > 0 ? LifeOSTokens.info : LifeOSTokens.warning
                         )
                     }
                     .accessibilityIdentifier("settings-health-retained-data")
@@ -632,7 +734,7 @@ private struct HealthDevicesSettingsView: View {
     }
 
     private var healthReadAccessStatusColor: Color {
-        switch healthReadAccess.state {
+        switch resolvedHealthReadAccess.state {
         case .readIndeterminate:
             return LifeOSTokens.info
         case .notRequested, .requestRequired, .requestPending, .protectedDataUnavailable, .unavailable:
@@ -667,7 +769,7 @@ private struct HealthDevicesSettingsView: View {
     }
 
     private var retainedHealthDataStatusColor: Color {
-        switch retainedHealthData.status {
+        switch resolvedRetainedHealthData.status {
         case .observed:
             return LifeOSTokens.success
         case .partial, .stale:
@@ -682,7 +784,7 @@ private struct HealthDevicesSettingsView: View {
     }
 
     private var retainedHealthDataIcon: LifeOSIconName {
-        switch retainedHealthData.status {
+        switch resolvedRetainedHealthData.status {
         case .observed:
             return .verified
         case .readIndeterminate:

@@ -217,9 +217,9 @@ private final class HealthKitObserverTaskState: @unchecked Sendable {
 /// read operations. No view or macOS target imports HealthKit through this
 /// type; the shared contract above remains platform-neutral.
 public final class LifeOSHealthKitAdapter: @unchecked Sendable, HealthKitReconciliationClient {
-    /// A finite first page keeps an unexpectedly large HealthKit store
-    /// bounded. Pagination is deliberately not claimed until the adapter can
-    /// prove that draining pages and advancing anchors is safe.
+    /// A finite page keeps an unexpectedly large HealthKit store bounded. The
+    /// returned opaque anchor is the continuation point for the next bounded
+    /// page; the reconciliation coordinator owns draining those pages.
     public static let defaultQueryLimit = 500
 
     public let store: HKHealthStore
@@ -348,11 +348,11 @@ public final class LifeOSHealthKitAdapter: @unchecked Sendable, HealthKitReconci
                             let deletions = try self.tombstones(metric: metric, deleted: deleted ?? [], deletedAt: .now)
                             let objectCount = (samples?.count ?? 0) + (deleted?.count ?? 0)
                             let partial = objectCount >= self.queryLimit
-                            // A bounded page cannot safely claim that its
-                            // returned anchor drained all changes. Leaving
-                            // nextAnchor nil makes the store retain the prior
-                            // anchor and causes a safe replay on the next run.
-                            let nextAnchor = partial ? nil : try self.archive(newAnchor)
+                            // HealthKit defines this as the anchor to pass to
+                            // the next anchored query. Persisting it for a
+                            // partial page lets reconciliation continue from
+                            // this page without replaying the entire store.
+                            let nextAnchor = try self.archive(newAnchor)
                             let readability: HealthKitReadability =
                                 objectCount == 0 && anchor == nil ? .emptyIndeterminate : .established
                             let input = try HealthKitMetricSyncInput(

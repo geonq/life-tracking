@@ -140,6 +140,20 @@ final class HealthKitIntegrationTests: XCTestCase {
         XCTAssertEqual(client.startCalls, 0)
     }
 
+    func testSettingsProjectionPreservesReadIndeterminateTruth() {
+        let snapshot = HealthKitIntegrationSnapshot(
+            authorizationState: .readIndeterminate,
+            lifecycle: .active,
+            explicitRequestCompleted: true
+        )
+
+        let settings = HealthReadAccessSettings.from(snapshot: snapshot)
+
+        XCTAssertEqual(settings.state, .readIndeterminate)
+        XCTAssertEqual(settings.title, "Read request completed")
+        XCTAssertTrue(settings.detail.contains("Empty reads"))
+    }
+
     func testExplicitRequestMapsSuccessfulPromptToReadIndeterminate() async {
         let client = RecordingHealthKitIntegrationClient()
         client.authorizationResult = HealthKitAuthorizationReport(

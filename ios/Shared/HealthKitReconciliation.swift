@@ -71,6 +71,13 @@ public struct HealthKitReconciliationReport: Equatable, Sendable {
 /// asks the actor-isolated store to atomically persist projection, tombstones,
 /// source index, and the new anchor together.
 public actor HealthKitReconciliationCoordinator {
+    /// Keep each reconciliation run finite even if a platform client keeps
+    /// reporting partial pages without advancing its opaque anchor. The
+    /// default iOS page is 500 objects, so this covers the durable 50,000-item
+    /// projection limit while still failing closed for a non-progressing
+    /// client.
+    private static let maxPaginationPages = 128
+
     public let store: HealthKitAnchorStore
     private let client: HealthKitReconciliationClient
     private let timeout: TimeInterval
@@ -106,6 +113,28 @@ public actor HealthKitReconciliationCoordinator {
     }
 
     public func reconcile(metric: HealthKitMetricID) async -> HealthKitMetricReconciliationResult {
+        var result = await reconcilePage(metric: metric)
+        var pageCount = 1
+        while result.state == .partial,
+              pageCount < Self.maxPaginationPages,
+              !Task.isCancelled {
+            let before = await store.snapshot(for: metric)
+            let next = await reconcilePage(metric: metric)
+            let after = await store.snapshot(for: metric)
+            pageCount += 1
+            result = next
+            // A partial page without a new durable anchor cannot make
+            // progress. Keep its explicit partial truth and wait for a
+            // later foreground retry rather than spinning forever.
+            guard before.anchorArchive != after.anchorArchive else { break }
+        }
+        return result
+    }
+
+    // Keep the bounded anchored-page primitive available to the test target
+    // so it can assert partial/readability semantics without bypassing the
+    // production drain used by startup and observer callbacks.
+    internal func reconcilePage(metric: HealthKitMetricID) async -> HealthKitMetricReconciliationResult {
         if await store.hasLoadFailure() {
             let message: String
             switch await store.loadFailureState() {

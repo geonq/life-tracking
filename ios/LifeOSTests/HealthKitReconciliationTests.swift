@@ -236,10 +236,52 @@ final class HealthKitReconciliationTests: XCTestCase {
         let client = SequenceHealthKitClient(batches: [partial, stale])
         let store = HealthKitAnchorStore(persistenceURL: nil)
         let coordinator = HealthKitReconciliationCoordinator(client: client, store: store, now: { self.now })
-        let partialResult = await coordinator.reconcile(metric: .water)
-        let staleResult = await coordinator.reconcile(metric: .water)
+        let partialResult = await coordinator.reconcilePage(metric: .water)
+        let partialState = await store.snapshot(for: .water)
+        let staleResult = await coordinator.reconcilePage(metric: .water)
         XCTAssertEqual(partialResult.state, .partial)
+        XCTAssertEqual(partialState.anchor, try testAnchor(1))
         XCTAssertEqual(staleResult.state, .stale)
+    }
+
+    func testMetricsReconciliationDrainsPartialPagesBeforeReporting() async throws {
+        let first = try observation(uuid: UUID(), value: 250)
+        let second = try observation(uuid: UUID(), value: 400)
+        let client = SequenceHealthKitClient(batches: [
+            try input(additions: [first], anchorByte: 1, partial: true),
+            try input(additions: [second], anchorByte: 2)
+        ])
+        let store = HealthKitAnchorStore(persistenceURL: nil)
+        let coordinator = HealthKitReconciliationCoordinator(client: client, store: store, now: { self.now })
+
+        let report = await coordinator.reconcile(metrics: [.water])
+        let state = await store.snapshot(for: .water)
+        let callCount = await client.callCount
+
+        XCTAssertEqual(report.results.map(\.state), [.synced])
+        XCTAssertEqual(callCount, 2)
+        XCTAssertEqual(state.observations.count, 2)
+        XCTAssertEqual(state.anchor, try testAnchor(2))
+    }
+
+    func testSingleMetricReconciliationDrainsPartialPagesBeforeObserverCompletion() async throws {
+        let first = try observation(uuid: UUID(), value: 250)
+        let second = try observation(uuid: UUID(), value: 400)
+        let client = SequenceHealthKitClient(batches: [
+            try input(additions: [first], anchorByte: 1, partial: true),
+            try input(additions: [second], anchorByte: 2)
+        ])
+        let store = HealthKitAnchorStore(persistenceURL: nil)
+        let coordinator = HealthKitReconciliationCoordinator(client: client, store: store, now: { self.now })
+
+        let result = await coordinator.reconcile(metric: .water)
+        let state = await store.snapshot(for: .water)
+        let callCount = await client.callCount
+
+        XCTAssertEqual(result.state, .synced)
+        XCTAssertEqual(callCount, 2)
+        XCTAssertEqual(state.observations.count, 2)
+        XCTAssertEqual(state.anchor, try testAnchor(2))
     }
 
     func testFutureBatchIsRejectedWithoutChangingProjection() async throws {
@@ -332,6 +374,7 @@ final class HealthKitReconciliationTests: XCTestCase {
 private actor SequenceHealthKitClient: HealthKitReconciliationClient {
     private var batches: [HealthKitMetricSyncInput]
     private let delayNanoseconds: UInt64
+    private(set) var callCount = 0
 
     init(batches: [HealthKitMetricSyncInput] = [], delayNanoseconds: UInt64 = 0) {
         self.batches = batches
@@ -339,6 +382,7 @@ private actor SequenceHealthKitClient: HealthKitReconciliationClient {
     }
 
     func changes(for metric: HealthKitMetricID, from anchor: HealthKitOpaqueAnchor?) async throws -> HealthKitMetricSyncInput {
+        callCount += 1
         if delayNanoseconds > 0 { try await Task.sleep(nanoseconds: delayNanoseconds) }
         guard let next = batches.isEmpty ? nil : batches.removeFirst() else {
             throw HealthKitReconciliationFailure.client("No fake batch")
