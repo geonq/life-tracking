@@ -70,6 +70,7 @@ public struct FinanceView: View {
 
                     financeMetricGrid(snapshot: snapshot)
                     FinanceAccountsCard(snapshot: snapshot)
+                    FinanceImportCard()
                 }
             }
         }
