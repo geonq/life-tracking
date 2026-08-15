@@ -196,6 +196,86 @@ public struct FitnessNutritionSnapshot {
         )
     }
 
+    /// Adds only confirmed, local `NutritionMealStore` records for the
+    /// selected calendar day. Mirrors `includingLocalBarcodeRecords`: the
+    /// caller decides whether the surrounding snapshot is a demo; production
+    /// UI uses this method while demo fixtures keep their immutable fixture
+    /// values unchanged. Soft-deleted meals are never passed in by the
+    /// caller (the store already excludes them via `meals(on:)`).
+    public func includingLocalMeals(_ localMeals: [NutritionMeal], for selectedDate: Date, calendar: Calendar = .current) -> FitnessNutritionSnapshot {
+        let dayMeals = localMeals
+            .filter { !$0.isDeleted && calendar.isDate($0.loggedAt, inSameDayAs: selectedDate) }
+            .sorted { $0.loggedAt < $1.loggedAt }
+
+        guard !dayMeals.isEmpty else { return self }
+
+        let explicitCalories = dayMeals.compactMap(\.kcal)
+        let addedCalories = explicitCalories.reduce(0, +)
+        let addedProtein = dayMeals.compactMap(\.proteinGrams).reduce(0, +)
+        let addedCarbs = dayMeals.compactMap(\.carbGrams).reduce(0, +)
+        let addedFat = dayMeals.compactMap(\.fatGrams).reduce(0, +)
+        let mergedMacros = macroValues.map { macro -> FitnessMacroValue in
+            let macroKey = macro.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let addition: Double?
+            switch macroKey {
+            case "protein": addition = dayMeals.contains { $0.proteinGrams != nil } ? Double(addedProtein) : nil
+            case "carbs", "carbohydrates": addition = dayMeals.contains { $0.carbGrams != nil } ? Double(addedCarbs) : nil
+            case "fat": addition = dayMeals.contains { $0.fatGrams != nil } ? Double(addedFat) : nil
+            default: addition = nil
+            }
+            guard let addition else { return macro }
+            return FitnessMacroValue(
+                name: macro.name,
+                value: (macro.value ?? 0) + addition,
+                target: macro.target,
+                unit: macro.unit,
+                hue: macro.hue
+            )
+        }
+        let localFitnessMeals = dayMeals.map { local -> FitnessMeal in
+            let source: FitnessMeal.Source
+            switch local.provenance {
+            case .manual: source = .manual
+            case .confirmedFromPhoto: source = .photoConfirmed
+            case .confirmedFromBarcode: source = .package
+            }
+            return FitnessMeal(
+                id: "meal-\(local.id.uuidString)",
+                name: local.name,
+                time: local.loggedAt,
+                calories: local.kcal,
+                protein: local.proteinGrams.map(Double.init),
+                carbohydrates: local.carbGrams.map(Double.init),
+                fat: local.fatGrams.map(Double.init),
+                detail: "Confirmed locally · sync pending",
+                source: source
+            )
+        }
+        let mergedCalories: Int?
+        if explicitCalories.isEmpty {
+            mergedCalories = caloriesConsumed
+        } else if let caloriesConsumed {
+            mergedCalories = caloriesConsumed + addedCalories
+        } else {
+            mergedCalories = addedCalories
+        }
+
+        return FitnessNutritionSnapshot(
+            calorieTarget: calorieTarget,
+            caloriesConsumed: mergedCalories,
+            sourceSupportedExpenditure: sourceSupportedExpenditure,
+            macroValues: mergedMacros,
+            meals: meals + localFitnessMeals,
+            hydrationMilliliters: hydrationMilliliters,
+            hydrationTargetMilliliters: hydrationTargetMilliliters,
+            caffeineMilligrams: caffeineMilligrams,
+            alcoholUnits: alcoholUnits,
+            qualityScore: qualityScore,
+            qualityDetail: qualityDetail,
+            qualityContributions: qualityContributions
+        )
+    }
+
     public static let unavailable = FitnessNutritionSnapshot(
         calorieTarget: nil,
         caloriesConsumed: nil,
@@ -307,7 +387,12 @@ struct FitnessNutritionView: View {
     @State private var handledEntryPoint = false
     @State private var localBarcodeRecords: [NutritionRecord] = []
     @State private var barcodePersistenceError: String?
+    @State private var localMeals: [NutritionMeal] = []
+    @State private var mealPersistenceError: String?
+    @State private var editingMeal: NutritionMeal?
+    @State private var mealPendingDeletion: NutritionMeal?
     private let nutritionRecordStore = NutritionRecordStore(url: NutritionRecordStore.defaultPersistenceURL)
+    private let nutritionMealStore: NutritionMealStore?
 
     init(
         snapshot: FitnessSnapshot,
@@ -317,6 +402,7 @@ struct FitnessNutritionView: View {
         self.snapshot = snapshot
         self.selectedDate = selectedDate
         self.initialEntryPoint = initialEntryPoint
+        self.nutritionMealStore = try? NutritionMealStore(url: NutritionMealStore.defaultURL())
         _captureAction = State(initialValue: nil)
     }
 
@@ -328,11 +414,25 @@ struct FitnessNutritionView: View {
             photoStage: $photoStage,
             localBarcodeRecordCount: effectiveBarcodeRecords.count,
             barcodePersistenceError: barcodePersistenceError,
+            mealPersistenceError: mealPersistenceError,
             onCapture: { method in
                 captureMethod = method
                 captureAction = nil
+                editingMeal = nil
                 photoStage = method == .photo ? .idle : .manualEntry
                 showingCapture = true
+            },
+            onEditMeal: { fitnessMeal in
+                guard let match = localMeal(for: fitnessMeal) else { return }
+                editingMeal = match
+                captureMethod = .manual
+                captureAction = nil
+                photoStage = .manualEntry
+                showingCapture = true
+            },
+            onDeleteMeal: { fitnessMeal in
+                guard let match = localMeal(for: fitnessMeal) else { return }
+                mealPendingDeletion = match
             }
         )
         .sheet(isPresented: $showingCapture) {
@@ -342,7 +442,10 @@ struct FitnessNutritionView: View {
                 stage: $photoStage,
                 isDemo: snapshot.source.status == .demo,
                 nutritionRecordStore: nutritionRecordStore,
-                onBarcodeSaved: reloadBarcodeRecords
+                nutritionMealStore: nutritionMealStore,
+                editingMeal: editingMeal,
+                onBarcodeSaved: reloadBarcodeRecords,
+                onMealSaved: reloadMeals
             )
                 .presentationDetents([.medium, .large])
         }
@@ -352,10 +455,25 @@ struct FitnessNutritionView: View {
         .navigationDestination(isPresented: $showingNetEnergy) {
             NutritionNetEnergyView(nutrition: effectiveNutrition)
         }
+        .alert(
+            "Delete this meal?",
+            isPresented: Binding(
+                get: { mealPendingDeletion != nil },
+                set: { if !$0 { mealPendingDeletion = nil } }
+            ),
+            presenting: mealPendingDeletion
+        ) { meal in
+            Button("Delete", role: .destructive) { deleteMeal(meal) }
+            Button("Cancel", role: .cancel) { mealPendingDeletion = nil }
+        } message: { meal in
+            Text("\(meal.name) will be removed from the meal timeline and daily totals.")
+        }
         .onAppear { handleInitialEntryPointIfNeeded() }
         .task { await loadBarcodeRecords() }
+        .task { await loadMeals() }
         .onChange(of: selectedDate) { _, _ in
             Task { await loadBarcodeRecords() }
+            Task { await loadMeals() }
         }
         .onChange(of: initialEntryPoint) { _, _ in
             handledEntryPoint = false
@@ -376,6 +494,7 @@ struct FitnessNutritionView: View {
         case .capture(let action):
             captureAction = action
             captureMethod = method(for: action)
+            editingMeal = nil
             photoStage = captureMethod == .photo ? .idle : .manualEntry
             showingCapture = true
         }
@@ -399,11 +518,41 @@ struct FitnessNutritionView: View {
 
     private var effectiveNutrition: FitnessNutritionSnapshot {
         guard snapshot.source.status != .demo else { return snapshot.nutrition }
-        return snapshot.nutrition.includingLocalBarcodeRecords(localBarcodeRecords, for: selectedDate)
+        return snapshot.nutrition
+            .includingLocalBarcodeRecords(localBarcodeRecords, for: selectedDate)
+            .includingLocalMeals(localMeals, for: selectedDate)
+    }
+
+    /// Resolves a displayed `FitnessMeal` row back to the durable
+    /// `NutritionMeal` it was built from. Only meals produced by
+    /// `includingLocalMeals` carry the `meal-` id prefix; barcode and demo
+    /// rows never match and correctly fall through to `nil`.
+    private func localMeal(for fitnessMeal: FitnessMeal) -> NutritionMeal? {
+        guard fitnessMeal.id.hasPrefix("meal-"),
+              let uuid = UUID(uuidString: String(fitnessMeal.id.dropFirst("meal-".count))) else { return nil }
+        return localMeals.first { $0.id == uuid && !$0.isDeleted }
+    }
+
+    private func deleteMeal(_ meal: NutritionMeal) {
+        mealPendingDeletion = nil
+        guard let nutritionMealStore else {
+            mealPersistenceError = "Local meal storage is unavailable. Nothing was deleted."
+            return
+        }
+        do {
+            try nutritionMealStore.softDelete(id: meal.id)
+            reloadMeals()
+        } catch {
+            mealPersistenceError = "The meal could not be deleted locally. Nothing was changed."
+        }
     }
 
     private func reloadBarcodeRecords() {
         Task { await loadBarcodeRecords() }
+    }
+
+    private func reloadMeals() {
+        Task { await loadMeals() }
     }
 
     private func loadBarcodeRecords() async {
@@ -418,6 +567,29 @@ struct FitnessNutritionView: View {
             await MainActor.run {
                 localBarcodeRecords = []
                 barcodePersistenceError = "Local barcode food log could not be read. No totals were added."
+            }
+        }
+    }
+
+    private func loadMeals() async {
+        guard snapshot.source.status != .demo else { return }
+        guard let nutritionMealStore else {
+            await MainActor.run {
+                localMeals = []
+                mealPersistenceError = "Local meal storage is unavailable. No manual meal totals were added."
+            }
+            return
+        }
+        do {
+            let loaded = try nutritionMealStore.load()
+            await MainActor.run {
+                localMeals = loaded
+                mealPersistenceError = nil
+            }
+        } catch {
+            await MainActor.run {
+                localMeals = []
+                mealPersistenceError = "Local meal log could not be read. No manual meal totals were added."
             }
         }
     }
@@ -436,7 +608,10 @@ private struct FitnessNutritionSurface: View {
     @Binding var photoStage: FitnessPhotoStage
     let localBarcodeRecordCount: Int
     let barcodePersistenceError: String?
+    let mealPersistenceError: String?
     let onCapture: (FitnessFoodCaptureMethod) -> Void
+    let onEditMeal: (FitnessMeal) -> Void
+    let onDeleteMeal: (FitnessMeal) -> Void
     @State private var macroDisplay: NutritionMacroDisplay = .grams
 
     var body: some View {
@@ -456,6 +631,13 @@ private struct FitnessNutritionSurface: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("nutrition-barcode-persistence-error")
             }
+            if let mealPersistenceError {
+                Text(mealPersistenceError)
+                    .font(LifeOSFont.caption(10))
+                    .foregroundStyle(LifeOSTokens.warning)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("nutrition-meal-persistence-error")
+            }
             FitnessNutritionHeroCard(nutrition: nutrition, isDemo: sourceStatus == .demo)
             FitnessNutritionSummaryRail(nutrition: nutrition)
             FitnessNutritionMacroCard(macros: nutrition.macroValues, display: $macroDisplay)
@@ -473,7 +655,8 @@ private struct FitnessNutritionSurface: View {
             FitnessNutritionMealTimelineCard(
                 meals: nutrition.meals,
                 onAdd: { onCapture(.manual) },
-                onEdit: { _ in onCapture(.manual) },
+                onEdit: onEditMeal,
+                onDelete: onDeleteMeal,
                 onReview: { _ in photoStage = .needsConfirmation }
             )
             FitnessNutritionTrendsCard(nutrition: nutrition)
@@ -1006,7 +1189,17 @@ private struct FitnessNutritionMealTimelineCard: View {
     let meals: [FitnessMeal]
     let onAdd: () -> Void
     let onEdit: (FitnessMeal) -> Void
+    let onDelete: (FitnessMeal) -> Void
     let onReview: (FitnessMeal) -> Void
+
+    /// A durable meal is editable/deletable through this card only when it
+    /// was built from `NutritionMealStore` (manual entry or a future photo
+    /// confirmation). Barcode (`.package`) and demo/proposal rows are backed
+    /// by a different store or no store at all, so they intentionally do not
+    /// get Edit/Delete here.
+    private func isDurable(_ meal: FitnessMeal) -> Bool {
+        meal.source == .manual || meal.source == .photoConfirmed
+    }
 
     var body: some View {
         NutritionSurfaceCard(accent: .purple) {
@@ -1032,8 +1225,15 @@ private struct FitnessNutritionMealTimelineCard: View {
                     FitnessEmptyRow(title: "No meals recorded", detail: "No entry is different from zero consumption.", icon: .grocery)
                 } else {
                     ForEach(meals) { meal in
-                        FitnessNutritionMealRow(meal: meal, onEdit: { onEdit(meal) }, onReview: { onReview(meal) })
+                        FitnessNutritionMealRow(
+                            meal: meal,
+                            isDurable: isDurable(meal),
+                            onEdit: { onEdit(meal) },
+                            onDelete: { onDelete(meal) },
+                            onReview: { onReview(meal) }
+                        )
                     }
+                    FitnessNutritionMealDailyTotalsRow(meals: meals)
                 }
             }
         }
@@ -1041,9 +1241,59 @@ private struct FitnessNutritionMealTimelineCard: View {
     }
 }
 
+private struct FitnessNutritionMealDailyTotalsRow: View {
+    let meals: [FitnessMeal]
+
+    private var totalKcal: Int? {
+        let values = meals.compactMap(\.calories)
+        return values.isEmpty ? nil : values.reduce(0, +)
+    }
+
+    private var totalProtein: Double? {
+        let values = meals.compactMap(\.protein)
+        return values.isEmpty ? nil : values.reduce(0, +)
+    }
+
+    private var totalCarbs: Double? {
+        let values = meals.compactMap(\.carbohydrates)
+        return values.isEmpty ? nil : values.reduce(0, +)
+    }
+
+    private var totalFat: Double? {
+        let values = meals.compactMap(\.fat)
+        return values.isEmpty ? nil : values.reduce(0, +)
+    }
+
+    var body: some View {
+        Divider().padding(.vertical, 2)
+        HStack(spacing: 12) {
+            totalItem(label: "kcal", value: totalKcal.map(String.init))
+            totalItem(label: "protein g", value: totalProtein.map { $0.formatted(.number.precision(.fractionLength(0))) })
+            totalItem(label: "carbs g", value: totalCarbs.map { $0.formatted(.number.precision(.fractionLength(0))) })
+            totalItem(label: "fat g", value: totalFat.map { $0.formatted(.number.precision(.fractionLength(0))) })
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("nutrition-meal-daily-totals")
+    }
+
+    private func totalItem(label: String, value: String?) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(value ?? "—")
+                .font(LifeOSFont.inter(13, weight: .semiBold))
+                .monospacedDigit()
+            Text(label)
+                .font(LifeOSFont.caption(9))
+                .foregroundStyle(LifeOSTokens.tertiaryText)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
 private struct FitnessNutritionMealRow: View {
     let meal: FitnessMeal
+    let isDurable: Bool
     let onEdit: () -> Void
+    let onDelete: () -> Void
     let onReview: () -> Void
 
     var body: some View {
@@ -1071,9 +1321,13 @@ private struct FitnessNutritionMealRow: View {
                 if meal.source == .proposal {
                     Button("Review", action: onReview)
                         .font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.accent).buttonStyle(.plain)
-                } else {
-                    Button("Edit", action: onEdit)
-                        .font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.accent).buttonStyle(.plain)
+                } else if isDurable {
+                    HStack(spacing: 10) {
+                        Button("Edit", action: onEdit)
+                            .font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.accent).buttonStyle(.plain)
+                        Button("Delete", role: .destructive, action: onDelete)
+                            .font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.warning).buttonStyle(.plain)
+                    }
                 }
             }
         }
@@ -1644,7 +1898,13 @@ private struct FitnessFoodReviewSheet: View {
     @Binding var stage: FitnessPhotoStage
     let isDemo: Bool
     let nutritionRecordStore: NutritionRecordStore
+    let nutritionMealStore: NutritionMealStore?
+    /// When set, the manual entry form is pre-filled from this durable meal
+    /// and "Save meal" calls `NutritionMealStore.correct` instead of
+    /// `addConfirmed`.
+    let editingMeal: NutritionMeal?
     let onBarcodeSaved: () -> Void
+    let onMealSaved: () -> Void
     @Environment(\.dismiss) private var dismiss
     @StateObject private var photoPreparation = FoodPhotoPreparationCoordinator()
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
@@ -1656,6 +1916,9 @@ private struct FitnessFoodReviewSheet: View {
     @State private var carbohydrates = ""
     @State private var fat = ""
     @State private var savedMessage: String?
+    @State private var mealSaveError: String?
+    @State private var mealSaving = false
+    @State private var mealSavedDurably = false
     @State private var barcodeInput = ""
     @State private var barcodeLookup: NutritionBarcodeLookup?
     @State private var barcodeProposal: NutritionBarcodeProposal?
@@ -1715,6 +1978,13 @@ private struct FitnessFoodReviewSheet: View {
                     if let savedMessage {
                         Text(savedMessage).font(LifeOSFont.caption(11)).foregroundStyle(LifeOSTokens.success)
                     }
+                    if let mealSaveError {
+                        Text(mealSaveError)
+                            .font(LifeOSFont.caption(11))
+                            .foregroundStyle(LifeOSTokens.warning)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("nutrition-meal-save-error")
+                    }
                     if method == .photo {
                         Button("Close") { dismiss() }
                             .buttonStyle(.bordered)
@@ -1729,19 +1999,42 @@ private struct FitnessFoodReviewSheet: View {
                                 .disabled((barcodeProposal == nil && confirmedBarcodeRecord == nil) || !barcodeConfirmationIsCurrent || barcodeLoading || barcodeSaving || savedMessage != nil)
                         }
                     } else {
-                        HStack {
-                            Button("Keep manual only") {
-                                stage = .manualEntry
-                                dismiss()
+                        VStack(spacing: 8) {
+                            HStack {
+                                Button("Keep manual only") {
+                                    stage = .manualEntry
+                                    dismiss()
+                                }
+                                .buttonStyle(.bordered)
+                                Spacer()
+                                Button("Apply local preview") {
+                                    stage = .edited
+                                    savedMessage = "Manual preview updated locally. Nothing was written to persistent storage."
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(LifeOSTokens.accent)
                             }
-                            .buttonStyle(.bordered)
-                            Spacer()
-                            Button("Apply local preview") {
-                                stage = .edited
-                                savedMessage = "Manual preview updated locally. Nothing was written to persistent storage."
+                            HStack {
+                                Spacer()
+                                Button(mealSaving ? "Saving…" : (mealSavedDurably ? "Saved" : (editingMeal == nil ? "Save meal" : "Confirm changes"))) {
+                                    saveMealDurably()
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(LifeOSTokens.success)
+                                .disabled(mealSaving || mealSavedDurably || nutritionMealStore == nil)
+                                .accessibilityIdentifier("nutrition-meal-save")
                             }
-                            .buttonStyle(.borderedProminent)
-                            .tint(LifeOSTokens.accent)
+                            if nutritionMealStore == nil {
+                                Text("Local meal storage is unavailable. Nothing can be saved right now.")
+                                    .font(LifeOSFont.caption(10))
+                                    .foregroundStyle(LifeOSTokens.warning)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            } else {
+                                Text("\"Save meal\" writes this entry to durable local storage; the other buttons above remain in-memory only.")
+                                    .font(LifeOSFont.caption(9))
+                                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                         }
                     }
                 }
@@ -1760,6 +2053,13 @@ private struct FitnessFoodReviewSheet: View {
                 protein = "51"
                 carbohydrates = "74"
                 fat = "30"
+            }
+            if let editingMeal {
+                mealName = editingMeal.name
+                calories = editingMeal.kcal.map(String.init) ?? ""
+                protein = editingMeal.proteinGrams.map(String.init) ?? ""
+                carbohydrates = editingMeal.carbGrams.map(String.init) ?? ""
+                fat = editingMeal.fatGrams.map(String.init) ?? ""
             }
             if method == .barcode, barcodeMealAt.isEmpty { barcodeMealAt = ISO8601DateFormatter().string(from: .now) }
         }
@@ -2153,14 +2453,72 @@ private struct FitnessFoodReviewSheet: View {
         }
     }
 
+    private func saveMealDurably() {
+        guard let nutritionMealStore else {
+            mealSaveError = "Local meal storage is unavailable. Nothing was saved."
+            return
+        }
+        let trimmedName = mealName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else {
+            mealSaveError = "Enter a meal name before saving."
+            return
+        }
+        let kcal = NutritionBarcodeValueParser.parse(calories, maximum: 5_000)
+        let proteinGrams = NutritionBarcodeValueParser.parse(protein, maximum: 2_000)
+        let carbGrams = NutritionBarcodeValueParser.parse(carbohydrates, maximum: 2_000)
+        let fatGrams = NutritionBarcodeValueParser.parse(fat, maximum: 2_000)
+        let rawInputs = [calories, protein, carbohydrates, fat]
+        let parsedValues = [kcal, proteinGrams, carbGrams, fatGrams]
+        guard zip(rawInputs, parsedValues).allSatisfy({ raw, value in
+            raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || value != nil
+        }) else {
+            mealSaveError = "Enter valid non-negative nutrition values (comma or dot decimals; up to 3 decimal places)."
+            return
+        }
+
+        mealSaving = true
+        mealSaveError = nil
+        do {
+            if let editingMeal {
+                try nutritionMealStore.correct(id: editingMeal.id) { draft in
+                    draft.name = trimmedName
+                    draft.kcal = kcal.map { Int($0.rounded()) }
+                    draft.proteinGrams = proteinGrams.map { Int($0.rounded()) }
+                    draft.carbGrams = carbGrams.map { Int($0.rounded()) }
+                    draft.fatGrams = fatGrams.map { Int($0.rounded()) }
+                }
+            } else {
+                let meal = NutritionMeal(
+                    loggedAt: .now,
+                    timeZoneIdentifier: TimeZone.current.identifier,
+                    name: trimmedName,
+                    kcal: kcal.map { Int($0.rounded()) },
+                    proteinGrams: proteinGrams.map { Int($0.rounded()) },
+                    carbGrams: carbGrams.map { Int($0.rounded()) },
+                    fatGrams: fatGrams.map { Int($0.rounded()) },
+                    provenance: .manual
+                )
+                try nutritionMealStore.addConfirmed(meal)
+            }
+            mealSaving = false
+            mealSavedDurably = true
+            stage = .confirmed
+            savedMessage = "Saved locally · durable · sync pending."
+            onMealSaved()
+        } catch {
+            mealSaving = false
+            mealSaveError = "Local save failed. Nothing was replaced; try Save meal again."
+        }
+    }
+
     @ViewBuilder
     private var manualPreviewFields: some View {
         FitnessCard {
             VStack(alignment: .leading, spacing: 10) {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text("Manual meal preview")
+                    Text("Manual meal entry")
                         .font(LifeOSFont.header(14))
-                    Text("This is an in-memory preview only; no meal is persisted from this sheet.")
+                    Text("\"Apply local preview\" stays in-memory only. \"Save meal\" below writes this entry to durable local storage.")
                         .font(LifeOSFont.caption(10))
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
