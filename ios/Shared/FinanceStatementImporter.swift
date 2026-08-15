@@ -37,6 +37,14 @@ public enum FinanceStatementImporter {
     private static let descriptionHeaders: Set<String> = [
         "description", "beschreibung", "memo", "merchant", "verwendungszweck", "text", "empfänger/zahlungspflichtiger", "empfaenger"
     ]
+    /// Merchant-name columns, checked BEFORE the generic description column.
+    /// Trade Republic's own export (23-column `name,...,description,...`
+    /// layout) puts the actual merchant in `name` and leaves `description`
+    /// generic ("TR Card Transaction") for card purchases, while transfers
+    /// leave `name` empty and put the meaningful text in `description` (or
+    /// `counterparty_name`). Preferring these columns when non-empty is what
+    /// makes card-purchase rows categorizable by `FinanceCategorizer`.
+    private static let merchantHeaders: Set<String> = ["name", "counterparty_name", "counterparty", "payee", "merchant"]
     private static let categoryHeaders: Set<String> = ["category", "kategorie", "typ", "type"]
 
     public static func parseCSV(_ text: String) -> FinanceImportResult {
@@ -59,6 +67,7 @@ public enum FinanceStatementImporter {
             return FinanceImportResult(transactions: [], skippedRowCount: max(dataRowCount, 0), detectedSource: .genericCSV)
         }
         let descriptionColumn = firstIndex(of: descriptionHeaders, in: header)
+        let merchantColumn = firstIndex(of: merchantHeaders, in: header)
         let categoryColumn = firstIndex(of: categoryHeaders, in: header)
         let detectedSource: FinanceImportSource = header.contains("betrag") && header.contains("datum") ? .tradeRepublicCSV : .genericCSV
 
@@ -77,13 +86,27 @@ public enum FinanceStatementImporter {
                 skipped += 1
                 continue
             }
+            let merchant = merchantColumn.flatMap { row.count > $0 ? row[$0].trimmingCharacters(in: .whitespaces) : nil }
             let description = descriptionColumn.flatMap { row.count > $0 ? row[$0].trimmingCharacters(in: .whitespaces) : nil }
             let category = categoryColumn.flatMap { row.count > $0 ? row[$0].trimmingCharacters(in: .whitespaces) : nil }
+            // Prefer the merchant column (e.g. TR's `name`) over the generic
+            // description column, since the latter is often a non-specific
+            // label like "TR Card Transaction". Falls back to description
+            // (meaningful for transfers, where `name` is empty) and finally
+            // to an honest placeholder if neither is present.
+            let resolvedDescription: String
+            if let merchant, !merchant.isEmpty {
+                resolvedDescription = merchant
+            } else if let description, !description.isEmpty {
+                resolvedDescription = description
+            } else {
+                resolvedDescription = "Imported transaction"
+            }
             transactions.append(
                 FinanceImportedTransaction(
                     bookedAt: bookedAt,
                     amountCents: amountCents,
-                    description: (description?.isEmpty == false) ? description! : "Imported transaction",
+                    description: resolvedDescription,
                     category: (category?.isEmpty == false) ? category : nil,
                     source: detectedSource
                 )

@@ -147,4 +147,64 @@ final class FinanceStatementImporterTests: XCTestCase {
         """)
         XCTAssertNil(withoutCategory.transactions.first?.category)
     }
+
+    // MARK: 9. Real Trade Republic 23-column export: merchant (`name`) wins
+    // over the generic `description` column for card purchases; transfers
+    // (empty `name`) fall back to the meaningful `description`. All values
+    // below are synthetic/fabricated for this test — not real statement data.
+
+    private let tradeRepublicRealExportHeader =
+        "datetime,date,account_type,category,type,asset_class,name,symbol,shares,price,amount,fee,tax,currency,original_amount,original_currency,fx_rate,description,transaction_id,counterparty_name,counterparty_iban,payment_reference,mcc_code"
+
+    private func tradeRepublicRealExportCSV() -> String {
+        let cardPurchase = """
+        "2025-06-07T10:15:00","2025-06-07","checking","card","payment_outbound","","REWE SAGT DANKE FIL.1234","","","","-23.450000","0.000000","0.000000","EUR","","","","TR Card Transaction","tid-1","","","",""
+        """
+        let subscription = """
+        "2025-06-08T09:00:00","2025-06-08","checking","card","payment_outbound","","Spotify","","","","-9.990000","0.000000","0.000000","EUR","","","","TR Card Transaction","tid-2","","","",""
+        """
+        let inboundTransfer = """
+        "2025-06-09T12:00:00","2025-06-09","checking","transfer","transfer_inbound","","","","","","500.000000","0.000000","0.000000","EUR","","","","Incoming transfer from A B","tid-3","","","",""
+        """
+        let internationalCard = """
+        "2025-06-10T18:30:00","2025-06-10","checking","card","payment_outbound","","ALLCHINABUY.COM","","","","-59.280000","0.000000","0.000000","EUR","-67.40","USD","","TR Card Transaction","tid-4","","","",""
+        """
+        return ([tradeRepublicRealExportHeader, cardPurchase, subscription, inboundTransfer, internationalCard])
+            .joined(separator: "\n")
+    }
+
+    func testTradeRepublicRealExportUsesNameColumnAsMerchantForCardPurchases() {
+        let result = FinanceStatementImporter.parseCSV(tradeRepublicRealExportCSV())
+
+        XCTAssertEqual(result.skippedRowCount, 0)
+        XCTAssertEqual(result.transactions.count, 4)
+
+        let grocery = result.transactions.first { $0.description == "REWE SAGT DANKE FIL.1234" }
+        XCTAssertEqual(grocery?.amountCents, -2345)
+        XCTAssertEqual(
+            FinanceCategorizer.category(for: grocery?.description ?? "", amountCents: grocery?.amountCents ?? 0),
+            .groceries
+        )
+
+        let subscription = result.transactions.first { $0.description == "Spotify" }
+        XCTAssertEqual(subscription?.amountCents, -999)
+        XCTAssertEqual(
+            FinanceCategorizer.category(for: subscription?.description ?? "", amountCents: subscription?.amountCents ?? 0),
+            .subscriptions
+        )
+    }
+
+    func testTradeRepublicRealExportFallsBackToDescriptionForTransfersWithEmptyName() {
+        let result = FinanceStatementImporter.parseCSV(tradeRepublicRealExportCSV())
+
+        let transfer = result.transactions.first { $0.amountCents == 50_000 }
+        XCTAssertEqual(transfer?.description, "Incoming transfer from A B")
+    }
+
+    func testTradeRepublicRealExportUsesEURAmountNotOriginalCurrencyForInternationalCardTxn() {
+        let result = FinanceStatementImporter.parseCSV(tradeRepublicRealExportCSV())
+
+        let international = result.transactions.first { $0.description == "ALLCHINABUY.COM" }
+        XCTAssertEqual(international?.amountCents, -5928)
+    }
 }
