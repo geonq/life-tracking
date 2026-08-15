@@ -151,12 +151,15 @@ struct OverviewView: View {
         } else {
             let hasOddFinalSection = supportingSections.count % 2 == 1
             let pairedSections = hasOddFinalSection ? Array(supportingSections.dropLast()) : supportingSections
-            VStack(spacing: 16) {
+            VStack(spacing: LifeOSTokens.overviewCardGap + 4) {
                 if !pairedSections.isEmpty {
                     LazyVGrid(
-                        columns: [GridItem(.flexible(minimum: 320), spacing: 16), GridItem(.flexible(minimum: 320), spacing: 16)],
+                        columns: [
+                            GridItem(.flexible(minimum: 320), spacing: LifeOSTokens.overviewCardGap + 4),
+                            GridItem(.flexible(minimum: 320), spacing: LifeOSTokens.overviewCardGap + 4)
+                        ],
                         alignment: .leading,
-                        spacing: 16
+                        spacing: LifeOSTokens.overviewCardGap + 4
                     ) {
                         ForEach(pairedSections) { section in
                             sectionRow(section)
@@ -645,6 +648,16 @@ private struct OverviewMetricCard: View {
         return LifeOSTokens.tertiaryText
     }
 
+    /// True only for the plain "demo fixture" case, never for a stale/partial/not-connected
+    /// status. The top-level header badge already states DEMO FIXTURES once; repeating the
+    /// full yellow "Demo fixture · not live" line on every single card is noise, so those
+    /// cards collapse to a small unobtrusive marker instead. Any other status (stale, partial,
+    /// not connected, permission needed) stays as full text — that's load-bearing per-card
+    /// information, not repetition.
+    private var isPlainDemoStatus: Bool {
+        sourceStatus == "Demo fixture · not live"
+    }
+
     private var healthIntegrityStatusPresent: Bool {
         OverviewHomeStatusPolicy.healthIntegrityStatus(
             source: fitnessSnapshot.source,
@@ -670,7 +683,7 @@ private struct OverviewMetricCard: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: featured ? 10 : 9) {
+        VStack(alignment: .leading, spacing: featured ? 16 : 14) {
             HStack(spacing: 12) {
                 LifeOSIcon(sectionIcon)
                     .foregroundStyle(.secondary)
@@ -689,16 +702,24 @@ private struct OverviewMetricCard: View {
                         .lineLimit(featured ? 1 : 2)
                 }
                 Spacer(minLength: 8)
+                if isPlainDemoStatus {
+                    Circle()
+                        .fill(LifeOSTokens.warning.opacity(0.7))
+                        .frame(width: 6, height: 6)
+                        .accessibilityHidden(true)
+                }
                 LifeOSIcon(.chevronRight)
                     .foregroundStyle(LifeOSTokens.accent.opacity(0.8))
                     .frame(width: 14, height: 14)
             }
 
-            Text(sourceStatus)
-                .font(LifeOSFont.inter(10.5, weight: .medium))
-                .foregroundStyle(sourceStatusColor)
-                .lineLimit(section.kind == .health && healthIntegrityStatusPresent ? 2 : 1)
-                .minimumScaleFactor(0.78)
+            if !isPlainDemoStatus {
+                Text(sourceStatus)
+                    .font(LifeOSFont.inter(10.5, weight: .medium))
+                    .foregroundStyle(sourceStatusColor)
+                    .lineLimit(section.kind == .health && healthIntegrityStatusPresent ? 2 : 1)
+                    .minimumScaleFactor(0.78)
+            }
 
             if featured && section.kind == .llm {
                 usageBody
@@ -706,10 +727,10 @@ private struct OverviewMetricCard: View {
                 supportingBody
             }
         }
-        .padding(.horizontal, featured ? 16 : 16)
-        .padding(.vertical, featured ? 14 : 14)
+        .padding(.horizontal, featured ? 18 : 18)
+        .padding(.vertical, featured ? 18 : 18)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .frame(minHeight: featured ? 190 : 188, alignment: .topLeading)
+        .frame(minHeight: featured ? 196 : 190, alignment: .topLeading)
         .background(cardBackground, in: cardShape)
         .overlay(cardShape.stroke(hovering ? Color.primary.opacity(0.18) : LifeOSTokens.quietBorder, lineWidth: 0.75))
         .contentShape(cardShape)
@@ -736,34 +757,39 @@ private struct OverviewMetricCard: View {
 
     @ViewBuilder
     private var usageBody: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(leadUsageSnapshot?.provider.displayName ?? "Usage")
-                    .font(LifeOSFont.spaceGrotesk(14, weight: .medium))
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .lastTextBaseline, spacing: 10) {
                 if let remaining = leadUsageSnapshot?.smallestObservedWindow?.usedPercent.map({ 1 - $0 }) {
-                    Text("\(Int((remaining * 100).rounded()))% remaining")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(LifeOSTokens.Series.actual)
+                    Text("\(Int((remaining * 100).rounded()))")
+                        .font(LifeOSFont.inter(44, weight: .extraBold))
                         .monospacedDigit()
+                        .foregroundStyle(.primary)
+                    Text("% remaining")
+                        .font(LifeOSFont.inter(13, weight: .medium))
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .padding(.bottom, 6)
+                } else {
+                    Text("—")
+                        .font(LifeOSFont.inter(44, weight: .extraBold))
+                        .foregroundStyle(.primary)
                 }
                 Spacer(minLength: 4)
-                Text(usageTrendLabel)
-                    .font(.caption2)
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(leadUsageSnapshot?.provider.displayName ?? "Usage")
+                        .font(LifeOSFont.inter(12, weight: .semiBold))
+                        .foregroundStyle(.primary)
+                    Text(usageTrendLabel)
+                        .font(.caption2)
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                }
             }
 
             if usageTrendPoints.count >= 2 {
-                OverviewAreaChart(
-                    title: "Usage remaining",
-                    subtitle: leadUsageSnapshot?.smallestObservedWindow?.label ?? "Observed activity",
-                    points: usageTrendPoints,
-                    tint: LifeOSTokens.Series.actual,
-                    valueLabel: { "\(Int(($0 * 100).rounded()))%" }
-                )
-                .frame(height: 82)
+                OverviewSparkline(points: usageTrendPoints, tint: LifeOSTokens.Series.actual)
+                    .frame(height: 44)
             } else {
                 OverviewChartUnavailable(detail: usageChartDetail)
-                    .frame(minHeight: 54)
+                    .frame(minHeight: 44)
             }
 
             HStack(spacing: 8) {
@@ -778,28 +804,22 @@ private struct OverviewMetricCard: View {
     private var supportingBody: some View {
         switch section.kind {
         case .clipper:
-            VStack(alignment: .leading, spacing: 7) {
-                HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 14) {
                     ValueMetric(value: clipperHomeMetricValue(containing: "Views"), label: "Views today")
                     ValueMetric(value: clipperHomeMetricValue(containing: "Subscribers"), label: "Subscribers")
                     ValueMetric(value: clipperHomeMetricValue(containing: "Revenue"), label: "Revenue")
                 }
                 if let clipperTrend {
-                    OverviewAreaChart(
-                        title: "\(clipperTrend.metric.title) trend",
-                        subtitle: "Observed history",
-                        points: clipperTrend.points,
-                        tint: LifeOSTokens.info,
-                        valueLabel: { clipperTrend.metric == .revenue ? overviewCurrency(cents: Int($0.rounded())) : Int($0.rounded()).formatted() }
-                    )
-                    .frame(height: 78)
+                    OverviewSparkline(points: clipperTrend.points, tint: LifeOSTokens.info)
+                        .frame(height: 36)
                 } else {
                     OverviewChartUnavailable(detail: clipperChartDetail)
-                        .frame(minHeight: 48)
+                        .frame(minHeight: 40)
                 }
             }
         case .health:
-            VStack(alignment: .leading, spacing: 7) {
+            VStack(alignment: .leading, spacing: 10) {
                 if !homeHealthMetrics.isEmpty {
                     LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 8) {
                         ForEach(homeHealthMetrics) { metric in
@@ -819,7 +839,7 @@ private struct OverviewMetricCard: View {
                 }
             }
         case .finance:
-            VStack(alignment: .leading, spacing: 7) {
+            VStack(alignment: .leading, spacing: 10) {
                 if !financeOverviewMetrics.isEmpty {
                     LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 8) {
                         ForEach(financeOverviewMetrics) { metric in
@@ -949,12 +969,12 @@ private struct OverviewDisplayMetric: Identifiable {
     var id: String { label }
 }
 
-private struct OverviewAreaChart: View {
-    let title: String
-    let subtitle: String
+/// A quiet, line-only trend accent: no fill, no axes, no gridlines. The single `tint` hue is
+/// the card's one accent color — everything else on the card stays neutral. Deliberately
+/// undecorated so it reads as a small supporting signal, not a dominant colored region.
+private struct OverviewSparkline: View {
     let points: [OverviewChartPoint]
     let tint: Color
-    let valueLabel: (Double) -> String
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var yDomain: ClosedRange<Double> {
@@ -969,77 +989,27 @@ private struct OverviewAreaChart: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(alignment: .firstTextBaseline, spacing: 7) {
-                Text(title)
-                    .font(.caption.weight(.semibold))
-                Text(subtitle)
-                    .font(.caption2)
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.72)
-                Spacer(minLength: 4)
-            }
-
-            Chart(points) { point in
-                AreaMark(
-                    x: .value("Time", point.date),
-                    y: .value(title, point.value)
-                )
-                .foregroundStyle(areaGradient)
-                .interpolationMethod(.catmullRom)
-
-                LineMark(
-                    x: .value("Time", point.date),
-                    y: .value(title, point.value)
-                )
-                .foregroundStyle(tint)
-                .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
-                .interpolationMethod(.catmullRom)
-            }
-            .chartYScale(domain: yDomain)
-            .chartYAxis {
-                AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { value in
-                    AxisGridLine().foregroundStyle(LifeOSTokens.chartGrid)
-                    AxisValueLabel {
-                        if let number = value.as(Double.self) {
-                            Text(valueLabel(number))
-                        }
-                    }
-                }
-            }
-            .chartXAxis {
-                AxisMarks(values: .automatic(desiredCount: min(points.count, 3))) { value in
-                    AxisValueLabel {
-                        if let date = value.as(Date.self) {
-                            switch OverviewChartAxis.labelMode(for: points) {
-                            case .time:
-                                Text(date, format: .dateTime.hour().minute())
-                            case .day:
-                                Text(date, format: .dateTime.weekday(.abbreviated).day())
-                            }
-                        }
-                    }
-                }
-            }
-            .chartPlotStyle { plot in
-                plot.background(Color.clear)
-            }
-            .transaction { transaction in
-                if reduceMotion { transaction.animation = nil }
-            }
+        Chart(points) { point in
+            LineMark(
+                x: .value("Time", point.date),
+                y: .value("Value", point.value)
+            )
+            .foregroundStyle(tint)
+            .lineStyle(StrokeStyle(lineWidth: 1.75, lineCap: .round, lineJoin: .round))
+            .interpolationMethod(.catmullRom)
+        }
+        .chartYScale(domain: yDomain)
+        .chartYAxis(.hidden)
+        .chartXAxis(.hidden)
+        .chartPlotStyle { plot in
+            plot.background(Color.clear)
+        }
+        .transaction { transaction in
+            if reduceMotion { transaction.animation = nil }
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(title) area chart")
-        .accessibilityValue(points.last.map { valueLabel($0.value) } ?? "No observations")
-    }
-
-    private var areaGradient: LinearGradient {
-        LinearGradient(
-            colors: [tint.opacity(0.22), tint.opacity(0.02)],
-            startPoint: .top,
-            endPoint: .bottom
-        )
+        .accessibilityLabel("Trend")
+        .accessibilityValue(points.last.map { String(format: "%.2f", $0.value) } ?? "No observations")
     }
 }
 
@@ -1094,13 +1064,15 @@ private struct ValueMetric: View {
     let label: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 4) {
             Text(value ?? "—")
-                .font(.system(size: 18, weight: .semibold, design: .rounded))
+                .font(LifeOSFont.inter(20, weight: .extraBold))
+                .foregroundStyle(.primary)
+                .monospacedDigit()
                 .lineLimit(1)
                 .minimumScaleFactor(0.72)
             Text(label)
-                .font(.system(size: 10.5, weight: .medium))
+                .font(LifeOSFont.inter(10.5, weight: .medium))
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .lineLimit(1)
         }

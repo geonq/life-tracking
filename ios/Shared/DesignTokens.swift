@@ -105,7 +105,7 @@ public enum LifeOSTokens {
     public static let iconFrame: CGFloat = 32
     public static let overviewContentInset: CGFloat = 40
     public static let overviewCardHeight: CGFloat = 80
-    public static let overviewCardGap: CGFloat = 10
+    public static let overviewCardGap: CGFloat = 14
     public static let overviewCardCorner: CGFloat = 12
     public static let overviewIconTile: CGFloat = 36
 
