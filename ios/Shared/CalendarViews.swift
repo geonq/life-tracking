@@ -818,7 +818,8 @@ private struct CalendarPagedTimeline: View {
                             isInteractionEnabled: offset == 0,
                             isVerticalScrollEnabled: offset == 0 &&
                                 pendingSettle == nil,
-                            interactionSession: interactionSession
+                            interactionSession: interactionSession,
+                            horizontalDragOffset: horizontalDragOffset
                         )
                         .frame(width: viewport.size.width)
                         .background {
@@ -1117,6 +1118,13 @@ private struct CalendarTimelinePage: View {
     let isInteractionEnabled: Bool
     let isVerticalScrollEnabled: Bool
     let interactionSession: CalendarInteractionSession
+    /// The parent pager's live horizontal drag/settle offset. Notion keeps the
+    /// hour-gutter visually anchored while the day columns page underneath it;
+    /// since every materialized page shares one `HStack` translation, counter-
+    /// offsetting just the gutter by the negative of that same value cancels
+    /// the shared pan and leaves it pinned on screen without a second scroll
+    /// view or an offset-sync PreferenceKey.
+    let horizontalDragOffset: CGFloat
     private let timeGutter: CGFloat = 52
     private let dayHeaderHeight: CGFloat = 58
 
@@ -1160,6 +1168,14 @@ private struct CalendarTimelinePage: View {
                                     contentHeight: timelineContentHeight
                                 )
                                     .frame(width: timeGutter)
+                                    // Cancel the parent pager's shared
+                                    // horizontal translation so the hour
+                                    // labels stay visually pinned to the
+                                    // left edge while the day columns page
+                                    // underneath them, matching Notion.
+                                    .offset(x: -horizontalDragOffset)
+                                    .zIndex(1)
+                                    .allowsHitTesting(false)
                                 ForEach(days, id: \.self) { day in
                                     CalendarDayTimeline(
                                         day: day,
