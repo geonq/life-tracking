@@ -137,6 +137,7 @@ struct UsageView: View {
 
                         tabContent(activeSnapshot, window: window)
                     } else {
+                        providerSwitcher
                         UsageEmptyState(
                             title: "Usage data unavailable",
                             detail: "No provider account is connected. LifeOS will not display placeholder usage."
@@ -451,32 +452,34 @@ struct UsageView: View {
                 }
             } valueText: { activeSnapshot.flatMap { selectedWindow(in: $0)?.label } ?? "Not available" }
 
-            if snapshots.count > 1 {
-                Menu {
-                    Picker("Provider", selection: $selectedProvider) {
-                        ForEach(snapshots.map(\.provider), id: \.self) { provider in
-                            Text("\(provider.displayName) · \(statusText(for: provider))").tag(provider)
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 4) {
-                        LifeOSIcon(.assistant).frame(width: 12, height: 12)
-                        Text("Provider · \(selectedProvider.displayName) · \(statusText(for: selectedProvider))")
-                            .font(.caption)
-                            .lineLimit(2)
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(Color.primary.opacity(0.06), in: Capsule())
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityLabel("Provider switcher, currently \(selectedProvider.displayName), \(statusText(for: selectedProvider))")
-            }
+            providerSwitcher
         }
     }
 
+    private var providerSwitcher: some View {
+        Menu {
+            Picker("Provider", selection: $selectedProvider) {
+                ForEach(Provider.allCases, id: \.self) { provider in
+                    Text("\(provider.displayName) · \(statusText(for: provider))").tag(provider)
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                LifeOSIcon(.assistant).frame(width: 12, height: 12)
+                Text("Provider · \(selectedProvider.displayName) · \(statusText(for: selectedProvider))")
+                    .font(.caption)
+                    .lineLimit(2)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Color.primary.opacity(0.06), in: Capsule())
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityLabel("Provider switcher, currently \(selectedProvider.displayName), \(statusText(for: selectedProvider))")
+    }
+
     private func statusText(for provider: Provider) -> String {
-        guard let snapshot = snapshots.first(where: { $0.provider == provider }) else { return "Unavailable" }
+        guard let snapshot = snapshots.first(where: { $0.provider == provider }) else { return "Not connected" }
         switch snapshot.provenance.quality {
         case .observed:
             switch snapshot.provenance.connector {
