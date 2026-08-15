@@ -131,6 +131,11 @@ struct FinanceImportCard: View {
                 .font(LifeOSFont.inter(10))
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .fixedSize(horizontal: false, vertical: true)
+
+            Divider()
+                .overlay(LifeOSTokens.hairlineBorder)
+
+            FinanceSpendingByCategorySection(transactions: model.savedTransactions)
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -355,19 +360,241 @@ private struct FinanceImportedEmptyState: View {
     }
 }
 
+// MARK: - Spending by category
+
+/// Groups the given imported transactions by month (newest first), keyed by
+/// the first-of-month `Date`. Shared by the imported-transactions list and
+/// the spending-by-category section so both use the same month buckets.
+private func financeImportGroupedByMonth(
+    _ transactions: [FinanceImportedTransaction]
+) -> [(key: Date, transactions: [FinanceImportedTransaction])] {
+    let calendar = Calendar.current
+    let grouped = Dictionary(grouping: transactions) { transaction in
+        calendar.date(from: calendar.dateComponents([.year, .month], from: transaction.bookedAt)) ?? transaction.bookedAt
+    }
+    return grouped
+        .map { (key: $0.key, transactions: $0.value) }
+        .sorted { $0.key > $1.key }
+}
+
+/// "Spending by category" section shown inside `FinanceImportCard`, below
+/// the import controls. Operates purely on `FinanceCategorizer` against
+/// whatever imported transactions already exist for the selected month —
+/// no new store, no persistence of categories, categorized fresh every
+/// render. Honest empty state when there are no imported transactions at
+/// all, or none for the selected month.
+private struct FinanceSpendingByCategorySection: View {
+    let transactions: [FinanceImportedTransaction]
+    @State private var selectedMonth: Date?
+
+    private var monthGroups: [(key: Date, transactions: [FinanceImportedTransaction])] {
+        financeImportGroupedByMonth(transactions)
+    }
+
+    private var currentMonth: Date? {
+        selectedMonth ?? monthGroups.first?.key
+    }
+
+    private var transactionsForMonth: [FinanceImportedTransaction] {
+        guard let currentMonth else { return [] }
+        return monthGroups.first { $0.key == currentMonth }?.transactions ?? []
+    }
+
+    private var summary: [FinanceCategorySpend] {
+        FinanceCategorizer.summary(for: transactionsForMonth)
+    }
+
+    private var totals: FinanceSpendTotals {
+        FinanceCategorizer.totals(for: transactionsForMonth)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Spending by category")
+                    .font(LifeOSFont.header(15))
+                Spacer(minLength: 8)
+                if !monthGroups.isEmpty {
+                    monthPicker
+                }
+            }
+
+            if transactions.isEmpty {
+                FinanceSpendingByCategoryEmptyState(hasAnyImports: false)
+            } else if transactionsForMonth.isEmpty {
+                FinanceSpendingByCategoryEmptyState(hasAnyImports: true)
+            } else {
+                FinanceSpendTotalsRow(totals: totals)
+                VStack(spacing: 8) {
+                    ForEach(summary, id: \.category) { spend in
+                        FinanceCategorySpendRow(spend: spend, maxMagnitudeCents: maxMagnitudeCents)
+                    }
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("finance-spending-by-category-section")
+    }
+
+    private var maxMagnitudeCents: Int {
+        summary.map { $0.outflowCents + $0.inflowCents }.max() ?? 0
+    }
+
+    private var monthPicker: some View {
+        Menu {
+            ForEach(monthGroups, id: \.key) { group in
+                Button(FinanceImportDateFormatter.month(group.key)) {
+                    selectedMonth = group.key
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text(currentMonth.map(FinanceImportDateFormatter.month) ?? "")
+                    .font(LifeOSFont.inter(12, weight: .medium))
+                LifeOSIcon(.chevronRight)
+                    .frame(width: 9, height: 9)
+                    .rotationEffect(.degrees(90))
+            }
+            .foregroundStyle(LifeOSTokens.tertiaryText)
+        }
+        .accessibilityIdentifier("finance-spending-by-category-month-picker")
+    }
+}
+
+private struct FinanceSpendTotalsRow: View {
+    let totals: FinanceSpendTotals
+
+    var body: some View {
+        HStack(spacing: 14) {
+            FinanceSpendTotalItem(label: "Spent", cents: totals.outflowCents, color: LifeOSTokens.danger)
+            FinanceSpendTotalItem(label: "Income", cents: totals.inflowCents, color: LifeOSTokens.success)
+            FinanceSpendTotalItem(
+                label: "Net",
+                cents: abs(totals.netCents),
+                color: totals.netCents < 0 ? LifeOSTokens.danger : LifeOSTokens.success,
+                isSigned: true,
+                signedValue: totals.netCents
+            )
+            Spacer(minLength: 0)
+        }
+    }
+}
+
+private struct FinanceSpendTotalItem: View {
+    let label: String
+    let cents: Int
+    let color: Color
+    var isSigned: Bool = false
+    var signedValue: Int = 0
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(LifeOSFont.inter(10))
+                .foregroundStyle(LifeOSTokens.tertiaryText)
+            Text(isSigned ? FinanceImportCurrencyFormatter.signedEuro(cents: signedValue) : FinanceImportCurrencyFormatter.magnitudeEuro(cents: cents))
+                .font(LifeOSFont.inter(13, weight: .semiBold))
+                .foregroundStyle(color)
+                .monospacedDigit()
+        }
+    }
+}
+
+/// One row per category: icon/hue, name, transaction count, EUR total, and
+/// a simple proportional bar. Outflow renders in `LifeOSTokens.danger`,
+/// pure-income categories in `.success`.
+private struct FinanceCategorySpendRow: View {
+    let spend: FinanceCategorySpend
+    let maxMagnitudeCents: Int
+    @State private var hasAppeared = false
+
+    private var magnitudeCents: Int { spend.outflowCents + spend.inflowCents }
+    private var isPrimarilyIncome: Bool { spend.inflowCents > spend.outflowCents }
+    private var amountColor: Color { isPrimarilyIncome ? LifeOSTokens.success : LifeOSTokens.danger }
+    private var barFraction: CGFloat {
+        guard maxMagnitudeCents > 0 else { return 0 }
+        return CGFloat(magnitudeCents) / CGFloat(maxMagnitudeCents)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 8) {
+                LifeOSIcon(spend.category.iconName)
+                    .foregroundStyle(spend.category.hue.base)
+                    .frame(width: 14, height: 14)
+                Text(spend.category.displayName)
+                    .font(LifeOSFont.inter(12, weight: .medium))
+                Text("\(spend.count)")
+                    .font(LifeOSFont.inter(10))
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                Spacer(minLength: 8)
+                Text(isPrimarilyIncome
+                     ? FinanceImportCurrencyFormatter.signedEuro(cents: spend.inflowCents)
+                     : FinanceImportCurrencyFormatter.signedEuro(cents: -spend.outflowCents))
+                    .font(LifeOSFont.inter(12, weight: .semiBold))
+                    .foregroundStyle(amountColor)
+                    .monospacedDigit()
+            }
+
+            GeometryReader { proxy in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(LifeOSTokens.Ring.track)
+                    Capsule()
+                        .fill(spend.category.hue.base)
+                        .frame(width: proxy.size.width * (hasAppeared ? barFraction : 0))
+                }
+            }
+            .frame(height: 5)
+            .accessibilityHidden(true)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(spend.category.displayName), \(spend.count) transactions")
+        .onAppear {
+            if LifeOSMotion.reduceMotion {
+                hasAppeared = true
+            } else {
+                withAnimation(LifeOSMotion.chartDraw) { hasAppeared = true }
+            }
+        }
+    }
+}
+
+private struct FinanceSpendingByCategoryEmptyState: View {
+    /// `true` when imports exist overall but not for the selected month;
+    /// `false` when there are no imported transactions at all. Both are
+    /// honest — neither fabricates category data.
+    let hasAnyImports: Bool
+
+    var body: some View {
+        Text(hasAnyImports
+             ? "No imported transactions in this month."
+             : "Import a CSV to see spending by category here.")
+            .font(LifeOSFont.inter(12))
+            .foregroundStyle(LifeOSTokens.tertiaryText)
+            .accessibilityIdentifier("finance-spending-by-category-empty-state")
+    }
+}
+
 // MARK: - Formatting helpers (kept local to this file; Finance's private
 // formatters in FinanceView.swift are not exposed outside that file)
 
 private enum FinanceImportCurrencyFormatter {
     static func signedEuro(cents: Int) -> String {
+        let magnitude = magnitudeEuro(cents: cents)
+        return cents < 0 ? "-\(magnitude)" : "+\(magnitude)"
+    }
+
+    /// Unsigned EUR string for `abs(cents)`. Used for totals rows where the
+    /// sign is already conveyed by a label ("Spent" / "Income") or color.
+    static func magnitudeEuro(cents: Int) -> String {
         let formatter = NumberFormatter()
         formatter.numberStyle = .currency
         formatter.currencyCode = "EUR"
         formatter.locale = Locale.current
         formatter.minimumFractionDigits = 0
         formatter.maximumFractionDigits = 0
-        let magnitude = formatter.string(from: NSNumber(value: Double(abs(cents)) / 100)) ?? "€\(abs(cents) / 100)"
-        return cents < 0 ? "-\(magnitude)" : "+\(magnitude)"
+        return formatter.string(from: NSNumber(value: Double(abs(cents)) / 100)) ?? "€\(abs(cents) / 100)"
     }
 }
 
