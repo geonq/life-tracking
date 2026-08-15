@@ -431,6 +431,9 @@ private struct FinanceMetricCard: View {
     let progress: Double?
     let isUnavailable: Bool
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var animatedProgress: Double = 0
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
@@ -445,11 +448,19 @@ private struct FinanceMetricCard: View {
                 Spacer()
                 if let progress {
                     Circle()
-                        .trim(from: 0, to: min(max(progress, 0), 1))
+                        .trim(from: 0, to: animatedProgress)
                         .stroke(hue.base, style: StrokeStyle(lineWidth: 3, lineCap: .round))
                         .frame(width: 23, height: 23)
                         .rotationEffect(.degrees(-90))
                         .accessibilityHidden(true)
+                        .task(id: "\(progress)-\(reduceMotion)") {
+                            let target = min(max(progress, 0), 1)
+                            if reduceMotion {
+                                animatedProgress = target
+                            } else {
+                                withAnimation(LifeOSMotion.ringReveal) { animatedProgress = target }
+                            }
+                        }
                 }
             }
             VStack(alignment: .leading, spacing: 3) {
@@ -1021,6 +1032,7 @@ private struct FinanceChartSelectionDetail: View {
                 Text(point.valueText)
                     .font(LifeOSFont.spaceGrotesk(17, weight: .bold))
                     .monospacedDigit()
+                    .numericTransition()
                 Text("\(point.dateLabel) · \(isDemo ? "Demo · not live" : point.sourceDisclosure)")
                     .font(LifeOSFont.inter(10))
                     .foregroundStyle(LifeOSTokens.tertiaryText)
@@ -1168,6 +1180,7 @@ private struct FinanceCategoriesCard: View {
                                     .font(LifeOSFont.inter(10, weight: .medium))
                                     .foregroundStyle(LifeOSTokens.tertiaryText)
                                     .monospacedDigit()
+                                    .numericTransition()
                             }
                             Spacer(minLength: 8)
                             if selectedCategory.contributingSources.count > 1 {
@@ -1284,21 +1297,29 @@ private struct FinanceCategoriesCard: View {
 private struct FinanceCategoryRing: View {
     let categories: [FinanceCategory]
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var revealProgress: Double = 0
+    @State private var revealHaloOpacity: Double = 0
+
+    private var categoryID: String {
+        categories.map { "\($0.id):\($0.fraction)" }.joined(separator: "|")
+    }
+
     var body: some View {
         ZStack {
             Circle()
                 .stroke(LifeOSTokens.Ring.track, lineWidth: 14)
-            ForEach(Array(categories.enumerated()), id: \.element.id) { index, category in
-                let start = categories.prefix(index).reduce(0.0) { $0 + $1.fraction }
-                let end = start + category.fraction
-                Circle()
-                    .trim(from: start + 0.006, to: max(end - 0.006, start + 0.01))
-                    .stroke(
-                        LifeOSTokens.Ring.progress(category.hue),
-                        style: StrokeStyle(lineWidth: 14, lineCap: .round)
-                    )
-                    .rotationEffect(.degrees(-90))
+
+            // Optional reveal halo. Exists only while the initial arc-draw-on is settling and
+            // is fully removed afterward — no persistent glow at rest.
+            if revealHaloOpacity > 0 {
+                categoryArcs
+                    .blur(radius: LifeOSTokens.Glow.blurRadius)
+                    .opacity(revealHaloOpacity)
             }
+
+            categoryArcs
+
             VStack(spacing: 1) {
                 Text("Spend")
                     .font(LifeOSFont.inter(10, weight: .medium))
@@ -1311,6 +1332,44 @@ private struct FinanceCategoryRing: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Spending category ring")
         .accessibilityValue(categories.map { "\($0.name) \(Int($0.fraction * 100)) percent" }.joined(separator: ", "))
+        .task(id: "\(categoryID)-\(reduceMotion)") {
+            if reduceMotion {
+                revealHaloOpacity = 0
+                revealProgress = 1
+                return
+            }
+
+            revealProgress = 0
+            revealHaloOpacity = LifeOSTokens.Glow.opacity * 0.42
+            withAnimation(LifeOSMotion.ringReveal) { revealProgress = 1 }
+
+            do {
+                try await Task.sleep(nanoseconds: 720_000_000)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeOut(duration: 0.18)) {
+                revealHaloOpacity = 0
+            }
+        }
+    }
+
+    /// The per-category arc segments, trimmed by `revealProgress` so the whole ring sweeps
+    /// on together during the one-shot reveal rather than each segment appearing pre-drawn.
+    private var categoryArcs: some View {
+        ForEach(Array(categories.enumerated()), id: \.element.id) { index, category in
+            let start = categories.prefix(index).reduce(0.0) { $0 + $1.fraction }
+            let end = start + category.fraction
+            let revealedEnd = start + (end - start) * revealProgress
+            Circle()
+                .trim(from: start + 0.006, to: max(revealedEnd - 0.006, start + 0.01))
+                .stroke(
+                    LifeOSTokens.Ring.progress(category.hue),
+                    style: StrokeStyle(lineWidth: 14, lineCap: .round)
+                )
+                .rotationEffect(.degrees(-90))
+        }
     }
 }
 
@@ -1716,15 +1775,14 @@ private struct FinanceDisplaySnapshot {
     ) -> [FinanceTransactionObservation] {
         guard let latest = transactions.map(\.timestamp).max() else { return [] }
         let calendar = Calendar.current
-        let days: Int
+        let start: Date?
         switch range {
-        case .week: days = 7
-        case .month: days = 31
-        case .quarter: days = 90
-        case .halfYear: days = 180
-        case .year: days = 365
+        case .week: start = calendar.date(byAdding: .day, value: -7, to: latest)
+        case .month: start = calendar.date(byAdding: .day, value: -31, to: latest)
+        case .halfYear: start = calendar.date(byAdding: .day, value: -180, to: latest)
+        case .year: start = calendar.date(byAdding: .day, value: -365, to: latest)
+        case .max: start = nil
         }
-        let start = calendar.date(byAdding: .day, value: -days, to: latest)
         return FinanceTransactionFilter(
             category: category,
             source: source,
@@ -1761,9 +1819,9 @@ private struct FinanceDisplaySnapshot {
         switch range {
         case .week: return hasDistinctHistory(source, days: 7) ? Array(source.suffix(min(source.count, 7))) : []
         case .month: return source
-        case .quarter: return hasDistinctHistory(source, days: 90) ? source : []
         case .halfYear: return hasDistinctHistory(source, days: 180) ? source : []
         case .year: return hasDistinctHistory(source, days: 365) ? source : []
+        case .max: return hasDistinctHistory(source, days: 365) ? source : []
         }
     }
 
@@ -1895,17 +1953,17 @@ private enum FinanceTransactionSeries {
 private enum FinanceRange: String, CaseIterable, Hashable {
     case week
     case month
-    case quarter
     case halfYear
     case year
+    case max
 
     var title: String {
         switch self {
         case .week: "1W"
         case .month: "1M"
-        case .quarter: "3M"
         case .halfYear: "6M"
         case .year: "1Y"
+        case .max: "Max"
         }
     }
 
@@ -1913,9 +1971,9 @@ private enum FinanceRange: String, CaseIterable, Hashable {
         switch self {
         case .week: "One week"
         case .month: "One month"
-        case .quarter: "Three months"
         case .halfYear: "Six months"
         case .year: "One year"
+        case .max: "Max"
         }
     }
 }
