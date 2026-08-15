@@ -1040,29 +1040,10 @@ private struct FinanceChartSelectionDetail: View {
                     .lineLimit(2)
             }
             Spacer(minLength: 8)
-            HStack(spacing: 7) {
-                stepperButton(icon: .chevronLeft, label: "Previous point") {
-                    selectedPoint = max(safeIndex - 1, 0)
-                }
-                stepperButton(icon: .chevronRight, label: "Next point") {
-                    selectedPoint = min(safeIndex + 1, points.count - 1)
-                }
-            }
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Selected \(point.seriesTitle) value")
         .accessibilityValue(point.accessibilityValue)
-    }
-
-    private func stepperButton(icon: LifeOSIconName, label: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            LifeOSIcon(icon)
-                .frame(width: 30, height: 30)
-                .background(Color.primary.opacity(0.08), in: Circle())
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(.primary)
-        .accessibilityLabel(label)
     }
 }
 

@@ -65,6 +65,7 @@ struct UsageTokenActivityView: View {
                         let frame = geometry[plotFrame]
 
                         Rectangle().fill(.clear).contentShape(Rectangle())
+#if os(iOS)
                             .gesture(DragGesture(minimumDistance: 0).onChanged { value in
                                 let x = value.location.x - frame.origin.x
                                 if let date: Date = proxy.value(atX: x) { selectClosest(to: date) }
@@ -73,6 +74,30 @@ struct UsageTokenActivityView: View {
                                 let x = location.x - frame.origin.x
                                 if let date: Date = proxy.value(atX: x) { selectClosest(to: date) }
                             }
+#elseif os(macOS)
+                            .onContinuousHover(coordinateSpace: .local) { phase in
+                                switch phase {
+                                case .active(let location):
+                                    let x = location.x - frame.origin.x
+                                    if let date: Date = proxy.value(atX: x) { selectClosest(to: date) }
+                                case .ended:
+                                    break
+                                }
+                            }
+#endif
+                        if let selectedPoint,
+                           let x = proxy.position(forX: selectedPoint.date) {
+                            let y = proxy.position(forY: Double(selectedPoint.tokens)) ?? frame.origin.y
+                            ScrubBubble(x: frame.origin.x + x, y: max(18, frame.origin.y + y - 26)) {
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(selectedPoint.tokens.formatted(.number.notation(.compactName)) + " tokens")
+                                    Text(selectedPoint.date, format: .dateTime.weekday(.abbreviated).hour().minute())
+                                        .font(.caption2)
+                                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                                }
+                            }
+                            .allowsHitTesting(false)
+                        }
                     }
                 }
             }
@@ -130,29 +155,19 @@ struct UsageTokenActivityView: View {
 
     private var footer: some View {
         HStack {
-            Text("Choose a point for exact details.")
+            Text(footerHintText)
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Spacer()
-            HStack(spacing: 6) {
-                stepButton(icon: .chevronLeft, accessibilityLabel: "Previous activity point") { step(by: -1) }
-                    .disabled((selectedID.flatMap { id in activity.firstIndex { $0.date == id } } ?? 0) <= 0)
-                stepButton(icon: .chevronRight, accessibilityLabel: "Next activity point") { step(by: 1) }
-                    .disabled((selectedID.flatMap { id in activity.firstIndex { $0.date == id } } ?? -1) >= activity.count - 1)
-            }
         }
     }
 
-    private func stepButton(icon: LifeOSIconName, accessibilityLabel: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            LifeOSIcon(icon)
-                .frame(width: 10, height: 10)
-                .frame(width: 26, height: 26)
-                .background(Color.primary.opacity(0.08), in: Circle())
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(.primary)
-        .accessibilityLabel(accessibilityLabel)
+    private var footerHintText: String {
+#if os(iOS)
+        "Drag or tap a bar for exact details."
+#else
+        "Hover a bar for exact details."
+#endif
     }
 
     private var activityAccessibilitySummary: String {
@@ -216,13 +231,9 @@ struct UsageTokenActivityView: View {
     private func selectClosest(to date: Date) {
         guard !activity.isEmpty else { return }
         let closest = activity.min { abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date)) }
+        if let closestDate = closest?.date, closestDate != selectedID {
+            ScrubBubble<EmptyView>.snapHaptic()
+        }
         selectedID = closest?.date
-    }
-
-    private func step(by delta: Int) {
-        guard !activity.isEmpty else { return }
-        let currentIndex = activity.firstIndex { $0.date == selectedID } ?? (delta > 0 ? -1 : activity.count)
-        let next = min(max(currentIndex + delta, 0), activity.count - 1)
-        selectedID = activity[next].date
     }
 }

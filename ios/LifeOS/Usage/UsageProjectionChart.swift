@@ -16,7 +16,6 @@ struct UsageProjectionChart: View {
     @State private var selectedIndex: Int?
     @State private var pinnedRangeStart: Date?
     @State private var zoomFactor: Double = 1
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     // MARK: Series data
 
@@ -36,11 +35,21 @@ struct UsageProjectionChart: View {
     /// Current estimate = the forward projection engine's points, only when the analytics
     /// snapshot declares the same window. A range switch must never reuse another window's
     /// estimate, even if the dates happen to overlap.
+    ///
+    /// Requires at least 2 actual points before rendering: fewer than that gives no observed
+    /// velocity to project from, so the honest "Not enough data" state applies instead of a
+    /// fabricated line. `UsageProjectionEngine.points` always re-emits an anchor point at the
+    /// observed date (equal to `lastObservedDate` in the common continuous-observation case) —
+    /// that anchor must be KEPT (`>=`, not `>`) so the estimate line has a starting vertex to
+    /// draw forward from. Excluding it left a single trailing point, which `LineMark` cannot
+    /// stroke (a lone point draws no visible segment) — that was the root cause of the line
+    /// never rendering.
     private var estimatePoints: [UsageProjectionPoint] {
+        guard actualPoints.count >= 2 else { return [] }
         guard let windowID = analytics.windowID, windowID == window?.id else { return [] }
         let lastObservedDate = actualPoints.last?.date ?? .distantPast
         return analytics.projection
-            .filter { $0.date > lastObservedDate }
+            .filter { $0.date >= lastObservedDate }
             .filter { point in
                 guard let resetAt = window?.resetAt else { return true }
                 return point.date <= resetAt
@@ -106,12 +115,32 @@ struct UsageProjectionChart: View {
                     if let plotFrame = proxy.plotFrame {
                         let frame = geometry[plotFrame]
                         Rectangle().fill(.clear).contentShape(Rectangle())
+#if os(iOS)
                             .gesture(DragGesture(minimumDistance: 0).onChanged { value in
                                 let x = value.location.x - frame.origin.x
                                 if let date: Date = proxy.value(atX: x) {
                                     selectClosest(to: date)
                                 }
                             })
+                            .onTapGesture { location in
+                                let x = location.x - frame.origin.x
+                                if let date: Date = proxy.value(atX: x) {
+                                    selectClosest(to: date)
+                                }
+                            }
+#elseif os(macOS)
+                            .onContinuousHover(coordinateSpace: .local) { phase in
+                                switch phase {
+                                case .active(let location):
+                                    let x = location.x - frame.origin.x
+                                    if let date: Date = proxy.value(atX: x) {
+                                        selectClosest(to: date)
+                                    }
+                                case .ended:
+                                    break
+                                }
+                            }
+#endif
                         if let selectedPoint,
                            let x = proxy.position(forX: selectedPoint.date),
                            let y = proxy.position(forY: selectedPoint.usedPercent) {
@@ -278,7 +307,7 @@ struct UsageProjectionChart: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    // MARK: Scrub detail row + prev/next stepper (02 §2 "Scrub bubble + stepper row")
+    // MARK: Scrub detail row (02 §2 "Scrub bubble row")
 
     private var detailRow: some View {
         HStack(alignment: .center, spacing: 10) {
@@ -299,16 +328,23 @@ struct UsageProjectionChart: View {
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
             } else {
-                Text("Scrub the chart or use the stepper for exact values.")
+                Text(scrubHintText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
             Spacer(minLength: 8)
-            stepperButtons
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private var scrubHintText: String {
+#if os(iOS)
+        "Drag or tap the chart for exact values."
+#else
+        "Hover the chart for exact values."
+#endif
     }
 
     private var qualityTag: String {
@@ -317,38 +353,6 @@ struct UsageProjectionChart: View {
         case .estimated: "Derived estimate · Low confidence"
         case .demo: "Demo fixtures · not live"
         case .unavailable: "Unavailable"
-        }
-    }
-
-    private var stepperButtons: some View {
-        HStack(spacing: 6) {
-            stepButton(icon: .chevronLeft, accessibilityLabel: "Previous usage point") { step(by: -1) }
-                .disabled(allSelectablePoints.isEmpty || (selectedIndex ?? 0) <= 0)
-            stepButton(icon: .chevronRight, accessibilityLabel: "Next usage point") { step(by: 1) }
-                .disabled(allSelectablePoints.isEmpty)
-        }
-    }
-
-    private func stepButton(icon: LifeOSIconName, accessibilityLabel: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            LifeOSIcon(icon)
-                .frame(width: 10, height: 10)
-                .frame(width: 26, height: 26)
-                .background(Color.primary.opacity(0.08), in: Circle())
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(.primary)
-        .accessibilityLabel(accessibilityLabel)
-    }
-
-    private func step(by delta: Int) {
-        guard !allSelectablePoints.isEmpty else { return }
-        let current = selectedIndex ?? (delta > 0 ? -1 : allSelectablePoints.count)
-        let next = min(max(current + delta, 0), allSelectablePoints.count - 1)
-        if reduceMotion { selectedIndex = next }
-        else {
-            withAnimation(LifeOSMotion.track) { selectedIndex = next }
-            ScrubBubble<EmptyView>.snapHaptic()
         }
     }
 
