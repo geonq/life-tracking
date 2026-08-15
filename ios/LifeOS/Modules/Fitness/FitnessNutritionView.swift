@@ -450,7 +450,7 @@ struct FitnessNutritionView: View {
                 .presentationDetents([.medium, .large])
         }
         .navigationDestination(isPresented: $showingGoals) {
-            NutritionGoalsView(nutrition: effectiveNutrition)
+            NutritionGoalsView(nutrition: effectiveNutrition, selectedDate: selectedDate, isDemo: snapshot.source.status == .demo)
         }
         .navigationDestination(isPresented: $showingNetEnergy) {
             NutritionNetEnergyView(nutrition: effectiveNutrition)
@@ -638,7 +638,7 @@ private struct FitnessNutritionSurface: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("nutrition-meal-persistence-error")
             }
-            FitnessNutritionHeroCard(nutrition: nutrition, isDemo: sourceStatus == .demo)
+            FitnessNutritionHeroCard(nutrition: nutrition, isDemo: sourceStatus == .demo, selectedDate: selectedDate)
             FitnessNutritionSummaryRail(nutrition: nutrition)
             FitnessNutritionMacroCard(macros: nutrition.macroValues, display: $macroDisplay)
             FitnessNutritionNetEnergyCard(nutrition: nutrition)
@@ -693,6 +693,7 @@ private struct FitnessNutritionSurface: View {
 private struct FitnessNutritionHeroCard: View {
     let nutrition: FitnessNutritionSnapshot
     let isDemo: Bool
+    let selectedDate: Date
 
     var body: some View {
         NutritionSurfaceCard(accent: .green) {
@@ -731,7 +732,7 @@ private struct FitnessNutritionHeroCard: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityHint("Opens food library")
-                NavigationLink(destination: NutritionGoalsView(nutrition: nutrition)) {
+                NavigationLink(destination: NutritionGoalsView(nutrition: nutrition, selectedDate: selectedDate, isDemo: isDemo)) {
                     NutritionActionLabel(title: "Goals", icon: .budget)
                 }
                 .buttonStyle(.plain)
@@ -1495,25 +1496,153 @@ private struct NutritionFoodLibraryView: View {
 
 private struct NutritionGoalsView: View {
     let nutrition: FitnessNutritionSnapshot
+    let selectedDate: Date
+    let isDemo: Bool
+
+    private let goalStore: NutritionGoalStore?
+    private let mealStore: NutritionMealStore?
+
+    @State private var currentGoal: NutritionGoal?
+    @State private var actualTotals: NutritionMealDailyTotals?
+    @State private var calorieText = ""
+    @State private var proteinText = ""
+    @State private var carbText = ""
+    @State private var fatText = ""
+    @State private var saveError: String?
+    @State private var savedConfirmation: String?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    init(nutrition: FitnessNutritionSnapshot, selectedDate: Date, isDemo: Bool) {
+        self.nutrition = nutrition
+        self.selectedDate = selectedDate
+        self.isDemo = isDemo
+        self.goalStore = try? NutritionGoalStore(url: NutritionGoalStore.defaultURL())
+        self.mealStore = try? NutritionMealStore(url: NutritionMealStore.defaultURL())
+    }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                FitnessSectionHeading(title: "Nutrition goals", subtitle: "User preferences for the selected day")
+                FitnessSectionHeading(title: "Nutrition goals", subtitle: "Durable targets you set, not a fixture")
                 NutritionSurfaceCard(accent: .green) {
-                    NutritionGoalLine(title: "Calories", value: nutrition.calorieTarget.map { "\($0) kcal" })
-                    ForEach(nutrition.macroValues) { macro in
-                        NutritionGoalLine(title: macro.name, value: macro.target.map { "\($0.formatted(.number.precision(.fractionLength(0)))) g" })
+                    progressSummary
+                    Divider().padding(.vertical, 6)
+                    Text("Edit targets").font(LifeOSFont.header(15))
+                    FitnessEditableField(title: "Calories (kcal)", text: $calorieText, numeric: true)
+                    FitnessEditableField(title: "Protein (g)", text: $proteinText, numeric: true)
+                    FitnessEditableField(title: "Carbs (g)", text: $carbText, numeric: true)
+                    FitnessEditableField(title: "Fat (g)", text: $fatText, numeric: true)
+                    if let saveError {
+                        Text(saveError)
+                            .font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.warning)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                    Text("Goal editing will be wired to the local nutrition store. Nothing here changes a target yet.")
-                        .font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.warning)
-                        .fixedSize(horizontal: false, vertical: true)
+                    if let savedConfirmation {
+                        Text(savedConfirmation)
+                            .font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.success)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    HStack {
+                        Spacer()
+                        Button("Save goal") { saveGoal() }
+                            .buttonStyle(.borderedProminent)
+                            .tint(LifeOSTokens.success)
+                            .disabled(goalStore == nil || isDemo)
+                            .accessibilityIdentifier("nutrition-goal-save")
+                    }
+                    if goalStore == nil {
+                        Text("Local goal storage is unavailable. Nothing can be saved right now.")
+                            .font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.warning)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else if isDemo {
+                        Text("Fixture values · goal editing is disabled in demo mode.")
+                            .font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Text("Saving records a new dated goal; it takes effect today and applies until you set another.")
+                            .font(LifeOSFont.caption(9)).foregroundStyle(LifeOSTokens.tertiaryText)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
             .padding(16)
         }
         .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
         .navigationTitle("Goals")
+        .task { await loadGoalAndActuals() }
+    }
+
+    @ViewBuilder
+    private var progressSummary: some View {
+        NutritionGoalLine(title: "Calories", value: currentGoal?.calorieTarget.map { "\($0) kcal" })
+        NutritionGoalLine(title: "Protein", value: currentGoal?.proteinGramsTarget.map { "\($0) g" })
+        NutritionGoalLine(title: "Carbs", value: currentGoal?.carbGramsTarget.map { "\($0) g" })
+        NutritionGoalLine(title: "Fat", value: currentGoal?.fatGramsTarget.map { "\($0) g" })
+        Text(progressLabel)
+            .font(LifeOSFont.inter(12, weight: .medium))
+            .foregroundStyle(progressAvailable ? Color.primary.opacity(0.82) : LifeOSTokens.warning)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.top, 4)
+    }
+
+    /// Progress is only ever shown when BOTH a persisted goal and an actual
+    /// logged intake exist for the day. Either half missing is an honest
+    /// "Goal not set" / "No meals logged" state — never a fabricated 0% or a
+    /// total that implies data that was never recorded.
+    private var progressAvailable: Bool {
+        currentGoal?.calorieTarget != nil && actualTotals?.kcal != nil
+    }
+
+    private var progressLabel: String {
+        guard let target = currentGoal?.calorieTarget else { return "Goal not set" }
+        guard let eaten = actualTotals?.kcal else { return "No meals logged" }
+        let percent = target > 0 ? Int((Double(eaten) / Double(target) * 100).rounded()) : 0
+        return "\(eaten.formatted()) / \(target.formatted()) kcal (\(percent)%)"
+    }
+
+    private func loadGoalAndActuals() async {
+        guard !isDemo else {
+            currentGoal = nil
+            actualTotals = nil
+            return
+        }
+        if let goalStore {
+            currentGoal = try? goalStore.currentGoal(on: selectedDate)
+        } else {
+            currentGoal = nil
+        }
+        if let mealStore {
+            actualTotals = try? mealStore.dailyTotals(on: selectedDate)
+        } else {
+            actualTotals = nil
+        }
+        calorieText = currentGoal?.calorieTarget.map(String.init) ?? ""
+        proteinText = currentGoal?.proteinGramsTarget.map(String.init) ?? ""
+        carbText = currentGoal?.carbGramsTarget.map(String.init) ?? ""
+        fatText = currentGoal?.fatGramsTarget.map(String.init) ?? ""
+    }
+
+    private func saveGoal() {
+        saveError = nil
+        savedConfirmation = nil
+        guard let goalStore else {
+            saveError = "Local goal storage is unavailable. Nothing was saved."
+            return
+        }
+        let goal = NutritionGoal(
+            effectiveFrom: .now,
+            calorieTarget: Int(calorieText.trimmingCharacters(in: .whitespaces)),
+            proteinGramsTarget: Int(proteinText.trimmingCharacters(in: .whitespaces)),
+            carbGramsTarget: Int(carbText.trimmingCharacters(in: .whitespaces)),
+            fatGramsTarget: Int(fatText.trimmingCharacters(in: .whitespaces))
+        )
+        do {
+            try goalStore.setGoal(goal)
+            currentGoal = goal
+            savedConfirmation = "Saved."
+        } catch {
+            saveError = "Could not save this goal. Nothing was changed."
+        }
     }
 }
 
