@@ -2,18 +2,35 @@ import SwiftUI
 
 // MARK: - Facts tab (02-charts-rings-widgets.md §0 Facts table)
 //
-// Every row maps to a real field or renders "Not available" — no fabricated numbers. See the
-// GAP table in 02 §0 for the authoritative list of what's missing from the data model.
+// Every row is either computed by `UsageFacts.compute(from:)` from real fields on
+// `UsageAnalyticsSnapshot`, or rendered as an honest "Not available" when the local data model
+// has no source for it — no fabricated numbers. See the GAP table in 02 §0 for the authoritative
+// list of what's still missing from the data model (lifetime tokens, per-turn duration, streaks,
+// credits, banked resets).
 
 struct UsageFactsView: View {
     let snapshot: ProviderSnapshot
     let analytics: UsageAnalyticsSnapshot?
+
+    private var facts: UsageFacts { UsageFacts.compute(from: analytics) }
 
     private var timestamp: String {
         snapshot.provenance.observedAt.formatted(.dateTime.month(.abbreviated).day().year().hour().minute())
     }
 
     private var subLabel: String { "\(snapshot.provider.displayName) · \(timestamp)" }
+
+    private static let tokenFormatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.groupingSeparator = ","
+        formatter.usesGroupingSeparator = true
+        return formatter
+    }()
+
+    private func formatTokens(_ tokens: Int) -> String {
+        Self.tokenFormatter.string(from: NSNumber(value: tokens)) ?? "\(tokens)"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -33,9 +50,21 @@ struct UsageFactsView: View {
             factRow(label: "Lifetime tokens", value: "Not available")
             divider
 
-            // Peak daily tokens — Partial per 02 §0: computable once daily-granularity history
-            // lands. Today's activity is hourly, not daily, so this is not a fair "peak day".
-            factRow(label: "Peak daily tokens", value: "Not available")
+            // Peak hour tokens — computed from the loaded activity series. Labeled "hour" (not
+            // "day") because today's activity points are hourly, not daily — see UsageFacts.swift.
+            factRow(
+                label: "Peak hour tokens",
+                value: facts.peakActivity.map { "\(formatTokens($0.tokens)) tok" } ?? "Not available"
+            )
+            divider
+
+            // Observed tokens — sum across the currently loaded window, with the number of
+            // observations that contributed. Explicitly NOT lifetime usage.
+            factRow(
+                label: "Observed tokens (window)",
+                value: facts.observedTotals.map { "\(formatTokens($0.totalTokens)) tok · \($0.observationCount) obs" }
+                    ?? "Not available"
+            )
             divider
 
             // Longest running turn — GAP. No per-turn/session duration field in the domain model.
@@ -50,8 +79,25 @@ struct UsageFactsView: View {
 
             // Credits — GAP. No credits/balance field; provider model here is percent-of-window.
             factRow(label: "Credits", value: "Not available")
+            divider
+
+            // Source freshness — derived from Provenance.freshness(); real signal, not fabricated.
+            factRow(
+                label: "Source freshness",
+                value: facts.freshness.map { freshnessLabel($0) } ?? "Not available"
+            )
         }
         .lifeOSCard()
+    }
+
+    private func freshnessLabel(_ fact: UsageFreshnessFact) -> String {
+        let observed = fact.observedAt.formatted(.dateTime.month(.abbreviated).day().hour().minute())
+        switch fact.freshness {
+        case .fresh: return "Fresh · \(observed)"
+        case .aging: return "Aging · \(observed)"
+        case .stale: return "Stale · \(observed)"
+        case .unavailable: return "Not available"
+        }
     }
 
     private var bankedResetsCard: some View {
