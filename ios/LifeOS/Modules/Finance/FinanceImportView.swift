@@ -136,6 +136,11 @@ struct FinanceImportCard: View {
                 .overlay(LifeOSTokens.hairlineBorder)
 
             FinanceSpendingByCategorySection(transactions: model.savedTransactions)
+
+            Divider()
+                .overlay(LifeOSTokens.hairlineBorder)
+
+            FinanceBudgetsSection(transactions: model.savedTransactions)
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -573,6 +578,289 @@ private struct FinanceSpendingByCategoryEmptyState: View {
             .font(LifeOSFont.inter(12))
             .foregroundStyle(LifeOSTokens.tertiaryText)
             .accessibilityIdentifier("finance-spending-by-category-empty-state")
+    }
+}
+
+// MARK: - Budgets
+
+/// Drives budget persistence for the "Budgets" section: reads/writes its own
+/// `FinanceBudgetStore` and is otherwise stateless. Self-contained, mirroring
+/// `FinanceImportViewModel` — never touches `FinanceCoordinator` or any other
+/// Finance surface.
+@MainActor
+final class FinanceBudgetViewModel: ObservableObject {
+    @Published private(set) var currentBudgets: [FinanceTransactionCategory: FinanceCategoryBudget] = [:]
+    @Published var errorMessage: String?
+
+    private let store: FinanceBudgetStore?
+
+    init() {
+        let resolvedStore = try? FinanceBudgetStore()
+        self.store = resolvedStore
+        reload(on: .now)
+    }
+
+    var hasStore: Bool { store != nil }
+
+    func reload(on date: Date) {
+        guard let store else { return }
+        do {
+            currentBudgets = try store.currentBudgets(on: date)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Sets a new monthly limit for `category`, effective from `date` (the
+    /// selected month being viewed). Rejects non-positive limits and
+    /// `.income` up front rather than round-tripping an invalid value
+    /// through the store.
+    func setLimit(cents: Int, for category: FinanceTransactionCategory, effectiveFrom date: Date) {
+        guard let store, category.isBudgetable, cents > 0 else { return }
+        do {
+            try store.setBudget(FinanceCategoryBudget(category: category, monthlyLimitCents: cents, effectiveFrom: date))
+            reload(on: date)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func removeBudget(for category: FinanceTransactionCategory, viewingDate date: Date) {
+        guard let store else { return }
+        do {
+            try store.remove(category: category)
+            reload(on: date)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+}
+
+/// "Budgets" section shown inside `FinanceImportCard`, below "Spending by
+/// category." For the selected month, shows every budgetable category with
+/// either its set monthly limit (editable) and actual spend as a progress
+/// bar, or an honest "No budget set" row when nothing has been configured —
+/// never a fabricated zero limit. Uses the same month-grouping helper as
+/// "Spending by category" so both sections agree on month boundaries.
+private struct FinanceBudgetsSection: View {
+    let transactions: [FinanceImportedTransaction]
+    @StateObject private var model = FinanceBudgetViewModel()
+    @State private var selectedMonth: Date?
+
+    private var monthGroups: [(key: Date, transactions: [FinanceImportedTransaction])] {
+        financeImportGroupedByMonth(transactions)
+    }
+
+    private var currentMonth: Date {
+        selectedMonth ?? monthGroups.first?.key ?? Calendar.current.date(from: Calendar.current.dateComponents([.year, .month], from: .now)) ?? .now
+    }
+
+    private var transactionsForMonth: [FinanceImportedTransaction] {
+        monthGroups.first { $0.key == currentMonth }?.transactions ?? []
+    }
+
+    private var spendByCategory: [FinanceTransactionCategory: FinanceCategorySpend] {
+        Dictionary(uniqueKeysWithValues: FinanceCategorizer.summary(for: transactionsForMonth).map { ($0.category, $0) })
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Budgets")
+                    .font(LifeOSFont.header(15))
+                Spacer(minLength: 8)
+                if !monthGroups.isEmpty {
+                    monthPicker
+                }
+            }
+
+            if transactions.isEmpty {
+                Text("Import a CSV to set budgets against your spending.")
+                    .font(LifeOSFont.inter(12))
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .accessibilityIdentifier("finance-budgets-empty-state")
+            } else {
+                VStack(spacing: 10) {
+                    ForEach(FinanceTransactionCategory.budgetableCategories, id: \.self) { category in
+                        FinanceCategoryBudgetRow(
+                            category: category,
+                            budget: model.currentBudgets[category],
+                            spend: spendByCategory[category],
+                            onSetLimit: { cents in
+                                model.setLimit(cents: cents, for: category, effectiveFrom: currentMonth)
+                            },
+                            onRemove: {
+                                model.removeBudget(for: category, viewingDate: currentMonth)
+                            }
+                        )
+                    }
+                }
+            }
+        }
+        .onAppear { model.reload(on: currentMonth) }
+        .onChange(of: selectedMonth) { _, newValue in
+            model.reload(on: newValue ?? currentMonth)
+        }
+        .alert("Budgets", isPresented: Binding(
+            get: { model.errorMessage != nil },
+            set: { if !$0 { model.errorMessage = nil } }
+        )) {
+            Button("OK") {}
+        } message: {
+            Text(model.errorMessage ?? "")
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("finance-budgets-section")
+    }
+
+    private var monthPicker: some View {
+        Menu {
+            ForEach(monthGroups, id: \.key) { group in
+                Button(FinanceImportDateFormatter.month(group.key)) {
+                    selectedMonth = group.key
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text(FinanceImportDateFormatter.month(currentMonth))
+                    .font(LifeOSFont.inter(12, weight: .medium))
+                LifeOSIcon(.chevronRight)
+                    .frame(width: 9, height: 9)
+                    .rotationEffect(.degrees(90))
+            }
+            .foregroundStyle(LifeOSTokens.tertiaryText)
+        }
+        .accessibilityIdentifier("finance-budgets-month-picker")
+    }
+}
+
+/// One row per budgetable category: icon/name, editable limit field, and
+/// (when a limit is set) actual spend this month with a progress bar and an
+/// honest remaining/over-by readout. When no limit is set, shows "No budget
+/// set" plus the entry field — never a fabricated zero limit standing in for
+/// "unset."
+private struct FinanceCategoryBudgetRow: View {
+    let category: FinanceTransactionCategory
+    let budget: FinanceCategoryBudget?
+    let spend: FinanceCategorySpend?
+    let onSetLimit: (Int) -> Void
+    let onRemove: () -> Void
+
+    @State private var limitText: String = ""
+    @FocusState private var isFieldFocused: Bool
+    @State private var hasAppeared = false
+
+    private var spentCents: Int { spend?.outflowCents ?? 0 }
+    private var limitCents: Int? { budget?.monthlyLimitCents }
+    private var isOverBudget: Bool {
+        guard let limitCents else { return false }
+        return spentCents > limitCents
+    }
+    private var progressFraction: CGFloat {
+        guard let limitCents, limitCents > 0 else { return 0 }
+        return min(CGFloat(spentCents) / CGFloat(limitCents), 1)
+    }
+    private var progressColor: Color {
+        isOverBudget ? LifeOSTokens.danger : LifeOSTokens.success
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                LifeOSIcon(category.iconName)
+                    .foregroundStyle(category.hue.base)
+                    .frame(width: 14, height: 14)
+                Text(category.displayName)
+                    .font(LifeOSFont.inter(12, weight: .medium))
+                Spacer(minLength: 8)
+                HStack(spacing: 3) {
+                    Text("€")
+                        .font(LifeOSFont.inter(12))
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                    TextField("Limit", text: $limitText)
+                        #if os(iOS)
+                        .keyboardType(.numberPad)
+                        #endif
+                        .multilineTextAlignment(.trailing)
+                        .font(LifeOSFont.inter(12, weight: .semiBold))
+                        .frame(width: 56)
+                        .focused($isFieldFocused)
+                        .onSubmit(commitLimit)
+                        .accessibilityIdentifier("finance-budget-limit-field-\(category.rawValue)")
+                }
+            }
+
+            if let limitCents {
+                HStack(spacing: 6) {
+                    GeometryReader { proxy in
+                        ZStack(alignment: .leading) {
+                            Capsule()
+                                .fill(LifeOSTokens.Ring.track)
+                            Capsule()
+                                .fill(progressColor)
+                                .frame(width: proxy.size.width * (hasAppeared ? progressFraction : 0))
+                        }
+                    }
+                    .frame(height: 5)
+                    .accessibilityHidden(true)
+                }
+                .onAppear {
+                    if LifeOSMotion.reduceMotion {
+                        hasAppeared = true
+                    } else {
+                        withAnimation(LifeOSMotion.chartDraw) { hasAppeared = true }
+                    }
+                }
+
+                HStack(spacing: 6) {
+                    Text(FinanceImportCurrencyFormatter.magnitudeEuro(cents: spentCents) + " of " + FinanceImportCurrencyFormatter.magnitudeEuro(cents: limitCents))
+                        .font(LifeOSFont.inter(10))
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                    Spacer(minLength: 8)
+                    Text(isOverBudget
+                         ? "Over by \(FinanceImportCurrencyFormatter.magnitudeEuro(cents: spentCents - limitCents))"
+                         : "\(FinanceImportCurrencyFormatter.magnitudeEuro(cents: limitCents - spentCents)) remaining")
+                        .font(LifeOSFont.inter(10, weight: .semiBold))
+                        .foregroundStyle(isOverBudget ? LifeOSTokens.danger : LifeOSTokens.success)
+                    Button("Remove", role: .destructive, action: onRemove)
+                        .font(LifeOSFont.inter(10))
+                        .buttonStyle(.plain)
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .accessibilityIdentifier("finance-budget-remove-\(category.rawValue)")
+                }
+            } else {
+                Text("No budget set")
+                    .font(LifeOSFont.inter(11))
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .accessibilityIdentifier("finance-budget-unset-\(category.rawValue)")
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("finance-budget-row-\(category.rawValue)")
+        .onChange(of: isFieldFocused) { wasFocused, isFocused in
+            if wasFocused && !isFocused {
+                commitLimit()
+            }
+        }
+        .onAppear {
+            limitText = limitCents.map { String($0 / 100) } ?? ""
+        }
+        .onChange(of: limitCents) { _, newValue in
+            if !isFieldFocused {
+                limitText = newValue.map { String($0 / 100) } ?? ""
+            }
+        }
+    }
+
+    private func commitLimit() {
+        let trimmed = limitText.trimmingCharacters(in: .whitespaces)
+        guard let euros = Int(trimmed), euros > 0 else {
+            // Invalid or empty entry: revert the field rather than silently
+            // writing a fabricated limit.
+            limitText = limitCents.map { String($0 / 100) } ?? ""
+            return
+        }
+        onSetLimit(euros * 100)
     }
 }
 
