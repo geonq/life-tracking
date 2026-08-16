@@ -7,6 +7,34 @@ public enum TailscaleSyncError: Error, Equatable, Sendable {
     case invalidResponse
     case httpError(Int)
     case responseTooLarge
+    case invalidInstitutionId
+    case invalidRequisitionId
+    case invalidConsentURL
+    case requisitionAlreadyLinking
+    case gatewayNotConfigured
+}
+
+/// The gateway's authoritative GoCardless requisition state for one consent
+/// attempt. Rendered directly; never widened to "connected" client-side.
+public enum BankConsentState: String, Equatable, Sendable {
+    case created
+    case linkOpened = "link_opened"
+    case linked
+    case expired
+    case error
+}
+
+/// The one-time consent link returned by `POST /finance/connect`. The phone
+/// never receives a GoCardless credential -- only an https consent URL to
+/// open and an opaque requisition id to poll.
+public struct BankConsentLink: Equatable, Sendable {
+    public let consentUrl: URL
+    public let requisitionId: String
+
+    public init(consentUrl: URL, requisitionId: String) {
+        self.consentUrl = consentUrl
+        self.requisitionId = requisitionId
+    }
 }
 
 /// A deliberately coarse connection result. It is safe to render because it
@@ -169,6 +197,44 @@ public actor TailscaleSyncClient {
         return rawValue
     }
 
+    /// GoCardless institution ids are short ASCII catalog keys sent in the
+    /// consent-initiation body. Reuses the printable-ASCII, no-whitespace
+    /// shape already proven for the Calendar idempotency key.
+    static func validatedInstitutionId(_ rawValue: String) -> String? {
+        guard (1...128).contains(rawValue.utf8.count),
+              rawValue.unicodeScalars.allSatisfy({ (0x21...0x7E).contains($0.value) }) else { return nil }
+        return rawValue
+    }
+
+    /// The gateway-issued requisition id is carried as a URL PATH component
+    /// (not a query string: `validatedServerURL` rejects any `?`). Fails
+    /// closed on anything that is not a simple printable-ASCII token so it
+    /// can never be used to smuggle an extra path segment or traversal.
+    static func validatedRequisitionId(_ rawValue: String) -> String? {
+        guard (1...128).contains(rawValue.utf8.count),
+              rawValue.unicodeScalars.allSatisfy({
+                  $0.value < 0x80 && ($0.properties.isAlphabetic || ($0.value >= 0x30 && $0.value <= 0x39) || $0 == "-" || $0 == "_")
+              }) else { return nil }
+        return rawValue
+    }
+
+    /// The bank consent URL is the one place this client ever opens a
+    /// gateway-supplied destination in a browser. It must be https with a
+    /// non-empty host and free of embedded credentials, control characters,
+    /// or whitespace -- fail closed rather than open an unvetted URL.
+    static func validatedConsentURL(_ rawValue: String) -> URL? {
+        guard !rawValue.isEmpty,
+              rawValue == rawValue.trimmingCharacters(in: .whitespacesAndNewlines),
+              rawValue.unicodeScalars.allSatisfy({
+                  !$0.properties.isWhitespace && !((0...0x1F).contains($0.value) || $0.value == 0x7F)
+              }) else { return nil }
+        guard let components = URLComponents(string: rawValue),
+              components.scheme?.lowercased() == "https",
+              components.user == nil, components.password == nil,
+              let host = components.host, !host.isEmpty else { return nil }
+        return components.url
+    }
+
     /// Builds a request for the verified Tailscale Serve origin. Authentication
     /// is supplied by the tailnet transport; the client deliberately adds no
     /// Authorization or Tailscale identity headers.
@@ -192,6 +258,20 @@ public actor TailscaleSyncClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(etag, forHTTPHeaderField: "If-Match")
         request.setValue(key, forHTTPHeaderField: "Idempotency-Key")
+        return request
+    }
+
+    /// Builds the one POST this client ever issues: bank consent initiation.
+    /// Still carries no Authorization or Tailscale identity header -- the
+    /// tailnet transport is the only authentication boundary, unchanged from
+    /// every read-only request.
+    nonisolated static func bankConsentRequest(url: URL, institutionId: String) -> URLRequest? {
+        guard let validatedId = validatedInstitutionId(institutionId),
+              let body = try? JSONSerialization.data(withJSONObject: ["institutionId": validatedId]) else { return nil }
+        var request = Self.gatewayRequest(url: url)
+        request.httpMethod = "POST"
+        request.httpBody = body
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         return request
     }
 
@@ -340,7 +420,9 @@ public actor TailscaleSyncClient {
                 return .authenticationRejected
             case .httpError(let status) where status == 408 || status == 429 || (500...599).contains(status):
                 return .serverUnavailable
-            case .invalidBarcode, .invalidResponse, .responseTooLarge, .httpError:
+            case .invalidBarcode, .invalidResponse, .responseTooLarge, .httpError,
+                 .invalidInstitutionId, .invalidRequisitionId, .invalidConsentURL,
+                 .requisitionAlreadyLinking, .gatewayNotConfigured:
                 return .invalidResponse
             }
         }
@@ -409,6 +491,89 @@ public actor TailscaleSyncClient {
     public func fetchFinanceSummary() async throws -> FinanceSummary {
         let data = try await fetchBoundedReadOnly(pathComponents: ["finance", "summary"])
         return try FinanceSummary.decode(data)
+    }
+
+    // MARK: - Bank consent initiation (the only mutating, parameterized gateway calls)
+
+    /// Starts a GoCardless bank-consent requisition via the gateway's
+    /// `POST /finance/connect`. The phone sends only the catalog institution
+    /// id and receives back a one-time https consent URL plus an opaque
+    /// requisition id -- never a GoCardless credential or access token.
+    public func requestBankConsent(institutionId: String) async throws -> BankConsentLink {
+        guard Self.validatedInstitutionId(institutionId) != nil else { throw TailscaleSyncError.invalidInstitutionId }
+        let url = try baseURL().appendingPathComponent("finance/connect")
+        guard let request = Self.bankConsentRequest(url: url, institutionId: institutionId) else {
+            throw TailscaleSyncError.invalidInstitutionId
+        }
+        let (data, response) = try await boundedMutatingRequest(request)
+        return try Self.parseBankConsentLinkResponse(data: data, response: response)
+    }
+
+    /// Polls the gateway for the current requisition state at
+    /// `GET /finance/connect/status/<requisitionId>`. The id is carried as a
+    /// path component (not a query string) because `validatedServerURL`
+    /// rejects any URL containing `?`; it is validated the same way the
+    /// Calendar idempotency key is before it is ever appended to a path.
+    public func bankConsentStatus(requisitionId: String) async throws -> BankConsentState {
+        guard let validatedId = Self.validatedRequisitionId(requisitionId) else {
+            throw TailscaleSyncError.invalidRequisitionId
+        }
+        let data = try await fetchBoundedReadOnly(pathComponents: ["finance", "connect", "status", validatedId])
+        return try Self.parseBankConsentStatusResponse(data: data)
+    }
+
+    /// Parses the consent-initiation response without performing I/O so the
+    /// contract can be exercised by tests against the production boundary.
+    /// 409 means a live requisition already exists; 503 means the gateway
+    /// has no GoCardless key configured. Both fail closed with a typed,
+    /// renderable error instead of a raw status/body.
+    nonisolated static func parseBankConsentLinkResponse(data: Data, response: HTTPURLResponse) throws -> BankConsentLink {
+        if response.statusCode == 409 { throw TailscaleSyncError.requisitionAlreadyLinking }
+        if response.statusCode == 503 { throw TailscaleSyncError.gatewayNotConfigured }
+        try checkHTTPStatus(response)
+        guard data.count <= maximumReadOnlyResponseBytes,
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rawConsentUrl = object["consentUrl"] as? String,
+              let rawRequisitionId = object["requisitionId"] as? String else {
+            throw TailscaleSyncError.invalidResponse
+        }
+        guard let consentUrl = validatedConsentURL(rawConsentUrl) else { throw TailscaleSyncError.invalidConsentURL }
+        guard let requisitionId = validatedRequisitionId(rawRequisitionId) else { throw TailscaleSyncError.invalidRequisitionId }
+        return BankConsentLink(consentUrl: consentUrl, requisitionId: requisitionId)
+    }
+
+    /// Parses the status-poll response without performing I/O.
+    nonisolated static func parseBankConsentStatusResponse(data: Data) throws -> BankConsentState {
+        guard data.count <= maximumReadOnlyResponseBytes,
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rawState = object["state"] as? String,
+              let state = BankConsentState(rawValue: rawState) else {
+            throw TailscaleSyncError.invalidResponse
+        }
+        return state
+    }
+
+    /// Sends the one bounded, non-GET request this client ever issues. Mirrors
+    /// the read-only bound (same byte cap, same Content-Length preflight) so
+    /// the mutating path carries no weaker guarantee than the GET paths.
+    nonisolated private static func performBoundedMutating(
+        session: URLSession,
+        request: URLRequest,
+        maximumBytes: Int
+    ) async throws -> (Data, HTTPURLResponse) {
+        let (bytes, response) = try await session.bytes(for: request)
+        guard let http = response as? HTTPURLResponse else { throw TailscaleSyncError.invalidResponse }
+        let declaredLength = http.value(forHTTPHeaderField: "Content-Length")
+        guard Self.contentLengthIsAllowed(declaredLength, maximumBytes: maximumBytes) else {
+            throw TailscaleSyncError.responseTooLarge
+        }
+        let data = try await Self.collectBounded(bytes, maximumBytes: maximumBytes)
+        return (data, http)
+    }
+
+    private func boundedMutatingRequest(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        try await Self.performBoundedMutating(session: session, request: request,
+                                              maximumBytes: Self.maximumReadOnlyResponseBytes)
     }
 
     // MARK: - Read-only Clipper analytics

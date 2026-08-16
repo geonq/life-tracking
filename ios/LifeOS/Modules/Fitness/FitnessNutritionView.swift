@@ -854,11 +854,7 @@ private struct NutritionSummaryValue: View {
         .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
         .padding(.horizontal, 9)
         .padding(.vertical, 8)
-        .background(
-            LinearGradient(colors: [LifeOSTokens.surface, hue.base.opacity(0.035)], startPoint: .topLeading, endPoint: .bottomTrailing),
-            in: LifeOSTokens.cardShape
-        )
-        .overlay(LifeOSTokens.cardShape.stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+        .glassCard()
     }
 }
 
@@ -1431,15 +1427,8 @@ private struct NutritionSurfaceCard<Content: View>: View {
         }
         .padding(15)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            LinearGradient(
-                colors: [LifeOSTokens.surface, accent.base.opacity(0.035)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            ),
-            in: LifeOSTokens.cardShape
-        )
-        .overlay(LifeOSTokens.cardShape.stroke(hovering ? accent.base.opacity(0.34) : LifeOSTokens.quietBorder, lineWidth: hovering ? 1 : 0.75))
+        .glassCard()
+        .overlay(LifeOSTokens.cardShape.stroke(hovering ? accent.base.opacity(0.34) : Color.clear, lineWidth: hovering ? 1 : 0.75))
 #if os(macOS)
         .onHover { hovering = $0 }
 #endif
@@ -2579,6 +2568,9 @@ private struct FitnessFoodReviewSheet: View {
         case .responseTooLarge: return "The gateway response exceeded the safety bound. No values are available."
         case .invalidResponse: return "The gateway returned an invalid barcode response. No values are available."
         case .invalidServerURL: return "The LifeOS server URL is not approved. No lookup was attempted."
+        case .invalidInstitutionId, .invalidRequisitionId, .invalidConsentURL,
+             .requisitionAlreadyLinking, .gatewayNotConfigured:
+            return "The gateway returned an unexpected response. No values are available."
         }
     }
 

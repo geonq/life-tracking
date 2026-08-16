@@ -1,4 +1,9 @@
 import SwiftUI
+#if os(iOS)
+import SafariServices
+#elseif os(macOS)
+import AppKit
+#endif
 
 struct RetainedHealthDataSettings: Equatable, Sendable {
     enum Status: Equatable, Sendable {
@@ -1035,10 +1040,260 @@ struct ProviderConnectionsSettingsView: View {
     }
 }
 
+#if os(iOS)
+/// Opens the gateway-issued consent URL in an in-app Safari sheet. LifeOS
+/// never renders bank credential UI itself -- the bank's own hosted consent
+/// page is shown verbatim inside the system browser surface.
+private struct BankConsentSafariView: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeUIViewController(context: Context) -> SFSafariViewController {
+        SFSafariViewController(url: url)
+    }
+
+    func updateUIViewController(_ uiViewController: SFSafariViewController, context: Context) {}
+}
+#endif
+
+/// Honest, coarse per-row state for one catalog connector's consent attempt.
+/// Mirrors `TailscaleConnectionPreflightState`: never claims "connected"
+/// without an authoritative `linked` status from the gateway.
+private enum BankConsentRowState: Equatable {
+    case idle
+    case openingConsent
+    case awaitingConsent(BankConsentLink)
+    case checkingStatus(BankConsentLink)
+    case linked
+    case expired
+    case alreadyLinking
+    case gatewayNotConfigured
+    case error
+}
+
+@MainActor
+private final class BankConsentRowController: ObservableObject {
+    @Published var state: BankConsentRowState = .idle
+    @Published var showSafari = false
+    private var task: Task<Void, Never>?
+    private let client: TailscaleSyncClient
+
+    init(client: TailscaleSyncClient) {
+        self.client = client
+    }
+
+    func start(institutionId: String) {
+        task?.cancel()
+        state = .openingConsent
+        task = Task { [client] in
+            do {
+                let link = try await client.requestBankConsent(institutionId: institutionId)
+                guard !Task.isCancelled else { return }
+                self.state = .awaitingConsent(link)
+#if os(iOS)
+                self.showSafari = true
+#elseif os(macOS)
+                NSWorkspace.shared.open(link.consentUrl)
+#endif
+            } catch {
+                guard !Task.isCancelled else { return }
+                self.state = Self.rowState(for: error)
+            }
+        }
+    }
+
+    func refreshStatus() {
+        guard case .awaitingConsent(let link) = state else { return }
+        task?.cancel()
+        state = .checkingStatus(link)
+        task = Task { [client] in
+            do {
+                let result = try await client.bankConsentStatus(requisitionId: link.requisitionId)
+                guard !Task.isCancelled else { return }
+                switch result {
+                case .linked: self.state = .linked
+                case .expired: self.state = .expired
+                case .error: self.state = .error
+                case .created, .linkOpened: self.state = .awaitingConsent(link)
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                self.state = Self.rowState(for: error)
+            }
+        }
+    }
+
+    func reset() {
+        task?.cancel()
+        state = .idle
+        showSafari = false
+    }
+
+    deinit {
+        task?.cancel()
+    }
+
+    private static func rowState(for error: Error) -> BankConsentRowState {
+        guard let syncError = error as? TailscaleSyncError else { return .error }
+        switch syncError {
+        case .requisitionAlreadyLinking: return .alreadyLinking
+        case .gatewayNotConfigured: return .gatewayNotConfigured
+        default: return .error
+        }
+    }
+}
+
+private struct BankConsentConnectRow: View {
+    let descriptor: FinanceConnectorDescriptor
+    let syncClient: TailscaleSyncClient
+    let gatewayConfigured: Bool
+    @StateObject private var controller: BankConsentRowController
+
+    init(descriptor: FinanceConnectorDescriptor, syncClient: TailscaleSyncClient, gatewayConfigured: Bool) {
+        self.descriptor = descriptor
+        self.syncClient = syncClient
+        self.gatewayConfigured = gatewayConfigured
+        _controller = StateObject(wrappedValue: BankConsentRowController(client: syncClient))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                controller.start(institutionId: descriptor.kind.rawValue)
+            } label: {
+                HStack(spacing: 7) {
+                    if isBusy {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        LifeOSIcon(.security).frame(width: 14, height: 14)
+                    }
+                    Text(buttonLabel)
+                        .font(LifeOSFont.inter(12, weight: .semiBold))
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .tint(LifeOSTokens.accent)
+            .disabled(!canTap)
+            .accessibilityIdentifier("settings-finance-connect-\(descriptor.kind.rawValue)")
+
+            HStack(alignment: .top, spacing: 6) {
+                LifeOSIcon(statusIcon)
+                    .frame(width: 13, height: 13)
+                    .foregroundStyle(statusColor)
+                Text(statusDetail)
+                    .font(LifeOSFont.inter(11))
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("settings-finance-connect-status-\(descriptor.kind.rawValue)")
+
+            if case .awaitingConsent = controller.state {
+                Button("Re-check status") {
+                    controller.refreshStatus()
+                }
+                .font(LifeOSFont.inter(11, weight: .semiBold))
+                .buttonStyle(.plain)
+                .foregroundStyle(LifeOSTokens.accent)
+                .accessibilityIdentifier("settings-finance-connect-recheck-\(descriptor.kind.rawValue)")
+            }
+        }
+        .padding(.top, 4)
+        .padding(.bottom, 10)
+#if os(iOS)
+        .sheet(isPresented: $controller.showSafari, onDismiss: {
+            controller.refreshStatus()
+        }) {
+            if case .awaitingConsent(let link) = controller.state {
+                BankConsentSafariView(url: link.consentUrl)
+            } else if case .checkingStatus(let link) = controller.state {
+                BankConsentSafariView(url: link.consentUrl)
+            }
+        }
+#endif
+        .onChange(of: gatewayConfigured) { _, isConfigured in
+            if !isConfigured { controller.reset() }
+        }
+    }
+
+    private var isBusy: Bool {
+        switch controller.state {
+        case .openingConsent, .checkingStatus: true
+        default: false
+        }
+    }
+
+    private var canTap: Bool {
+        guard gatewayConfigured, !isBusy else { return false }
+        switch controller.state {
+        case .linked, .awaitingConsent: return false
+        default: return true
+        }
+    }
+
+    private var buttonLabel: String {
+        if !gatewayConfigured { return "Gateway required" }
+        switch controller.state {
+        case .idle, .error, .expired: return "Connect"
+        case .openingConsent: return "Opening consent…"
+        case .awaitingConsent: return "Awaiting consent"
+        case .checkingStatus: return "Checking status…"
+        case .linked: return "Linked"
+        case .alreadyLinking: return "Already linking"
+        case .gatewayNotConfigured: return "Gateway required"
+        }
+    }
+
+    private var statusIcon: LifeOSIconName {
+        switch controller.state {
+        case .linked: .verified
+        case .error, .expired, .alreadyLinking, .gatewayNotConfigured: .warning
+        default: .security
+        }
+    }
+
+    private var statusColor: Color {
+        switch controller.state {
+        case .linked: LifeOSTokens.success
+        case .error, .expired, .alreadyLinking, .gatewayNotConfigured: LifeOSTokens.warning
+        default: LifeOSTokens.tertiaryText
+        }
+    }
+
+    private var statusDetail: String {
+        if !gatewayConfigured {
+            return "The Tailscale gateway is not configured or unreachable. Configure Sync & Storage before connecting."
+        }
+        switch controller.state {
+        case .idle:
+            return "No consent requested yet. Tap Connect to open \(descriptor.displayName)'s hosted consent page."
+        case .openingConsent:
+            return "Requesting a one-time consent link from the gateway."
+        case .awaitingConsent:
+            return "Waiting on the bank's consent page. Re-check status once you finish or return to the app."
+        case .checkingStatus:
+            return "Checking the requisition state with the gateway."
+        case .linked:
+            return "The gateway reports this requisition as linked."
+        case .expired:
+            return "The consent link expired before it was completed. Tap Connect to request a new one."
+        case .alreadyLinking:
+            return "A requisition is already in progress for this connector. Finish or expire it before starting another."
+        case .gatewayNotConfigured:
+            return "The gateway has no GoCardless key configured. Nothing was linked."
+        case .error:
+            return "The gateway rejected the request. Nothing was linked."
+        }
+    }
+}
+
 private struct FinanceConnectionsSettingsView: View {
     let snapshot: FinanceSettingsSnapshot
     let refreshAction: (() async -> Void)?
     private let catalog = FinanceConnectorCatalog.defaults
+    private let syncClient = TailscaleSyncClient()
+    @State private var gatewayConfigured = false
+    @State private var gatewayPreflightTask: Task<Void, Never>?
 
     init(
         snapshot: FinanceSettingsSnapshot = .unavailable,
@@ -1101,13 +1356,22 @@ private struct FinanceConnectionsSettingsView: View {
                 SettingsSection(title: "Connection catalog", icon: .bankConnections) {
                     VStack(spacing: 0) {
                         ForEach(catalog) { descriptor in
-                            SettingsStatusRow(
-                                title: descriptor.displayName,
-                                detail: "\(accessMethodTitle(descriptor.accessMethod)) · \(descriptor.recommendation)",
-                                status: gateTitle(descriptor.risk),
-                                icon: .finance,
-                                statusColor: LifeOSTokens.warning
-                            )
+                            VStack(spacing: 0) {
+                                SettingsStatusRow(
+                                    title: descriptor.displayName,
+                                    detail: "\(accessMethodTitle(descriptor.accessMethod)) · \(descriptor.recommendation)",
+                                    status: gateTitle(descriptor.risk),
+                                    icon: .finance,
+                                    statusColor: LifeOSTokens.warning
+                                )
+                                if supportsInAppConsent(descriptor.accessMethod) {
+                                    BankConsentConnectRow(
+                                        descriptor: descriptor,
+                                        syncClient: syncClient,
+                                        gatewayConfigured: gatewayConfigured
+                                    )
+                                }
+                            }
                             if descriptor.id != catalog.last?.id {
                                 Divider().padding(.leading, 38)
                             }
@@ -1147,6 +1411,27 @@ private struct FinanceConnectionsSettingsView: View {
         }
         .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
         .navigationTitle("Bank & Finance")
+        .task {
+            gatewayPreflightTask?.cancel()
+            gatewayPreflightTask = Task {
+                let result = await syncClient.checkConnection()
+                guard !Task.isCancelled else { return }
+                gatewayConfigured = (result == .reachable)
+            }
+        }
+        .onDisappear {
+            gatewayPreflightTask?.cancel()
+        }
+    }
+
+    /// Only officially-oAuth'd and regulated open-banking connectors have a
+    /// gateway-mediated consent flow; manual-import connectors never get a
+    /// Connect button so this view cannot imply a live link that isn't real.
+    private func supportsInAppConsent(_ method: FinanceAccessMethod) -> Bool {
+        switch method {
+        case .officialOAuth, .regulatedOpenBanking: true
+        case .manualImport: false
+        }
     }
 
     private var summaryColor: Color {
