@@ -689,7 +689,8 @@ private struct OverviewMetricCard: View {
                     .foregroundStyle(.secondary)
                     .frame(width: 18, height: 18)
                     .frame(width: LifeOSTokens.overviewIconTile, height: LifeOSTokens.overviewIconTile)
-                    .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    .background(LifeOSTokens.Glass.tileGradient(), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(LifeOSTokens.Glass.edgeHighlight, lineWidth: LifeOSTokens.Glass.strokeWidth))
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text(title)
@@ -704,12 +705,12 @@ private struct OverviewMetricCard: View {
                 Spacer(minLength: 8)
                 if isPlainDemoStatus {
                     Circle()
-                        .fill(LifeOSTokens.warning.opacity(0.7))
+                        .fill(LifeOSTokens.Hue.amber.base)
                         .frame(width: 6, height: 6)
                         .accessibilityHidden(true)
                 }
                 LifeOSIcon(.chevronRight)
-                    .foregroundStyle(LifeOSTokens.accent.opacity(0.8))
+                    .foregroundStyle(LifeOSTokens.Hue.blue.base)
                     .frame(width: 14, height: 14)
             }
 
@@ -731,9 +732,8 @@ private struct OverviewMetricCard: View {
         .padding(.vertical, featured ? 18 : 18)
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(minHeight: featured ? 196 : 190, alignment: .topLeading)
-        .background(cardBackground, in: cardShape)
-        .overlay(cardShape.stroke(hovering ? Color.primary.opacity(0.18) : LifeOSTokens.quietBorder, lineWidth: 0.75))
-        .contentShape(cardShape)
+        .glassCard(featured: featured)
+        .overlay(cardShape.stroke(hovering ? Color.primary.opacity(0.18) : Color.clear, lineWidth: 0.75))
         .offset(y: hovering && !reduceMotion ? -1 : 0)
         .animation(reduceMotion ? nil : LifeOSMotion.springSnappy, value: hovering)
 #if os(macOS)
@@ -745,14 +745,6 @@ private struct OverviewMetricCard: View {
 
     private var cardShape: RoundedRectangle {
         RoundedRectangle(cornerRadius: LifeOSTokens.overviewCardCorner, style: .continuous)
-    }
-
-    private var cardBackground: LinearGradient {
-        LinearGradient(
-            colors: [LifeOSTokens.surface, LifeOSTokens.surface.opacity(featured ? 0.96 : 0.92)],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
     }
 
     @ViewBuilder
@@ -1147,7 +1139,8 @@ private struct ClipperAnalyticsView: View {
                     .foregroundStyle(.secondary)
                     .frame(width: 18, height: 18)
                     .frame(width: LifeOSTokens.overviewIconTile, height: LifeOSTokens.overviewIconTile)
-                    .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    .background(LifeOSTokens.Glass.tileGradient(), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(LifeOSTokens.Glass.edgeHighlight, lineWidth: LifeOSTokens.Glass.strokeWidth))
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Clipper Analytics")
                         .font(LifeOSFont.spaceGrotesk(20, weight: .medium))
@@ -1184,8 +1177,7 @@ private struct ClipperAnalyticsView: View {
         }
         .padding(22)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(LifeOSTokens.surface, in: RoundedRectangle(cornerRadius: LifeOSTokens.overviewCardCorner, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: LifeOSTokens.overviewCardCorner, style: .continuous).stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+        .glassCard()
     }
 
     @ViewBuilder
@@ -1313,8 +1305,7 @@ private struct ClipperAnalyticsView: View {
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(LifeOSTokens.surface, in: RoundedRectangle(cornerRadius: LifeOSTokens.overviewCardCorner, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: LifeOSTokens.overviewCardCorner, style: .continuous).stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+        .glassCard()
     }
 
     private func compactMetricRow(_ metrics: ClipperMetricSet) -> some View {
@@ -1389,8 +1380,7 @@ private struct ClipperAnalyticsView: View {
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(LifeOSTokens.surface, in: RoundedRectangle(cornerRadius: LifeOSTokens.overviewCardCorner, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: LifeOSTokens.overviewCardCorner, style: .continuous).stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+        .glassCard()
         .accessibilityElement(children: .combine)
     }
 
@@ -1416,8 +1406,7 @@ private struct ClipperAnalyticsView: View {
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(LifeOSTokens.surface, in: RoundedRectangle(cornerRadius: LifeOSTokens.overviewCardCorner, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: LifeOSTokens.overviewCardCorner, style: .continuous).stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+        .glassCard()
         .accessibilityElement(children: .combine)
     }
 

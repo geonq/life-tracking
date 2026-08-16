@@ -306,6 +306,70 @@ public enum LifeOSTokens {
     public static let cardShadowX: CGFloat = 0
     public static let cardShadowY: CGFloat = 0
 
+    // MARK: Liquid Glass (iOS 26-style card depth)
+    //
+    // Additive polish over the monochrome foundation: a soft top→bottom surface gradient,
+    // a hairline edge-light stroke, a frosted material layer, and a quiet shadow. Peak-chroma
+    // accents (Hue.base / providerColor / semantic tokens) stay the only saturated color;
+    // the glass layer itself is neutral so it reads as depth, not tint.
+    public enum Glass {
+        /// Low-contrast surface gradient, top (lighter) → bottom (deeper). Composited under
+        /// the material so the frosted layer has a hint of directional light instead of a
+        /// flat tone.
+        public static func backgroundGradient(featured: Bool = false) -> LinearGradient {
+            LinearGradient(
+                colors: [
+                    surface.opacity(featured ? 0.98 : 0.95),
+                    surface.opacity(featured ? 0.88 : 0.84)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        }
+
+        /// Frosted material composited over the gradient. Callers must fall back to a solid
+        /// surface (`fallbackFill`) when `accessibilityReduceTransparency` is true.
+        public static var material: Material { .ultraThinMaterial }
+
+        /// Solid replacement for `material` under Reduce Transparency — no blur, no
+        /// translucency, same gradient tone so the layout doesn't shift.
+        public static func fallbackFill(featured: Bool = false) -> LinearGradient {
+            backgroundGradient(featured: featured)
+        }
+
+        /// Hairline edge-light stroke: a soft white-opacity line that reads as glass-edge
+        /// catch-light in both appearances, layered above the neutral quietBorder tone.
+        public static let edgeHighlight = Color.white.opacity(0.16)
+
+        /// Combined stroke drawn on glass cards: a faint neutral border plus the edge
+        /// highlight, both hairline weight.
+        public static let strokeWidth: CGFloat = 0.5
+
+        /// Soft ambient shadow — depth, not a drop-shadow effect. Kept very low opacity so it
+        /// stays quiet on both light and dark canvases.
+        public static let shadowColor = Color.black.opacity(0.16)
+        public static let shadowRadius: CGFloat = 14
+        public static let shadowX: CGFloat = 0
+        public static let shadowY: CGFloat = 6
+
+        /// Subtle gradient for small components (icon tiles, badges, ring tracks) — low
+        /// contrast, never a loud fill. Neutral by default; pass a hue for a tinted tile.
+        public static func tileGradient(hue: Hue? = nil) -> LinearGradient {
+            if let hue {
+                return LinearGradient(
+                    colors: [hue.base.opacity(0.20), hue.base.opacity(0.08)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            }
+            return LinearGradient(
+                colors: [Color.primary.opacity(0.07), Color.primary.opacity(0.03)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        }
+    }
+
     // MARK: Convenience Shapes
 
     public static var cardShape: RoundedRectangle {
@@ -397,6 +461,16 @@ extension View {
                 .overlay(LifeOSTokens.pillShape.stroke(color.opacity(0.22)))
         }
     }
+
+    /// iOS-26 "Liquid Glass" card surface: a soft top→bottom gradient, a frosted material
+    /// layer, a hairline edge-light stroke, and a quiet ambient shadow. Reusable across
+    /// screens — this is the one place the glass recipe lives.
+    ///
+    /// Falls back to a solid gradient fill (no material, no blur) when
+    /// `accessibilityReduceTransparency` is enabled, so content never becomes harder to read.
+    func glassCard(cornerRadius: CGFloat = LifeOSTokens.overviewCardCorner, featured: Bool = false) -> some View {
+        modifier(LifeOSGlassCardModifier(cornerRadius: cornerRadius, featured: featured))
+    }
 }
 
 private struct LifeOSCardModifier: ViewModifier {
@@ -405,6 +479,39 @@ private struct LifeOSCardModifier: ViewModifier {
             .padding(LifeOSTokens.cardPadding)
             .background(LifeOSTokens.surface, in: LifeOSTokens.cardShape)
             .overlay(LifeOSTokens.cardShape.stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+    }
+}
+
+private struct LifeOSGlassCardModifier: ViewModifier {
+    let cornerRadius: CGFloat
+    let featured: Bool
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    private var shape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .background {
+                if reduceTransparency {
+                    shape.fill(LifeOSTokens.Glass.fallbackFill(featured: featured))
+                } else {
+                    ZStack {
+                        shape.fill(LifeOSTokens.Glass.backgroundGradient(featured: featured))
+                        shape.fill(LifeOSTokens.Glass.material)
+                    }
+                }
+            }
+            .overlay(shape.stroke(LifeOSTokens.Glass.edgeHighlight, lineWidth: LifeOSTokens.Glass.strokeWidth))
+            .overlay(shape.stroke(LifeOSTokens.quietBorder, lineWidth: LifeOSTokens.Glass.strokeWidth))
+            .shadow(
+                color: reduceTransparency ? .clear : LifeOSTokens.Glass.shadowColor,
+                radius: LifeOSTokens.Glass.shadowRadius,
+                x: LifeOSTokens.Glass.shadowX,
+                y: LifeOSTokens.Glass.shadowY
+            )
+            .contentShape(shape)
     }
 }
 
