@@ -295,6 +295,16 @@ public enum LifeOSTokens {
         }
     }
 
+    /// Hue-ramp counterpart to `providerColor`, for call sites (rings) that key off a
+    /// `Hue` case rather than a single `Color`. Mirrors the same restrained blue/teal
+    /// split so a ring's gradient (reveal→base) matches the provider's identity color.
+    public static func providerHue(_ provider: Provider) -> Hue {
+        switch provider {
+        case .codex, .glm, .deepseek: .blue
+        case .claude, .googleAIStudio: .teal
+        }
+    }
+
     // Borders & quiescent states
     public static let quietBorder = Color.primary.opacity(0.11)
     public static let hairlineBorder = Color.primary.opacity(0.07)

@@ -369,15 +369,7 @@ private struct FinanceHeroCard: View {
         }
         .padding(17)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            LinearGradient(
-                colors: [LifeOSTokens.surface, LifeOSTokens.surface.opacity(0.78)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            ),
-            in: LifeOSTokens.cardShape
-        )
-        .overlay(LifeOSTokens.cardShape.stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+        .glassCard(featured: true)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Net worth")
         .accessibilityValue("\(snapshot.netWorth.accessibilityValue). Accounts \(snapshot.accounts.isEmpty ? "not available" : "\(snapshot.accounts.count) connected"). Updated \(snapshot.updatedLabel).")
@@ -482,8 +474,7 @@ private struct FinanceMetricCard: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, minHeight: 124, alignment: .leading)
-        .background(LifeOSTokens.surface, in: LifeOSTokens.cardShape)
-        .overlay(LifeOSTokens.cardShape.stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+        .glassCard()
         .accessibilityElement(children: .combine)
         .accessibilityLabel(title)
         .accessibilityValue("\(value). \(detail)")
@@ -538,8 +529,7 @@ private struct FinanceDetailChartCard: View {
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(LifeOSTokens.surface, in: LifeOSTokens.cardShape)
-        .overlay(LifeOSTokens.cardShape.stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+        .glassCard()
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("finance-detail-chart-\(title.lowercased().replacingOccurrences(of: " ", with: "-"))")
     }
@@ -1074,8 +1064,7 @@ private struct FinanceAccountsCard: View {
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(LifeOSTokens.surface, in: LifeOSTokens.cardShape)
-        .overlay(LifeOSTokens.cardShape.stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+        .glassCard()
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("finance-accounts")
     }
@@ -1206,8 +1195,7 @@ private struct FinanceCategoriesCard: View {
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(LifeOSTokens.surface, in: LifeOSTokens.cardShape)
-        .overlay(LifeOSTokens.cardShape.stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+        .glassCard()
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("finance-categories")
     }

@@ -144,8 +144,7 @@ struct FinanceImportCard: View {
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(LifeOSTokens.surface, in: LifeOSTokens.cardShape)
-        .overlay(LifeOSTokens.cardShape.stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+        .glassCard()
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("finance-import-card")
         .fileImporter(

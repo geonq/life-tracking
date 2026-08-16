@@ -109,7 +109,7 @@ struct UsageTokenActivityView: View {
 
             footer
         }
-        .lifeOSCard()
+        .glassCard()
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(provider.displayName) token activity")
     }

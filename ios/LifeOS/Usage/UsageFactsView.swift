@@ -87,7 +87,7 @@ struct UsageFactsView: View {
                 value: facts.freshness.map { freshnessLabel($0) } ?? "Not available"
             )
         }
-        .lifeOSCard()
+        .glassCard()
     }
 
     private func freshnessLabel(_ fact: UsageFreshnessFact) -> String {
@@ -116,7 +116,7 @@ struct UsageFactsView: View {
             divider
             factRow(label: "Source", value: "Not available")
         }
-        .lifeOSCard()
+        .glassCard()
     }
 
     private var divider: some View {

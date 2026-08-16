@@ -583,7 +583,7 @@ struct UsageLimitsCard: View {
     var body: some View {
         VStack(spacing: 14) {
             if let ringWindow {
-                GlowRing(progress: ringWindow.usedPercent ?? 0, hue: .blue, diameter: 148, lineWidth: 12) {
+                GlowRing(progress: ringWindow.usedPercent ?? 0, hue: LifeOSTokens.providerHue(snapshot.provider), diameter: 148, lineWidth: 12) {
                     VStack(spacing: 3) {
                         Text(ringWindow.usedPercent.map { "\(Int(($0 * 100).rounded()))" } ?? "—")
                             .font(.system(size: 34, weight: .bold, design: .rounded))
@@ -636,7 +636,7 @@ struct UsageLimitsCard: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .lifeOSCard()
+        .glassCard(featured: true)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(snapshot.provider.displayName) usage limits")
     }
@@ -731,7 +731,7 @@ struct UsageEmptyState: View {
             Text(detail).font(.caption).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .lifeOSCard()
+        .glassCard()
         .accessibilityElement(children: .combine)
     }
 }
@@ -746,7 +746,7 @@ struct UsageModelMixCard: View {
             UsageCardHeader(title: "Model mix", subtitle: "Token composition by model", icon: .assistant)
             ModelCompositionChart(models: models)
         }
-        .lifeOSCard()
+        .glassCard()
         .accessibilityElement(children: .contain)
     }
 }
@@ -881,7 +881,7 @@ struct UsageHeatmapCard: View {
             .font(.caption2)
             .foregroundStyle(.secondary)
         }
-        .lifeOSCard()
+        .glassCard()
         .animation(reduceMotion ? nil : LifeOSMotion.snappy, value: selectedCell?.id)
     }
 
