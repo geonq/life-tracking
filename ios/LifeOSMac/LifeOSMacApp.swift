@@ -8,6 +8,11 @@ struct LifeOSMacApp: App {
     @StateObject private var clipperCoordinator: ClipperCoordinator
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private let usesVisualFixtures: Bool
+    /// Coalescing state for the future-module widget snapshot publisher.
+    /// Mac has no HealthKit, so only Finance/Nutrition are mapped; Fitness
+    /// stays permanently unavailable via `WidgetSnapshotPublisher`'s
+    /// non-iOS mapping functions.
+    @State private var widgetSnapshotPublisher = WidgetSnapshotPublisher()
 
     init() {
         LifeOSFontRegistrar.registerBundledFonts()
@@ -52,7 +57,14 @@ struct LifeOSMacApp: App {
                         await usageCoordinator.refresh()
                         await financeCoordinator.refresh()
                         await clipperCoordinator.refresh()
+                        publishWidgetSnapshots()
                     }
+                }
+                .onChange(of: financeCoordinator.summary) { _, _ in
+                    publishWidgetSnapshots()
+                }
+                .onChange(of: financeCoordinator.state) { _, _ in
+                    publishWidgetSnapshots()
                 }
         }
         .defaultSize(width: 1512, height: 982)
@@ -64,6 +76,7 @@ struct LifeOSMacApp: App {
                         await usageCoordinator.refresh()
                         await financeCoordinator.refresh()
                         await clipperCoordinator.refresh()
+                        publishWidgetSnapshots()
                     }
                 }
                 .keyboardShortcut("r", modifiers: .command)
@@ -77,6 +90,46 @@ struct LifeOSMacApp: App {
             )
                 .frame(minWidth: 520, minHeight: 360)
                 .tint(LifeOSTokens.accent)
+        }
+    }
+
+    /// Mirrors `LifeOSApp.publishWidgetSnapshots()` on iOS: maps confirmed
+    /// Finance/Nutrition state into a `FutureWidgetSnapshot` and requests a
+    /// coalesced reload for `LifeOSMacWidget`'s future-module widget kinds.
+    /// No-op during `-LifeOSVisualFixtures` (demo data must never publish)
+    /// and when no App Group container is configured.
+    private func publishWidgetSnapshots() {
+        guard !usesVisualFixtures,
+              FutureWidgetSnapshotStore.url() != nil else { return }
+
+        let financeSummary = financeCoordinator.summary
+        let financeState = financeCoordinator.state
+        let now = Date.now
+        let publisherBinding = $widgetSnapshotPublisher
+
+        Task.detached(priority: .utility) { [widgetSnapshotPublisher] in
+            var publisher = widgetSnapshotPublisher
+            let finance = WidgetSnapshotPublisher.mapFinance(summary: financeSummary, state: financeState, now: now)
+            let fitness = WidgetSnapshotPublisher.mapFitness(now: now)
+            let fitnessWidgets = WidgetSnapshotPublisher.mapFitnessWidgets(now: now)
+            let nutrition: WidgetSafeNutritionSummary
+            if let mealStore = try? NutritionMealStore(), let goalStore = try? NutritionGoalStore() {
+                nutrition = WidgetSnapshotPublisher.mapNutrition(mealStore: mealStore, goalStore: goalStore, on: now, calendar: .current)
+            } else {
+                nutrition = .unavailable()
+            }
+
+            publisher.publish(
+                finance: finance,
+                fitness: fitness,
+                fitnessWidgets: fitnessWidgets,
+                nutrition: nutrition,
+                privacyMode: .summaryAllowed,
+                now: now
+            )
+            await MainActor.run {
+                publisherBinding.wrappedValue = publisher
+            }
         }
     }
 }

@@ -59,6 +59,10 @@ struct LifeOSApp: App {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
     private let usesVisualFixtures: Bool
+    /// Coalescing state for the future-module widget snapshot publisher.
+    /// `@State` so the struct's `lastPublished` dedupe value survives across
+    /// the several call sites below without becoming a stored class.
+    @State private var widgetSnapshotPublisher = WidgetSnapshotPublisher()
 
     init() {
         let enabled = ProcessInfo.processInfo.arguments.contains("-LifeOSVisualFixtures")
@@ -214,6 +218,7 @@ struct LifeOSApp: App {
                     await financeCoordinator.refresh()
                     await clipperCoordinator.refresh()
                     await healthKitFitnessRepository.refresh()
+                    publishWidgetSnapshots()
                 }
             }
             .onAppear {
@@ -226,6 +231,7 @@ struct LifeOSApp: App {
                     Task { @MainActor in
                         await healthKitController.refreshStatus()
                         await healthKitFitnessRepository.refresh()
+                        publishWidgetSnapshots()
                     }
                 case .inactive:
                     healthKitController.appInactive()
@@ -238,14 +244,83 @@ struct LifeOSApp: App {
 #if os(iOS)
             .onChange(of: healthKitFitnessRepository.projection, initial: true) { _, projection in
                 updateHomeFitnessSnapshot(from: projection)
+                publishWidgetSnapshots()
             }
             .onChange(of: healthKitController.snapshot.observerCompletionSequence) { _, _ in
                 guard !usesVisualFixtures else { return }
                 Task { @MainActor in
                     await healthKitFitnessRepository.refresh()
+                    publishWidgetSnapshots()
                 }
             }
 #endif
+            .onChange(of: financeCoordinator.summary) { _, _ in
+                publishWidgetSnapshots()
+            }
+            .onChange(of: financeCoordinator.state) { _, _ in
+                publishWidgetSnapshots()
+            }
+        }
+    }
+
+    /// Maps confirmed Finance/Fitness/Nutrition state into a
+    /// `FutureWidgetSnapshot` and requests a coalesced widget reload. This is
+    /// the single gate that decides whether real data may reach the widget
+    /// store at all: it is a no-op whenever `usesVisualFixtures` is true, so
+    /// a demo/fixture launch can never publish through this path (the
+    /// `-LifeOSVisualFixtures` widget preview path, if any, is entirely
+    /// separate from this production publisher). It is also a no-op when no
+    /// App Group container is configured, mirroring
+    /// `CalendarCoordinator.sharedStorageAvailable`'s existing gate, so a
+    /// build without a provisioned App Group does not do wasted work on
+    /// every state change.
+    private func publishWidgetSnapshots() {
+        guard !usesVisualFixtures,
+              FutureWidgetSnapshotStore.url() != nil else { return }
+
+        let financeSummary = financeCoordinator.summary
+        let financeState = financeCoordinator.state
+#if os(iOS)
+        let fitnessProjection = healthKitFitnessRepository.projection
+#endif
+        let now = Date.now
+        // Capture the `@State` binding's setter, not `self`, so the write
+        // back on MainActor updates the live coalescing state regardless of
+        // which struct copy this detached task was spawned from.
+        let publisherBinding = $widgetSnapshotPublisher
+
+        Task.detached(priority: .utility) { [widgetSnapshotPublisher] in
+            var publisher = widgetSnapshotPublisher
+            let finance = WidgetSnapshotPublisher.mapFinance(summary: financeSummary, state: financeState, now: now)
+#if os(iOS)
+            let fitness = WidgetSnapshotPublisher.mapFitness(projection: fitnessProjection, now: now)
+            let fitnessWidgets = WidgetSnapshotPublisher.mapFitnessWidgets(
+                projection: fitnessProjection,
+                selectedDate: now,
+                now: now
+            )
+#else
+            let fitness = WidgetSnapshotPublisher.mapFitness(now: now)
+            let fitnessWidgets = WidgetSnapshotPublisher.mapFitnessWidgets(now: now)
+#endif
+            let nutrition: WidgetSafeNutritionSummary
+            if let mealStore = try? NutritionMealStore(), let goalStore = try? NutritionGoalStore() {
+                nutrition = WidgetSnapshotPublisher.mapNutrition(mealStore: mealStore, goalStore: goalStore, on: now, calendar: .current)
+            } else {
+                nutrition = .unavailable()
+            }
+
+            publisher.publish(
+                finance: finance,
+                fitness: fitness,
+                fitnessWidgets: fitnessWidgets,
+                nutrition: nutrition,
+                privacyMode: .summaryAllowed,
+                now: now
+            )
+            await MainActor.run {
+                publisherBinding.wrappedValue = publisher
+            }
         }
     }
 

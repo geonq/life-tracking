@@ -87,6 +87,7 @@ targets:
       - LifeOS/CalendarView.swift
       - LifeOS/Modules
       - LifeOS/TaxDocumentsView.swift
+      - LifeOS/WidgetSnapshotPublisher.swift
     resources:
       - path: Shared/Resources/Fonts
     settings:

@@ -104,6 +104,19 @@ public struct HealthKitFitnessComposition {
     public let projectionWindow: DateInterval
     public let calendarIdentifier: Calendar.Identifier
     public let timeZoneIdentifier: String
+    /// Exact HealthKit-derived asleep duration in whole seconds, gated by the
+    /// same `FitnessSleepNight` validator that produces `snapshot.sleepDetail`
+    /// (observed source, no unsupported stage, exact sample reconciliation).
+    /// `nil` whenever that validator does not clear the night as `.observed`
+    /// with a complete named-stage timeline — never a derived/estimated
+    /// fallback. This is a raw-value seam for non-UI consumers (e.g. the
+    /// future-widget publisher) that cannot re-parse the formatted
+    /// `sleepDetail.duration.value` string.
+    public let sourceDerivedSleepDurationSeconds: Int?
+    /// The latest sample end-date contributing to
+    /// `sourceDerivedSleepDurationSeconds`, i.e. when that duration was last
+    /// observed. `nil` exactly when the duration itself is `nil`.
+    public let sourceDerivedSleepObservedAt: Date?
 
     public init(
         projection: HealthKitFitnessProjection,
@@ -120,6 +133,24 @@ public struct HealthKitFitnessComposition {
         self.projectionWindow = built.projectionWindow
         self.calendarIdentifier = projection.bucketCalendarIdentifier
         self.timeZoneIdentifier = projection.bucketTimeZoneIdentifier
+        self.sourceDerivedSleepDurationSeconds = built.sourceDerivedSleepDurationSeconds
+        self.sourceDerivedSleepObservedAt = built.sourceDerivedSleepObservedAt
+    }
+
+    /// Pure extraction seam for non-UI consumers that need the raw,
+    /// already-gated asleep duration instead of `FitnessSnapshot`'s formatted
+    /// string. Internally this runs the exact same validated pipeline as
+    /// `compose(projection:selectedDate:)` — it does not re-implement or
+    /// approximate the sleep-night gates, it just also returns the seconds
+    /// that `sourceDerivedSleepMetrics` already computed before formatting.
+    public static func sourceDerivedSleepDurationHours(
+        from projection: HealthKitFitnessProjection,
+        selectedDate: Date
+    ) -> (hours: Double, observedAt: Date)? {
+        let composed = Self(projection: projection, selectedDate: selectedDate)
+        guard let seconds = composed.sourceDerivedSleepDurationSeconds,
+              let observedAt = composed.sourceDerivedSleepObservedAt else { return nil }
+        return (Double(seconds) / 3_600, observedAt)
     }
 
     /// Named constructor for call sites that prefer a verb over an init.
@@ -156,6 +187,8 @@ public struct HealthKitFitnessComposition {
         let workoutState: SourceState
         let evidence: [HealthKitMetricID: HealthKitFitnessCompositionEvidence]
         let projectionWindow: DateInterval
+        let sourceDerivedSleepDurationSeconds: Int?
+        let sourceDerivedSleepObservedAt: Date?
     }
 
     private struct MetricMapping {
@@ -436,6 +469,21 @@ public struct HealthKitFitnessComposition {
             evidence: sleepEvidence,
             timeZoneIdentifier: projection.bucketTimeZoneIdentifier
         )
+        // Reuses the identical gate `makeSleepDetail` already applied above
+        // (same `selected`/`night`/`hasUnsupportedStage` inputs) to also
+        // expose the raw seconds for `sourceDerivedSleepDurationHours`.
+        let sleepHasUnsupportedStage = selectedSleep.samples.contains { fitnessSleepStage(for: $0.stage) == nil }
+        let sleepSecondsByStage = sourceDerivedAsleepSecondsByStage(
+            selected: selectedSleep,
+            night: sleepDetail.night,
+            hasUnsupportedStage: sleepHasUnsupportedStage
+        )
+        let sourceDerivedSleepDurationSeconds = sleepSecondsByStage.map { seconds in
+            [FitnessSleepStageSample.Stage.core, .deep, .rem].reduce(0) { $0 + (seconds[$1] ?? 0) }
+        }
+        let sourceDerivedSleepObservedAt = sourceDerivedSleepDurationSeconds != nil
+            ? sleepDetail.night.stageSamples.map(\.end).max()
+            : nil
         let workoutFacts: [FitnessWorkout] = workoutState == .observed
             ? selectedWorkouts.map { makeWorkout($0, state: workoutState, evidence: evidence[.workout]!) }
             : []
@@ -469,7 +517,9 @@ public struct HealthKitFitnessComposition {
             sleepState: sleepState,
             workoutState: workoutState,
             evidence: evidence,
-            projectionWindow: projectionWindow
+            projectionWindow: projectionWindow,
+            sourceDerivedSleepDurationSeconds: sourceDerivedSleepDurationSeconds,
+            sourceDerivedSleepObservedAt: sourceDerivedSleepObservedAt
         )
     }
 
@@ -961,18 +1011,17 @@ public struct HealthKitFitnessComposition {
         let stages: [FitnessSleepStageSample.Stage: FitnessMetric]
     }
 
-    /// Source-derived sleep totals are deliberately gated by the final
-    /// `FitnessSleepNight` validator.  The enclosing interval is not itself
-    /// asleep time: only the exact sums of named asleep stages are exposed.
-    /// In-bed, unspecified, and unknown source stages make the whole derived
-    /// set unavailable even when the remaining named samples appear to cover
-    /// the interval.
-    private static func sourceDerivedSleepMetrics(
+    /// The exact validated gate shared by `sourceDerivedSleepMetrics` (the
+    /// formatted `FitnessSleepDetail` path) and
+    /// `sourceDerivedSleepDurationHours` (the raw-value seam for non-UI
+    /// consumers). Extracted so both call sites run the identical
+    /// observed/no-unsupported-stage/exact-reconciliation gate instead of
+    /// each maintaining their own copy that could silently drift apart.
+    private static func sourceDerivedAsleepSecondsByStage(
         selected: SelectedSleep,
         night: FitnessSleepNight,
-        evidence: HealthKitFitnessCompositionEvidence,
         hasUnsupportedStage: Bool
-    ) -> SourceDerivedSleepMetrics? {
+    ) -> [FitnessSleepStageSample.Stage: Int]? {
         guard selected.state == .observed,
               case .observed = night.state,
               case .observed = night.evidence.state,
@@ -986,9 +1035,29 @@ public struct HealthKitFitnessComposition {
         }
         guard durations.values.allSatisfy({ $0.isFinite && $0 >= 0 }) else { return nil }
 
-        let secondsByStage = durations.reduce(into: [FitnessSleepStageSample.Stage: Int]()) { result, entry in
+        return durations.reduce(into: [FitnessSleepStageSample.Stage: Int]()) { result, entry in
             result[entry.key] = Int(entry.value.rounded())
         }
+    }
+
+    /// Source-derived sleep totals are deliberately gated by the final
+    /// `FitnessSleepNight` validator.  The enclosing interval is not itself
+    /// asleep time: only the exact sums of named asleep stages are exposed.
+    /// In-bed, unspecified, and unknown source stages make the whole derived
+    /// set unavailable even when the remaining named samples appear to cover
+    /// the interval.
+    private static func sourceDerivedSleepMetrics(
+        selected: SelectedSleep,
+        night: FitnessSleepNight,
+        evidence: HealthKitFitnessCompositionEvidence,
+        hasUnsupportedStage: Bool
+    ) -> SourceDerivedSleepMetrics? {
+        guard let secondsByStage = sourceDerivedAsleepSecondsByStage(
+            selected: selected,
+            night: night,
+            hasUnsupportedStage: hasUnsupportedStage
+        ) else { return nil }
+
         let asleepSeconds = [
             FitnessSleepStageSample.Stage.core,
             .deep,
