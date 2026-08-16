@@ -493,15 +493,7 @@ private struct StressSurfaceCard<Content: View>: View {
     var body: some View {
         content
             .padding(16)
-            .background(
-                LinearGradient(
-                    colors: [LifeOSTokens.surface, LifeOSTokens.surface.opacity(0.78)],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                ),
-                in: RoundedRectangle(cornerRadius: 18, style: .continuous)
-            )
-            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+            .glassCard(cornerRadius: 18)
     }
 }
 

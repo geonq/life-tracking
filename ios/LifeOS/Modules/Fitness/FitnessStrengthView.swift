@@ -887,14 +887,6 @@ private struct StrengthSurfaceCard<Content: View>: View {
     var body: some View {
         content
             .padding(LifeOSTokens.cardPadding)
-            .background {
-                LinearGradient(
-                    colors: [LifeOSTokens.surface, LifeOSTokens.canvas.opacity(0.34)],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-            }
-            .clipShape(LifeOSTokens.cardShape)
-            .overlay(LifeOSTokens.cardShape.stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+            .glassCard()
     }
 }

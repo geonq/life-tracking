@@ -227,15 +227,8 @@ private struct FitnessBiologicalAgeCard: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            LinearGradient(
-                colors: [LifeOSTokens.surface, LifeOSTokens.accent.opacity(0.055)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            ),
-            in: LifeOSTokens.cardShape
-        )
-        .overlay(LifeOSTokens.cardShape.stroke(hovering ? LifeOSTokens.accent.opacity(0.30) : LifeOSTokens.quietBorder, lineWidth: hovering ? 1 : 0.75))
+        .glassCard()
+        .overlay(LifeOSTokens.cardShape.stroke(hovering ? LifeOSTokens.accent.opacity(0.30) : Color.clear, lineWidth: hovering ? 1 : 0.75))
         .onHover { hovering = $0 }
         .animation(reduceMotion ? nil : LifeOSMotion.snappy, value: hovering)
         .accessibilityElement(children: .combine)
@@ -281,15 +274,8 @@ private struct FitnessBiologyMetricCard: View {
             }
             .padding(15)
             .frame(maxWidth: .infinity, minHeight: 118, alignment: .leading)
-            .background(
-                LinearGradient(
-                    colors: [LifeOSTokens.surface, metric.id.hue.base.opacity(hovering ? 0.075 : 0.035)],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                ),
-                in: LifeOSTokens.cardShape
-            )
-            .overlay(LifeOSTokens.cardShape.stroke(hovering ? metric.id.hue.base.opacity(0.38) : LifeOSTokens.quietBorder, lineWidth: hovering ? 1 : 0.75))
+            .glassCard()
+            .overlay(LifeOSTokens.cardShape.stroke(hovering ? metric.id.hue.base.opacity(0.38) : Color.clear, lineWidth: hovering ? 1 : 0.75))
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
@@ -449,8 +435,7 @@ private struct FitnessBiologyDetailHero: View {
             Spacer(minLength: 8)
         }
         .padding(16)
-        .background(LinearGradient(colors: [LifeOSTokens.surface, metric.id.hue.base.opacity(0.05)], startPoint: .topLeading, endPoint: .bottomTrailing), in: LifeOSTokens.cardShape)
-        .overlay(LifeOSTokens.cardShape.stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+        .glassCard()
     }
 }
 
@@ -488,8 +473,7 @@ private struct FitnessBiologyTrendCard: View {
             }
         }
         .padding(16)
-        .background(LifeOSTokens.surface, in: LifeOSTokens.cardShape)
-        .overlay(LifeOSTokens.cardShape.stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+        .glassCard()
     }
 }
 
@@ -544,8 +528,7 @@ private struct FitnessBiologyEmptyTrendCard: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(LifeOSTokens.surface, in: LifeOSTokens.cardShape)
-        .overlay(LifeOSTokens.cardShape.stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+        .glassCard()
     }
 }
 
@@ -571,8 +554,7 @@ private struct FitnessBiologyProvenanceCard: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(LifeOSTokens.surface, in: LifeOSTokens.cardShape)
-        .overlay(LifeOSTokens.cardShape.stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+        .glassCard()
     }
 
     private func sourceRow(_ label: String, _ value: String) -> some View {

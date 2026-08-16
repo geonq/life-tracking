@@ -1560,17 +1560,10 @@ private struct FitnessCoreNavigationCard<Content: View>: View {
             }
             .padding(13)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                LinearGradient(
-                    colors: [LifeOSTokens.surface, accent.base.opacity(0.045)],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                ),
-                in: LifeOSTokens.cardShape
-            )
+            .glassCard()
             .overlay(
                 LifeOSTokens.cardShape.stroke(
-                    hovering ? accent.base.opacity(0.42) : LifeOSTokens.quietBorder,
+                    hovering ? accent.base.opacity(0.42) : Color.clear,
                     lineWidth: hovering ? 1 : 0.75
                 )
             )
@@ -2151,8 +2144,7 @@ private struct FitnessCoreLoadTrends: View {
 #endif
         }
         .padding(13)
-        .background(LinearGradient(colors: [LifeOSTokens.surface, LifeOSTokens.accent.opacity(0.035)], startPoint: .topLeading, endPoint: .bottomTrailing), in: LifeOSTokens.cardShape)
-        .overlay(LifeOSTokens.cardShape.stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+        .glassCard()
     }
 }
 
@@ -2633,15 +2625,7 @@ private struct FitnessCoreSleepScheduleCard: View {
         }
         .padding(15)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            LinearGradient(
-                colors: [LifeOSTokens.surface, LifeOSTokens.accent.opacity(0.035)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            ),
-            in: LifeOSTokens.cardShape
-        )
-        .overlay(LifeOSTokens.cardShape.stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+        .glassCard()
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("fitness-sleep-schedule-card")
     }
@@ -2838,15 +2822,7 @@ private struct FitnessCoreSleepTrends: View {
             }
         }
         .padding(13)
-        .background(
-            LinearGradient(
-                colors: [LifeOSTokens.surface, LifeOSTokens.accent.opacity(0.025)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            ),
-            in: LifeOSTokens.cardShape
-        )
-        .overlay(LifeOSTokens.cardShape.stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+        .glassCard()
         .accessibilityIdentifier("fitness-sleep-trends")
     }
 }
@@ -3488,8 +3464,7 @@ private struct FitnessSourceGateCard: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(LifeOSTokens.surface, in: LifeOSTokens.cardShape)
-        .overlay(LifeOSTokens.cardShape.stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+        .glassCard()
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("fitness-health-source-gate")
     }
@@ -5509,8 +5484,7 @@ struct FitnessCard<Content: View>: View {
         }
             .padding(15)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(LifeOSTokens.surface, in: LifeOSTokens.cardShape)
-            .overlay(LifeOSTokens.cardShape.stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+            .glassCard()
     }
 }
 
