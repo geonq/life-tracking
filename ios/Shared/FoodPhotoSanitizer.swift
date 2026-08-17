@@ -310,8 +310,8 @@ public struct FoodPhotoSanitizer: Sendable {
         ]
         var topLevel: [String: Any] = [:]
         for (key, value) in properties {
-            guard let keyText = key as? String,
-                  allowedTopLevelKeys.contains(keyText),
+            let keyText = key as String
+            guard allowedTopLevelKeys.contains(keyText),
                   topLevel[keyText] == nil else {
                 throw FoodPhotoSanitizationError.sensitiveMetadataPresent
             }
