@@ -11,8 +11,10 @@ struct LifeOSMacApp: App {
     /// Coalescing state for the future-module widget snapshot publisher.
     /// Mac has no HealthKit, so only Finance/Nutrition are mapped; Fitness
     /// stays permanently unavailable via `WidgetSnapshotPublisher`'s
-    /// non-iOS mapping functions.
-    @State private var widgetSnapshotPublisher = WidgetSnapshotPublisher()
+    /// non-iOS mapping functions. `WidgetSnapshotPublisher` is an actor, so
+    /// a plain `let` keeps one durable instance alive across the call sites
+    /// below — its own mailbox serializes concurrent `publish` calls.
+    private let widgetSnapshotPublisher = WidgetSnapshotPublisher()
 
     init() {
         LifeOSFontRegistrar.registerBundledFonts()
@@ -105,10 +107,13 @@ struct LifeOSMacApp: App {
         let financeSummary = financeCoordinator.summary
         let financeState = financeCoordinator.state
         let now = Date.now
-        let publisherBinding = $widgetSnapshotPublisher
+        let publisher = widgetSnapshotPublisher
 
-        Task.detached(priority: .utility) { [widgetSnapshotPublisher] in
-            var publisher = widgetSnapshotPublisher
+        // `publisher` is an actor; every call here targets the same
+        // instance, so a burst of near-simultaneous
+        // `publishWidgetSnapshots()` calls serializes on its mailbox and
+        // only a genuine content change results in a write + reload.
+        Task.detached(priority: .utility) {
             let finance = WidgetSnapshotPublisher.mapFinance(summary: financeSummary, state: financeState, now: now)
             let fitness = WidgetSnapshotPublisher.mapFitness(now: now)
             let fitnessWidgets = WidgetSnapshotPublisher.mapFitnessWidgets(now: now)
@@ -119,7 +124,7 @@ struct LifeOSMacApp: App {
                 nutrition = .unavailable()
             }
 
-            publisher.publish(
+            await publisher.publish(
                 finance: finance,
                 fitness: fitness,
                 fitnessWidgets: fitnessWidgets,
@@ -127,9 +132,6 @@ struct LifeOSMacApp: App {
                 privacyMode: .summaryAllowed,
                 now: now
             )
-            await MainActor.run {
-                publisherBinding.wrappedValue = publisher
-            }
         }
     }
 }

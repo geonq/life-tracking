@@ -295,22 +295,36 @@ final class WidgetSnapshotPublisherTests: XCTestCase {
 
     // MARK: - Reload coalescing
 
-    func testCoalescingSkipsWriteAndReloadWhenContentUnchanged() throws {
-        final class Spy {
-            var writeCount = 0
-            var reloadCount = 0
-        }
+    /// Thread-safe counter/recorder used by the coalescing tests below.
+    /// `WidgetSnapshotPublisher`'s `write`/`reload` closures are `@Sendable`
+    /// and may be invoked from the actor's executor, which is not
+    /// necessarily the calling test's thread — a plain mutable class would
+    /// be a data race under `-only-testing` parallelism and under the
+    /// concurrent-burst test in particular.
+    private final class Spy: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _writeCount = 0
+        private var _reloadCount = 0
+
+        var writeCount: Int { lock.withLock { _writeCount } }
+        var reloadCount: Int { lock.withLock { _reloadCount } }
+
+        func recordWrite() { lock.withLock { _writeCount += 1 } }
+        func recordReload() { lock.withLock { _reloadCount += 1 } }
+    }
+
+    func testCoalescingSkipsWriteAndReloadWhenContentUnchanged() async throws {
         let spy = Spy()
-        var publisher = WidgetSnapshotPublisher(
-            write: { _ in spy.writeCount += 1 },
-            reload: { spy.reloadCount += 1 }
+        let publisher = WidgetSnapshotPublisher(
+            write: { _ in spy.recordWrite() },
+            reload: { spy.recordReload() }
         )
         let finance = WidgetSafeFinanceSummary(
             connector: .connected, consent: .granted, freshness: .fresh,
             observedAt: now.addingTimeInterval(-60), spendCents: 1_000
         )
 
-        let firstResult = publisher.publish(
+        let firstResult = await publisher.publish(
             finance: finance, fitness: .unavailable(), fitnessWidgets: .unavailable(),
             nutrition: .unavailable(), privacyMode: .summaryAllowed, now: now
         )
@@ -319,7 +333,7 @@ final class WidgetSnapshotPublisherTests: XCTestCase {
         XCTAssertEqual(spy.reloadCount, 1)
 
         // Same semantic content, only `now`/generatedAt differs — must be a no-op.
-        let secondResult = publisher.publish(
+        let secondResult = await publisher.publish(
             finance: finance, fitness: .unavailable(), fitnessWidgets: .unavailable(),
             nutrition: .unavailable(), privacyMode: .summaryAllowed, now: now.addingTimeInterval(5)
         )
@@ -332,7 +346,7 @@ final class WidgetSnapshotPublisherTests: XCTestCase {
             connector: .connected, consent: .granted, freshness: .fresh,
             observedAt: now.addingTimeInterval(-30), spendCents: 2_000
         )
-        let thirdResult = publisher.publish(
+        let thirdResult = await publisher.publish(
             finance: changedFinance, fitness: .unavailable(), fitnessWidgets: .unavailable(),
             nutrition: .unavailable(), privacyMode: .summaryAllowed, now: now.addingTimeInterval(10)
         )
@@ -341,21 +355,80 @@ final class WidgetSnapshotPublisherTests: XCTestCase {
         XCTAssertEqual(spy.reloadCount, 2)
     }
 
-    func testCoalescingSkipsOnWriteFailureAndReportsError() {
+    func testCoalescingSkipsOnWriteFailureAndReportsError() async {
         struct WriteFailure: Error {}
-        var reloadCount = 0
-        var reportedError: Error?
-        var publisher = WidgetSnapshotPublisher(
+        let spy = Spy()
+        final class ErrorBox: @unchecked Sendable {
+            private let lock = NSLock()
+            private var _error: Error?
+            var error: Error? { lock.withLock { _error } }
+            func record(_ error: Error) { lock.withLock { _error = error } }
+        }
+        let errorBox = ErrorBox()
+        let publisher = WidgetSnapshotPublisher(
             write: { _ in throw WriteFailure() },
-            reload: { reloadCount += 1 }
+            reload: { spy.recordReload() }
         )
-        let result = publisher.publish(
+        let result = await publisher.publish(
             finance: .unavailable(), fitness: .unavailable(), fitnessWidgets: .unavailable(),
             nutrition: .unavailable(), privacyMode: .summaryAllowed, now: now,
-            onWriteFailure: { reportedError = $0 }
+            onWriteFailure: { errorBox.record($0) }
         )
         XCTAssertFalse(result)
-        XCTAssertEqual(reloadCount, 0)
-        XCTAssertNotNil(reportedError)
+        XCTAssertEqual(spy.reloadCount, 0)
+        XCTAssertNotNil(errorBox.error)
+    }
+
+    /// F1 regression guard: a burst of concurrent, content-identical
+    /// `publish` calls against the SAME actor instance (mirroring how
+    /// `LifeOSApp`/`LifeOSMacApp` spawn one `Task.detached` per
+    /// `publishWidgetSnapshots()` call site, all targeting one durable
+    /// `widgetSnapshotPublisher`) must collapse to exactly one write and one
+    /// reload — not one per caller. A following genuinely-changed publish
+    /// must still fire again afterward.
+    func testConcurrentBurstOfIdenticalPublishesCollapsesToOneWriteAndReload() async throws {
+        let spy = Spy()
+        let publisher = WidgetSnapshotPublisher(
+            write: { _ in spy.recordWrite() },
+            reload: { spy.recordReload() }
+        )
+        let finance = WidgetSafeFinanceSummary(
+            connector: .connected, consent: .granted, freshness: .fresh,
+            observedAt: now.addingTimeInterval(-60), spendCents: 4_200
+        )
+
+        // Fire N concurrent publishes with identical content (generatedAt is
+        // excluded from the dedupe comparison) at the same actor instance,
+        // exactly as a burst of near-simultaneous onChange call sites would.
+        let burstSize = 25
+        await withTaskGroup(of: Bool.self) { group in
+            for offset in 0..<burstSize {
+                group.addTask {
+                    await publisher.publish(
+                        finance: finance, fitness: .unavailable(), fitnessWidgets: .unavailable(),
+                        nutrition: .unavailable(), privacyMode: .summaryAllowed,
+                        now: self.now.addingTimeInterval(TimeInterval(offset))
+                    )
+                }
+            }
+            var trueCount = 0
+            for await result in group where result { trueCount += 1 }
+            XCTAssertEqual(trueCount, 1, "Exactly one publish in the burst should report a real write")
+        }
+        XCTAssertEqual(spy.writeCount, 1)
+        XCTAssertEqual(spy.reloadCount, 1)
+
+        // A following genuinely different publish must still fire again.
+        let changedFinance = WidgetSafeFinanceSummary(
+            connector: .connected, consent: .granted, freshness: .fresh,
+            observedAt: now.addingTimeInterval(-10), spendCents: 5_500
+        )
+        let changedResult = await publisher.publish(
+            finance: changedFinance, fitness: .unavailable(), fitnessWidgets: .unavailable(),
+            nutrition: .unavailable(), privacyMode: .summaryAllowed, now: now.addingTimeInterval(100)
+        )
+        XCTAssertTrue(changedResult)
+        XCTAssertEqual(spy.writeCount, 2)
+        XCTAssertEqual(spy.reloadCount, 2)
     }
 }

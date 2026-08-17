@@ -21,14 +21,25 @@ import WidgetKit
 /// Fitness health/recovery/strain scores, most `WidgetSafeFitnessWidgetsSummary`
 /// fields), the mapping functions below say so in a comment next to the
 /// permanent `.unavailable()` they return.
-public struct WidgetSnapshotPublisher {
+public actor WidgetSnapshotPublisher {
     /// Lives in `ios/LifeOS/` rather than `ios/Shared/` because it needs
     /// `HealthKitFitnessProjection`/`HealthKitFitnessComposition`, which are
     /// app-target-only (excluded from `Shared/` for `LifeOSWidget`,
     /// `LifeOSMac`, `LifeOSMacWidget` in `project.yml`). It is only ever
     /// constructed and called from `LifeOSApp.swift`, also app-target-only.
-    private let write: (FutureWidgetSnapshot) throws -> Void
-    private let reload: () -> Void
+    ///
+    /// `actor` rather than a mutable struct: every call site spawns its own
+    /// concurrent publish attempt (an app-active transition, a HealthKit
+    /// observer completion, a Finance change can all fire within the same
+    /// burst). An actor serializes those into a single mailbox, so the
+    /// compare-write-reload sequence below is a true read-modify-write —
+    /// only one call in a simultaneous burst of identical content actually
+    /// writes and reloads. A struct mutated by independently-spawned
+    /// detached tasks cannot make that guarantee: each task captures its own
+    /// copy of `lastPublished` at spawn time, so a burst can race past the
+    /// dedupe check and each perform a redundant write + reload.
+    private let write: @Sendable (FutureWidgetSnapshot) throws -> Void
+    private let reload: @Sendable () -> Void
     private var lastPublished: FutureWidgetSnapshot?
 
     /// The future-module widget kinds that share `FutureModuleTimelineProvider`
@@ -51,17 +62,17 @@ public struct WidgetSnapshotPublisher {
     ]
 
     public init(
-        write: @escaping (FutureWidgetSnapshot) throws -> Void = { snapshot in
+        write: @escaping @Sendable (FutureWidgetSnapshot) throws -> Void = { snapshot in
             try FutureWidgetSnapshotStore.write(snapshot)
         },
-        reload: @escaping () -> Void = WidgetSnapshotPublisher.defaultReload
+        reload: @escaping @Sendable () -> Void = WidgetSnapshotPublisher.defaultReload
     ) {
         self.write = write
         self.reload = reload
         self.lastPublished = nil
     }
 
-    public static func defaultReload() {
+    @Sendable public static func defaultReload() {
 #if canImport(WidgetKit)
         for kind in widgetKinds {
             WidgetCenter.shared.reloadTimelines(ofKind: kind)
@@ -75,15 +86,20 @@ public struct WidgetSnapshotPublisher {
     /// only on that same condition. A write failure is swallowed after being
     /// reported through `onWriteFailure` — a widget staying on its last good
     /// snapshot is the correct honest fallback, not a crash.
+    ///
+    /// Actor-isolated, so concurrent callers queue on the actor's mailbox
+    /// and this compare-write-reload sequence runs as an atomic unit per
+    /// call: a burst of simultaneous identical publishes results in exactly
+    /// one write + reload, not one per caller.
     @discardableResult
-    public mutating func publish(
+    public func publish(
         finance: WidgetSafeFinanceSummary,
         fitness: WidgetSafeFitnessSummary,
         fitnessWidgets: WidgetSafeFitnessWidgetsSummary,
         nutrition: WidgetSafeNutritionSummary,
         privacyMode: WidgetPrivacyMode,
         now: Date = .now,
-        onWriteFailure: ((Error) -> Void)? = nil
+        onWriteFailure: (@Sendable (Error) -> Void)? = nil
     ) -> Bool {
         let candidate = FutureWidgetSnapshot(
             generatedAt: now,

@@ -60,9 +60,11 @@ struct LifeOSApp: App {
     @Environment(\.scenePhase) private var scenePhase
     private let usesVisualFixtures: Bool
     /// Coalescing state for the future-module widget snapshot publisher.
-    /// `@State` so the struct's `lastPublished` dedupe value survives across
-    /// the several call sites below without becoming a stored class.
-    @State private var widgetSnapshotPublisher = WidgetSnapshotPublisher()
+    /// `WidgetSnapshotPublisher` is an actor, so a plain `let` is enough to
+    /// keep one durable instance alive across the several call sites below —
+    /// its own mailbox serializes concurrent `publish` calls, no `@State`
+    /// write-back required.
+    private let widgetSnapshotPublisher = WidgetSnapshotPublisher()
 
     init() {
         let enabled = ProcessInfo.processInfo.arguments.contains("-LifeOSVisualFixtures")
@@ -284,13 +286,15 @@ struct LifeOSApp: App {
         let fitnessProjection = healthKitFitnessRepository.projection
 #endif
         let now = Date.now
-        // Capture the `@State` binding's setter, not `self`, so the write
-        // back on MainActor updates the live coalescing state regardless of
-        // which struct copy this detached task was spawned from.
-        let publisherBinding = $widgetSnapshotPublisher
+        let publisher = widgetSnapshotPublisher
 
-        Task.detached(priority: .utility) { [widgetSnapshotPublisher] in
-            var publisher = widgetSnapshotPublisher
+        // `publisher` is an actor: this detached task is still off-main, and
+        // a burst of near-simultaneous calls to `publishWidgetSnapshots()`
+        // each spawn their own task here, but every one of them ultimately
+        // calls `publish` on the SAME actor instance, so the actor's mailbox
+        // serializes the compare-write-reload step across the whole burst —
+        // only a genuine content change results in a write + reload.
+        Task.detached(priority: .utility) {
             let finance = WidgetSnapshotPublisher.mapFinance(summary: financeSummary, state: financeState, now: now)
 #if os(iOS)
             let fitness = WidgetSnapshotPublisher.mapFitness(projection: fitnessProjection, now: now)
@@ -310,7 +314,7 @@ struct LifeOSApp: App {
                 nutrition = .unavailable()
             }
 
-            publisher.publish(
+            await publisher.publish(
                 finance: finance,
                 fitness: fitness,
                 fitnessWidgets: fitnessWidgets,
@@ -318,9 +322,6 @@ struct LifeOSApp: App {
                 privacyMode: .summaryAllowed,
                 now: now
             )
-            await MainActor.run {
-                publisherBinding.wrappedValue = publisher
-            }
         }
     }
 
