@@ -688,6 +688,122 @@ final class HealthKitFitnessCompositionTests: XCTestCase {
         XCTAssertNil(trends.first(where: { $0.id == .deep })?.metric.value)
     }
 
+    // MARK: - sourceDerivedSleepDurationHours equivalence with the UI path
+    //
+    // `WidgetSnapshotPublisher` reads sleep duration exclusively through
+    // `sourceDerivedSleepDurationHours`, a raw-value seam that must never
+    // diverge from what `sleepDetail`/`sourceDerivedSleepMetrics` (the UI
+    // path) derives from the identical projection. These three tests guard
+    // that seam directly, since a silent drift there would let the widget
+    // publish a sleep duration the app's own UI would refuse to show.
+
+    func testSourceDerivedSleepDurationHoursEqualsUIPathForFullyStagedObservedNight() throws {
+        // Each stage kept under 60s so `formatDuration` always emits the
+        // simple "<n> s" form (matching the style already used by
+        // `testSleepDurationReconcilesWithRoundedObservedStageTotals`),
+        // which lets this test parse the UI-rendered totals back to seconds
+        // and compare them against the widget seam without duplicating the
+        // summation logic under test.
+        let start = now.addingTimeInterval(-45)
+        let sleepSamples = [
+            try sleep(stage: .asleepCore, start: start, end: start.addingTimeInterval(20)),
+            try sleep(stage: .asleepDeep, start: start.addingTimeInterval(20), end: start.addingTimeInterval(33)),
+            try sleep(stage: .asleepREM, start: start.addingTimeInterval(33), end: start.addingTimeInterval(45))
+        ]
+        let testProjection = projection(states: [try state(metric: .sleep, observations: sleepSamples)])
+        let composition = HealthKitFitnessComposition.compose(projection: testProjection, selectedDate: now)
+
+        // The UI path: sum the exact per-stage second totals backing
+        // `sleepDetail.trends`, the same fields the Fitness screen renders.
+        let trends = composition.snapshot.sleepDetail.trends
+        func stageSeconds(_ id: FitnessSleepTrendID) -> TimeInterval {
+            guard let value = trends.first(where: { $0.id == id })?.metric.value,
+                  let digits = value.split(separator: " ").first else { return 0 }
+            return TimeInterval(digits) ?? 0
+        }
+        let uiDerivedSeconds = stageSeconds(.core) + stageSeconds(.deep) + stageSeconds(.rem)
+
+        let widgetDerived = try XCTUnwrap(HealthKitFitnessComposition.sourceDerivedSleepDurationHours(
+            from: testProjection,
+            selectedDate: now
+        ))
+
+        XCTAssertEqual(composition.snapshot.sleepDetail.night.state, .observed)
+        XCTAssertEqual(widgetDerived.hours * 3_600, uiDerivedSeconds, accuracy: 0.001)
+        XCTAssertEqual(widgetDerived.hours * 3_600, 45, accuracy: 0.001)
+        XCTAssertEqual(composition.snapshot.sleepDetail.duration.value, "45 s")
+    }
+
+    func testSourceDerivedSleepDurationHoursIsNilWhenAnySampleHasUnsupportedStage() throws {
+        let start = now.addingTimeInterval(-3_000)
+        let unsupportedStages: [HealthKitSleepStage] = [.inBed, .asleepUnspecified, .unknown(rawValue: 99)]
+        for unsupported in unsupportedStages {
+            let sleepSamples = [
+                try sleep(stage: .asleepCore, start: start, end: start.addingTimeInterval(1_500)),
+                try sleep(stage: unsupported, start: start.addingTimeInterval(1_500), end: start.addingTimeInterval(3_000))
+            ]
+            let testProjection = projection(states: [try state(metric: .sleep, observations: sleepSamples)])
+
+            let widgetDerived = HealthKitFitnessComposition.sourceDerivedSleepDurationHours(
+                from: testProjection,
+                selectedDate: now
+            )
+            XCTAssertNil(widgetDerived, "Expected nil when a sample has unsupported stage \(unsupported)")
+
+            // Same all-or-nothing gate as the UI path: the formatted duration
+            // must also be unavailable, never a partial sum.
+            let composition = HealthKitFitnessComposition.compose(projection: testProjection, selectedDate: now)
+            XCTAssertNil(composition.snapshot.sleepDetail.duration.value, "UI duration leaked a value for unsupported stage \(unsupported)")
+        }
+    }
+
+    func testSourceDerivedSleepDurationHoursIsNilForNonObservedSleepState() throws {
+        let start = now.addingTimeInterval(-3_000)
+        let sleepSamples = [
+            try sleep(stage: .asleepCore, start: start, end: start.addingTimeInterval(1_500)),
+            try sleep(stage: .asleepREM, start: start.addingTimeInterval(1_500), end: start.addingTimeInterval(3_000))
+        ]
+        // `.conflict` is intentionally excluded from this sweep: a bare
+        // `.conflict` syncState with no actual conflicting sample for the
+        // selected day resolves to `.observed` (see `selectSleep`'s comment
+        // that a raw conflict elsewhere in the projection does not poison a
+        // clean selected bucket). A real, selected-day conflict is covered
+        // as its own case below.
+        for syncState in [HealthKitSyncState.partial, .stale, .readIndeterminate, .error, .neverSynced] {
+            let testProjection = projection(states: [try state(metric: .sleep, observations: sleepSamples, syncState: syncState)])
+
+            let widgetDerived = HealthKitFitnessComposition.sourceDerivedSleepDurationHours(
+                from: testProjection,
+                selectedDate: now
+            )
+            XCTAssertNil(widgetDerived, "Expected nil for non-observed sleep sync state \(syncState)")
+        }
+
+        // A genuine selected-day conflict (not just a bare `.conflict`
+        // syncState) must also gate the widget seam to nil.
+        let identity = sleepSamples[0].identity
+        let changed = try sleep(
+            stage: .asleepDeep,
+            start: start,
+            end: start.addingTimeInterval(1_500),
+            uuid: identity.uuid
+        )
+        let conflict = HealthKitObservationConflict(
+            metric: .sleep,
+            identity: identity,
+            existing: sleepSamples[0],
+            incoming: changed
+        )
+        let conflictedProjection = projection(states: [
+            try state(metric: .sleep, observations: sleepSamples, conflicts: [conflict])
+        ])
+        let conflictedWidgetDerived = HealthKitFitnessComposition.sourceDerivedSleepDurationHours(
+            from: conflictedProjection,
+            selectedDate: now
+        )
+        XCTAssertNil(conflictedWidgetDerived, "Expected nil for a genuine selected-day sleep conflict")
+    }
+
     func testWorkoutRetainsRawActivityFactsWithoutKindMappingOrLoad() throws {
         let sample = try workout(start: now.addingTimeInterval(-600), duration: 321, activityType: 99, energy: 210)
         let composition = HealthKitFitnessComposition.compose(
