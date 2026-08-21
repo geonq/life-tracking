@@ -490,6 +490,16 @@ private struct UsageRingView: View {
 struct LifeOSUsageSmallWidgetView: View {
     let entry: LifeOSEntry
 
+    @Environment(\.showsWidgetContainerBackground) private var showsWidgetContainerBackground
+    @Environment(\.widgetRenderingMode) private var widgetRenderingMode
+
+    private var chrome: LifeOSWidgetChrome {
+        LifeOSWidgetChrome.resolving(
+            showsContainerBackground: showsWidgetContainerBackground,
+            renderingMode: widgetRenderingMode
+        )
+    }
+
     private var providers: [UsageWidgetProviderData] {
         UsageWidgetData.providersForDisplay(from: entry.snapshot, at: entry.date)
     }
@@ -531,12 +541,12 @@ struct LifeOSUsageSmallWidgetView: View {
                 }
             }
             .font(.system(size: 8, weight: .medium))
-            .foregroundStyle(LifeOSTokens.tertiaryText)
+            .foregroundStyle(chrome.tertiary)
             .lineLimit(1)
             .minimumScaleFactor(0.7)
         }
         .padding(10)
-        .containerBackground(for: .widget) { LifeOSTokens.surface }
+        .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(URL(string: "lifeos://usage"))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilitySummary)
@@ -565,6 +575,16 @@ struct LifeOSUsageSmallWidgetView: View {
 
 struct LifeOSWidgetView: View {
     let entry: LifeOSEntry
+
+    @Environment(\.showsWidgetContainerBackground) private var showsWidgetContainerBackground
+    @Environment(\.widgetRenderingMode) private var widgetRenderingMode
+
+    private var chrome: LifeOSWidgetChrome {
+        LifeOSWidgetChrome.resolving(
+            showsContainerBackground: showsWidgetContainerBackground,
+            renderingMode: widgetRenderingMode
+        )
+    }
 
     private var providers: [UsageWidgetProviderData] {
         UsageWidgetData.providersForDisplay(from: entry.snapshot, at: entry.date)
@@ -642,12 +662,12 @@ struct LifeOSWidgetView: View {
                 }
             }
             .font(.system(size: 8, weight: .medium))
-            .foregroundStyle(LifeOSTokens.tertiaryText)
+            .foregroundStyle(chrome.tertiary)
             .lineLimit(1)
             .minimumScaleFactor(0.6)
         }
         .padding(12)
-        .containerBackground(for: .widget) { LifeOSTokens.surface }
+        .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(URL(string: "lifeos://usage"))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilitySummary)
@@ -725,6 +745,8 @@ private struct SharedUsageGraph: View {
 
     private let observedX = 0.62
 
+    @Environment(\.lifeOSWidgetChrome) private var chrome
+
     @ViewBuilder
     var body: some View {
         if state.rendersSeries, let summary, summary.hasValidatedTrend,
@@ -740,7 +762,7 @@ private struct SharedUsageGraph: View {
                 if !state.detail.isEmpty {
                     Text(state.detail)
                         .font(.system(size: 8, weight: .medium))
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .foregroundStyle(chrome.tertiary)
                         .lineLimit(1)
                         .minimumScaleFactor(0.65)
                 }

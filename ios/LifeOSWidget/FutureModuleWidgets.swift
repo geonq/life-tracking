@@ -1,6 +1,69 @@
 import SwiftUI
 import WidgetKit
 
+/// Text colors shared by every chrome-managed widget. Accented/vibrant homescreen
+/// rendering composites the widget over a system backdrop, where opaque token
+/// surfaces and dark text become illegible; those modes resolve to white/opacity
+/// pairs over a cleared container background instead.
+struct LifeOSWidgetChrome {
+    let hero: Color
+    let secondary: Color
+    let tertiary: Color
+    let usesTransparentTreatment: Bool
+
+    static func resolving(
+        showsContainerBackground: Bool,
+        renderingMode: WidgetRenderingMode
+    ) -> Self {
+        let usesTransparentTreatment = !showsContainerBackground || renderingMode != .fullColor
+        return LifeOSWidgetChrome(
+            hero: usesTransparentTreatment ? .white : .primary,
+            secondary: usesTransparentTreatment ? .white.opacity(0.76) : .secondary,
+            tertiary: usesTransparentTreatment ? .white.opacity(0.53) : LifeOSTokens.tertiaryText,
+            usesTransparentTreatment: usesTransparentTreatment
+        )
+    }
+}
+
+private struct LifeOSWidgetChromeKey: EnvironmentKey {
+    static let defaultValue = LifeOSWidgetChrome(hero: .primary, secondary: .secondary, tertiary: LifeOSTokens.tertiaryText, usesTransparentTreatment: false)
+}
+
+extension EnvironmentValues {
+    var lifeOSWidgetChrome: LifeOSWidgetChrome {
+        get { self[LifeOSWidgetChromeKey.self] }
+        set { self[LifeOSWidgetChromeKey.self] = newValue }
+    }
+}
+
+private struct LifeOSWidgetContainerModifier<Background: View>: ViewModifier {
+    @Environment(\.showsWidgetContainerBackground) private var showsWidgetContainerBackground
+    @Environment(\.widgetRenderingMode) private var widgetRenderingMode
+    let background: Background
+
+    init(@ViewBuilder background: () -> Background) {
+        self.background = background()
+    }
+
+    func body(content: Content) -> some View {
+        let chrome = LifeOSWidgetChrome.resolving(
+            showsContainerBackground: showsWidgetContainerBackground,
+            renderingMode: widgetRenderingMode
+        )
+        return content
+            .containerBackground(for: .widget) {
+                chrome.usesTransparentTreatment ? AnyView(Color.clear) : AnyView(background)
+            }
+            .environment(\.lifeOSWidgetChrome, chrome)
+    }
+}
+
+extension View {
+    func lifeOSWidgetContainer(@ViewBuilder background: () -> some View) -> some View {
+        modifier(LifeOSWidgetContainerModifier(background: background))
+    }
+}
+
 /// A single unavailable entry shared by every future-module widget.
 ///
 /// These widgets are selectable before their modules have connectors. Keeping the entry free of
@@ -89,14 +152,16 @@ private struct FutureModuleWidgetHeader: View {
     let title: String
     let icon: LifeOSIconName
 
+    @Environment(\.lifeOSWidgetChrome) private var chrome
+
     var body: some View {
         HStack(spacing: 7) {
             LifeOSIcon(icon)
                 .frame(width: 16, height: 16)
-                .foregroundStyle(LifeOSTokens.tertiaryText)
+                .foregroundStyle(chrome.tertiary)
             Text(title)
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.primary)
+                .foregroundStyle(chrome.hero)
             Spacer(minLength: 0)
         }
     }
@@ -125,14 +190,16 @@ private struct FutureModuleUnavailableHero: View {
         self.state = state
     }
 
+    @Environment(\.lifeOSWidgetChrome) private var chrome
+
     var body: some View {
         VStack(spacing: 2) {
             Text(state == .redacted ? "Hidden" : "—")
                 .font(.system(size: 24, weight: .bold, design: .rounded))
-                .foregroundStyle(.primary)
+                .foregroundStyle(chrome.hero)
             Text(state == .redacted ? "Summary hidden" : "Not connected")
                 .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(LifeOSTokens.tertiaryText)
+                .foregroundStyle(chrome.tertiary)
         }
     }
 }
@@ -217,11 +284,13 @@ private struct FutureModuleEmptyCashFlowTracks: View {
 private struct FutureModuleCashFlowTrack: View {
     let label: String
 
+    @Environment(\.lifeOSWidgetChrome) private var chrome
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label)
                 .font(.system(size: 9, weight: .medium))
-                .foregroundStyle(LifeOSTokens.tertiaryText)
+                .foregroundStyle(chrome.tertiary)
             Capsule()
                 .fill(LifeOSTokens.Ring.track)
                 .frame(height: 5)
@@ -232,6 +301,16 @@ private struct FutureModuleCashFlowTrack: View {
 struct NetWorthWidgetView: View {
     let entry: FutureModuleWidgetEntry
 
+    @Environment(\.showsWidgetContainerBackground) private var showsWidgetContainerBackground
+    @Environment(\.widgetRenderingMode) private var widgetRenderingMode
+
+    private var chrome: LifeOSWidgetChrome {
+        LifeOSWidgetChrome.resolving(
+            showsContainerBackground: showsWidgetContainerBackground,
+            renderingMode: widgetRenderingMode
+        )
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             FutureModuleWidgetHeader(title: "Net Worth", icon: .savings)
@@ -240,14 +319,14 @@ struct NetWorthWidgetView: View {
                entry.snapshot.financeDisplayState(at: entry.date) == .fresh || entry.snapshot.financeDisplayState(at: entry.date) == .stale {
                 Text(futureModuleCurrency(netWorth, maximumFractionDigits: 2))
                     .font(.system(size: 24, weight: .bold, design: .rounded))
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(chrome.hero)
                 Text(futureModuleStateText(entry.snapshot.financeDisplayState(at: entry.date)))
                     .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .foregroundStyle(chrome.tertiary)
                 Spacer(minLength: 0)
                 Text("Aggregate only")
                     .font(.system(size: 9, weight: .medium))
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .foregroundStyle(chrome.tertiary)
             } else {
                 FutureModuleUnavailableHero(state: futureModuleMetricState(
                     entry.snapshot.financeDisplayState(at: entry.date),
@@ -258,7 +337,7 @@ struct NetWorthWidgetView: View {
             }
         }
         .padding(15)
-        .containerBackground(for: .widget) { LifeOSTokens.surface }
+        .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(URL(string: "lifeos://finance"))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(futureModuleAccessibilityLabel(
@@ -272,6 +351,16 @@ struct NetWorthWidgetView: View {
 struct SpendRingWidgetView: View {
     let entry: FutureModuleWidgetEntry
 
+    @Environment(\.showsWidgetContainerBackground) private var showsWidgetContainerBackground
+    @Environment(\.widgetRenderingMode) private var widgetRenderingMode
+
+    private var chrome: LifeOSWidgetChrome {
+        LifeOSWidgetChrome.resolving(
+            showsContainerBackground: showsWidgetContainerBackground,
+            renderingMode: widgetRenderingMode
+        )
+    }
+
     var body: some View {
         VStack(spacing: 8) {
             FutureModuleWidgetHeader(title: "Spend", icon: .budget)
@@ -283,30 +372,30 @@ struct SpendRingWidgetView: View {
                     FutureModuleTrackRing(diameter: 64, lineWidth: 6)
                     Text(futureModuleCurrency(spend))
                         .font(.system(size: 17, weight: .bold, design: .rounded))
-                        .foregroundStyle(.primary)
+                        .foregroundStyle(chrome.hero)
                         .minimumScaleFactor(0.65)
                 }
                 Text(futureModuleStateText(entry.snapshot.financeDisplayState(at: entry.date)))
                     .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .foregroundStyle(chrome.tertiary)
             } else {
                 ZStack {
                     FutureModuleTrackRing(diameter: 64, lineWidth: 6)
                     Text("—")
                         .font(.system(size: 20, weight: .bold, design: .rounded))
-                        .foregroundStyle(.primary)
+                        .foregroundStyle(chrome.hero)
                 }
                 Text(futureModuleStateText(futureModuleMetricState(
                     entry.snapshot.financeDisplayState(at: entry.date),
                     hasValue: entry.snapshot.finance.spendCents != nil
                 )))
                     .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .foregroundStyle(chrome.tertiary)
             }
             Spacer(minLength: 0)
         }
         .padding(15)
-        .containerBackground(for: .widget) { LifeOSTokens.surface }
+        .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(URL(string: "lifeos://finance/spend"))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(futureModuleAccessibilityLabel(
@@ -320,6 +409,16 @@ struct SpendRingWidgetView: View {
 struct CashFlowWidgetView: View {
     let entry: FutureModuleWidgetEntry
 
+    @Environment(\.showsWidgetContainerBackground) private var showsWidgetContainerBackground
+    @Environment(\.widgetRenderingMode) private var widgetRenderingMode
+
+    private var chrome: LifeOSWidgetChrome {
+        LifeOSWidgetChrome.resolving(
+            showsContainerBackground: showsWidgetContainerBackground,
+            renderingMode: widgetRenderingMode
+        )
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             FutureModuleWidgetHeader(title: "Cash Flow", icon: .revenue)
@@ -328,14 +427,14 @@ struct CashFlowWidgetView: View {
                entry.snapshot.financeDisplayState(at: entry.date) == .fresh || entry.snapshot.financeDisplayState(at: entry.date) == .stale {
                 Text(futureModuleCurrency(cashFlow, maximumFractionDigits: 2))
                     .font(.system(size: 24, weight: .bold, design: .rounded))
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(chrome.hero)
                 Text(futureModuleStateText(entry.snapshot.financeDisplayState(at: entry.date)))
                     .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .foregroundStyle(chrome.tertiary)
                 Spacer(minLength: 0)
                 Text("Aggregate only")
                     .font(.system(size: 9, weight: .medium))
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .foregroundStyle(chrome.tertiary)
             } else {
                 FutureModuleUnavailableHero(state: futureModuleMetricState(
                     entry.snapshot.financeDisplayState(at: entry.date),
@@ -348,7 +447,7 @@ struct CashFlowWidgetView: View {
             }
         }
         .padding(15)
-        .containerBackground(for: .widget) { LifeOSTokens.surface }
+        .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(URL(string: "lifeos://finance/cashflow"))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(futureModuleAccessibilityLabel(
@@ -362,6 +461,16 @@ struct CashFlowWidgetView: View {
 struct HealthMonitorWidgetView: View {
     let entry: FutureModuleWidgetEntry
 
+    @Environment(\.showsWidgetContainerBackground) private var showsWidgetContainerBackground
+    @Environment(\.widgetRenderingMode) private var widgetRenderingMode
+
+    private var chrome: LifeOSWidgetChrome {
+        LifeOSWidgetChrome.resolving(
+            showsContainerBackground: showsWidgetContainerBackground,
+            renderingMode: widgetRenderingMode
+        )
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             FutureModuleWidgetHeader(title: "Health Monitor", icon: .health)
@@ -370,14 +479,14 @@ struct HealthMonitorWidgetView: View {
                entry.snapshot.fitnessDisplayState(at: entry.date) == .fresh || entry.snapshot.fitnessDisplayState(at: entry.date) == .stale {
                 Text(futureModuleScore(health))
                     .font(.system(size: 28, weight: .bold, design: .rounded))
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(chrome.hero)
                 Text("Health aggregate")
                     .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .foregroundStyle(chrome.tertiary)
                 Spacer(minLength: 0)
                 Text(futureModuleStateText(entry.snapshot.fitnessDisplayState(at: entry.date)))
                     .font(.system(size: 9, weight: .medium))
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .foregroundStyle(chrome.tertiary)
             } else {
                 HStack(alignment: .center, spacing: 16) {
                     FutureModuleUnavailableHero(state: futureModuleMetricState(
@@ -393,11 +502,11 @@ struct HealthMonitorWidgetView: View {
                     hasValue: entry.snapshot.fitness.healthScore != nil
                 )))
                     .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .foregroundStyle(chrome.tertiary)
             }
         }
         .padding(15)
-        .containerBackground(for: .widget) { LifeOSTokens.surface }
+        .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(URL(string: "lifeos://fitness"))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(futureModuleAccessibilityLabel(
@@ -411,15 +520,25 @@ struct HealthMonitorWidgetView: View {
 struct RecoveryRingWidgetView: View {
     let entry: FutureModuleWidgetEntry
 
+    @Environment(\.showsWidgetContainerBackground) private var showsWidgetContainerBackground
+    @Environment(\.widgetRenderingMode) private var widgetRenderingMode
+
+    private var chrome: LifeOSWidgetChrome {
+        LifeOSWidgetChrome.resolving(
+            showsContainerBackground: showsWidgetContainerBackground,
+            renderingMode: widgetRenderingMode
+        )
+    }
+
     var body: some View {
         VStack(spacing: 7) {
             HStack(spacing: 5) {
                 LifeOSIcon(.heartRate)
                     .frame(width: 14, height: 14)
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .foregroundStyle(chrome.tertiary)
                 Text("Recovery")
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(chrome.hero)
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity)
@@ -430,28 +549,28 @@ struct RecoveryRingWidgetView: View {
                     FutureModuleProgressRing(diameter: 56, lineWidth: 6, progress: recovery / 100)
                     Text(futureModuleScore(recovery))
                         .font(.system(size: 19, weight: .bold, design: .rounded))
-                        .foregroundStyle(.primary)
+                        .foregroundStyle(chrome.hero)
                 }
                 Text(futureModuleStateText(futureModuleMetricState(
                     entry.snapshot.fitnessDisplayState(at: entry.date),
                     hasValue: entry.snapshot.fitness.recoveryScore != nil
                 )))
                     .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .foregroundStyle(chrome.tertiary)
             } else {
                 ZStack {
                     FutureModuleTrackRing(diameter: 56, lineWidth: 6)
                     Text("—")
                         .font(.system(size: 19, weight: .bold, design: .rounded))
-                        .foregroundStyle(.primary)
+                        .foregroundStyle(chrome.hero)
                 }
                 Text(futureModuleStateText(entry.snapshot.fitnessDisplayState(at: entry.date)))
                     .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .foregroundStyle(chrome.tertiary)
             }
         }
         .padding(15)
-        .containerBackground(for: .widget) { LifeOSTokens.surface }
+        .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(URL(string: "lifeos://fitness"))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(futureModuleAccessibilityLabel(
@@ -476,7 +595,7 @@ struct TasksSmallWidgetView: View {
             Spacer(minLength: 0)
         }
         .padding(15)
-        .containerBackground(for: .widget) { LifeOSTokens.surface }
+        .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(URL(string: "lifeos://tasks/today"))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(
@@ -487,6 +606,16 @@ struct TasksSmallWidgetView: View {
 
 struct TasksMediumWidgetView: View {
     let entry: FutureModuleWidgetEntry
+
+    @Environment(\.showsWidgetContainerBackground) private var showsWidgetContainerBackground
+    @Environment(\.widgetRenderingMode) private var widgetRenderingMode
+
+    private var chrome: LifeOSWidgetChrome {
+        LifeOSWidgetChrome.resolving(
+            showsContainerBackground: showsWidgetContainerBackground,
+            renderingMode: widgetRenderingMode
+        )
+    }
 
     var body: some View {
         HStack(spacing: 14) {
@@ -499,15 +628,15 @@ struct TasksMediumWidgetView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(entry.snapshot.privacyMode == .redacted ? "Hidden" : "—")
                     .font(.system(size: 24, weight: .bold, design: .rounded))
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(chrome.hero)
                 Text(entry.snapshot.privacyMode == .redacted ? "Summary hidden" : "Not connected")
                     .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .foregroundStyle(chrome.tertiary)
             }
             Spacer(minLength: 0)
         }
         .padding(15)
-        .containerBackground(for: .widget) { LifeOSTokens.surface }
+        .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(URL(string: "lifeos://tasks/today"))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(
@@ -574,11 +703,13 @@ private struct NutritionWidgetSourceBadge: View {
     let summary: WidgetSafeNutritionSummary
     let date: Date
 
+    @Environment(\.lifeOSWidgetChrome) private var chrome
+
     var body: some View {
         Text(summary.provenanceLabel ?? nutritionWidgetStateText(summary.displayState(at: date)))
             .font(.system(size: 7, weight: .semibold))
             .tracking(0.15)
-            .foregroundStyle(summary.provenanceLabel == nil ? LifeOSTokens.tertiaryText : LifeOSTokens.warning)
+            .foregroundStyle(summary.provenanceLabel == nil ? chrome.tertiary : LifeOSTokens.warning)
             .lineLimit(1)
             .minimumScaleFactor(0.65)
             .accessibilityLabel("Nutrition data status")
@@ -591,11 +722,13 @@ private struct NutritionWidgetHeader: View {
     let summary: WidgetSafeNutritionSummary
     let date: Date
 
+    @Environment(\.lifeOSWidgetChrome) private var chrome
+
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 7) {
             Text(title)
                 .font(.system(size: 13, weight: .bold, design: .rounded))
-                .foregroundStyle(.primary)
+                .foregroundStyle(chrome.hero)
                 .lineLimit(1)
             Spacer(minLength: 4)
             NutritionWidgetSourceBadge(summary: summary, date: date)
@@ -674,6 +807,8 @@ private struct NutritionDotMatrix: View {
 
     private let columns = Array(repeating: GridItem(.fixed(4), spacing: 3), count: 8)
 
+    @Environment(\.lifeOSWidgetChrome) private var chrome
+
     var body: some View {
         VStack(spacing: 3) {
             Text(title)
@@ -690,7 +825,7 @@ private struct NutritionDotMatrix: View {
             Text(nutritionWidgetValue(metric, at: date, unit: "g"))
                 .font(.system(size: 10, weight: .bold, design: .rounded))
                 .monospacedDigit()
-                .foregroundStyle(.primary)
+                .foregroundStyle(chrome.hero)
                 .lineLimit(1)
                 .minimumScaleFactor(0.65)
         }
@@ -715,6 +850,8 @@ private struct NutritionQualityRing: View {
     let label: String?
     let date: Date
 
+    @Environment(\.lifeOSWidgetChrome) private var chrome
+
     var body: some View {
         VStack(spacing: 3) {
             ZStack {
@@ -736,7 +873,7 @@ private struct NutritionQualityRing: View {
             .frame(width: 54, height: 54)
             Text(label ?? nutritionWidgetStateText(nutritionWidgetMetricState(metric, at: date)))
                 .font(.system(size: 8, weight: .medium))
-                .foregroundStyle(label == nil ? LifeOSTokens.tertiaryText : LifeOSTokens.warning)
+                .foregroundStyle(label == nil ? chrome.tertiary : LifeOSTokens.warning)
                 .lineLimit(2)
                 .multilineTextAlignment(.center)
                 .minimumScaleFactor(0.6)
@@ -751,6 +888,16 @@ private struct NutritionQualityRing: View {
 struct NutritionOverviewWidgetView: View {
     let entry: FutureModuleWidgetEntry
 
+    @Environment(\.showsWidgetContainerBackground) private var showsWidgetContainerBackground
+    @Environment(\.widgetRenderingMode) private var widgetRenderingMode
+
+    private var chrome: LifeOSWidgetChrome {
+        LifeOSWidgetChrome.resolving(
+            showsContainerBackground: showsWidgetContainerBackground,
+            renderingMode: widgetRenderingMode
+        )
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             NutritionWidgetHeader(title: "Today's Food", summary: entry.snapshot.nutrition, date: entry.date)
@@ -761,7 +908,7 @@ struct NutritionOverviewWidgetView: View {
                         .monospacedDigit()
                     Text("eaten")
                         .font(.system(size: 8, weight: .medium))
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .foregroundStyle(chrome.tertiary)
                 }
                 NutritionDotMatrix(title: "Fat", metric: entry.snapshot.nutrition.fatGrams, goal: entry.snapshot.nutrition.fatGoalGrams, date: entry.date, hue: .pink)
                 NutritionDotMatrix(title: "Carbs", metric: entry.snapshot.nutrition.carbsGrams, goal: entry.snapshot.nutrition.carbsGoalGrams, date: entry.date, hue: .orange)
@@ -772,7 +919,7 @@ struct NutritionOverviewWidgetView: View {
             NutritionWidgetQuickActions()
         }
         .padding(12)
-        .containerBackground(for: .widget) {
+        .lifeOSWidgetContainer {
             LinearGradient(colors: [LifeOSTokens.surface, LifeOSTokens.canvas], startPoint: .topLeading, endPoint: .bottomTrailing)
         }
         .widgetURL(URL(string: "lifeos://fitness/nutrition"))
@@ -785,6 +932,8 @@ private struct NutritionCalorieTrack: View {
     let eaten: WidgetNutritionMetric
     let goal: WidgetNutritionMetric
     let date: Date
+
+    @Environment(\.lifeOSWidgetChrome) private var chrome
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -805,7 +954,7 @@ private struct NutritionCalorieTrack: View {
             .frame(height: 16)
             Text("Goal \(nutritionWidgetValue(goal, at: date, unit: "kcal"))")
                 .font(.system(size: 8, weight: .medium))
-                .foregroundStyle(LifeOSTokens.tertiaryText)
+                .foregroundStyle(chrome.tertiary)
                 .monospacedDigit()
         }
         .accessibilityElement(children: .ignore)
@@ -874,6 +1023,16 @@ private struct NutritionMacroGoalCell: View {
 struct CaloriesMacrosWidgetView: View {
     let entry: FutureModuleWidgetEntry
 
+    @Environment(\.showsWidgetContainerBackground) private var showsWidgetContainerBackground
+    @Environment(\.widgetRenderingMode) private var widgetRenderingMode
+
+    private var chrome: LifeOSWidgetChrome {
+        LifeOSWidgetChrome.resolving(
+            showsContainerBackground: showsWidgetContainerBackground,
+            renderingMode: widgetRenderingMode
+        )
+    }
+
     var body: some View {
         let nutrition = entry.snapshot.nutrition
         VStack(alignment: .leading, spacing: 7) {
@@ -891,11 +1050,11 @@ struct CaloriesMacrosWidgetView: View {
             }
             Text("Goal period · today · \(nutritionWidgetStateText(entry.snapshot.nutritionDisplayState(at: entry.date)))")
                 .font(.system(size: 8, weight: .medium))
-                .foregroundStyle(LifeOSTokens.tertiaryText)
+                .foregroundStyle(chrome.tertiary)
                 .lineLimit(1)
         }
         .padding(12)
-        .containerBackground(for: .widget) {
+        .lifeOSWidgetContainer {
             LinearGradient(colors: [LifeOSTokens.surface, LifeOSTokens.canvas], startPoint: .topLeading, endPoint: .bottomTrailing)
         }
         .widgetURL(URL(string: "lifeos://fitness/nutrition/goals"))
@@ -919,6 +1078,8 @@ struct CaloriesMacrosWidgetView: View {
 private struct NutritionSignedBalanceScale: View {
     let balance: Double?
     let date: Date
+
+    @Environment(\.lifeOSWidgetChrome) private var chrome
 
     var body: some View {
         VStack(spacing: 3) {
@@ -950,7 +1111,7 @@ private struct NutritionSignedBalanceScale: View {
             }
             .font(.system(size: 8, weight: .medium, design: .rounded))
             .monospacedDigit()
-            .foregroundStyle(LifeOSTokens.tertiaryText)
+            .foregroundStyle(chrome.tertiary)
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Signed net energy scale from minus 500 to plus 500 kilocalories")
@@ -960,6 +1121,16 @@ private struct NutritionSignedBalanceScale: View {
 
 struct NetEnergyWidgetView: View {
     let entry: FutureModuleWidgetEntry
+
+    @Environment(\.showsWidgetContainerBackground) private var showsWidgetContainerBackground
+    @Environment(\.widgetRenderingMode) private var widgetRenderingMode
+
+    private var chrome: LifeOSWidgetChrome {
+        LifeOSWidgetChrome.resolving(
+            showsContainerBackground: showsWidgetContainerBackground,
+            renderingMode: widgetRenderingMode
+        )
+    }
 
     var body: some View {
         let nutrition = entry.snapshot.nutrition
@@ -971,7 +1142,7 @@ struct NetEnergyWidgetView: View {
                     .monospacedDigit()
                     .lineLimit(1)
                     .minimumScaleFactor(0.55)
-                Text("kcal balance").font(.system(size: 9, weight: .medium)).foregroundStyle(LifeOSTokens.tertiaryText)
+                Text("kcal balance").font(.system(size: 9, weight: .medium)).foregroundStyle(chrome.tertiary)
                 Spacer(minLength: 5)
                 Text("Burned \(nutritionWidgetValue(nutrition.caloriesBurned, at: entry.date, unit: "kcal"))")
                     .font(.system(size: 9, weight: .semibold, design: .rounded)).monospacedDigit()
@@ -981,11 +1152,11 @@ struct NetEnergyWidgetView: View {
             NutritionSignedBalanceScale(balance: signedBalance, date: entry.date)
             Text(provenanceText)
                 .font(.system(size: 8, weight: .medium))
-                .foregroundStyle(LifeOSTokens.tertiaryText)
+                .foregroundStyle(chrome.tertiary)
                 .lineLimit(1)
         }
         .padding(12)
-        .containerBackground(for: .widget) {
+        .lifeOSWidgetContainer {
             LinearGradient(colors: [LifeOSTokens.surface, LifeOSTokens.canvas], startPoint: .topLeading, endPoint: .bottomTrailing)
         }
         .widgetURL(URL(string: "lifeos://fitness/net-energy"))
@@ -1072,14 +1243,16 @@ private struct FitnessCompactWidgetHeader: View {
     let title: String
     let icon: LifeOSIconName
 
+    @Environment(\.lifeOSWidgetChrome) private var chrome
+
     var body: some View {
         HStack(spacing: 5) {
             LifeOSIcon(icon)
                 .frame(width: 12, height: 12)
-                .foregroundStyle(LifeOSTokens.tertiaryText)
+                .foregroundStyle(chrome.tertiary)
             Text(title)
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.primary)
+                .foregroundStyle(chrome.hero)
             Spacer(minLength: 0)
         }
     }
@@ -1109,6 +1282,8 @@ private struct FitnessRingCell: View {
     let date: Date
     let hue: LifeOSTokens.Hue
 
+    @Environment(\.lifeOSWidgetChrome) private var chrome
+
     var body: some View {
         Link(destination: URL(string: route)!) {
             VStack(spacing: 2) {
@@ -1136,7 +1311,7 @@ private struct FitnessRingCell: View {
                     .lineLimit(1)
                 Text(fitnessWidgetState(metric, at: date) == .fresh ? "Observed" : futureModuleStateText(fitnessWidgetState(metric, at: date)))
                     .font(.system(size: 6, weight: .medium))
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .foregroundStyle(chrome.tertiary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.65)
             }
@@ -1152,6 +1327,16 @@ private struct FitnessRingCell: View {
 
 struct DailyOverviewWidgetView: View {
     let entry: FutureModuleWidgetEntry
+
+    @Environment(\.showsWidgetContainerBackground) private var showsWidgetContainerBackground
+    @Environment(\.widgetRenderingMode) private var widgetRenderingMode
+
+    private var chrome: LifeOSWidgetChrome {
+        LifeOSWidgetChrome.resolving(
+            showsContainerBackground: showsWidgetContainerBackground,
+            renderingMode: widgetRenderingMode
+        )
+    }
 
     var body: some View {
         let fitness = entry.snapshot.fitnessWidgets
@@ -1171,7 +1356,7 @@ struct DailyOverviewWidgetView: View {
                         .lineLimit(1)
                     Text("Aggregate signals")
                         .font(.system(size: 7, weight: .medium))
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .foregroundStyle(chrome.tertiary)
                         .lineLimit(1)
                 }
                 .padding(.horizontal, 7)
@@ -1186,7 +1371,7 @@ struct DailyOverviewWidgetView: View {
             .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(LifeOSTokens.quietBorder, lineWidth: 0.7))
         }
         .padding(10)
-        .containerBackground(for: .widget) {
+        .lifeOSWidgetContainer {
             LinearGradient(colors: [LifeOSTokens.surface, LifeOSTokens.canvas], startPoint: .topLeading, endPoint: .bottomTrailing)
         }
         .widgetURL(URL(string: "lifeos://fitness/daily-overview"))
@@ -1201,6 +1386,8 @@ private struct FitnessHealthMetricCell: View {
     let route: String
     let date: Date
     let icon: LifeOSIconName
+
+    @Environment(\.lifeOSWidgetChrome) private var chrome
 
     var body: some View {
         Link(destination: URL(string: route)!) {
@@ -1235,10 +1422,10 @@ private struct FitnessHealthMetricCell: View {
                 .minimumScaleFactor(0.5)
                 Text(metric.unit.displayName)
                     .font(.system(size: 7, weight: .medium))
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .foregroundStyle(chrome.tertiary)
                 LifeOSIcon(icon)
                     .frame(width: 11, height: 11)
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .foregroundStyle(chrome.tertiary)
             }
             .padding(.horizontal, 3)
             .padding(.vertical, 3)
@@ -1291,7 +1478,7 @@ struct FitnessHealthMonitorWidgetView: View {
             }
         }
         .padding(11)
-        .containerBackground(for: .widget) {
+        .lifeOSWidgetContainer {
             LinearGradient(colors: [LifeOSTokens.surface, LifeOSTokens.canvas], startPoint: .topLeading, endPoint: .bottomTrailing)
         }
         .widgetURL(URL(string: "lifeos://fitness/health"))
@@ -1303,6 +1490,8 @@ struct FitnessHealthMonitorWidgetView: View {
 private struct FitnessStressChart: View {
     let trend: WidgetStressTrend
     let currentValue: Double?
+
+    @Environment(\.lifeOSWidgetChrome) private var chrome
 
     var body: some View {
         GeometryReader { proxy in
@@ -1339,11 +1528,11 @@ private struct FitnessStressChart: View {
                 }
                 Text("100")
                     .font(.system(size: 7, weight: .medium, design: .rounded))
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .foregroundStyle(chrome.tertiary)
                     .offset(x: 2, y: -1)
                 Text("0")
                     .font(.system(size: 7, weight: .medium, design: .rounded))
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .foregroundStyle(chrome.tertiary)
                     .offset(x: 6, y: proxy.size.height - 10)
             }
         }
@@ -1355,6 +1544,16 @@ private struct FitnessStressChart: View {
 
 struct FitnessStressWidgetView: View {
     let entry: FutureModuleWidgetEntry
+
+    @Environment(\.showsWidgetContainerBackground) private var showsWidgetContainerBackground
+    @Environment(\.widgetRenderingMode) private var widgetRenderingMode
+
+    private var chrome: LifeOSWidgetChrome {
+        LifeOSWidgetChrome.resolving(
+            showsContainerBackground: showsWidgetContainerBackground,
+            renderingMode: widgetRenderingMode
+        )
+    }
 
     var body: some View {
         let fitness = entry.snapshot.fitnessWidgets
@@ -1368,7 +1567,7 @@ struct FitnessStressWidgetView: View {
                 Spacer(minLength: 0)
                 Text(fitnessWidgetFreshness(fitness.stressScore, at: entry.date))
                     .font(.system(size: 8, weight: .medium))
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .foregroundStyle(chrome.tertiary)
                     .lineLimit(1)
             }
             FitnessStressChart(
@@ -1383,11 +1582,11 @@ struct FitnessStressWidgetView: View {
             }
             .font(.system(size: 8, weight: .medium, design: .rounded))
             .monospacedDigit()
-            .foregroundStyle(LifeOSTokens.tertiaryText)
+            .foregroundStyle(chrome.tertiary)
             .lineLimit(1)
         }
         .padding(10)
-        .containerBackground(for: .widget) {
+        .lifeOSWidgetContainer {
             LinearGradient(colors: [LifeOSTokens.surface, LifeOSTokens.canvas], startPoint: .topLeading, endPoint: .bottomTrailing)
         }
         .widgetURL(URL(string: "lifeos://fitness/stress"))
@@ -1419,6 +1618,16 @@ private struct FitnessEnergySegments: View {
 struct FitnessEnergyReserveWidgetView: View {
     let entry: FutureModuleWidgetEntry
 
+    @Environment(\.showsWidgetContainerBackground) private var showsWidgetContainerBackground
+    @Environment(\.widgetRenderingMode) private var widgetRenderingMode
+
+    private var chrome: LifeOSWidgetChrome {
+        LifeOSWidgetChrome.resolving(
+            showsContainerBackground: showsWidgetContainerBackground,
+            renderingMode: widgetRenderingMode
+        )
+    }
+
     var body: some View {
         let fitness = entry.snapshot.fitnessWidgets
         let energy = fitness.energyReserve
@@ -1430,7 +1639,7 @@ struct FitnessEnergyReserveWidgetView: View {
                 Spacer(minLength: 0)
                 Text(futureModuleStateText(state))
                     .font(.system(size: 8, weight: .medium))
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .foregroundStyle(chrome.tertiary)
                     .lineLimit(1)
             }
             HStack(alignment: .firstTextBaseline, spacing: 5) {
@@ -1439,11 +1648,11 @@ struct FitnessEnergyReserveWidgetView: View {
                     .monospacedDigit()
                 Text("% reserve")
                     .font(.system(size: 9, weight: .medium))
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .foregroundStyle(chrome.tertiary)
                 Spacer(minLength: 0)
                 Text(lastChargedText(energy.lastChargedAt))
                     .font(.system(size: 9, weight: .medium))
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .foregroundStyle(chrome.tertiary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.65)
             }
@@ -1455,7 +1664,7 @@ struct FitnessEnergyReserveWidgetView: View {
             }
         }
         .padding(10)
-        .containerBackground(for: .widget) {
+        .lifeOSWidgetContainer {
             LinearGradient(colors: [LifeOSTokens.surface, LifeOSTokens.canvas], startPoint: .topLeading, endPoint: .bottomTrailing)
         }
         .widgetURL(URL(string: "lifeos://fitness/energy-reserve"))
