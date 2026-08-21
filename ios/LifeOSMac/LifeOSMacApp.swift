@@ -88,7 +88,8 @@ struct LifeOSMacApp: App {
         Settings {
             SettingsView(
                 usageCoordinator: usageCoordinator,
-                financeCoordinator: financeCoordinator
+                financeCoordinator: financeCoordinator,
+                clipperCoordinator: clipperCoordinator
             )
                 .frame(minWidth: 520, minHeight: 360)
                 .tint(LifeOSTokens.accent)
@@ -356,7 +357,8 @@ struct LifeOSMacRootView: View {
             NavigationStack {
                 SettingsView(
                     usageCoordinator: usageCoordinator,
-                    financeCoordinator: financeCoordinator
+                    financeCoordinator: financeCoordinator,
+                    clipperCoordinator: clipperCoordinator
                 )
             }
                 .transition(reduceMotion ? .identity : .opacity)

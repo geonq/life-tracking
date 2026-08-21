@@ -602,6 +602,7 @@ struct AppGroupSettingsSnapshot: Equatable, Sendable {
 struct SettingsView: View {
     @ObservedObject private var usageCoordinator: UsageCoordinator
     @ObservedObject private var financeCoordinator: FinanceCoordinator
+    @ObservedObject private var clipperCoordinator: ClipperCoordinator
     private let healthReadAccess: HealthReadAccessSettings
     private let requestHealthReadAccess: (@MainActor () async -> Void)?
     private let retainedHealthData: RetainedHealthDataSettings
@@ -627,10 +628,15 @@ struct SettingsView: View {
         )
     }
 
+    private var clipperReadiness: SettingsReadiness {
+        .clipper(clipperCoordinator.state)
+    }
+
     private var categories: [SettingsCategory] {
         [
             .init(id: "providers", title: "AI providers", subtitle: "Codex, Claude, GLM, DeepSeek, Google AI Studio", readiness: .providers(usageSettings.readiness), icon: .assistant),
             .init(id: "finance", title: "Bank connections", subtitle: "Sparkasse, Revolut Personal / Business, Trade Republic, and consent", readiness: .finance(financeSettings.readiness), icon: .bankConnections),
+            .init(id: "clipper", title: "Clipper", subtitle: "Transit capture via the Windows gateway source", readiness: clipperReadiness, icon: .clipper),
             .init(id: "health", title: "Health & devices", subtitle: "Helio → Zepp → Apple Health / HealthKit", readiness: .healthRead(healthReadAccess.state), icon: .health),
             .init(id: "sync", title: "Sync & storage", subtitle: "Tailscale device identity, Windows authority, and local data", readiness: .identityPending, icon: .refresh),
             .init(id: "privacy", title: "Privacy & security", subtitle: "Local safeguards, signing, and unresolved server gates", readiness: .localSafeguards, icon: .security)
@@ -641,6 +647,7 @@ struct SettingsView: View {
     init(
         usageCoordinator: UsageCoordinator,
         financeCoordinator: FinanceCoordinator,
+        clipperCoordinator: ClipperCoordinator,
         healthReadAccess: HealthReadAccessSettings,
         requestHealthReadAccess: (@MainActor () async -> Void)?,
         retainedHealthData: RetainedHealthDataSettings,
@@ -649,6 +656,7 @@ struct SettingsView: View {
     ) {
         _usageCoordinator = ObservedObject(wrappedValue: usageCoordinator)
         _financeCoordinator = ObservedObject(wrappedValue: financeCoordinator)
+        _clipperCoordinator = ObservedObject(wrappedValue: clipperCoordinator)
         self.healthReadAccess = healthReadAccess
         self.requestHealthReadAccess = requestHealthReadAccess
         self.retainedHealthData = retainedHealthData
@@ -659,12 +667,14 @@ struct SettingsView: View {
     init(
         usageCoordinator: UsageCoordinator,
         financeCoordinator: FinanceCoordinator,
+        clipperCoordinator: ClipperCoordinator,
         healthReadAccess: HealthReadAccessSettings = .platformDefault,
         requestHealthReadAccess: (@MainActor () async -> Void)? = nil,
         retainedHealthData: RetainedHealthDataSettings = .unavailable
     ) {
         _usageCoordinator = ObservedObject(wrappedValue: usageCoordinator)
         _financeCoordinator = ObservedObject(wrappedValue: financeCoordinator)
+        _clipperCoordinator = ObservedObject(wrappedValue: clipperCoordinator)
         self.healthReadAccess = healthReadAccess
         self.requestHealthReadAccess = requestHealthReadAccess
         self.retainedHealthData = retainedHealthData
@@ -708,6 +718,19 @@ struct SettingsView: View {
                         .accessibilityIdentifier("settings-category-finance")
 
                         NavigationLink {
+                            ClipperConnectionSettingsView(
+                                state: clipperCoordinator.state,
+                                lastUpdated: clipperCoordinator.lastUpdated,
+                                errorMessage: clipperCoordinator.errorMessage,
+                                refreshAction: { await clipperCoordinator.refresh() }
+                            )
+                        } label: {
+                            SettingsHubCard(category: categories[2])
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("settings-category-clipper")
+
+                        NavigationLink {
 #if os(iOS)
                             HealthDevicesSettingsView(
                                 healthReadAccess: healthReadAccess,
@@ -724,7 +747,7 @@ struct SettingsView: View {
                             )
 #endif
                         } label: {
-                            SettingsHubCard(category: categories[2])
+                            SettingsHubCard(category: categories[3])
                         }
                         .buttonStyle(.plain)
                         .accessibilityIdentifier("settings-category-health")
@@ -732,7 +755,7 @@ struct SettingsView: View {
                         NavigationLink {
                             SyncStorageSettingsView()
                         } label: {
-                            SettingsHubCard(category: categories[3])
+                            SettingsHubCard(category: categories[4])
                         }
                         .buttonStyle(.plain)
                         .accessibilityIdentifier("settings-category-sync")
@@ -740,7 +763,7 @@ struct SettingsView: View {
                         NavigationLink {
                             PrivacySecuritySettingsView()
                         } label: {
-                            SettingsHubCard(category: categories[4])
+                            SettingsHubCard(category: categories[5])
                         }
                         .buttonStyle(.plain)
                         .accessibilityIdentifier("settings-category-privacy")
@@ -772,6 +795,7 @@ private struct SettingsCategory: Identifiable {
 private enum SettingsReadiness: Equatable {
     case providers(UsageSettingsHubReadiness)
     case finance(FinanceSettingsReadiness)
+    case clipper(ClipperLoadState)
     case serverGatePending
     case consentRequired
     case healthRead(HealthReadAccessSettings.State)
@@ -782,6 +806,14 @@ private enum SettingsReadiness: Equatable {
         switch self {
         case .providers(let readiness): readiness.title
         case .finance(let readiness): readiness.title
+        case .clipper(let state):
+            switch state {
+            case .demo: "Demo fixtures active"
+            case .loading: "Checking gateway"
+            case .observed: "Connected"
+            case .stale: "Stale · refresh available"
+            case .unavailable: "Not connected"
+            }
         case .serverGatePending: "Server gate pending"
         case .consentRequired: "Consent required"
         case .healthRead(let state):
@@ -809,6 +841,12 @@ private enum SettingsReadiness: Equatable {
              .providers(.unavailable),
              .finance(.loading), .finance(.stale),
              .finance(.demo), .finance(.unavailable):
+            LifeOSTokens.warning
+        case .clipper(.observed):
+            LifeOSTokens.success
+        case .clipper(.demo), .clipper(.loading):
+            LifeOSTokens.info
+        case .clipper(.stale), .clipper(.unavailable):
             LifeOSTokens.warning
         case .healthRead(.readIndeterminate):
             LifeOSTokens.info
@@ -1036,6 +1074,135 @@ struct ProviderConnectionsSettingsView: View {
         case .observed: LifeOSTokens.success
         case .partial: LifeOSTokens.info
         case .loading, .stale, .unavailable: LifeOSTokens.warning
+        }
+    }
+}
+
+struct ClipperConnectionSettingsView: View {
+    let state: ClipperLoadState
+    let lastUpdated: Date?
+    let errorMessage: String?
+    let refreshAction: (() async -> Void)?
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                SettingsIntro(
+                    title: "Clipper connection",
+                    message: "Transit data is read from the Windows Hermes gateway. There is no credential, capture, or storage path in this app."
+                )
+
+                SettingsSection(title: "Connection status", icon: .clipper) {
+                    VStack(spacing: 0) {
+                        SettingsStatusRow(
+                            title: "Clipper source",
+                            detail: clipperDetail,
+                            status: readinessTitle,
+                            icon: .clipper,
+                            statusColor: readinessColor
+                        )
+                        if let lastUpdated {
+                            Divider().padding(.leading, 38)
+                            SettingsStatusRow(
+                                title: "Latest source update",
+                                detail: "Snapshot timestamp reported by the gateway.",
+                                status: lastUpdated.formatted(date: .abbreviated, time: .shortened),
+                                icon: .refresh,
+                                statusColor: LifeOSTokens.tertiaryText
+                            )
+                        }
+                        if let errorMessage, !errorMessage.isEmpty {
+                            Divider().padding(.leading, 38)
+                            SettingsStatusRow(
+                                title: "Last error",
+                                detail: errorMessage,
+                                status: "Attention",
+                                icon: .warning,
+                                statusColor: LifeOSTokens.warning
+                            )
+                        }
+                    }
+                }
+
+                SettingsSection(title: "Dependency", icon: .bankConnections) {
+                    VStack(spacing: 0) {
+                        SettingsStatusRow(
+                            title: "Tailscale sync",
+                            detail: "The gateway is reachable only through the sync path configured under Sync & storage. If that shows not ready, Clipper cannot connect.",
+                            status: "Required",
+                            icon: .refresh,
+                            statusColor: LifeOSTokens.tertiaryText
+                        )
+                        Divider().padding(.leading, 38)
+                        SettingsStatusRow(
+                            title: "Gateway route",
+                            detail: "GET /clipper/summary on the Windows gateway. Until a real source feeds it, the route reports an honest typed-unavailable snapshot.",
+                            status: state == .unavailable ? "Source not connected" : "Serving",
+                            icon: .clipper,
+                            statusColor: state == .unavailable ? LifeOSTokens.warning : LifeOSTokens.success
+                        )
+                    }
+                }
+
+                if let refreshAction {
+                    Button {
+                        Task { await refreshAction() }
+                    } label: {
+                        HStack(spacing: 8) {
+                            if state == .loading {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                LifeOSIcon(.refresh).frame(width: 15, height: 15)
+                            }
+                            Text(state == .loading ? "Checking gateway…" : "Refresh Clipper connection")
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(LifeOSTokens.accent)
+                    .disabled(state == .loading)
+                    .accessibilityIdentifier("settings-clipper-refresh")
+                }
+
+                TruthfulSetupNote(text: "Rows reflect only ClipperCoordinator observations. No demo or placeholder transit data exists outside explicit fixture builds; unavailable means not connected.")
+            }
+            .frame(maxWidth: 760, alignment: .leading)
+            .padding(LifeOSTokens.pagePadding)
+        }
+        .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
+        .navigationTitle("Clipper")
+    }
+
+    private var readinessTitle: String {
+        switch state {
+        case .demo: "Demo fixtures"
+        case .loading: "Checking"
+        case .observed: "Connected"
+        case .stale: "Stale"
+        case .unavailable: "Not connected"
+        }
+    }
+
+    private var readinessColor: Color {
+        switch state {
+        case .demo, .loading: LifeOSTokens.info
+        case .observed: LifeOSTokens.success
+        case .stale, .unavailable: LifeOSTokens.warning
+        }
+    }
+
+    private var clipperDetail: String {
+        switch state {
+        case .demo:
+            return "Fixture build active; production source is bypassed."
+        case .loading:
+            return "Contacting the gateway for a fresh snapshot."
+        case .observed:
+            return "Fresh snapshot observed from the gateway source."
+        case .stale:
+            return "Last observation aged out; refresh to re-check."
+        case .unavailable:
+            return "No current observation. The gateway route answers honestly until a source is wired."
         }
     }
 }

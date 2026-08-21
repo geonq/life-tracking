@@ -447,6 +447,7 @@ struct LifeOSApp: App {
             return AnyView(HealthKitSettingsDestination(
                 usageCoordinator: usageCoordinator,
                 financeCoordinator: financeCoordinator,
+                clipperCoordinator: clipperCoordinator,
                 healthKitController: healthKitController,
                 healthKitFitnessRepository: healthKitFitnessRepository,
                 requestHealthReadAccess: usesVisualFixtures ? nil : requestHealthReadAccess
@@ -455,6 +456,7 @@ struct LifeOSApp: App {
             return AnyView(SettingsView(
                 usageCoordinator: usageCoordinator,
                 financeCoordinator: financeCoordinator,
+                clipperCoordinator: clipperCoordinator,
                 healthReadAccess: healthReadAccessSettings,
                 requestHealthReadAccess: usesVisualFixtures ? nil : requestHealthReadAccess,
                 retainedHealthData: retainedHealthDataSettings
@@ -490,6 +492,7 @@ struct LifeOSApp: App {
 private struct HealthKitSettingsDestination: View {
     @ObservedObject private var usageCoordinator: UsageCoordinator
     @ObservedObject private var financeCoordinator: FinanceCoordinator
+    @ObservedObject private var clipperCoordinator: ClipperCoordinator
     @ObservedObject private var healthKitController: HealthKitIntegrationController
     @ObservedObject private var healthKitFitnessRepository: HealthKitFitnessRepository
     private let requestHealthReadAccess: (@MainActor () async -> Void)?
@@ -497,12 +500,14 @@ private struct HealthKitSettingsDestination: View {
     init(
         usageCoordinator: UsageCoordinator,
         financeCoordinator: FinanceCoordinator,
+        clipperCoordinator: ClipperCoordinator,
         healthKitController: HealthKitIntegrationController,
         healthKitFitnessRepository: HealthKitFitnessRepository,
         requestHealthReadAccess: (@MainActor () async -> Void)?
     ) {
         _usageCoordinator = ObservedObject(wrappedValue: usageCoordinator)
         _financeCoordinator = ObservedObject(wrappedValue: financeCoordinator)
+        _clipperCoordinator = ObservedObject(wrappedValue: clipperCoordinator)
         _healthKitController = ObservedObject(wrappedValue: healthKitController)
         _healthKitFitnessRepository = ObservedObject(wrappedValue: healthKitFitnessRepository)
         self.requestHealthReadAccess = requestHealthReadAccess
@@ -512,6 +517,7 @@ private struct HealthKitSettingsDestination: View {
         SettingsView(
             usageCoordinator: usageCoordinator,
             financeCoordinator: financeCoordinator,
+            clipperCoordinator: clipperCoordinator,
             healthReadAccess: HealthReadAccessSettings.from(snapshot: healthKitController.snapshot),
             requestHealthReadAccess: requestHealthReadAccess,
             retainedHealthData: retainedHealthData,
