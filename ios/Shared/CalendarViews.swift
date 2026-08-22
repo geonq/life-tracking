@@ -1224,13 +1224,6 @@ private struct CalendarTimelinePage: View {
                     // tracking the finger. Once a page is settling, this
                     // explicit state disables the center vertical scroll.
                     .scrollDisabled(!isVerticalScrollEnabled)
-                    // XCUITest resolves native scroll surfaces by their own
-                    // identifier; the passive overlay below is not the
-                    // ScrollView and cannot answer scrollViews queries. Only
-                    // the centred page may publish it.
-                    .accessibilityIdentifier(
-                        isInteractionEnabled ? "calendar-vertical-timeline-scroll" : ""
-                    )
                     .task(id: days.first) {
                         scrollProxy.scrollTo(
                             CalendarTimelineScrollAnchor.id(for: initialVisibleHour),
@@ -1243,9 +1236,7 @@ private struct CalendarTimelinePage: View {
                         Color.clear
                             .accessibilityElement(children: .ignore)
                             .accessibilityLabel("Active calendar timeline viewport")
-                            .accessibilityIdentifier(
-                                isInteractionEnabled ? "calendar-vertical-timeline" : ""
-                            )
+                            .accessibilityIdentifier("calendar-vertical-timeline")
                             .accessibilityHidden(!isInteractionEnabled)
                             .allowsHitTesting(false)
                     }
@@ -1390,7 +1381,7 @@ private struct CalendarAllDayRow: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            Text("All-day")
+            Text(Locale.current.identifier.hasPrefix("de") ? "Ganztägig" : "All-day")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .frame(width: timeGutter - 8, height: laneHeight, alignment: .trailing)
@@ -1808,6 +1799,94 @@ private enum CalendarInteractionHaptics {
 }
 
 private struct CalendarCreationGhost: View {
+    let start: Date
+    let day: Date
+    let hourHeight: CGFloat
+    let calendar: Calendar
+
+    var body: some View {
+        GeometryReader { proxy in
+            let scale = CalendarInteractionLayout.timelineScale(
+                day: day,
+                hourHeight: Double(hourHeight),
+                calendar: calendar
+            )
+            let end = calendar.date(byAdding: .minute, value: CalendarInteractionLayout.creationDurationMinutes, to: start) ?? start
+            let startY = scale?.y(for: start, calendar: calendar) ?? 0
+            let endY = scale.map { startY + $0.height(from: start, to: end, calendar: calendar) } ?? startY
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(CalendarEventVisuals.accent.opacity(0.20))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(CalendarEventVisuals.accent.opacity(0.66), lineWidth: 1)
+                }
+                .frame(width: max(0, proxy.size.width - 2), height: max(1, CGFloat(endY - startY)))
+                .offset(x: 1, y: CGFloat(startY) + 1)
+        }
+        .frame(height: hourHeight * 24)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("New 60 minute event preview")
+        .accessibilityValue(start.formatted(date: .omitted, time: .shortened))
+        .accessibilityIdentifier("calendar-creation-ghost")
+    }
+}
+
+private struct CalendarCreationRangeGhost: View {
+    let start: Date
+    let end: Date
+    let day: Date
+    let hourHeight: CGFloat
+    let calendar: Calendar
+
+    var body: some View {
+        GeometryReader { proxy in
+            let scale = CalendarInteractionLayout.timelineScale(
+                day: day,
+                hourHeight: Double(hourHeight),
+                calendar: calendar
+            )
+            let startY = scale?.y(for: start, calendar: calendar) ?? 0
+            let endY = scale.map { startY + $0.height(from: start, to: end, calendar: calendar) } ?? startY
+            let rangeHeight = max(1, CGFloat(endY - startY))
+            ZStack {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(CalendarEventVisuals.accent.opacity(0.20))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(CalendarEventVisuals.accent.opacity(0.66), lineWidth: 1)
+                    }
+                VStack(spacing: 0) {
+                    CalendarCreationHandle()
+                    Spacer(minLength: 0)
+                    CalendarCreationHandle()
+                }
+                .padding(.vertical, 3)
+            }
+            .frame(width: max(0, proxy.size.width - 2), height: rangeHeight)
+            .offset(x: 1, y: CGFloat(startY) + 1)
+        }
+        .frame(height: hourHeight * 24)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("New event selection")
+        .accessibilityValue(
+            "\(CalendarTimelineScale.localizedTimeLabel(for: start, calendar: calendar)) to " +
+            CalendarTimelineScale.localizedTimeLabel(for: end, calendar: calendar)
+        )
+        .accessibilityIdentifier("calendar-creation-range-ghost")
+    }
+}
+
+private struct CalendarCreationHandle: View {
+    var body: some View {
+        Capsule(style: .continuous)
+            .fill(CalendarEventVisuals.accent.opacity(0.80))
+            .frame(width: 30, height: 4)
+            .overlay {
+                Capsule(style: .continuous)
+                    .stroke(Color.white.opacity(0.45), lineWidth: 0.5)
+            }
+    }
+}
 
 private struct CalendarInteractiveTimelineEvent: View {
     let item: CalendarItem
@@ -2355,6 +2434,10 @@ private struct CalendarNowLine: View {
                     calendar: calendar
                 )
                 let y = min(totalHeight - 1, max(0, CGFloat(scale?.y(for: context.date, calendar: calendar) ?? 0)))
+                // The rule spans only today's column (Notion parity); the
+                // gutter label + dot stay pinned to the left edge.
+                let dayColumnWidth = days.isEmpty ? 0 : max(0, (contentWidth - timeGutter) / CGFloat(days.count))
+                let todayIndex = days.firstIndex(where: { calendar.isDateInToday($0) }) ?? 0
                 HStack(spacing: 0) {
                     Text(CalendarTimelineScale.localizedTimeLabel(for: context.date, calendar: calendar))
                         .font(.caption2.monospacedDigit().weight(.semibold))
@@ -2372,9 +2455,9 @@ private struct CalendarNowLine: View {
                         .frame(width: 7, height: 7)
                     Rectangle()
                         .fill(Color.primary)
-                        .frame(width: max(0, contentWidth - timeGutter - 7), height: 2)
+                        .frame(width: max(0, dayColumnWidth - 7), height: 2)
                 }
-                .offset(y: y - 1)
+                .offset(x: CGFloat(todayIndex) * dayColumnWidth, y: y - 1)
                 .frame(width: contentWidth, alignment: .leading)
                 .animation(reduceMotion ? nil : .linear(duration: 0.3), value: y)
                 .zIndex(4)
