@@ -1678,7 +1678,7 @@ private struct CalendarDayTimeline: View {
             narrow: layerWidth < 82,
             availableHeight: renderedHeight,
             hidesSecondaryMetadata: placement.depth == 0 && placement.columnCount > 1,
-            timeZone: calendar.timeZone,
+            timeZone: item.timeZoneIdentifier.flatMap(TimeZone.init(identifier:)) ?? calendar.timeZone,
             cornerRadii: placement.cornerRadii,
             day: day,
             hourHeight: hourHeight,

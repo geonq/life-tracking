@@ -10,6 +10,9 @@ import AppKit
 private enum CalendarDisplayMode: Hashable {
     case timeline
     case month
+    #if os(iOS)
+    case week
+    #endif
 }
 
 private struct CalendarEditorPresentation: Identifiable {
@@ -100,7 +103,12 @@ public struct CalendarView: View {
 #if os(macOS)
         CalendarDateRange.week(containing: selectedDate, calendar: calendar)
 #else
-        CalendarDateRange.days(containing: selectedDate, count: 3, calendar: calendar)
+        switch displayMode {
+        case .week:
+            CalendarDateRange.week(containing: selectedDate, calendar: calendar)
+        case .timeline, .month:
+            CalendarDateRange.days(containing: selectedDate, count: 3, calendar: calendar)
+        }
 #endif
     }
 
@@ -257,6 +265,9 @@ public struct CalendarView: View {
 #else
     private var mobileLayout: some View {
         calendarContent
+            .overlay(alignment: .bottom) {
+                calendarQuickActions
+            }
             .refreshable { await coordinator.manualRefresh() }
             .background(LifeOSTokens.canvas)
             .sheet(item: $editorPresentation) { presentation in
@@ -265,6 +276,50 @@ public struct CalendarView: View {
                     .presentationDragIndicator(.visible)
                     .presentationCornerRadius(28)
             }
+    }
+#endif
+
+#if os(iOS)
+    private var calendarQuickActions: some View {
+        HStack(spacing: 12) {
+            if let next = nextUpcomingTimedItem {
+                CalendarNextEventPill(item: next, calendar: calendar) { edit(next) }
+            }
+            Spacer(minLength: 0)
+            CalendarQuickCreateButton(action: quickCreate)
+        }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 10)
+    }
+
+    private var nextUpcomingTimedItem: CalendarItem? {
+        let now = Date.now
+        return visibleItems
+            .filter { !CalendarAllDayLayout.isAllDay($0, calendar: calendar) && $0.start > now }
+            .min { lhs, rhs in
+                lhs.start == rhs.start ? lhs.id.uuidString < rhs.id.uuidString : lhs.start < rhs.start
+            }
+    }
+
+    private var isTimedGridVisible: Bool {
+        switch displayMode {
+        case .timeline, .week: true
+        case .month: false
+        }
+    }
+
+    private func quickCreate() {
+        create(at: quickCreationDate())
+    }
+
+    private func quickCreationDate() -> Date {
+        let fallback = calendar.date(bySettingHour: 9, minute: 0, second: 0, of: selectedDate) ?? selectedDate
+        guard isTimedGridVisible else { return fallback }
+        let now = Date.now
+        guard calendar.isDate(now, inSameDayAs: selectedDate) else { return fallback }
+        let dayStart = calendar.startOfDay(for: now)
+        let elapsedMinutes = calendar.dateComponents([.minute], from: dayStart, to: now).minute ?? 0
+        return calendar.date(byAdding: .minute, value: ((elapsedMinutes / 30) + 1) * 30, to: dayStart) ?? fallback
     }
 #endif
 
@@ -305,73 +360,10 @@ public struct CalendarView: View {
             Group {
                 switch displayMode {
                 case .timeline:
-                    VStack(spacing: 0) {
-                        CalendarExpandedMonthGrid(
-                            month: headerDate,
-                            selectedDate: headerDate,
-                            selectedRange: CalendarDateRange.days(
-                                containing: headerDate,
-                                count: timelineDays.count,
-                                calendar: calendar
-                            ),
-                            calendar: calendar,
-                            namespace: reduceMotion ? nil : calendarMonthNamespace,
-                            isSource: monthExpanded,
-                            reduceMotion: reduceMotion,
-                            onSelectDate: selectExpandedDate
-                        )
-                        // Notion grows the month panel in place below the
-                        // header. Keeping its layout alive at zero height lets
-                        // the selected cell's matched geometry morph while
-                        // the day grid below follows the same height change.
-                        .frame(maxWidth: .infinity)
-                        .frame(
-                            height: monthExpanded ? CalendarExpandedMonthGrid.preferredHeight : 0,
-                            alignment: .top
-                        )
-                        .clipped()
-                        .opacity(monthExpanded ? 1 : 0)
-                        // Reduced motion keeps the matched-geometry namespace
-                        // disabled, but still gives the month panel a short,
-                        // opacity-led cross-fade instead of an abrupt reveal.
-                        .animation(
-                            reduceMotion
-                                ? .easeInOut(duration: CalendarInteractionLayout.reducedMotionMonthCrossfadeDuration)
-                                : LifeOSMotion.heroMorph,
-                            value: monthExpanded
-                        )
-                        .allowsHitTesting(monthExpanded)
-                        .accessibilityHidden(!monthExpanded)
-                        CalendarTimelineView(
-                            days: timelineDays,
-                            items: visibleItems,
-                            holidays: visibleHolidays,
-                            hourHeight: hourHeight,
-                            calendar: calendar,
-                            onSelect: calendarEventSelectionHandler,
-                            onCreate: create(at:),
-                            onCreateTimedRange: createTimedRange(start:end:anchor:),
-                            timedCreationPreview: timedCreationPreview,
-                            onUpdate: update,
-                            onStatusUpdate: updateStatus,
-                            onPreviewDateChange: previewDate,
-                            onCommitDateChange: commitPreviewDate,
-                            monthNamespace: reduceMotion ? nil : calendarMonthNamespace,
-                            monthExpanded: monthExpanded,
-                            monthSelectedDate: headerDate,
-                            reduceMotion: reduceMotion
-                        )
-                    }
+                    timedGridContent
 #if os(iOS)
-                    .simultaneousGesture(
-                        MagnificationGesture()
-                            .onChanged { scale in
-                                if gestureStartHourHeight == nil { gestureStartHourHeight = hourHeight }
-                                hourHeight = min(110, max(38, (gestureStartHourHeight ?? hourHeight) * scale))
-                            }
-                            .onEnded { _ in gestureStartHourHeight = nil }
-                    )
-                    .accessibilityHint("Pinch vertically to change hour spacing")
+                case .week:
+                    timedGridContent
 #endif
                 case .month:
                     ScrollView {
@@ -434,6 +426,78 @@ public struct CalendarView: View {
 #endif
     }
 
+    @ViewBuilder
+    private var timedGridContent: some View {
+        VStack(spacing: 0) {
+            CalendarExpandedMonthGrid(
+                month: headerDate,
+                selectedDate: headerDate,
+                selectedRange: CalendarDateRange.days(
+                    containing: headerDate,
+                    count: timelineDays.count,
+                    calendar: calendar
+                ),
+                calendar: calendar,
+                namespace: reduceMotion ? nil : calendarMonthNamespace,
+                isSource: monthExpanded,
+                reduceMotion: reduceMotion,
+                onSelectDate: selectExpandedDate
+            )
+            // Notion grows the month panel in place below the
+            // header. Keeping its layout alive at zero height lets
+            // the selected cell's matched geometry morph while
+            // the day grid below follows the same height change.
+            .frame(maxWidth: .infinity)
+            .frame(
+                height: monthExpanded ? CalendarExpandedMonthGrid.preferredHeight : 0,
+                alignment: .top
+            )
+            .clipped()
+            .opacity(monthExpanded ? 1 : 0)
+            // Reduced motion keeps the matched-geometry namespace
+            // disabled, but still gives the month panel a short,
+            // opacity-led cross-fade instead of an abrupt reveal.
+            .animation(
+                reduceMotion
+                    ? .easeInOut(duration: CalendarInteractionLayout.reducedMotionMonthCrossfadeDuration)
+                    : LifeOSMotion.heroMorph,
+                value: monthExpanded
+            )
+            .allowsHitTesting(monthExpanded)
+            .accessibilityHidden(!monthExpanded)
+            CalendarTimelineView(
+                days: timelineDays,
+                items: visibleItems,
+                holidays: visibleHolidays,
+                hourHeight: hourHeight,
+                calendar: calendar,
+                onSelect: calendarEventSelectionHandler,
+                onCreate: create(at:),
+                onCreateTimedRange: createTimedRange(start:end:anchor:),
+                timedCreationPreview: timedCreationPreview,
+                onUpdate: update,
+                onStatusUpdate: updateStatus,
+                onPreviewDateChange: previewDate,
+                onCommitDateChange: commitPreviewDate,
+                monthNamespace: reduceMotion ? nil : calendarMonthNamespace,
+                monthExpanded: monthExpanded,
+                monthSelectedDate: headerDate,
+                reduceMotion: reduceMotion
+            )
+        }
+        #if os(iOS)
+        .simultaneousGesture(
+            MagnificationGesture()
+                .onChanged { scale in
+                    if gestureStartHourHeight == nil { gestureStartHourHeight = hourHeight }
+                    hourHeight = min(110, max(38, (gestureStartHourHeight ?? hourHeight) * scale))
+                }
+                .onEnded { _ in gestureStartHourHeight = nil }
+        )
+        .accessibilityHint("Pinch vertically to change hour spacing")
+        #endif
+    }
+
     private var calendarHeader: some View {
         Group {
 #if os(iOS)
@@ -483,6 +547,9 @@ public struct CalendarView: View {
 
                 Menu {
                     Button("Timeline") { setDisplayMode(.timeline) }
+                    #if os(iOS)
+                    Button("Week") { setDisplayMode(.week) }
+                    #endif
                     Button("Month view") { setDisplayMode(.month) }
                 } label: {
                     LifeOSIcon(.calendar)
@@ -637,7 +704,11 @@ public struct CalendarView: View {
 #if os(macOS)
         "week"
 #else
-        "three days"
+        switch displayMode {
+        case .month: "month"
+        case .week: "week"
+        case .timeline: "three days"
+        }
 #endif
     }
 
@@ -678,7 +749,12 @@ public struct CalendarView: View {
 #if os(macOS)
         let amount = displayMode == .month ? direction : direction * 7
 #else
-        let amount = displayMode == .month ? direction : direction * 3
+        let amount: Int
+        switch displayMode {
+        case .month: amount = direction
+        case .week: amount = direction * 7
+        case .timeline: amount = direction * 3
+        }
 #endif
         selectedDate = calendar.date(byAdding: component, value: amount, to: selectedDate) ?? selectedDate
     }
@@ -932,6 +1008,124 @@ public struct CalendarView: View {
     }
 }
 
+#if os(iOS)
+private struct CalendarNextEventPill: View {
+    let item: CalendarItem
+    let calendar: Calendar
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: "clock")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.lifeOSCalendarRed)
+                Text("Next: \(item.title) · \(timeLabel)")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 36)
+            .background(.ultraThinMaterial, in: Capsule())
+            .overlay { Capsule().stroke(LifeOSTokens.quietBorder, lineWidth: 0.75) }
+            .shadow(color: .black.opacity(0.12), radius: 8, y: 2)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Next event, \(item.title), \(timeLabel)")
+        .accessibilityIdentifier("calendar-next-event-pill")
+    }
+
+    private var timeLabel: String {
+        var zoned = calendar
+        zoned.timeZone = itemTimeZone
+        return String(
+            format: "%02d:%02d",
+            zoned.component(.hour, from: item.start),
+            zoned.component(.minute, from: item.start)
+        )
+    }
+
+    private var itemTimeZone: TimeZone {
+        item.timeZoneIdentifier.flatMap(TimeZone.init(identifier:)) ?? calendar.timeZone
+    }
+}
+
+private struct CalendarQuickCreateButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            LifeOSIcon(.add)
+                .frame(width: 22, height: 22)
+                .foregroundStyle(.white)
+                .frame(width: 48, height: 48)
+                .background(Color.lifeOSCalendarRed, in: Circle())
+                .shadow(color: .black.opacity(0.16), radius: 10, y: 3)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("New event")
+        .accessibilityIdentifier("calendar-fab-create")
+    }
+}
+
+private struct CalendarEditorTimeZoneChip: View {
+    @Binding var identifier: String?
+    private let deviceIdentifier = TimeZone.current.identifier
+    private static let commonZoneIdentifiers = ["UTC", "Europe/Berlin"]
+
+    var body: some View {
+        Menu {
+            Button {
+                identifier = nil
+            } label: {
+                choiceLabel(deviceIdentifier, isSelected: identifier == nil)
+            }
+            ForEach(Self.commonZoneIdentifiers, id: \.self) { candidate in
+                Button {
+                    identifier = TimeZone(identifier: candidate)?.identifier ?? candidate
+                } label: {
+                    choiceLabel(candidate, isSelected: identifier == candidate)
+                }
+            }
+        } label: {
+            HStack(spacing: 7) {
+                Text(shortName(effectiveIdentifier))
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Color.primary.opacity(0.07), in: Capsule())
+        }
+        .accessibilityLabel("Timezone")
+        .accessibilityValue(effectiveIdentifier)
+        .accessibilityIdentifier("calendar-event-timezone")
+    }
+
+    private var effectiveIdentifier: String {
+        identifier ?? deviceIdentifier
+    }
+
+    private func choiceLabel(_ zoneIdentifier: String, isSelected: Bool) -> some View {
+        HStack(spacing: 6) {
+            Text(zoneIdentifier)
+            if isSelected {
+                Image(systemName: "checkmark")
+            }
+        }
+    }
+
+    private func shortName(_ zoneIdentifier: String) -> String {
+        zoneIdentifier.split(separator: "/").last.map(String.init) ?? zoneIdentifier
+    }
+}
+#endif
+
 /// Pure date translation used by the editor when its day property changes.
 /// Translating the existing interval, rather than rebuilding the end from its
 /// wall-clock components, preserves both duration and overnight placement.
@@ -1039,6 +1233,7 @@ struct CalendarEditor: View {
     @State private var eventDate: Date
     @State private var allDay: Bool
     @State private var showTimezone: Bool
+    @State private var timeZoneIdentifier: String?
     @State private var validationMessage: String?
     @State private var retryAvailable = false
     @State private var showingIconPicker = false
@@ -1088,6 +1283,7 @@ struct CalendarEditor: View {
         let nextDay = calendar.date(byAdding: .day, value: 1, to: startDay)
         _allDay = State(initialValue: nextDay.map { item?.start == startDay && item?.end == $0 } ?? false)
         _showTimezone = State(initialValue: false)
+        _timeZoneIdentifier = State(initialValue: item?.timeZoneIdentifier)
     }
 
     var body: some View {
@@ -1460,29 +1656,18 @@ struct CalendarEditor: View {
 #if os(macOS)
                 CalendarEditorInlineToggle(title: "All day", isOn: $allDay, identifier: "calendar-event-all-day")
                 CalendarEditorInlineToggle(title: "Timezone", isOn: $showTimezone, identifier: "calendar-event-timezone")
+                if showTimezone {
+                    Text(TimeZone.current.identifier)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
 #else
                 Toggle("All day", isOn: $allDay)
                     .toggleStyle(.button)
                     .controlSize(.small)
                     .accessibilityIdentifier("calendar-event-all-day")
-                Toggle("Timezone", isOn: $showTimezone)
-                    .toggleStyle(.button)
-                    .controlSize(.small)
-                    .accessibilityIdentifier("calendar-event-timezone")
-                if showTimezone {
-                    Text(TimeZone.current.identifier)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-#endif
-#if os(macOS)
-                if showTimezone {
-                    Text(TimeZone.current.identifier)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
+                CalendarEditorTimeZoneChip(identifier: $timeZoneIdentifier)
 #endif
                 Spacer(minLength: 0)
             }
@@ -1566,7 +1751,8 @@ struct CalendarEditor: View {
                 end: end,
                 createdAt: existing?.createdAt ?? .now,
                 updatedAt: .now,
-                deletedAt: existing?.deletedAt
+                deletedAt: existing?.deletedAt,
+                timeZoneIdentifier: timeZoneIdentifier
             )
             onSave(item, handleMutationResult)
         } catch {

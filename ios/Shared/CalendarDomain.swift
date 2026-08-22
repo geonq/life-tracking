@@ -123,6 +123,7 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
     public var status: CalendarProgress
     public var start: Date
     public var end: Date
+    public var timeZoneIdentifier: String?
     public let createdAt: Date
     public var updatedAt: Date
     public var deletedAt: Date?
@@ -132,7 +133,8 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
 
     public init(id: UUID = UUID(), title: String, kind: CalendarItemKind = .event, icon: String? = nil, iconAsset: CalendarIconAsset? = nil,
                 systemIconName: String? = nil, status: CalendarProgress = .planned,
-                start: Date, end: Date, createdAt: Date = .now, updatedAt: Date? = nil, deletedAt: Date? = nil) throws {
+                start: Date, end: Date, createdAt: Date = .now, updatedAt: Date? = nil, deletedAt: Date? = nil,
+                timeZoneIdentifier: String? = nil) throws {
         guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw CalendarValidationError.blankTitle }
         guard end > start else { throw CalendarValidationError.invalidInterval }
         self.id = id; self.title = title.trimmingCharacters(in: .whitespacesAndNewlines); self.kind = kind
@@ -146,12 +148,14 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
         self.icon = validatedSystemIconName == nil && retainedAsset == nil
             ? CalendarEmojiValidation.validated(icon)
             : nil
-        self.status = status; self.start = start; self.end = end; self.createdAt = createdAt
+        self.status = status; self.start = start; self.end = end
+        self.timeZoneIdentifier = timeZoneIdentifier.flatMap { TimeZone(identifier: $0)?.identifier }
+        self.createdAt = createdAt
         self.updatedAt = updatedAt ?? createdAt; self.deletedAt = deletedAt
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, kind, icon, iconAsset, systemIconName, status, start, end, createdAt, updatedAt, deletedAt
+        case id, title, kind, icon, iconAsset, systemIconName, status, start, end, createdAt, updatedAt, deletedAt, timeZoneIdentifier
     }
 
     public init(from decoder: Decoder) throws {
@@ -170,7 +174,8 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
             end: container.decode(Date.self, forKey: .end),
             createdAt: container.decode(Date.self, forKey: .createdAt),
             updatedAt: container.decode(Date.self, forKey: .updatedAt),
-            deletedAt: container.decodeIfPresent(Date.self, forKey: .deletedAt)
+            deletedAt: container.decodeIfPresent(Date.self, forKey: .deletedAt),
+            timeZoneIdentifier: container.decodeIfPresent(String.self, forKey: .timeZoneIdentifier)
         )
     }
 
@@ -189,6 +194,7 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
         try container.encode(createdAt, forKey: .createdAt)
         try container.encode(updatedAt, forKey: .updatedAt)
         try container.encodeIfPresent(deletedAt, forKey: .deletedAt)
+        try container.encodeIfPresent(timeZoneIdentifier, forKey: .timeZoneIdentifier)
     }
 
     fileprivate var conflictKey: String {
@@ -202,7 +208,8 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
             status.rawValue,
             String(start.timeIntervalSince1970),
             String(end.timeIntervalSince1970),
-            String(deletedAt?.timeIntervalSince1970 ?? 0)
+            String(deletedAt?.timeIntervalSince1970 ?? 0),
+            timeZoneIdentifier ?? ""
         ].joined(separator: "|")
     }
 
@@ -214,12 +221,14 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
                          iconAsset: CalendarIconAsset? = nil,
                          clearIconAsset: Bool = false, systemIconName: String? = nil,
                          clearSystemIconName: Bool = false, status: CalendarProgress? = nil,
-                         start: Date? = nil, end: Date? = nil, at: Date) throws -> CalendarItem {
+                         start: Date? = nil, end: Date? = nil, at: Date,
+                         timeZoneIdentifier: String? = nil) throws -> CalendarItem {
         try CalendarItem(id: id, title: title ?? self.title, kind: kind ?? self.kind, icon: clearIcon ? nil : (icon ?? self.icon),
                          iconAsset: clearIconAsset ? nil : (iconAsset ?? self.iconAsset),
                          systemIconName: clearSystemIconName ? nil : (systemIconName ?? self.systemIconName),
                          status: status ?? self.status,
-                         start: start ?? self.start, end: end ?? self.end, createdAt: createdAt, updatedAt: at, deletedAt: deletedAt)
+                         start: start ?? self.start, end: end ?? self.end, createdAt: createdAt, updatedAt: at, deletedAt: deletedAt,
+                         timeZoneIdentifier: timeZoneIdentifier ?? self.timeZoneIdentifier)
     }
 
     /// A to-do is complete when its durable progress is `.done`; toggling the
