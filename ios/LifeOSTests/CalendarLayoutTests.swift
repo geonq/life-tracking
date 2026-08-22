@@ -201,6 +201,18 @@ final class CalendarLayoutTests: XCTestCase {
             ),
             axisHeight + CalendarInteractionLayout.timelineBottomInset
         )
+        // The iPhone viewport's VStack runs to the physical screen bottom,
+        // underneath the home-indicator safe area (34pt) and the overlaid
+        // compact tab bar (44pt row + 6pt vertical padding). The buffer must
+        // exceed that occlusion plus the 24:00 label's own height, or
+        // maximum scroll leaves the unique endpoint hidden behind the
+        // chrome — the exact regression from the physical route test.
+        let bottomOcclusion = 34 + 44 + 6
+        XCTAssertGreaterThanOrEqual(
+            CalendarInteractionLayout.timelineBottomInset,
+            Double(bottomOcclusion) + 14,
+            "24:00 must clear the home indicator and overlaid compact tab bar at maximum scroll"
+        )
         XCTAssertEqual(
             CalendarInteractionLayout.timelineHourLabel(
                 minute: 1_440,

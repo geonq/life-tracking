@@ -1224,6 +1224,13 @@ private struct CalendarTimelinePage: View {
                     // tracking the finger. Once a page is settling, this
                     // explicit state disables the center vertical scroll.
                     .scrollDisabled(!isVerticalScrollEnabled)
+                    // XCUITest resolves native scroll surfaces by their own
+                    // identifier; the passive overlay below is not the
+                    // ScrollView and cannot answer scrollViews queries. Only
+                    // the centred page may publish it.
+                    .accessibilityIdentifier(
+                        isInteractionEnabled ? "calendar-vertical-timeline-scroll" : ""
+                    )
                     .task(id: days.first) {
                         scrollProxy.scrollTo(
                             CalendarTimelineScrollAnchor.id(for: initialVisibleHour),
@@ -1236,7 +1243,9 @@ private struct CalendarTimelinePage: View {
                         Color.clear
                             .accessibilityElement(children: .ignore)
                             .accessibilityLabel("Active calendar timeline viewport")
-                            .accessibilityIdentifier("calendar-vertical-timeline")
+                            .accessibilityIdentifier(
+                                isInteractionEnabled ? "calendar-vertical-timeline" : ""
+                            )
                             .accessibilityHidden(!isInteractionEnabled)
                             .allowsHitTesting(false)
                     }

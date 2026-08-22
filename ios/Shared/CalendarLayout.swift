@@ -602,7 +602,14 @@ public enum CalendarInteractionLayout {
     /// Space after the final 24:00 mark so the endpoint remains visible when
     /// the finite timed viewport is scrolled all the way to the bottom. This
     /// is display-only; creation and event math continue to use `timelineHeight`.
-    public static let timelineBottomInset: Double = 24
+    ///
+    /// On iPhone the timed viewport's VStack runs to the physical screen
+    /// bottom, underneath both the home-indicator safe area (34pt) and the
+    /// overlaid compact tab bar (44pt row + 6pt padding). A trailing buffer
+    /// smaller than that occlusion plus the label height clamps maximum
+    /// scroll with 24:00 still hidden behind the chrome — exactly the
+    /// unreachable-endpoint regression from the physical route test.
+    public static let timelineBottomInset: Double = 104
     /// The short range shown while a mobile time selection is being held.
     /// The editor receives the actual dragged interval; this is only the
     /// initial ghost before the finger expresses a longer/shorter range.
