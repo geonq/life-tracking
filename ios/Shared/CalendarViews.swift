@@ -1798,39 +1798,6 @@ private enum CalendarInteractionHaptics {
     }
 }
 
-private struct CalendarCreationGhost: View {
-    let start: Date
-    let day: Date
-    let hourHeight: CGFloat
-    let calendar: Calendar
-
-    var body: some View {
-        GeometryReader { proxy in
-            let scale = CalendarInteractionLayout.timelineScale(
-                day: day,
-                hourHeight: Double(hourHeight),
-                calendar: calendar
-            )
-            let end = calendar.date(byAdding: .minute, value: CalendarInteractionLayout.creationDurationMinutes, to: start) ?? start
-            let startY = scale?.y(for: start, calendar: calendar) ?? 0
-            let endY = scale.map { startY + $0.height(from: start, to: end, calendar: calendar) } ?? startY
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(CalendarEventVisuals.accent.opacity(0.20))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(CalendarEventVisuals.accent.opacity(0.66), lineWidth: 1)
-                }
-                .frame(width: max(0, proxy.size.width - 2), height: max(1, CGFloat(endY - startY)))
-                .offset(x: 1, y: CGFloat(startY) + 1)
-        }
-        .frame(height: hourHeight * 24)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("New 60 minute event preview")
-        .accessibilityValue(start.formatted(date: .omitted, time: .shortened))
-        .accessibilityIdentifier("calendar-creation-ghost")
-    }
-}
-
 private struct CalendarCreationRangeGhost: View {
     let start: Date
     let end: Date
@@ -2182,7 +2149,11 @@ private struct CalendarInteractiveTimelineEvent: View {
             resizeHandleSurface
         }
 #else
-        resizeHandleSurface
+        // Reveal the affordance only while resizing (Notion parity): idle
+        // cards stay clean; the capsule appears for the active interaction.
+        if isResizing {
+            resizeHandleSurface
+        }
 #endif
     }
 
