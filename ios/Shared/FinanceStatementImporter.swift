@@ -49,9 +49,9 @@ public enum FinanceStatementImporter {
 
     public static func parseCSV(_ text: String) -> FinanceImportResult {
         let lines = splitLines(text)
-        guard !lines.isEmpty else { return .empty }
+        guard let firstLine = lines.first else { return .empty }
 
-        let delimiter = detectDelimiter(in: lines.first!)
+        let delimiter = detectDelimiter(in: firstLine)
         let rows = lines.map { splitRow($0, delimiter: delimiter) }
 
         guard let headerIndex = rows.firstIndex(where: { isHeaderRow($0) }) else {

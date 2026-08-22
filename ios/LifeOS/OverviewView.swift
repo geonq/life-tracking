@@ -88,8 +88,7 @@ struct OverviewView: View {
                             section: clipperSection,
                             snapshot: snapshot.clipperSnapshot,
                             refreshAction: clipperRefreshAction,
-                            clipperState: clipperState,
-                            namespace: cardNamespace
+                            clipperState: clipperState
                         ),
                         sourceID: OverviewSectionKind.clipper.rawValue
                     )
@@ -282,24 +281,6 @@ struct OverviewView: View {
                 Button {
                     showingUsage = true
                 } label: {
-                    matchedSource(
-                        OverviewMetricCard(
-                            section: section,
-                            featured: featured,
-                            usageSnapshots: usageSnapshots,
-                            usageAnalytics: usageAnalytics,
-                            fitnessSnapshot: fitnessSnapshot,
-                            financeSummary: financeSummary,
-                            financeState: financeState
-                        ),
-                        id: section.kind.rawValue
-                    )
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("account-usage-link")
-                .accessibilityHint("Opens detailed Usage analytics")
-            } else {
-                matchedSource(
                     OverviewMetricCard(
                         section: section,
                         featured: featured,
@@ -308,8 +289,20 @@ struct OverviewView: View {
                         fitnessSnapshot: fitnessSnapshot,
                         financeSummary: financeSummary,
                         financeState: financeState
-                    ),
-                    id: section.kind.rawValue
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("account-usage-link")
+                .accessibilityHint("Opens detailed Usage analytics")
+            } else {
+                OverviewMetricCard(
+                    section: section,
+                    featured: featured,
+                    usageSnapshots: usageSnapshots,
+                    usageAnalytics: usageAnalytics,
+                    fitnessSnapshot: fitnessSnapshot,
+                    financeSummary: financeSummary,
+                    financeState: financeState
                 )
             }
         case .clipper:
@@ -323,17 +316,14 @@ struct OverviewView: View {
                 }
             } label: {
                 zoomSource(
-                    matchedSource(
-                        OverviewMetricCard(
-                            section: section,
-                            usageSnapshots: usageSnapshots,
-                            clipperState: clipperState,
-                            clipperSnapshot: snapshot.clipperSnapshot,
-                            fitnessSnapshot: fitnessSnapshot,
-                            financeSummary: financeSummary,
-                            financeState: financeState
-                        ),
-                        id: section.kind.rawValue
+                    OverviewMetricCard(
+                        section: section,
+                        usageSnapshots: usageSnapshots,
+                        clipperState: clipperState,
+                        clipperSnapshot: snapshot.clipperSnapshot,
+                        fitnessSnapshot: fitnessSnapshot,
+                        financeSummary: financeSummary,
+                        financeState: financeState
                     ),
                     id: section.kind.rawValue
                 )
@@ -344,78 +334,57 @@ struct OverviewView: View {
         case .health:
             if openDestination != nil {
                 Button { openDestination?(.fitness) } label: {
-                    matchedSource(
-                        OverviewMetricCard(
-                            section: section,
-                            usageSnapshots: usageSnapshots,
-                            fitnessSnapshot: fitnessSnapshot,
-                            financeSummary: financeSummary,
-                            financeState: financeState
-                        ),
-                        id: section.kind.rawValue
+                    OverviewMetricCard(
+                        section: section,
+                        usageSnapshots: usageSnapshots,
+                        fitnessSnapshot: fitnessSnapshot,
+                        financeSummary: financeSummary,
+                        financeState: financeState
                     )
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("overview-health-link")
                 .accessibilityHint("Opens Fitness")
             } else {
-                matchedSource(
+                OverviewMetricCard(
+                    section: section,
+                    usageSnapshots: usageSnapshots,
+                    fitnessSnapshot: fitnessSnapshot,
+                    financeSummary: financeSummary,
+                    financeState: financeState
+                )
+            }
+        case .finance:
+            if openDestination != nil {
+                Button { openDestination?(.finance) } label: {
                     OverviewMetricCard(
                         section: section,
                         usageSnapshots: usageSnapshots,
                         fitnessSnapshot: fitnessSnapshot,
                         financeSummary: financeSummary,
                         financeState: financeState
-                    ),
-                    id: section.kind.rawValue
-                )
-            }
-        case .finance:
-            if openDestination != nil {
-                Button { openDestination?(.finance) } label: {
-                    matchedSource(
-                        OverviewMetricCard(
-                            section: section,
-                            usageSnapshots: usageSnapshots,
-                            fitnessSnapshot: fitnessSnapshot,
-                            financeSummary: financeSummary,
-                            financeState: financeState
-                        ),
-                        id: section.kind.rawValue
                     )
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("overview-finance-link")
                 .accessibilityHint("Opens Finance")
             } else {
-                matchedSource(
-                    OverviewMetricCard(
-                        section: section,
-                        usageSnapshots: usageSnapshots,
-                        fitnessSnapshot: fitnessSnapshot,
-                        financeSummary: financeSummary,
-                        financeState: financeState
-                    ),
-                    id: section.kind.rawValue
+                OverviewMetricCard(
+                    section: section,
+                    usageSnapshots: usageSnapshots,
+                    fitnessSnapshot: fitnessSnapshot,
+                    financeSummary: financeSummary,
+                    financeState: financeState
                 )
             }
         }
     }
 
-    @ViewBuilder
-    private func matchedSource<Content: View>(_ content: Content, id: String) -> some View {
-        if reduceMotion {
-            content
-        } else {
-            content.matchedCard(id: id, in: cardNamespace)
-        }
-    }
-
     /// Tags the clipper card as the source of an iOS 18 zoom navigation transition.
-    /// `matchedGeometryEffect` (used by `matchedSource`/`matchedCard`) cannot animate across a
-    /// `navigationDestination` boundary, so the hero-morph into `ClipperAnalyticsView` needs the
-    /// dedicated `matchedTransitionSource` API instead. No-op on iOS 17 (falls back to a plain
-    /// push) and on macOS, where `NavigationTransition.zoom` is unavailable entirely.
+    /// `matchedGeometryEffect` cannot animate across a `navigationDestination` boundary, so the
+    /// hero-morph into `ClipperAnalyticsView` needs the dedicated `matchedTransitionSource` API
+    /// instead. No-op on iOS 17 (falls back to a plain push) and on macOS, where
+    /// `NavigationTransition.zoom` is unavailable entirely.
     @ViewBuilder
     private func zoomSource<Content: View>(_ content: Content, id: String) -> some View {
 #if os(iOS)
@@ -1078,8 +1047,6 @@ private struct ClipperAnalyticsView: View {
     let snapshot: ClipperSnapshot?
     let refreshAction: (() async -> Void)?
     let clipperState: ClipperLoadState
-    let namespace: Namespace.ID
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isRefreshing = false
 
     var body: some View {
@@ -1090,7 +1057,7 @@ private struct ClipperAnalyticsView: View {
                 bottomPadding: 28
             ) {
                 VStack(alignment: .leading, spacing: 16) {
-                    matchedDetail(heroCard)
+                    heroCard.transition(.opacity)
                     if let snapshot, snapshot.availability == .observed {
                         observedDetailCards(snapshot)
                     } else if section.provenance.quality == .demo {
@@ -1178,17 +1145,6 @@ private struct ClipperAnalyticsView: View {
         .padding(22)
         .frame(maxWidth: .infinity, alignment: .leading)
         .glassCard()
-    }
-
-    @ViewBuilder
-    private func matchedDetail<Content: View>(_ content: Content) -> some View {
-        if reduceMotion {
-            content.transition(.opacity)
-        } else {
-            content
-                .matchedCard(id: OverviewSectionKind.clipper.rawValue, in: namespace)
-                .transition(.opacity)
-        }
     }
 
     private func detailMetric(label: String, value: String?) -> some View {
