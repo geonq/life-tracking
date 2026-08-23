@@ -48,7 +48,8 @@ public enum CalendarWidgetData {
     /// Finds the nearest event that is still active or upcoming at `date`.
     /// Recurring items use a per-item window so an old anchor can still yield
     /// today's occurrence while the expansion remains bounded by the shared
-    /// 400-instance recurrence cap.
+    /// logarithmic historical search and the shared 400-instance recurrence
+    /// output cap.
     public static func nextEvent(
         in snapshot: CalendarSnapshot,
         at date: Date,

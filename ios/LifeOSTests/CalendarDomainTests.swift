@@ -219,6 +219,52 @@ final class CalendarDomainTests: XCTestCase {
         ).isEmpty)
     }
 
+    func testDistantHistoricalAnchorsFindOnlyInWindowOccurrencesForEveryFrequency() throws {
+        let calendar = berlinCalendar()
+        let cases: [(frequency: CalendarRecurrenceFrequency, anchor: Date, expected: Date)] = [
+            (
+                .daily,
+                try XCTUnwrap(calendar.date(from: DateComponents(year: 1, month: 1, day: 1, hour: 9))),
+                try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 8, day: 23, hour: 9)))
+            ),
+            (
+                .weekly,
+                try XCTUnwrap(calendar.date(from: DateComponents(year: 1900, month: 1, day: 1, hour: 9))),
+                try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 8, day: 24, hour: 9)))
+            ),
+            (
+                .monthly,
+                try XCTUnwrap(calendar.date(from: DateComponents(year: 1900, month: 1, day: 1, hour: 9))),
+                try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 8, day: 1, hour: 9)))
+            ),
+            (
+                .yearly,
+                try XCTUnwrap(calendar.date(from: DateComponents(year: 1900, month: 1, day: 1, hour: 9))),
+                try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 1, day: 1, hour: 9)))
+            )
+        ]
+
+        for (frequency, anchor, expected) in cases {
+            let item = try CalendarItem(
+                title: "Historical \(frequency.rawValue)",
+                start: anchor,
+                end: anchor.addingTimeInterval(1_800),
+                recurrence: CalendarRecurrenceRule(frequency: frequency)
+            )
+            let day = calendar.startOfDay(for: expected)
+            let windowEnd = try XCTUnwrap(calendar.date(byAdding: .day, value: 1, to: day))
+            let occurrences = CalendarRecurrence.occurrences(
+                of: item,
+                overlapping: DateInterval(start: day, end: windowEnd),
+                calendar: calendar
+            )
+
+            XCTAssertEqual(occurrences.count, 1, "Unexpected \(frequency.rawValue) occurrence count")
+            XCTAssertEqual(occurrences.first?.start, expected, "Unexpected \(frequency.rawValue) occurrence start")
+            XCTAssertEqual(occurrences.first?.occurrenceSourceID, item.id)
+        }
+    }
+
     func testRecurrenceCodableRoundTripLegacyPayloadAndTransientOccurrenceIdentity() throws {
         let calendar = berlinCalendar()
         let anchor = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 8, day: 1, hour: 8)))

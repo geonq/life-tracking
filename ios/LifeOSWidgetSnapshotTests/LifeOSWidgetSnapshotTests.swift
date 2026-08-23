@@ -1195,6 +1195,30 @@ final class LifeOSWidgetSnapshotTests: XCTestCase {
         XCTAssertEqual(agenda[0].start, calendarDemoDate)
     }
 
+    func testCalendarWidgetFindsTodayFromDistantHistoricalDailyAnchor() throws {
+        let today = fixedCalendar.startOfDay(for: calendarDemoDate)
+        let anchorStart = try XCTUnwrap(fixedCalendar.date(from: DateComponents(year: 1, month: 1, day: 1, hour: 8)))
+        let anchor = try CalendarItem(
+            id: UUID(uuidString: "20000000-0000-0000-0000-000000000014")!,
+            title: "Historical daily standup",
+            start: anchorStart,
+            end: anchorStart.addingTimeInterval(30 * 60),
+            createdAt: anchorStart,
+            updatedAt: anchorStart,
+            recurrence: CalendarRecurrenceRule(frequency: .daily)
+        )
+
+        let agenda = CalendarWidgetData.items(
+            on: today,
+            in: CalendarSnapshot(items: [anchor]),
+            calendar: fixedCalendar
+        )
+
+        XCTAssertEqual(agenda.count, 1)
+        XCTAssertEqual(agenda.first?.start, calendarDemoDate)
+        XCTAssertEqual(agenda.first?.occurrenceSourceID, anchor.id)
+    }
+
     func testNextEventWidgetSelectsNearestDerivedOccurrence() throws {
         let now = calendarDemoDate
         let anchorStart = fixedCalendar.date(byAdding: .day, value: -2, to: now)!

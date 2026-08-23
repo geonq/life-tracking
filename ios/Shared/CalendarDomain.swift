@@ -157,6 +157,104 @@ public enum CalendarRecurrence {
     /// so an open-ended daily rule can never explode rendering or sync work.
     public static let maximumOccurrencesPerItem = 400
 
+    /// Returns the calendar-derived start for an occurrence index without
+    /// allowing `step * interval` to overflow. Keeping this calculation
+    /// anchored to the original item preserves wall-clock and month/year
+    /// clamping semantics across DST and variable-length calendar units.
+    private static func start(
+        forStep step: Int,
+        item: CalendarItem,
+        rule: CalendarRecurrenceRule,
+        calendar: Calendar
+    ) -> Date? {
+        guard step >= 0 else { return nil }
+        let value: Int
+        if step == 0 {
+            value = 0
+        } else {
+            guard rule.interval <= Int.max / step else { return nil }
+            value = step * rule.interval
+        }
+        return calendar.date(
+            byAdding: rule.frequency.stepUnit,
+            value: value,
+            to: item.start
+        )
+    }
+
+    /// Finds the first occurrence that can overlap a finite window. The
+    /// overlap condition is `occurrenceStart + duration > window.start`, so
+    /// all earlier starts can be skipped safely. Exponential probing followed
+    /// by binary search makes the number of calendar evaluations logarithmic in
+    /// the number of periods between the anchor and the query, rather than one
+    /// evaluation per historical period. The doubling guard bounds the probe
+    /// even for malformed/extreme dates or intervals.
+    private static func firstPotentialStep(
+        for item: CalendarItem,
+        rule: CalendarRecurrenceRule,
+        duration: TimeInterval,
+        window: DateInterval?,
+        calendar: Calendar
+    ) -> Int? {
+        guard let window else { return 0 }
+
+        let overlapThreshold = window.start.addingTimeInterval(-duration)
+        guard item.start <= overlapThreshold else { return 0 }
+
+        // `until` is inclusive, but an occurrence ending exactly at the
+        // window start does not overlap. Nothing can qualify when the last
+        // permitted start is at or before that strict threshold.
+        if let until = rule.until, until <= overlapThreshold {
+            return nil
+        }
+
+        var lower = 0
+        var upper = 1
+
+        // upper doubles on every pass, so a signed Int can require at most
+        // one probe per bit before the range is exhausted.
+        var bracketFound = false
+        for _ in 0..<Int.bitWidth {
+            guard let upperStart = start(forStep: upper, item: item, rule: rule, calendar: calendar) else {
+                return nil
+            }
+            if upperStart > overlapThreshold {
+                bracketFound = true
+                break
+            }
+
+            lower = upper
+            if upper > Int.max / 2 {
+                // There is no representable later step to search. If the
+                // largest representable step is still before the threshold,
+                // no occurrence can overlap the finite query window.
+                upper = Int.max
+                guard let maximumStart = start(forStep: upper, item: item, rule: rule, calendar: calendar),
+                      maximumStart > overlapThreshold else {
+                    return nil
+                }
+                bracketFound = true
+                break
+            }
+            upper *= 2
+        }
+        guard bracketFound else { return nil }
+
+        // Find the first step whose start is strictly after the overlap
+        // threshold. A failed calendar conversion is beyond the representable
+        // date range and therefore also acts as the upper side of the search.
+        while upper - lower > 1 {
+            let midpoint = lower + (upper - lower) / 2
+            if let midpointStart = start(forStep: midpoint, item: item, rule: rule, calendar: calendar),
+               midpointStart <= overlapThreshold {
+                lower = midpoint
+            } else {
+                upper = midpoint
+            }
+        }
+        return upper
+    }
+
     /// Returns the anchor item plus every derived occurrence overlapping the
     /// window (anchor start inside the window counts as overlap). A nil
     /// window expands up to the until boundary and cap only. A non-recurring
@@ -171,19 +269,18 @@ public enum CalendarRecurrence {
 
         let duration = item.end.timeIntervalSince(item.start)
         var results: [CalendarItem] = []
-        var step = 0
+        guard var step = firstPotentialStep(
+            for: item,
+            rule: rule,
+            duration: duration,
+            window: window,
+            calendar: calendar
+        ) else {
+            return results
+        }
+
         while results.count < maximumOccurrencesPerItem {
-            let start: Date
-            if step == 0 {
-                start = item.start
-            } else {
-                guard let stepped = calendar.date(
-                    byAdding: rule.frequency.stepUnit,
-                    value: step * rule.interval,
-                    to: item.start
-                ) else { break }
-                start = stepped
-            }
+            guard let start = start(forStep: step, item: item, rule: rule, calendar: calendar) else { break }
             // Starts are monotonically increasing; once past the inclusive
             // until boundary (or the window end) nothing later can qualify.
             if let until = rule.until, start > until { break }
@@ -199,6 +296,7 @@ public enum CalendarRecurrence {
                     results.append(copy)
                 }
             }
+            guard step < Int.max else { break }
             step += 1
         }
         return results
