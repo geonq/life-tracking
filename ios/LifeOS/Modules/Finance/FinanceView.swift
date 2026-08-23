@@ -1660,6 +1660,7 @@ private struct FinanceDisplaySnapshot {
     }
 
     private static let maximumFinanceCents = 9_007_199_254_740_991
+    private static let financeStaleAfter: TimeInterval = 15 * 60
 
     private static func usableObservedAccounts(from summary: FinanceSummary?) -> [FinanceAccountObservation] {
         guard let snapshot = summary?.accounts,
@@ -1699,6 +1700,10 @@ private struct FinanceDisplaySnapshot {
         transactionRows: [FinanceTransactionObservation],
         accountObservations: [FinanceAccountObservation]
     ) -> FinancePayloadFreshness {
+        if let summary,
+           Date.now.timeIntervalSince(summary.generatedAt) >= financeStaleAfter {
+            return .stale
+        }
         var provenances: [FinancePayloadProvenance] = []
         if transactionSourceAvailable {
             if let transactionProvenance = summary?.transactions?.provenance {

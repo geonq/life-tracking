@@ -176,6 +176,22 @@ final class FinanceCoordinatorTests: XCTestCase {
         XCTAssertEqual(truth.netWorthCents, 123_456)
     }
 
+    func testFinanceViewStaleSummaryEnvelopeIsLabelledStale() throws {
+        let now = Date.now
+        let summary = try makeAccountOnlySummary(
+            now: now,
+            generatedAt: now.addingTimeInterval(-60 * 60),
+            observedAt: now.addingTimeInterval(-1),
+            freshness: "fresh",
+            connector: "healthy"
+        )
+
+        let truth = FinanceView.displayTruth(summary: summary)
+
+        XCTAssertEqual(truth.statusLabel, "Stale")
+        XCTAssertTrue(truth.sourceDisclosure.contains("Stale"))
+    }
+
     func testFinanceViewOverflowingTransactionAggregateRemainsUnavailable() throws {
         let maximum = 9_007_199_254_740_991
         let summary = try makeTransactionOnlySummary(
@@ -229,6 +245,7 @@ final class FinanceCoordinatorTests: XCTestCase {
 
     private func makeAccountOnlySummary(
         now: Date,
+        generatedAt: Date? = nil,
         observedAt: Date,
         freshness: String,
         connector: String
@@ -250,7 +267,7 @@ final class FinanceCoordinatorTests: XCTestCase {
             "balanceCents": 123_456, "source": "sparkasse_leipzig", "provenance": accountProvenance
         ]
         let payload: [String: Any] = [
-            "generatedAt": formatter.string(from: now), "currency": "EUR",
+            "generatedAt": formatter.string(from: generatedAt ?? now), "currency": "EUR",
             "monthlyIncome": unavailable, "fixedCosts": unavailable,
             "discretionaryBuffer": unavailable, "spent": unavailable,
             "savingsGoal": unavailable, "saved": unavailable,

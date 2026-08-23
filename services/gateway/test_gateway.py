@@ -1098,7 +1098,7 @@ def test_finance_summary_rejects_account_overflow_source_mismatch_and_bad_proven
         "provenance": provenance,
     }
     overflow = copy.deepcopy(payload)
-    overflow["accounts"]["accounts"][0]["balanceCents"] = FINANCE_MAX_SAFE_CENTS + 1
+    overflow["accounts"]["accounts"][0]["balanceCents"] = main.FINANCE_MAX_SAFE_CENTS + 1
     assert not main._validate_finance_payload(overflow)
 
     source_mismatch = copy.deepcopy(payload)
