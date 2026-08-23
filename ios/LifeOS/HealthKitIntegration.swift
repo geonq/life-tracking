@@ -325,9 +325,10 @@ public final class HealthKitIntegrationController: ObservableObject {
         }
     }
 
-    /// Marks the app foregrounded. A transition from inactive requests a fresh
-    /// bounded reconciliation while the production bridge keeps observer
-    /// registration idempotent.
+    /// Marks the app foregrounded. A transition from inactive restores the
+    /// observer session when the authorization gate is already open. The app
+    /// scene coordinator owns the awaited status refresh; starting another
+    /// unawaited status task here would race an explicit permission request.
     public func appActive() {
         guard snapshot.lifecycle != .active else { return }
         publish(lifecycle: .active, lastObserverCompletion: .replace(nil))

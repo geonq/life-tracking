@@ -23,6 +23,7 @@ public struct FinanceView: View {
     private let usesVisualFixtures: Bool
     private let initialDetail: FinanceDetailRoute?
     private let onOpenConnections: (() -> Void)?
+    private let onRefresh: (() async -> Void)?
 
     @State private var selectedDetail: FinanceDetail = .spend
     @State private var selectedRange: FinanceRange = .month
@@ -32,6 +33,7 @@ public struct FinanceView: View {
     @State private var selectedNetWorthPoint: Int?
     @State private var selectedCategoryID: String?
     @State private var selectedCategorySource: String?
+    @State private var isRefreshing = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// A small public route value keeps deep-link callers independent from the private
@@ -41,13 +43,15 @@ public struct FinanceView: View {
         transactions: [FinanceTransactionObservation]? = nil,
         usesVisualFixtures: Bool = false,
         initialDetail: FinanceDetailRoute? = nil,
-        onOpenConnections: (() -> Void)? = nil
+        onOpenConnections: (() -> Void)? = nil,
+        onRefresh: (() async -> Void)? = nil
     ) {
         self.summary = summary
         self.transactions = transactions
         self.usesVisualFixtures = usesVisualFixtures
         self.initialDetail = initialDetail
         self.onOpenConnections = onOpenConnections
+        self.onRefresh = onRefresh
         switch initialDetail {
         case .income: _selectedDetail = State(initialValue: .income)
         case .cashFlow: _selectedDetail = State(initialValue: .cashFlow)
@@ -81,6 +85,10 @@ public struct FinanceView: View {
         .scrollIndicators(.hidden)
         .onAppear {
             selectLatestPoints(in: snapshot)
+        }
+        .task {
+            guard !usesVisualFixtures, summary == nil, let onRefresh else { return }
+            await refresh(using: onRefresh)
         }
         .onChange(of: selectedRange) { _, _ in
             selectLatestPoints(in: snapshot)
@@ -121,11 +129,40 @@ public struct FinanceView: View {
 
             Spacer(minLength: 6)
 
+            if let onRefresh {
+                Button {
+                    Task { await refresh(using: onRefresh) }
+                } label: {
+                    Group {
+                        if isRefreshing {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            LifeOSIcon(.refresh)
+                                .frame(width: 15, height: 15)
+                        }
+                    }
+                    .frame(width: 34, height: 34)
+                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .disabled(isRefreshing)
+                .accessibilityLabel("Refresh finance summary")
+                .accessibilityIdentifier("finance-refresh")
+            }
+
             FinanceStatusBadge(snapshot: snapshot)
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Finance")
         .accessibilityValue(snapshot.accessibilityStatus)
+    }
+
+    @MainActor
+    private func refresh(using action: @escaping () async -> Void) async {
+        guard !isRefreshing else { return }
+        isRefreshing = true
+        await action()
+        isRefreshing = false
     }
 
     @ViewBuilder

@@ -1671,7 +1671,7 @@ private struct FinanceConnectionsSettingsView: View {
 
     private func gateTitle(_ risk: FinanceConnectorRisk) -> String {
         switch risk {
-        case .consentRequired: "External consent required"
+        case .consentRequired: "Consent-based connector"
         case .accountEligibilityRequired: "Eligibility + OAuth required"
         case .manualImportOnly: "Manual import only"
         }
