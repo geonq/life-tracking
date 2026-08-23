@@ -975,23 +975,21 @@ def test_loopback_upstream_clients_disable_ambient_proxy_environment(tmp_path, m
 
     def make_client(**kwargs):
         options.append(kwargs)
-        payload = VALID if len(options) == 1 else VALID_FINANCE if len(options) == 2 else VALID_CLIPPER_UNAVAILABLE
+        payload = VALID if len(options) == 1 else VALID_CLIPPER_UNAVAILABLE
         return FakeClient(FakeResponse(json.dumps(payload).encode()), **kwargs)
 
     with patch("main.httpx.AsyncClient", make_client):
         assert client.get("/usage", headers=AUTH).status_code == 200
-        assert client.get("/finance/summary", headers=AUTH).status_code == 200
         assert client.get("/clipper/summary", headers=AUTH).status_code == 200
-    assert len(options) == 3
+    assert len(options) == 2
     assert all(item["trust_env"] is False for item in options)
     assert all(item["follow_redirects"] is False for item in options)
 
 
-def test_finance_summary_healthy_unavailable_proxy():
-    with request_with(FakeResponse(json.dumps(VALID_FINANCE).encode())):
-        response = client.get("/finance/summary", headers=AUTH)
-    assert response.status_code == 200
-    assert response.json() == VALID_FINANCE
+def test_finance_summary_without_linked_connection_is_unavailable():
+    response = client.get("/finance/summary", headers=AUTH)
+    assert response.status_code == 503
+    assert response.json() == {"error": "finance unavailable"}
     assert response.headers["cache-control"] == "no-store"
 
 

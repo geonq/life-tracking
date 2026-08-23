@@ -34,6 +34,8 @@ import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response
 
+from enablebanking import EnableBankingService
+
 
 def _is_allowed_upstream(value: str, expected_path: str) -> bool:
     try:
@@ -822,6 +824,81 @@ def _validate_clipper_unavailable_snapshot(data: object) -> bool:
     )
 
 
+enable_banking = EnableBankingService(
+    data_dir=lambda: DATA_DIR,
+    validate_finance_payload=_validate_finance_payload,
+    max_safe_cents=FINANCE_MAX_SAFE_CENTS,
+)
+
+
+async def _read_bounded_finance_request(request: Request) -> bytes:
+    """Read the only mutating finance request without accepting an unbounded body."""
+    raw_length = request.headers.get("content-length")
+    if raw_length is not None:
+        try:
+            content_length = int(raw_length)
+        except ValueError as exc:
+            raise ValueError("invalid content length") from exc
+        if content_length < 0 or content_length > enable_banking.BODY_LIMIT:
+            raise ValueError("finance request too large")
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > enable_banking.BODY_LIMIT:
+            raise ValueError("finance request too large")
+        body.extend(chunk)
+    return bytes(body)
+
+
+def _finance_consent_response(payload: dict, status_code: int) -> JSONResponse:
+    return JSONResponse(payload, status_code=status_code, headers={"Cache-Control": "no-store"})
+
+
+def _finance_callback_page(linked: bool) -> Response:
+    message = "Connected — you can close this page." if linked else "Connection failed — you can close this page."
+    body = "<html><body><script>window.close()</script>" + message + "</body></html>"
+    return Response(
+        content=body.encode("utf-8"),
+        media_type="text/html; charset=utf-8",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/finance/connect")
+async def post_finance_connect(request: Request) -> Response:
+    try:
+        body = await _read_bounded_finance_request(request)
+        payload = json.loads(
+            body.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite_constant,
+        )
+    except (TimeoutError, OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return _finance_consent_response({"error": "invalid_request"}, 400)
+    institution_id = payload.get("institutionId") if isinstance(payload, dict) else None
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"institutionId"}
+        or not isinstance(institution_id, str)
+    ):
+        return _finance_consent_response({"error": "invalid_request"}, 400)
+    status_code, result = await enable_banking.start(institution_id)
+    return _finance_consent_response(result, status_code)
+
+
+@app.get("/finance/connect/status/{connection_id}")
+async def get_finance_connect_status(connection_id: str) -> Response:
+    result = await enable_banking.status(connection_id)
+    return _finance_consent_response(result, 400 if "error" in result else 200)
+
+
+@app.get("/finance/callback")
+async def get_finance_callback(request: Request) -> Response:
+    result = await enable_banking.callback(request.url.query)
+    if not result.valid:
+        return _finance_consent_response({"error": "invalid_request"}, 400)
+    return _finance_callback_page(result.linked)
+
+
 @app.websocket("/ws")
 async def ws_changes(websocket: WebSocket) -> None:
     identity = _tailscale_login_from_raw_headers(websocket.scope.get("headers", []))
@@ -1124,7 +1201,13 @@ async def get_usage() -> Response:
 
 @app.get("/finance/summary")
 async def get_finance_summary() -> Response:
-    return await _proxy_validated_json(FINANCE_UPSTREAM, _validate_finance_payload, "finance")
+    try:
+        payload = await enable_banking.refresh_summary()
+    except Exception:
+        payload = enable_banking.load_cached_summary()
+        if payload is None:
+            return _finance_consent_response({"error": "finance unavailable"}, 503)
+    return _finance_consent_response(payload, 200)
 
 
 @app.get("/clipper/summary")
