@@ -92,6 +92,18 @@ final class BankConsentTests: XCTestCase {
         XCTAssertNil(BankConsentPendingLinkStore.load(institutionId: "sparkasse_leipzig", defaults: defaults))
     }
 
+    func testPendingConsentLinkStoreRejectsMalformedPersistedValues() throws {
+        let suite = "LifeOS.BankConsentTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(
+            ["consentUrl": "http://untrusted.example/consent#fragment", "connectionId": "../escape"],
+            forKey: "LifeOS.Finance.PendingConsent.sparkasse_leipzig"
+        )
+
+        XCTAssertNil(BankConsentPendingLinkStore.load(institutionId: "sparkasse_leipzig", defaults: defaults))
+    }
+
     // MARK: - consent-link response parsing
 
     func testParseBankConsentLinkResponseSucceedsOnValidShape() throws {
