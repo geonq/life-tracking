@@ -38,9 +38,9 @@ public struct BankConsentLink: Equatable, Sendable {
 }
 
 /// Stores only the validated, opaque consent handoff needed to resume a bank
-/// login after Safari/backgrounding or an app relaunch. Bank credentials,
-/// authorization codes, provider session ids, and tokens are never persisted
-/// on the phone.
+/// login after Safari/backgrounding or an app relaunch, and to re-check a
+/// previously linked connection. Bank credentials, authorization codes,
+/// provider session ids, and tokens are never persisted on the phone.
 public enum BankConsentPendingLinkStore {
     private static let keyPrefix = "LifeOS.Finance.PendingConsent."
 

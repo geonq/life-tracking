@@ -1298,7 +1298,8 @@ private final class BankConsentRowController: ObservableObject {
                 guard !Task.isCancelled else { return }
                 switch result {
                 case .linked:
-                    BankConsentPendingLinkStore.clear(institutionId: self.institutionId)
+                    // Retain only the opaque handoff so a later Settings
+                    // visit can re-check the gateway and render Linked again.
                     self.state = .linked
                 case .expired:
                     BankConsentPendingLinkStore.clear(institutionId: self.institutionId)
