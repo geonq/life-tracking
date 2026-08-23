@@ -152,7 +152,8 @@ struct LifeOSApp: App {
                         FinanceView(
                             summary: financeCoordinator.summary,
                             usesVisualFixtures: usesVisualFixtures,
-                            initialDetail: financeDetailRoute
+                            initialDetail: financeDetailRoute,
+                            onOpenConnections: { navigate(.settings) }
                         )
                     case .fitness:
                         FitnessView(

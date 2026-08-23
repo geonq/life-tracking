@@ -22,6 +22,7 @@ public struct FinanceView: View {
     private let transactions: [FinanceTransactionObservation]?
     private let usesVisualFixtures: Bool
     private let initialDetail: FinanceDetailRoute?
+    private let onOpenConnections: (() -> Void)?
 
     @State private var selectedDetail: FinanceDetail = .spend
     @State private var selectedRange: FinanceRange = .month
@@ -39,12 +40,14 @@ public struct FinanceView: View {
         summary: FinanceSummary? = nil,
         transactions: [FinanceTransactionObservation]? = nil,
         usesVisualFixtures: Bool = false,
-        initialDetail: FinanceDetailRoute? = nil
+        initialDetail: FinanceDetailRoute? = nil,
+        onOpenConnections: (() -> Void)? = nil
     ) {
         self.summary = summary
         self.transactions = transactions
         self.usesVisualFixtures = usesVisualFixtures
         self.initialDetail = initialDetail
+        self.onOpenConnections = onOpenConnections
         switch initialDetail {
         case .income: _selectedDetail = State(initialValue: .income)
         case .cashFlow: _selectedDetail = State(initialValue: .cashFlow)
@@ -69,7 +72,7 @@ public struct FinanceView: View {
                     financeDetailAndCategories(snapshot: snapshot)
 
                     financeMetricGrid(snapshot: snapshot)
-                    FinanceAccountsCard(snapshot: snapshot)
+                    FinanceAccountsCard(snapshot: snapshot, onOpenConnections: onOpenConnections)
                     FinanceImportCard()
                 }
             }
@@ -1041,6 +1044,7 @@ private struct FinanceChartSelectionDetail: View {
 
 private struct FinanceAccountsCard: View {
     let snapshot: FinanceDisplaySnapshot
+    let onOpenConnections: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 13) {
@@ -1049,7 +1053,9 @@ private struct FinanceAccountsCard: View {
                 FinanceEmptyModuleRow(
                     icon: .bankConnections,
                     title: "No accounts connected",
-                    detail: "Connect a reviewed bank source before account balances appear."
+                    detail: "Connect a reviewed bank source before account balances appear.",
+                    actionTitle: onOpenConnections == nil ? nil : "Manage connections",
+                    action: onOpenConnections
                 )
             } else {
                 VStack(spacing: 0) {
@@ -1381,20 +1387,45 @@ private struct FinanceEmptyModuleRow: View {
     let icon: LifeOSIconName
     let title: String
     let detail: String
+    let actionTitle: String?
+    let action: (() -> Void)?
+
+    init(
+        icon: LifeOSIconName,
+        title: String,
+        detail: String,
+        actionTitle: String? = nil,
+        action: (() -> Void)? = nil
+    ) {
+        self.icon = icon
+        self.title = title
+        self.detail = detail
+        self.actionTitle = actionTitle
+        self.action = action
+    }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            LifeOSIcon(icon)
-                .foregroundStyle(LifeOSTokens.tertiaryText)
-                .frame(width: 21, height: 21)
-                .padding(.top, 2)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(LifeOSFont.inter(13, weight: .semiBold))
-                Text(detail)
-                    .font(LifeOSFont.inter(11))
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 12) {
+                LifeOSIcon(icon)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(width: 21, height: 21)
+                    .padding(.top, 2)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .font(LifeOSFont.inter(13, weight: .semiBold))
+                    Text(detail)
+                        .font(LifeOSFont.inter(11))
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            if let actionTitle, let action {
+                Button(actionTitle, action: action)
+                    .font(LifeOSFont.inter(12, weight: .semiBold))
+                    .buttonStyle(.bordered)
+                    .tint(LifeOSTokens.accent)
+                    .accessibilityIdentifier("finance-open-connections")
             }
         }
         .padding(.vertical, 5)
