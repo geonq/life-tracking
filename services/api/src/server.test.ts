@@ -168,7 +168,7 @@ describe('HTTP API', () => {
       ]);
       expect(finance.body.connectors.every((connector: { enabled: boolean }) => !connector.enabled)).toBe(true);
       expect(finance.body.connectors.every((connector: { requiresExplicitOptIn: boolean }) => connector.requiresExplicitOptIn)).toBe(true);
-      expect(finance.body.connectors.filter((connector: { provider: string }) => connector.provider === 'GoCardless Bank Account Data')).toHaveLength(2);
+      expect(finance.body.connectors.filter((connector: { provider: string }) => connector.provider === 'Enable Banking')).toHaveLength(2);
       expect(finance.body.connectors.filter((connector: { risk: string }) => connector.risk === 'consent_required')).toHaveLength(2);
       expect(finance.body.connectors.find((connector: { id: string }) => connector.id === 'revolut_business')).toMatchObject({
         accessMethod: 'official_oauth',
