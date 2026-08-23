@@ -753,7 +753,9 @@ public struct CalendarView: View {
         switch displayMode {
         case .month: amount = direction
         case .week: amount = direction * 7
-        case .timeline: amount = direction * 3
+        // The strip slides exactly one day per step, matching the swipe
+        // contract; chevrons and keyboard navigation stay in sync with it.
+        case .timeline: amount = direction
         }
 #endif
         selectedDate = calendar.date(byAdding: component, value: amount, to: selectedDate) ?? selectedDate

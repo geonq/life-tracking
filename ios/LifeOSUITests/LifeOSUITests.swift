@@ -431,7 +431,7 @@ final class LifeOSUITests: XCTestCase {
         XCTAssertFalse(battery.label.localizedCaseInsensitiveContains("Observed"), "Unavailable battery must not be presented as observed")
     }
 
-    func testCalendarPagerCommitsThreeDayPageAndCancelsShortDrag() throws {
+    func testCalendarPagerCommitsOneDaySlideAndCancelsShortDrag() throws {
         let calendarTab = app.buttons["Calendar"]
         XCTAssertTrue(calendarTab.waitForExistence(timeout: 5))
 
@@ -442,20 +442,30 @@ final class LifeOSUITests: XCTestCase {
         let header = app.buttons["calendar-month-toggle"]
         XCTAssertTrue(header.waitForExistence(timeout: 5))
         let today = calendarISODate(Calendar.current.startOfDay(for: Date()))
-        XCTAssertTrue(waitForCalendarHeaderValue(today, element: header), "Initial calendar header should expose today's fixture anchor")
+        let initialHeaderSettled = waitForCalendarHeaderValue(today, element: header)
+        if !initialHeaderSettled {
+            let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            screenshot.name = "calendar-pager-initial-header-failure"
+            screenshot.lifetime = .keepAlways
+            add(screenshot)
+        }
+        XCTAssertTrue(
+            initialHeaderSettled,
+            "Initial calendar header should expose today's fixture anchor (value=\(String(describing: header.value).debugDescription), label=\(header.label.debugDescription), exists=\(header.exists), hittable=\(header.isHittable))"
+        )
         XCTAssertTrue(
             waitForCalendarPagerCommittedDate(today, element: pager),
             "The pager must expose its committed page independently of the preview header"
         )
 
         let anchor = Calendar.current.startOfDay(for: Date())
-        let nextPage = calendarISODate(Calendar.current.date(byAdding: .day, value: 3, to: anchor)!)
+        let nextPage = calendarISODate(Calendar.current.date(byAdding: .day, value: 1, to: anchor)!)
         pager.swipeLeft()
         XCTAssertTrue(
             waitForCalendarPagerCommittedDate(nextPage, element: pager),
             "A committed swipe must update the pager's settled page/content state"
         )
-        XCTAssertTrue(waitForCalendarHeaderValue(nextPage, element: header), "A committed swipe must advance exactly one 3-day page")
+        XCTAssertTrue(waitForCalendarHeaderValue(nextPage, element: header), "A committed swipe must advance exactly one day")
 
         // A short horizontal drag should not cross the pager's paging threshold.
         let shortDragStart = pager.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
@@ -615,7 +625,7 @@ final class LifeOSUITests: XCTestCase {
 
         let header = app.buttons["calendar-month-toggle"]
         let anchor = today
-        let nextPage = calendarISODate(Calendar.current.date(byAdding: .day, value: 3, to: anchor)!)
+        let nextPage = calendarISODate(Calendar.current.date(byAdding: .day, value: 1, to: anchor)!)
         pager.swipeLeft()
         let pagerAdvanced = waitForCalendarHeaderValue(nextPage, element: header)
         if !pagerAdvanced {
