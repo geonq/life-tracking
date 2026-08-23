@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { normalizeWindow, UnifiedUsage, UsageHistoryEntry, UsageProvenance, UsageWindow } from './usage.js';
 import {
   ConnectorState, FinanceConnectorCatalog, FinanceConnectorDescriptor,
-  FinanceSummary, parseOverview, fixtures,
+  FinanceAccountSnapshot, FinanceSummary, parseOverview, fixtures,
   NutritionBenchmarkFoodClass,
 } from './index.js';
 describe('contracts',()=>{ it('accepts truthful fixture',()=>expect(parseOverview(fixtures.overview).label).toBe('Demo data')); it('rejects invalid connector state',()=>expect(()=>ConnectorState.parse('connected')).toThrow()); it('requires provenance',()=>expect(()=>parseOverview({...fixtures.overview,codex:{...fixtures.overview.codex,usage5h:{value:1,unit:'%'}}})).toThrow()); });
@@ -322,5 +322,91 @@ describe('finance summary truthfulness', () => {
         },
       },
     })).toThrow();
+  });
+
+  it('accepts an account-only observed snapshot with opaque account fields', () => {
+    const observedAt = new Date().toISOString();
+    const account = {
+      id: 'account-1', name: 'Girokonto', detail: 'EUR · Sparkasse Leipzig', balanceCents: 125_000,
+      source: 'sparkasse_leipzig',
+      provenance: {
+        source: 'sparkasse_leipzig', observedAt, freshness: 'fresh' as const,
+        quality: 'observed' as const, connectorState: 'healthy' as const,
+      },
+    };
+    const parsed = FinanceSummary.parse({
+      ...unavailableFinance,
+      generatedAt: observedAt,
+      accounts: {
+        availability: 'observed', accounts: [account], provenance: account.provenance,
+      },
+    });
+    expect(parsed.accounts?.availability).toBe('observed');
+    if (parsed.accounts?.availability !== 'observed') throw new Error('expected observed account snapshot');
+    expect(parsed.accounts.accounts[0]).toMatchObject({ id: 'account-1', balanceCents: 125_000 });
+  });
+
+  it('keeps unavailable account snapshots free of account rows and accepts missing consent summaries', () => {
+    expect(FinanceSummary.parse(unavailableFinance).accounts).toBeUndefined();
+    const unavailable = {
+      availability: 'unavailable' as const,
+      provenance: unavailableFinance.spent.provenance,
+    };
+    expect(FinanceAccountSnapshot.parse(unavailable).availability).toBe('unavailable');
+    expect(() => FinanceAccountSnapshot.parse({ ...unavailable, accounts: [] })).toThrow();
+  });
+
+  it('rejects account balance overflow and source/provenance contradictions', () => {
+    const observedAt = new Date().toISOString();
+    const account = {
+      id: 'account-1', name: 'Girokonto', detail: 'EUR', balanceCents: 100,
+      source: 'sparkasse_leipzig',
+      provenance: {
+        source: 'sparkasse_leipzig', observedAt, freshness: 'fresh' as const,
+        quality: 'observed' as const, connectorState: 'healthy' as const,
+      },
+    };
+    const base = {
+      ...unavailableFinance,
+      generatedAt: observedAt,
+      accounts: { availability: 'observed' as const, accounts: [account], provenance: account.provenance },
+    };
+    expect(() => FinanceSummary.parse({
+      ...base,
+      accounts: { ...base.accounts, accounts: [{ ...account, balanceCents: Number.MAX_SAFE_INTEGER + 1 }] },
+    })).toThrow();
+    expect(() => FinanceSummary.parse({
+      ...base,
+      accounts: { ...base.accounts, accounts: [{ ...account, source: 'revolut_personal' }] },
+    })).toThrow();
+    expect(() => FinanceSummary.parse({
+      ...base,
+      accounts: { ...base.accounts, provenance: { ...account.provenance, freshness: 'stale', connectorState: 'unavailable' } },
+    })).toThrow();
+  });
+
+  it('accepts a representative mixed account and source-aware transaction summary', () => {
+    const observedAt = new Date().toISOString();
+    const provenance = {
+      source: 'revolut_personal', observedAt, freshness: 'fresh' as const,
+      quality: 'observed' as const, connectorState: 'healthy' as const,
+    };
+    const account = {
+      id: 'account-2', name: 'Personal account', detail: 'EUR', balanceCents: -4_200,
+      source: 'revolut_personal', provenance,
+    };
+    const transaction = {
+      id: 'transaction-1', merchant: 'REWE', title: 'Groceries', signedAmountCents: -2_450,
+      timestamp: observedAt, account: 'Personal account', source: 'revolut_personal', category: 'Food',
+      provenance,
+    };
+    const parsed = FinanceSummary.parse({
+      ...unavailableFinance,
+      generatedAt: observedAt,
+      accounts: { availability: 'observed', accounts: [account], provenance },
+      transactions: { availability: 'observed', transactions: [transaction], provenance },
+    });
+    expect(parsed.accounts?.availability).toBe('observed');
+    expect(parsed.transactions?.availability).toBe('observed');
   });
 });

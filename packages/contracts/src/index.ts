@@ -79,6 +79,73 @@ const FinanceUnavailableMetric = z.object({
 export const FinanceMetric = z.discriminatedUnion('availability', [FinanceObservedMetric, FinanceUnavailableMetric]);
 export type FinanceMetric = z.infer<typeof FinanceMetric>;
 
+const financeNonEmptyText = z.string().min(1).refine(
+  value => value.trim().length > 0,
+  'finance text must not be blank',
+);
+const FinanceObservedAccountProvenance = Provenance.extend({
+  source: financeNonEmptyText,
+  freshness: z.enum(['fresh', 'stale']),
+  quality: z.literal('observed'),
+  connectorState: z.enum(['healthy', 'refresh_due']),
+}).strict();
+const FinanceUnavailableAccountProvenance = Provenance.extend({
+  source: financeNonEmptyText,
+  freshness: z.literal('unknown'),
+  quality: z.literal('unavailable'),
+}).strict().refine(
+  value => value.connectorState !== 'healthy' && value.connectorState !== 'refresh_due',
+  { message: 'unavailable finance accounts cannot have a healthy connector', path: ['connectorState'] },
+);
+
+/** Keep this wire shape in lockstep with FinanceAccountObservation in the native client. */
+const FinanceAccountObservationBase = z.object({
+  id: financeNonEmptyText,
+  name: financeNonEmptyText,
+  detail: financeNonEmptyText,
+  balanceCents: z.number().int().min(-Number.MAX_SAFE_INTEGER).max(Number.MAX_SAFE_INTEGER),
+  source: financeNonEmptyText,
+  provenance: FinanceObservedAccountProvenance,
+}).strict();
+export const FinanceAccountObservation = FinanceAccountObservationBase.superRefine((value, context) => {
+  if (value.source !== value.provenance.source) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['source'],
+      message: 'finance account source must match its provenance source',
+    });
+  }
+});
+export type FinanceAccountObservation = z.infer<typeof FinanceAccountObservation>;
+
+const FinanceObservedAccountSnapshot = z.object({
+  availability: z.literal('observed'),
+  accounts: z.array(FinanceAccountObservation).min(1),
+  provenance: FinanceObservedAccountProvenance,
+}).strict();
+const FinanceUnavailableAccountSnapshot = z.object({
+  availability: z.literal('unavailable'),
+  provenance: FinanceUnavailableAccountProvenance,
+}).strict();
+const FinanceAccountSnapshotBase = z.discriminatedUnion('availability', [
+  FinanceObservedAccountSnapshot,
+  FinanceUnavailableAccountSnapshot,
+]);
+export const FinanceAccountSnapshot = FinanceAccountSnapshotBase.superRefine((value, context) => {
+  if (value.availability !== 'observed') return;
+  const envelopeObservedAt = Date.parse(value.provenance.observedAt);
+  value.accounts.forEach((account, index) => {
+    if (Date.parse(account.provenance.observedAt) > envelopeObservedAt) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['accounts', index, 'provenance', 'observedAt'],
+        message: 'finance account observation must not be newer than its snapshot',
+      });
+    }
+  });
+});
+export type FinanceAccountSnapshot = z.infer<typeof FinanceAccountSnapshot>;
+
 const financeDerivedTransactionSnapshotSource = 'derived-transaction-snapshot';
 
 /**
@@ -186,5 +253,6 @@ export const FinanceSummary = z.object({
   // source-authorized transaction history exists; an empty observed array is
   // reserved for a connector that explicitly observed an empty ledger.
   transactions: FinanceTransactionSnapshot.nullable().optional(),
+  accounts: FinanceAccountSnapshot.nullable().optional(),
 }).strict();
 export type FinanceSummary = z.infer<typeof FinanceSummary>;

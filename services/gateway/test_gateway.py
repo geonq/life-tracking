@@ -1050,6 +1050,102 @@ def test_finance_summary_rejects_fabricated_or_malformed_metrics():
     assert response.status_code == 503
 
 
+def test_finance_summary_accepts_account_only_observation_and_unavailable_omission():
+    observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    provenance = {
+        "source": "sparkasse_leipzig", "observedAt": observed_at,
+        "freshness": "fresh", "quality": "observed", "connectorState": "healthy",
+    }
+    payload = copy.deepcopy(VALID_FINANCE)
+    payload["generatedAt"] = observed_at
+    payload["accounts"] = {
+        "availability": "observed",
+        "accounts": [{
+            "id": "account-1", "name": "Girokonto", "detail": "EUR",
+            "balanceCents": 125_000, "source": "sparkasse_leipzig",
+            "provenance": provenance,
+        }],
+        "provenance": provenance,
+    }
+    assert main._validate_finance_payload(payload)
+    assert main._validate_finance_payload(VALID_FINANCE)
+
+    unavailable = copy.deepcopy(VALID_FINANCE)
+    unavailable["accounts"] = {
+        "availability": "unavailable",
+        "provenance": copy.deepcopy(FINANCE_PROVENANCE),
+    }
+    assert main._validate_finance_payload(unavailable)
+    unavailable["accounts"]["accounts"] = []
+    assert not main._validate_finance_payload(unavailable)
+
+
+def test_finance_summary_rejects_account_overflow_source_mismatch_and_bad_provenance():
+    observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    provenance = {
+        "source": "revolut_personal", "observedAt": observed_at,
+        "freshness": "fresh", "quality": "observed", "connectorState": "healthy",
+    }
+    payload = copy.deepcopy(VALID_FINANCE)
+    payload["generatedAt"] = observed_at
+    payload["accounts"] = {
+        "availability": "observed",
+        "accounts": [{
+            "id": "account-2", "name": "Personal", "detail": "EUR",
+            "balanceCents": -4_200, "source": "revolut_personal", "provenance": provenance,
+        }],
+        "provenance": provenance,
+    }
+    overflow = copy.deepcopy(payload)
+    overflow["accounts"]["accounts"][0]["balanceCents"] = FINANCE_MAX_SAFE_CENTS + 1
+    assert not main._validate_finance_payload(overflow)
+
+    source_mismatch = copy.deepcopy(payload)
+    source_mismatch["accounts"]["accounts"][0]["source"] = "sparkasse_leipzig"
+    assert not main._validate_finance_payload(source_mismatch)
+
+    bad_provenance = copy.deepcopy(payload)
+    bad_provenance["accounts"]["provenance"]["quality"] = "unavailable"
+    assert not main._validate_finance_payload(bad_provenance)
+
+    malformed_provenance = copy.deepcopy(payload)
+    malformed_provenance["accounts"]["accounts"][0]["provenance"] = None
+    assert not main._validate_finance_payload(malformed_provenance)
+
+
+def test_finance_summary_accepts_mixed_account_and_transaction_snapshot_but_rejects_unknown_fields():
+    observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    provenance = {
+        "source": "revolut_personal", "observedAt": observed_at,
+        "freshness": "fresh", "quality": "observed", "connectorState": "healthy",
+    }
+    payload = copy.deepcopy(VALID_FINANCE)
+    payload["generatedAt"] = observed_at
+    payload["accounts"] = {
+        "availability": "observed",
+        "accounts": [{
+            "id": "account-2", "name": "Personal", "detail": "EUR",
+            "balanceCents": -4_200, "source": "revolut_personal", "provenance": provenance,
+        }],
+        "provenance": provenance,
+    }
+    payload["transactions"] = {
+        "availability": "observed",
+        "transactions": [{
+            "id": "transaction-1", "merchant": "REWE", "title": "Groceries",
+            "signedAmountCents": -2_450, "timestamp": observed_at,
+            "account": "Personal", "source": "revolut_personal", "category": "Food",
+            "provenance": provenance,
+        }],
+        "provenance": provenance,
+    }
+    assert main._validate_finance_payload(payload)
+
+    malformed = copy.deepcopy(payload)
+    malformed["transactions"]["transactions"][0]["iban"] = "DE00"
+    assert not main._validate_finance_payload(malformed)
+
+
 @pytest.mark.parametrize("document_id", [
     "not-a-uuid",
     "../../outside",

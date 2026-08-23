@@ -491,14 +491,59 @@ FINANCE_MAX_SAFE_CENTS = 9_007_199_254_740_991
 FINANCE_METRICS = {
     "monthlyIncome", "fixedCosts", "discretionaryBuffer", "spent", "savingsGoal", "saved"
 }
+FINANCE_PROVENANCE_FIELDS = {
+    "source", "observedAt", "freshness", "quality", "connectorState"
+}
+FINANCE_ACCOUNT_FIELDS = {
+    "id", "name", "detail", "balanceCents", "source", "provenance"
+}
+FINANCE_ACCOUNT_SNAPSHOT_FIELDS = {"availability", "accounts", "provenance"}
+FINANCE_TRANSACTION_FIELDS = {
+    "id", "merchant", "title", "signedAmountCents", "timestamp",
+    "account", "source", "category", "provenance"
+}
+FINANCE_TRANSACTION_SNAPSHOT_FIELDS = {"availability", "transactions", "provenance"}
+FINANCE_DERIVED_TRANSACTION_SOURCE = "derived-transaction-snapshot"
+
+
+def _contains_sensitive_finance(obj) -> bool:
+    """Apply value scanning without treating the reviewed `account` fields as secrets.
+
+    Exact allowlists below reject unknown/sensitive fields; this scan still rejects
+    secret-bearing values and pathological structures.
+    """
+    pending = [(obj, 0)]
+    visited = 0
+    safe_account_keys = {"account", "accounts"}
+    while pending:
+        value, depth = pending.pop()
+        visited += 1
+        if depth > USAGE_MAX_STRUCTURE_DEPTH or visited > USAGE_MAX_STRUCTURE_NODES:
+            return True
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if (
+                    isinstance(key, str)
+                    and key not in safe_account_keys
+                    and any(term in key.lower() for term in SENSITIVE_KEYS)
+                ):
+                    return True
+                pending.append((child, depth + 1))
+        elif isinstance(value, list):
+            pending.extend((child, depth + 1) for child in value)
+        elif isinstance(value, str) and SENSITIVE_VALUE_PATTERN.search(value):
+            return True
+    return False
 
 
 def _validate_finance_provenance(value, *, observed: bool) -> bool:
-    if not isinstance(value, dict) or set(value) != {
-        "source", "observedAt", "freshness", "quality", "connectorState"
-    }:
+    if not isinstance(value, dict) or set(value) != FINANCE_PROVENANCE_FIELDS:
         return False
-    if not isinstance(value["source"], str) or not value["source"] or not _is_iso8601(value["observedAt"]):
+    if (
+        not isinstance(value["source"], str)
+        or not value["source"].strip()
+        or not _is_usage_observed_timestamp(value["observedAt"])
+    ):
         return False
     if not _is_choice(value["freshness"], {"fresh", "stale", "unknown"}):
         return False
@@ -507,6 +552,20 @@ def _validate_finance_provenance(value, *, observed: bool) -> bool:
     if observed:
         return value["quality"] == "observed" and value["connectorState"] in {"healthy", "refresh_due"}
     return value["quality"] == "unavailable" and value["connectorState"] not in {"healthy", "refresh_due"}
+
+
+def _validate_finance_observed_provenance(value, *, age_consistent: bool) -> bool:
+    if not _validate_finance_provenance(value, observed=True) or value["freshness"] == "unknown":
+        return False
+    if not age_consistent:
+        return True
+    try:
+        observed_at = datetime.fromisoformat(value["observedAt"].replace("Z", "+00:00"))
+        age = datetime.now(timezone.utc) - observed_at
+    except (OverflowError, OSError, ValueError):
+        return False
+    expected = ("fresh", "healthy") if age <= timedelta(minutes=15) else ("stale", "refresh_due")
+    return age >= timedelta(seconds=-5) and (value["freshness"], value["connectorState"]) == expected
 
 
 def _validate_finance_metric(value) -> bool:
@@ -523,14 +582,122 @@ def _validate_finance_metric(value) -> bool:
     )
 
 
-def _validate_finance_payload(data: dict) -> bool:
-    if not isinstance(data, dict) or set(data) != {"generatedAt", "currency"} | FINANCE_METRICS:
+def _validate_finance_account_observation(value) -> bool:
+    if not isinstance(value, dict) or set(value) != FINANCE_ACCOUNT_FIELDS:
+        return False
+    text_fields = ("id", "name", "detail", "source")
+    if not all(isinstance(value[field], str) and value[field].strip() for field in text_fields):
+        return False
+    provenance = value["provenance"]
+    if not isinstance(provenance, dict):
         return False
     return (
-        not _contains_sensitive(data)
-        and _is_iso8601(data["generatedAt"])
+        isinstance(value["balanceCents"], int)
+        and not isinstance(value["balanceCents"], bool)
+        and -FINANCE_MAX_SAFE_CENTS <= value["balanceCents"] <= FINANCE_MAX_SAFE_CENTS
+        and value["source"] == provenance.get("source")
+        and _validate_finance_observed_provenance(provenance, age_consistent=False)
+    )
+
+
+def _validate_finance_account_snapshot(value) -> bool:
+    if not isinstance(value, dict) or value.get("availability") not in {"observed", "unavailable"}:
+        return False
+    provenance = value.get("provenance")
+    if value["availability"] == "unavailable":
+        return (
+            set(value) == {"availability", "provenance"}
+            and _validate_finance_provenance(provenance, observed=False)
+            and provenance["freshness"] == "unknown"
+        )
+    if set(value) != FINANCE_ACCOUNT_SNAPSHOT_FIELDS or not isinstance(value.get("accounts"), list):
+        return False
+    if not value["accounts"] or not _validate_finance_observed_provenance(provenance, age_consistent=False):
+        return False
+    try:
+        snapshot_observed_at = datetime.fromisoformat(provenance["observedAt"].replace("Z", "+00:00"))
+    except (AttributeError, OverflowError, OSError, TypeError, ValueError):
+        return False
+    return all(
+        _validate_finance_account_observation(account)
+        and datetime.fromisoformat(account["provenance"]["observedAt"].replace("Z", "+00:00")) <= snapshot_observed_at
+        for account in value["accounts"]
+    )
+
+
+def _validate_finance_transaction_observation(value) -> bool:
+    if not isinstance(value, dict) or set(value) != FINANCE_TRANSACTION_FIELDS:
+        return False
+    text_fields = ("id", "merchant", "title", "account", "source", "category")
+    if not all(isinstance(value[field], str) and value[field].strip() for field in text_fields):
+        return False
+    provenance = value["provenance"]
+    return (
+        isinstance(value["signedAmountCents"], int)
+        and not isinstance(value["signedAmountCents"], bool)
+        and -FINANCE_MAX_SAFE_CENTS <= value["signedAmountCents"] <= FINANCE_MAX_SAFE_CENTS
+        and _is_usage_observed_timestamp(value["timestamp"])
+        and value["source"] == provenance.get("source")
+        and _validate_finance_observed_provenance(provenance, age_consistent=True)
+    )
+
+
+def _validate_finance_transaction_snapshot(value) -> bool:
+    if not isinstance(value, dict) or value.get("availability") not in {"observed", "unavailable"}:
+        return False
+    provenance = value.get("provenance")
+    if value["availability"] == "unavailable":
+        return (
+            set(value) == {"availability", "provenance"}
+            and _validate_finance_provenance(provenance, observed=False)
+            and provenance["freshness"] == "unknown"
+        )
+    if set(value) != FINANCE_TRANSACTION_SNAPSHOT_FIELDS or not isinstance(value.get("transactions"), list):
+        return False
+    rows = value["transactions"]
+    if not _validate_finance_observed_provenance(provenance, age_consistent=not rows):
+        return False
+    if not all(_validate_finance_transaction_observation(row) for row in rows):
+        return False
+    row_sources = {row["source"] for row in rows}
+    if row_sources and not (
+        len(row_sources) == 1 and next(iter(row_sources)) == provenance["source"]
+        or provenance["source"] == FINANCE_DERIVED_TRANSACTION_SOURCE
+    ):
+        return False
+    if rows:
+        has_stale_row = any(
+            row["provenance"]["freshness"] == "stale"
+            or row["provenance"]["connectorState"] == "refresh_due"
+            for row in rows
+        )
+        expected = ("stale", "refresh_due") if has_stale_row else ("fresh", "healthy")
+        if (provenance["freshness"], provenance["connectorState"]) != expected:
+            return False
+        try:
+            envelope_observed_at = datetime.fromisoformat(provenance["observedAt"].replace("Z", "+00:00"))
+            latest_row_observed_at = max(
+                datetime.fromisoformat(row["provenance"]["observedAt"].replace("Z", "+00:00"))
+                for row in rows
+            )
+        except (OverflowError, OSError, TypeError, ValueError):
+            return False
+        if envelope_observed_at < latest_row_observed_at:
+            return False
+    return True
+
+
+def _validate_finance_payload(data: dict) -> bool:
+    allowed = {"generatedAt", "currency"} | FINANCE_METRICS | {"accounts", "transactions"}
+    if not isinstance(data, dict) or not set(data).issubset(allowed) or not FINANCE_METRICS.issubset(data):
+        return False
+    return (
+        not _contains_sensitive_finance(data)
+        and _is_usage_observed_timestamp(data["generatedAt"])
         and data["currency"] == "EUR"
         and all(_validate_finance_metric(data[key]) for key in FINANCE_METRICS)
+        and ("accounts" not in data or data["accounts"] is None or _validate_finance_account_snapshot(data["accounts"]))
+        and ("transactions" not in data or data["transactions"] is None or _validate_finance_transaction_snapshot(data["transactions"]))
     )
 
 
