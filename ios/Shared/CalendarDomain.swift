@@ -243,6 +243,36 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+/// Pure title matching for calendar search. Kept out of SwiftUI so ranking,
+/// folding, and deletion rules stay deterministic in unit tests.
+public enum CalendarSearch {
+    /// Case- and diacritic-insensitive substring match over non-deleted item
+    /// titles. Upcoming matches lead in ascending start order; past matches
+    /// follow, most recent first. A blank query yields no results.
+    public static func results(
+        matching query: String,
+        in items: [CalendarItem],
+        calendar: Calendar = .current,
+        now: Date = .now
+    ) -> [CalendarItem] {
+        let needle = normalized(query.trimmingCharacters(in: .whitespacesAndNewlines))
+        guard !needle.isEmpty else { return [] }
+        let today = calendar.startOfDay(for: now)
+        let matches = items.filter { !$0.isDeleted && normalized($0.title).contains(needle) }
+        let upcoming = matches
+            .filter { $0.start >= today }
+            .sorted { $0.start == $1.start ? $0.id.uuidString < $1.id.uuidString : $0.start < $1.start }
+        let past = matches
+            .filter { $0.start < today }
+            .sorted { $0.start == $1.start ? $0.id.uuidString < $1.id.uuidString : $0.start > $1.start }
+        return upcoming + past
+    }
+
+    private static func normalized(_ value: String) -> String {
+        value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+    }
+}
+
 public struct CalendarSnapshot: Codable, Equatable, Sendable {
     public var schemaVersion: Int = 1
     public var items: [CalendarItem]

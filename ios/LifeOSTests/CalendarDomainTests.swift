@@ -94,6 +94,35 @@ final class CalendarDomainTests: XCTestCase {
         XCTAssertEqual(changed.status, .inProgress)
     }
 
+    func testSearchRanksUpcomingAscendingThenPastDescendingAndIgnoresCaseDiacriticsAndTombstones() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let now = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 8, day: 23, hour: 12)))
+
+        let pastOld = try CalendarItem(title: "Café review", start: now.addingTimeInterval(-93_600), end: now.addingTimeInterval(-90_000))
+        let pastRecent = try CalendarItem(title: "cafe planning", start: now.addingTimeInterval(-90_000), end: now.addingTimeInterval(-86_400))
+        let upcomingFar = try CalendarItem(title: "CAFE sync", start: now.addingTimeInterval(7_200), end: now.addingTimeInterval(10_800))
+        let upcomingSoon = try CalendarItem(title: "Team cafe", start: now.addingTimeInterval(1_800), end: now.addingTimeInterval(3_600))
+        let tombstone = try CalendarItem(title: "cafe ghost", start: now.addingTimeInterval(600), end: now.addingTimeInterval(1_200)).deleting(at: now)
+        let unrelated = try CalendarItem(title: "Gym", start: now.addingTimeInterval(900), end: now.addingTimeInterval(1_800))
+
+        let results = CalendarSearch.results(
+            matching: "  CAFe ",
+            in: [upcomingFar, pastOld, tombstone, unrelated, pastRecent, upcomingSoon],
+            calendar: calendar,
+            now: now
+        )
+
+        XCTAssertEqual(results.map(\.title), ["Team cafe", "CAFE sync", "cafe planning", "Café review"])
+    }
+
+    func testSearchReturnsNothingForBlankQuery() throws {
+        let item = try CalendarItem(title: "Standup", start: base, end: base.addingTimeInterval(600))
+        XCTAssertTrue(CalendarSearch.results(matching: "", in: [item]).isEmpty)
+        XCTAssertTrue(CalendarSearch.results(matching: "   ", in: [item]).isEmpty)
+        XCTAssertTrue(CalendarSearch.results(matching: "nonexistent", in: [item]).isEmpty)
+    }
+
     func testEditorDateAdjustmentPreservesDurationAndOvernightDayOffset() throws {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!

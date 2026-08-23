@@ -59,6 +59,7 @@ public struct CalendarView: View {
     @State private var editorPresentation: CalendarEditorPresentation?
     @State private var anchoredEditorPresentation: CalendarEditorPresentation?
     @State private var timedCreationPreview: CalendarTimedCreationPreview?
+    @State private var isSearchPresented = false
 #if os(macOS)
     @State private var editorAnchorFrame: CGRect?
     @State private var editorPresentationGeneration = 0
@@ -165,6 +166,13 @@ public struct CalendarView: View {
             if presentationID == nil {
                 timedCreationPreview = nil
             }
+        }
+        .sheet(isPresented: $isSearchPresented) {
+            CalendarSearchView(
+                items: visibleItems,
+                calendar: calendar,
+                onSelect: openSearchResult(_:)
+            )
         }
     }
 
@@ -532,6 +540,19 @@ public struct CalendarView: View {
                 Spacer(minLength: 4)
 
                 Button {
+                    isSearchPresented = true
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 32, height: 32)
+                        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Search events")
+                .accessibilityIdentifier("calendar-search")
+
+                Button {
                     Task { _ = await coordinator.undo() }
                 } label: {
                     Image(systemName: "arrow.uturn.backward")
@@ -595,6 +616,14 @@ public struct CalendarView: View {
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
+                    Button {
+                        isSearchPresented = true
+                    } label: {
+                        Image(systemName: "magnifyingglass")
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityLabel("Search events")
+                    .accessibilityIdentifier("calendar-search")
                     Button {
                         Task { _ = await coordinator.undo() }
                     } label: {
@@ -918,6 +947,17 @@ public struct CalendarView: View {
 #else
         editorPresentation = CalendarEditorPresentation(item: item, date: selectedDate)
 #endif
+    }
+
+    /// A search result jumps to the item's day and opens its editor. The
+    /// editor presentation waits one runloop turn so the search sheet's
+    /// dismissal transaction never races the new presentation.
+    private func openSearchResult(_ item: CalendarItem) {
+        isSearchPresented = false
+        retargetSelectedDate(item.start)
+        DispatchQueue.main.async {
+            edit(item)
+        }
     }
 
 #if os(macOS)
@@ -3614,5 +3654,135 @@ struct CalendarCustomIconSheet: View {
         } catch {
             errorMessage = "Enter a short icon name and choose a valid image."
         }
+    }
+}
+
+/// Live title search over every non-deleted calendar item. Upcoming matches
+/// lead chronologically; past matches follow, most recent first. Selecting a
+/// result jumps to its day and opens the editor.
+struct CalendarSearchView: View {
+    let items: [CalendarItem]
+    let calendar: Calendar
+    let onSelect: (CalendarItem) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+    @FocusState private var fieldFocused: Bool
+
+    private var results: [CalendarItem] {
+        CalendarSearch.results(matching: query, in: items, calendar: calendar)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    ContentUnavailableView(
+                        "Search events",
+                        systemImage: "magnifyingglass",
+                        description: Text("Find events and to-dos by title.")
+                    )
+                } else if results.isEmpty {
+                    ContentUnavailableView(
+                        "No matches",
+                        systemImage: "questionmark.text.page",
+                        description: Text("Nothing in the calendar matches \"\(trimmedQuery)\".")
+                    )
+                } else {
+                    List(results) { item in
+                        Button {
+                            onSelect(item)
+                        } label: {
+                            searchResultRow(item)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("calendar-search-result-\(item.id.uuidString)")
+                    }
+                    .listStyle(.plain)
+                }
+            }
+            .navigationTitle("Search")
+#if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+#endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                searchField
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(LifeOSTokens.canvas)
+            }
+            .onAppear { fieldFocused = true }
+        }
+    }
+
+    private var trimmedQuery: String {
+        query.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(LifeOSTokens.tertiaryText)
+            TextField("Event or to-do title", text: $query)
+                .textFieldStyle(.plain)
+                .autocorrectionDisabled()
+                .focused($fieldFocused)
+                .accessibilityIdentifier("calendar-search-field")
+            if !trimmedQuery.isEmpty {
+                Button {
+                    query = ""
+                    fieldFocused = true
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear search")
+            }
+        }
+        .padding(.horizontal, 11)
+        .frame(height: 38)
+        .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+    }
+
+    private func searchResultRow(_ item: CalendarItem) -> some View {
+        HStack(spacing: 10) {
+            RoundedRectangle(cornerRadius: 2, style: .continuous)
+                .fill(item.status == .done ? LifeOSTokens.Hue.green.base : Color.lifeOSCalendarRed)
+                .frame(width: 3, height: 34)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color.primary)
+                    .lineLimit(1)
+                Text(resultSubtitle(item))
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+            if item.hasIcon {
+                CalendarIconView(item: item, size: 17)
+            }
+            if item.kind == .todo {
+                Image(systemName: item.status == .done ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(item.status == .done ? LifeOSTokens.Hue.green.base : Color.secondary)
+                    .font(.system(size: 14))
+            }
+        }
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+    }
+
+    private func resultSubtitle(_ item: CalendarItem) -> String {
+        var style = Date.FormatStyle.dateTime.weekday(.abbreviated).month(.abbreviated).day().hour().minute()
+        style.timeZone = calendar.timeZone
+        return item.start.formatted(style)
     }
 }
