@@ -488,6 +488,82 @@ final class CalendarLayoutTests: XCTestCase {
         )
     }
 
+    func testPressDragCreationDraftsSnappedRangeFromDownwardMovement() throws {
+        let sample = try XCTUnwrap(CalendarInteractionLayout.creationPressDragSample(
+            day: dayStart,
+            anchorY: 9 * 60,
+            currentY: 10 * 60,
+            hourHeight: 60,
+            calendar: calendar
+        ))
+        XCTAssertEqual(sample, .drafted(DateInterval(
+            start: calendar.date(bySettingHour: 9, minute: 0, second: 0, of: dayStart)!,
+            end: calendar.date(bySettingHour: 10, minute: 0, second: 0, of: dayStart)!
+        )))
+    }
+
+    func testPressDragCreationPullsStartEarlierOnUpwardMovement() throws {
+        let sample = try XCTUnwrap(CalendarInteractionLayout.creationPressDragSample(
+            day: dayStart,
+            anchorY: 10 * 60,
+            currentY: 9 * 60 + 15,
+            hourHeight: 60,
+            calendar: calendar
+        ))
+        XCTAssertEqual(sample, .drafted(DateInterval(
+            start: calendar.date(bySettingHour: 9, minute: 15, second: 0, of: dayStart)!,
+            end: calendar.date(bySettingHour: 10, minute: 0, second: 0, of: dayStart)!
+        )))
+    }
+
+    func testPressDragCreationKeepsDefaultBlockUntilMovementIsIntentional() throws {
+        let sample = try XCTUnwrap(CalendarInteractionLayout.creationPressDragSample(
+            day: dayStart,
+            anchorY: 9 * 60,
+            currentY: 9 * 60 + 5,
+            hourHeight: 60,
+            calendar: calendar
+        ))
+        XCTAssertEqual(sample, .pending(DateInterval(
+            start: calendar.date(bySettingHour: 9, minute: 0, second: 0, of: dayStart)!,
+            end: calendar.date(bySettingHour: 9, minute: 30, second: 0, of: dayStart)!
+        )))
+    }
+
+    func testPressDragCreationClampsPastTheDayBoundary() throws {
+        let sample = try XCTUnwrap(CalendarInteractionLayout.creationPressDragSample(
+            day: dayStart,
+            anchorY: 23 * 60,
+            currentY: 40 * 60,
+            hourHeight: 60,
+            calendar: calendar
+        ))
+        let interval = try XCTUnwrap(
+            CalendarInteractionLayout.dayInterval(containing: dayStart, calendar: calendar)
+        )
+        XCTAssertEqual(sample, .drafted(DateInterval(
+            start: calendar.date(bySettingHour: 23, minute: 0, second: 0, of: dayStart)!,
+            end: interval.end
+        )))
+    }
+
+    func testPressDragCreationRejectsNonFiniteSamples() {
+        XCTAssertNil(CalendarInteractionLayout.creationPressDragSample(
+            day: dayStart,
+            anchorY: 9 * 60,
+            currentY: .infinity,
+            hourHeight: 60,
+            calendar: calendar
+        ))
+        XCTAssertNil(CalendarInteractionLayout.creationPressDragSample(
+            day: dayStart,
+            anchorY: .nan,
+            currentY: 9 * 60,
+            hourHeight: 60,
+            calendar: calendar
+        ))
+    }
+
     private var calendar: Calendar {
         var value = Calendar(identifier: .gregorian)
         value.timeZone = TimeZone(secondsFromGMT: 0)!

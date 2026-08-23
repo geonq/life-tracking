@@ -1005,6 +1005,51 @@ public enum CalendarInteractionLayout {
         return DateInterval(start: start, end: end)
     }
 
+    /// Outcome of one iOS press-and-drag creation sample. The gesture maps
+    /// every finger sample through this single pure function so live preview
+    /// and final commit can never disagree about the produced range.
+    public enum CalendarCreationPressDragSample: Equatable, Sendable {
+        /// The hold is recognized but the finger has not expressed an
+        /// intentional vertical range yet. The payload is the anchor's
+        /// default block and doubles as the release-without-drag commit.
+        case pending(DateInterval)
+        /// An intentional vertical drag maps to this exact snapped range.
+        case drafted(DateInterval)
+
+        public var interval: DateInterval {
+            switch self {
+            case .pending(let interval), .drafted(let interval): interval
+            }
+        }
+    }
+
+    /// Maps a press-and-drag empty-grid sample onto the wall-clock axis.
+    /// Downward drags extend the end, upward drags pull the start earlier,
+    /// sub-threshold movement keeps the anchor's default block, and both
+    /// edges clamp inside the local calendar day.
+    public static func creationPressDragSample(
+        day: Date,
+        anchorY: Double,
+        currentY: Double,
+        hourHeight: Double,
+        calendar: Calendar,
+        defaultDurationMinutes: Int = mobileSelectionDurationMinutes
+    ) -> CalendarCreationPressDragSample? {
+        guard let interval = creationInterval(
+            day: day,
+            verticalStart: anchorY,
+            verticalEnd: currentY,
+            hourHeight: hourHeight,
+            calendar: calendar,
+            defaultDurationMinutes: defaultDurationMinutes
+        ) else { return nil }
+        let intentional = isIntentionalCreationDrag(
+            verticalTranslation: currentY - anchorY,
+            horizontalTranslation: 0
+        )
+        return intentional ? .drafted(interval) : .pending(interval)
+    }
+
     public static func movedInterval(
         item: CalendarItem,
         translation: Double,

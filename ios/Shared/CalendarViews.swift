@@ -451,6 +451,10 @@ public struct CalendarTimelineView: View {
     /// resolving through a hosting-view origin.
     public let onCreateTimedRange: ((Date, Date, CalendarTimedCreationAnchor) -> Void)?
     public let timedCreationPreview: CalendarTimedCreationPreview?
+    /// Live press-and-drag creation drafts from the iOS empty grid. Called
+    /// continuously while the finger moves and once more with `nil` when the
+    /// gesture fails or finishes; the parent owns the ghost state.
+    public let onTimedCreationDraft: ((CalendarTimedCreationPreview?) -> Void)?
     public let onUpdate: CalendarUpdateHandler?
     public let onStatusUpdate: CalendarStatusUpdateHandler?
     /// Called while the iOS pager is in flight so the compact header can track
@@ -481,6 +485,7 @@ public struct CalendarTimelineView: View {
                 onCreate: ((Date) -> Void)? = nil,
                 onCreateTimedRange: ((Date, Date, CalendarTimedCreationAnchor) -> Void)? = nil,
                 timedCreationPreview: CalendarTimedCreationPreview? = nil,
+                onTimedCreationDraft: ((CalendarTimedCreationPreview?) -> Void)? = nil,
                 onUpdate: CalendarUpdateHandler? = nil,
                 onStatusUpdate: CalendarStatusUpdateHandler? = nil,
                 onPreviewDateChange: ((Date) -> Void)? = nil,
@@ -498,6 +503,7 @@ public struct CalendarTimelineView: View {
         self.onCreate = onCreate
         self.onCreateTimedRange = onCreateTimedRange
         self.timedCreationPreview = timedCreationPreview
+        self.onTimedCreationDraft = onTimedCreationDraft
         self.onUpdate = onUpdate
         self.onStatusUpdate = onStatusUpdate
         self.onPreviewDateChange = onPreviewDateChange
@@ -523,6 +529,7 @@ public struct CalendarTimelineView: View {
             onUpdate: onUpdate,
             onStatusUpdate: onStatusUpdate,
             timedCreationPreview: timedCreationPreview,
+            onTimedCreationDraft: onTimedCreationDraft,
             onPreviewDateChange: onPreviewDateChange,
             onCommitDateChange: onCommitDateChange,
             monthNamespace: monthNamespace,
@@ -565,6 +572,7 @@ public struct CalendarTimelineView: View {
                                         onCreate: onCreate,
                                         onCreateTimedRange: onCreateTimedRange,
                                         timedCreationPreview: timedCreationPreview,
+                                        onTimedCreationDraft: nil,
                                         onUpdate: onUpdate,
                                         onStatusUpdate: onStatusUpdate,
                                         monthNamespace: monthNamespace,
@@ -748,6 +756,7 @@ private struct CalendarPagedTimeline: View {
     let onCreate: ((Date) -> Void)?
     let onCreateTimedRange: ((Date, Date, CalendarTimedCreationAnchor) -> Void)?
     let timedCreationPreview: CalendarTimedCreationPreview?
+    let onTimedCreationDraft: ((CalendarTimedCreationPreview?) -> Void)?
     let onUpdate: CalendarUpdateHandler?
     let onStatusUpdate: CalendarStatusUpdateHandler?
     let onPreviewDateChange: ((Date) -> Void)?
@@ -774,6 +783,7 @@ private struct CalendarPagedTimeline: View {
          onCreate: ((Date) -> Void)?, onCreateTimedRange: ((Date, Date, CalendarTimedCreationAnchor) -> Void)?, onUpdate: CalendarUpdateHandler?,
          onStatusUpdate: CalendarStatusUpdateHandler?,
          timedCreationPreview: CalendarTimedCreationPreview?,
+         onTimedCreationDraft: ((CalendarTimedCreationPreview?) -> Void)?,
          onPreviewDateChange: ((Date) -> Void)?, onCommitDateChange: ((Date) -> Void)?,
          monthNamespace: Namespace.ID?, monthExpanded: Bool, monthSelectedDate: Date?, reduceMotion: Bool,
          interactionSession: CalendarInteractionSession) {
@@ -788,6 +798,7 @@ private struct CalendarPagedTimeline: View {
         self.onUpdate = onUpdate
         self.onStatusUpdate = onStatusUpdate
         self.timedCreationPreview = timedCreationPreview
+        self.onTimedCreationDraft = onTimedCreationDraft
         self.onPreviewDateChange = onPreviewDateChange
         self.onCommitDateChange = onCommitDateChange
         self.monthNamespace = monthNamespace
@@ -887,6 +898,7 @@ private struct CalendarPagedTimeline: View {
                                         onCreate: onCreate,
                                         onCreateTimedRange: onCreateTimedRange,
                                         timedCreationPreview: timedCreationPreview,
+                                        onTimedCreationDraft: onTimedCreationDraft,
                                         onUpdate: onUpdate,
                                         onStatusUpdate: onStatusUpdate,
                                         monthNamespace: monthNamespace,
@@ -1594,6 +1606,7 @@ private struct CalendarDayTimeline: View {
     let onCreate: ((Date) -> Void)?
     let onCreateTimedRange: ((Date, Date, CalendarTimedCreationAnchor) -> Void)?
     let timedCreationPreview: CalendarTimedCreationPreview?
+    let onTimedCreationDraft: ((CalendarTimedCreationPreview?) -> Void)?
     let onUpdate: CalendarUpdateHandler?
     let onStatusUpdate: CalendarStatusUpdateHandler?
     let monthNamespace: Namespace.ID?
@@ -1602,6 +1615,10 @@ private struct CalendarDayTimeline: View {
     let reduceMotion: Bool
     let isInteractionEnabled: Bool
     let interactionSession: CalendarInteractionSession
+#if os(iOS)
+    @State private var pressCreationActive = false
+    @State private var pressCreationSnapMinutes: Int?
+#endif
 
     private var interval: DateInterval {
         let start = calendar.startOfDay(for: day)
@@ -1656,6 +1673,7 @@ private struct CalendarDayTimeline: View {
                     .contentShape(Rectangle())
 #if os(iOS)
                     .simultaneousGesture(creationGesture)
+                    .highPriorityGesture(creationPressDragGesture)
 #else
                     .simultaneousGesture(macDoubleClickGesture(proxy: proxy))
                     .simultaneousGesture(macCreationDragGesture(proxy: proxy))
@@ -1831,6 +1849,73 @@ private struct CalendarDayTimeline: View {
                 onCreateTimedRange?(interval.start, interval.end, .zero)
             }
     }
+
+    /// Notion-style press-and-drag creation on the empty grid. A hold claims
+    /// both pager axes exactly like an event move, every finger sample maps
+    /// through one pure layout function so the live ghost and the committed
+    /// range can never disagree, and release commits either the drafted range
+    /// or the anchor's default block. Double-tap creation remains available.
+#if os(iOS)
+    private var creationPressDragGesture: some Gesture {
+        LongPressGesture(minimumDuration: 0.45, maximumDistance: 12)
+            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .local))
+            .onChanged { phase in
+                if case .first(true) = phase {
+                    guard isInteractionEnabled else { return }
+                    interactionSession.eventMoveActive = true
+                }
+                guard case .second(true, let drag?) = phase else { return }
+                guard isInteractionEnabled,
+                      let sample = CalendarInteractionLayout.creationPressDragSample(
+                        day: day,
+                        anchorY: Double(drag.startLocation.y),
+                        currentY: Double(drag.location.y),
+                        hourHeight: Double(hourHeight),
+                        calendar: calendar
+                      ) else { return }
+                if !pressCreationActive {
+                    pressCreationActive = true
+                    CalendarInteractionHaptics.grab()
+                    pressCreationSnapMinutes = 0
+                }
+                let snapped = CalendarInteractionLayout.snappedMinuteDelta(
+                    translation: Double(drag.translation.height),
+                    hourHeight: Double(hourHeight)
+                )
+                if pressCreationSnapMinutes != snapped {
+                    CalendarInteractionHaptics.snap()
+                    pressCreationSnapMinutes = snapped
+                }
+                onTimedCreationDraft?(creationDraftPreview(for: sample.interval))
+            }
+            .onEnded { phase in
+                defer {
+                    pressCreationActive = false
+                    pressCreationSnapMinutes = nil
+                    interactionSession.eventMoveActive = false
+                }
+                guard isInteractionEnabled,
+                      case .second(_, let drag?) = phase,
+                      let sample = CalendarInteractionLayout.creationPressDragSample(
+                        day: day,
+                        anchorY: Double(drag.startLocation.y),
+                        currentY: Double(drag.location.y),
+                        hourHeight: Double(hourHeight),
+                        calendar: calendar
+                      ) else {
+                    onTimedCreationDraft?(nil)
+                    return
+                }
+                // The commit overwrites the live draft with the authoritative
+                // range; the parent keeps it mounted behind the editor sheet.
+                onCreateTimedRange?(sample.interval.start, sample.interval.end, .zero)
+            }
+    }
+
+    private func creationDraftPreview(for interval: DateInterval) -> CalendarTimedCreationPreview {
+        CalendarTimedCreationPreview(day: interval.start, start: interval.start, end: interval.end)
+    }
+#endif
 
 #if os(macOS)
     private func macDoubleClickGesture(proxy: GeometryProxy) -> some Gesture {

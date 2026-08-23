@@ -475,6 +475,7 @@ public struct CalendarView: View {
                 onCreate: create(at:),
                 onCreateTimedRange: createTimedRange(start:end:anchor:),
                 timedCreationPreview: timedCreationPreview,
+                onTimedCreationDraft: updateTimedCreationDraft,
                 onUpdate: update,
                 onStatusUpdate: updateStatus,
                 onPreviewDateChange: previewDate,
@@ -888,6 +889,13 @@ public struct CalendarView: View {
         // mounted behind the sheet until Cancel or local save completion.
         editorPresentation = CalendarEditorPresentation(item: nil, date: start, endDate: end)
 #endif
+    }
+
+    /// Live ghost state for the iOS press-and-drag creation gesture. Passing
+    /// `nil` clears a stale draft when the gesture fails before commit; the
+    /// commit path overwrites the draft with the authoritative range.
+    private func updateTimedCreationDraft(_ preview: CalendarTimedCreationPreview?) {
+        timedCreationPreview = preview
     }
 
 #if os(macOS)
