@@ -70,6 +70,141 @@ public enum CalendarValidationError: Error, Equatable, Sendable {
     case invalidIconAsset
 }
 
+/// How often a recurring item repeats.
+public enum CalendarRecurrenceFrequency: String, Codable, CaseIterable, Sendable {
+    case daily
+    case weekly
+    case monthly
+    case yearly
+
+    public var label: String {
+        switch self {
+        case .daily: "Daily"
+        case .weekly: "Weekly"
+        case .monthly: "Monthly"
+        case .yearly: "Yearly"
+        }
+    }
+
+    var stepUnit: Calendar.Component {
+        switch self {
+        case .daily: .day
+        case .weekly: .weekOfYear
+        case .monthly: .month
+        case .yearly: .year
+        }
+    }
+}
+
+/// A recurrence schedule attached to a calendar item: every N units, with an
+/// optional inclusive last-occurrence start boundary. The anchor instance is
+/// the item itself; every later occurrence is derived, never stored.
+public struct CalendarRecurrenceRule: Codable, Equatable, Sendable {
+    public var frequency: CalendarRecurrenceFrequency
+    public var interval: Int
+    /// Inclusive upper bound for occurrence starts. `nil` repeats indefinitely
+    /// subject to the engine's expansion cap.
+    public var until: Date?
+
+    public init(frequency: CalendarRecurrenceFrequency, interval: Int = 1, until: Date? = nil) throws {
+        guard interval >= 1 else { throw CalendarValidationError.invalidInterval }
+        self.frequency = frequency
+        self.interval = interval
+        self.until = until
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case frequency, interval, until
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        frequency = try container.decode(CalendarRecurrenceFrequency.self, forKey: .frequency)
+        // A corrupted interval from a peer must not poison the stored snapshot;
+        // clamp to the nearest valid value instead of failing the whole decode.
+        interval = max(1, try container.decodeIfPresent(Int.self, forKey: .interval) ?? 1)
+        until = try container.decodeIfPresent(Date.self, forKey: .until)
+    }
+
+    /// Human summary used by the editor row and accessibility labels.
+    public var summary: String {
+        switch (frequency, interval) {
+        case (.daily, 1): return "Every day"
+        case (.weekly, 1): return "Every week"
+        case (.monthly, 1): return "Every month"
+        case (.yearly, 1): return "Every year"
+        case (_, let n):
+            let unit: String
+            switch frequency {
+            case .daily: unit = n == 1 ? "day" : "days"
+            case .weekly: unit = n == 1 ? "week" : "weeks"
+            case .monthly: unit = n == 1 ? "month" : "months"
+            case .yearly: unit = n == 1 ? "year" : "years"
+            }
+            return "Every \(n) \(unit)"
+        }
+    }
+}
+
+/// Pure expansion of recurring items into concrete occurrences. Wall-clock
+/// time-of-day is preserved across DST transitions by stepping with calendar
+/// arithmetic; month and year steps clamp to the last valid day (Jan 31
+/// monthly lands on Feb 28). Occurrences are never persisted: each one is a
+/// value copy of the anchor carrying its own identity in
+/// `occurrenceSourceID`.
+public enum CalendarRecurrence {
+    /// Hard ceiling on generated occurrences per item regardless of window,
+    /// so an open-ended daily rule can never explode rendering or sync work.
+    public static let maximumOccurrencesPerItem = 400
+
+    /// Returns the anchor item plus every derived occurrence overlapping the
+    /// window (anchor start inside the window counts as overlap). A nil
+    /// window expands up to the until boundary and cap only. A non-recurring
+    /// item expands to just itself.
+    public static func occurrences(
+        of item: CalendarItem,
+        overlapping window: DateInterval?,
+        calendar: Calendar
+    ) -> [CalendarItem] {
+        guard !item.isDeleted else { return [] }
+        guard let rule = item.recurrence else { return [item] }
+
+        let duration = item.end.timeIntervalSince(item.start)
+        var results: [CalendarItem] = []
+        var step = 0
+        while results.count < maximumOccurrencesPerItem {
+            let start: Date
+            if step == 0 {
+                start = item.start
+            } else {
+                guard let stepped = calendar.date(
+                    byAdding: rule.frequency.stepUnit,
+                    value: step * rule.interval,
+                    to: item.start
+                ) else { break }
+                start = stepped
+            }
+            // Starts are monotonically increasing; once past the inclusive
+            // until boundary (or the window end) nothing later can qualify.
+            if let until = rule.until, start > until { break }
+            if let window, start >= window.end { break }
+
+            let occurrenceEnd = start.addingTimeInterval(duration)
+            if window == nil || occurrenceEnd > window!.start {
+                if step == 0 {
+                    results.append(item)
+                } else if let occurrence = try? item.updating(start: start, end: occurrenceEnd, at: item.updatedAt) {
+                    var copy = occurrence
+                    copy.occurrenceSourceID = item.id
+                    results.append(copy)
+                }
+            }
+            step += 1
+        }
+        return results
+    }
+}
+
 /// Validates the single-grapheme emoji value accepted by the calendar icon
 /// contract. Apple does not expose an enumerable installed emoji catalogue;
 /// callers may still provide any emoji copied from the system keyboard.
@@ -124,6 +259,12 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
     public var start: Date
     public var end: Date
     public var timeZoneIdentifier: String?
+    /// When present, this item generates derived occurrences. `nil` is a real
+    /// no-recurrence choice.
+    public var recurrence: CalendarRecurrenceRule?
+    /// Transient identity of a derived occurrence (the anchor's id). Never
+    /// persisted and never encoded; stored items always carry `nil`.
+    public var occurrenceSourceID: UUID?
     public let createdAt: Date
     public var updatedAt: Date
     public var deletedAt: Date?
@@ -134,7 +275,7 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
     public init(id: UUID = UUID(), title: String, kind: CalendarItemKind = .event, icon: String? = nil, iconAsset: CalendarIconAsset? = nil,
                 systemIconName: String? = nil, status: CalendarProgress = .planned,
                 start: Date, end: Date, createdAt: Date = .now, updatedAt: Date? = nil, deletedAt: Date? = nil,
-                timeZoneIdentifier: String? = nil) throws {
+                timeZoneIdentifier: String? = nil, recurrence: CalendarRecurrenceRule? = nil) throws {
         guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw CalendarValidationError.blankTitle }
         guard end > start else { throw CalendarValidationError.invalidInterval }
         self.id = id; self.title = title.trimmingCharacters(in: .whitespacesAndNewlines); self.kind = kind
@@ -150,12 +291,14 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
             : nil
         self.status = status; self.start = start; self.end = end
         self.timeZoneIdentifier = timeZoneIdentifier.flatMap { TimeZone(identifier: $0)?.identifier }
+        self.recurrence = recurrence
+        self.occurrenceSourceID = nil
         self.createdAt = createdAt
         self.updatedAt = updatedAt ?? createdAt; self.deletedAt = deletedAt
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, kind, icon, iconAsset, systemIconName, status, start, end, createdAt, updatedAt, deletedAt, timeZoneIdentifier
+        case id, title, kind, icon, iconAsset, systemIconName, status, start, end, createdAt, updatedAt, deletedAt, timeZoneIdentifier, recurrence
     }
 
     public init(from decoder: Decoder) throws {
@@ -175,7 +318,8 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
             createdAt: container.decode(Date.self, forKey: .createdAt),
             updatedAt: container.decode(Date.self, forKey: .updatedAt),
             deletedAt: container.decodeIfPresent(Date.self, forKey: .deletedAt),
-            timeZoneIdentifier: container.decodeIfPresent(String.self, forKey: .timeZoneIdentifier)
+            timeZoneIdentifier: container.decodeIfPresent(String.self, forKey: .timeZoneIdentifier),
+            recurrence: container.decodeIfPresent(CalendarRecurrenceRule.self, forKey: .recurrence)
         )
     }
 
@@ -195,6 +339,7 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
         try container.encode(updatedAt, forKey: .updatedAt)
         try container.encodeIfPresent(deletedAt, forKey: .deletedAt)
         try container.encodeIfPresent(timeZoneIdentifier, forKey: .timeZoneIdentifier)
+        try container.encodeIfPresent(recurrence, forKey: .recurrence)
     }
 
     fileprivate var conflictKey: String {
@@ -209,7 +354,8 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
             String(start.timeIntervalSince1970),
             String(end.timeIntervalSince1970),
             String(deletedAt?.timeIntervalSince1970 ?? 0),
-            timeZoneIdentifier ?? ""
+            timeZoneIdentifier ?? "",
+            recurrence.map { "\($0.frequency.rawValue)|\($0.interval)|\($0.until?.timeIntervalSince1970 ?? 0)" } ?? ""
         ].joined(separator: "|")
     }
 
@@ -222,13 +368,15 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
                          clearIconAsset: Bool = false, systemIconName: String? = nil,
                          clearSystemIconName: Bool = false, status: CalendarProgress? = nil,
                          start: Date? = nil, end: Date? = nil, at: Date,
-                         timeZoneIdentifier: String? = nil) throws -> CalendarItem {
+                         timeZoneIdentifier: String? = nil,
+                         recurrence: CalendarRecurrenceRule? = nil, clearRecurrence: Bool = false) throws -> CalendarItem {
         try CalendarItem(id: id, title: title ?? self.title, kind: kind ?? self.kind, icon: clearIcon ? nil : (icon ?? self.icon),
                          iconAsset: clearIconAsset ? nil : (iconAsset ?? self.iconAsset),
                          systemIconName: clearSystemIconName ? nil : (systemIconName ?? self.systemIconName),
                          status: status ?? self.status,
                          start: start ?? self.start, end: end ?? self.end, createdAt: createdAt, updatedAt: at, deletedAt: deletedAt,
-                         timeZoneIdentifier: timeZoneIdentifier ?? self.timeZoneIdentifier)
+                         timeZoneIdentifier: timeZoneIdentifier ?? self.timeZoneIdentifier,
+                         recurrence: clearRecurrence ? nil : (recurrence ?? self.recurrence))
     }
 
     /// A to-do is complete when its durable progress is `.done`; toggling the

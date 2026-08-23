@@ -93,6 +93,19 @@ public struct CalendarView: View {
         coordinator.snapshot.items.filter { !$0.isDeleted }
     }
 
+    /// The window every surface renders from: base items plus their derived
+    /// recurring occurrences. One year back and two ahead covers search of
+    /// recent history and any reachable month grid; the engine cap bounds the
+    /// expansion regardless.
+    private var displayItems: [CalendarItem] {
+        let now = Date.now
+        let window = DateInterval(
+            start: calendar.date(byAdding: .year, value: -1, to: now) ?? now,
+            end: calendar.date(byAdding: .year, value: 2, to: now) ?? now
+        )
+        return visibleItems.flatMap { CalendarRecurrence.occurrences(of: $0, overlapping: window, calendar: calendar) }
+    }
+
     private var visibleHolidays: [CalendarHoliday] {
         let selectedYear = calendar.component(.year, from: selectedDate)
         return (selectedYear - 1...selectedYear + 1).flatMap {
@@ -114,7 +127,7 @@ public struct CalendarView: View {
     }
 
     private var selectedDayItems: [CalendarItem] {
-        visibleItems
+        displayItems
             .filter { calendar.isDate($0.start, inSameDayAs: selectedDate) }
             .sorted { $0.start < $1.start }
     }
@@ -169,7 +182,7 @@ public struct CalendarView: View {
         }
         .sheet(isPresented: $isSearchPresented) {
             CalendarSearchView(
-                items: visibleItems,
+                items: displayItems,
                 calendar: calendar,
                 onSelect: openSearchResult(_:)
             )
@@ -183,7 +196,7 @@ public struct CalendarView: View {
                 CalendarCompactMonth(
                     selectedDate: $selectedDate,
                     calendar: calendar,
-                    items: visibleItems
+                    items: displayItems
                 )
                 .padding(.horizontal, 14)
                 .padding(.top, 14)
@@ -302,7 +315,7 @@ public struct CalendarView: View {
 
     private var nextUpcomingTimedItem: CalendarItem? {
         let now = Date.now
-        return visibleItems
+        return displayItems
             .filter { !CalendarAllDayLayout.isAllDay($0, calendar: calendar) && $0.start > now }
             .min { lhs, rhs in
                 lhs.start == rhs.start ? lhs.id.uuidString < rhs.id.uuidString : lhs.start < rhs.start
@@ -378,7 +391,7 @@ public struct CalendarView: View {
                         CalendarMonthGrid(
                             month: selectedDate,
                             selectedDate: selectedDate,
-                            items: visibleItems,
+                            items: displayItems,
                             holidays: visibleHolidays,
                             calendar: calendar,
                             onSelectDate: { date in
@@ -475,7 +488,7 @@ public struct CalendarView: View {
             .accessibilityHidden(!monthExpanded)
             CalendarTimelineView(
                 days: timelineDays,
-                items: visibleItems,
+                items: displayItems,
                 holidays: visibleHolidays,
                 hourHeight: hourHeight,
                 calendar: calendar,
@@ -937,15 +950,23 @@ public struct CalendarView: View {
     }
 #endif
 
+    /// A derived occurrence is never edited directly: selection opens the
+    /// anchor item so every change is a series-level change.
+    private func resolveAnchor(for item: CalendarItem) -> CalendarItem {
+        guard let sourceID = item.occurrenceSourceID else { return item }
+        return visibleItems.first { $0.id == sourceID } ?? item
+    }
+
     private func edit(_ item: CalendarItem) {
         timedCreationPreview = nil
+        let target = resolveAnchor(for: item)
 #if os(macOS)
         presentMacEditor(
-            CalendarEditorPresentation(item: item, date: selectedDate),
+            CalendarEditorPresentation(item: target, date: selectedDate),
             sourceFrame: toolbarEditorSourceFrame
         )
 #else
-        editorPresentation = CalendarEditorPresentation(item: item, date: selectedDate)
+        editorPresentation = CalendarEditorPresentation(item: target, date: selectedDate)
 #endif
     }
 
@@ -1023,8 +1044,26 @@ public struct CalendarView: View {
     }
 
     private func update(_ item: CalendarItem, start: Date, end: Date, completion: @escaping CalendarUpdateCompletion) {
-        guard start != item.start || end != item.end,
-              let updated = try? item.updating(start: start, end: end, at: .now) else {
+        guard start != item.start || end != item.end else {
+            completion(.success)
+            return
+        }
+        // Moving or resizing any occurrence shifts the whole series by the
+        // same delta: recurring items are series-owned in this version.
+        let resolved: CalendarItem?
+        if let sourceID = item.occurrenceSourceID,
+           let anchor = visibleItems.first(where: { $0.id == sourceID }) {
+            let startDelta = start.timeIntervalSince(item.start)
+            let endDelta = end.timeIntervalSince(item.end)
+            resolved = try? anchor.updating(
+                start: anchor.start.addingTimeInterval(startDelta),
+                end: max(anchor.start.addingTimeInterval(startDelta), anchor.end.addingTimeInterval(endDelta)),
+                at: .now
+            )
+        } else {
+            resolved = try? item.updating(start: start, end: end, at: .now)
+        }
+        guard let updated = resolved else {
             completion(.success)
             return
         }
@@ -1035,8 +1074,14 @@ public struct CalendarView: View {
     }
 
     private func updateStatus(_ item: CalendarItem, status: CalendarProgress, completion: @escaping CalendarUpdateCompletion) {
-        guard item.kind == .todo,
-              let updated = try? item.updating(status: status, at: .now) else {
+        guard item.kind == .todo else {
+            completion(.failure("Only to-do items have an interactive completion checkbox."))
+            return
+        }
+        // A recurring to-do completes as a series; its occurrences all share
+        // the anchor's durable progress.
+        let target = resolveAnchor(for: item)
+        guard let updated = try? target.updating(status: status, at: .now) else {
             completion(.failure("Only to-do items have an interactive completion checkbox."))
             return
         }
@@ -1284,6 +1329,10 @@ struct CalendarEditor: View {
     @State private var allDay: Bool
     @State private var showTimezone: Bool
     @State private var timeZoneIdentifier: String?
+    @State private var repeatFrequency: CalendarRecurrenceFrequency?
+    @State private var repeatInterval: Int
+    @State private var repeatUntilEnabled: Bool
+    @State private var repeatUntil: Date
     @State private var validationMessage: String?
     @State private var retryAvailable = false
     @State private var showingIconPicker = false
@@ -1334,6 +1383,13 @@ struct CalendarEditor: View {
         _allDay = State(initialValue: nextDay.map { item?.start == startDay && item?.end == $0 } ?? false)
         _showTimezone = State(initialValue: false)
         _timeZoneIdentifier = State(initialValue: item?.timeZoneIdentifier)
+        _repeatFrequency = State(initialValue: item?.recurrence?.frequency)
+        _repeatInterval = State(initialValue: item?.recurrence?.interval ?? 1)
+        _repeatUntilEnabled = State(initialValue: item?.recurrence?.until != nil)
+        _repeatUntil = State(
+            initialValue: item?.recurrence?.until
+                ?? (calendar.date(byAdding: .day, value: 30, to: roundedStart) ?? roundedStart)
+        )
     }
 
     var body: some View {
@@ -1535,6 +1591,8 @@ struct CalendarEditor: View {
             Divider().padding(.vertical, 12)
             editorSchedule
             Divider().padding(.vertical, 12)
+            editorRecurrenceRow
+            Divider().padding(.vertical, 12)
             editorStatusRow
 #if os(iOS)
             if let existing {
@@ -1734,6 +1792,88 @@ struct CalendarEditor: View {
 #endif
     }
 
+    /// Series-level recurrence editing. Every occurrence of a repeating item
+    /// shares this schedule; there are deliberately no per-instance overrides
+    /// yet, so the caption states that honestly.
+    private var editorRecurrenceRow: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Image(systemName: "repeat")
+                    .frame(width: 16, height: 16)
+                    .foregroundStyle(.secondary)
+                Text("Repeat")
+                    .font(.system(size: 13, weight: .medium))
+                Spacer(minLength: 0)
+                Menu {
+                    Button("None") { repeatFrequency = nil }
+                    ForEach(CalendarRecurrenceFrequency.allCases, id: \.self) { candidate in
+                        Button(candidate.label) {
+                            repeatFrequency = candidate
+                            if repeatInterval < 1 { repeatInterval = 1 }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 7) {
+                        Text(repeatFrequency?.label ?? "None")
+                            .font(.system(size: 12, weight: .semibold))
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.primary.opacity(0.07), in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Repeats, \(repeatFrequency?.label ?? "none")")
+                .accessibilityIdentifier("calendar-item-recurrence-picker")
+            }
+
+            if repeatFrequency != nil {
+                Stepper(value: $repeatInterval, in: 1...30) {
+                    Text(repeatSummary)
+                        .font(.system(size: 12, weight: .medium))
+                        .accessibilityIdentifier("calendar-item-recurrence-interval")
+                }
+                .accessibilityLabel("Repeat interval")
+
+                Toggle(isOn: $repeatUntilEnabled) {
+                    Text("Until")
+                        .font(.system(size: 12, weight: .medium))
+                }
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .accessibilityIdentifier("calendar-item-recurrence-until-toggle")
+
+                if repeatUntilEnabled {
+                    DatePicker(
+                        "Last occurrence",
+                        selection: $repeatUntil,
+                        displayedComponents: [.date]
+                    )
+                    .font(.system(size: 12, weight: .medium))
+                    .accessibilityIdentifier("calendar-item-recurrence-until-date")
+                }
+
+                if existing != nil {
+                    Text("Changes apply to every occurrence.")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("calendar-event-recurrence")
+    }
+
+    private var repeatSummary: String {
+        guard let frequency = repeatFrequency,
+              let rule = try? CalendarRecurrenceRule(frequency: frequency, interval: max(1, repeatInterval)) else {
+            return ""
+        }
+        return rule.summary
+    }
+
     private var editorStatusRow: some View {
         HStack(spacing: 10) {
             LifeOSIcon(status.iconName)
@@ -1789,6 +1929,16 @@ struct CalendarEditor: View {
 
     private func commit() {
         do {
+            let rule: CalendarRecurrenceRule?
+            if let frequency = repeatFrequency {
+                rule = try CalendarRecurrenceRule(
+                    frequency: frequency,
+                    interval: max(1, repeatInterval),
+                    until: repeatUntilEnabled ? repeatUntil : nil
+                )
+            } else {
+                rule = nil
+            }
             let item = try CalendarItem(
                 id: existing?.id ?? UUID(),
                 title: title,
@@ -1802,7 +1952,8 @@ struct CalendarEditor: View {
                 createdAt: existing?.createdAt ?? .now,
                 updatedAt: .now,
                 deletedAt: existing?.deletedAt,
-                timeZoneIdentifier: timeZoneIdentifier
+                timeZoneIdentifier: timeZoneIdentifier,
+                recurrence: rule
             )
             onSave(item, handleMutationResult)
         } catch {

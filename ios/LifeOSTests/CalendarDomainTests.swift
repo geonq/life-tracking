@@ -123,6 +123,158 @@ final class CalendarDomainTests: XCTestCase {
         XCTAssertTrue(CalendarSearch.results(matching: "nonexistent", in: [item]).isEmpty)
     }
 
+    private func berlinCalendar() -> Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Europe/Berlin")!
+        return calendar
+    }
+
+    func testRecurrenceExpansionPreservesWallClockAcrossDSTSpringForward() throws {
+        let calendar = berlinCalendar()
+        let anchor = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 3, day: 28, hour: 9)))
+        let rule = try CalendarRecurrenceRule(frequency: .daily)
+        let item = try CalendarItem(title: "Morning sync", start: anchor, end: anchor.addingTimeInterval(1_800), recurrence: rule)
+        let windowStart = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 3, day: 27)))
+        let windowEnd = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 4, day: 1, hour: 12)))
+
+        let occurrences = CalendarRecurrence.occurrences(
+            of: item,
+            overlapping: DateInterval(start: windowStart, end: windowEnd),
+            calendar: calendar
+        )
+
+        // Anchor plus Mar 29-31 and Apr 1: five daily instances, each at
+        // 09:00 wall-clock even though Mar 29 only has 23 hours.
+        XCTAssertEqual(occurrences.count, 5)
+        XCTAssertEqual(occurrences.first, item)
+        for occurrence in occurrences.dropFirst() {
+            XCTAssertEqual(calendar.component(.hour, from: occurrence.start), 9)
+            XCTAssertEqual(calendar.component(.minute, from: occurrence.start), 0)
+            XCTAssertEqual(occurrence.occurrenceSourceID, item.id)
+            XCTAssertNil(try XCTUnwrap(occurrences.last).recurrence?.until)
+        }
+    }
+
+    func testMonthlyRecurrenceClampsToLastValidDayWithoutCompoundingDrift() throws {
+        let calendar = berlinCalendar()
+        let anchor = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 1, day: 31, hour: 10)))
+        let rule = try CalendarRecurrenceRule(frequency: .monthly)
+        let item = try CalendarItem(title: "Month-end review", start: anchor, end: anchor.addingTimeInterval(3_600), recurrence: rule)
+        let windowStart = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 1, day: 1)))
+        let windowEnd = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 5, day: 1)))
+
+        let occurrences = CalendarRecurrence.occurrences(
+            of: item,
+            overlapping: DateInterval(start: windowStart, end: windowEnd),
+            calendar: calendar
+        )
+
+        // Jan 31, Feb 28 (clamped), Mar 31, Apr 30 — always recomputed from
+        // the anchor, so the clamped February step cannot shift March.
+        XCTAssertEqual(occurrences.map { calendar.component(.day, from: $0.start) }, [31, 28, 31, 30])
+    }
+
+    func testBiweeklyRecurrenceHonorsInclusiveUntilBoundaryAndWindowClip() throws {
+        let calendar = berlinCalendar()
+        let anchor = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 8, day: 5, hour: 18)))
+        let until = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 9, day: 2, hour: 18)))
+        let rule = try CalendarRecurrenceRule(frequency: .weekly, interval: 2, until: until)
+        let item = try CalendarItem(title: "Fortnightly", start: anchor, end: anchor.addingTimeInterval(3_600), recurrence: rule)
+
+        let all = CalendarRecurrence.occurrences(of: item, overlapping: nil, calendar: calendar)
+        // Sep 2 18:00 equals `until` exactly; the boundary is inclusive.
+        XCTAssertEqual(all.map { calendar.component(.day, from: $0.start) }, [5, 19, 2])
+
+        let lateWindow = DateInterval(
+            start: try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 8, day: 15))),
+            end: try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 9, day: 20)))
+        )
+        let clipped = CalendarRecurrence.occurrences(of: item, overlapping: lateWindow, calendar: calendar)
+        XCTAssertEqual(clipped.map { calendar.component(.day, from: $0.start) }, [19, 2])
+
+        let exclusiveUntil = try CalendarRecurrenceRule(frequency: .weekly, interval: 2, until: until.addingTimeInterval(-1))
+        let strictItem = try CalendarItem(title: "Fortnightly strict", start: anchor, end: anchor.addingTimeInterval(3_600), recurrence: exclusiveUntil)
+        let strict = CalendarRecurrence.occurrences(of: strictItem, overlapping: nil, calendar: calendar)
+        XCTAssertEqual(strict.map { calendar.component(.day, from: $0.start) }, [5, 19])
+    }
+
+    func testOpenEndedDailyRecurrenceStopsAtEngineCapAndNonRecurringExpandsToSelf() throws {
+        let calendar = berlinCalendar()
+        let anchor = try XCTUnwrap(calendar.date(from: DateComponents(year: 2020, month: 1, day: 1, hour: 7)))
+        let repeating = try CalendarItem(
+            title: "Every day forever",
+            start: anchor,
+            end: anchor.addingTimeInterval(600),
+            recurrence: CalendarRecurrenceRule(frequency: .daily)
+        )
+        let plain = try CalendarItem(title: "One off", start: anchor, end: anchor.addingTimeInterval(600))
+
+        XCTAssertEqual(CalendarRecurrence.occurrences(of: repeating, overlapping: nil, calendar: calendar).count,
+                       CalendarRecurrence.maximumOccurrencesPerItem)
+        XCTAssertEqual(CalendarRecurrence.occurrences(of: plain, overlapping: nil, calendar: calendar), [plain])
+        XCTAssertTrue(CalendarRecurrence.occurrences(
+            of: plain.deleting(at: anchor),
+            overlapping: nil,
+            calendar: calendar
+        ).isEmpty)
+    }
+
+    func testRecurrenceCodableRoundTripLegacyPayloadAndTransientOccurrenceIdentity() throws {
+        let calendar = berlinCalendar()
+        let anchor = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 8, day: 1, hour: 8)))
+        let until = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 12, day: 24)))
+        let rule = try CalendarRecurrenceRule(frequency: .weekly, interval: 3, until: until)
+        let item = try CalendarItem(title: "Retro", start: anchor, end: anchor.addingTimeInterval(3_600), recurrence: rule)
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .secondsSince1970
+        let data = try encoder.encode(item)
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertNotNil(object["recurrence"])
+        XCTAssertNil(object["occurrenceSourceID"], "Derived-instance identity is transient and must never persist")
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        let decoded = try decoder.decode(CalendarItem.self, from: data)
+        XCTAssertEqual(decoded.recurrence, rule)
+        XCTAssertEqual(decoded.occurrenceSourceID, nil)
+
+        // A legacy payload written before the field existed still decodes.
+        var legacy = object
+        legacy.removeValue(forKey: "recurrence")
+        let legacyData = try JSONSerialization.data(withJSONObject: legacy)
+        let legacyItem = try decoder.decode(CalendarItem.self, from: legacyData)
+        XCTAssertNil(legacyItem.recurrence)
+
+        // Derived copies keep the anchor id family but flag their source.
+        let occurrences = CalendarRecurrence.occurrences(of: item, overlapping: nil, calendar: calendar)
+        let derived = occurrences.dropFirst().first
+        XCTAssertEqual(derived?.occurrenceSourceID, item.id)
+        XCTAssertNotEqual(derived?.start, item.start)
+    }
+
+    func testUpdatingReplacesAndClearsRecurrenceExplicitly() throws {
+        let start = base
+        let original = try CalendarItem(
+            title: "Series",
+            start: start,
+            end: start.addingTimeInterval(600),
+            recurrence: CalendarRecurrenceRule(frequency: .daily)
+        )
+        let replaced = try original.updating(
+            at: start,
+            recurrence: CalendarRecurrenceRule(frequency: .weekly, interval: 2)
+        )
+        XCTAssertEqual(replaced.recurrence?.frequency, .weekly)
+        XCTAssertEqual(replaced.recurrence?.interval, 2)
+
+        let cleared = try replaced.updating(at: start, clearRecurrence: true)
+        XCTAssertNil(cleared.recurrence)
+
+        let invalid = try? CalendarRecurrenceRule(frequency: .daily, interval: 0)
+        XCTAssertNil(invalid)
+    }
+
     func testEditorDateAdjustmentPreservesDurationAndOvernightDayOffset() throws {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
