@@ -319,10 +319,11 @@ Deliverables:
 - version Finance schemas first: account identity, balances/holdings, integer
   cents, reconciliation IDs, cursors/pagination, provenance, stale/revoked
   states, and migrations;
-- implement gateway-owned OAuth state/PKCE/callback/token storage. Settings may
+- implement gateway-owned Enable Banking session/callback/token storage. Settings may
   initiate, show pending/authorized/expiry/failure/unavailable, revoke, and
-  retry—never receive raw tokens. Support GoCardless, Revolut Business where
-  eligible, and explicit Trade Republic manual-import fallback;
+  retry—never receive raw tokens. Support Sparkasse and Revolut Personal through
+  Enable Banking, Revolut Business where eligible, and explicit Trade Republic
+  manual-import fallback;
 - ingest accounts, balances, transactions, categories, income, budgets,
   investments, net worth, freshness, and reconciliation;
 - complete all Revolut motion leaves explicitly: hero morph, ring reveal, chart
@@ -444,7 +445,7 @@ These are not reasons to idle; local implementation can proceed around them.
 - approved exact private `.ts.net` hostname and signed config/App Group values;
 - approval of the reviewed Windows deploy tree;
 - Clipper authoritative source choice;
-- GoCardless/Revolut Business eligibility and consent;
+- Enable Banking consent plus Revolut Business eligibility and consent;
 - signed-device HealthKit/notification/widget permission;
 - a dedicated Gemini credential provisioned to the Windows gateway;
 - live-account/device test windows and final visual-review windows.

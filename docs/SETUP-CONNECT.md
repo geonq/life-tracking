@@ -31,17 +31,21 @@ machine you code on. So:
 4. Do the **Step 0** master-switch once. Then LifeOS shows real usage. Your part: BitLocker + run
    the gateway + paste the URL. The rest is built.
 
-## 3. Bank (spending / balances) — needs a GoCardless account (one-time)
-Open-Banking law requires a licensed aggregator; you can't connect a bank from the app directly.
-1. Create a free **GoCardless Bank Account Data** account, register an app, get the API key.
-2. Put that key on the **Windows gateway** (never in the app / this repo).
-3. Once the gateway holds a connected account, LifeOS reads `/finance/summary` (via Step 0) and
-   shows balances/transactions. Settings → **Bank connections** shows each bank's access method +
-   honest state.
-Honest status: the *balances/transactions read* is built. The in-app **"Connect → open the bank
-consent screen"** tap (which triggers the GoCardless requisition on the gateway) is the one piece
-still to build — it's gated on the gateway's requisition route. Until then, the consent step is
-done gateway-side. Your part: the GoCardless signup + dropping the key on the PC.
+## 3. Bank (spending / balances) — Enable Banking (one-time)
+Open-Banking law requires a regulated account-information provider; LifeOS does not connect to a
+bank directly from the phone. The reviewed gateway owns the Enable Banking credentials and
+consent lifecycle.
+1. Register the production Enable Banking application and keep its app ID, private key, and
+   public certificate on the BitLocker-protected **Windows gateway** only.
+2. In LifeOS → **Settings → Bank connections**, choose **Sparkasse Leipzig** and tap **Connect**.
+   Complete the bank-hosted login/2FA consent page, then return to LifeOS and re-check the status.
+3. Repeat for **Revolut Personal** after the Sparkasse flow is linked.
+4. Once a connection is linked, LifeOS reads `/finance/summary` (via Step 0) and shows only
+   observed balances/transactions with source and freshness labels.
+
+The consent initiation and status polling are already implemented. The remaining action is the
+end-user bank login/consent itself; no bank password, access token, private key, or certificate
+belongs in the app or this repository.
 
 ## 4. Revolut Business — official Revolut API app (one-time), same pattern as #3.
 
@@ -56,9 +60,10 @@ Then the food-photo estimate works. Your part: the key; it never leaves the PC.
 - **The master switch (in-app, built):** Settings → Sync & storage → paste `.ts.net` URL → Check
   secure connection. This alone lights up usage + finance summary once the gateway runs.
 - **Needs BitLocker + the gateway running:** AI usage, finance summary.
-- **Needs a free provider signup + a key on the PC:** bank, Revolut Business, Gemini.
-- **Still to build (app side):** the in-app bank-consent tap (GoCardless requisition initiation).
+- **Needs provider credentials on the PC:** Enable Banking, Revolut Business, Gemini.
+- **Needs one-time user action:** complete Sparkasse Leipzig and Revolut Personal consent in
+  Settings → Bank connections.
 
 Every in-app Connect surface + honest state is already built (AI providers, bank catalog, health
-grant, gateway config + connection check). No fake buttons; honest "not connected" until the
-gateway + your signups exist. The only remaining app-side build is the bank-consent initiation.
+grant, gateway config + connection check). No fake buttons; the app remains honestly unavailable
+until the gateway and the selected consent flows exist.

@@ -333,7 +333,7 @@ integration evidence before that domain is live-enabled.
 
 | ID | Provider | Binding outcome | Severity | Current | Required evidence |
 |---|---|---|---:|---|---|
-| PC-01 | Sparkasse/GoCardless | consent/PKCE/token expiry/revoke/freshness/retry/live read-only | P0 | missing | integration + live-readonly |
+| PC-01 | Sparkasse/Enable Banking | consent/session expiry/revoke/freshness/retry/live read-only | P0 | missing | integration + live-readonly |
 | PC-02 | Revolut Personal | explicit supported/unavailable capability and consent lifecycle | P0 | missing | integration + live-readonly |
 | PC-03 | Revolut Business | eligibility/consent/token lifecycle/freshness/revoke | P0 | missing | integration + live-readonly |
 | PC-04 | Trade Republic | manual import parser/provenance/duplicates/reconciliation/reimport | P0 | missing | integration |
@@ -1859,8 +1859,8 @@ integration evidence before that domain is live-enabled.
       {"id": "HK-05B", "severity": "P0", "acceptance": "Physical-device evidence covers partial, stale, and conflict states without fixture substitution.", "evidence_types": ["device", "live-readonly"]}
     ],
     "PC-01": [
-      {"id": "PC-01A", "severity": "P0", "acceptance": "Sparkasse/GoCardless consent and PKCE lifecycle is gateway-owned and read-only.", "evidence_types": ["integration", "live-readonly"]},
-      {"id": "PC-01B", "severity": "P0", "acceptance": "Sparkasse/GoCardless expiry, revoke, freshness, and retry states are source-labelled.", "threshold": "Fresh <=15 minutes from observedAt; stale >15 minutes; at most 3 attempts; replaying one observation 10 times yields exactly 1 durable history record.", "evidence_types": ["integration", "live-readonly"]}
+      {"id": "PC-01A", "severity": "P0", "acceptance": "Sparkasse/Enable Banking consent and session lifecycle is gateway-owned and read-only.", "evidence_types": ["integration", "live-readonly"]},
+      {"id": "PC-01B", "severity": "P0", "acceptance": "Sparkasse/Enable Banking expiry, revoke, freshness, and retry states are source-labelled.", "threshold": "Fresh <=15 minutes from observedAt; stale >15 minutes; at most 3 attempts; replaying one observation 10 times yields exactly 1 durable history record.", "evidence_types": ["integration", "live-readonly"]}
     ],
     "PC-02": [
       {"id": "PC-02A", "severity": "P0", "acceptance": "Revolut Personal support or unavailable capability is explicit and consent is gateway-owned.", "evidence_types": ["integration", "live-readonly"]},
