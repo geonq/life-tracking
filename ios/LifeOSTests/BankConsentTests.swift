@@ -63,6 +63,7 @@ final class BankConsentTests: XCTestCase {
             "https://",
             "https:///consent",
             "https://user:pass@bank.example.com/consent",
+            "https://bank.example.com/consent#fragment",
             "javascript:alert(1)",
             " https://bank.example.com/consent",
             "https://bank.example.com/consent\n",

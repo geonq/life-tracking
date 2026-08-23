@@ -231,6 +231,7 @@ public actor TailscaleSyncClient {
         guard let components = URLComponents(string: rawValue),
               components.scheme?.lowercased() == "https",
               components.user == nil, components.password == nil,
+              components.fragment == nil,
               let host = components.host, !host.isEmpty else { return nil }
         return components.url
     }
