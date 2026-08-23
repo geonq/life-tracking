@@ -1,9 +1,10 @@
 # LifeOS execution plan to a defensible 95% checkpoint
 
 Updated: 2026-08-13. Branch: `lifeos-foundation-checkpoint-20260812`; current
-reviewed implementation checkpoint `f3338c4`. Draft PR:
-https://github.com/geonq/life-tracking/pull/1. This is the reviewed execution
-plan. Its companion registry is frozen at the recorded T0 hash; the 2026-08-13
+reviewed implementation checkpoint `f3338c4`. The old PR reference is retained
+only in history; it is not part of the current execution workflow. This is the
+reviewed execution plan. Its companion registry is frozen at the recorded T0
+hash; the 2026-08-13
 Helio device-management scope clarification requires one controlled,
 deduplicated refreeze before those new leaves can be scored.
 
