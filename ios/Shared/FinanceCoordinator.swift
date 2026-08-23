@@ -172,6 +172,13 @@ public final class FinanceCoordinator: ObservableObject {
                     || $0.provenance.connectorState == .refreshDue
                     || now.timeIntervalSince($0.provenance.observedAt) >= staleAfter
             } ?? false)
+            || (summary.accounts.map {
+                guard hasObservedAccounts(in: summary) else { return false }
+                return provenanceIsStale($0.provenance, now: now, staleAfter: staleAfter)
+                    || ($0.accounts ?? []).contains {
+                        provenanceIsStale($0.provenance, now: now, staleAfter: staleAfter)
+                    }
+            } ?? false)
         return stale ? .stale : .observed
     }
 
@@ -187,5 +194,36 @@ public final class FinanceCoordinator: ObservableObject {
             || (summary.transactions.map {
                 $0.availability == .observed && $0.transactions != nil
             } ?? false)
+            || hasObservedAccounts(in: summary)
+    }
+
+    /// Accounts are a first-class observation source. A summary containing no
+    /// metric totals can still be truthful when its account envelope and every
+    /// account row carry observed, source-backed provenance.
+    private static func hasObservedAccounts(in summary: FinanceSummary) -> Bool {
+        guard let snapshot = summary.accounts,
+              snapshot.availability == .observed,
+              isUsableObservedProvenance(snapshot.provenance),
+              let accounts = snapshot.accounts,
+              !accounts.isEmpty else {
+            return false
+        }
+        return accounts.allSatisfy { isUsableObservedProvenance($0.provenance) }
+    }
+
+    private static func isUsableObservedProvenance(_ provenance: FinancePayloadProvenance) -> Bool {
+        provenance.quality == .observed
+            && provenance.freshness != .unknown
+            && (provenance.connectorState == .healthy || provenance.connectorState == .refreshDue)
+    }
+
+    private static func provenanceIsStale(
+        _ provenance: FinancePayloadProvenance,
+        now: Date,
+        staleAfter: TimeInterval
+    ) -> Bool {
+        provenance.freshness == .stale
+            || provenance.connectorState == .refreshDue
+            || now.timeIntervalSince(provenance.observedAt) >= staleAfter
     }
 }

@@ -299,6 +299,36 @@ public struct FinanceView: View {
         case .spend, nil: .spend
         }
     }
+
+    /// A small, data-only acceptance seam for the production display model.
+    /// It keeps account-only truth testable without exposing the private
+    /// SwiftUI view hierarchy or any fixture-only entry point.
+    internal static func displayTruth(
+        summary: FinanceSummary?,
+        transactions: [FinanceTransactionObservation]? = nil,
+        usesVisualFixtures: Bool = false
+    ) -> FinanceDisplayTruth {
+        let snapshot = FinanceDisplaySnapshot(
+            summary: summary,
+            transactions: transactions,
+            usesVisualFixtures: usesVisualFixtures
+        )
+        return FinanceDisplayTruth(
+            statusLabel: snapshot.statusLabel,
+            sourceDisclosure: snapshot.sourceDisclosure,
+            netWorthCents: snapshot.netWorth.cents,
+            accountsCount: snapshot.accounts.count,
+            hasObservedValue: snapshot.hasObservedValue
+        )
+    }
+}
+
+internal struct FinanceDisplayTruth: Equatable {
+    let statusLabel: String
+    let sourceDisclosure: String
+    let netWorthCents: Int?
+    let accountsCount: Int
+    let hasObservedValue: Bool
 }
 
 // MARK: - Header and honest states
@@ -1534,6 +1564,7 @@ private struct FinanceDisplaySnapshot {
     let cashFlowPoints: [FinanceChartPoint]
     let updatedLabel: String
     let sourceDisclosure: String
+    let overallFreshness: FinancePayloadFreshness
 
     init(
         summary: FinanceSummary?,
@@ -1545,18 +1576,21 @@ private struct FinanceDisplaySnapshot {
             return
         }
 
-        let transactionSourceAvailable = suppliedTransactions != nil
-            || summary?.transactions?.availability == .observed
+        let transactionSourceAvailable = suppliedTransactions.map { !$0.isEmpty }
+            ?? (summary?.transactions?.availability == .observed
+                && !(summary?.transactions?.transactions ?? []).isEmpty)
         let transactionRows = suppliedTransactions ?? summary?.transactions?.transactions ?? []
         let transactionTotals = transactionSourceAvailable
             ? FinanceTransactionTotals(transactions: transactionRows)
             : nil
+        let accountObservations = Self.usableObservedAccounts(from: summary)
         let observed = summary != nil && [
             summary?.monthlyIncomeCents,
             summary?.fixedCostsCents,
             summary?.spentCents,
             summary?.savedCents
         ].contains(where: { $0 != nil }) || transactionSourceAvailable
+            || !accountObservations.isEmpty
 
         isDemo = false
         transactions = transactionRows
@@ -1580,7 +1614,7 @@ private struct FinanceDisplaySnapshot {
         fixedCosts = FinanceDisplayMetric(cents: summary?.fixedCostsCents, detail: summary == nil ? "Not connected" : "Observed total")
         saved = FinanceDisplayMetric(cents: summary?.savedCents, detail: summary == nil ? "Not connected" : "Observed total")
         savingsGoal = FinanceDisplayMetric(cents: summary?.savingsGoalCents, detail: summary == nil ? "Not connected" : "Savings goal")
-        accounts = (summary?.accounts?.accounts ?? []).map { observation in
+        accounts = accountObservations.map { observation in
             FinanceAccount(
                 id: observation.id,
                 name: observation.name,
@@ -1590,9 +1624,9 @@ private struct FinanceDisplaySnapshot {
                 hue: observation.source.localizedCaseInsensitiveContains("revolut") ? .blue : .teal
             )
         }
-        netWorth = accounts.isEmpty
-            ? .unavailable("Not available")
-            : FinanceDisplayMetric(cents: accounts.reduce(0) { $0 + $1.balanceCents }, detail: "Observed account balances")
+        netWorth = Self.overflowCheckedAccountTotal(accountObservations).map {
+            FinanceDisplayMetric(cents: $0, detail: "Observed account balances")
+        } ?? .unavailable("Not available")
         categories = transactionTotals?.categoryObservations.map(FinanceCategory.init) ?? []
         netWorthPoints = []
         spendPoints = []
@@ -1602,15 +1636,93 @@ private struct FinanceDisplaySnapshot {
         cashFlowPoints = transactionTotals.map { _ in
             Self.transactionPoints(transactionRows, title: "Cash flow", series: .cashFlow)
         } ?? []
+        overallFreshness = Self.overallFreshness(
+            summary: summary,
+            transactionSourceAvailable: transactionSourceAvailable,
+            transactionRows: transactionRows,
+            accountObservations: accountObservations
+        )
         updatedLabel = observed ? summary.map { FinanceDateFormatter.short($0.generatedAt) } ?? "Not available" : "Not available"
-        if transactionSourceAvailable {
-            let sourceIDs = Array(Set(transactionRows.map(\.source))).sorted()
-            sourceDisclosure = "\(FinanceSourceLabel.join(sourceIDs)) · \(FinanceFreshnessLabel.text(for: transactionRows)) · Updated \(updatedLabel)"
+        let sourceIDs = Array(Set(transactionRows.map(\.source) + accountObservations.map(\.source))).sorted()
+        if !sourceIDs.isEmpty {
+            sourceDisclosure = "\(FinanceSourceLabel.join(sourceIDs)) · \(FinanceFreshnessLabel.text(overallFreshness)) · Updated \(updatedLabel)"
         } else if let metric = summary?.spent {
             sourceDisclosure = "\(FinanceSourceLabel.display(metric.provenance.source)) · \(FinanceFreshnessLabel.text(metric.provenance.freshness)) · Updated \(updatedLabel)"
         } else {
             sourceDisclosure = "No authorized source · Not available"
         }
+    }
+
+    private static let maximumFinanceCents = 9_007_199_254_740_991
+
+    private static func usableObservedAccounts(from summary: FinanceSummary?) -> [FinanceAccountObservation] {
+        guard let snapshot = summary?.accounts,
+              snapshot.availability == .observed,
+              isUsableObservedProvenance(snapshot.provenance),
+              let accounts = snapshot.accounts,
+              !accounts.isEmpty else {
+            return []
+        }
+        return accounts.filter { isUsableObservedProvenance($0.provenance) }
+    }
+
+    private static func overflowCheckedAccountTotal(_ accounts: [FinanceAccountObservation]) -> Int? {
+        guard !accounts.isEmpty else { return nil }
+        var total = 0
+        for account in accounts {
+            let (next, overflowed) = total.addingReportingOverflow(account.balanceCents)
+            guard !overflowed,
+                  next >= -maximumFinanceCents,
+                  next <= maximumFinanceCents else {
+                return nil
+            }
+            total = next
+        }
+        return total
+    }
+
+    private static func isUsableObservedProvenance(_ provenance: FinancePayloadProvenance) -> Bool {
+        provenance.quality == .observed
+            && provenance.freshness != .unknown
+            && (provenance.connectorState == .healthy || provenance.connectorState == .refreshDue)
+    }
+
+    private static func overallFreshness(
+        summary: FinanceSummary?,
+        transactionSourceAvailable: Bool,
+        transactionRows: [FinanceTransactionObservation],
+        accountObservations: [FinanceAccountObservation]
+    ) -> FinancePayloadFreshness {
+        var provenances: [FinancePayloadProvenance] = []
+        if transactionSourceAvailable {
+            if let transactionProvenance = summary?.transactions?.provenance {
+                provenances.append(transactionProvenance)
+            }
+            provenances.append(contentsOf: transactionRows.map(\.provenance))
+        }
+        if !accountObservations.isEmpty {
+            if let accountProvenance = summary?.accounts?.provenance {
+                provenances.append(accountProvenance)
+            }
+            provenances.append(contentsOf: accountObservations.map(\.provenance))
+        }
+        if let summary {
+            let metrics = [
+                summary.monthlyIncome,
+                summary.fixedCosts,
+                summary.discretionaryBuffer,
+                summary.spent,
+                summary.savingsGoal,
+                summary.saved
+            ]
+            provenances.append(contentsOf: metrics.compactMap { metric in
+                guard metric.availability == .observed,
+                      metric.amountCents != nil,
+                      isUsableObservedProvenance(metric.provenance) else { return nil }
+                return metric.provenance
+            })
+        }
+        return FinanceFreshnessLabel.value(for: provenances)
     }
 
     private init(
@@ -1632,7 +1744,8 @@ private struct FinanceDisplaySnapshot {
         incomePoints: [FinanceChartPoint],
         cashFlowPoints: [FinanceChartPoint],
         updatedLabel: String,
-        sourceDisclosure: String
+        sourceDisclosure: String,
+        overallFreshness: FinancePayloadFreshness
     ) {
         self.isDemo = isDemo
         self.transactions = transactions
@@ -1653,6 +1766,7 @@ private struct FinanceDisplaySnapshot {
         self.cashFlowPoints = cashFlowPoints
         self.updatedLabel = updatedLabel
         self.sourceDisclosure = sourceDisclosure
+        self.overallFreshness = overallFreshness
     }
 
     static let demo: FinanceDisplaySnapshot = {
@@ -1696,7 +1810,8 @@ private struct FinanceDisplaySnapshot {
             incomePoints: Self.transactionPoints(transactions, title: "Income", series: .income),
             cashFlowPoints: Self.transactionPoints(transactions, title: "Cash flow", series: .cashFlow),
             updatedLabel: "Just now",
-            sourceDisclosure: "Demo fixture · not live · Revolut Personal · Fresh"
+            sourceDisclosure: "Demo fixture · not live · Revolut Personal · Fresh",
+            overallFreshness: .fresh
         )
     }()
 
@@ -1814,10 +1929,20 @@ private struct FinanceDisplaySnapshot {
         return min(Double(saved) / Double(goal), 1)
     }
 
-    var statusLabel: String { isDemo ? "Demo · not live" : (hasObservedValue ? "Observed" : "Not connected") }
-    var statusColor: Color { isDemo ? LifeOSTokens.warning : (hasObservedValue ? LifeOSTokens.success : LifeOSTokens.tertiaryText) }
+    var statusLabel: String {
+        if isDemo { return "Demo · not live" }
+        guard hasObservedValue else { return "Not connected" }
+        return overallFreshness == .stale ? "Stale" : "Observed"
+    }
+    var statusColor: Color {
+        if isDemo { return LifeOSTokens.warning }
+        guard hasObservedValue else { return LifeOSTokens.tertiaryText }
+        return overallFreshness == .stale ? LifeOSTokens.warning : LifeOSTokens.success
+    }
     var accessibilityStatus: String { statusLabel }
-    var hasObservedValue: Bool { [spent, income, fixedCosts, saved].contains(where: { !$0.isUnavailable }) }
+    var hasObservedValue: Bool {
+        [netWorth, spent, income, fixedCosts, saved].contains(where: { !$0.isUnavailable })
+    }
 
     func points(for detail: FinanceDetail, range: FinanceRange) -> [FinanceChartPoint] {
         let source: [FinanceChartPoint]
@@ -2062,6 +2187,21 @@ private enum FinanceFreshnessLabel {
         guard !rows.isEmpty else { return .unknown }
         if rows.contains(where: { $0.provenance.freshness == .unknown }) { return .unknown }
         if rows.contains(where: { $0.provenance.freshness == .stale || $0.provenance.connectorState == .refreshDue }) {
+            return .stale
+        }
+        return .fresh
+    }
+
+    static func value(for provenances: [FinancePayloadProvenance]) -> FinancePayloadFreshness {
+        guard !provenances.isEmpty else { return .unknown }
+        if provenances.contains(where: {
+            $0.quality != .observed || $0.freshness == .unknown
+        }) {
+            return .unknown
+        }
+        if provenances.contains(where: {
+            $0.freshness == .stale || $0.connectorState == .refreshDue
+        }) {
             return .stale
         }
         return .fresh

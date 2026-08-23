@@ -15,7 +15,8 @@ final class WidgetSnapshotPublisherTests: XCTestCase {
         spentAvailability: String = "observed",
         spentCents: Int = 45_000,
         observedAt: Date? = nil,
-        freshness: String = "fresh"
+        freshness: String = "fresh",
+        transactions: [String: Any]? = nil
     ) throws -> FinanceSummary {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -35,7 +36,7 @@ final class WidgetSnapshotPublisherTests: XCTestCase {
         } else {
             spentMetric = unavailableMetric
         }
-        let payload: [String: Any] = [
+        var payload: [String: Any] = [
             "generatedAt": formatter.string(from: now),
             "currency": "EUR",
             "monthlyIncome": unavailableMetric,
@@ -44,6 +45,50 @@ final class WidgetSnapshotPublisherTests: XCTestCase {
             "spent": spentMetric,
             "savingsGoal": unavailableMetric,
             "saved": unavailableMetric
+        ]
+        if let transactions {
+            payload["transactions"] = transactions
+        }
+        return try FinanceSummary.decode(JSONSerialization.data(withJSONObject: payload), now: now)
+    }
+
+    private func accountOnlyFinanceSummary(
+        balances: [Int],
+        observedAt: Date? = nil,
+        freshness: String = "fresh",
+        connector: String = "healthy"
+    ) throws -> FinanceSummary {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let accountObservedAt = observedAt ?? now.addingTimeInterval(-60)
+        let observed = formatter.string(from: accountObservedAt)
+        let unavailableProvenance: [String: Any] = [
+            "source": "no-authorized-finance-source", "observedAt": observed,
+            "freshness": "unknown", "quality": "unavailable", "connectorState": "unavailable"
+        ]
+        let unavailableMetric: [String: Any] = [
+            "availability": "unavailable", "provenance": unavailableProvenance
+        ]
+        let accountProvenance: [String: Any] = [
+            "source": "sparkasse_leipzig", "observedAt": observed,
+            "freshness": freshness, "quality": "observed", "connectorState": connector
+        ]
+        let accounts: [[String: Any]] = balances.enumerated().map { index, balance in
+            [
+                "id": "sparkasse-(index)", "name": "Sparkasse Leipzig (index + 1)",
+                "detail": "Checking", "balanceCents": balance,
+                "source": "sparkasse_leipzig", "provenance": accountProvenance
+            ]
+        }
+        let payload: [String: Any] = [
+            "generatedAt": formatter.string(from: now), "currency": "EUR",
+            "monthlyIncome": unavailableMetric, "fixedCosts": unavailableMetric,
+            "discretionaryBuffer": unavailableMetric, "spent": unavailableMetric,
+            "savingsGoal": unavailableMetric, "saved": unavailableMetric,
+            "accounts": [
+                "availability": "observed", "accounts": accounts,
+                "provenance": accountProvenance
+            ]
         ]
         return try FinanceSummary.decode(JSONSerialization.data(withJSONObject: payload), now: now)
     }
@@ -66,6 +111,88 @@ final class WidgetSnapshotPublisherTests: XCTestCase {
 
         XCTAssertNil(mapped.spendCents)
         XCTAssertNil(mapped.netWorthCents)
+        XCTAssertNil(mapped.cashFlowCents)
+        XCTAssertEqual(mapped.availability(at: now), .unavailable)
+    }
+
+    func testObservedAccountsMapToOverflowSafeNetWorth() throws {
+        let summary = try accountOnlyFinanceSummary(balances: [125_000, -25_000])
+        let mapped = WidgetSnapshotPublisher.mapFinance(summary: summary, state: .observed, now: now)
+
+        XCTAssertEqual(mapped.netWorthCents, 100_000)
+        XCTAssertNil(mapped.cashFlowCents)
+        XCTAssertEqual(mapped.freshness, .fresh)
+        XCTAssertEqual(mapped.availability(at: now), .fresh)
+    }
+
+    func testOverflowingObservedAccountTotalFailsClosed() throws {
+        // Each row is within the FinanceDomain account bound, but this many
+        // rows exceed Int.max when summed. The mapper must not trap or wrap.
+        let summary = try accountOnlyFinanceSummary(
+            balances: Array(repeating: 9_007_199_254_740_991, count: 1_025)
+        )
+        let mapped = WidgetSnapshotPublisher.mapFinance(summary: summary, state: .observed, now: now)
+
+        XCTAssertNil(mapped.netWorthCents)
+        XCTAssertEqual(mapped.availability(at: now), .unavailable)
+    }
+
+    func testStaleObservedAccountsRemainVisibleWithStaleFreshness() throws {
+        let summary = try accountOnlyFinanceSummary(
+            balances: [100_000],
+            observedAt: now.addingTimeInterval(-3_600),
+            freshness: "stale",
+            connector: "refresh_due"
+        )
+        let mapped = WidgetSnapshotPublisher.mapFinance(summary: summary, state: .stale, now: now)
+
+        XCTAssertEqual(mapped.netWorthCents, 100_000)
+        XCTAssertEqual(mapped.freshness, .stale)
+        XCTAssertEqual(mapped.availability(at: now), .stale)
+    }
+
+    func testObservedTransactionsDeriveCashFlowFromSignedTotals() throws {
+        let observedAt = now.addingTimeInterval(-60)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let timestamp = formatter.string(from: observedAt)
+        let provenance: [String: Any] = [
+            "source": "revolut_personal", "observedAt": timestamp,
+            "freshness": "fresh", "quality": "observed", "connectorState": "healthy"
+        ]
+        let transactions: [String: Any] = [
+            "availability": "observed",
+            "transactions": [
+                [
+                    "id": "income-1", "merchant": "Employer", "title": "Salary",
+                    "signedAmountCents": 1_200, "timestamp": timestamp,
+                    "account": "Revolut Personal", "source": "revolut_personal",
+                    "category": "Income", "provenance": provenance
+                ],
+                [
+                    "id": "spend-1", "merchant": "REWE", "title": "Groceries",
+                    "signedAmountCents": -250, "timestamp": timestamp,
+                    "account": "Revolut Personal", "source": "revolut_personal",
+                    "category": "Food", "provenance": provenance
+                ]
+            ],
+            "provenance": provenance
+        ]
+        let summary = try financeSummary(
+            spentAvailability: "unavailable",
+            transactions: transactions
+        )
+        let mapped = WidgetSnapshotPublisher.mapFinance(summary: summary, state: .observed, now: now)
+
+        XCTAssertEqual(mapped.cashFlowCents, 950)
+        XCTAssertNil(mapped.netWorthCents)
+        XCTAssertNil(mapped.spendCents)
+    }
+
+    func testAbsentTransactionsNeverMapCashFlowToZero() throws {
+        let summary = try financeSummary(spentAvailability: "unavailable")
+        let mapped = WidgetSnapshotPublisher.mapFinance(summary: summary, state: .observed, now: now)
+
         XCTAssertNil(mapped.cashFlowCents)
         XCTAssertEqual(mapped.availability(at: now), .unavailable)
     }

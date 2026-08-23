@@ -138,36 +138,107 @@ public actor WidgetSnapshotPublisher {
 // MARK: - Mapping: Finance
 
 extension WidgetSnapshotPublisher {
-    /// `FinanceSummary` has no net-worth or cash-flow field, and no app-side
-    /// code derives either from it (verified: the only `netWorth` usage in
-    /// the app is `FinanceView`'s own `FinanceDisplayMetric`, built from a
-    /// separate, more detailed account model that `FinanceCoordinator` does
-    /// not expose). Both stay permanently unavailable rather than guessing a
-    /// formula. Only `spendCents` has a direct, honest source.
+    /// Finance widget aggregates are derived only from observations already
+    /// accepted by `FinanceDomain`:
+    ///
+    /// - net worth is the overflow-checked sum of observed account balances;
+    /// - cash flow is `FinanceTransactionTotals.netCashFlowCents`, i.e. the
+    ///   sum of signed observed transaction amounts.
+    ///
+    /// A missing transaction snapshot is not an empty ledger, so cash flow
+    /// remains unavailable until at least one observed transaction is present.
     public static func mapFinance(
         summary: FinanceSummary?,
         state: FinanceLoadState,
         now: Date = .now
     ) -> WidgetSafeFinanceSummary {
-        guard state == .observed || state == .stale,
-              let summary,
-              summary.spent.availability == .observed,
-              let spendCents = summary.spent.amountCents else {
+        guard state == .observed || state == .stale, let summary else {
             return .unavailable()
         }
-        let observedAt = summary.spent.provenance.observedAt
-        let freshness: WidgetSnapshotFreshness = summary.spent.provenance.freshness == .stale || state == .stale
-            ? .stale
-            : .fresh
+
+        var observedProvenance: [FinancePayloadProvenance] = []
+        var spendCents: Int?
+        if summary.spent.availability == .observed,
+           let amount = summary.spent.amountCents,
+           isUsableObservedProvenance(summary.spent.provenance) {
+            spendCents = amount
+            observedProvenance.append(summary.spent.provenance)
+        }
+
+        let accounts = usableObservedAccounts(from: summary)
+        let netWorthCents = overflowCheckedAccountTotal(accounts)
+        if !accounts.isEmpty {
+            observedProvenance.append(summary.accounts!.provenance)
+            observedProvenance.append(contentsOf: accounts.map(\.provenance))
+        }
+
+        var cashFlowCents: Int?
+        if let transactionSnapshot = summary.transactions,
+           transactionSnapshot.availability == .observed,
+           let transactions = transactionSnapshot.transactions,
+           !transactions.isEmpty,
+           isUsableObservedProvenance(transactionSnapshot.provenance),
+           transactions.allSatisfy({ isUsableObservedProvenance($0.provenance) }) {
+            // FinanceTransactionTotals is the shared, reviewable rule: each
+            // row is signed, so income minus spending equals signed sum.
+            cashFlowCents = FinanceTransactionTotals(transactions: transactions).netCashFlowCents
+            observedProvenance.append(transactionSnapshot.provenance)
+            observedProvenance.append(contentsOf: transactions.map(\.provenance))
+        }
+
+        guard spendCents != nil || netWorthCents != nil || cashFlowCents != nil,
+              let observedAt = observedProvenance.map(\.observedAt).min() else {
+            return .unavailable()
+        }
+
+        let hasStaleEvidence = state == .stale || observedProvenance.contains {
+            $0.freshness == .stale
+                || $0.connectorState == .refreshDue
+        }
+        let freshness: WidgetSnapshotFreshness = hasStaleEvidence ? .stale : .fresh
         return WidgetSafeFinanceSummary(
             connector: .connected,
             consent: .granted,
             freshness: freshness,
             observedAt: observedAt,
-            netWorthCents: nil,
+            netWorthCents: netWorthCents,
             spendCents: spendCents,
-            cashFlowCents: nil
+            cashFlowCents: cashFlowCents
         )
+    }
+
+    private static let maximumFinanceCents = 9_007_199_254_740_991
+
+    private static func usableObservedAccounts(from summary: FinanceSummary) -> [FinanceAccountObservation] {
+        guard let snapshot = summary.accounts,
+              snapshot.availability == .observed,
+              isUsableObservedProvenance(snapshot.provenance),
+              let accounts = snapshot.accounts,
+              !accounts.isEmpty else {
+            return []
+        }
+        return accounts.filter { isUsableObservedProvenance($0.provenance) }
+    }
+
+    private static func overflowCheckedAccountTotal(_ accounts: [FinanceAccountObservation]) -> Int? {
+        guard !accounts.isEmpty else { return nil }
+        var total = 0
+        for account in accounts {
+            let (next, overflowed) = total.addingReportingOverflow(account.balanceCents)
+            guard !overflowed,
+                  next >= -maximumFinanceCents,
+                  next <= maximumFinanceCents else {
+                return nil
+            }
+            total = next
+        }
+        return total
+    }
+
+    private static func isUsableObservedProvenance(_ provenance: FinancePayloadProvenance) -> Bool {
+        provenance.quality == .observed
+            && provenance.freshness != .unknown
+            && (provenance.connectorState == .healthy || provenance.connectorState == .refreshDue)
     }
 }
 

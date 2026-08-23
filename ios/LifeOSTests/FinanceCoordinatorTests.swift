@@ -108,6 +108,74 @@ final class FinanceCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.state, .stale)
     }
 
+    func testFreshAccountOnlySummaryPublishesObservedState() async throws {
+        let now = Date.now
+        let summary = try makeAccountOnlySummary(
+            now: now,
+            observedAt: now.addingTimeInterval(-1),
+            freshness: "fresh",
+            connector: "healthy"
+        )
+        let coordinator = await MainActor.run {
+            FinanceCoordinator(fetch: { summary })
+        }
+
+        await coordinator.refresh()
+
+        let result = await MainActor.run { (coordinator.state, coordinator.summary?.accounts?.availability) }
+        XCTAssertEqual(result.0, .observed)
+        XCTAssertEqual(result.1, .observed)
+    }
+
+    @MainActor
+    func testStaleAccountProvenancePublishesStaleState() throws {
+        let now = Date.now
+        let summary = try makeAccountOnlySummary(
+            now: now,
+            observedAt: now.addingTimeInterval(-60 * 60),
+            freshness: "stale",
+            connector: "refresh_due"
+        )
+        let coordinator = FinanceCoordinator(initialSummary: summary)
+
+        XCTAssertEqual(coordinator.state, .stale)
+    }
+
+    func testFinanceViewAccountOnlyDataIsObservedAndDisclosesSource() throws {
+        let now = Date.now
+        let summary = try makeAccountOnlySummary(
+            now: now,
+            observedAt: now.addingTimeInterval(-1),
+            freshness: "fresh",
+            connector: "healthy"
+        )
+
+        let truth = FinanceView.displayTruth(summary: summary)
+
+        XCTAssertTrue(truth.hasObservedValue)
+        XCTAssertEqual(truth.statusLabel, "Observed")
+        XCTAssertEqual(truth.accountsCount, 1)
+        XCTAssertEqual(truth.netWorthCents, 123_456)
+        XCTAssertTrue(truth.sourceDisclosure.contains("Sparkasse Leipzig"))
+        XCTAssertTrue(truth.sourceDisclosure.contains("Fresh"))
+    }
+
+    func testFinanceViewStaleAccountDataIsLabelledStale() throws {
+        let now = Date.now
+        let summary = try makeAccountOnlySummary(
+            now: now,
+            observedAt: now.addingTimeInterval(-60 * 60),
+            freshness: "stale",
+            connector: "refresh_due"
+        )
+
+        let truth = FinanceView.displayTruth(summary: summary)
+
+        XCTAssertEqual(truth.statusLabel, "Stale")
+        XCTAssertTrue(truth.sourceDisclosure.contains("Stale"))
+        XCTAssertEqual(truth.netWorthCents, 123_456)
+    }
+
     private func makeSummary(
         generatedAt: Date = .now,
         observedAt: Date = .now.addingTimeInterval(-1),
@@ -140,6 +208,43 @@ final class FinanceCoordinatorTests: XCTestCase {
             "saved": metric
         ]
         return try FinanceSummary.decode(JSONSerialization.data(withJSONObject: payload))
+    }
+
+    private func makeAccountOnlySummary(
+        now: Date,
+        observedAt: Date,
+        freshness: String,
+        connector: String
+    ) throws -> FinanceSummary {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let observed = formatter.string(from: observedAt)
+        let unavailableProvenance: [String: Any] = [
+            "source": "no-authorized-finance-source", "observedAt": observed,
+            "freshness": "unknown", "quality": "unavailable", "connectorState": "unavailable"
+        ]
+        let unavailable: [String: Any] = ["availability": "unavailable", "provenance": unavailableProvenance]
+        let accountProvenance: [String: Any] = [
+            "source": "sparkasse_leipzig", "observedAt": observed,
+            "freshness": freshness, "quality": "observed", "connectorState": connector
+        ]
+        let account: [String: Any] = [
+            "id": "sparkasse-checking", "name": "Sparkasse Leipzig", "detail": "Checking",
+            "balanceCents": 123_456, "source": "sparkasse_leipzig", "provenance": accountProvenance
+        ]
+        let payload: [String: Any] = [
+            "generatedAt": formatter.string(from: now), "currency": "EUR",
+            "monthlyIncome": unavailable, "fixedCosts": unavailable,
+            "discretionaryBuffer": unavailable, "spent": unavailable,
+            "savingsGoal": unavailable, "saved": unavailable,
+            "accounts": [
+                "availability": "observed", "accounts": [account], "provenance": accountProvenance
+            ]
+        ]
+        return try FinanceSummary.decode(
+            JSONSerialization.data(withJSONObject: payload),
+            now: now
+        )
     }
 
     private func makeTransactionOnlySummary(
