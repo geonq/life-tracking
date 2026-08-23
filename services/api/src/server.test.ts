@@ -161,7 +161,7 @@ describe('HTTP API', () => {
       const finance = await call('/api/finance/connectors');
       expect(finance.status).toBe(200);
       expect(finance.body.connectors.map((connector: { id: string }) => connector.id)).toEqual([
-        'sparkasse',
+        'sparkasse_leipzig',
         'revolut_personal',
         'revolut_business',
         'trade_republic',

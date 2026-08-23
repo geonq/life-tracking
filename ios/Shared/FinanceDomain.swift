@@ -36,7 +36,7 @@ private func rejectUnknownFinanceKeys(_ decoder: Decoder, allowed: Set<String>) 
 }
 
 public enum FinanceConnectorKind: String, Codable, CaseIterable, Equatable, Sendable {
-    case sparkasse
+    case sparkasse = "sparkasse_leipzig"
     case revolutPersonal = "revolut_personal"
     case revolutBusiness = "revolut_business"
     case tradeRepublic = "trade_republic"
@@ -127,9 +127,9 @@ public struct FinanceConnectorCatalog: Decodable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey { case connectors }
 
     public static let defaults: [FinanceConnectorDescriptor] = [
-        .init(kind: .sparkasse, displayName: "Sparkasse", accessMethod: .regulatedOpenBanking,
+        .init(kind: .sparkasse, displayName: "Sparkasse Leipzig", accessMethod: .regulatedOpenBanking,
               provider: "Enable Banking", risk: .consentRequired,
-              recommendation: "Configure the Sparkasse institution and complete one-time Enable Banking consent before enabling; keep statement import as the fallback."),
+              recommendation: "Configure the exact Sparkasse Leipzig institution and complete one-time Enable Banking consent before enabling; keep statement import as the fallback."),
         .init(kind: .revolutPersonal, displayName: "Revolut Personal", accessMethod: .regulatedOpenBanking,
               provider: "Enable Banking", risk: .consentRequired,
               recommendation: "Configure the personal Revolut institution and complete one-time Enable Banking consent before enabling; keep statement import as the fallback."),

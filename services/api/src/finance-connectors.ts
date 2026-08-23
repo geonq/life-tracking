@@ -2,8 +2,8 @@ import type { FinanceConnectorDescriptor } from '@iphone-life-os/contracts';
 
 export const financeConnectors = [
   {
-    id: 'sparkasse',
-    displayName: 'Sparkasse',
+    id: 'sparkasse_leipzig',
+    displayName: 'Sparkasse Leipzig',
     accessMethod: 'regulated_open_banking',
     provider: 'Enable Banking',
     enabled: false,

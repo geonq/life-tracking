@@ -94,13 +94,13 @@ describe('usage window truthfulness', () => {
 
 const connectors = [
   {
-    id: 'sparkasse', displayName: 'Sparkasse', accessMethod: 'regulated_open_banking',
-    provider: 'GoCardless Bank Account Data', enabled: false, requiresExplicitOptIn: true,
+    id: 'sparkasse_leipzig', displayName: 'Sparkasse Leipzig', accessMethod: 'regulated_open_banking',
+    provider: 'Enable Banking', enabled: false, requiresExplicitOptIn: true,
     risk: 'consent_required', recommendation: 'Configure the institution and complete one-time consent before enabling.',
   },
   {
     id: 'revolut_personal', displayName: 'Revolut Personal', accessMethod: 'regulated_open_banking',
-    provider: 'GoCardless Bank Account Data', enabled: false, requiresExplicitOptIn: true,
+    provider: 'Enable Banking', enabled: false, requiresExplicitOptIn: true,
     risk: 'consent_required', recommendation: 'Configure the institution and complete one-time consent before enabling.',
   },
   {

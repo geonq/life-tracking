@@ -1313,12 +1313,19 @@ private struct BankConsentConnectRow: View {
     let descriptor: FinanceConnectorDescriptor
     let syncClient: TailscaleSyncClient
     let gatewayConfigured: Bool
+    let onLinked: (() async -> Void)?
     @StateObject private var controller: BankConsentRowController
 
-    init(descriptor: FinanceConnectorDescriptor, syncClient: TailscaleSyncClient, gatewayConfigured: Bool) {
+    init(
+        descriptor: FinanceConnectorDescriptor,
+        syncClient: TailscaleSyncClient,
+        gatewayConfigured: Bool,
+        onLinked: (() async -> Void)? = nil
+    ) {
         self.descriptor = descriptor
         self.syncClient = syncClient
         self.gatewayConfigured = gatewayConfigured
+        self.onLinked = onLinked
         _controller = StateObject(wrappedValue: BankConsentRowController(client: syncClient))
     }
 
@@ -1380,6 +1387,10 @@ private struct BankConsentConnectRow: View {
 #endif
         .onChange(of: gatewayConfigured) { _, isConfigured in
             if !isConfigured { controller.reset() }
+        }
+        .onChange(of: controller.state) { previous, current in
+            guard previous != current, case .linked = current, let onLinked else { return }
+            Task { await onLinked() }
         }
     }
 
@@ -1535,7 +1546,8 @@ private struct FinanceConnectionsSettingsView: View {
                                     BankConsentConnectRow(
                                         descriptor: descriptor,
                                         syncClient: syncClient,
-                                        gatewayConfigured: gatewayConfigured
+                                        gatewayConfigured: gatewayConfigured,
+                                        onLinked: refreshAction
                                     )
                                 }
                             }

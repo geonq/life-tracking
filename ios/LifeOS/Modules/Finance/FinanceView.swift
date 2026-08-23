@@ -1996,7 +1996,7 @@ private enum FinanceCurrencyFormatter {
 private enum FinanceSourceLabel {
     static func display(_ source: String) -> String {
         switch source {
-        case "sparkasse": "Sparkasse"
+        case "sparkasse_leipzig": "Sparkasse Leipzig"
         case "revolut_personal": "Revolut Personal"
         case "revolut_business": "Revolut Business"
         case "trade_republic": "Trade Republic"

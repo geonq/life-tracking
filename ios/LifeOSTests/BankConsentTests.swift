@@ -17,7 +17,7 @@ final class BankConsentTests: XCTestCase {
     // MARK: - institutionId validation (request body)
 
     func testInstitutionIdValidationFailsClosedOnEmptyOversizedOrControlCharacters() {
-        XCTAssertEqual(TailscaleSyncClient.validatedInstitutionId("sparkasse"), "sparkasse")
+        XCTAssertEqual(TailscaleSyncClient.validatedInstitutionId("sparkasse_leipzig"), "sparkasse_leipzig")
         XCTAssertEqual(TailscaleSyncClient.validatedInstitutionId("revolut_personal"), "revolut_personal")
         for value in ["", " ", "bad id", "bad\nid", "bad\tid", String(repeating: "x", count: 129)] {
             XCTAssertNil(TailscaleSyncClient.validatedInstitutionId(value), value)
@@ -30,14 +30,14 @@ final class BankConsentTests: XCTestCase {
     }
 
     func testBankConsentRequestIsPOSTWithJSONBodyAndNoCredentialHeaders() throws {
-        let request = try XCTUnwrap(TailscaleSyncClient.bankConsentRequest(url: url, institutionId: "sparkasse"))
+        let request = try XCTUnwrap(TailscaleSyncClient.bankConsentRequest(url: url, institutionId: "sparkasse_leipzig"))
         XCTAssertEqual(request.httpMethod, "POST")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
         XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
         XCTAssertNil(request.value(forHTTPHeaderField: "Tailscale-User-Login"))
         let body = try XCTUnwrap(request.httpBody)
         let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: String])
-        XCTAssertEqual(object, ["institutionId": "sparkasse"])
+        XCTAssertEqual(object, ["institutionId": "sparkasse_leipzig"])
     }
 
     // MARK: - connectionId validation (path component, not query string)
