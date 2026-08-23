@@ -26,7 +26,7 @@ import os
 import re
 import stat
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -488,6 +488,11 @@ def _validate_usage_payload(data: dict) -> bool:
 
 
 FINANCE_MAX_SAFE_CENTS = 9_007_199_254_740_991
+FINANCE_MAX_CLOCK_SKEW = timedelta(seconds=5)
+FINANCE_STALE_AFTER = timedelta(minutes=15)
+FINANCE_DATETIME_PATTERN = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
+)
 FINANCE_METRICS = {
     "monthlyIncome", "fixedCosts", "discretionaryBuffer", "spent", "savingsGoal", "saved"
 }
@@ -503,6 +508,7 @@ FINANCE_TRANSACTION_FIELDS = {
     "account", "source", "category", "provenance"
 }
 FINANCE_TRANSACTION_SNAPSHOT_FIELDS = {"availability", "transactions", "provenance"}
+FINANCE_DERIVED_ACCOUNT_SOURCE = "derived-account-snapshot"
 FINANCE_DERIVED_TRANSACTION_SOURCE = "derived-transaction-snapshot"
 
 
@@ -536,36 +542,68 @@ def _contains_sensitive_finance(obj) -> bool:
     return False
 
 
-def _validate_finance_provenance(value, *, observed: bool) -> bool:
+def _parse_finance_timestamp(value):
+    if not isinstance(value, str) or not FINANCE_DATETIME_PATTERN.fullmatch(value):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, OverflowError, OSError, TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def _is_finance_observed_timestamp(value) -> bool:
+    parsed = _parse_finance_timestamp(value)
+    if parsed is None:
+        return False
+    try:
+        return parsed <= datetime.now(timezone.utc) + FINANCE_MAX_CLOCK_SKEW
+    except (OverflowError, OSError, TypeError, ValueError):
+        return False
+
+
+def _expected_finance_observed_pair(value):
+    observed_at = _parse_finance_timestamp(value.get("observedAt")) if isinstance(value, dict) else None
+    if observed_at is None:
+        return None
+    try:
+        age = datetime.now(timezone.utc) - observed_at
+    except (OverflowError, OSError, TypeError, ValueError):
+        return None
+    if age < -FINANCE_MAX_CLOCK_SKEW:
+        return None
+    return ("fresh", "healthy") if age <= FINANCE_STALE_AFTER else ("stale", "refresh_due")
+
+
+def _validate_finance_provenance(value, *, observed: bool, age_consistent: bool = False) -> bool:
     if not isinstance(value, dict) or set(value) != FINANCE_PROVENANCE_FIELDS:
         return False
     if (
         not isinstance(value["source"], str)
         or not value["source"].strip()
-        or not _is_usage_observed_timestamp(value["observedAt"])
+        or not _is_finance_observed_timestamp(value["observedAt"])
     ):
         return False
-    if not _is_choice(value["freshness"], {"fresh", "stale", "unknown"}):
-        return False
-    if not _is_choice(value["connectorState"], CONNECTOR_STATES):
-        return False
     if observed:
-        return value["quality"] == "observed" and value["connectorState"] in {"healthy", "refresh_due"}
-    return value["quality"] == "unavailable" and value["connectorState"] not in {"healthy", "refresh_due"}
+        if (
+            value["quality"] != "observed"
+            or not _is_choice(value["freshness"], {"fresh", "stale"})
+            or not _is_choice(value["connectorState"], {"healthy", "refresh_due"})
+        ):
+            return False
+        if not age_consistent:
+            return True
+        expected = _expected_finance_observed_pair(value)
+        return expected is not None and (value["freshness"], value["connectorState"]) == expected
+    return (
+        value["quality"] == "unavailable"
+        and _is_choice(value["freshness"], {"unknown"})
+        and _is_choice(value["connectorState"], CONNECTOR_STATES - {"healthy", "refresh_due"})
+    )
 
 
-def _validate_finance_observed_provenance(value, *, age_consistent: bool) -> bool:
-    if not _validate_finance_provenance(value, observed=True) or value["freshness"] == "unknown":
-        return False
-    if not age_consistent:
-        return True
-    try:
-        observed_at = datetime.fromisoformat(value["observedAt"].replace("Z", "+00:00"))
-        age = datetime.now(timezone.utc) - observed_at
-    except (OverflowError, OSError, ValueError):
-        return False
-    expected = ("fresh", "healthy") if age <= timedelta(minutes=15) else ("stale", "refresh_due")
-    return age >= timedelta(seconds=-5) and (value["freshness"], value["connectorState"]) == expected
+def _validate_finance_observed_provenance(value, *, age_consistent: bool = True) -> bool:
+    return _validate_finance_provenance(value, observed=True, age_consistent=age_consistent)
 
 
 def _validate_finance_metric(value) -> bool:
@@ -573,7 +611,9 @@ def _validate_finance_metric(value) -> bool:
         return False
     observed = value["availability"] == "observed"
     expected = {"availability", "provenance", "amountCents"} if observed else {"availability", "provenance"}
-    if set(value) != expected or not _validate_finance_provenance(value.get("provenance"), observed=observed):
+    if set(value) != expected or not _validate_finance_provenance(
+        value.get("provenance"), observed=observed, age_consistent=observed
+    ):
         return False
     return not observed or (
         isinstance(value["amountCents"], int)
@@ -588,41 +628,56 @@ def _validate_finance_account_observation(value) -> bool:
     text_fields = ("id", "name", "detail", "source")
     if not all(isinstance(value[field], str) and value[field].strip() for field in text_fields):
         return False
-    provenance = value["provenance"]
+    provenance = value.get("provenance")
     if not isinstance(provenance, dict):
         return False
     return (
         isinstance(value["balanceCents"], int)
         and not isinstance(value["balanceCents"], bool)
         and -FINANCE_MAX_SAFE_CENTS <= value["balanceCents"] <= FINANCE_MAX_SAFE_CENTS
-        and value["source"] == provenance.get("source")
-        and _validate_finance_observed_provenance(provenance, age_consistent=False)
+        and _validate_finance_observed_provenance(provenance, age_consistent=True)
+        and value["source"] == provenance["source"]
     )
 
 
 def _validate_finance_account_snapshot(value) -> bool:
-    if not isinstance(value, dict) or value.get("availability") not in {"observed", "unavailable"}:
+    if not isinstance(value, dict) or not _is_choice(value.get("availability"), {"observed", "unavailable"}):
         return False
     provenance = value.get("provenance")
     if value["availability"] == "unavailable":
         return (
             set(value) == {"availability", "provenance"}
             and _validate_finance_provenance(provenance, observed=False)
-            and provenance["freshness"] == "unknown"
         )
     if set(value) != FINANCE_ACCOUNT_SNAPSHOT_FIELDS or not isinstance(value.get("accounts"), list):
         return False
-    if not value["accounts"] or not _validate_finance_observed_provenance(provenance, age_consistent=False):
+    accounts = value["accounts"]
+    if not accounts or not _validate_finance_observed_provenance(provenance, age_consistent=False):
         return False
-    try:
-        snapshot_observed_at = datetime.fromisoformat(provenance["observedAt"].replace("Z", "+00:00"))
-    except (AttributeError, OverflowError, OSError, TypeError, ValueError):
+    if not all(_validate_finance_account_observation(account) for account in accounts):
         return False
-    return all(
-        _validate_finance_account_observation(account)
-        and datetime.fromisoformat(account["provenance"]["observedAt"].replace("Z", "+00:00")) <= snapshot_observed_at
-        for account in value["accounts"]
+    snapshot_observed_at = _parse_finance_timestamp(provenance["observedAt"])
+    if snapshot_observed_at is None:
+        return False
+    account_observed_at = [
+        _parse_finance_timestamp(account["provenance"]["observedAt"])
+        for account in accounts
+    ]
+    if any(observed_at is None or observed_at > snapshot_observed_at for observed_at in account_observed_at):
+        return False
+    account_sources = {account["source"] for account in accounts}
+    if not (
+        len(account_sources) == 1 and next(iter(account_sources)) == provenance["source"]
+        or provenance["source"] == FINANCE_DERIVED_ACCOUNT_SOURCE
+    ):
+        return False
+    has_stale_account = any(
+        account["provenance"]["freshness"] == "stale"
+        or account["provenance"]["connectorState"] == "refresh_due"
+        for account in accounts
     )
+    expected = ("stale", "refresh_due") if has_stale_account else ("fresh", "healthy")
+    return (provenance["freshness"], provenance["connectorState"]) == expected
 
 
 def _validate_finance_transaction_observation(value) -> bool:
@@ -631,26 +686,26 @@ def _validate_finance_transaction_observation(value) -> bool:
     text_fields = ("id", "merchant", "title", "account", "source", "category")
     if not all(isinstance(value[field], str) and value[field].strip() for field in text_fields):
         return False
-    provenance = value["provenance"]
+    provenance = value.get("provenance")
+    if not isinstance(provenance, dict) or not _validate_finance_observed_provenance(provenance, age_consistent=True):
+        return False
     return (
         isinstance(value["signedAmountCents"], int)
         and not isinstance(value["signedAmountCents"], bool)
         and -FINANCE_MAX_SAFE_CENTS <= value["signedAmountCents"] <= FINANCE_MAX_SAFE_CENTS
-        and _is_usage_observed_timestamp(value["timestamp"])
-        and value["source"] == provenance.get("source")
-        and _validate_finance_observed_provenance(provenance, age_consistent=True)
+        and _is_finance_observed_timestamp(value["timestamp"])
+        and value["source"] == provenance["source"]
     )
 
 
 def _validate_finance_transaction_snapshot(value) -> bool:
-    if not isinstance(value, dict) or value.get("availability") not in {"observed", "unavailable"}:
+    if not isinstance(value, dict) or not _is_choice(value.get("availability"), {"observed", "unavailable"}):
         return False
     provenance = value.get("provenance")
     if value["availability"] == "unavailable":
         return (
             set(value) == {"availability", "provenance"}
             and _validate_finance_provenance(provenance, observed=False)
-            and provenance["freshness"] == "unknown"
         )
     if set(value) != FINANCE_TRANSACTION_SNAPSHOT_FIELDS or not isinstance(value.get("transactions"), list):
         return False
@@ -674,26 +729,30 @@ def _validate_finance_transaction_snapshot(value) -> bool:
         expected = ("stale", "refresh_due") if has_stale_row else ("fresh", "healthy")
         if (provenance["freshness"], provenance["connectorState"]) != expected:
             return False
-        try:
-            envelope_observed_at = datetime.fromisoformat(provenance["observedAt"].replace("Z", "+00:00"))
-            latest_row_observed_at = max(
-                datetime.fromisoformat(row["provenance"]["observedAt"].replace("Z", "+00:00"))
-                for row in rows
-            )
-        except (OverflowError, OSError, TypeError, ValueError):
+        envelope_observed_at = _parse_finance_timestamp(provenance["observedAt"])
+        row_observed_at = [
+            _parse_finance_timestamp(row["provenance"]["observedAt"])
+            for row in rows
+        ]
+        if envelope_observed_at is None or any(observed_at is None for observed_at in row_observed_at):
             return False
-        if envelope_observed_at < latest_row_observed_at:
+        if envelope_observed_at < max(row_observed_at):
             return False
     return True
 
 
 def _validate_finance_payload(data: dict) -> bool:
     allowed = {"generatedAt", "currency"} | FINANCE_METRICS | {"accounts", "transactions"}
-    if not isinstance(data, dict) or not set(data).issubset(allowed) or not FINANCE_METRICS.issubset(data):
+    if (
+        not isinstance(data, dict)
+        or not set(data).issubset(allowed)
+        or not {"generatedAt", "currency"}.issubset(data)
+        or not FINANCE_METRICS.issubset(data)
+    ):
         return False
     return (
         not _contains_sensitive_finance(data)
-        and _is_usage_observed_timestamp(data["generatedAt"])
+        and _is_finance_observed_timestamp(data["generatedAt"])
         and data["currency"] == "EUR"
         and all(_validate_finance_metric(data[key]) for key in FINANCE_METRICS)
         and ("accounts" not in data or data["accounts"] is None or _validate_finance_account_snapshot(data["accounts"]))

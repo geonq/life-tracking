@@ -13,6 +13,7 @@ from starlette.websockets import WebSocketDisconnect
 
 os.environ["LIFEOS_TAILSCALE_ALLOWED_LOGIN"] = "test-user@example.com"
 
+import main
 from main import app
 
 client = TestClient(app)
@@ -1144,6 +1145,160 @@ def test_finance_summary_accepts_mixed_account_and_transaction_snapshot_but_reje
     malformed = copy.deepcopy(payload)
     malformed["transactions"]["transactions"][0]["iban"] = "DE00"
     assert not main._validate_finance_payload(malformed)
+
+
+def test_finance_validator_is_total_for_missing_top_level_and_nested_values():
+    for field in {
+        "generatedAt", "currency", "monthlyIncome", "fixedCosts",
+        "discretionaryBuffer", "spent", "savingsGoal", "saved",
+    }:
+        payload = copy.deepcopy(VALID_FINANCE)
+        payload.pop(field)
+        assert main._validate_finance_payload(payload) is False, field
+
+    for malformed in (None, [], "not-an-object", {}, {"source": "x"}):
+        payload = copy.deepcopy(VALID_FINANCE)
+        payload["spent"]["provenance"] = malformed
+        assert main._validate_finance_payload(payload) is False
+
+    for field in main.FINANCE_PROVENANCE_FIELDS:
+        for malformed in (None, [], {}):
+            payload = copy.deepcopy(VALID_FINANCE)
+            payload["spent"]["provenance"][field] = malformed
+            assert main._validate_finance_payload(payload) is False
+
+    observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    observed_provenance = {
+        "source": "revolut_personal", "observedAt": observed_at,
+        "freshness": "fresh", "quality": "observed", "connectorState": "healthy",
+    }
+    account = {
+        "id": "account-1", "name": "Personal", "detail": "EUR",
+        "balanceCents": 100, "source": "revolut_personal", "provenance": observed_provenance,
+    }
+    transaction = {
+        "id": "transaction-1", "merchant": "REWE", "title": "Groceries",
+        "signedAmountCents": -100, "timestamp": observed_at, "account": "Personal",
+        "source": "revolut_personal", "category": "Food", "provenance": observed_provenance,
+    }
+    for snapshot_key, row in (("accounts", account), ("transactions", transaction)):
+        payload = copy.deepcopy(VALID_FINANCE)
+        payload["generatedAt"] = observed_at
+        payload[snapshot_key] = {
+            "availability": "observed",
+            snapshot_key: [row],
+            "provenance": observed_provenance,
+        }
+        payload[snapshot_key][snapshot_key][0]["provenance"] = None
+        assert main._validate_finance_payload(payload) is False
+
+
+def test_finance_validator_enforces_age_order_worst_freshness_and_source_reconciliation():
+    now = datetime.now(timezone.utc)
+    now_string = now.isoformat().replace("+00:00", "Z")
+    old_string = (now - timedelta(minutes=16)).isoformat().replace("+00:00", "Z")
+    fresh = {
+        "source": "revolut_personal", "observedAt": now_string,
+        "freshness": "fresh", "quality": "observed", "connectorState": "healthy",
+    }
+    stale = {
+        "source": "revolut_personal", "observedAt": old_string,
+        "freshness": "stale", "quality": "observed", "connectorState": "refresh_due",
+    }
+    payload = copy.deepcopy(VALID_FINANCE)
+    payload["generatedAt"] = now_string
+    payload["accounts"] = {
+        "availability": "observed",
+        "accounts": [{
+            "id": "account-1", "name": "Personal", "detail": "EUR",
+            "balanceCents": 100, "source": "revolut_personal", "provenance": stale,
+        }],
+        "provenance": fresh,
+    }
+    assert not main._validate_finance_payload(payload)
+    payload["accounts"]["provenance"] = {**stale, "observedAt": now_string}
+    assert main._validate_finance_payload(payload)
+
+    account_source_mismatch = copy.deepcopy(payload)
+    account_source_mismatch["accounts"]["provenance"]["source"] = "sparkasse_leipzig"
+    assert not main._validate_finance_payload(account_source_mismatch)
+
+    transaction = {
+        "id": "transaction-1", "merchant": "REWE", "title": "Groceries",
+        "signedAmountCents": -100, "timestamp": now_string, "account": "Personal",
+        "source": "revolut_personal", "category": "Food", "provenance": stale,
+    }
+    payload["transactions"] = {
+        "availability": "observed", "transactions": [transaction], "provenance": fresh,
+    }
+    assert not main._validate_finance_payload(payload)
+    payload["transactions"]["provenance"] = {**stale, "observedAt": now_string}
+    assert main._validate_finance_payload(payload)
+
+    transaction_source_mismatch = copy.deepcopy(payload)
+    transaction_source_mismatch["transactions"]["provenance"]["source"] = "sparkasse_leipzig"
+    assert not main._validate_finance_payload(transaction_source_mismatch)
+
+    row_order_mismatch = copy.deepcopy(payload)
+    row_order_mismatch["transactions"]["transactions"][0]["provenance"] = fresh
+    row_order_mismatch["transactions"]["provenance"] = {
+        **fresh, "observedAt": (now - timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
+    }
+    assert not main._validate_finance_payload(row_order_mismatch)
+
+    mixed_accounts = copy.deepcopy(payload)
+    mixed_accounts["accounts"] = {
+        "availability": "observed",
+        "accounts": [
+            {**mixed_accounts["accounts"]["accounts"][0], "provenance": fresh},
+            {**mixed_accounts["accounts"]["accounts"][0], "id": "account-2", "source": "sparkasse_leipzig",
+             "provenance": {**fresh, "source": "sparkasse_leipzig"}},
+        ],
+        "provenance": {**fresh, "source": "derived-account-snapshot"},
+    }
+    assert main._validate_finance_payload(mixed_accounts)
+
+
+def test_finance_metrics_require_age_consistent_observed_provenance():
+    observed_at = (datetime.now(timezone.utc) - timedelta(minutes=16)).isoformat().replace("+00:00", "Z")
+    payload = copy.deepcopy(VALID_FINANCE)
+    payload["generatedAt"] = observed_at
+    payload["spent"] = {
+        "availability": "observed", "amountCents": 100,
+        "provenance": {
+            "source": "revolut_personal", "observedAt": observed_at,
+            "freshness": "fresh", "quality": "observed", "connectorState": "healthy",
+        },
+    }
+    assert not main._validate_finance_payload(payload)
+    payload["spent"]["provenance"]["freshness"] = "stale"
+    payload["spent"]["provenance"]["connectorState"] = "refresh_due"
+    assert main._validate_finance_payload(payload)
+
+
+def test_finance_validator_keeps_empty_observed_ledgers_truthful_and_rejects_sensitive_values():
+    observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    provenance = {
+        "source": "revolut_personal", "observedAt": observed_at,
+        "freshness": "fresh", "quality": "observed", "connectorState": "healthy",
+    }
+    payload = copy.deepcopy(VALID_FINANCE)
+    payload["generatedAt"] = observed_at
+    payload["transactions"] = {
+        "availability": "observed", "transactions": [], "provenance": provenance,
+    }
+    assert main._validate_finance_payload(payload)
+
+    sensitive = copy.deepcopy(payload)
+    sensitive["accounts"] = {
+        "availability": "observed",
+        "accounts": [{
+            "id": "account-1", "name": "Personal", "detail": "Bearer should-not-escape",
+            "balanceCents": 100, "source": "revolut_personal", "provenance": provenance,
+        }],
+        "provenance": provenance,
+    }
+    assert not main._validate_finance_payload(sensitive)
 
 
 @pytest.mark.parametrize("document_id", [

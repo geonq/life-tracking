@@ -16,7 +16,11 @@ const observedTimestamp = z.string().datetime({ offset: true }).refine(
   value => Date.parse(value) <= Date.now() + maximumClockSkewMs,
   'future observation timestamp',
 );
-export const Provenance = z.object({ source: z.string().min(1), observedAt: observedTimestamp, freshness: Freshness, quality: Quality, connectorState: ConnectorState });
+const financeNonEmptyText = z.string().min(1).refine(
+  value => value.trim().length > 0,
+  'finance text must not be blank',
+);
+export const Provenance = z.object({ source: financeNonEmptyText, observedAt: observedTimestamp, freshness: Freshness, quality: Quality, connectorState: ConnectorState }).strict();
 export type Provenance = z.infer<typeof Provenance>;
 export const Metric = z.object({ value: z.number().finite(), unit: z.string().min(1), provenance: Provenance });
 export const Overview = z.object({ kind: z.literal('overview'), label: z.literal('Demo data'), generatedAt: z.string().datetime({ offset: true }), codex: z.object({ status: z.string(), usage5h: Metric, usageWeek: Metric }), connectors: z.record(ConnectorState) });
@@ -52,51 +56,39 @@ export const FinanceConnectorCatalog = z.object({
 });
 export type FinanceConnectorCatalog = z.infer<typeof FinanceConnectorCatalog>;
 
-const FinanceObservedMetric = z.object({
-  availability: z.literal('observed'),
-  amountCents: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-  provenance: Provenance.extend({
-    quality: z.literal('observed'),
-    connectorState: z.enum(['healthy', 'refresh_due']),
-  }).strict().superRefine((value, context) => {
-    const expected = freshnessFromObservedAt(value.observedAt);
-    const expectedConnector = expected === 'fresh' ? 'healthy' : expected === 'stale' ? 'refresh_due' : undefined;
-    if (!expectedConnector || value.freshness !== expected || value.connectorState !== expectedConnector) {
-      context.addIssue({ code: z.ZodIssueCode.custom, message: 'observed finance provenance is contradictory' });
-    }
-  }),
-}).strict();
-const FinanceUnavailableMetric = z.object({
-  availability: z.literal('unavailable'),
-  provenance: Provenance.extend({ quality: z.literal('unavailable'), freshness: z.literal('unknown') }).strict()
-    .refine(value => Date.parse(value.observedAt) <= Date.now() + maximumClockSkewMs, {
-      message: 'future finance provenance timestamp', path: ['observedAt'],
-    })
-    .refine(value => value.connectorState !== 'healthy' && value.connectorState !== 'refresh_due', {
-      message: 'unavailable finance metric cannot have a healthy connector', path: ['connectorState'],
-    }),
-}).strict();
-export const FinanceMetric = z.discriminatedUnion('availability', [FinanceObservedMetric, FinanceUnavailableMetric]);
-export type FinanceMetric = z.infer<typeof FinanceMetric>;
-
-const financeNonEmptyText = z.string().min(1).refine(
-  value => value.trim().length > 0,
-  'finance text must not be blank',
-);
-const FinanceObservedAccountProvenance = Provenance.extend({
-  source: financeNonEmptyText,
+const FinanceObservedProvenanceBase = Provenance.extend({
   freshness: z.enum(['fresh', 'stale']),
   quality: z.literal('observed'),
   connectorState: z.enum(['healthy', 'refresh_due']),
 }).strict();
-const FinanceUnavailableAccountProvenance = Provenance.extend({
-  source: financeNonEmptyText,
+const FinanceObservedProvenance = FinanceObservedProvenanceBase.superRefine((value, context) => {
+  const expected = freshnessFromObservedAt(value.observedAt);
+  const expectedConnector = expected === 'fresh' ? 'healthy' : expected === 'stale' ? 'refresh_due' : undefined;
+  if (!expectedConnector || value.freshness !== expected || value.connectorState !== expectedConnector) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'observed finance provenance is contradictory' });
+  }
+});
+const FinanceUnavailableProvenance = Provenance.extend({
   freshness: z.literal('unknown'),
   quality: z.literal('unavailable'),
-}).strict().refine(
-  value => value.connectorState !== 'healthy' && value.connectorState !== 'refresh_due',
-  { message: 'unavailable finance accounts cannot have a healthy connector', path: ['connectorState'] },
-);
+}).strict()
+    .refine(value => value.connectorState !== 'healthy' && value.connectorState !== 'refresh_due', {
+      message: 'unavailable finance provenance cannot have a healthy connector', path: ['connectorState'],
+    });
+const FinanceObservedMetric = z.object({
+  availability: z.literal('observed'),
+  amountCents: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  provenance: FinanceObservedProvenance,
+}).strict();
+const FinanceUnavailableMetric = z.object({
+  availability: z.literal('unavailable'),
+  provenance: FinanceUnavailableProvenance,
+}).strict();
+export const FinanceMetric = z.discriminatedUnion('availability', [FinanceObservedMetric, FinanceUnavailableMetric]);
+export type FinanceMetric = z.infer<typeof FinanceMetric>;
+
+const FinanceObservedAccountProvenance = FinanceObservedProvenance;
+const FinanceUnavailableAccountProvenance = FinanceUnavailableProvenance;
 
 /** Keep this wire shape in lockstep with FinanceAccountObservation in the native client. */
 const FinanceAccountObservationBase = z.object({
@@ -121,7 +113,7 @@ export type FinanceAccountObservation = z.infer<typeof FinanceAccountObservation
 const FinanceObservedAccountSnapshot = z.object({
   availability: z.literal('observed'),
   accounts: z.array(FinanceAccountObservation).min(1),
-  provenance: FinanceObservedAccountProvenance,
+  provenance: FinanceObservedProvenanceBase,
 }).strict();
 const FinanceUnavailableAccountSnapshot = z.object({
   availability: z.literal('unavailable'),
@@ -133,6 +125,27 @@ const FinanceAccountSnapshotBase = z.discriminatedUnion('availability', [
 ]);
 export const FinanceAccountSnapshot = FinanceAccountSnapshotBase.superRefine((value, context) => {
   if (value.availability !== 'observed') return;
+  const rowSources = new Set(value.accounts.map(account => account.source));
+  const sourceReconciles = rowSources.size === 1 && rowSources.has(value.provenance.source)
+    || value.provenance.source === 'derived-account-snapshot';
+  if (!sourceReconciles) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['provenance', 'source'],
+      message: 'observed finance account snapshot provenance must reconcile account sources',
+    });
+  }
+  const hasStaleAccount = value.accounts.some(account =>
+    account.provenance.freshness === 'stale' || account.provenance.connectorState === 'refresh_due');
+  const expectedFreshness = hasStaleAccount ? 'stale' : 'fresh';
+  const expectedConnector = hasStaleAccount ? 'refresh_due' : 'healthy';
+  if (value.provenance.freshness !== expectedFreshness || value.provenance.connectorState !== expectedConnector) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['provenance'],
+      message: 'account snapshot freshness must represent the stalest account',
+    });
+  }
   const envelopeObservedAt = Date.parse(value.provenance.observedAt);
   value.accounts.forEach((account, index) => {
     if (Date.parse(account.provenance.observedAt) > envelopeObservedAt) {
@@ -164,10 +177,7 @@ const FinanceTransactionObservationBase = z.object({
   account: z.string().trim().min(1),
   source: z.string().trim().min(1),
   category: z.string().trim().min(1),
-  provenance: Provenance.extend({
-    quality: z.literal('observed'),
-    connectorState: z.enum(['healthy', 'refresh_due']),
-  }).strict(),
+  provenance: FinanceObservedProvenance,
 }).strict();
 export const FinanceTransactionObservation = FinanceTransactionObservationBase.superRefine((value, context) => {
   if (value.source !== value.provenance.source) {
@@ -183,28 +193,12 @@ export type FinanceTransactionObservation = z.infer<typeof FinanceTransactionObs
 const FinanceObservedTransactionSnapshot = z.object({
   availability: z.literal('observed'),
   transactions: z.array(FinanceTransactionObservation),
-  provenance: Provenance.extend({
-    quality: z.literal('observed'),
-    freshness: z.enum(['fresh', 'stale']),
-    connectorState: z.enum(['healthy', 'refresh_due']),
-  }).strict().superRefine((value, context) => {
-    const expected = freshnessFromObservedAt(value.observedAt);
-    const expectedConnector = expected === 'fresh' ? 'healthy' : expected === 'stale' ? 'refresh_due' : undefined;
-    if (!expectedConnector || value.freshness !== expected || value.connectorState !== expectedConnector) {
-      context.addIssue({ code: z.ZodIssueCode.custom, message: 'observed finance transaction provenance is contradictory' });
-    }
-  }),
+  provenance: FinanceObservedProvenanceBase,
 }).strict();
 
 const FinanceUnavailableTransactionSnapshot = z.object({
   availability: z.literal('unavailable'),
-  provenance: Provenance.extend({
-    quality: z.literal('unavailable'),
-    freshness: z.literal('unknown'),
-  }).strict()
-    .refine(value => value.connectorState !== 'healthy' && value.connectorState !== 'refresh_due', {
-      message: 'unavailable finance transactions cannot have a healthy connector', path: ['connectorState'],
-    }),
+  provenance: FinanceUnavailableProvenance,
 }).strict();
 
 const FinanceTransactionSnapshotBase = z.discriminatedUnion('availability', [
@@ -213,6 +207,14 @@ const FinanceTransactionSnapshotBase = z.discriminatedUnion('availability', [
 ]);
 export const FinanceTransactionSnapshot = FinanceTransactionSnapshotBase.superRefine((value, context) => {
   if (value.availability !== 'observed') return;
+  if (value.transactions.length === 0) {
+    const expected = freshnessFromObservedAt(value.provenance.observedAt);
+    const expectedConnector = expected === 'fresh' ? 'healthy' : expected === 'stale' ? 'refresh_due' : undefined;
+    if (!expectedConnector || value.provenance.freshness !== expected || value.provenance.connectorState !== expectedConnector) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ['provenance'], message: 'empty observed finance transaction snapshot has contradictory provenance' });
+    }
+    return;
+  }
   const rowSources = new Set(value.transactions.map(transaction => transaction.source));
   const sourceReconciles = rowSources.size === 0
     || (rowSources.size === 1 && rowSources.has(value.provenance.source))
@@ -222,6 +224,17 @@ export const FinanceTransactionSnapshot = FinanceTransactionSnapshotBase.superRe
       code: z.ZodIssueCode.custom,
       path: ['provenance', 'source'],
       message: 'observed finance snapshot provenance must reconcile row sources',
+    });
+  }
+  const hasStaleRow = value.transactions.some(transaction =>
+    transaction.provenance.freshness === 'stale' || transaction.provenance.connectorState === 'refresh_due');
+  const expectedFreshness = hasStaleRow ? 'stale' : 'fresh';
+  const expectedConnector = hasStaleRow ? 'refresh_due' : 'healthy';
+  if (value.provenance.freshness !== expectedFreshness || value.provenance.connectorState !== expectedConnector) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['provenance'],
+      message: 'transaction snapshot freshness must represent the stalest row',
     });
   }
   const latestRowObservation = value.transactions.reduce<string | undefined>((latest, transaction) => {

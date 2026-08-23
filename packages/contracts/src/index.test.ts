@@ -409,4 +409,126 @@ describe('finance summary truthfulness', () => {
     expect(parsed.accounts?.availability).toBe('observed');
     expect(parsed.transactions?.availability).toBe('observed');
   });
+
+  it('fails closed for missing top-level fields and malformed nested provenance', () => {
+    for (const field of ['generatedAt', 'currency', 'monthlyIncome', 'fixedCosts',
+      'discretionaryBuffer', 'spent', 'savingsGoal', 'saved']) {
+      const missing = { ...unavailableFinance } as Record<string, unknown>;
+      delete missing[field];
+      expect(() => FinanceSummary.parse(missing), `missing ${field}`).toThrow();
+    }
+
+    const observedAt = new Date().toISOString();
+    const row = {
+      id: 'revolut-1', merchant: 'REWE', title: 'Groceries', signedAmountCents: -2450,
+      timestamp: observedAt, account: 'Personal account', source: 'revolut_personal', category: 'Food',
+      provenance: {
+        source: 'revolut_personal', observedAt, freshness: 'fresh' as const,
+        quality: 'observed' as const, connectorState: 'healthy' as const,
+      },
+    };
+    expect(() => FinanceSummary.parse({
+      ...unavailableFinance,
+      generatedAt: observedAt,
+      accounts: {
+        availability: 'observed', accounts: [{
+          id: 'account-1', name: 'Personal', detail: 'EUR', balanceCents: 100,
+          source: 'revolut_personal', provenance: null,
+        }], provenance: row.provenance,
+      },
+    })).toThrow();
+    expect(() => FinanceSummary.parse({
+      ...unavailableFinance,
+      generatedAt: observedAt,
+      transactions: { availability: 'observed', transactions: [{ ...row, provenance: null }], provenance: row.provenance },
+    })).toThrow();
+  });
+
+  it('requires age-consistent row provenance and worst-row freshness for accounts and transactions', () => {
+    const now = new Date();
+    const nowString = now.toISOString();
+    const oldString = new Date(now.getTime() - 16 * 60_000).toISOString();
+    const freshProvenance = {
+      source: 'revolut_personal', observedAt: nowString, freshness: 'fresh' as const,
+      quality: 'observed' as const, connectorState: 'healthy' as const,
+    };
+    const staleProvenance = {
+      source: 'revolut_personal', observedAt: oldString, freshness: 'stale' as const,
+      quality: 'observed' as const, connectorState: 'refresh_due' as const,
+    };
+    const account = {
+      id: 'account-1', name: 'Personal', detail: 'EUR', balanceCents: 100,
+      source: 'revolut_personal', provenance: staleProvenance,
+    };
+    const base = { ...unavailableFinance, generatedAt: nowString };
+
+    expect(() => FinanceSummary.parse({
+      ...base,
+      accounts: { availability: 'observed', accounts: [account], provenance: freshProvenance },
+    })).toThrow();
+    expect(FinanceSummary.parse({
+      ...base,
+      accounts: { availability: 'observed', accounts: [account], provenance: { ...staleProvenance, observedAt: nowString } },
+    }).accounts?.availability).toBe('observed');
+
+    const row = {
+      id: 'revolut-1', merchant: 'REWE', title: 'Groceries', signedAmountCents: -2450,
+      timestamp: nowString, account: 'Personal', source: 'revolut_personal', category: 'Food',
+      provenance: staleProvenance,
+    };
+    expect(() => FinanceSummary.parse({
+      ...base,
+      transactions: { availability: 'observed', transactions: [row], provenance: freshProvenance },
+    })).toThrow();
+    expect(FinanceSummary.parse({
+      ...base,
+      transactions: { availability: 'observed', transactions: [row], provenance: { ...staleProvenance, observedAt: nowString } },
+    }).transactions?.availability).toBe('observed');
+  });
+
+  it('preserves explicit empty observed ledgers and rejects source/order contradictions', () => {
+    const observedAt = new Date().toISOString();
+    const provenance = {
+      source: 'revolut_personal', observedAt, freshness: 'fresh' as const,
+      quality: 'observed' as const, connectorState: 'healthy' as const,
+    };
+    const base = { ...unavailableFinance, generatedAt: observedAt };
+    expect(FinanceSummary.parse({
+      ...base,
+      transactions: { availability: 'observed', transactions: [], provenance },
+    }).transactions?.availability).toBe('observed');
+
+    const row = {
+      id: 'revolut-1', merchant: 'REWE', title: 'Groceries', signedAmountCents: -2450,
+      timestamp: observedAt, account: 'Personal', source: 'revolut_personal', category: 'Food', provenance,
+    };
+    expect(() => FinanceSummary.parse({
+      ...base,
+      transactions: { availability: 'observed', transactions: [row], provenance: { ...provenance, source: 'sparkasse_leipzig' } },
+    })).toThrow();
+    expect(() => FinanceSummary.parse({
+      ...base,
+      transactions: { availability: 'observed', transactions: [row], provenance: { ...provenance, observedAt: new Date(Date.parse(observedAt) - 1_000).toISOString() } },
+    })).toThrow();
+    expect(() => FinanceSummary.parse({
+      ...base,
+      accounts: {
+        availability: 'observed',
+        accounts: [{ id: 'account-1', name: 'Personal', detail: 'EUR', balanceCents: 100, source: 'revolut_personal', provenance }],
+        provenance: { ...provenance, source: 'sparkasse_leipzig' },
+      },
+    })).toThrow();
+    expect(FinanceSummary.parse({
+      ...base,
+      accounts: {
+        availability: 'observed',
+        accounts: [
+          { id: 'account-1', name: 'Personal', detail: 'EUR', balanceCents: 100, source: 'revolut_personal', provenance },
+          { id: 'account-2', name: 'Girokonto', detail: 'EUR', balanceCents: 200, source: 'sparkasse_leipzig',
+            provenance: { ...provenance, source: 'sparkasse_leipzig' } },
+        ],
+        provenance: { ...provenance, source: 'derived-account-snapshot' },
+      },
+    }).accounts?.availability).toBe('observed');
+  });
 });
