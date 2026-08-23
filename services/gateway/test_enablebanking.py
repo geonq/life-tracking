@@ -276,6 +276,31 @@ def test_refresh_fails_closed_on_aggregate_overflow(tmp_path, monkeypatch):
         adapter._checked_add(main.FINANCE_MAX_SAFE_CENTS, 1)
 
 
+def test_transaction_response_uses_larger_but_bounded_payload_limit(tmp_path, monkeypatch):
+    adapter = service(tmp_path, monkeypatch)
+    large_transaction = {
+        "transaction_id": "tx-large",
+        "transaction_amount": {"amount": "1.00", "currency": "EUR"},
+        "credit_debit_indicator": "DBIT",
+        "creditor": {"name": "Merchant"},
+        "booking_date": "2026-08-24",
+        "remittance_information": ["x" * 70_000],
+    }
+    holder = QueueClient([FakeResponse({"transactions": [large_transaction]})])
+    monkeypatch.setattr(enablebanking.httpx, "AsyncClient", lambda **_: holder)
+
+    payload = run(adapter._get_account_json(
+        holder,
+        {"api_base_url": "https://api.enablebanking.com"},
+        "test-token",
+        "01234567-89ab-cdef-0123-456789abcdef",
+        "transactions",
+    ))
+
+    assert len(json.dumps(payload)) > adapter.MAX_RESPONSE_SIZE
+    assert adapter.MAX_TRANSACTION_RESPONSE_SIZE == 1 * 1024 * 1024
+
+
 def test_jwt_builder_uses_required_rs256_claims(tmp_path, monkeypatch):
     import jwt
     from cryptography.hazmat.primitives import serialization

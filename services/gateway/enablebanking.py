@@ -50,6 +50,10 @@ class EnableBankingService:
 
     BODY_LIMIT = 4 * 1024
     MAX_RESPONSE_SIZE = 64 * 1024
+    # A normal 180-day transaction page can exceed the small control-response
+    # bound while remaining safely bounded. Account details, balances, auth,
+    # and session responses continue to use MAX_RESPONSE_SIZE.
+    MAX_TRANSACTION_RESPONSE_SIZE = 1 * 1024 * 1024
     MAX_ASPSP_RESPONSE_SIZE = 4 * 1024 * 1024
     REQUEST_TIMEOUT = httpx.Timeout(5.0, connect=2.0)
     TOTAL_TIMEOUT = 8.0
@@ -501,6 +505,11 @@ class EnableBankingService:
     ) -> dict:
         if not re.fullmatch(r"[0-9a-fA-F-]{16,128}", account_uid):
             raise EnableBankingUnavailable("invalid provider account id")
+        maximum_bytes = (
+            self.MAX_TRANSACTION_RESPONSE_SIZE
+            if endpoint == "transactions"
+            else self.MAX_RESPONSE_SIZE
+        )
         async with asyncio.timeout(self.TOTAL_TIMEOUT):
             async with client.stream(
                 "GET",
@@ -511,7 +520,7 @@ class EnableBankingService:
                 data = await self._read_upstream_json(
                     upstream,
                     expected_statuses={200},
-                    maximum_bytes=self.MAX_RESPONSE_SIZE,
+                    maximum_bytes=maximum_bytes,
                 )
         if not isinstance(data, dict):
             raise EnableBankingUnavailable("invalid provider account response")
