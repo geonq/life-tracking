@@ -77,6 +77,7 @@ class EnableBankingService:
         "sparkasse_leipzig": (("DE", "Stadt- und Kreissparkasse Leipzig"),),
         "revolut_personal": (("LT", "Revolut"), ("GB", "Revolut")),
     }
+    KNOWN_INSTITUTION_IDS = frozenset(INSTITUTION_CATALOG)
     SENSITIVE_PROVIDER_TEXT = re.compile(
         r"(?:bearer\s+\S+|-----BEGIN\s+[^-]*PRIVATE KEY-----|"
         r"[A-Z]{2}\d{2}[A-Z0-9]{10,34}|(?<!\d)\d{8,}(?!\d))",
@@ -225,6 +226,11 @@ class EnableBankingService:
             if not self.CONNECTION_ID_PATTERN.fullmatch(value["connectionId"]):
                 continue
             if not self.INSTITUTION_ID_PATTERN.fullmatch(value["institutionId"]):
+                continue
+            # Ignore opaque records from retired/sandbox connectors. A single
+            # invalid legacy session must not make current live connections
+            # disappear from the aggregate summary.
+            if value["institutionId"] not in self.KNOWN_INSTITUTION_IDS:
                 continue
             if not self.PROVIDER_ID_PATTERN.fullmatch(value["sessionId"]):
                 continue

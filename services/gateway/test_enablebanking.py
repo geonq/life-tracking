@@ -222,6 +222,22 @@ def test_refresh_normalizes_realistic_account_and_transaction_shapes(tmp_path, m
         "sessionId": "session-1",
         "linkedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     })
+    (tmp_path / "enablebanking-connections.json").write_text(json.dumps({
+        "connections": [
+            {
+                "connectionId": "legacy-sandbox-flow",
+                "institutionId": "SANDBOXFINANCE_SINST_DE",
+                "sessionId": "legacy-sandbox-session",
+                "linkedAt": "2026-01-01T00:00:00Z",
+            },
+            {
+                "connectionId": "eb-flow",
+                "institutionId": "revolut_personal",
+                "sessionId": "session-1",
+                "linkedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            },
+        ]
+    }))
     account_uid = "01234567-89ab-cdef-0123-456789abcdef"
     today = datetime.now(timezone.utc).date().isoformat()
     holder = QueueClient([
