@@ -240,12 +240,15 @@ public enum CalendarOverlapLayout {
     }
 }
 
-/// Pure geometry for the sticky all-day lane above the timed grid. All-day
-/// items occupy one contiguous day range; overlapping ranges are assigned to
-/// the first free row so an empty/one-item lane stays one normal row tall.
-/// Keeping this separate from SwiftUI makes the lane height and stacking
-/// deterministic across iPhone sizes and gives the interaction tests a model
-/// contract to exercise without rendering a view.
+/// Pure geometry for the sticky all-day lane above the timed grid.
+///
+/// Row contract (geonq's exact rule): every all-day entry owns exactly one
+/// lane cell, and one empty cell always trails below them. Zero entries
+/// therefore render exactly ONE empty cell; n entries render n cells plus one
+/// empty cell. Overlaps never share a row because sharing would collapse the
+/// count. Keeping this separate from SwiftUI makes the lane height and
+/// stacking deterministic across iPhone sizes and gives the interaction tests
+/// a model contract to exercise without rendering a view.
 public enum CalendarAllDayLayout {
     public static let rowHeight: Double = 26
     public static let rowSpacing: Double = 2
@@ -281,8 +284,6 @@ public enum CalendarAllDayLayout {
         guard !days.isEmpty else { return [] }
         let dayStarts = days.map { calendar.startOfDay(for: $0) }
         let dayEnds = dayStarts.map { calendar.date(byAdding: .day, value: 1, to: $0) ?? $0 }
-        var rowEnds: [Int] = []
-        var result: [Placement] = []
 
         let allDayItems = items
             .filter { !$0.isDeleted && isAllDay($0, calendar: calendar) }
@@ -292,20 +293,13 @@ public enum CalendarAllDayLayout {
                 return $0.id.uuidString < $1.id.uuidString
             }
 
-        for item in allDayItems {
+        var result: [Placement] = []
+        for (row, item) in allDayItems.enumerated() {
             let visibleIndices = days.indices.filter { index in
                 item.start < dayEnds[index] && item.end > dayStarts[index]
             }
             guard let first = visibleIndices.first, let last = visibleIndices.last else { continue }
             let endExclusive = last + 1
-            let row: Int
-            if let available = rowEnds.firstIndex(where: { $0 <= first }) {
-                row = available
-                rowEnds[available] = endExclusive
-            } else {
-                row = rowEnds.count
-                rowEnds.append(endExclusive)
-            }
             result.append(
                 Placement(
                     item: item,
@@ -318,12 +312,14 @@ public enum CalendarAllDayLayout {
         return result
     }
 
+    /// Entries + 1: the trailing empty cell is part of the contract even when
+    /// the lane is empty (zero entries -> exactly one cell).
     public static func rowCount(
         items: [CalendarItem],
         days: [Date],
         calendar: Calendar
     ) -> Int {
-        max(minimumRows, (placements(items: items, days: days, calendar: calendar).map(\.row).max() ?? -1) + 1)
+        max(minimumRows, placements(items: items, days: days, calendar: calendar).count + 1)
     }
 
     public static func height(
@@ -603,13 +599,24 @@ public enum CalendarInteractionLayout {
     /// the finite timed viewport is scrolled all the way to the bottom. This
     /// is display-only; creation and event math continue to use `timelineHeight`.
     ///
-    /// On iPhone the timed viewport's VStack runs to the physical screen
-    /// bottom, underneath both the home-indicator safe area (34pt) and the
-    /// overlaid compact tab bar (44pt row + 6pt padding). A trailing buffer
-    /// smaller than that occlusion plus the label height clamps maximum
-    /// scroll with 24:00 still hidden behind the chrome — exactly the
-    /// unreachable-endpoint regression from the physical route test.
-    public static let timelineBottomInset: Double = 104
+    /// The buffer must exceed every floating layer that covers the timeline's
+    /// trailing edge on iPhone: the home-indicator safe area, the compact tab
+    /// bar, and the calendar's own quick-action pill/FAB overlay. A buffer
+    /// budgeted only for the first two clamps maximum scroll with 21:00+
+    /// hidden behind the floating chrome and the last reachable hour stuck
+    /// around 13:00 at the top of the viewport — the reported
+    /// "vertical scroll stops around 13:00" regression.
+    public static let homeIndicatorSafeAreaHeight: Double = 34
+    public static let compactTabBarHeight: Double = 50
+    public static let quickActionsOverlayHeight: Double = 58
+    public static let endpointLabelClearance: Double = 14
+    public static let endpointScrollMargin: Double = 8
+    public static let timelineBottomInset: Double =
+        homeIndicatorSafeAreaHeight
+            + compactTabBarHeight
+            + quickActionsOverlayHeight
+            + endpointLabelClearance
+            + endpointScrollMargin
     /// The short range shown while a mobile time selection is being held.
     /// The editor receives the actual dragged interval; this is only the
     /// initial ghost before the finger expresses a longer/shorter range.

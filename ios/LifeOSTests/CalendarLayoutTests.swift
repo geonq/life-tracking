@@ -88,6 +88,43 @@ final class CalendarLayoutTests: XCTestCase {
         XCTAssertEqual(shortDrag, .init(pageDelta: 0, normalizedVelocity: 0))
     }
 
+    func testDayStripSettleNeverAdvancesMoreThanOneDay() {
+        // geonq spec: a swipe slides by exactly one day; even a violent flick
+        // with a huge predicted translation may reach only the adjacent day.
+        let gentleSwipe = CalendarInteractionLayout.pagerSettleProjection(
+            translation: -80,
+            predictedTranslation: -120,
+            pageWidth: 113,
+            maximumPages: 1
+        )
+        XCTAssertEqual(gentleSwipe.pageDelta, 1)
+
+        let hardFlick = CalendarInteractionLayout.pagerSettleProjection(
+            translation: -110,
+            predictedTranslation: -1_900,
+            pageWidth: 113,
+            maximumPages: 1
+        )
+        XCTAssertEqual(hardFlick.pageDelta, 1, "A one-day strip must clamp even extreme flicks to the adjacent day")
+        XCTAssertLessThanOrEqual(abs(hardFlick.normalizedVelocity), 3)
+
+        let backwardFlick = CalendarInteractionLayout.pagerSettleProjection(
+            translation: 200,
+            predictedTranslation: 900,
+            pageWidth: 113,
+            maximumPages: 1
+        )
+        XCTAssertEqual(backwardFlick.pageDelta, -1)
+
+        let cancelledShortDrag = CalendarInteractionLayout.pagerSettleProjection(
+            translation: -20,
+            predictedTranslation: -30,
+            pageWidth: 113,
+            maximumPages: 1
+        )
+        XCTAssertEqual(cancelledShortDrag, .init(pageDelta: 0, normalizedVelocity: 0))
+    }
+
     func testReducedMotionMonthExpansionUsesShortOpacityCrossfade() {
         switch CalendarInteractionLayout.monthExpansionMotionPolicy(reduceMotion: true) {
         case .opacityCrossfade(let duration):
@@ -201,17 +238,44 @@ final class CalendarLayoutTests: XCTestCase {
             ),
             axisHeight + CalendarInteractionLayout.timelineBottomInset
         )
-        // The iPhone viewport's VStack runs to the physical screen bottom,
-        // underneath the home-indicator safe area (34pt) and the overlaid
-        // compact tab bar (44pt row + 6pt vertical padding). The buffer must
-        // exceed that occlusion plus the 24:00 label's own height, or
-        // maximum scroll leaves the unique endpoint hidden behind the
-        // chrome — the exact regression from the physical route test.
-        let bottomOcclusion = 34 + 44 + 6
+        // The iPhone timeline's trailing edge sits under a stack of floating
+        // chrome: home-indicator safe area (34) + compact tab bar (50) + the
+        // calendar's quick-action pill/FAB overlay (58). The buffer must
+        // exceed that stack plus the 24:00 label height, or maximum scroll
+        // leaves the endpoint hidden behind the chrome and the last reachable
+        // hour sticks around 13:00 at the viewport top — the reported
+        // "vertical scroll stops around 13:00" regression.
+        let occlusionStack = CalendarInteractionLayout.homeIndicatorSafeAreaHeight
+            + CalendarInteractionLayout.compactTabBarHeight
+            + CalendarInteractionLayout.quickActionsOverlayHeight
         XCTAssertGreaterThanOrEqual(
             CalendarInteractionLayout.timelineBottomInset,
-            Double(bottomOcclusion) + 14,
-            "24:00 must clear the home indicator and overlaid compact tab bar at maximum scroll"
+            occlusionStack + CalendarInteractionLayout.endpointLabelClearance,
+            "24:00 must clear every floating layer at maximum scroll"
+        )
+
+        // Full-day reachability on an iPhone 17 Pro-class layout: the maximum
+        // scroll offset must place the entire 00:00->24:00 axis above the
+        // occlusion stack inside the finite timed viewport.
+        let deviceContainerHeight = 731.0
+        let dayHeaderHeight = 58.0
+        let allDayHeight = CalendarAllDayLayout.rowHeight
+        let viewport = CalendarInteractionLayout.timedViewportHeight(
+            containerHeight: deviceContainerHeight,
+            dayHeaderHeight: dayHeaderHeight,
+            allDayHeight: allDayHeight
+        )
+        let contentHeight = CalendarInteractionLayout.timelineContentHeight(
+            days: [day],
+            hourHeight: 54,
+            calendar: calendar
+        )
+        let maxOffset = contentHeight - viewport
+        XCTAssertGreaterThan(maxOffset, 0, "The full-day content must be scrollable inside the finite viewport")
+        XCTAssertGreaterThanOrEqual(
+            maxOffset + viewport - axisHeight,
+            occlusionStack + CalendarInteractionLayout.endpointLabelClearance,
+            "At maximum scroll the 24:00 endpoint must sit fully above the floating chrome"
         )
         XCTAssertEqual(
             CalendarInteractionLayout.timelineHourLabel(
@@ -232,6 +296,7 @@ final class CalendarLayoutTests: XCTestCase {
             ),
             "23:00"
         )
+        // The trailing buffer is display-only: the creation axis stays 24h.
         let created = try XCTUnwrap(CalendarInteractionLayout.creationDate(
             day: day,
             verticalOffset: axisHeight,
@@ -241,13 +306,18 @@ final class CalendarLayoutTests: XCTestCase {
         XCTAssertLessThan(created, calendar.date(byAdding: .day, value: 1, to: day)!)
     }
 
-    func testAllDayLayoutKeepsEmptyLaneCompactAndStacksOnlyOverlaps() throws {
+    func testAllDayLaneFollowsEntriesPlusOneCellRule() throws {
         let anchor = DateComponents(calendar: calendar, year: 2026, month: 7, day: 31).date!
         let day1 = calendar.date(byAdding: .day, value: 1, to: anchor)!
         let day2 = calendar.date(byAdding: .day, value: 2, to: anchor)!
         let day3 = calendar.date(byAdding: .day, value: 3, to: anchor)!
         let days = [anchor, day1, day2]
 
+        // Zero entries -> exactly ONE empty cell.
+        XCTAssertEqual(
+            CalendarAllDayLayout.rowCount(items: [], days: days, calendar: calendar),
+            1
+        )
         XCTAssertEqual(
             CalendarAllDayLayout.height(items: [], days: days, calendar: calendar),
             CalendarAllDayLayout.rowHeight
@@ -259,25 +329,37 @@ final class CalendarLayoutTests: XCTestCase {
         let timedStart = calendar.date(bySettingHour: 9, minute: 0, second: 0, of: anchor)!
         let timedEnd = calendar.date(byAdding: .hour, value: 1, to: timedStart)!
         let timed = try CalendarItem(title: "Timed", start: timedStart, end: timedEnd)
+        let deleted = try CalendarItem(title: "Deleted", start: anchor, end: day1).deleting(at: anchor.addingTimeInterval(1))
 
+        // Three entries -> three cells PLUS one empty cell below them.
+        // Non-overlapping ranges must not collapse into a shared row.
         let placements = CalendarAllDayLayout.placements(
-            items: [first, adjacent, overlapping, timed],
+            items: [first, adjacent, overlapping, timed, deleted],
             days: days,
             calendar: calendar
         )
         let byTitle = Dictionary(uniqueKeysWithValues: placements.map { ($0.item.title, $0) })
+        XCTAssertEqual(placements.count, 3, "Timed and deleted items must never enter the lane")
+        // Deterministic lane order: start ascending, then end ascending.
         XCTAssertEqual(byTitle["First"]?.row, 0)
-        XCTAssertEqual(byTitle["Adjacent"]?.row, 0, "Adjacent all-day ranges should reuse a row")
         XCTAssertEqual(byTitle["Overlapping"]?.row, 1)
+        XCTAssertEqual(byTitle["Adjacent"]?.row, 2, "Every entry owns its own cell")
         XCTAssertEqual(byTitle["First"]?.firstDayIndex, 0)
         XCTAssertEqual(byTitle["Adjacent"]?.firstDayIndex, 1)
         XCTAssertEqual(byTitle["Overlapping"]?.firstDayIndex, 0)
         XCTAssertEqual(byTitle["First"]?.dayCount, 1)
         XCTAssertEqual(byTitle["Adjacent"]?.dayCount, 1)
         XCTAssertEqual(byTitle["Overlapping"]?.dayCount, 3)
+
+        let entries = [first, adjacent, overlapping]
         XCTAssertEqual(
-            CalendarAllDayLayout.height(items: [first, adjacent, overlapping], days: days, calendar: calendar),
-            CalendarAllDayLayout.rowHeight * 2 + CalendarAllDayLayout.rowSpacing
+            CalendarAllDayLayout.rowCount(items: entries, days: days, calendar: calendar),
+            4,
+            "n entries -> n cells plus one trailing empty cell"
+        )
+        XCTAssertEqual(
+            CalendarAllDayLayout.height(items: entries, days: days, calendar: calendar),
+            CalendarAllDayLayout.rowHeight * 4 + CalendarAllDayLayout.rowSpacing * 3
         )
     }
 
