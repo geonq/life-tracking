@@ -529,6 +529,24 @@ class EnableBankingService:
         for key in sorted(terminal, key=lambda item: self.consent_flows[item]["started"])[:max(excess, 0)]:
             del self.consent_flows[key]
 
+    def _active_flow_for_institution(self, institution_id: str) -> tuple[str, dict] | None:
+        """Return the active in-process flow for this institution, if any.
+
+        Consent initiation is intentionally idempotent for the same connector:
+        the phone may lose the Safari presentation race or be relaunched after
+        the gateway has created the flow.  Re-serving the already-issued opaque
+        handoff lets the user recover without creating a second provider flow.
+        A different connector remains blocked until the active flow reaches a
+        terminal state.
+        """
+        for connection_id, flow in self.consent_flows.items():
+            if (
+                flow["state"] in self.ACTIVE_STATES
+                and flow.get("institutionId") == institution_id
+            ):
+                return connection_id, flow
+        return None
+
     async def start(self, institution_id: str) -> tuple[int, dict]:
         credentials = self._credentials()
         if credentials is None:
@@ -540,6 +558,13 @@ class EnableBankingService:
             return 400, {"error": "unknown_institution"}
         async with self.consent_lock:
             self._expire_flows()
+            existing = self._active_flow_for_institution(institution_id)
+            if existing is not None:
+                connection_id, flow = existing
+                consent_url = flow.get("consent_url")
+                if self._safe_consent_url(consent_url):
+                    return 200, {"consentUrl": consent_url, "connectionId": connection_id}
+                return 409, {"error": "already_linking"}
             if any(flow["state"] in self.ACTIVE_STATES for flow in self.consent_flows.values()):
                 return 409, {"error": "already_linking"}
             try:
@@ -568,6 +593,7 @@ class EnableBankingService:
                 "started": time.monotonic(),
                 "csrf_state": state,
                 "authorization_id": authorization_id,
+                "consent_url": consent_url,
                 "session_id": None,
             }
             self._prune_flows()

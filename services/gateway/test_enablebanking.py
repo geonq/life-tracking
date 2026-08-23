@@ -126,6 +126,41 @@ def test_fastapi_connect_route_exposes_connection_id_contract(tmp_path, monkeypa
     assert response.headers["cache-control"] == "no-store"
 
 
+def test_start_replays_same_connector_flow_without_creating_provider_duplicate(tmp_path, monkeypatch):
+    adapter = service(tmp_path, monkeypatch)
+    holder = QueueClient([
+        FakeResponse({"aspsps": [{"name": "Revolut", "country": "LT"}]}),
+        FakeResponse({
+            "url": "https://auth.enablebanking.com/ais/start?sessionid=provider-session",
+            "authorization_id": "authorization-1",
+        }),
+    ])
+    monkeypatch.setattr(enablebanking.httpx, "AsyncClient", lambda **_: holder)
+
+    first_status, first_body = run(adapter.start("revolut_personal"))
+    second_status, second_body = run(adapter.start("revolut_personal"))
+
+    assert first_status == second_status == 200
+    assert second_body == first_body
+    assert len(holder.calls) == 2
+
+
+def test_start_keeps_other_connector_blocked_while_a_flow_is_active(tmp_path, monkeypatch):
+    adapter = service(tmp_path, monkeypatch)
+    holder = QueueClient([
+        FakeResponse({"aspsps": [{"name": "Revolut", "country": "LT"}]}),
+        FakeResponse({
+            "url": "https://auth.enablebanking.com/ais/start?sessionid=provider-session",
+            "authorization_id": "authorization-1",
+        }),
+    ])
+    monkeypatch.setattr(enablebanking.httpx, "AsyncClient", lambda **_: holder)
+
+    assert run(adapter.start("revolut_personal"))[0] == 200
+    assert run(adapter.start("sparkasse_leipzig")) == (409, {"error": "already_linking"})
+    assert len(holder.calls) == 2
+
+
 def test_start_rejects_consent_url_fragment_and_expires_flow(tmp_path, monkeypatch):
     adapter = service(tmp_path, monkeypatch)
     holder = QueueClient([
