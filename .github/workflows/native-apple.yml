@@ -1,39 +1,9 @@
 name: Native Apple validation
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - "docs/**"
-      - "ios/**"
-      - "scripts/validate_native_calendar.py"
-      - "scripts/validate_acceptance_registry.py"
-      - "scripts/validate_native_release.py"
-      - "scripts/validate_xcodegen.py"
-      - "scripts/validate_xcresult.py"
-      - "scripts/lane_manifest.py"
-      - "scripts/native_lane_manifest.json"
-      - "scripts/validate_apple_on_mac.sh"
-      - "scripts/run_prerelease_lanes.sh"
-      - "scripts/tests/**"
-      - ".github/workflows/native-apple.yml"
-  pull_request:
-    types: [opened, synchronize, reopened]
-    paths:
-      - "docs/**"
-      - "ios/**"
-      - "scripts/validate_native_calendar.py"
-      - "scripts/validate_acceptance_registry.py"
-      - "scripts/validate_native_release.py"
-      - "scripts/validate_xcodegen.py"
-      - "scripts/validate_xcresult.py"
-      - "scripts/lane_manifest.py"
-      - "scripts/native_lane_manifest.json"
-      - "scripts/validate_apple_on_mac.sh"
-      - "scripts/run_prerelease_lanes.sh"
-      - "scripts/tests/**"
-      - ".github/workflows/native-apple.yml"
+  # CI is intentionally manual while the native validation lane is under
+  # active development. This prevents every implementation push/PR update
+  # from consuming hosted macOS minutes and generating notification noise.
   workflow_dispatch:
     inputs:
       final_acceptance:
