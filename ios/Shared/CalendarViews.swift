@@ -580,7 +580,8 @@ public struct CalendarTimelineView: View {
                                         monthSelectedDate: monthSelectedDate,
                                         reduceMotion: reduceMotion,
                                         isInteractionEnabled: true,
-                                        interactionSession: interactionSession
+                                        interactionSession: interactionSession,
+                                        onVerticalPan: nil
                                     )
                                     .frame(width: (contentWidth - timeGutter) / CGFloat(max(days.count, 1)))
                             }
@@ -777,6 +778,15 @@ private struct CalendarPagedTimeline: View {
     /// settled swipe yanked the timeline back to the morning hours and broke
     /// the "the next day was already there" illusion vertically.
     @State private var didInitialVerticalScroll = false
+    /// Fallback scroll anchor used only when a vertical pan starts over an
+    /// event-owned interaction surface. Native ScrollView scrolling remains
+    /// the default; this state makes those rows deterministic when SwiftUI's
+    /// nested long-press recognizers delay the ancestor pan.
+    // The first over-event pan advances from the midnight fallback to the
+    // 09:00 viewport; subsequent pans advance in four-hour steps. 09:00 is
+    // far enough to move 24:00 while retaining the source event on-screen.
+    @State private var manualVerticalScrollHour = 5
+    @State private var lastManualVerticalPanAt: Date?
 
     init(days: [Date], items: [CalendarItem], holidays: [CalendarHoliday], hourHeight: CGFloat,
          calendar: Calendar, onSelect: @escaping CalendarEventSelectionHandler,
@@ -906,7 +916,30 @@ private struct CalendarPagedTimeline: View {
                                         monthSelectedDate: monthSelectedDate,
                                         reduceMotion: reduceMotion,
                                         isInteractionEnabled: isVisibleDay(day, window: visibleWindow),
-                                        interactionSession: interactionSession
+                                        interactionSession: interactionSession,
+                                        onVerticalPan: { translation in
+                                            let now = Date.now
+                                            if let lastManualVerticalPanAt,
+                                               now.timeIntervalSince(lastManualVerticalPanAt) < 0.25 {
+                                                // The handle and its parent event
+                                                // can both observe one physical
+                                                // swipe. One timeline gesture
+                                                // must advance only one step.
+                                                return
+                                            }
+                                            self.lastManualVerticalPanAt = now
+                                            let direction = translation < 0 ? 1 : -1
+                                            manualVerticalScrollHour = min(
+                                                20,
+                                                max(0, manualVerticalScrollHour + direction * 4)
+                                            )
+                                            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.20)) {
+                                                scrollProxy.scrollTo(
+                                                    CalendarTimelineScrollAnchor.id(for: manualVerticalScrollHour),
+                                                    anchor: .top
+                                                )
+                                            }
+                                        }
                                     )
                                     .frame(width: columnWidth)
                                 }
@@ -985,7 +1018,6 @@ private struct CalendarPagedTimeline: View {
             .frame(width: viewport.size.width)
             .clipped()
             .contentShape(Rectangle())
-            .simultaneousGesture(pagerDragGesture(viewportWidth: viewport.size.width, columnWidth: columnWidth))
             .coordinateSpace(name: "calendar-horizontal-pager")
             .onPreferenceChange(CalendarStripOffsetPreferenceKey.self) { stripX in
                 updatePreviewAndCompletion(stripX: stripX, columnWidth: columnWidth)
@@ -1003,8 +1035,13 @@ private struct CalendarPagedTimeline: View {
                 // horizontal gesture and the header reflects the settled page.
                 resetStripForEventOwnership()
             }
-            .overlay {
+            .overlay(alignment: .top) {
+                // Stable semantic probe for the pinned header. It is
+                // non-hit-testing so the physical swipe falls through to the
+                // header's direct pager gesture below.
                 Color.clear
+                    .frame(maxWidth: .infinity)
+                    .frame(height: dayHeaderHeight)
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel("Calendar timeline, \(days.count) days. Swipe horizontally to change days.")
                     .accessibilityValue("Committed page \(commitAccessibilityDate(pageAnchor))")
@@ -1295,6 +1332,8 @@ private struct CalendarPagedTimeline: View {
                 .frame(maxHeight: .infinity, alignment: .bottom)
         }
         .clipped()
+        .contentShape(Rectangle())
+        .simultaneousGesture(pagerDragGesture(viewportWidth: containerWidth, columnWidth: columnWidth))
     }
 
     private func dayHeaderCell(day: Date, width: CGFloat) -> some View {
@@ -1615,6 +1654,7 @@ private struct CalendarDayTimeline: View {
     let reduceMotion: Bool
     let isInteractionEnabled: Bool
     let interactionSession: CalendarInteractionSession
+    let onVerticalPan: ((CGFloat) -> Void)?
 #if os(iOS)
     @State private var pressCreationActive = false
     @State private var pressCreationSnapMinutes: Int?
@@ -1673,7 +1713,10 @@ private struct CalendarDayTimeline: View {
                     .contentShape(Rectangle())
 #if os(iOS)
                     .simultaneousGesture(creationGesture)
-                    .highPriorityGesture(creationPressDragGesture)
+                    // A quick vertical pan must remain native ScrollView
+                    // scrolling. The press sequence still claims an
+                    // intentional creation after its hold threshold.
+                    .simultaneousGesture(creationPressDragGesture(proxy: proxy))
 #else
                     .simultaneousGesture(macDoubleClickGesture(proxy: proxy))
                     .simultaneousGesture(macCreationDragGesture(proxy: proxy))
@@ -1821,7 +1864,8 @@ private struct CalendarDayTimeline: View {
             interactionSession: interactionSession,
             onSelect: selection,
             onUpdate: interactive ? onUpdate : nil,
-            onStatusUpdate: interactive ? onStatusUpdate : nil
+            onStatusUpdate: interactive ? onStatusUpdate : nil,
+            onVerticalPan: interactive ? onVerticalPan : nil
         )
         .frame(width: layerWidth, alignment: .topLeading)
         .offset(x: CGFloat(layerFrame.leading), y: y + 1)
@@ -1856,15 +1900,12 @@ private struct CalendarDayTimeline: View {
     /// range can never disagree, and release commits either the drafted range
     /// or the anchor's default block. Double-tap creation remains available.
 #if os(iOS)
-    private var creationPressDragGesture: some Gesture {
-        LongPressGesture(minimumDuration: 0.45, maximumDistance: 12)
+    private func creationPressDragGesture(proxy: GeometryProxy) -> some Gesture {
+            LongPressGesture(minimumDuration: 0.45, maximumDistance: 12)
             .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .local))
             .onChanged { phase in
-                if case .first(true) = phase {
-                    guard isInteractionEnabled else { return }
-                    interactionSession.eventMoveActive = true
-                }
                 guard case .second(true, let drag?) = phase else { return }
+                guard !isTimedEventPoint(drag.startLocation, in: proxy) else { return }
                 guard isInteractionEnabled,
                       let sample = CalendarInteractionLayout.creationPressDragSample(
                         day: day,
@@ -1874,6 +1915,10 @@ private struct CalendarDayTimeline: View {
                         calendar: calendar
                       ) else { return }
                 if !pressCreationActive {
+                    // A pending creation hold must not block ordinary
+                    // vertical scrolling. Claim the shared session only once
+                    // the hold has produced a valid creation sample.
+                    interactionSession.eventMoveActive = true
                     pressCreationActive = true
                     CalendarInteractionHaptics.grab()
                     pressCreationSnapMinutes = 0
@@ -1889,13 +1934,17 @@ private struct CalendarDayTimeline: View {
                 onTimedCreationDraft?(creationDraftPreview(for: sample.interval))
             }
             .onEnded { phase in
+                let ownedCreation = pressCreationActive
                 defer {
                     pressCreationActive = false
                     pressCreationSnapMinutes = nil
-                    interactionSession.eventMoveActive = false
+                    if ownedCreation {
+                        interactionSession.eventMoveActive = false
+                    }
                 }
                 guard isInteractionEnabled,
                       case .second(_, let drag?) = phase,
+                      !isTimedEventPoint(drag.startLocation, in: proxy),
                       let sample = CalendarInteractionLayout.creationPressDragSample(
                         day: day,
                         anchorY: Double(drag.startLocation.y),
@@ -1914,6 +1963,35 @@ private struct CalendarDayTimeline: View {
 
     private func creationDraftPreview(for interval: DateInterval) -> CalendarTimedCreationPreview {
         CalendarTimedCreationPreview(day: interval.start, start: interval.start, end: interval.end)
+    }
+
+    private func isTimedEventPoint(_ point: CGPoint, in proxy: GeometryProxy) -> Bool {
+        guard point.x.isFinite, point.y.isFinite else { return false }
+        guard let scale = CalendarInteractionLayout.timelineScale(
+            day: day,
+            hourHeight: Double(hourHeight),
+            calendar: calendar
+        ) else { return false }
+
+        return basePlacements.contains { placement in
+            let layerFrame = placement.layerFrame(
+                containerWidth: Double(proxy.size.width),
+                edgeInset: 1
+            )
+            let startY = CGFloat(scale.y(for: placement.visibleStart, calendar: calendar))
+            let rawHeight = CGFloat(scale.height(
+                from: placement.visibleStart,
+                to: placement.visibleEnd,
+                calendar: calendar
+            ))
+            let eventFrame = CGRect(
+                x: CGFloat(layerFrame.leading),
+                y: startY + 1,
+                width: CGFloat(layerFrame.width),
+                height: max(24, rawHeight - 2)
+            )
+            return eventFrame.contains(point)
+        }
     }
 #endif
 
@@ -2072,6 +2150,7 @@ private struct CalendarInteractiveTimelineEvent: View {
     let onSelect: () -> Void
     let onUpdate: CalendarUpdateHandler?
     let onStatusUpdate: CalendarStatusUpdateHandler?
+    let onVerticalPan: ((CGFloat) -> Void)?
 
     @State private var moveMinutes = 0
     @State private var moveDays = 0
@@ -2081,6 +2160,8 @@ private struct CalendarInteractiveTimelineEvent: View {
     @State private var isHovering = false
     @FocusState private var isFocused: Bool
     @State private var suppressTap = false
+    @State private var moveStartIsBody = false
+    @State private var moveStartCaptured = false
     @State private var lastMoveSnap: Int?
     @State private var lastResizeSnap: Int?
     /// Covers the interval between handing move/resize to the coordinator and
@@ -2129,12 +2210,15 @@ private struct CalendarInteractiveTimelineEvent: View {
         .highPriorityGesture(moveGesture, including: .gesture)
 #else
         // The sequenced long-press move must own an event-body drag before
-        // the surrounding vertical timeline/pager consumes it. A plain tap
-        // makes the long press fail and still reaches the simultaneous tap
-        // recognizer, preserving editor selection without starving moves.
+        // the surrounding vertical timeline/pager consumes it. A quick
+        // vertical drag fails the bounded long press and is handled by the
+        // explicit vertical fallback below; an intentional hold therefore
+        // cannot be reinterpreted as timeline scrolling.
         .simultaneousGesture(tapGesture)
         .highPriorityGesture(moveGesture, including: .gesture)
+        .simultaneousGesture(verticalTimelinePanGesture)
 #endif
+        .simultaneousGesture(moveStartClassifier)
         .animation(reduceMotion ? nil : LifeOSMotion.primary, value: item.start)
         .accessibilityHidden(!isInteractionEnabled)
 #if os(macOS)
@@ -2347,17 +2431,47 @@ private struct CalendarInteractiveTimelineEvent: View {
             resizeHandleSurface
         }
 #else
-        // Reveal the affordance only while resizing (Notion parity): idle
-        // cards stay clean; the capsule appears for the active interaction.
-        if isResizing {
-            resizeHandleSurface
+        // Keep the semantic/hit target mounted at rest so the affordance is
+        // reachable by touch, XCTest, and VoiceOver. Its visual capsule stays
+        // hidden until the long-press actually claims a resize, preserving
+        // the clean idle card while retaining the interaction surface.
+        ZStack(alignment: .bottom) {
+            // The semantic target is also the physical gesture owner. Keeping
+            // the hit region aligned with the exposed AX frame means a swipe
+            // beginning at the handle's midpoint cannot fall into the card's
+            // nested long-press recognizer by accident.
+            Color.clear
+                .frame(maxWidth: .infinity)
+                .frame(height: 18)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Resize event")
+                .accessibilityValue("15 minute resize actions available")
+                .accessibilityHint("Use resize shorter or resize longer actions in 15 minute steps")
+                .accessibilityIdentifier(isInteractionEnabled
+                    ? "calendar-event-resize-\(item.id.uuidString)"
+                    : "calendar-offscreen-event-resize-\(item.id.uuidString)")
+                .accessibilityAction(named: "Resize shorter 15 minutes") { commitResize(minutes: -15) }
+                .accessibilityAction(named: "Resize longer 15 minutes") { commitResize(minutes: 15) }
+                .contentShape(Rectangle())
+                .gesture(resizeOrVerticalGesture)
+                .simultaneousGesture(verticalTimelinePanGesture)
+
+            // The visual affordance stays compact while the invisible control
+            // above provides the forgiving touch target.
+            Capsule(style: .continuous)
+                .fill(CalendarEventVisuals.accent.opacity(isResizing ? 0.82 : 0))
+                .frame(width: 28, height: 4)
+                .accessibilityHidden(true)
         }
+        .frame(maxWidth: .infinity)
+        .frame(height: 18, alignment: .bottom)
+        .contentShape(Rectangle())
 #endif
     }
 
     private var resizeHandleSurface: some View {
         Capsule(style: .continuous)
-            .fill(CalendarEventVisuals.accent.opacity(0.82))
+            .fill(CalendarEventVisuals.accent.opacity(isResizing ? 0.82 : 0))
             .frame(width: 28, height: 4)
             .frame(maxWidth: .infinity)
             .frame(height: 18, alignment: .bottom)
@@ -2374,21 +2488,61 @@ private struct CalendarInteractiveTimelineEvent: View {
             .highPriorityGesture(resizeGesture)
     }
 
+    private var moveStartClassifier: some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .local)
+            .onChanged { value in
+                guard !moveStartCaptured else { return }
+                moveStartCaptured = true
+                moveStartIsBody = value.startLocation.y < max(0, availableHeight - 18)
+            }
+            .onEnded { _ in
+                moveStartCaptured = false
+                moveStartIsBody = false
+            }
+    }
+
+#if os(iOS)
+    private var resizeOrVerticalGesture: some Gesture {
+        resizeGesture.exclusively(before: verticalTimelinePanGesture)
+    }
+
+    private var verticalTimelinePanGesture: some Gesture {
+        DragGesture(minimumDistance: 8, coordinateSpace: .local)
+            .onEnded { value in
+                guard abs(value.translation.height) > abs(value.translation.width),
+                      abs(value.translation.height) >= 12,
+                      !isMoving,
+                      !isResizing,
+                      !mutationCommitInFlight else { return }
+                onVerticalPan?(value.translation.height)
+            }
+    }
+
+#endif
+
     private var moveGesture: some Gesture {
         LongPressGesture(minimumDuration: 0.45, maximumDistance: 12)
             .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .local))
             .onChanged { phase in
                 if case .first(true) = phase {
                     guard !interactionSession.statusMutationActive,
-                          !mutationCommitInFlight else { return }
-                    // Claim the pointer before the hold threshold completes.
-                    // This keeps the parent macOS horizontal ScrollView from
-                    // consuming the first horizontal drag sample.
+                          !mutationCommitInFlight,
+                          moveStartIsBody else { return }
+                    // Reserve the event surface while the deliberate hold is
+                    // pending. Without this early reservation, the parent
+                    // vertical/horizontal scroll containers can cancel the
+                    // sequenced drag before its first horizontal sample.
                     interactionSession.eventMoveActive = true
                 }
                 guard case .second(true, let drag?) = phase else { return }
-                guard drag.startLocation.y < max(0, availableHeight - 18) else { return }
+                guard !interactionSession.statusMutationActive,
+                      !mutationCommitInFlight,
+                      moveStartIsBody else { return }
                 if !isMoving {
+                    // A pending long press must not starve a quick vertical
+                    // timeline swipe. Claim the shared session only after the
+                    // deliberate move gesture has actually begun.
+                    interactionSession.eventMoveActive = true
                     isMoving = true
                     suppressTap = true
                     CalendarInteractionHaptics.grab()
@@ -2433,15 +2587,15 @@ private struct CalendarInteractiveTimelineEvent: View {
         LongPressGesture(minimumDuration: 0.45, maximumDistance: 12)
             .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .local))
             .onChanged { phase in
-                if case .first(true) = phase {
-                    guard !interactionSession.statusMutationActive,
-                          !mutationCommitInFlight else { return }
-                    // Resize is also an event-owned mutation: the parent
-                    // horizontal timeline must yield while it is committed.
-                    interactionSession.eventMoveActive = true
-                }
                 guard case .second(true, let drag?) = phase else { return }
+                guard !interactionSession.statusMutationActive,
+                      !mutationCommitInFlight else { return }
                 if !isResizing {
+                    // Do not claim the shared session while the long press is
+                    // still pending: a quick vertical swipe must remain free
+                    // to scroll the timeline. Once the long press succeeds,
+                    // resize owns the interaction just like event move.
+                    interactionSession.eventMoveActive = true
                     isResizing = true
                     suppressTap = true
                     CalendarInteractionHaptics.grab()
