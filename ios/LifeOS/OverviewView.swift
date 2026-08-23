@@ -1002,7 +1002,9 @@ private struct UsageMiniRing: View {
 
     var body: some View {
         VStack(spacing: 3) {
-            GlowRing(progress: remaining ?? 0, hue: LifeOSTokens.providerHue(provider), diameter: 38, lineWidth: 4) {
+            // The compact Usage preview follows the same blue-forward Usage token as
+            // the full screen; the provider name remains the identity cue.
+            GlowRing(progress: remaining ?? 0, hue: .blue, diameter: 38, lineWidth: 4) {
                 Text(remaining.map { "\(Int(($0 * 100).rounded()))" } ?? "—")
                     .font(.system(size: 10, weight: .bold, design: .rounded))
                     .monospacedDigit()

@@ -583,7 +583,9 @@ struct UsageLimitsCard: View {
     var body: some View {
         VStack(spacing: 14) {
             if let ringWindow {
-                GlowRing(progress: ringWindow.usedPercent ?? 0, hue: LifeOSTokens.providerHue(snapshot.provider), diameter: 148, lineWidth: 12) {
+                // Usage owns one blue visual language; provider identity is carried by
+                // the account switcher and labels, never by a provider-specific ring hue.
+                GlowRing(progress: ringWindow.usedPercent ?? 0, hue: .blue, diameter: 148, lineWidth: 12) {
                     VStack(spacing: 3) {
                         Text(ringWindow.usedPercent.map { "\(Int(($0 * 100).rounded()))" } ?? "—")
                             .font(.system(size: 34, weight: .bold, design: .rounded))

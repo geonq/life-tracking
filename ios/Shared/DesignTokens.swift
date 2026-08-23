@@ -279,32 +279,6 @@ public enum LifeOSTokens {
     // Calendar's identity color — sample exact value from Figma in the calendar workstream.
     public static let calendarRed = Color.lifeOSCalendarRed
 
-    // MARK: Provider identity
-    // interim: full blue-lead + segment redesign is workstream 3 per 02-charts-rings-widgets.md
-    // Providers are distinguished by label + segment, not loud per-provider hue; both are
-    // drawn from the vivid palette (Usage view specifics, 01-color-system-v2.md).
-    public static func providerColor(_ provider: Provider) -> Color {
-        switch provider {
-        case .codex: .lifeOSBlue500
-        case .claude: .lifeOSTeal500
-        // Provider identity stays restrained; labels and the switcher carry the
-        // distinction while these tokens remain available to future accents.
-        case .glm: .lifeOSBlue400
-        case .deepseek: .lifeOSBlue600
-        case .googleAIStudio: .lifeOSTeal400
-        }
-    }
-
-    /// Hue-ramp counterpart to `providerColor`, for call sites (rings) that key off a
-    /// `Hue` case rather than a single `Color`. Mirrors the same restrained blue/teal
-    /// split so a ring's gradient (reveal→base) matches the provider's identity color.
-    public static func providerHue(_ provider: Provider) -> Hue {
-        switch provider {
-        case .codex, .glm, .deepseek: .blue
-        case .claude, .googleAIStudio: .teal
-        }
-    }
-
     // Borders & quiescent states
     public static let quietBorder = Color.primary.opacity(0.11)
     public static let hairlineBorder = Color.primary.opacity(0.07)
@@ -320,7 +294,7 @@ public enum LifeOSTokens {
     //
     // Additive polish over the monochrome foundation: a soft top→bottom surface gradient,
     // a hairline edge-light stroke, a frosted material layer, and a quiet shadow. Peak-chroma
-    // accents (Hue.base / providerColor / semantic tokens) stay the only saturated color;
+    // accents (Hue.base / semantic tokens) stay the only saturated color;
     // the glass layer itself is neutral so it reads as depth, not tint.
     public enum Glass {
         /// Low-contrast surface gradient, top (lighter) → bottom (deeper). Composited under
