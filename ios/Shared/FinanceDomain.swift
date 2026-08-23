@@ -2,6 +2,7 @@ import Foundation
 
 private let financeMaximumClockSkew: TimeInterval = 5
 private let financeStaleAfter: TimeInterval = 15 * 60
+private let financeDerivedAccountSnapshotSource = "derived-account-snapshot"
 private let financeDerivedTransactionSnapshotSource = "derived-transaction-snapshot"
 
 private func financeObservedProvenanceIsAgeConsistent(
@@ -277,10 +278,7 @@ public struct FinanceAccountObservation: Codable, Equatable, Identifiable, Senda
         guard fields.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }),
               validAmount,
               source == provenance.source,
-              provenance.observedAt <= now.addingTimeInterval(financeMaximumClockSkew),
-              provenance.quality == .observed,
-              provenance.freshness != .unknown,
-              provenance.connectorState == .healthy || provenance.connectorState == .refreshDue else {
+              financeObservedProvenanceIsAgeConsistent(provenance, now: now) else {
             throw DecodingError.dataCorruptedError(
                 forKey: .id,
                 in: container,
@@ -320,11 +318,23 @@ public struct FinanceAccountSnapshot: Codable, Equatable, Sendable {
         let valid: Bool
         switch availability {
         case .observed:
-            valid = hasAccounts && accounts != nil && !(accounts ?? []).isEmpty
+            let rows = accounts ?? []
+            let rowSources = Set(rows.map(\.source))
+            let sourceReconciles = (rowSources.count == 1 && rowSources.contains(provenance.source))
+                || provenance.source == financeDerivedAccountSnapshotSource
+            let hasStaleAccount = rows.contains {
+                $0.provenance.freshness == .stale || $0.provenance.connectorState == .refreshDue
+            }
+            let expectedFreshness: FinancePayloadFreshness = hasStaleAccount ? .stale : .fresh
+            let expectedConnector: ConnectorState = hasStaleAccount ? .refreshDue : .healthy
+            valid = hasAccounts && accounts != nil && !rows.isEmpty
                 && provenance.quality == .observed
                 && provenance.freshness != .unknown
                 && healthy
-                && (accounts ?? []).allSatisfy { $0.provenance.observedAt <= provenance.observedAt }
+                && sourceReconciles
+                && provenance.freshness == expectedFreshness
+                && provenance.connectorState == expectedConnector
+                && rows.allSatisfy { $0.provenance.observedAt <= provenance.observedAt }
         case .unavailable:
             valid = !hasAccounts && accounts == nil
                 && provenance.quality == .unavailable
@@ -634,7 +644,16 @@ public struct FinanceTransactionSnapshot: Codable, Equatable, Sendable {
     }
 }
 
+public enum FinanceTransactionTotalsError: Error, Equatable, Sendable {
+    case aggregateOverflow
+}
+
 /// Deterministic rollups used by the Finance detail surfaces and their tests.
+///
+/// The initializer is throwing because each source row can be valid while the
+/// derived ledger totals are not representable in the bounded Finance amount
+/// domain. Callers must omit the affected aggregate instead of wrapping,
+/// saturating, or displaying a fabricated zero.
 public struct FinanceTransactionTotals: Equatable, Sendable {
     public let incomeCents: Int
     public let spendingCents: Int
@@ -642,32 +661,76 @@ public struct FinanceTransactionTotals: Equatable, Sendable {
     public let transactionCount: Int
     public let categoryObservations: [FinanceCategoryObservation]
 
-    public init(transactions: [FinanceTransactionObservation]) {
-        incomeCents = transactions.reduce(0) { total, transaction in
-            total + max(transaction.signedAmountCents, 0)
-        }
-        spendingCents = transactions.reduce(0) { total, transaction in
-            total + transaction.spendingCents
-        }
-        netCashFlowCents = incomeCents - spendingCents
-        transactionCount = transactions.count
+    public init(transactions: [FinanceTransactionObservation]) throws {
+        var income = 0
+        var spending = 0
+        for transaction in transactions {
+            let incomeAmount = max(transaction.signedAmountCents, 0)
+            let spendingAmount = try Self.spendingMagnitude(of: transaction.signedAmountCents)
 
-        let grouped = Dictionary(grouping: transactions.filter(\.isSpending), by: \.category)
-        let totalSpending = spendingCents
-        categoryObservations = grouped.keys.sorted().map { category in
+            let (nextIncome, incomeOverflowed) = income.addingReportingOverflow(incomeAmount)
+            let (nextSpending, spendingOverflowed) = spending.addingReportingOverflow(spendingAmount)
+            guard !incomeOverflowed,
+                  !spendingOverflowed,
+                  Self.isWithinAggregateBounds(nextIncome),
+                  Self.isWithinAggregateBounds(nextSpending) else {
+                throw FinanceTransactionTotalsError.aggregateOverflow
+            }
+            income = nextIncome
+            spending = nextSpending
+        }
+
+        let (netCashFlow, netOverflowed) = income.subtractingReportingOverflow(spending)
+        guard !netOverflowed, Self.isWithinAggregateBounds(netCashFlow) else {
+            throw FinanceTransactionTotalsError.aggregateOverflow
+        }
+
+        let grouped = Dictionary(grouping: transactions.filter { $0.signedAmountCents < 0 }, by: \.category)
+        var categories: [FinanceCategoryObservation] = []
+        categories.reserveCapacity(grouped.count)
+        for category in grouped.keys.sorted() {
             let rows = grouped[category, default: []]
-            let amount = rows.reduce(0) { $0 + $1.spendingCents }
-            return FinanceCategoryObservation(
+            var amount = 0
+            for row in rows {
+                let spendingAmount = try Self.spendingMagnitude(of: row.signedAmountCents)
+                let (nextAmount, overflowed) = amount.addingReportingOverflow(spendingAmount)
+                guard !overflowed, Self.isWithinAggregateBounds(nextAmount) else {
+                    throw FinanceTransactionTotalsError.aggregateOverflow
+                }
+                amount = nextAmount
+            }
+            categories.append(FinanceCategoryObservation(
                 id: category,
                 name: category,
                 amountCents: amount,
                 transactionCount: rows.count,
-                fraction: totalSpending > 0 ? Double(amount) / Double(totalSpending) : 0,
+                fraction: spending > 0 ? Double(amount) / Double(spending) : 0,
                 source: "derived-transaction-rollup",
                 provenance: Self.derivedCategoryProvenance(from: rows),
                 contributingSources: rows.map(\.source)
-            )
+            ))
         }
+
+        incomeCents = income
+        spendingCents = spending
+        netCashFlowCents = netCashFlow
+        transactionCount = transactions.count
+        categoryObservations = categories
+    }
+
+    private static let maximumAggregateCents = 9_007_199_254_740_991
+
+    private static func isWithinAggregateBounds(_ amount: Int) -> Bool {
+        amount >= -maximumAggregateCents && amount <= maximumAggregateCents
+    }
+
+    private static func spendingMagnitude(of signedAmountCents: Int) throws -> Int {
+        guard signedAmountCents < 0 else { return 0 }
+        let (magnitude, overflowed) = 0.subtractingReportingOverflow(signedAmountCents)
+        guard !overflowed else {
+            throw FinanceTransactionTotalsError.aggregateOverflow
+        }
+        return magnitude
     }
 
     /// Category totals are a local derivation and must never inherit the

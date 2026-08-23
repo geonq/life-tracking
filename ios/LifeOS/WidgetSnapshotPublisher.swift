@@ -180,10 +180,14 @@ extension WidgetSnapshotPublisher {
            isUsableObservedProvenance(transactionSnapshot.provenance),
            transactions.allSatisfy({ isUsableObservedProvenance($0.provenance) }) {
             // FinanceTransactionTotals is the shared, reviewable rule: each
-            // row is signed, so income minus spending equals signed sum.
-            cashFlowCents = FinanceTransactionTotals(transactions: transactions).netCashFlowCents
-            observedProvenance.append(transactionSnapshot.provenance)
-            observedProvenance.append(contentsOf: transactions.map(\.provenance))
+            // row is signed, so income minus spending equals signed sum. An
+            // overflowing derived ledger is not a zero-valued ledger; omit
+            // only this aggregate and retain independent observed fields.
+            if let totals = try? FinanceTransactionTotals(transactions: transactions) {
+                cashFlowCents = totals.netCashFlowCents
+                observedProvenance.append(transactionSnapshot.provenance)
+                observedProvenance.append(contentsOf: transactions.map(\.provenance))
+            }
         }
 
         guard spendCents != nil || netWorthCents != nil || cashFlowCents != nil,

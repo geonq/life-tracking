@@ -189,6 +189,38 @@ final class WidgetSnapshotPublisherTests: XCTestCase {
         XCTAssertNil(mapped.spendCents)
     }
 
+    func testOverflowingObservedTransactionAggregateOmitsCashFlowWithoutInventingZero() throws {
+        let observedAt = now.addingTimeInterval(-60)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let timestamp = formatter.string(from: observedAt)
+        let provenance: [String: Any] = [
+            "source": "revolut_personal", "observedAt": timestamp,
+            "freshness": "fresh", "quality": "observed", "connectorState": "healthy"
+        ]
+        let maximum = 9_007_199_254_740_991
+        func row(id: String) -> [String: Any] {
+            [
+                "id": id, "merchant": "Employer", "title": "Salary",
+                "signedAmountCents": maximum, "timestamp": timestamp,
+                "account": "Revolut Personal", "source": "revolut_personal",
+                "category": "Income", "provenance": provenance
+            ]
+        }
+        let transactions: [String: Any] = [
+            "availability": "observed",
+            "transactions": [row(id: "overflow-1"), row(id: "overflow-2")],
+            "provenance": provenance
+        ]
+        let summary = try financeSummary(spentCents: 12_345, transactions: transactions)
+
+        let mapped = WidgetSnapshotPublisher.mapFinance(summary: summary, state: .observed, now: now)
+
+        XCTAssertEqual(mapped.spendCents, 12_345)
+        XCTAssertNil(mapped.cashFlowCents)
+        XCTAssertEqual(mapped.availability(at: now), .fresh)
+    }
+
     func testAbsentTransactionsNeverMapCashFlowToZero() throws {
         let summary = try financeSummary(spentAvailability: "unavailable")
         let mapped = WidgetSnapshotPublisher.mapFinance(summary: summary, state: .observed, now: now)

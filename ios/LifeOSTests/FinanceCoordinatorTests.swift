@@ -176,6 +176,23 @@ final class FinanceCoordinatorTests: XCTestCase {
         XCTAssertEqual(truth.netWorthCents, 123_456)
     }
 
+    func testFinanceViewOverflowingTransactionAggregateRemainsUnavailable() throws {
+        let maximum = 9_007_199_254_740_991
+        let summary = try makeTransactionOnlySummary(
+            observedAt: .now.addingTimeInterval(-1),
+            freshness: "fresh",
+            connector: "healthy",
+            signedAmounts: [maximum, maximum]
+        )
+
+        let truth = FinanceView.displayTruth(summary: summary)
+
+        XCTAssertTrue(truth.hasObservedValue)
+        XCTAssertEqual(truth.statusLabel, "Observed")
+        XCTAssertFalse(truth.transactionTotalsAvailable)
+        XCTAssertTrue(truth.sourceDisclosure.contains("Revolut Personal"))
+    }
+
     private func makeSummary(
         generatedAt: Date = .now,
         observedAt: Date = .now.addingTimeInterval(-1),
@@ -250,7 +267,8 @@ final class FinanceCoordinatorTests: XCTestCase {
     private func makeTransactionOnlySummary(
         observedAt: Date,
         freshness: String,
-        connector: String
+        connector: String,
+        signedAmounts: [Int] = [-2_450]
     ) throws -> FinanceSummary {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -265,18 +283,26 @@ final class FinanceCoordinatorTests: XCTestCase {
             "source": "revolut_personal", "observedAt": observed,
             "freshness": freshness, "quality": "observed", "connectorState": connector
         ]
-        let transaction: [String: Any] = [
-            "id": "revolut-1", "merchant": "REWE", "title": "Groceries", "signedAmountCents": -2_450,
-            "timestamp": observed, "account": "Revolut Personal", "source": "revolut_personal",
-            "category": "Food", "provenance": transactionProvenance
-        ]
+        let transactions = signedAmounts.enumerated().map { index, amount -> [String: Any] in
+            [
+                "id": "revolut-\(index + 1)",
+                "merchant": amount > 0 ? "Employer" : "REWE",
+                "title": amount > 0 ? "Salary" : "Groceries",
+                "signedAmountCents": amount,
+                "timestamp": observed,
+                "account": "Revolut Personal",
+                "source": "revolut_personal",
+                "category": amount > 0 ? "Income" : "Food",
+                "provenance": transactionProvenance
+            ]
+        }
         let payload: [String: Any] = [
             "generatedAt": generatedAt, "currency": "EUR",
             "monthlyIncome": unavailable, "fixedCosts": unavailable,
             "discretionaryBuffer": unavailable, "spent": unavailable,
             "savingsGoal": unavailable, "saved": unavailable,
             "transactions": [
-                "availability": "observed", "transactions": [transaction], "provenance": transactionProvenance
+                "availability": "observed", "transactions": transactions, "provenance": transactionProvenance
             ]
         ]
         return try FinanceSummary.decode(JSONSerialization.data(withJSONObject: payload))

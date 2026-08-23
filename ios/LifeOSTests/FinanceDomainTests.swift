@@ -251,6 +251,103 @@ final class FinanceDomainTests: XCTestCase {
             payload(observedAt: now.addingTimeInterval(-3600), freshness: "fresh", connector: "healthy"), now: now))
     }
 
+    func testAccountSnapshotsRequireAgeAndStalestRowProvenanceParity() throws {
+        let now = Date(timeIntervalSince1970: 1_754_660_000)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
+        let unavailableProvenance: [String: Any] = [
+            "source": "no-authorized-finance-source",
+            "observedAt": formatter.string(from: now.addingTimeInterval(-60)),
+            "freshness": "unknown",
+            "quality": "unavailable",
+            "connectorState": "unavailable"
+        ]
+        let unavailableMetric: [String: Any] = [
+            "availability": "unavailable", "provenance": unavailableProvenance
+        ]
+
+        func provenance(
+            source: String = "sparkasse_leipzig",
+            observedAt: Date,
+            freshness: String,
+            connector: String
+        ) -> [String: Any] {
+            [
+                "source": source,
+                "observedAt": formatter.string(from: observedAt),
+                "freshness": freshness,
+                "quality": "observed",
+                "connectorState": connector
+            ]
+        }
+
+        func accountSummary(
+            rowProvenance: [String: Any],
+            envelopeProvenance: [String: Any],
+            rowSource: String = "sparkasse_leipzig"
+        ) throws -> FinanceSummary {
+            let account: [String: Any] = [
+                "id": "sparkasse-checking",
+                "name": "Sparkasse Leipzig",
+                "detail": "EUR",
+                "balanceCents": 123_456,
+                "source": rowSource,
+                "provenance": rowProvenance
+            ]
+            let payload: [String: Any] = [
+                "generatedAt": formatter.string(from: now),
+                "currency": "EUR",
+                "monthlyIncome": unavailableMetric,
+                "fixedCosts": unavailableMetric,
+                "discretionaryBuffer": unavailableMetric,
+                "spent": unavailableMetric,
+                "savingsGoal": unavailableMetric,
+                "saved": unavailableMetric,
+                "accounts": [
+                    "availability": "observed",
+                    "accounts": [account],
+                    "provenance": envelopeProvenance
+                ]
+            ]
+            return try FinanceSummary.decode(
+                JSONSerialization.data(withJSONObject: payload), now: now
+            )
+        }
+
+        let freshRow = provenance(observedAt: now.addingTimeInterval(-60), freshness: "fresh", connector: "healthy")
+        let valid = try accountSummary(rowProvenance: freshRow, envelopeProvenance: freshRow)
+        XCTAssertEqual(valid.accounts?.accounts?.first?.balanceCents, 123_456)
+        XCTAssertEqual(valid.accounts?.provenance.freshness, .fresh)
+
+        let ageContradictoryRow = provenance(observedAt: now.addingTimeInterval(-3_600), freshness: "fresh", connector: "healthy")
+        let staleEnvelope = provenance(observedAt: now.addingTimeInterval(-3_600), freshness: "stale", connector: "refresh_due")
+        XCTAssertThrowsError(try accountSummary(
+            rowProvenance: ageContradictoryRow,
+            envelopeProvenance: staleEnvelope
+        ))
+
+        let staleRow = provenance(observedAt: now.addingTimeInterval(-3_600), freshness: "stale", connector: "refresh_due")
+        XCTAssertThrowsError(try accountSummary(
+            rowProvenance: staleRow,
+            envelopeProvenance: freshRow
+        ), "A fresh envelope must not hide a stale account row")
+
+        let stale = try accountSummary(rowProvenance: staleRow, envelopeProvenance: staleEnvelope)
+        XCTAssertEqual(stale.accounts?.provenance.freshness, .stale)
+
+        let sourceMismatchEnvelope = provenance(
+            source: "revolut_personal",
+            observedAt: now.addingTimeInterval(-30),
+            freshness: "fresh",
+            connector: "healthy"
+        )
+        XCTAssertThrowsError(try accountSummary(
+            rowProvenance: freshRow,
+            envelopeProvenance: sourceMismatchEnvelope
+        ))
+    }
+
     func testTransactionObservationRejectsUnknownAndAgeInconsistentFreshness() throws {
         let now = Date(timeIntervalSince1970: 1_754_660_000)
         let formatter = ISO8601DateFormatter()
@@ -355,9 +452,9 @@ final class FinanceDomainTests: XCTestCase {
         try assertRejects(observedAt: now.addingTimeInterval(-3600), freshness: "fresh", connector: "healthy")
     }
 
-    func testTransactionTotalsReconcileIncomeSpendAndCashFlow() {
+    func testTransactionTotalsReconcileIncomeSpendAndCashFlow() throws {
         let transactions = fixtureTransactions()
-        let totals = FinanceTransactionTotals(transactions: transactions)
+        let totals = try FinanceTransactionTotals(transactions: transactions)
 
         XCTAssertEqual(totals.incomeCents, 10_500)
         XCTAssertEqual(totals.spendingCents, 4_000)
@@ -370,7 +467,42 @@ final class FinanceDomainTests: XCTestCase {
         XCTAssertEqual(totals.categoryObservations.reduce(0.0) { $0 + $1.fraction }, 1.0, accuracy: 0.0001)
     }
 
-    func testCategoryProvenanceIsExplicitlyDerivedForMixedSources() {
+    func testTransactionTotalsRejectsCollectivelyOverflowingIncomeAndSpending() throws {
+        let base = fixtureTransactions()[0]
+        let maximum = 9_007_199_254_740_991
+
+        func row(id: String, amount: Int, category: String) -> FinanceTransactionObservation {
+            FinanceTransactionObservation(
+                id: id,
+                merchant: base.merchant,
+                title: base.title,
+                signedAmountCents: amount,
+                timestamp: base.timestamp,
+                account: base.account,
+                source: base.source,
+                category: category,
+                provenance: base.provenance
+            )
+        }
+
+        let overflowingIncome = [
+            row(id: "income-overflow-1", amount: maximum, category: "Income"),
+            row(id: "income-overflow-2", amount: maximum, category: "Income")
+        ]
+        XCTAssertThrowsError(try FinanceTransactionTotals(transactions: overflowingIncome)) { error in
+            XCTAssertEqual(error as? FinanceTransactionTotalsError, .aggregateOverflow)
+        }
+
+        let overflowingSpending = [
+            row(id: "spend-overflow-1", amount: -maximum, category: "Food"),
+            row(id: "spend-overflow-2", amount: -1, category: "Food")
+        ]
+        XCTAssertThrowsError(try FinanceTransactionTotals(transactions: overflowingSpending)) { error in
+            XCTAssertEqual(error as? FinanceTransactionTotalsError, .aggregateOverflow)
+        }
+    }
+
+    func testCategoryProvenanceIsExplicitlyDerivedForMixedSources() throws {
         let base = fixtureTransactions()
         let sparkasseObservedAt = base[1].provenance.observedAt.addingTimeInterval(-60 * 60)
         let sparkasseProvenance = FinancePayloadProvenance(
@@ -382,8 +514,8 @@ final class FinanceDomainTests: XCTestCase {
             timestamp: sparkasseObservedAt, account: "Sparkasse", source: "sparkasse",
             category: "Food", provenance: sparkasseProvenance
         )
-        let totals = FinanceTransactionTotals(transactions: base + [secondFood])
-        let food = try! XCTUnwrap(totals.categoryObservations.first(where: { $0.name == "Food" }))
+        let totals = try FinanceTransactionTotals(transactions: base + [secondFood])
+        let food = try XCTUnwrap(totals.categoryObservations.first(where: { $0.name == "Food" }))
 
         XCTAssertEqual(food.source, "derived-transaction-rollup")
         XCTAssertEqual(food.provenance.source, "derived-transaction-rollup")
@@ -598,7 +730,7 @@ final class FinanceDomainTests: XCTestCase {
 
     func testCategoryObservationRejectsMalformedInvariants() throws {
         let category = try XCTUnwrap(
-            FinanceTransactionTotals(transactions: fixtureTransactions())
+            try FinanceTransactionTotals(transactions: fixtureTransactions())
                 .categoryObservations.first(where: { $0.name == "Food" })
         )
         let valid = try XCTUnwrap(

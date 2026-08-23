@@ -318,7 +318,8 @@ public struct FinanceView: View {
             sourceDisclosure: snapshot.sourceDisclosure,
             netWorthCents: snapshot.netWorth.cents,
             accountsCount: snapshot.accounts.count,
-            hasObservedValue: snapshot.hasObservedValue
+            hasObservedValue: snapshot.hasObservedValue,
+            transactionTotalsAvailable: snapshot.transactionTotalsAvailable
         )
     }
 }
@@ -329,6 +330,7 @@ internal struct FinanceDisplayTruth: Equatable {
     let netWorthCents: Int?
     let accountsCount: Int
     let hasObservedValue: Bool
+    let transactionTotalsAvailable: Bool
 }
 
 // MARK: - Header and honest states
@@ -1183,7 +1185,9 @@ private struct FinanceCategoriesCard: View {
                                     source: selectedSourceID,
                                     range: selectedRange
                                 )
-                                Text("\(filteredTransactions.count) · \(FinanceCurrencyFormatter.euro(cents: filteredTransactions.reduce(0) { $0 + $1.spendingCents })) · \(selectedRange.accessibilityTitle)")
+                                let filteredSpendCents = (try? FinanceTransactionTotals(transactions: filteredTransactions))?.spendingCents
+                                let filteredSpendLabel = filteredSpendCents.map { FinanceCurrencyFormatter.euro(cents: $0) } ?? "Unavailable"
+                                Text("\(filteredTransactions.count) · \(filteredSpendLabel) · \(selectedRange.accessibilityTitle)")
                                     .font(LifeOSFont.inter(10, weight: .medium))
                                     .foregroundStyle(LifeOSTokens.tertiaryText)
                                     .monospacedDigit()
@@ -1548,6 +1552,7 @@ private struct FinanceDisplaySnapshot {
     let isDemo: Bool
     let transactions: [FinanceTransactionObservation]
     let hasTransactionSource: Bool
+    let transactionTotalsAvailable: Bool
     let netWorth: FinanceDisplayMetric
     let spent: FinanceDisplayMetric
     let spendBudget: FinanceDisplayMetric
@@ -1581,7 +1586,7 @@ private struct FinanceDisplaySnapshot {
                 && !(summary?.transactions?.transactions ?? []).isEmpty)
         let transactionRows = suppliedTransactions ?? summary?.transactions?.transactions ?? []
         let transactionTotals = transactionSourceAvailable
-            ? FinanceTransactionTotals(transactions: transactionRows)
+            ? try? FinanceTransactionTotals(transactions: transactionRows)
             : nil
         let accountObservations = Self.usableObservedAccounts(from: summary)
         let observed = summary != nil && [
@@ -1595,6 +1600,7 @@ private struct FinanceDisplaySnapshot {
         isDemo = false
         transactions = transactionRows
         hasTransactionSource = transactionSourceAvailable
+        transactionTotalsAvailable = transactionTotals != nil
         spent = transactionTotals.map {
             FinanceDisplayMetric(cents: $0.spendingCents, detail: "\($0.transactionCount) transactions")
         } ?? FinanceDisplayMetric(cents: summary?.spentCents, detail: summary == nil ? "Not connected" : "Observed total")
@@ -1630,10 +1636,10 @@ private struct FinanceDisplaySnapshot {
         categories = transactionTotals?.categoryObservations.map(FinanceCategory.init) ?? []
         netWorthPoints = []
         spendPoints = []
-        incomePoints = transactionTotals.map { _ in
+        incomePoints = transactionTotals.flatMap { _ in
             Self.transactionPoints(transactionRows, title: "Income", series: .income)
         } ?? []
-        cashFlowPoints = transactionTotals.map { _ in
+        cashFlowPoints = transactionTotals.flatMap { _ in
             Self.transactionPoints(transactionRows, title: "Cash flow", series: .cashFlow)
         } ?? []
         overallFreshness = Self.overallFreshness(
@@ -1729,6 +1735,7 @@ private struct FinanceDisplaySnapshot {
         isDemo: Bool,
         transactions: [FinanceTransactionObservation],
         hasTransactionSource: Bool,
+        transactionTotalsAvailable: Bool,
         netWorth: FinanceDisplayMetric,
         spent: FinanceDisplayMetric,
         spendBudget: FinanceDisplayMetric,
@@ -1750,6 +1757,7 @@ private struct FinanceDisplaySnapshot {
         self.isDemo = isDemo
         self.transactions = transactions
         self.hasTransactionSource = hasTransactionSource
+        self.transactionTotalsAvailable = transactionTotalsAvailable
         self.netWorth = netWorth
         self.spent = spent
         self.spendBudget = spendBudget
@@ -1772,7 +1780,31 @@ private struct FinanceDisplaySnapshot {
     static let demo: FinanceDisplaySnapshot = {
         let now = Date.now
         let transactions = Self.demoTransactions(now: now)
-        let totals = FinanceTransactionTotals(transactions: transactions)
+        guard let totals = try? FinanceTransactionTotals(transactions: transactions) else {
+            return FinanceDisplaySnapshot(
+                isDemo: true,
+                transactions: [],
+                hasTransactionSource: false,
+                transactionTotalsAvailable: false,
+                netWorth: .unavailable("Not available"),
+                spent: .unavailable("Not available"),
+                spendBudget: .unavailable("Not available"),
+                cashFlow: .unavailable("Not available"),
+                income: .unavailable("Not available"),
+                fixedCosts: .unavailable("Not available"),
+                saved: .unavailable("Not available"),
+                savingsGoal: .unavailable("Not available"),
+                accounts: [],
+                categories: [],
+                netWorthPoints: [],
+                spendPoints: [],
+                incomePoints: [],
+                cashFlowPoints: [],
+                updatedLabel: "Not available",
+                sourceDisclosure: "Demo fixture · aggregate unavailable",
+                overallFreshness: .unknown
+            )
+        }
         let calendar = Calendar.current
         let dayStarts = (0..<12).compactMap { calendar.date(byAdding: .day, value: -11 + $0, to: now) }
         let netValues = [772_000, 782_000, 779_000, 798_000, 804_000, 811_000, 818_000, 826_000, 831_000, 842_000, 850_000, 856_000]
@@ -1791,6 +1823,7 @@ private struct FinanceDisplaySnapshot {
             isDemo: true,
             transactions: transactions,
             hasTransactionSource: true,
+            transactionTotalsAvailable: true,
             netWorth: FinanceDisplayMetric(cents: accountBalanceCents, detail: "Observed account balances"),
             spent: FinanceDisplayMetric(cents: totals.spendingCents, detail: "\(totals.transactionCount) transactions", progress: 0.64),
             spendBudget: FinanceDisplayMetric(cents: 200_000, detail: "Monthly budget"),
@@ -1806,9 +1839,9 @@ private struct FinanceDisplaySnapshot {
             accounts: accounts,
             categories: totals.categoryObservations.map(FinanceCategory.init),
             netWorthPoints: points(netValues, "Net worth"),
-            spendPoints: Self.transactionPoints(transactions, title: "Spend", series: .spending),
-            incomePoints: Self.transactionPoints(transactions, title: "Income", series: .income),
-            cashFlowPoints: Self.transactionPoints(transactions, title: "Cash flow", series: .cashFlow),
+            spendPoints: Self.transactionPoints(transactions, title: "Spend", series: .spending) ?? [],
+            incomePoints: Self.transactionPoints(transactions, title: "Income", series: .income) ?? [],
+            cashFlowPoints: Self.transactionPoints(transactions, title: "Cash flow", series: .cashFlow) ?? [],
             updatedLabel: "Just now",
             sourceDisclosure: "Demo fixture · not live · Revolut Personal · Fresh",
             overallFreshness: .fresh
@@ -1871,28 +1904,34 @@ private struct FinanceDisplaySnapshot {
         _ transactions: [FinanceTransactionObservation],
         title: String,
         series: FinanceTransactionSeries
-    ) -> [FinanceChartPoint] {
+    ) -> [FinanceChartPoint]? {
         let calendar = Calendar.current
         let grouped = Dictionary(grouping: transactions) { calendar.startOfDay(for: $0.timestamp) }
-        return grouped.keys.sorted().map { date in
+        var points: [FinanceChartPoint] = []
+        points.reserveCapacity(grouped.count)
+        for date in grouped.keys.sorted() {
             let rows = grouped[date, default: []]
+            guard let totals = try? FinanceTransactionTotals(transactions: rows) else {
+                return nil
+            }
             let value: Int
             switch series {
             case .income:
-                value = rows.reduce(0) { $0 + max($1.signedAmountCents, 0) }
+                value = totals.incomeCents
             case .spending:
-                value = rows.reduce(0) { $0 + $1.spendingCents }
+                value = totals.spendingCents
             case .cashFlow:
-                value = rows.reduce(0) { $0 + $1.signedAmountCents }
+                value = totals.netCashFlowCents
             }
-            return FinanceChartPoint(
+            points.append(FinanceChartPoint(
                 date: date,
                 value: value,
                 seriesTitle: title,
                 sourceLabel: FinanceSourceLabel.join(Array(Set(rows.map(\.source))).sorted()),
                 freshness: FinanceFreshnessLabel.value(for: rows)
-            )
+            ))
         }
+        return points
     }
 
     func filteredTransactions(
@@ -1941,7 +1980,7 @@ private struct FinanceDisplaySnapshot {
     }
     var accessibilityStatus: String { statusLabel }
     var hasObservedValue: Bool {
-        [netWorth, spent, income, fixedCosts, saved].contains(where: { !$0.isUnavailable })
+        hasTransactionSource || [netWorth, spent, income, fixedCosts, saved].contains(where: { !$0.isUnavailable })
     }
 
     func points(for detail: FinanceDetail, range: FinanceRange) -> [FinanceChartPoint] {
