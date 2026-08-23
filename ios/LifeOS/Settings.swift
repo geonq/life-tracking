@@ -1274,7 +1274,7 @@ private final class BankConsentRowController: ObservableObject {
         state = .checkingStatus(link)
         task = Task { [client] in
             do {
-                let result = try await client.bankConsentStatus(requisitionId: link.requisitionId)
+                let result = try await client.bankConsentStatus(connectionId: link.connectionId)
                 guard !Task.isCancelled else { return }
                 switch result {
                 case .linked: self.state = .linked
@@ -1302,7 +1302,7 @@ private final class BankConsentRowController: ObservableObject {
     private static func rowState(for error: Error) -> BankConsentRowState {
         guard let syncError = error as? TailscaleSyncError else { return .error }
         switch syncError {
-        case .requisitionAlreadyLinking: return .alreadyLinking
+        case .connectionAlreadyLinking: return .alreadyLinking
         case .gatewayNotConfigured: return .gatewayNotConfigured
         default: return .error
         }
@@ -1439,15 +1439,15 @@ private struct BankConsentConnectRow: View {
         case .awaitingConsent:
             return "Waiting on the bank's consent page. Re-check status once you finish or return to the app."
         case .checkingStatus:
-            return "Checking the requisition state with the gateway."
+            return "Checking the connection state with the gateway."
         case .linked:
-            return "The gateway reports this requisition as linked."
+            return "The gateway reports this connection as linked."
         case .expired:
             return "The consent link expired before it was completed. Tap Connect to request a new one."
         case .alreadyLinking:
-            return "A requisition is already in progress for this connector. Finish or expire it before starting another."
+            return "A connection is already in progress for this connector. Finish or expire it before starting another."
         case .gatewayNotConfigured:
-            return "The gateway has no GoCardless key configured. Nothing was linked."
+            return "The gateway has no Enable Banking configuration. Nothing was linked."
         case .error:
             return "The gateway rejected the request. Nothing was linked."
         }

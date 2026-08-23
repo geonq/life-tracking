@@ -128,11 +128,11 @@ public struct FinanceConnectorCatalog: Decodable, Equatable, Sendable {
 
     public static let defaults: [FinanceConnectorDescriptor] = [
         .init(kind: .sparkasse, displayName: "Sparkasse", accessMethod: .regulatedOpenBanking,
-              provider: "GoCardless Bank Account Data", risk: .consentRequired,
-              recommendation: "Configure the Sparkasse institution and complete one-time GoCardless consent before enabling; keep statement import as the fallback."),
+              provider: "Enable Banking", risk: .consentRequired,
+              recommendation: "Configure the Sparkasse institution and complete one-time Enable Banking consent before enabling; keep statement import as the fallback."),
         .init(kind: .revolutPersonal, displayName: "Revolut Personal", accessMethod: .regulatedOpenBanking,
-              provider: "GoCardless Bank Account Data", risk: .consentRequired,
-              recommendation: "Configure the personal Revolut institution and complete one-time GoCardless consent before enabling; keep statement import as the fallback."),
+              provider: "Enable Banking", risk: .consentRequired,
+              recommendation: "Configure the personal Revolut institution and complete one-time Enable Banking consent before enabling; keep statement import as the fallback."),
         .init(kind: .revolutBusiness, displayName: "Revolut Business", accessMethod: .officialOAuth,
               provider: "Official Revolut Business API", risk: .accountEligibilityRequired,
               recommendation: "Register an eligible Revolut Business app and complete official OAuth before enabling; Revolut review may delay access."),
@@ -227,6 +227,118 @@ public struct FinancePayloadProvenance: Codable, Equatable, Sendable {
         }
     }
 
+}
+
+/// A connected account balance. The gateway deliberately sends an opaque
+/// stable id and display label, never an IBAN or provider account identifier.
+public struct FinanceAccountObservation: Codable, Equatable, Identifiable, Sendable {
+    public let id: String
+    public let name: String
+    public let detail: String
+    public let balanceCents: Int
+    public let source: String
+    public let provenance: FinancePayloadProvenance
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, detail, balanceCents, source, provenance
+    }
+
+    public init(
+        id: String,
+        name: String,
+        detail: String,
+        balanceCents: Int,
+        source: String,
+        provenance: FinancePayloadProvenance
+    ) {
+        self.id = id
+        self.name = name
+        self.detail = detail
+        self.balanceCents = balanceCents
+        self.source = source
+        self.provenance = provenance
+    }
+
+    public init(from decoder: Decoder) throws {
+        try rejectUnknownFinanceKeys(decoder, allowed: [
+            "id", "name", "detail", "balanceCents", "source", "provenance"
+        ])
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        detail = try container.decode(String.self, forKey: .detail)
+        balanceCents = try container.decode(Int.self, forKey: .balanceCents)
+        source = try container.decode(String.self, forKey: .source)
+        provenance = try container.decode(FinancePayloadProvenance.self, forKey: .provenance)
+        let now = decoder.userInfo[.lifeOSNow] as? Date ?? .now
+        let fields = [id, name, detail, source]
+        let validAmount = balanceCents >= -9_007_199_254_740_991
+            && balanceCents <= 9_007_199_254_740_991
+        guard fields.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }),
+              validAmount,
+              source == provenance.source,
+              provenance.observedAt <= now.addingTimeInterval(financeMaximumClockSkew),
+              provenance.quality == .observed,
+              provenance.freshness != .unknown,
+              provenance.connectorState == .healthy || provenance.connectorState == .refreshDue else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .id,
+                in: container,
+                debugDescription: "Finance account observation is invalid"
+            )
+        }
+    }
+}
+
+public struct FinanceAccountSnapshot: Codable, Equatable, Sendable {
+    public let availability: FinanceMetricAvailability
+    public let accounts: [FinanceAccountObservation]?
+    public let provenance: FinancePayloadProvenance
+
+    private enum CodingKeys: String, CodingKey {
+        case availability, accounts, provenance
+    }
+
+    public init(
+        availability: FinanceMetricAvailability,
+        accounts: [FinanceAccountObservation]?,
+        provenance: FinancePayloadProvenance
+    ) {
+        self.availability = availability
+        self.accounts = accounts
+        self.provenance = provenance
+    }
+
+    public init(from decoder: Decoder) throws {
+        try rejectUnknownFinanceKeys(decoder, allowed: ["availability", "accounts", "provenance"])
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        availability = try container.decode(FinanceMetricAvailability.self, forKey: .availability)
+        let hasAccounts = container.contains(.accounts)
+        accounts = try container.decodeIfPresent([FinanceAccountObservation].self, forKey: .accounts)
+        provenance = try container.decode(FinancePayloadProvenance.self, forKey: .provenance)
+        let healthy = provenance.connectorState == .healthy || provenance.connectorState == .refreshDue
+        let valid: Bool
+        switch availability {
+        case .observed:
+            valid = hasAccounts && accounts != nil && !(accounts ?? []).isEmpty
+                && provenance.quality == .observed
+                && provenance.freshness != .unknown
+                && healthy
+                && (accounts ?? []).allSatisfy { $0.provenance.observedAt <= provenance.observedAt }
+        case .unavailable:
+            valid = !hasAccounts && accounts == nil
+                && provenance.quality == .unavailable
+                && provenance.freshness == .unknown
+                && !healthy
+        }
+        guard valid else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .availability,
+                in: container,
+                debugDescription: "Finance account availability, observations, and provenance are inconsistent"
+            )
+        }
+    }
 }
 
 /// A single bank observation. Amounts are signed: positive values are income and
@@ -664,16 +776,17 @@ public struct FinanceSummary: Decodable, Equatable, Sendable {
     /// missing snapshot is not an empty ledger; the transaction surfaces must
     /// remain unavailable until an observed source supplies it.
     public let transactions: FinanceTransactionSnapshot?
+    public let accounts: FinanceAccountSnapshot?
 
     private enum CodingKeys: String, CodingKey {
         case generatedAt, currency, monthlyIncome, fixedCosts, discretionaryBuffer, spent, savingsGoal, saved
-        case transactions
+        case transactions, accounts
     }
 
     public init(from decoder: Decoder) throws {
         try rejectUnknownFinanceKeys(decoder, allowed: [
             "generatedAt", "currency", "monthlyIncome", "fixedCosts",
-            "discretionaryBuffer", "spent", "savingsGoal", "saved", "transactions"
+            "discretionaryBuffer", "spent", "savingsGoal", "saved", "transactions", "accounts"
         ])
         let container = try decoder.container(keyedBy: CodingKeys.self)
         generatedAt = try container.decode(Date.self, forKey: .generatedAt)
@@ -685,6 +798,7 @@ public struct FinanceSummary: Decodable, Equatable, Sendable {
         savingsGoal = try container.decode(FinanceAmountMetric.self, forKey: .savingsGoal)
         saved = try container.decode(FinanceAmountMetric.self, forKey: .saved)
         transactions = try container.decodeIfPresent(FinanceTransactionSnapshot.self, forKey: .transactions)
+        accounts = try container.decodeIfPresent(FinanceAccountSnapshot.self, forKey: .accounts)
         let now = decoder.userInfo[.lifeOSNow] as? Date ?? .now
         guard generatedAt <= now.addingTimeInterval(financeMaximumClockSkew), currency == "EUR" else {
             throw DecodingError.dataCorruptedError(

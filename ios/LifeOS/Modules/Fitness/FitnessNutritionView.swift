@@ -2568,8 +2568,8 @@ private struct FitnessFoodReviewSheet: View {
         case .responseTooLarge: return "The gateway response exceeded the safety bound. No values are available."
         case .invalidResponse: return "The gateway returned an invalid barcode response. No values are available."
         case .invalidServerURL: return "The LifeOS server URL is not approved. No lookup was attempted."
-        case .invalidInstitutionId, .invalidRequisitionId, .invalidConsentURL,
-             .requisitionAlreadyLinking, .gatewayNotConfigured:
+        case .invalidInstitutionId, .invalidConnectionId, .invalidConsentURL,
+             .connectionAlreadyLinking, .gatewayNotConfigured:
             return "The gateway returned an unexpected response. No values are available."
         }
     }

@@ -8,13 +8,13 @@ public enum TailscaleSyncError: Error, Equatable, Sendable {
     case httpError(Int)
     case responseTooLarge
     case invalidInstitutionId
-    case invalidRequisitionId
+    case invalidConnectionId
     case invalidConsentURL
-    case requisitionAlreadyLinking
+    case connectionAlreadyLinking
     case gatewayNotConfigured
 }
 
-/// The gateway's authoritative GoCardless requisition state for one consent
+/// The gateway's authoritative Enable Banking connection state for one consent
 /// attempt. Rendered directly; never widened to "connected" client-side.
 public enum BankConsentState: String, Equatable, Sendable {
     case created
@@ -25,15 +25,15 @@ public enum BankConsentState: String, Equatable, Sendable {
 }
 
 /// The one-time consent link returned by `POST /finance/connect`. The phone
-/// never receives a GoCardless credential -- only an https consent URL to
-/// open and an opaque requisition id to poll.
+/// never receives a bank credential -- only an https consent URL to open and
+/// an opaque connection id to poll.
 public struct BankConsentLink: Equatable, Sendable {
     public let consentUrl: URL
-    public let requisitionId: String
+    public let connectionId: String
 
-    public init(consentUrl: URL, requisitionId: String) {
+    public init(consentUrl: URL, connectionId: String) {
         self.consentUrl = consentUrl
-        self.requisitionId = requisitionId
+        self.connectionId = connectionId
     }
 }
 
@@ -197,7 +197,7 @@ public actor TailscaleSyncClient {
         return rawValue
     }
 
-    /// GoCardless institution ids are short ASCII catalog keys sent in the
+    /// Enable Banking institution ids are short ASCII catalog keys sent in the
     /// consent-initiation body. Reuses the printable-ASCII, no-whitespace
     /// shape already proven for the Calendar idempotency key.
     static func validatedInstitutionId(_ rawValue: String) -> String? {
@@ -206,11 +206,11 @@ public actor TailscaleSyncClient {
         return rawValue
     }
 
-    /// The gateway-issued requisition id is carried as a URL PATH component
+    /// The gateway-issued connection id is carried as a URL PATH component
     /// (not a query string: `validatedServerURL` rejects any `?`). Fails
     /// closed on anything that is not a simple printable-ASCII token so it
     /// can never be used to smuggle an extra path segment or traversal.
-    static func validatedRequisitionId(_ rawValue: String) -> String? {
+    static func validatedConnectionId(_ rawValue: String) -> String? {
         guard (1...128).contains(rawValue.utf8.count),
               rawValue.unicodeScalars.allSatisfy({
                   $0.value < 0x80 && ($0.properties.isAlphabetic || ($0.value >= 0x30 && $0.value <= 0x39) || $0 == "-" || $0 == "_")
@@ -401,7 +401,7 @@ public actor TailscaleSyncClient {
     /// credential, response body, or raw error description.
     public func checkConnection() async -> TailscaleConnectionPreflightState? {
         do {
-            let url = try baseURL().appendingPathComponent("usage")
+            let url = try baseURL().appendingPathComponent("health")
             let request = request(url: url)
             return await Self.performConnectionPreflight(session: session, request: request,
                                                          maximumBytes: Self.maximumReadOnlyResponseBytes)
@@ -421,8 +421,8 @@ public actor TailscaleSyncClient {
             case .httpError(let status) where status == 408 || status == 429 || (500...599).contains(status):
                 return .serverUnavailable
             case .invalidBarcode, .invalidResponse, .responseTooLarge, .httpError,
-                 .invalidInstitutionId, .invalidRequisitionId, .invalidConsentURL,
-                 .requisitionAlreadyLinking, .gatewayNotConfigured:
+                 .invalidInstitutionId, .invalidConnectionId, .invalidConsentURL,
+                 .connectionAlreadyLinking, .gatewayNotConfigured:
                 return .invalidResponse
             }
         }
@@ -486,8 +486,9 @@ public actor TailscaleSyncClient {
 
     // MARK: - Read-only finance summary
 
-    /// Reads the Tailscale-identity-verified Python gateway route. The gateway, not the loopback-only
-    /// Node API, owns `/finance/summary` and proxies it to `/api/finance/summary`.
+    /// Reads the Tailscale-identity-verified Python gateway route. The gateway
+    /// directly owns `/finance/summary` and normalizes the provider response;
+    /// the phone never talks to the provider or receives bank credentials.
     public func fetchFinanceSummary() async throws -> FinanceSummary {
         let data = try await fetchBoundedReadOnly(pathComponents: ["finance", "summary"])
         return try FinanceSummary.decode(data)
@@ -495,10 +496,10 @@ public actor TailscaleSyncClient {
 
     // MARK: - Bank consent initiation (the only mutating, parameterized gateway calls)
 
-    /// Starts a GoCardless bank-consent requisition via the gateway's
+    /// Starts an Enable Banking bank-consent connection via the gateway's
     /// `POST /finance/connect`. The phone sends only the catalog institution
     /// id and receives back a one-time https consent URL plus an opaque
-    /// requisition id -- never a GoCardless credential or access token.
+    /// connection id -- never a bank credential or access token.
     public func requestBankConsent(institutionId: String) async throws -> BankConsentLink {
         guard Self.validatedInstitutionId(institutionId) != nil else { throw TailscaleSyncError.invalidInstitutionId }
         let url = try baseURL().appendingPathComponent("finance/connect")
@@ -509,14 +510,14 @@ public actor TailscaleSyncClient {
         return try Self.parseBankConsentLinkResponse(data: data, response: response)
     }
 
-    /// Polls the gateway for the current requisition state at
-    /// `GET /finance/connect/status/<requisitionId>`. The id is carried as a
+    /// Polls the gateway for the current connection state at
+    /// `GET /finance/connect/status/<connectionId>`. The id is carried as a
     /// path component (not a query string) because `validatedServerURL`
     /// rejects any URL containing `?`; it is validated the same way the
     /// Calendar idempotency key is before it is ever appended to a path.
-    public func bankConsentStatus(requisitionId: String) async throws -> BankConsentState {
-        guard let validatedId = Self.validatedRequisitionId(requisitionId) else {
-            throw TailscaleSyncError.invalidRequisitionId
+    public func bankConsentStatus(connectionId: String) async throws -> BankConsentState {
+        guard let validatedId = Self.validatedConnectionId(connectionId) else {
+            throw TailscaleSyncError.invalidConnectionId
         }
         let data = try await fetchBoundedReadOnly(pathComponents: ["finance", "connect", "status", validatedId])
         return try Self.parseBankConsentStatusResponse(data: data)
@@ -524,22 +525,22 @@ public actor TailscaleSyncClient {
 
     /// Parses the consent-initiation response without performing I/O so the
     /// contract can be exercised by tests against the production boundary.
-    /// 409 means a live requisition already exists; 503 means the gateway
-    /// has no GoCardless key configured. Both fail closed with a typed,
+    /// 409 means a live connection already exists; 503 means the gateway
+    /// has no Enable Banking configuration. Both fail closed with a typed,
     /// renderable error instead of a raw status/body.
     nonisolated static func parseBankConsentLinkResponse(data: Data, response: HTTPURLResponse) throws -> BankConsentLink {
-        if response.statusCode == 409 { throw TailscaleSyncError.requisitionAlreadyLinking }
+        if response.statusCode == 409 { throw TailscaleSyncError.connectionAlreadyLinking }
         if response.statusCode == 503 { throw TailscaleSyncError.gatewayNotConfigured }
         try checkHTTPStatus(response)
         guard data.count <= maximumReadOnlyResponseBytes,
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let rawConsentUrl = object["consentUrl"] as? String,
-              let rawRequisitionId = object["requisitionId"] as? String else {
+              let rawConnectionId = object["connectionId"] as? String else {
             throw TailscaleSyncError.invalidResponse
         }
         guard let consentUrl = validatedConsentURL(rawConsentUrl) else { throw TailscaleSyncError.invalidConsentURL }
-        guard let requisitionId = validatedRequisitionId(rawRequisitionId) else { throw TailscaleSyncError.invalidRequisitionId }
-        return BankConsentLink(consentUrl: consentUrl, requisitionId: requisitionId)
+        guard let connectionId = validatedConnectionId(rawConnectionId) else { throw TailscaleSyncError.invalidConnectionId }
+        return BankConsentLink(consentUrl: consentUrl, connectionId: connectionId)
     }
 
     /// Parses the status-poll response without performing I/O.

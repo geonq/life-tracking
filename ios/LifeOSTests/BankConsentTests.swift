@@ -6,7 +6,7 @@ import XCTest
 /// I/O-free parse/validate boundary proven by `TailscaleSyncClientSecurityTests`:
 /// no live network, no credential, just the response-shape and validation
 /// guarantees that must hold before a consent URL is ever opened or a
-/// requisition id is ever sent back to the gateway.
+/// connection id is ever sent back to the gateway.
 final class BankConsentTests: XCTestCase {
     private let url = URL(string: "https://lifeos.example-tailnet.ts.net/finance/connect")!
 
@@ -40,15 +40,15 @@ final class BankConsentTests: XCTestCase {
         XCTAssertEqual(object, ["institutionId": "sparkasse"])
     }
 
-    // MARK: - requisitionId validation (path component, not query string)
+    // MARK: - connectionId validation (path component, not query string)
 
-    func testRequisitionIdValidationAcceptsSimpleTokensAndRejectsPathInjectionShapes() {
-        XCTAssertEqual(TailscaleSyncClient.validatedRequisitionId("req-abc123_XYZ"), "req-abc123_XYZ")
+    func testConnectionIdValidationAcceptsSimpleTokensAndRejectsPathInjectionShapes() {
+        XCTAssertEqual(TailscaleSyncClient.validatedConnectionId("req-abc123_XYZ"), "req-abc123_XYZ")
         for value in [
             "", " ", "req/../etc", "req/other", "req?x=1", "req#frag",
             "req id", "req\nid", "req\u{0}id", String(repeating: "a", count: 129),
         ] {
-            XCTAssertNil(TailscaleSyncClient.validatedRequisitionId(value), value)
+            XCTAssertNil(TailscaleSyncClient.validatedConnectionId(value), value)
         }
     }
 
@@ -75,37 +75,37 @@ final class BankConsentTests: XCTestCase {
     // MARK: - consent-link response parsing
 
     func testParseBankConsentLinkResponseSucceedsOnValidShape() throws {
-        let body = Data(#"{"consentUrl":"https://bank.example.com/consent/abc","requisitionId":"req-1"}"#.utf8)
+        let body = Data(#"{"consentUrl":"https://bank.example.com/consent/abc","connectionId":"req-1"}"#.utf8)
         let link = try TailscaleSyncClient.parseBankConsentLinkResponse(data: body, response: response(status: 200))
         XCTAssertEqual(link.consentUrl, URL(string: "https://bank.example.com/consent/abc"))
-        XCTAssertEqual(link.requisitionId, "req-1")
+        XCTAssertEqual(link.connectionId, "req-1")
     }
 
     func testParseBankConsentLinkResponseRejectsNonHTTPSConsentURL() {
-        let body = Data(#"{"consentUrl":"http://bank.example.com/consent/abc","requisitionId":"req-1"}"#.utf8)
+        let body = Data(#"{"consentUrl":"http://bank.example.com/consent/abc","connectionId":"req-1"}"#.utf8)
         XCTAssertThrowsError(try TailscaleSyncClient.parseBankConsentLinkResponse(data: body, response: response(status: 200))) { error in
             XCTAssertEqual(error as? TailscaleSyncError, .invalidConsentURL)
         }
     }
 
     func testParseBankConsentLinkResponseRejectsMissingHost() {
-        let body = Data(#"{"consentUrl":"https:///consent/abc","requisitionId":"req-1"}"#.utf8)
+        let body = Data(#"{"consentUrl":"https:///consent/abc","connectionId":"req-1"}"#.utf8)
         XCTAssertThrowsError(try TailscaleSyncClient.parseBankConsentLinkResponse(data: body, response: response(status: 200))) { error in
             XCTAssertEqual(error as? TailscaleSyncError, .invalidConsentURL)
         }
     }
 
-    func testParseBankConsentLinkResponseRejectsMalformedRequisitionId() {
-        let body = Data(#"{"consentUrl":"https://bank.example.com/consent/abc","requisitionId":"bad id"}"#.utf8)
+    func testParseBankConsentLinkResponseRejectsMalformedConnectionId() {
+        let body = Data(#"{"consentUrl":"https://bank.example.com/consent/abc","connectionId":"bad id"}"#.utf8)
         XCTAssertThrowsError(try TailscaleSyncClient.parseBankConsentLinkResponse(data: body, response: response(status: 200))) { error in
-            XCTAssertEqual(error as? TailscaleSyncError, .invalidRequisitionId)
+            XCTAssertEqual(error as? TailscaleSyncError, .invalidConnectionId)
         }
     }
 
     func testParseBankConsentLinkResponseRejectsMissingFieldsOrUnparsableBody() {
         for body in [
             Data(#"{"consentUrl":"https://bank.example.com/consent/abc"}"#.utf8),
-            Data(#"{"requisitionId":"req-1"}"#.utf8),
+            Data(#"{"connectionId":"req-1"}"#.utf8),
             Data("not json".utf8),
             Data(),
         ] {
@@ -118,7 +118,7 @@ final class BankConsentTests: XCTestCase {
     func testParseBankConsentLinkResponseMaps409ToAlreadyLinking() {
         let body = Data()
         XCTAssertThrowsError(try TailscaleSyncClient.parseBankConsentLinkResponse(data: body, response: response(status: 409))) { error in
-            XCTAssertEqual(error as? TailscaleSyncError, .requisitionAlreadyLinking)
+            XCTAssertEqual(error as? TailscaleSyncError, .connectionAlreadyLinking)
         }
     }
 
@@ -170,9 +170,9 @@ final class BankConsentTests: XCTestCase {
     func testConnectionPreflightClassifiesNewBankConsentErrorsAsInvalidResponseNotReachable() {
         for error in [
             TailscaleSyncError.invalidInstitutionId,
-            .invalidRequisitionId,
+            .invalidConnectionId,
             .invalidConsentURL,
-            .requisitionAlreadyLinking,
+            .connectionAlreadyLinking,
             .gatewayNotConfigured,
         ] {
             XCTAssertEqual(TailscaleSyncClient.connectionPreflightState(for: error), .invalidResponse)

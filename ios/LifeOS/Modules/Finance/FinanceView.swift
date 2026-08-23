@@ -1530,7 +1530,6 @@ private struct FinanceDisplaySnapshot {
         isDemo = false
         transactions = transactionRows
         hasTransactionSource = transactionSourceAvailable
-        netWorth = .unavailable("Not available")
         spent = transactionTotals.map {
             FinanceDisplayMetric(cents: $0.spendingCents, detail: "\($0.transactionCount) transactions")
         } ?? FinanceDisplayMetric(cents: summary?.spentCents, detail: summary == nil ? "Not connected" : "Observed total")
@@ -1550,7 +1549,19 @@ private struct FinanceDisplaySnapshot {
         fixedCosts = FinanceDisplayMetric(cents: summary?.fixedCostsCents, detail: summary == nil ? "Not connected" : "Observed total")
         saved = FinanceDisplayMetric(cents: summary?.savedCents, detail: summary == nil ? "Not connected" : "Observed total")
         savingsGoal = FinanceDisplayMetric(cents: summary?.savingsGoalCents, detail: summary == nil ? "Not connected" : "Savings goal")
-        accounts = []
+        accounts = (summary?.accounts?.accounts ?? []).map { observation in
+            FinanceAccount(
+                id: observation.id,
+                name: observation.name,
+                detail: observation.detail,
+                balanceCents: observation.balanceCents,
+                icon: .bankConnections,
+                hue: observation.source.localizedCaseInsensitiveContains("revolut") ? .blue : .teal
+            )
+        }
+        netWorth = accounts.isEmpty
+            ? .unavailable("Not available")
+            : FinanceDisplayMetric(cents: accounts.reduce(0) { $0 + $1.balanceCents }, detail: "Observed account balances")
         categories = transactionTotals?.categoryObservations.map(FinanceCategory.init) ?? []
         netWorthPoints = []
         spendPoints = []
@@ -1854,12 +1865,28 @@ private struct FinanceChartPoint: Identifiable {
 }
 
 private struct FinanceAccount: Identifiable {
-    let id = UUID()
+    let id: String
     let name: String
     let detail: String
     let balanceCents: Int
     let icon: LifeOSIconName
     let hue: LifeOSTokens.Hue
+
+    init(
+        id: String = UUID().uuidString,
+        name: String,
+        detail: String,
+        balanceCents: Int,
+        icon: LifeOSIconName,
+        hue: LifeOSTokens.Hue
+    ) {
+        self.id = id
+        self.name = name
+        self.detail = detail
+        self.balanceCents = balanceCents
+        self.icon = icon
+        self.hue = hue
+    }
 
     var balanceText: String { FinanceCurrencyFormatter.euro(cents: balanceCents) }
 }

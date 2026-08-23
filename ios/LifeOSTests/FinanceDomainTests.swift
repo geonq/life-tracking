@@ -60,7 +60,7 @@ final class FinanceDomainTests: XCTestCase {
         XCTAssertTrue(FinanceConnectorCatalog.defaults.allSatisfy { !$0.isEnabled })
         XCTAssertTrue(FinanceConnectorCatalog.defaults.allSatisfy(\.requiresExplicitOptIn))
         XCTAssertTrue(FinanceConnectorCatalog.defaults.allSatisfy { !$0.provider.isEmpty && !$0.recommendation.isEmpty })
-        XCTAssertEqual(FinanceConnectorCatalog.defaults.filter { $0.accessMethod == .regulatedOpenBanking }.map(\.provider), ["GoCardless Bank Account Data", "GoCardless Bank Account Data"])
+        XCTAssertEqual(FinanceConnectorCatalog.defaults.filter { $0.accessMethod == .regulatedOpenBanking }.map(\.provider), ["Enable Banking", "Enable Banking"])
         XCTAssertEqual(FinanceConnectorCatalog.defaults.filter { $0.risk == .consentRequired }.map(\.kind), [.sparkasse, .revolutPersonal])
         XCTAssertEqual(FinanceConnectorCatalog.defaults.first { $0.kind == .revolutBusiness }?.accessMethod, .officialOAuth)
         XCTAssertEqual(FinanceConnectorCatalog.defaults.first { $0.kind == .revolutBusiness }?.provider, "Official Revolut Business API")
