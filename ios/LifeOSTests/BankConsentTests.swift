@@ -73,6 +73,25 @@ final class BankConsentTests: XCTestCase {
         }
     }
 
+    func testPendingConsentLinkStoreRoundTripsOnlyValidatedOpaqueLink() throws {
+        let suite = "LifeOS.BankConsentTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let link = BankConsentLink(
+            consentUrl: try XCTUnwrap(URL(string: "https://bank.example.com/consent?session=opaque")),
+            connectionId: "eb-opaque-123"
+        )
+
+        BankConsentPendingLinkStore.save(link, institutionId: "sparkasse_leipzig", defaults: defaults)
+
+        XCTAssertEqual(
+            BankConsentPendingLinkStore.load(institutionId: "sparkasse_leipzig", defaults: defaults),
+            link
+        )
+        BankConsentPendingLinkStore.clear(institutionId: "sparkasse_leipzig", defaults: defaults)
+        XCTAssertNil(BankConsentPendingLinkStore.load(institutionId: "sparkasse_leipzig", defaults: defaults))
+    }
+
     // MARK: - consent-link response parsing
 
     func testParseBankConsentLinkResponseSucceedsOnValidShape() throws {

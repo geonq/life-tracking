@@ -1243,18 +1243,22 @@ private final class BankConsentRowController: ObservableObject {
     @Published var showSafari = false
     private var task: Task<Void, Never>?
     private let client: TailscaleSyncClient
+    private let institutionId: String
 
-    init(client: TailscaleSyncClient) {
+    init(client: TailscaleSyncClient, institutionId: String) {
         self.client = client
+        self.institutionId = institutionId
     }
 
     func start(institutionId: String) {
         task?.cancel()
+        BankConsentPendingLinkStore.clear(institutionId: self.institutionId)
         state = .openingConsent
         task = Task { [client] in
             do {
                 let link = try await client.requestBankConsent(institutionId: institutionId)
                 guard !Task.isCancelled else { return }
+                BankConsentPendingLinkStore.save(link, institutionId: self.institutionId)
                 self.state = .awaitingConsent(link)
 #if os(iOS)
                 self.showSafari = true
@@ -1268,6 +1272,22 @@ private final class BankConsentRowController: ObservableObject {
         }
     }
 
+    func restorePendingConsent() {
+        guard case .idle = state,
+              let link = BankConsentPendingLinkStore.load(institutionId: institutionId) else { return }
+        state = .awaitingConsent(link)
+        refreshStatus()
+    }
+
+    func openConsent() {
+        guard case .awaitingConsent(let link) = state else { return }
+#if os(iOS)
+        showSafari = true
+#elseif os(macOS)
+        NSWorkspace.shared.open(link.consentUrl)
+#endif
+    }
+
     func refreshStatus() {
         guard case .awaitingConsent(let link) = state else { return }
         task?.cancel()
@@ -1277,9 +1297,15 @@ private final class BankConsentRowController: ObservableObject {
                 let result = try await client.bankConsentStatus(connectionId: link.connectionId)
                 guard !Task.isCancelled else { return }
                 switch result {
-                case .linked: self.state = .linked
-                case .expired: self.state = .expired
-                case .error: self.state = .error
+                case .linked:
+                    BankConsentPendingLinkStore.clear(institutionId: self.institutionId)
+                    self.state = .linked
+                case .expired:
+                    BankConsentPendingLinkStore.clear(institutionId: self.institutionId)
+                    self.state = .expired
+                case .error:
+                    BankConsentPendingLinkStore.clear(institutionId: self.institutionId)
+                    self.state = .error
                 case .created, .linkOpened: self.state = .awaitingConsent(link)
                 }
             } catch {
@@ -1326,13 +1352,20 @@ private struct BankConsentConnectRow: View {
         self.syncClient = syncClient
         self.gatewayConfigured = gatewayConfigured
         self.onLinked = onLinked
-        _controller = StateObject(wrappedValue: BankConsentRowController(client: syncClient))
+        _controller = StateObject(wrappedValue: BankConsentRowController(
+            client: syncClient,
+            institutionId: descriptor.kind.rawValue
+        ))
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Button {
-                controller.start(institutionId: descriptor.kind.rawValue)
+                if case .awaitingConsent = controller.state {
+                    controller.openConsent()
+                } else {
+                    controller.start(institutionId: descriptor.kind.rawValue)
+                }
             } label: {
                 HStack(spacing: 7) {
                     if isBusy {
@@ -1385,8 +1418,15 @@ private struct BankConsentConnectRow: View {
             }
         }
 #endif
+        .onAppear {
+            if gatewayConfigured { controller.restorePendingConsent() }
+        }
         .onChange(of: gatewayConfigured) { _, isConfigured in
-            if !isConfigured { controller.reset() }
+            if isConfigured {
+                controller.restorePendingConsent()
+            } else {
+                controller.reset()
+            }
         }
         .onChange(of: controller.state) { previous, current in
             guard previous != current, case .linked = current, let onLinked else { return }
@@ -1404,7 +1444,7 @@ private struct BankConsentConnectRow: View {
     private var canTap: Bool {
         guard gatewayConfigured, !isBusy else { return false }
         switch controller.state {
-        case .linked, .awaitingConsent: return false
+        case .linked: return false
         default: return true
         }
     }
@@ -1414,7 +1454,7 @@ private struct BankConsentConnectRow: View {
         switch controller.state {
         case .idle, .error, .expired: return "Connect"
         case .openingConsent: return "Opening consent…"
-        case .awaitingConsent: return "Awaiting consent"
+        case .awaitingConsent: return "Continue consent"
         case .checkingStatus: return "Checking status…"
         case .linked: return "Linked"
         case .alreadyLinking: return "Already linking"

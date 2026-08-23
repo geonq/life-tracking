@@ -37,6 +37,56 @@ public struct BankConsentLink: Equatable, Sendable {
     }
 }
 
+/// Stores only the validated, opaque consent handoff needed to resume a bank
+/// login after Safari/backgrounding or an app relaunch. Bank credentials,
+/// authorization codes, provider session ids, and tokens are never persisted
+/// on the phone.
+public enum BankConsentPendingLinkStore {
+    private static let keyPrefix = "LifeOS.Finance.PendingConsent."
+
+    private static func key(for institutionId: String) -> String? {
+        guard TailscaleSyncClient.validatedInstitutionId(institutionId) != nil else { return nil }
+        return keyPrefix + institutionId
+    }
+
+    public static func save(
+        _ link: BankConsentLink,
+        institutionId: String,
+        defaults: UserDefaults = .standard
+    ) {
+        guard let key = key(for: institutionId),
+              TailscaleSyncClient.validatedConsentURL(link.consentUrl.absoluteString) != nil,
+              TailscaleSyncClient.validatedConnectionId(link.connectionId) != nil else { return }
+        defaults.set(
+            ["consentUrl": link.consentUrl.absoluteString, "connectionId": link.connectionId],
+            forKey: key
+        )
+    }
+
+    public static func load(
+        institutionId: String,
+        defaults: UserDefaults = .standard
+    ) -> BankConsentLink? {
+        guard let key = key(for: institutionId),
+              let value = defaults.dictionary(forKey: key),
+              let rawURL = value["consentUrl"] as? String,
+              let rawConnectionId = value["connectionId"] as? String,
+              let consentURL = TailscaleSyncClient.validatedConsentURL(rawURL),
+              let connectionId = TailscaleSyncClient.validatedConnectionId(rawConnectionId) else {
+            return nil
+        }
+        return BankConsentLink(consentUrl: consentURL, connectionId: connectionId)
+    }
+
+    public static func clear(
+        institutionId: String,
+        defaults: UserDefaults = .standard
+    ) {
+        guard let key = key(for: institutionId) else { return }
+        defaults.removeObject(forKey: key)
+    }
+}
+
 /// A deliberately coarse connection result. It is safe to render because it
 /// never carries a hostname, credential, response body, or underlying error text.
 public enum TailscaleConnectionPreflightState: String, Equatable, Sendable {
