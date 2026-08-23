@@ -34,13 +34,11 @@ public struct NextEventWidgetView: View {
     }
 
     private var nextEvent: CalendarItem? {
-        entry.snapshot.items
-            .filter { !$0.isDeleted && $0.end >= entry.date }
-            .sorted {
-                if $0.start != $1.start { return $0.start < $1.start }
-                return $0.id.uuidString < $1.id.uuidString
-            }
-            .first
+        CalendarWidgetData.nextEvent(
+            in: entry.snapshot,
+            at: entry.date,
+            calendar: environmentCalendar
+        )
     }
 
     private func dateFormatter(template: String) -> DateFormatter {

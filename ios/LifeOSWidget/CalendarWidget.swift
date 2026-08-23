@@ -2,6 +2,105 @@ import Foundation
 import WidgetKit
 import SwiftUI
 
+/// Shared, widget-only projection of persisted calendar items.
+///
+/// `CalendarSnapshot.items(on:)` intentionally exposes stored anchors. Widgets
+/// need the same bounded derived-occurrence semantics as the calendar surface,
+/// so every widget query expands through `CalendarRecurrence` before applying
+/// its own date filter. This keeps deletion, `until`, ordering, and the
+/// recurrence engine's per-item cap in one place without persisting shadows.
+public enum CalendarWidgetData {
+    static let refreshBoundaryHorizon: TimeInterval = 2 * 60 * 60
+    static let boundaryInclusivityEpsilon: TimeInterval = 1
+
+    public static func items(
+        on day: Date,
+        in snapshot: CalendarSnapshot,
+        calendar: Calendar
+    ) -> [CalendarItem] {
+        let dayStart = calendar.startOfDay(for: day)
+        guard let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) else {
+            return []
+        }
+        return items(
+            overlapping: DateInterval(start: dayStart, end: dayEnd),
+            in: snapshot,
+            calendar: calendar
+        )
+    }
+
+    public static func items(
+        overlapping window: DateInterval,
+        in snapshot: CalendarSnapshot,
+        calendar: Calendar
+    ) -> [CalendarItem] {
+        guard window.duration > 0 else { return [] }
+
+        return snapshot.items
+            .flatMap { CalendarRecurrence.occurrences(of: $0, overlapping: window, calendar: calendar) }
+            // The recurrence engine filters recurring values itself. The extra
+            // overlap filter is required for non-recurring items, whose engine
+            // contract deliberately returns the item unchanged.
+            .filter { !$0.isDeleted && $0.start < window.end && $0.end > window.start }
+            .sorted(by: stableAscendingOrder)
+    }
+
+    /// Finds the nearest event that is still active or upcoming at `date`.
+    /// Recurring items use a per-item window so an old anchor can still yield
+    /// today's occurrence while the expansion remains bounded by the shared
+    /// 400-instance recurrence cap.
+    public static func nextEvent(
+        in snapshot: CalendarSnapshot,
+        at date: Date,
+        calendar: Calendar
+    ) -> CalendarItem? {
+        let candidates = snapshot.items.flatMap { item -> [CalendarItem] in
+            guard !item.isDeleted else { return [] }
+            guard item.recurrence != nil else {
+                return item.end >= date ? [item] : []
+            }
+
+            let duration = max(0, item.end.timeIntervalSince(item.start))
+            let windowStart = date.addingTimeInterval(-duration)
+            // The anchor is itself a valid occurrence. Keep it in the search
+            // window even when it is farther away than the derived look-ahead.
+            let windowEnd = max(
+                recurrenceSearchEnd(for: item, after: date, calendar: calendar),
+                item.end
+            )
+            guard windowEnd > windowStart else { return [] }
+
+            return CalendarRecurrence.occurrences(
+                of: item,
+                overlapping: DateInterval(start: windowStart, end: windowEnd),
+                calendar: calendar
+            )
+            .filter { !$0.isDeleted && $0.end >= date }
+        }
+
+        return candidates.sorted(by: stableAscendingOrder).first
+    }
+
+    private static func recurrenceSearchEnd(
+        for item: CalendarItem,
+        after date: Date,
+        calendar: Calendar
+    ) -> Date {
+        guard let rule = item.recurrence else { return date }
+        let maximum = CalendarRecurrence.maximumOccurrencesPerItem
+        guard rule.interval <= Int.max / maximum else { return .distantFuture }
+        let value = rule.interval * maximum
+        return calendar.date(byAdding: rule.frequency.stepUnit, value: value, to: date) ?? .distantFuture
+    }
+
+    private static func stableAscendingOrder(_ lhs: CalendarItem, _ rhs: CalendarItem) -> Bool {
+        if lhs.start != rhs.start { return lhs.start < rhs.start }
+        if lhs.id != rhs.id { return lhs.id.uuidString < rhs.id.uuidString }
+        if lhs.end != rhs.end { return lhs.end < rhs.end }
+        return (lhs.occurrenceSourceID?.uuidString ?? "") < (rhs.occurrenceSourceID?.uuidString ?? "")
+    }
+}
+
 public struct CalendarWidgetEntry: TimelineEntry {
     public let date: Date
     public let snapshot: CalendarSnapshot
@@ -52,13 +151,22 @@ public struct CalendarWidgetProvider: TimelineProvider {
     /// matter. A quiet calendar still gets a bounded refresh so a newly-saved event can
     /// appear without waiting for the next day.
     static func nextRefreshDate(for snapshot: CalendarSnapshot, after date: Date) -> Date {
-        let boundaries = snapshot.items
-            .filter { !$0.isDeleted }
+        // Add a one-second epsilon because CalendarRecurrence treats the window
+        // end as exclusive, while the legacy raw-item path treated a boundary
+        // exactly two hours away as eligible.
+        let window = DateInterval(
+            start: date,
+            end: date.addingTimeInterval(
+                CalendarWidgetData.refreshBoundaryHorizon + CalendarWidgetData.boundaryInclusivityEpsilon
+            )
+        )
+        let boundaries = CalendarWidgetData.items(overlapping: window, in: snapshot, calendar: .current)
             .flatMap { [$0.start, $0.end] }
             .filter { $0 > date }
             .sorted()
 
-        if let nextBoundary = boundaries.first, nextBoundary.timeIntervalSince(date) <= 2 * 60 * 60 {
+        if let nextBoundary = boundaries.first,
+           nextBoundary.timeIntervalSince(date) <= CalendarWidgetData.refreshBoundaryHorizon {
             return nextBoundary
         }
         return date.addingTimeInterval(30 * 60)
@@ -174,7 +282,7 @@ public struct CalendarWidgetView: View {
     }
 
     private func snapshotItems(on day: Date) -> [CalendarItem] {
-        entry.snapshot.items(on: day, calendar: calendar)
+        CalendarWidgetData.items(on: day, in: entry.snapshot, calendar: calendar)
     }
 
     private func isInDisplayedMonth(_ day: Date) -> Bool {

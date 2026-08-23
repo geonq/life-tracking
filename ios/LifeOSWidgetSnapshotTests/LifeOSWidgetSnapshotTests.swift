@@ -1169,6 +1169,87 @@ final class LifeOSWidgetSnapshotTests: XCTestCase {
         XCTAssertFalse(CalendarWidgetEntry.SharingCopy.accessibility.localizedCaseInsensitiveContains("disconnected"))
     }
 
+    func testCalendarWidgetExpandsRecurringAnchorIntoTodayAgenda() throws {
+        let today = fixedCalendar.startOfDay(for: calendarDemoDate)
+        let anchorStart = fixedCalendar.date(byAdding: .day, value: -2, to: calendarDemoDate)!
+        let recurrence = try CalendarRecurrenceRule(frequency: .daily)
+        let anchor = try CalendarItem(
+            id: UUID(uuidString: "20000000-0000-0000-0000-000000000010")!,
+            title: "Recurring standup",
+            start: anchorStart,
+            end: anchorStart.addingTimeInterval(30 * 60),
+            createdAt: anchorStart,
+            updatedAt: anchorStart,
+            recurrence: recurrence
+        )
+
+        let agenda = CalendarWidgetData.items(
+            on: today,
+            in: CalendarSnapshot(items: [anchor]),
+            calendar: fixedCalendar
+        )
+
+        XCTAssertEqual(agenda.count, 1)
+        XCTAssertEqual(agenda[0].title, anchor.title)
+        XCTAssertEqual(agenda[0].occurrenceSourceID, anchor.id)
+        XCTAssertEqual(agenda[0].start, calendarDemoDate)
+    }
+
+    func testNextEventWidgetSelectsNearestDerivedOccurrence() throws {
+        let now = calendarDemoDate
+        let anchorStart = fixedCalendar.date(byAdding: .day, value: -2, to: now)!
+        let recurrence = try CalendarRecurrenceRule(frequency: .daily)
+        let anchor = try CalendarItem(
+            id: UUID(uuidString: "20000000-0000-0000-0000-000000000011")!,
+            title: "Recurring standup",
+            start: anchorStart,
+            end: anchorStart.addingTimeInterval(30 * 60),
+            createdAt: anchorStart,
+            updatedAt: anchorStart,
+            recurrence: recurrence
+        )
+        let later = try CalendarItem(
+            id: UUID(uuidString: "20000000-0000-0000-0000-000000000012")!,
+            title: "Later meeting",
+            start: now.addingTimeInterval(2 * 60 * 60),
+            end: now.addingTimeInterval(3 * 60 * 60),
+            createdAt: now,
+            updatedAt: now
+        )
+
+        let next = CalendarWidgetData.nextEvent(
+            in: CalendarSnapshot(items: [anchor, later]),
+            at: now,
+            calendar: fixedCalendar
+        )
+
+        XCTAssertEqual(next?.title, anchor.title)
+        XCTAssertEqual(next?.occurrenceSourceID, anchor.id)
+        XCTAssertEqual(next?.start, now)
+    }
+
+    func testCalendarWidgetTimelineRefreshesAtDerivedOccurrenceBoundary() throws {
+        let now = fixedCalendar.date(bySettingHour: 8, minute: 0, second: 0, of: fixedCalendar.startOfDay(for: calendarDemoDate))!
+        let anchorStart = fixedCalendar.date(byAdding: .day, value: -1, to: fixedCalendar.date(bySettingHour: 10, minute: 0, second: 0, of: now)!)!
+        let recurrence = try CalendarRecurrenceRule(frequency: .daily)
+        let anchor = try CalendarItem(
+            id: UUID(uuidString: "20000000-0000-0000-0000-000000000013")!,
+            title: "Recurring standup",
+            start: anchorStart,
+            end: anchorStart.addingTimeInterval(30 * 60),
+            createdAt: anchorStart,
+            updatedAt: anchorStart,
+            recurrence: recurrence
+        )
+
+        let refresh = CalendarWidgetProvider.nextRefreshDate(
+            for: CalendarSnapshot(items: [anchor]),
+            after: now
+        )
+
+        XCTAssertEqual(refresh, fixedCalendar.date(bySettingHour: 10, minute: 0, second: 0, of: now))
+    }
+
     func testNextEventSmallDemoSnapshot() {
         render(
             NextEventWidgetView(entry: calendarDemoEntry),
