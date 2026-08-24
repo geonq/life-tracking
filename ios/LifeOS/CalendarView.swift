@@ -494,6 +494,7 @@ public struct CalendarView: View {
                 calendar: calendar,
                 onSelect: calendarEventSelectionHandler,
                 onCreate: create(at:),
+                onCreateAllDay: createAllDay(at:),
                 onCreateTimedRange: createTimedRange(start:end:anchor:),
                 timedCreationPreview: timedCreationPreview,
                 onTimedCreationDraft: updateTimedCreationDraft,
@@ -901,6 +902,19 @@ public struct CalendarView: View {
         create(at: date, sourceFrame: toolbarEditorSourceFrame)
 #else
         create(at: date, anchor: CGPoint(x: 300, y: 100))
+#endif
+    }
+
+    private func createAllDay(at day: Date) {
+        guard let interval = CalendarAllDayLayout.creationInterval(for: day, calendar: calendar) else { return }
+        timedCreationPreview = nil
+#if os(macOS)
+        presentMacEditor(
+            CalendarEditorPresentation(item: nil, date: interval.start, endDate: interval.end),
+            sourceFrame: toolbarEditorSourceFrame
+        )
+#else
+        editorPresentation = CalendarEditorPresentation(item: nil, date: interval.start, endDate: interval.end)
 #endif
     }
 
@@ -1378,9 +1392,12 @@ struct CalendarEditor: View {
         _start = State(initialValue: roundedStart)
         _end = State(initialValue: item?.end ?? endDate ?? roundedStart.addingTimeInterval(3600))
         _eventDate = State(initialValue: calendar.startOfDay(for: roundedStart))
-        let startDay = calendar.startOfDay(for: roundedStart)
-        let nextDay = calendar.date(byAdding: .day, value: 1, to: startDay)
-        _allDay = State(initialValue: nextDay.map { item?.start == startDay && item?.end == $0 } ?? false)
+        _allDay = State(initialValue: Self.inferredAllDay(
+            item: item,
+            start: roundedStart,
+            endDate: endDate,
+            calendar: calendar
+        ))
         _showTimezone = State(initialValue: false)
         _timeZoneIdentifier = State(initialValue: item?.timeZoneIdentifier)
         _repeatFrequency = State(initialValue: item?.recurrence?.frequency)
@@ -1390,6 +1407,23 @@ struct CalendarEditor: View {
             initialValue: item?.recurrence?.until
                 ?? (calendar.date(byAdding: .day, value: 30, to: roundedStart) ?? roundedStart)
         )
+    }
+
+    static func inferredAllDay(
+        item: CalendarItem?,
+        start: Date,
+        endDate: Date?,
+        calendar: Calendar
+    ) -> Bool {
+        let startDay = calendar.startOfDay(for: start)
+        guard start == startDay,
+              let nextDay = calendar.date(byAdding: .day, value: 1, to: startDay) else {
+            return false
+        }
+        if let item {
+            return item.start == startDay && item.end == nextDay
+        }
+        return endDate == nextDay
     }
 
     var body: some View {

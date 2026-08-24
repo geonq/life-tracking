@@ -361,6 +361,156 @@ final class CalendarLayoutTests: XCTestCase {
             CalendarAllDayLayout.height(items: entries, days: days, calendar: calendar),
             CalendarAllDayLayout.rowHeight * 4 + CalendarAllDayLayout.rowSpacing * 3
         )
+
+        let trailingRow = CalendarAllDayLayout.trailingEmptyRowIndex(
+            items: entries,
+            days: days,
+            calendar: calendar
+        )
+        XCTAssertEqual(trailingRow, 3)
+        let trailingCell = try XCTUnwrap(CalendarAllDayLayout.trailingEmptyCellFrame(
+            dayIndex: 1,
+            dayWidth: 120,
+            items: entries,
+            days: days,
+            calendar: calendar
+        ))
+        XCTAssertEqual(trailingCell, CGRect(x: 120, y: 84, width: 120, height: 26))
+        XCTAssertEqual(
+            CalendarAllDayLayout.trailingEmptyCellDay(
+                at: CGPoint(x: 180, y: 97),
+                dayWidth: 120,
+                items: entries,
+                days: days,
+                calendar: calendar
+            ),
+            calendar.startOfDay(for: day1)
+        )
+        XCTAssertNil(
+            CalendarAllDayLayout.trailingEmptyCellDay(
+                at: CGPoint(x: 180, y: 80),
+                dayWidth: 120,
+                items: entries,
+                days: days,
+                calendar: calendar
+            ),
+            "The inter-row spacing must not be a creation hit target"
+        )
+        XCTAssertEqual(
+            CalendarAllDayLayout.trailingEmptyCellAccessibilityIdentifier(
+                for: day1,
+                calendar: calendar
+            ),
+            "calendar-empty-all-day-2026-08-01"
+        )
+    }
+
+    func testAllDayRowsIgnoreOffWindowItemsAndRecurringRenderIDsStayUnique() throws {
+        let anchor = try XCTUnwrap(DateComponents(
+            calendar: calendar,
+            year: 2026,
+            month: 7,
+            day: 31
+        ).date)
+        let day1 = try XCTUnwrap(calendar.date(byAdding: .day, value: 1, to: anchor))
+        let day2 = try XCTUnwrap(calendar.date(byAdding: .day, value: 2, to: anchor))
+        let before = try XCTUnwrap(calendar.date(byAdding: .day, value: -2, to: anchor))
+        let after = try XCTUnwrap(calendar.date(byAdding: .day, value: 3, to: anchor))
+        let days = [anchor, day1, day2]
+
+        let visibleFirst = try CalendarItem(title: "Visible first", start: anchor, end: day1)
+        let visibleSecond = try CalendarItem(title: "Visible second", start: day1, end: day2)
+        let offWindowBefore = try CalendarItem(title: "Off-window before", start: before, end: anchor)
+        let afterEnd = try XCTUnwrap(calendar.date(byAdding: .day, value: 1, to: after))
+        let offWindowAfter = try CalendarItem(title: "Off-window after", start: after, end: afterEnd)
+
+        let placements = CalendarAllDayLayout.placements(
+            items: [offWindowBefore, visibleFirst, offWindowAfter, visibleSecond],
+            days: days,
+            calendar: calendar
+        )
+        XCTAssertEqual(placements.map(\.item.title), ["Visible first", "Visible second"])
+        XCTAssertEqual(placements.map(\.row), [0, 1], "Visible rows must be contiguous after filtering the window")
+        XCTAssertEqual(
+            CalendarAllDayLayout.rowCount(items: [offWindowBefore, visibleFirst, offWindowAfter, visibleSecond], days: days, calendar: calendar),
+            placements.count + 1,
+            "The trailing creation row follows visible events only"
+        )
+
+        let recurrence = try CalendarRecurrenceRule(frequency: .daily, until: day1)
+        let recurring = try CalendarItem(title: "Recurring all-day", start: anchor, end: day1, recurrence: recurrence)
+        let occurrences = CalendarRecurrence.occurrences(
+            of: recurring,
+            overlapping: DateInterval(start: anchor, end: day2),
+            calendar: calendar
+        )
+        let occurrencePlacements = CalendarAllDayLayout.placements(
+            items: occurrences,
+            days: days,
+            calendar: calendar
+        )
+        XCTAssertEqual(occurrencePlacements.count, 2)
+        XCTAssertEqual(Set(occurrencePlacements.map(\.renderID)).count, occurrencePlacements.count)
+        XCTAssertTrue(occurrencePlacements.dropFirst().allSatisfy {
+            $0.renderID.hasPrefix(recurring.id.uuidString + "-")
+        })
+        XCTAssertEqual(
+            occurrencePlacements.map(\.renderID),
+            occurrences.map(CalendarAllDayLayout.renderIdentity(for:))
+        )
+    }
+
+    func testTimedRecurringPlacementsExposeStableUniqueRenderIDs() throws {
+        let anchor = try XCTUnwrap(DateComponents(
+            calendar: calendar,
+            year: 2026,
+            month: 7,
+            day: 31,
+            hour: 9
+        ).date)
+        let nextDay = try XCTUnwrap(calendar.date(byAdding: .day, value: 1, to: anchor))
+        let until = try XCTUnwrap(calendar.date(byAdding: .day, value: 2, to: anchor))
+        let rule = try CalendarRecurrenceRule(frequency: .daily, until: until)
+        let recurring = try CalendarItem(
+            title: "Recurring timed",
+            start: anchor,
+            end: nextDay,
+            recurrence: rule
+        )
+        let occurrences = CalendarRecurrence.occurrences(
+            of: recurring,
+            overlapping: DateInterval(start: anchor, end: until),
+            calendar: calendar
+        )
+        let placements = CalendarOverlapLayout.layout(
+            items: occurrences,
+            interval: DateInterval(start: anchor, end: until),
+        )
+
+        XCTAssertEqual(placements.count, occurrences.count)
+        XCTAssertEqual(Set(placements.map(\.renderID)).count, placements.count)
+        XCTAssertTrue(placements.dropFirst().allSatisfy { $0.renderID.hasPrefix(recurring.id.uuidString + "-") })
+        XCTAssertEqual(placements.first?.renderID, recurring.id.uuidString)
+    }
+
+    func testPagerDaySurfaceStartsAtThe52PointGutterBoundary() {
+        XCTAssertFalse(CalendarInteractionLayout.isPagerStartInDaySurface(startX: 51.99, timeGutter: 52))
+        XCTAssertTrue(CalendarInteractionLayout.isPagerStartInDaySurface(startX: 52, timeGutter: 52))
+        XCTAssertTrue(CalendarInteractionLayout.isPagerStartInDaySurface(startX: 52.01, timeGutter: 52))
+        XCTAssertFalse(CalendarInteractionLayout.isPagerStartInDaySurface(startX: .nan, timeGutter: 52))
+    }
+
+    func testCalendarEditorDoesNotInferTimedMidnightEndingEventAsAllDay() throws {
+        let day = try XCTUnwrap(DateComponents(calendar: calendar, year: 2026, month: 7, day: 31).date)
+        let nextDay = try XCTUnwrap(calendar.date(byAdding: .day, value: 1, to: day))
+        let timedStart = try XCTUnwrap(calendar.date(bySettingHour: 23, minute: 30, second: 0, of: day))
+        let timed = try CalendarItem(title: "Late event", start: timedStart, end: nextDay)
+        let allDay = try CalendarItem(title: "All day", start: day, end: nextDay)
+
+        XCTAssertFalse(CalendarEditor.inferredAllDay(item: timed, start: timed.start, endDate: nil, calendar: calendar))
+        XCTAssertTrue(CalendarEditor.inferredAllDay(item: allDay, start: allDay.start, endDate: nil, calendar: calendar))
+        XCTAssertFalse(CalendarEditor.inferredAllDay(item: nil, start: timedStart, endDate: nextDay, calendar: calendar))
+        XCTAssertTrue(CalendarEditor.inferredAllDay(item: nil, start: day, endDate: nextDay, calendar: calendar))
     }
 
     func testTimedViewportLeavesFullDayContentScrollableInsideFinitePage() {
@@ -404,17 +554,37 @@ final class CalendarLayoutTests: XCTestCase {
 
     func testPagerFallbackOnlyClaimsClearlyHorizontalMovement() {
         XCTAssertTrue(CalendarInteractionLayout.isHorizontalPagerDrag(
-            horizontalTranslation: 5,
+            horizontalTranslation: 12,
             verticalTranslation: 1
         ))
         XCTAssertFalse(CalendarInteractionLayout.isHorizontalPagerDrag(
-            horizontalTranslation: 5,
-            verticalTranslation: 5
+            horizontalTranslation: 10,
+            verticalTranslation: 9
         ))
         XCTAssertFalse(CalendarInteractionLayout.isHorizontalPagerDrag(
             horizontalTranslation: 1,
             verticalTranslation: 12
         ))
+        XCTAssertTrue(CalendarInteractionLayout.isHorizontalPagerDrag(
+            horizontalTranslation: 12,
+            verticalTranslation: 10
+        ))
+        XCTAssertFalse(CalendarInteractionLayout.isHorizontalPagerDrag(
+            horizontalTranslation: 10,
+            verticalTranslation: 12
+        ))
+        XCTAssertEqual(
+            CalendarInteractionLayout.pagerDragAxis(horizontalTranslation: 10, verticalTranslation: 9),
+            .undecided
+        )
+        XCTAssertEqual(
+            CalendarInteractionLayout.pagerDragAxis(horizontalTranslation: 12, verticalTranslation: 10),
+            .horizontal
+        )
+        XCTAssertEqual(
+            CalendarInteractionLayout.pagerDragAxis(horizontalTranslation: 10, verticalTranslation: 12),
+            .vertical
+        )
     }
 
     func testMobileDefaultSelectionCreatesExactThirtyMinuteInterval() throws {
@@ -1157,6 +1327,35 @@ final class CalendarLayoutTests: XCTestCase {
             calendar: newYork
         ))
         XCTAssertEqual(newYork.component(.hour, from: creation), 3)
+    }
+
+    func testAllDayCreationUsesLocalMidnightBoundsAcrossDST() throws {
+        var newYork = Calendar(identifier: .gregorian)
+        newYork.timeZone = try XCTUnwrap(TimeZone(identifier: "America/New_York"))
+        let springDay = try XCTUnwrap(DateComponents(
+            calendar: newYork,
+            timeZone: newYork.timeZone,
+            year: 2026,
+            month: 3,
+            day: 8
+        ).date)
+        let fallDay = try XCTUnwrap(DateComponents(
+            calendar: newYork,
+            timeZone: newYork.timeZone,
+            year: 2026,
+            month: 11,
+            day: 1
+        ).date)
+
+        let spring = try XCTUnwrap(CalendarAllDayLayout.creationInterval(for: springDay, calendar: newYork))
+        let fall = try XCTUnwrap(CalendarAllDayLayout.creationInterval(for: fallDay, calendar: newYork))
+
+        XCTAssertEqual(newYork.component(.hour, from: spring.start), 0)
+        XCTAssertEqual(newYork.component(.minute, from: spring.start), 0)
+        XCTAssertEqual(newYork.component(.hour, from: spring.end), 0)
+        XCTAssertEqual(newYork.component(.minute, from: spring.end), 0)
+        XCTAssertEqual(spring.duration, 23 * 3_600, accuracy: 0.001)
+        XCTAssertEqual(fall.duration, 25 * 3_600, accuracy: 0.001)
     }
 
     func testTimedCreationSnapsDoubleClickToQuarterHourAndDefaultDuration() throws {

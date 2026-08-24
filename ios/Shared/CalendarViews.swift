@@ -445,6 +445,9 @@ public struct CalendarTimelineView: View {
     /// Deliberate empty-space creation and final event interval updates are
     /// emitted only after the gesture settles. The parent owns persistence.
     public let onCreate: ((Date) -> Void)?
+    /// Double-tapping the trailing all-day cell emits its local day. The
+    /// parent owns editor presentation and persistence.
+    public let onCreateAllDay: ((Date) -> Void)?
     /// macOS-only intentional empty-grid creation. The source frame is in the
     /// shared named CalendarEditorAnchorGeometry coordinate space so the
     /// parent can present the inspector beside the actual click rather than
@@ -483,6 +486,7 @@ public struct CalendarTimelineView: View {
     public init(days: [Date], items: [CalendarItem], holidays: [CalendarHoliday] = [], hourHeight: CGFloat, calendar: Calendar = .current,
                 onSelect: @escaping CalendarEventSelectionHandler,
                 onCreate: ((Date) -> Void)? = nil,
+                onCreateAllDay: ((Date) -> Void)? = nil,
                 onCreateTimedRange: ((Date, Date, CalendarTimedCreationAnchor) -> Void)? = nil,
                 timedCreationPreview: CalendarTimedCreationPreview? = nil,
                 onTimedCreationDraft: ((CalendarTimedCreationPreview?) -> Void)? = nil,
@@ -501,6 +505,7 @@ public struct CalendarTimelineView: View {
         self.calendar = calendar
         self.onSelect = onSelect
         self.onCreate = onCreate
+        self.onCreateAllDay = onCreateAllDay
         self.onCreateTimedRange = onCreateTimedRange
         self.timedCreationPreview = timedCreationPreview
         self.onTimedCreationDraft = onTimedCreationDraft
@@ -525,6 +530,7 @@ public struct CalendarTimelineView: View {
             calendar: calendar,
             onSelect: onSelect,
             onCreate: onCreate,
+            onCreateAllDay: onCreateAllDay,
             onCreateTimedRange: onCreateTimedRange,
             onUpdate: onUpdate,
             onStatusUpdate: onStatusUpdate,
@@ -755,6 +761,7 @@ private struct CalendarPagedTimeline: View {
     let calendar: Calendar
     let onSelect: CalendarEventSelectionHandler
     let onCreate: ((Date) -> Void)?
+    let onCreateAllDay: ((Date) -> Void)?
     let onCreateTimedRange: ((Date, Date, CalendarTimedCreationAnchor) -> Void)?
     let timedCreationPreview: CalendarTimedCreationPreview?
     let onTimedCreationDraft: ((CalendarTimedCreationPreview?) -> Void)?
@@ -790,7 +797,7 @@ private struct CalendarPagedTimeline: View {
 
     init(days: [Date], items: [CalendarItem], holidays: [CalendarHoliday], hourHeight: CGFloat,
          calendar: Calendar, onSelect: @escaping CalendarEventSelectionHandler,
-         onCreate: ((Date) -> Void)?, onCreateTimedRange: ((Date, Date, CalendarTimedCreationAnchor) -> Void)?, onUpdate: CalendarUpdateHandler?,
+         onCreate: ((Date) -> Void)?, onCreateAllDay: ((Date) -> Void)?, onCreateTimedRange: ((Date, Date, CalendarTimedCreationAnchor) -> Void)?, onUpdate: CalendarUpdateHandler?,
          onStatusUpdate: CalendarStatusUpdateHandler?,
          timedCreationPreview: CalendarTimedCreationPreview?,
          onTimedCreationDraft: ((CalendarTimedCreationPreview?) -> Void)?,
@@ -804,6 +811,7 @@ private struct CalendarPagedTimeline: View {
         self.calendar = calendar
         self.onSelect = onSelect
         self.onCreate = onCreate
+        self.onCreateAllDay = onCreateAllDay
         self.onCreateTimedRange = onCreateTimedRange
         self.onUpdate = onUpdate
         self.onStatusUpdate = onStatusUpdate
@@ -875,7 +883,7 @@ private struct CalendarPagedTimeline: View {
             ))
             let allDayHeight = CGFloat(CalendarAllDayLayout.height(
                 items: items,
-                days: stripDays,
+                days: visibleWindow,
                 calendar: calendar
             ))
             let timedViewportHeight = CGFloat(CalendarInteractionLayout.timedViewportHeight(
@@ -887,13 +895,16 @@ private struct CalendarPagedTimeline: View {
                 dayHeaderStrip(days: stripDays, columnWidth: columnWidth, containerWidth: viewport.size.width)
                 CalendarAllDayLaneStrip(
                     days: stripDays,
+                    visibleDays: visibleWindow,
                     items: items,
                     calendar: calendar,
                     columnWidth: columnWidth,
                     slideOffset: stripBaseX(columnWidth: columnWidth) + horizontalDragOffset,
                     timeGutter: timeGutter,
-                    onSelect: { item in onSelect(item) }
+                    onSelect: { item in onSelect(item) },
+                    onCreateAllDay: onCreateAllDay
                 )
+                .simultaneousGesture(pagerDragGesture(columnWidth: columnWidth), including: .all)
                 ScrollViewReader { scrollProxy in
                     ScrollView(.vertical) {
                         ZStack(alignment: .topLeading) {
@@ -981,6 +992,7 @@ private struct CalendarPagedTimeline: View {
                     // would cancel the shared DragGesture. Once a settle is in
                     // flight the axis is owned by the animation instead.
                     .scrollDisabled(pendingSettle != nil)
+                    .simultaneousGesture(pagerDragGesture(columnWidth: columnWidth), including: .all)
                     .accessibilityIdentifier("calendar-vertical-timeline-scroll")
                     .task {
                         guard !didInitialVerticalScroll else { return }
@@ -1017,7 +1029,6 @@ private struct CalendarPagedTimeline: View {
             }
             .frame(width: viewport.size.width)
             .clipped()
-            .contentShape(Rectangle())
             .coordinateSpace(name: "calendar-horizontal-pager")
             .onPreferenceChange(CalendarStripOffsetPreferenceKey.self) { stripX in
                 updatePreviewAndCompletion(stripX: stripX, columnWidth: columnWidth)
@@ -1099,85 +1110,120 @@ private struct CalendarPagedTimeline: View {
         }
     }
 
-    private func pagerDragGesture(viewportWidth: CGFloat, columnWidth: CGFloat) -> some Gesture {
+    private func pagerDragGesture(columnWidth: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 8, coordinateSpace: .local)
             .onChanged { value in
-                guard pendingSettle == nil,
-                      !interactionSession.eventMoveActive,
-                      interactionSession.eventMovePreview == nil,
-                      columnWidth > 0 else {
-                    if interactionSession.eventMoveActive || interactionSession.eventMovePreview != nil {
-                        resetStripForEventOwnership()
-                    }
-                    return
-                }
-
-                if pagerDragAxisIsHorizontal == nil {
-                    let horizontal = CalendarInteractionLayout.isHorizontalPagerDrag(
-                        horizontalTranslation: Double(value.translation.width),
-                        verticalTranslation: Double(value.translation.height)
-                    )
-                    // Lock the first meaningful axis. Once a vertical drag has
-                    // been handed to the nested ScrollView, a later diagonal
-                    // sample must not steal it for the pager.
-                    guard max(abs(value.translation.width), abs(value.translation.height)) >= 4 else {
-                        return
-                    }
-                    pagerDragAxisIsHorizontal = horizontal
-                }
-                guard pagerDragAxisIsHorizontal == true else { return }
-                if !horizontalDragActive {
-                    horizontalDragActive = true
-                    pagerGeneration += 1
-                }
-                guard horizontalDragActive else { return }
-                // 1:1 finger tracking with slack for a rubber-band feel, but
-                // never past the pre-mounted spare columns.
-                let dragLimit = columnWidth * 1.6
-                horizontalDragOffset = max(-dragLimit, min(dragLimit, value.translation.width))
-            }
-            .onEnded { value in
-                switch CalendarInteractionLayout.pagerEndDisposition(
-                    hasPendingSettle: pendingSettle != nil,
-                    eventMutationActive: interactionSession.eventMoveActive,
-                    hasProvisionalEventPreview: interactionSession.eventMovePreview != nil,
-                    horizontalDragActive: horizontalDragActive
-                ) {
-                case .resetForEventOwnership:
-                    resetStripForEventOwnership()
-                    return
-                case .preservePendingSettle:
-                    return
-                case .cancelNonOwnedDrag:
+                guard CalendarInteractionLayout.isPagerStartInDaySurface(
+                    startX: Double(value.startLocation.x),
+                    timeGutter: Double(timeGutter)
+                ) else {
                     pagerDragAxisIsHorizontal = nil
                     return
-                case .settleHorizontalPage:
-                    guard columnWidth > 0 else {
-                        pagerDragAxisIsHorizontal = nil
-                        return
-                    }
                 }
-
-                horizontalDragActive = false
-                pagerDragAxisIsHorizontal = nil
-                let projection = CalendarInteractionLayout.pagerSettleProjection(
-                    translation: Double(value.translation.width),
-                    predictedTranslation: Double(value.predictedEndTranslation.width),
-                    pageWidth: Double(columnWidth),
-                    // geonq spec: a swipe slides by exactly one day, and even a
-                    // hard flick may advance at most to the adjacent day.
-                    maximumPages: 1
-                )
-                let dayDelta = projection.pageDelta
-                let nextAnchor = calendar.date(byAdding: .day, value: dayDelta, to: pageAnchor) ?? pageAnchor
-                beginSettle(
-                    dayDelta: dayDelta,
-                    targetOffset: -columnWidth * CGFloat(dayDelta),
-                    nextAnchor: nextAnchor,
-                    normalizedVelocity: projection.normalizedVelocity,
+                handlePagerChanged(translation: value.translation, columnWidth: columnWidth)
+            }
+            .onEnded { value in
+                guard CalendarInteractionLayout.isPagerStartInDaySurface(
+                    startX: Double(value.startLocation.x),
+                    timeGutter: Double(timeGutter)
+                ) else {
+                    pagerDragAxisIsHorizontal = nil
+                    return
+                }
+                handlePagerEnded(
+                    translation: value.translation.width,
+                    predictedTranslation: value.predictedEndTranslation.width,
                     columnWidth: columnWidth
                 )
             }
+    }
+
+    private func handlePagerChanged(translation: CGSize, columnWidth: CGFloat) {
+        guard pendingSettle == nil,
+              !interactionSession.eventMoveActive,
+              interactionSession.eventMovePreview == nil,
+              columnWidth > 0 else {
+            if interactionSession.eventMoveActive || interactionSession.eventMovePreview != nil {
+                resetStripForEventOwnership()
+            }
+            return
+        }
+
+        if pagerDragAxisIsHorizontal == nil {
+            let axis = CalendarInteractionLayout.pagerDragAxis(
+                horizontalTranslation: Double(translation.width),
+                verticalTranslation: Double(translation.height)
+            )
+            // Keep the undecided state alive through near-diagonal samples.
+            // The first sample is not allowed to permanently classify a
+            // 10x9 movement as vertical when a later 12x10 sample is clearly
+            // horizontal. Once an axis is actually dominant, lock it.
+            switch axis {
+            case .undecided:
+                return
+            case .horizontal:
+                pagerDragAxisIsHorizontal = true
+            case .vertical:
+                pagerDragAxisIsHorizontal = false
+            }
+        }
+        guard pagerDragAxisIsHorizontal == true else { return }
+        if !horizontalDragActive {
+            horizontalDragActive = true
+            pagerGeneration += 1
+        }
+        guard horizontalDragActive else { return }
+        // 1:1 finger tracking with slack for a rubber-band feel, but never
+        // past the pre-mounted spare columns.
+        let dragLimit = columnWidth * 1.6
+        horizontalDragOffset = max(-dragLimit, min(dragLimit, translation.width))
+    }
+
+    private func handlePagerEnded(
+        translation: CGFloat,
+        predictedTranslation: CGFloat,
+        columnWidth: CGFloat
+    ) {
+        switch CalendarInteractionLayout.pagerEndDisposition(
+            hasPendingSettle: pendingSettle != nil,
+            eventMutationActive: interactionSession.eventMoveActive,
+            hasProvisionalEventPreview: interactionSession.eventMovePreview != nil,
+            horizontalDragActive: horizontalDragActive
+        ) {
+        case .resetForEventOwnership:
+            resetStripForEventOwnership()
+            return
+        case .preservePendingSettle:
+            return
+        case .cancelNonOwnedDrag:
+            pagerDragAxisIsHorizontal = nil
+            return
+        case .settleHorizontalPage:
+            guard columnWidth > 0 else {
+                pagerDragAxisIsHorizontal = nil
+                return
+            }
+        }
+
+        horizontalDragActive = false
+        pagerDragAxisIsHorizontal = nil
+        let projection = CalendarInteractionLayout.pagerSettleProjection(
+            translation: Double(translation),
+            predictedTranslation: Double(predictedTranslation),
+            pageWidth: Double(columnWidth),
+            // geonq spec: a swipe slides by exactly one day, and even a hard
+            // flick may advance at most to the adjacent day.
+            maximumPages: 1
+        )
+        let dayDelta = projection.pageDelta
+        let nextAnchor = calendar.date(byAdding: .day, value: dayDelta, to: pageAnchor) ?? pageAnchor
+        beginSettle(
+            dayDelta: dayDelta,
+            targetOffset: -columnWidth * CGFloat(dayDelta),
+            nextAnchor: nextAnchor,
+            normalizedVelocity: projection.normalizedVelocity,
+            columnWidth: columnWidth
+        )
     }
 
     private func beginSettle(
@@ -1333,7 +1379,12 @@ private struct CalendarPagedTimeline: View {
         }
         .clipped()
         .contentShape(Rectangle())
-        .simultaneousGesture(pagerDragGesture(viewportWidth: containerWidth, columnWidth: columnWidth))
+        // The composite surface gesture is intentionally supplemented here.
+        // XCTest and VoiceOver can start a swipe from the semantic header
+        // probe, while SwiftUI may otherwise route that non-hit-testing probe
+        // past the composite recognizer. Both recognizers share the same
+        // settle gate, so one physical swipe can only commit once.
+        .simultaneousGesture(pagerDragGesture(columnWidth: columnWidth), including: .all)
     }
 
     private func dayHeaderCell(day: Date, width: CGFloat) -> some View {
@@ -1414,23 +1465,41 @@ private struct CalendarPagedTimeline: View {
 /// strip slides; the localized label stays pinned over the gutter.
 private struct CalendarAllDayLaneStrip: View {
     let days: [Date]
+    let visibleDays: [Date]
     let items: [CalendarItem]
     let calendar: Calendar
     let columnWidth: CGFloat
     let slideOffset: CGFloat
     let timeGutter: CGFloat
     let onSelect: ((CalendarItem) -> Void)?
+    let onCreateAllDay: ((Date) -> Void)?
+
+    /// Virtual neighbours are mounted so a multi-day bar can track the pager,
+    /// but events that live only in those neighbours must not consume rows in
+    /// the settled visible lane. The row contract is defined by the visible
+    /// day window; an event crossing into that window remains included.
+    private var visibleLayoutItems: [CalendarItem] {
+        guard let firstDay = visibleDays.first,
+              let lastDay = visibleDays.last,
+              let end = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: lastDay)) else {
+            return []
+        }
+        let start = calendar.startOfDay(for: firstDay)
+        return items.filter { item in
+            !item.isDeleted && item.start < end && item.end > start
+        }
+    }
 
     private var placements: [CalendarAllDayLayout.Placement] {
-        CalendarAllDayLayout.placements(items: items, days: days, calendar: calendar)
+        CalendarAllDayLayout.placements(items: visibleLayoutItems, days: days, calendar: calendar)
     }
 
     private var rowCount: Int {
-        CalendarAllDayLayout.rowCount(items: items, days: days, calendar: calendar)
+        CalendarAllDayLayout.rowCount(items: visibleLayoutItems, days: days, calendar: calendar)
     }
 
     private var laneHeight: CGFloat {
-        CGFloat(CalendarAllDayLayout.height(items: items, days: days, calendar: calendar))
+        CGFloat(CalendarAllDayLayout.height(items: visibleLayoutItems, days: days, calendar: calendar))
     }
 
     private var accessibilitySummary: String {
@@ -1438,6 +1507,32 @@ private struct CalendarAllDayLaneStrip: View {
         let eventWord = count == 1 ? "event" : "events"
         let rowWord = rowCount == 1 ? "row" : "rows"
         return "\(count) \(eventWord), \(rowCount) \(rowWord)"
+    }
+
+    private struct VisibleEmptyCell: Identifiable {
+        let day: Date
+        let frame: CGRect
+
+        var id: Date { day }
+    }
+
+    /// Empty-cell semantics belong only to the settled visible window. The
+    /// virtual strip still supplies the rendered background and event rows,
+    /// but its neighbouring columns must never leak stale/offscreen AX frames.
+    private var visibleEmptyCells: [VisibleEmptyCell] {
+        visibleDays.compactMap { day in
+            guard let index = days.firstIndex(where: { calendar.isDate($0, inSameDayAs: day) }),
+                  let frame = CalendarAllDayLayout.trailingEmptyCellFrame(
+                      dayIndex: index,
+                      dayWidth: Double(columnWidth),
+                      items: visibleLayoutItems,
+                      days: days,
+                      calendar: calendar
+                  ) else {
+                return nil
+            }
+            return VisibleEmptyCell(day: day, frame: frame)
+        }
     }
 
     var body: some View {
@@ -1450,7 +1545,7 @@ private struct CalendarAllDayLaneStrip: View {
                         .frame(width: 1, height: laneHeight)
                         .offset(x: CGFloat(index + 1) * columnWidth - 1)
                 }
-                ForEach(placements) { placement in
+                ForEach(placements, id: \.renderID) { placement in
                     CalendarAllDayEventChip(
                         item: placement.item,
                         calendar: calendar,
@@ -1466,6 +1561,17 @@ private struct CalendarAllDayLaneStrip: View {
                         y: CGFloat(placement.row) * (CalendarAllDayLayout.rowHeight + CGFloat(CalendarAllDayLayout.rowSpacing)) + 2
                     )
                 }
+                ForEach(visibleEmptyCells) { cell in
+                    CalendarAllDayEmptyCell(
+                        day: cell.day,
+                        calendar: calendar,
+                        onCreate: onCreateAllDay
+                    )
+                    .frame(width: cell.frame.width, height: cell.frame.height)
+                    .offset(x: cell.frame.minX, y: cell.frame.minY)
+                    .allowsHitTesting(onCreateAllDay != nil)
+                    .accessibilityHidden(onCreateAllDay == nil)
+                }
             }
             .frame(width: CGFloat(days.count) * columnWidth, height: laneHeight, alignment: .topLeading)
             .offset(x: slideOffset)
@@ -1476,8 +1582,16 @@ private struct CalendarAllDayLaneStrip: View {
                 .padding(.trailing, 8)
                 .background(LifeOSTokens.canvas)
         }
-        .frame(maxWidth: .infinity, idealHeight: laneHeight, alignment: .leading)
-        .frame(height: laneHeight, alignment: .leading)
+        // Pin the lane to the actual viewport width. Without an explicit
+        // width, the oversized virtual strip participates in the flexible
+        // ZStack's ideal-size calculation and SwiftUI shifts the whole lane
+        // left; the header and timed strip then disagree about the visible
+        // day columns (and AX frames inherit that shift).
+        .frame(
+            width: timeGutter + columnWidth * CGFloat(max(1, visibleDays.count)),
+            height: laneHeight,
+            alignment: .leading
+        )
         .background(LifeOSTokens.canvas)
         .overlay(alignment: .bottom) { Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 1) }
         .clipped()
@@ -1485,6 +1599,45 @@ private struct CalendarAllDayLaneStrip: View {
         .accessibilityLabel("All-day events")
         .accessibilityIdentifier("calendar-all-day-lane")
         .accessibilityValue(accessibilitySummary)
+    }
+
+}
+
+private struct CalendarAllDayEmptyCell: View {
+    let day: Date
+    let calendar: Calendar
+    let onCreate: ((Date) -> Void)?
+
+    var body: some View {
+        Color.clear
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2) {
+                createAllDayEvent()
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Empty all-day cell")
+            .accessibilityValue(calendarISODate(day))
+            .accessibilityHint("Double-tap to create an all-day event")
+            .accessibilityIdentifier(
+                CalendarAllDayLayout.trailingEmptyCellAccessibilityIdentifier(
+                    for: day,
+                    calendar: calendar
+                )
+            )
+            .accessibilityAction(named: "Create all-day event") {
+                createAllDayEvent()
+            }
+    }
+
+    private func createAllDayEvent() {
+        guard let interval = CalendarAllDayLayout.creationInterval(for: day, calendar: calendar) else { return }
+        CalendarInteractionHaptics.grab()
+        onCreate?(interval.start)
+    }
+
+    private func calendarISODate(_ date: Date) -> String {
+        let components = calendar.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", components.year ?? 0, components.month ?? 0, components.day ?? 0)
     }
 }
 
@@ -1557,7 +1710,7 @@ private struct CalendarAllDayRow: View {
                         .frame(width: 1, height: laneHeight)
                         .offset(x: CGFloat(index + 1) * dayWidth - 1)
                 }
-                ForEach(placements) { placement in
+                ForEach(placements, id: \.renderID) { placement in
                     CalendarAllDayEventChip(
                         item: placement.item,
                         calendar: calendar,
@@ -1627,7 +1780,7 @@ private struct CalendarAllDayEventChip: View {
         .accessibilityValue(
             "\(calendarISODate(item.start)) to \(calendarISODate(item.end))"
         )
-        .accessibilityIdentifier("calendar-all-day-event-\(item.id.uuidString)")
+        .accessibilityIdentifier("calendar-all-day-event-\(CalendarAllDayLayout.renderIdentity(for: item))")
     }
 
     private func calendarISODate(_ date: Date) -> String {
@@ -1717,6 +1870,7 @@ private struct CalendarDayTimeline: View {
                     // scrolling. The press sequence still claims an
                     // intentional creation after its hold threshold.
                     .simultaneousGesture(creationPressDragGesture(proxy: proxy))
+                    .simultaneousGesture(emptyGridVerticalTimelinePanGesture(proxy: proxy))
 #else
                     .simultaneousGesture(macDoubleClickGesture(proxy: proxy))
                     .simultaneousGesture(macCreationDragGesture(proxy: proxy))
@@ -1724,7 +1878,7 @@ private struct CalendarDayTimeline: View {
                     .accessibilityIdentifier("calendar-empty-timed-grid-\(calendarISODate(day))")
                     .accessibilityHidden(!isInteractionEnabled)
 
-                ForEach(renderedPlacements) { placement in
+                ForEach(renderedPlacements, id: \.renderID) { placement in
                     eventLayer(
                         placement: placement,
                         item: placement.item,
@@ -1963,6 +2117,22 @@ private struct CalendarDayTimeline: View {
 
     private func creationDraftPreview(for interval: DateInterval) -> CalendarTimedCreationPreview {
         CalendarTimedCreationPreview(day: interval.start, start: interval.start, end: interval.end)
+    }
+
+    /// The empty grid's sequenced creation recognizer can delay the ancestor
+    /// ScrollView pan until its hold threshold. Keep a narrow fallback for a
+    /// deliberate quick vertical drag, matching the event-row fallback while
+    /// leaving event points and press-created ranges to their own owners.
+    private func emptyGridVerticalTimelinePanGesture(proxy: GeometryProxy) -> some Gesture {
+        DragGesture(minimumDistance: 8, coordinateSpace: .local)
+            .onEnded { value in
+                guard isInteractionEnabled,
+                      !interactionSession.eventMoveActive,
+                      !isTimedEventPoint(value.startLocation, in: proxy),
+                      abs(value.translation.height) > abs(value.translation.width),
+                      abs(value.translation.height) >= 12 else { return }
+                onVerticalPan?(value.translation.height)
+            }
     }
 
     private func isTimedEventPoint(_ point: CGPoint, in proxy: GeometryProxy) -> Bool {
@@ -2278,7 +2448,7 @@ private struct CalendarInteractiveTimelineEvent: View {
         .disabled(!canToggleTodo)
         .accessibilityLabel(item.status == .done ? "Mark to-do incomplete" : "Mark to-do complete")
         .accessibilityValue(canToggleTodo ? item.status.label : "Temporarily unavailable")
-        .accessibilityIdentifier("calendar-todo-toggle-\(item.id.uuidString)")
+        .accessibilityIdentifier("calendar-todo-toggle-\(CalendarAllDayLayout.renderIdentity(for: item))")
         .zIndex(20)
         // Physical taps are routed through the card's spatial recognizer;
         // this stable Button remains the accessibility target without
@@ -2377,28 +2547,28 @@ private struct CalendarInteractiveTimelineEvent: View {
                 }
                 .accessibilityLabel("Move event to previous day")
                 .help("Move event to previous day")
-                .accessibilityIdentifier("calendar-event-move-previous-day-\(item.id.uuidString)")
+                .accessibilityIdentifier("calendar-event-move-previous-day-\(CalendarAllDayLayout.renderIdentity(for: item))")
 
                 Button { performHoverControlAction { commitMove(dayDelta: 1) } } label: {
                     Image(systemName: "arrow.right")
                 }
                 .accessibilityLabel("Move event to next day")
                 .help("Move event to next day")
-                .accessibilityIdentifier("calendar-event-move-next-day-\(item.id.uuidString)")
+                .accessibilityIdentifier("calendar-event-move-next-day-\(CalendarAllDayLayout.renderIdentity(for: item))")
 
                 Button { performHoverControlAction { commitResize(minutes: -15) } } label: {
                     Image(systemName: "minus")
                 }
                 .accessibilityLabel("Resize event shorter 15 minutes")
                 .help("Resize event shorter by 15 minutes")
-                .accessibilityIdentifier("calendar-event-resize-shorter-\(item.id.uuidString)")
+                .accessibilityIdentifier("calendar-event-resize-shorter-\(CalendarAllDayLayout.renderIdentity(for: item))")
 
                 Button { performHoverControlAction { commitResize(minutes: 15) } } label: {
                     Image(systemName: "plus")
                 }
                 .accessibilityLabel("Resize event longer 15 minutes")
                 .help("Resize event longer by 15 minutes")
-                .accessibilityIdentifier("calendar-event-resize-longer-\(item.id.uuidString)")
+                .accessibilityIdentifier("calendar-event-resize-longer-\(CalendarAllDayLayout.renderIdentity(for: item))")
             }
             .font(.system(size: 9, weight: .semibold))
             .buttonStyle(.borderless)
@@ -2414,9 +2584,10 @@ private struct CalendarInteractiveTimelineEvent: View {
 #endif
 
     private var eventAccessibilityID: String {
-        isInteractionEnabled
-            ? "calendar-event-\(item.id.uuidString)"
-            : "calendar-offscreen-event-\(item.id.uuidString)"
+        let renderIdentity = CalendarAllDayLayout.renderIdentity(for: item)
+        return isInteractionEnabled
+            ? "calendar-event-\(renderIdentity)"
+            : "calendar-offscreen-event-\(renderIdentity)"
     }
 
     private var accessibilityValue: String {
@@ -2448,8 +2619,8 @@ private struct CalendarInteractiveTimelineEvent: View {
                 .accessibilityValue("15 minute resize actions available")
                 .accessibilityHint("Use resize shorter or resize longer actions in 15 minute steps")
                 .accessibilityIdentifier(isInteractionEnabled
-                    ? "calendar-event-resize-\(item.id.uuidString)"
-                    : "calendar-offscreen-event-resize-\(item.id.uuidString)")
+                    ? "calendar-event-resize-\(CalendarAllDayLayout.renderIdentity(for: item))"
+                    : "calendar-offscreen-event-resize-\(CalendarAllDayLayout.renderIdentity(for: item))")
                 .accessibilityAction(named: "Resize shorter 15 minutes") { commitResize(minutes: -15) }
                 .accessibilityAction(named: "Resize longer 15 minutes") { commitResize(minutes: 15) }
                 .contentShape(Rectangle())
@@ -2481,8 +2652,8 @@ private struct CalendarInteractiveTimelineEvent: View {
             .accessibilityValue("15 minute resize actions available")
             .accessibilityHint("Use resize shorter or resize longer actions in 15 minute steps")
             .accessibilityIdentifier(isInteractionEnabled
-                ? "calendar-event-resize-\(item.id.uuidString)"
-                : "calendar-offscreen-event-resize-\(item.id.uuidString)")
+                ? "calendar-event-resize-\(CalendarAllDayLayout.renderIdentity(for: item))"
+                : "calendar-offscreen-event-resize-\(CalendarAllDayLayout.renderIdentity(for: item))")
             .accessibilityAction(named: "Resize shorter 15 minutes") { commitResize(minutes: -15) }
             .accessibilityAction(named: "Resize longer 15 minutes") { commitResize(minutes: 15) }
             .highPriorityGesture(resizeGesture)

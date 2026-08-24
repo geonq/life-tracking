@@ -294,6 +294,125 @@ final class LifeOSUITests: XCTestCase {
         )
     }
 
+    func testCalendarTimedSurfaceVerticalSwipeDoesNotPage() throws {
+        app.buttons["main-tab-calendar"].tap()
+        let pager = app.descendants(matching: .any)["calendar-pager"]
+        XCTAssertTrue(pager.waitForExistence(timeout: 5))
+        let scrollView = app.scrollViews["calendar-vertical-timeline-scroll"]
+        XCTAssertTrue(scrollView.waitForExistence(timeout: 5))
+        let endpoint = app.staticTexts["calendar-timeline-end"]
+        XCTAssertTrue(endpoint.waitForExistence(timeout: 5))
+
+        let committedPage = try XCTUnwrap(pager.value as? String, "The calendar pager must expose a committed page value")
+        let initialEndpointY = endpoint.frame.minY
+        let start = scrollView.coordinate(withNormalizedOffset: CGVector(dx: 0.82, dy: 0.72))
+        let end = scrollView.coordinate(withNormalizedOffset: CGVector(dx: 0.82, dy: 0.28))
+        start.press(forDuration: 0.1, thenDragTo: end)
+
+        let moved = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in endpoint.frame.minY < initialEndpointY - 1 },
+            object: endpoint
+        )
+        XCTAssertEqual(
+            XCTWaiter().wait(for: [moved], timeout: 2),
+            .completed,
+            "A vertical drag starting on the timed surface must remain native vertical scrolling"
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(pager.value as? String),
+            committedPage,
+            "A vertical timed-surface drag must not commit a horizontal day"
+        )
+    }
+
+    func testCalendarPagerUsesAllDayAndTimedSurfacesButNotTheGutter() throws {
+        app.buttons["main-tab-calendar"].tap()
+        let pager = app.descendants(matching: .any)["calendar-pager"]
+        XCTAssertTrue(pager.waitForExistence(timeout: 5))
+        let today = calendarISODate(Calendar.current.startOfDay(for: Date()))
+        XCTAssertTrue(waitForCalendarPagerCommittedDate(today, element: pager))
+
+        let nextPage = calendarISODate(try XCTUnwrap(Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: Date()))))
+        let allDayLane = app.descendants(matching: .any)["calendar-all-day-lane"]
+        XCTAssertTrue(allDayLane.waitForExistence(timeout: 5))
+        allDayLane.swipeLeft()
+        XCTAssertTrue(
+            waitForCalendarPagerCommittedDate(nextPage, element: pager),
+            "A horizontal swipe beginning in the all-day surface must page"
+        )
+
+        app.buttons["calendar-today"].tap()
+        XCTAssertTrue(waitForCalendarPagerCommittedDate(today, element: pager))
+        let timeline = app.scrollViews["calendar-vertical-timeline-scroll"]
+        XCTAssertTrue(timeline.waitForExistence(timeout: 5))
+        let timedStart = timeline.coordinate(withNormalizedOffset: CGVector(dx: 0.82, dy: 0.78))
+        let timedEnd = timeline.coordinate(withNormalizedOffset: CGVector(dx: 0.48, dy: 0.78))
+        timedStart.press(forDuration: 0.1, thenDragTo: timedEnd)
+        XCTAssertTrue(
+            waitForCalendarPagerCommittedDate(nextPage, element: pager),
+            "A horizontal swipe beginning in the timed surface must page"
+        )
+
+        app.buttons["calendar-today"].tap()
+        XCTAssertTrue(waitForCalendarPagerCommittedDate(today, element: pager))
+        let gutterStart = pager.coordinate(withNormalizedOffset: CGVector(dx: 0.02, dy: 0.5))
+        let gutterEnd = pager.coordinate(withNormalizedOffset: CGVector(dx: 0.18, dy: 0.5))
+        gutterStart.press(forDuration: 0.1, thenDragTo: gutterEnd)
+        XCTAssertTrue(
+            waitForCalendarPagerCommittedDate(today, element: pager),
+            "A horizontal drag beginning in the 52pt gutter must not page"
+        )
+    }
+
+    func testCalendarEmptyAllDayDoubleTapCreatesLocalDayEvent() throws {
+        app.buttons["main-tab-calendar"].tap()
+        let pager = app.descendants(matching: .any)["calendar-pager"]
+        XCTAssertTrue(pager.waitForExistence(timeout: 5))
+
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        let todayValue = calendarISODate(today)
+        let nextDay = try XCTUnwrap(calendar.date(byAdding: .day, value: 1, to: today))
+        let nextDayValue = calendarISODate(nextDay)
+        let emptyCell = app.descendants(matching: .any)["calendar-empty-all-day-\(todayValue)"]
+        XCTAssertTrue(emptyCell.waitForExistence(timeout: 5), "The trailing all-day row must expose today's empty cell")
+        emptyCell.doubleTap()
+
+        XCTAssertTrue(app.navigationBars["New event"].waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            app.descendants(matching: .any)["calendar-event-all-day-summary"].waitForExistence(timeout: 5),
+            "Double-tap creation must open an all-day editor, not a timed editor"
+        )
+        let title = app.textFields["calendar-event-title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        title.tap()
+        title.typeText("Phase 2A all-day")
+        app.buttons["calendar-event-save"].tap()
+
+        let lane = app.descendants(matching: .any)["calendar-all-day-lane"]
+        XCTAssertTrue(lane.waitForExistence(timeout: 5))
+        let saved = XCTNSPredicateExpectation(
+            predicate: NSPredicate { object, _ in
+                guard let lane = object as? XCUIElement else { return false }
+                return (lane.value as? String) == "1 event, 2 rows"
+            },
+            object: lane
+        )
+        XCTAssertEqual(XCTWaiter().wait(for: [saved], timeout: 5), .completed)
+
+        let eventCandidates = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "calendar-all-day-event-"))
+            .allElementsBoundByIndex
+        let created = try XCTUnwrap(
+            eventCandidates.first { $0.label.contains("Phase 2A all-day") },
+            "The saved all-day event must render in the all-day lane"
+        )
+        XCTAssertTrue(
+            created.value as? String == "\(todayValue) to \(nextDayValue)",
+            "The created event must use local midnight-to-next-midnight bounds"
+        )
+    }
+
     func testFitnessSourceReviewDismissesSheetAndReachesHealthSettings() throws {
         openFitnessRouteAndAssertTodaySurface()
 

@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 public struct CalendarEventPlacement: Identifiable, Equatable, Sendable {
     public let id: UUID
@@ -14,6 +15,13 @@ public struct CalendarEventPlacement: Identifiable, Equatable, Sendable {
     /// greater depths are inset from the leading edge and rendered above it.
     /// `column` remains as a source-compatible alias for older callers.
     public var depth: Int { column }
+
+    /// SwiftUI/accessibility identity for a rendered occurrence. Recurring
+    /// timed items reuse their anchor UUID, so the occurrence start must be
+    /// part of the identity just as it is for all-day chips.
+    public var renderID: String {
+        CalendarAllDayLayout.renderIdentity(for: item)
+    }
 
     public func layerFrame(containerWidth: Double, edgeInset: Double = 0) -> CalendarEventLayerFrame {
         CalendarOverlapLayout.layerFrame(depth: depth, containerWidth: containerWidth, edgeInset: edgeInset)
@@ -260,7 +268,13 @@ public enum CalendarAllDayLayout {
         public let firstDayIndex: Int
         public let dayCount: Int
 
+        /// Preserve the public UUID identity used by existing callers.
         public var id: UUID { item.id }
+
+        /// A recurring series reuses its source UUID for every derived item.
+        /// The occurrence start is therefore part of the render identity so
+        /// SwiftUI and accessibility never collapse two visible occurrences.
+        public var renderID: String { CalendarAllDayLayout.renderIdentity(for: item) }
 
         fileprivate init(item: CalendarItem, row: Int, firstDayIndex: Int, dayCount: Int) {
             self.item = item
@@ -287,6 +301,11 @@ public enum CalendarAllDayLayout {
 
         let allDayItems = items
             .filter { !$0.isDeleted && isAllDay($0, calendar: calendar) }
+            .filter { item in
+                days.indices.contains { index in
+                    item.start < dayEnds[index] && item.end > dayStarts[index]
+                }
+            }
             .sorted {
                 if $0.start != $1.start { return $0.start < $1.start }
                 if $0.end != $1.end { return $0.end < $1.end }
@@ -312,6 +331,21 @@ public enum CalendarAllDayLayout {
         return result
     }
 
+    /// Stable render identity for both an anchor item and each derived
+    /// recurring occurrence. The exact Date bit pattern avoids locale and DST
+    /// formatting changes while still making the source ID + occurrence start
+    /// explicit in the identity.
+    public static func renderIdentity(for item: CalendarItem) -> String {
+        // Keep the established identifier for ordinary persisted items so
+        // existing deep links and UI automation remain source-compatible.
+        // Only derived recurring occurrences need the additional timestamp.
+        guard let sourceID = item.occurrenceSourceID else {
+            return item.id.uuidString
+        }
+        let occurrenceStart = String(item.start.timeIntervalSinceReferenceDate.bitPattern, radix: 16)
+        return "\(sourceID.uuidString)-\(occurrenceStart)"
+    }
+
     /// Entries + 1: the trailing empty cell is part of the contract even when
     /// the lane is empty (zero entries -> exactly one cell).
     public static func rowCount(
@@ -329,6 +363,96 @@ public enum CalendarAllDayLayout {
     ) -> Double {
         let rows = rowCount(items: items, days: days, calendar: calendar)
         return Double(rows) * rowHeight + Double(max(0, rows - 1)) * rowSpacing
+    }
+
+    /// The row reserved for creation below every rendered all-day entry.
+    /// Keeping this as a pure value makes the hit surface independent from
+    /// SwiftUI's view tree and preserves the entries-plus-one contract.
+    public static func trailingEmptyRowIndex(
+        items: [CalendarItem],
+        days: [Date],
+        calendar: Calendar
+    ) -> Int {
+        max(0, rowCount(items: items, days: days, calendar: calendar) - 1)
+    }
+
+    /// Returns the local frame of one day cell in the trailing empty row.
+    /// The frame is relative to the un-slid all-day strip (the caller applies
+    /// the pager offset), so it is also suitable for deterministic hit tests.
+    public static func trailingEmptyCellFrame(
+        dayIndex: Int,
+        dayWidth: Double,
+        items: [CalendarItem],
+        days: [Date],
+        calendar: Calendar
+    ) -> CGRect? {
+        guard days.indices.contains(dayIndex),
+              dayWidth.isFinite,
+              dayWidth > 0 else { return nil }
+        let row = trailingEmptyRowIndex(items: items, days: days, calendar: calendar)
+        let y = Double(row) * (rowHeight + rowSpacing)
+        return CGRect(
+            x: CGFloat(Double(dayIndex) * dayWidth),
+            y: CGFloat(y),
+            width: CGFloat(dayWidth),
+            height: CGFloat(rowHeight)
+        )
+    }
+
+    /// Resolves a local all-day-strip point to the day owned by the trailing
+    /// empty row. Points in event rows, the gutter, or spacing are rejected.
+    public static func trailingEmptyCellDay(
+        at point: CGPoint,
+        dayWidth: Double,
+        items: [CalendarItem],
+        days: [Date],
+        calendar: Calendar
+    ) -> Date? {
+        guard point.x.isFinite,
+              point.y.isFinite,
+              dayWidth.isFinite,
+              dayWidth > 0,
+              !days.isEmpty else { return nil }
+        let row = trailingEmptyRowIndex(items: items, days: days, calendar: calendar)
+        let rowY = Double(row) * (rowHeight + rowSpacing)
+        let localX = Double(point.x)
+        let localY = Double(point.y)
+        guard localX >= 0,
+              localY >= rowY,
+              localY <= rowY + rowHeight else { return nil }
+        let dayIndex = Int(floor(localX / dayWidth))
+        guard let frame = trailingEmptyCellFrame(
+            dayIndex: dayIndex,
+            dayWidth: dayWidth,
+            items: items,
+            days: days,
+            calendar: calendar
+        ), frame.contains(point) else { return nil }
+        return calendar.startOfDay(for: days[dayIndex])
+    }
+
+    /// All-day creation always uses local midnight boundaries. Calendar day
+    /// arithmetic deliberately preserves 23/24/25-hour DST durations.
+    public static func creationInterval(for day: Date, calendar: Calendar) -> DateInterval? {
+        let start = calendar.startOfDay(for: day)
+        guard let end = calendar.date(byAdding: .day, value: 1, to: start), end > start else {
+            return nil
+        }
+        return DateInterval(start: start, end: end)
+    }
+
+    /// Stable across renders and independent of locale or row position.
+    public static func trailingEmptyCellAccessibilityIdentifier(
+        for day: Date,
+        calendar: Calendar
+    ) -> String {
+        let components = calendar.dateComponents([.year, .month, .day], from: day)
+        return String(
+            format: "calendar-empty-all-day-%04d-%02d-%02d",
+            components.year ?? 0,
+            components.month ?? 0,
+            components.day ?? 0
+        )
     }
 }
 
@@ -829,17 +953,56 @@ public enum CalendarInteractionLayout {
 
     /// Resolves the direction of the iOS 17 fallback drag without claiming
     /// vertical timeline scrolling or event move/resize gestures.
-    public static func isHorizontalPagerDrag(
+    public enum PagerDragAxis: Equatable, Sendable {
+        case undecided
+        case horizontal
+        case vertical
+    }
+
+    public static func pagerDragAxis(
         horizontalTranslation: Double,
         verticalTranslation: Double,
-        minimumDistance: Double = 4
-    ) -> Bool {
+        minimumDistance: Double = 8,
+        dominanceRatio: Double = 1.15
+    ) -> PagerDragAxis {
         guard horizontalTranslation.isFinite,
               verticalTranslation.isFinite,
               minimumDistance.isFinite,
-              minimumDistance >= 0 else { return false }
-        return abs(horizontalTranslation) >= minimumDistance &&
-            abs(horizontalTranslation) > abs(verticalTranslation)
+              minimumDistance >= 0,
+              dominanceRatio.isFinite,
+              dominanceRatio >= 1 else { return .undecided }
+        let horizontal = abs(horizontalTranslation)
+        let vertical = abs(verticalTranslation)
+        guard max(horizontal, vertical) >= minimumDistance else { return .undecided }
+        if horizontal >= vertical * dominanceRatio { return .horizontal }
+        if vertical >= horizontal * dominanceRatio { return .vertical }
+        return .undecided
+    }
+
+    public static func isHorizontalPagerDrag(
+        horizontalTranslation: Double,
+        verticalTranslation: Double,
+        minimumDistance: Double = 8,
+        dominanceRatio: Double = 1.15
+    ) -> Bool {
+        pagerDragAxis(
+            horizontalTranslation: horizontalTranslation,
+            verticalTranslation: verticalTranslation,
+            minimumDistance: minimumDistance,
+            dominanceRatio: dominanceRatio
+        ) == .horizontal
+    }
+
+    /// The hour gutter remains pinned and never starts a horizontal page
+    /// gesture. The boundary itself belongs to the first day column.
+    public static func isPagerStartInDaySurface(
+        startX: Double,
+        timeGutter: Double = 52
+    ) -> Bool {
+        guard startX.isFinite,
+              timeGutter.isFinite,
+              timeGutter >= 0 else { return false }
+        return startX >= timeGutter
     }
 
     /// The Mac empty-grid drag must be visibly intentional. A click or a
