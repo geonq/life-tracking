@@ -2924,6 +2924,13 @@ private struct FitnessHydrationLifestyleCard: View {
                     lifestyleLink(kind: .caffeine, hue: .orange)
                     lifestyleLink(kind: .alcohol, hue: .pink)
                 }
+                if !isFixture,
+                   nutrition.hydrationMilliliters != nil || nutrition.caffeineMilligrams != nil {
+                    Text(appleHealthDaySummary)
+                        .font(LifeOSFont.caption(10))
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 Text("No health-risk conclusion is inferred from these logs. Empty entries remain empty rather than becoming zero.")
                     .font(LifeOSFont.caption(10))
                     .foregroundStyle(LifeOSTokens.tertiaryText)
@@ -2961,6 +2968,22 @@ private struct FitnessHydrationLifestyleCard: View {
     private var timeZoneIdentifier: String {
         let identifier = TimeZone.current.identifier
         return FitnessLifestyleTime.isValidTimeZoneIdentifier(identifier) ? identifier : "UTC"
+    }
+
+    /// Exact selected-day HealthKit totals supplied by the production
+    /// composition. They are shown as a separate labeled fact — never merged
+    /// into the local ledger totals — so a value logged by hand and a value
+    /// synced from Apple Health can never silently double-count.
+    private var appleHealthDaySummary: String {
+        var parts: [String] = []
+        if let hydration = nutrition.hydrationMilliliters {
+            parts.append("Water \(hydration) ml")
+        }
+        if let caffeine = nutrition.caffeineMilligrams {
+            parts.append("Caffeine \(caffeine) mg")
+        }
+        guard !parts.isEmpty else { return "" }
+        return "Apple Health · selected day · " + parts.joined(separator: " · ")
     }
 
     private func reloadLedger() {

@@ -33,7 +33,7 @@ targets:
       CODE_SIGN_ENTITLEMENTS: LifeOS/LifeOS.entitlements
       # A signed local/CI Release configuration must inject the exact private
       # `.ts.net` host. Missing configuration intentionally fails closed.
-      LIFEOS_SYNC_APPROVED_HOSTS: ""
+      LIFEOS_SYNC_APPROVED_HOSTS: "geonqserver.tail5f8789.ts.net"
     dependencies:
       - target: LifeOSWidget
         embed: true
@@ -100,7 +100,7 @@ targets:
       INFOPLIST_FILE: LifeOSMac/Info.plist
       CODE_SIGN_ENTITLEMENTS: LifeOSMac/LifeOSMac.entitlements
       # Same release gate as iOS; never commit the private MagicDNS hostname.
-      LIFEOS_SYNC_APPROVED_HOSTS: ""
+      LIFEOS_SYNC_APPROVED_HOSTS: "geonqserver.tail5f8789.ts.net"
     dependencies:
       - target: LifeOSMacWidget
         embed: true

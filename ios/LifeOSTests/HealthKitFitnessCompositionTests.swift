@@ -547,7 +547,7 @@ final class HealthKitFitnessCompositionTests: XCTestCase {
         XCTAssertEqual(unconfirmed.evidence[.restingHeartRate]?.sourceMatches, [.candidate])
     }
 
-    func testSleepRetainsIntervalAndNamedStagesButDoesNotCallIntervalAsleepDuration() throws {
+    func testSleepWithUnnamedStageShowsExactPartialNamedStageSums() throws {
         let start = now.addingTimeInterval(-3_600)
         let sleepSamples = [
             try sleep(stage: .inBed, start: start, end: start.addingTimeInterval(600)),
@@ -560,18 +560,31 @@ final class HealthKitFitnessCompositionTests: XCTestCase {
             selectedDate: now
         )
 
+        // The night stays partial and its evidence unavailable: the in-bed
+        // interval is never called asleep time. The exact named-stage sums
+        // stay visible with an explicit Partial label instead of vanishing.
         XCTAssertEqual(composition.snapshot.sleepDetail.night.start, start)
         XCTAssertEqual(composition.snapshot.sleepDetail.night.end, start.addingTimeInterval(2_400))
         XCTAssertEqual(composition.snapshot.sleepDetail.night.stageSamples.map(\.stage), [.core, .awake, .rem])
-        XCTAssertNil(composition.snapshot.sleepDetail.duration.value)
         XCTAssertNil(composition.snapshot.sleepDetail.quality.value)
         XCTAssertEqual(composition.snapshot.sleepDetail.night.state, .partial(reason: "Stage samples do not cover the full observed sleep interval."))
         XCTAssertEqual(composition.sleepState, .partial)
         XCTAssertEqual(composition.evidence[.sleep]?.state, .partial)
+
+        // Exact sums of named source stages only; the 600 s in-bed interval
+        // contributes to nothing.
+        XCTAssertEqual(composition.snapshot.sleepDetail.duration.value, "26 min 40s")
         XCTAssertTrue(composition.snapshot.sleepDetail.duration.detail.contains("Partial"))
-        XCTAssertEqual(composition.sleepState, .partial)
-        XCTAssertEqual(composition.evidence[.sleep]?.state, .partial)
-        XCTAssertNil(composition.snapshot.sleepDetail.trends.first(where: { $0.id == .rem })?.metric.value)
+        XCTAssertTrue(composition.snapshot.sleepDetail.duration.detail.contains("unnamed source intervals excluded"))
+        let trends = composition.snapshot.sleepDetail.trends
+        XCTAssertEqual(trends.first(where: { $0.id == .core })?.metric.value, "20 min")
+        XCTAssertEqual(trends.first(where: { $0.id == .awake })?.metric.value, "3 min 20s")
+        XCTAssertEqual(trends.first(where: { $0.id == .rem })?.metric.value, "6 min 40s")
+
+        // The Today Sleep card carries the same exact partial sum.
+        XCTAssertEqual(composition.snapshot.sleep.value, "26 min 40s")
+        XCTAssertTrue((composition.snapshot.sleep.detail).contains("Partial"))
+
         if case .unavailable = composition.snapshot.sleepDetail.night.evidence.state {
             // The domain validator downgraded the night, so its evidence must
             // not continue to claim an observed sleep night.
@@ -734,7 +747,7 @@ final class HealthKitFitnessCompositionTests: XCTestCase {
         XCTAssertEqual(composition.snapshot.sleepDetail.duration.value, "45 s")
     }
 
-    func testSourceDerivedSleepDurationHoursIsNilWhenAnySampleHasUnsupportedStage() throws {
+    func testSourceDerivedSleepDurationHoursMatchesUIPathWhenSampleHasUnsupportedStage() throws {
         let start = now.addingTimeInterval(-3_000)
         let unsupportedStages: [HealthKitSleepStage] = [.inBed, .asleepUnspecified, .unknown(rawValue: 99)]
         for unsupported in unsupportedStages {
@@ -744,16 +757,22 @@ final class HealthKitFitnessCompositionTests: XCTestCase {
             ]
             let testProjection = projection(states: [try state(metric: .sleep, observations: sleepSamples)])
 
-            let widgetDerived = HealthKitFitnessComposition.sourceDerivedSleepDurationHours(
-                from: testProjection,
-                selectedDate: now
+            // The widget seam exposes exactly the named-stage sum (1_500 s);
+            // the unnamed interval is excluded, never counted as asleep.
+            let widgetDerived = try XCTUnwrap(
+                HealthKitFitnessComposition.sourceDerivedSleepDurationHours(
+                    from: testProjection,
+                    selectedDate: now
+                ),
+                "Expected a partial named-stage sum for unsupported stage \(unsupported)"
             )
-            XCTAssertNil(widgetDerived, "Expected nil when a sample has unsupported stage \(unsupported)")
+            XCTAssertEqual(widgetDerived.hours * 3_600, 1_500, accuracy: 0.001)
 
-            // Same all-or-nothing gate as the UI path: the formatted duration
-            // must also be unavailable, never a partial sum.
+            // The UI path stays equivalent to the widget seam and labels the
+            // reduced coverage as Partial.
             let composition = HealthKitFitnessComposition.compose(projection: testProjection, selectedDate: now)
-            XCTAssertNil(composition.snapshot.sleepDetail.duration.value, "UI duration leaked a value for unsupported stage \(unsupported)")
+            XCTAssertEqual(composition.snapshot.sleepDetail.duration.value, "25 min", "UI duration diverged for unsupported stage \(unsupported)")
+            XCTAssertTrue(composition.snapshot.sleepDetail.duration.detail.contains("Partial"))
         }
     }
 
@@ -1279,5 +1298,83 @@ final class HealthKitFitnessCompositionTests: XCTestCase {
         XCTAssertEqual(settings.status, .error)
         XCTAssertEqual(settings.sampleCount, 0)
         XCTAssertEqual(settings.categoryCount, 0)
+    }
+
+    // MARK: - Full coverage of synced metrics
+
+    func testSyncedHeartRateReachesTheHealthMonitorSurface() throws {
+        let sample = try quantity(metric: .heartRate, value: 61.4, at: now)
+        let composition = HealthKitFitnessComposition.compose(
+            projection: projection(states: [try state(metric: .heartRate, observations: [sample])]),
+            selectedDate: now
+        )
+
+        let card = try XCTUnwrap(
+            composition.snapshot.healthMonitor.first(where: { $0.title == "Heart rate" }),
+            "A synced heart-rate observation must be displayed"
+        )
+        XCTAssertEqual(card.value, "61.4")
+        XCTAssertEqual(card.unit, "bpm")
+        XCTAssertEqual(composition.metricStates[.heartRate], .observed)
+
+        let empty = HealthKitFitnessComposition.compose(
+            projection: projection(states: [try state(metric: .heartRate, syncState: .readIndeterminate)]),
+            selectedDate: now
+        )
+        XCTAssertNil(empty.snapshot.healthMonitor.first(where: { $0.title == "Heart rate" })?.value)
+        XCTAssertEqual(empty.metricStates[.heartRate], .readIndeterminate)
+    }
+
+    func testSyncedWaterAndCaffeineDayTotalsReachTheNutritionSnapshot() throws {
+        let water = try quantity(metric: .water, value: 1_250, at: now)
+        let caffeine = try quantity(metric: .caffeine, value: 180, at: now)
+        let composition = HealthKitFitnessComposition.compose(
+            projection: projection(states: [
+                try state(metric: .water, observations: [water]),
+                try state(metric: .caffeine, observations: [caffeine])
+            ]),
+            selectedDate: now
+        )
+
+        XCTAssertEqual(composition.snapshot.nutrition.hydrationMilliliters, 1_250)
+        XCTAssertEqual(composition.snapshot.nutrition.caffeineMilligrams, 180)
+        XCTAssertNil(composition.snapshot.nutrition.hydrationTargetMilliliters, "No target is fabricated")
+
+        // Non-observed durable states stay nil instead of becoming zero.
+        let indeterminate = HealthKitFitnessComposition.compose(
+            projection: projection(states: [
+                try state(metric: .water, syncState: .readIndeterminate),
+                try state(metric: .caffeine, observations: [caffeine], syncState: .partial)
+            ]),
+            selectedDate: now
+        )
+        XCTAssertNil(indeterminate.snapshot.nutrition.hydrationMilliliters)
+        XCTAssertNil(indeterminate.snapshot.nutrition.caffeineMilligrams)
+    }
+
+    func testObservedSleepNightPopulatesTheTodaySleepCardWithExactDuration() throws {
+        let start = now.addingTimeInterval(-2_400)
+        let sleepSamples = [
+            try sleep(stage: .asleepCore, start: start, end: start.addingTimeInterval(1_000)),
+            try sleep(stage: .awake, start: start.addingTimeInterval(1_000), end: start.addingTimeInterval(1_400)),
+            try sleep(stage: .asleepREM, start: start.addingTimeInterval(1_400), end: start.addingTimeInterval(2_400))
+        ]
+        let composition = HealthKitFitnessComposition.compose(
+            projection: projection(states: [try state(metric: .sleep, observations: sleepSamples)]),
+            selectedDate: now
+        )
+        XCTAssertEqual(composition.snapshot.sleep.value, "33 min 20s")
+        XCTAssertEqual(composition.snapshot.sleep.quality, .observed)
+        XCTAssertTrue(composition.snapshot.sleep.detail.contains("Exact HealthKit interval sum"))
+
+        // Without a validated exact sum the card stays unavailable with a
+        // reason rather than showing zero.
+        let empty = HealthKitFitnessComposition.compose(
+            projection: projection(states: [try state(metric: .sleep, syncState: .neverSynced)]),
+            selectedDate: now
+        )
+        XCTAssertNil(empty.snapshot.sleep.value)
+        XCTAssertEqual(empty.snapshot.sleep.quality, .unavailable)
+        XCTAssertTrue(empty.snapshot.sleep.detail.contains("Unavailable"))
     }
 }

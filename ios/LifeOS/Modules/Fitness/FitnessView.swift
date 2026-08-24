@@ -1653,7 +1653,7 @@ private struct FitnessCoreHealthMonitorCard: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Health Monitor")
                         .font(LifeOSFont.header(17))
-                    Text("Six independent observations; missing fields stay unavailable")
+                    Text("Independent observations; missing fields stay unavailable")
                         .font(LifeOSFont.caption(10))
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }

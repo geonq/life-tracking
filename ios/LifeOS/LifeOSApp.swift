@@ -234,6 +234,7 @@ struct LifeOSApp: App {
                     healthKitController.appActive()
                     Task { @MainActor in
                         await healthKitController.refreshStatus()
+                        await autoRequestHealthReadAccessIfNeeded()
                         await healthKitFitnessRepository.refresh()
                         publishWidgetSnapshots()
                     }
@@ -483,6 +484,25 @@ struct LifeOSApp: App {
         if report.promptCompleted == true {
             UserDefaults.standard.set(true, forKey: Self.healthReadPromptCompletedKey)
         }
+    }
+
+    /// Issues the Health read prompt automatically when the system reports it
+    /// is still required, so an install never dead-ends behind the Settings
+    /// navigation just to open the one-time sheet. `requestAuthorization`
+    /// completes instantly without a sheet once every determination exists
+    /// (including grants made manually in the Settings app), so this is a
+    /// no-op for an already-authorized installation and can re-show at most
+    /// until the first completed determination. Read access itself remains
+    /// indeterminate; no per-type denial is inferred from the outcome.
+    @MainActor
+    private func autoRequestHealthReadAccessIfNeeded() async {
+        guard !usesVisualFixtures else { return }
+        let snapshot = healthKitController.snapshot
+        guard !snapshot.isRequestInFlight,
+              !snapshot.explicitRequestCompleted,
+              snapshot.authorizationState == .notRequested ||
+              snapshot.authorizationState == .requestRequired else { return }
+        await requestHealthReadAccess()
     }
 }
 

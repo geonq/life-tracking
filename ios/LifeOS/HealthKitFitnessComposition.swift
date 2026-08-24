@@ -226,6 +226,7 @@ public struct HealthKitFitnessComposition {
 
     private static let latestMetricIDs: [HealthKitMetricID] = [
         .restingHeartRate,
+        .heartRate,
         .heartRateVariabilitySDNN,
         .respiratoryRate,
         .oxygenSaturation,
@@ -314,6 +315,7 @@ public struct HealthKitFitnessComposition {
         }
 
         let restingHeartRate = latestMapping(.restingHeartRate, title: "Resting heart rate", unit: "bpm", hue: .pink)
+        let heartRate = latestMapping(.heartRate, title: "Heart rate", unit: "bpm", hue: .red)
         let hrv = latestMapping(.heartRateVariabilitySDNN, title: "HRV", unit: "ms", hue: .teal)
         let respiration = latestMapping(.respiratoryRate, title: "Respiration", unit: "/min", hue: .blue)
         let oxygen = latestMapping(.oxygenSaturation, title: "Blood oxygen", unit: "%", hue: .green)
@@ -322,7 +324,7 @@ public struct HealthKitFitnessComposition {
         let leanBodyMass = latestMapping(.leanBodyMass, title: "Lean mass", unit: "kg", hue: .teal)
         let vo2Max = latestMapping(.vo2Max, title: "VO₂ max", unit: "ml/kg/min", hue: .green)
 
-        for mapping in [restingHeartRate, hrv, respiration, oxygen, bodyMass, bodyFat, leanBodyMass, vo2Max] {
+        for mapping in [restingHeartRate, heartRate, hrv, respiration, oxygen, bodyMass, bodyFat, leanBodyMass, vo2Max] {
             metricStates[mapping.metricID] = mapping.state
             evidence[mapping.metricID] = mapping.evidence
         }
@@ -349,10 +351,60 @@ public struct HealthKitFitnessComposition {
             selectedDayDescription: selectedDayDescription,
             windowDescription: windowDescription
         )
+        let dailyWater = dailyMapping(
+            projection: projection,
+            metricID: .water,
+            title: "Water",
+            unit: "ml",
+            hue: .blue,
+            selectedDate: selectedDate,
+            selectedDateIsFinite: selectedDateIsFinite,
+            selectedDayDescription: selectedDayDescription,
+            windowDescription: windowDescription
+        )
+        let dailyCaffeine = dailyMapping(
+            projection: projection,
+            metricID: .caffeine,
+            title: "Caffeine",
+            unit: "mg",
+            hue: .amber,
+            selectedDate: selectedDate,
+            selectedDateIsFinite: selectedDateIsFinite,
+            selectedDayDescription: selectedDayDescription,
+            windowDescription: windowDescription
+        )
         metricStates[.steps] = dailySteps.state
         metricStates[.activeEnergy] = dailyEnergy.state
+        metricStates[.water] = dailyWater.state
+        metricStates[.caffeine] = dailyCaffeine.state
         evidence[.steps] = dailySteps.evidence
         evidence[.activeEnergy] = dailyEnergy.evidence
+        evidence[.water] = dailyWater.evidence
+        evidence[.caffeine] = dailyCaffeine.evidence
+
+        // Synced HealthKit water/caffeine day totals reach the Nutrition
+        // surface as exact observed values. Targets stay nil because no
+        // reviewed target source exists here; an absent total stays nil so a
+        // missing observation never becomes a fabricated zero.
+        func displayableDayTotal(_ mapping: MetricMapping, _ metricID: HealthKitMetricID) -> Int? {
+            guard mapping.state == .observed,
+                  selectedDateIsFinite,
+                  let daily = projection.dailyTotal(for: metricID, on: selectedDate),
+                  let total = daily.total,
+                  total.metric == metricID else { return nil }
+            return Int(total.value.rounded())
+        }
+        let nutritionSnapshot = FitnessNutritionSnapshot(
+            calorieTarget: nil,
+            caloriesConsumed: nil,
+            sourceSupportedExpenditure: nil,
+            macroValues: FitnessNutritionSnapshot.unavailable.macroValues,
+            meals: [],
+            hydrationMilliliters: displayableDayTotal(dailyWater, .water),
+            hydrationTargetMilliliters: nil,
+            caffeineMilligrams: displayableDayTotal(dailyCaffeine, .caffeine),
+            alcoholUnits: nil
+        )
 
         let rawSleepEvidence = makeEvidence(
             state: selectedSleep.state,
@@ -360,14 +412,13 @@ public struct HealthKitFitnessComposition {
             window: selectedDayDescription + " · " + windowDescription,
             freshness: sleepFreshness(selectedSleep, calendar: calendar)
         )
-        let preliminarySleepDetail = makeSleepDetail(
-            selected: selectedSleep,
-            evidence: rawSleepEvidence,
-            timeZoneIdentifier: projection.bucketTimeZoneIdentifier
-        )
         let sleepState = reconciledSleepState(
             source: selectedSleep.state,
-            night: preliminarySleepDetail.night.state
+            night: makeSleepDetail(
+                selected: selectedSleep,
+                evidence: rawSleepEvidence,
+                timeZoneIdentifier: projection.bucketTimeZoneIdentifier
+            ).night.state
         )
         let sleepEvidence = makeEvidence(
             state: sleepState,
@@ -420,19 +471,59 @@ public struct HealthKitFitnessComposition {
             freshness: aggregateFreshness
         )
 
+        let sleepDetail = makeSleepDetail(
+            selected: selectedSleep,
+            evidence: sleepEvidence,
+            timeZoneIdentifier: projection.bucketTimeZoneIdentifier
+        )
+        // Reuses the identical gate `makeSleepDetail` already applied above
+        // (same `selected`/`night`/`hasUnsupportedStage` inputs) to also
+        // expose the raw seconds for `sourceDerivedSleepDurationHours`.
+        let sleepHasUnsupportedStage = selectedSleep.samples.contains { fitnessSleepStage(for: $0.stage) == nil }
+        let sleepSecondsByStage = sourceDerivedAsleepSecondsByStage(
+            selected: selectedSleep,
+            night: sleepDetail.night,
+            hasUnsupportedStage: sleepHasUnsupportedStage
+        )
+        let sourceDerivedSleepDurationSeconds = sleepSecondsByStage.map { derived in
+            [FitnessSleepStageSample.Stage.core, .deep, .rem].reduce(0) {
+                $0 + (derived.secondsByStage[$1] ?? 0)
+            }
+        }
+        let sourceDerivedSleepObservedAt = sourceDerivedSleepDurationSeconds != nil
+            ? sleepDetail.night.stageSamples.map(\.end).max()
+            : nil
+
+        // The Today Sleep card shows the exact validated asleep-stage sum —
+        // never a score or quality number. When even that exact sum is not
+        // derivable, the card stays unavailable with its reason.
+        let sleepSummary: FitnessMetric
+        if sleepDetail.duration.quality == .observed, let durationValue = sleepDetail.duration.value {
+            sleepSummary = FitnessMetric(
+                id: "sleep",
+                title: "Sleep",
+                value: durationValue,
+                unit: "",
+                detail: sleepDetail.duration.detail,
+                quality: .observed,
+                hue: .violet
+            )
+        } else {
+            sleepSummary = unavailableMetric(
+                title: "Sleep",
+                unit: "",
+                detail: "Unavailable · exact source stage sums require named HealthKit sleep stages; LifeOS does not calculate sleep quality.",
+                hue: .violet,
+                id: "sleep"
+            )
+        }
+
         let unsupportedSkinTemperature = unavailableMetric(
             title: "Skin temperature",
             unit: "°C",
             detail: "Unavailable · no supported HealthKit fitness mapping in this composition.",
             hue: .orange,
             id: "skin_temperature"
-        )
-        let unsupportedSleep = unavailableMetric(
-            title: "Sleep",
-            unit: "",
-            detail: "Unavailable · source sleep quality is not calculated by LifeOS.",
-            hue: .violet,
-            id: "sleep"
         )
         let unsupportedBaseline = unavailableMetric(
             title: "HRV baseline",
@@ -445,10 +536,11 @@ public struct HealthKitFitnessComposition {
         let healthMonitor = [
             hrv.metric,
             restingHeartRate.metric,
+            heartRate.metric,
             respiration.metric,
             oxygen.metric,
             unsupportedSkinTemperature,
-            unsupportedSleep
+            sleepSummary
         ]
         let bodyMetrics = [
             bodyMass.metric,
@@ -464,26 +556,6 @@ public struct HealthKitFitnessComposition {
             selectedDay: selectedDay
         )
 
-        let sleepDetail = makeSleepDetail(
-            selected: selectedSleep,
-            evidence: sleepEvidence,
-            timeZoneIdentifier: projection.bucketTimeZoneIdentifier
-        )
-        // Reuses the identical gate `makeSleepDetail` already applied above
-        // (same `selected`/`night`/`hasUnsupportedStage` inputs) to also
-        // expose the raw seconds for `sourceDerivedSleepDurationHours`.
-        let sleepHasUnsupportedStage = selectedSleep.samples.contains { fitnessSleepStage(for: $0.stage) == nil }
-        let sleepSecondsByStage = sourceDerivedAsleepSecondsByStage(
-            selected: selectedSleep,
-            night: sleepDetail.night,
-            hasUnsupportedStage: sleepHasUnsupportedStage
-        )
-        let sourceDerivedSleepDurationSeconds = sleepSecondsByStage.map { seconds in
-            [FitnessSleepStageSample.Stage.core, .deep, .rem].reduce(0) { $0 + (seconds[$1] ?? 0) }
-        }
-        let sourceDerivedSleepObservedAt = sourceDerivedSleepDurationSeconds != nil
-            ? sleepDetail.night.stageSamples.map(\.end).max()
-            : nil
         let workoutFacts: [FitnessWorkout] = workoutState == .observed
             ? selectedWorkouts.map { makeWorkout($0, state: workoutState, evidence: evidence[.workout]!) }
             : []
@@ -497,12 +569,13 @@ public struct HealthKitFitnessComposition {
             source: source,
             readiness: .unavailable("Readiness"),
             strain: .unavailable("Strain"),
-            sleep: unsupportedSleep,
+            sleep: sleepSummary,
             stress: .unavailable("Stress"),
             energyReserve: .unavailable("Energy reserve"),
             healthMonitor: healthMonitor,
             bodyMetrics: bodyMetrics,
             workouts: workoutFacts,
+            nutrition: nutritionSnapshot,
             activity: .unavailable,
             biology: biology,
             loadDetail: loadDetail,
@@ -974,9 +1047,7 @@ public struct HealthKitFitnessComposition {
             detail: metricDetail(
                 state: effectiveState,
                 evidence: evidence,
-                reason: hasUnsupportedStage
-                    ? "Source sleep interval and stages retained; derived totals are unavailable because every source stage is not named."
-                    : "Source sleep interval retained; derived totals require a complete, non-overlapping named stage timeline."
+                reason: "Source sleep interval retained; exact derived totals require a clean, non-overlapping named-stage timeline."
             ),
             hue: .violet,
             id: "sleep_duration"
@@ -1015,55 +1086,102 @@ public struct HealthKitFitnessComposition {
     /// formatted `FitnessSleepDetail` path) and
     /// `sourceDerivedSleepDurationHours` (the raw-value seam for non-UI
     /// consumers). Extracted so both call sites run the identical
-    /// observed/no-unsupported-stage/exact-reconciliation gate instead of
-    /// each maintaining their own copy that could silently drift apart.
+    /// gate instead of each maintaining their own copy that could silently
+    /// drift apart.
+    ///
+    /// Tier 1 keeps the original strict contract: a fully validated observed
+    /// night whose samples are all named stages. Tier 2 relaxes only the
+    /// completeness requirement while preserving every truth property: the
+    /// durable sync state must still be clean (`.observed`), the validated
+    /// night timeline must exist without conflicts, and the named stage
+    /// intervals must not overlap. Unnamed source intervals (`inBed`,
+    /// unspecified, unknown) are excluded from the sums — never counted as
+    /// sleep — and the caller labels the result Partial so incomplete stage
+    /// coverage stays visible instead of zeroing every derived total.
     private static func sourceDerivedAsleepSecondsByStage(
         selected: SelectedSleep,
         night: FitnessSleepNight,
         hasUnsupportedStage: Bool
-    ) -> [FitnessSleepStageSample.Stage: Int]? {
-        guard selected.state == .observed,
-              case .observed = night.state,
-              case .observed = night.evidence.state,
-              !hasUnsupportedStage,
-              selected.samples.count == night.stageSamples.count else {
-            return nil
+    ) -> (secondsByStage: [FitnessSleepStageSample.Stage: Int], isPartialCoverage: Bool)? {
+        let strictNightObserved: Bool
+        if case .observed = night.state { strictNightObserved = true } else { strictNightObserved = false }
+        if selected.state == .observed,
+           strictNightObserved,
+           case .observed = night.evidence.state,
+           !hasUnsupportedStage,
+           selected.samples.count == night.stageSamples.count,
+           let strictSeconds = exactStageSeconds(night.stageSamples) {
+            return (secondsByStage: strictSeconds, isPartialCoverage: false)
         }
 
-        let durations = night.stageSamples.reduce(into: [FitnessSleepStageSample.Stage: Double]()) { result, sample in
+        // Tier 2: exact partial-coverage sums for a clean, conflict-free
+        // retained night.
+        guard selected.state == .observed,
+              !night.isUnavailable,
+              strictNightObserved || isPartialNight(night.state),
+              !night.stageSamples.isEmpty else {
+            return nil
+        }
+        guard !hasOverlappingStageIntervals(night.stageSamples) else { return nil }
+        guard let seconds = exactStageSeconds(night.stageSamples) else { return nil }
+        // A relaxed result must actually relax something; otherwise the
+        // strict tier above already declined for a reason worth keeping.
+        guard hasUnsupportedStage || isPartialNight(night.state) else { return nil }
+        return (secondsByStage: seconds, isPartialCoverage: true)
+    }
+
+    private static func isPartialNight(_ state: FitnessSleepNight.State) -> Bool {
+        if case .partial = state { return true }
+        return false
+    }
+
+    private static func exactStageSeconds(
+        _ samples: [FitnessSleepStageSample]
+    ) -> [FitnessSleepStageSample.Stage: Int]? {
+        let durations = samples.reduce(into: [FitnessSleepStageSample.Stage: Double]()) { result, sample in
             result[sample.stage, default: 0] += sample.end.timeIntervalSince(sample.start)
         }
         guard durations.values.allSatisfy({ $0.isFinite && $0 >= 0 }) else { return nil }
-
         return durations.reduce(into: [FitnessSleepStageSample.Stage: Int]()) { result, entry in
             result[entry.key] = Int(entry.value.rounded())
         }
     }
 
-    /// Source-derived sleep totals are deliberately gated by the final
+    private static func hasOverlappingStageIntervals(_ samples: [FitnessSleepStageSample]) -> Bool {
+        let sorted = samples.sorted { $0.start < $1.start }
+        return zip(sorted, sorted.dropFirst()).contains { $0.end > $1.start }
+    }
+
+    /// Source-derived sleep totals are gated by the final
     /// `FitnessSleepNight` validator.  The enclosing interval is not itself
     /// asleep time: only the exact sums of named asleep stages are exposed.
-    /// In-bed, unspecified, and unknown source stages make the whole derived
-    /// set unavailable even when the remaining named samples appear to cover
-    /// the interval.
+    /// When unnamed source stages or coverage gaps make the night partial,
+    /// the exact named-stage sums stay visible with an explicit Partial
+    /// label instead of disappearing entirely.
     private static func sourceDerivedSleepMetrics(
         selected: SelectedSleep,
         night: FitnessSleepNight,
         evidence: HealthKitFitnessCompositionEvidence,
         hasUnsupportedStage: Bool
     ) -> SourceDerivedSleepMetrics? {
-        guard let secondsByStage = sourceDerivedAsleepSecondsByStage(
+        guard let derived = sourceDerivedAsleepSecondsByStage(
             selected: selected,
             night: night,
             hasUnsupportedStage: hasUnsupportedStage
         ) else { return nil }
+        let secondsByStage = derived.secondsByStage
 
         let asleepSeconds = [
             FitnessSleepStageSample.Stage.core,
             .deep,
             .rem
         ].reduce(0) { total, stage in total + (secondsByStage[stage] ?? 0) }
-        let detail = "Exact HealthKit interval sum · named stages · \(evidence.source) · \(evidence.provenance) · \(evidence.freshness)"
+        let detail: String
+        if derived.isPartialCoverage {
+            detail = "Partial · exact HealthKit interval sum of named stages only · unnamed source intervals excluded · \(evidence.source) · \(evidence.provenance) · \(evidence.freshness)"
+        } else {
+            detail = "Exact HealthKit interval sum · named stages · \(evidence.source) · \(evidence.provenance) · \(evidence.freshness)"
+        }
         let duration = FitnessMetric(
             id: "sleep_duration",
             title: "Sleep duration",

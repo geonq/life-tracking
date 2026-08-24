@@ -319,6 +319,7 @@ public struct HealthKitFitnessProjection: Equatable, Sendable {
     public static let maximumWindow: TimeInterval = 366 * 24 * 60 * 60
     public static let latestMetricIDs: [HealthKitMetricID] = [
         .restingHeartRate,
+        .heartRate,
         .heartRateVariabilitySDNN,
         .respiratoryRate,
         .oxygenSaturation,
