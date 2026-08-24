@@ -344,9 +344,9 @@ public extension CalendarProgress {
     var color: Color {
         switch self {
         case .planned: LifeOSTokens.accent
-        case .inProgress: .orange
-        case .done: .green
-        case .aborted: .red
+        case .inProgress: LifeOSTokens.warning
+        case .done: LifeOSTokens.success
+        case .aborted: LifeOSTokens.danger
         }
     }
 
@@ -361,11 +361,15 @@ public extension CalendarProgress {
 }
 
 private enum CalendarEventVisuals {
-    static let accent = LifeOSTokens.Hue.green.base
-    static let today = Color.lifeOSCalendarRed
-    static let fillOpacity = 0.24
-    static let leadingBarOpacity = 0.92
-    static let borderOpacity = 0.38
+    /// Quiet Machine §5.6: ONE restrained event color — the accent. Fill 10%,
+    /// solid 3pt leading bar, no chip border.
+    static let accent = LifeOSTokens.accent
+    /// Today is marked by primary-text inversion (filled marker in
+    /// primaryText, numeral in canvas color) — no dedicated red hue.
+    static let today = LifeOSTokens.primaryText
+    static let fillOpacity = 0.10
+    static let leadingBarOpacity = 1.0
+    static let borderOpacity = 0.0
     static let hoverOpacity = 0.72
     static let pressOpacity = 0.84
 }
@@ -3079,7 +3083,8 @@ private struct CalendarDayHeaderNumber: View {
         let isToday = calendar.isDateInToday(day)
         let label = Text(day, format: .dateTime.day())
             .font(.title3.weight(isToday ? .bold : .medium))
-            .foregroundStyle(isToday ? Color.white : Color.primary)
+            // Inverted today marker: numeral in canvas color on primaryText.
+            .foregroundStyle(isToday ? LifeOSTokens.canvas : Color.primary)
             .frame(width: 30, height: 28)
             .background(isToday ? CalendarEventVisuals.today : .clear, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
 
@@ -3358,7 +3363,7 @@ public struct CalendarMonthGrid: View {
             Button { onSelectDate(day) } label: {
                 Text(day, format: .dateTime.day())
                     .font(.caption.weight(calendar.isDateInToday(day) ? .bold : .medium))
-                    .foregroundStyle(calendar.isDateInToday(day) ? .white : (isCurrentMonth ? Color.primary : Color.secondary))
+                    .foregroundStyle(calendar.isDateInToday(day) ? LifeOSTokens.canvas : (isCurrentMonth ? Color.primary : Color.secondary))
                     .frame(width: 25, height: 25)
                     .background(calendar.isDateInToday(day) ? CalendarEventVisuals.today : .clear, in: Circle())
             }
@@ -3825,7 +3830,9 @@ private struct CalendarExpandedDateCell: View {
                 }
                 let label = Text(day, format: .dateTime.day())
                     .font(.system(size: 15, weight: isToday || isSelected ? .semibold : .regular))
-                    .foregroundStyle(isToday ? Color.white : (isCurrentMonth ? Color.primary : Color.secondary.opacity(0.50)))
+                    // §5.6: today inverts (canvas numeral on primaryText);
+                    // out-of-month days read quaternary.
+                    .foregroundStyle(isToday ? LifeOSTokens.canvas : (isCurrentMonth ? Color.primary : LifeOSTokens.quaternaryText))
                     .frame(width: 32, height: 32)
                     .background(isToday ? CalendarEventVisuals.today : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                 if isSelected, let namespace, !reduceMotion {
@@ -3991,8 +3998,11 @@ private struct CalendarCompactDayButton: View {
     }
 
     private var dayForeground: Color {
-        if isSelected || isToday { return .white }
-        return isInMonth ? .primary : LifeOSTokens.tertiaryText.opacity(0.55)
+        // Selected days sit on the accent (white text); today inverts to
+        // canvas-on-primaryText. Selection wins when both apply.
+        if isSelected { return .white }
+        if isToday { return LifeOSTokens.canvas }
+        return isInMonth ? .primary : LifeOSTokens.quaternaryText
     }
 
     private var dayBackground: Color {

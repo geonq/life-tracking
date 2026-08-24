@@ -275,7 +275,7 @@ private struct FitnessBiologyMetricCard: View {
             .padding(15)
             .frame(maxWidth: .infinity, minHeight: 118, alignment: .leading)
             .glassCard()
-            .overlay(LifeOSTokens.cardShape.stroke(hovering ? metric.id.hue.base.opacity(0.38) : Color.clear, lineWidth: hovering ? 1 : 0.75))
+            .overlay(LifeOSTokens.cardShape.stroke(hovering ? LifeOSTokens.strongBorder : Color.clear, lineWidth: 1))
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
@@ -339,13 +339,13 @@ private struct FitnessBiologyMiniChart: View {
                 let path = FitnessBiologyChartGeometry.path(for: points, in: geometry.size)
                 ZStack {
                     path
-                        .stroke(hue.base.opacity(0.22), style: StrokeStyle(lineWidth: 1, dash: [2, 3]))
+                        .stroke(LifeOSTokens.accent.opacity(0.22), style: StrokeStyle(lineWidth: 1, dash: [2, 3]))
                     path
-                        .stroke(hue.base, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                        .stroke(LifeOSTokens.accent, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
                 }
             } else {
                 HStack(spacing: 4) {
-                    Circle().fill(isEmpty ? LifeOSTokens.tertiaryText.opacity(0.45) : hue.base).frame(width: 5, height: 5)
+                    Circle().fill(isEmpty ? LifeOSTokens.tertiaryText.opacity(0.45) : LifeOSTokens.accent).frame(width: 5, height: 5)
                     Rectangle().fill(LifeOSTokens.quietBorder).frame(height: 1)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
@@ -487,7 +487,7 @@ private struct FitnessBiologyTrendChart: View {
         GeometryReader { geometry in
             ZStack(alignment: .topLeading) {
                 FitnessBiologyChartGeometry.path(for: points, in: geometry.size)
-                    .stroke(hue.base, style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
+                    .stroke(LifeOSTokens.accent, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
                 if let selectedIndex, points.indices.contains(selectedIndex) {
                     let point = points[selectedIndex]
                     let location = FitnessBiologyChartGeometry.location(for: point, points: points, in: geometry.size)
@@ -497,7 +497,7 @@ private struct FitnessBiologyTrendChart: View {
                         .offset(x: location.x)
                     Circle()
                         .fill(LifeOSTokens.surface)
-                        .overlay(Circle().stroke(hue.base, lineWidth: 2))
+                        .overlay(Circle().stroke(LifeOSTokens.accent, lineWidth: 2))
                         .frame(width: 12, height: 12)
                         .position(location)
                 }

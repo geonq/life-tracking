@@ -2371,9 +2371,10 @@ private struct SettingsIntro: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
-                .font(LifeOSFont.spaceGrotesk(22, weight: .bold))
+                .font(LifeOSFont.title())
+                .tracking(-0.2)
             Text(message)
-                .font(LifeOSFont.inter(14))
+                .font(LifeOSFont.bodyText())
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -2401,10 +2402,17 @@ private struct SettingsStatusRow: View {
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
             Spacer(minLength: 8)
-            Text(status)
-                .font(LifeOSFont.inter(11, weight: .semiBold))
-                .foregroundStyle(statusColor)
-                .multilineTextAlignment(.trailing)
+            // §4.2: semantic dot + axis text instead of colored text alone.
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 6, height: 6)
+                Text(status)
+                    .font(LifeOSFont.axis())
+                    .tracking(0.2)
+                    .foregroundStyle(statusColor)
+                    .multilineTextAlignment(.trailing)
+            }
         }
         .padding(.vertical, 10)
         .accessibilityElement(children: .combine)
@@ -2426,19 +2434,21 @@ private struct TruthfulSetupNote: View {
     let text: String
 
     var body: some View {
+        // §5.2: the warning is a 6pt dot on a flat card — no tinted fill,
+        // hairline border only. Copy is product truth and stays verbatim.
         HStack(alignment: .top, spacing: 8) {
-            LifeOSIcon(.warning)
-                .foregroundStyle(LifeOSTokens.warning)
-                .frame(width: 16, height: 16)
+            Circle()
+                .fill(LifeOSTokens.warning)
+                .frame(width: 6, height: 6)
+                .padding(.top, 5)
             Text(text)
-                .font(LifeOSFont.inter(12))
+                .font(LifeOSFont.metadata())
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(LifeOSTokens.warning.opacity(0.07), in: LifeOSTokens.cardShape)
-        .overlay(LifeOSTokens.cardShape.stroke(LifeOSTokens.warning.opacity(0.24), lineWidth: 0.75))
+        .flatCard()
         .accessibilityElement(children: .combine)
     }
 }
@@ -2450,17 +2460,20 @@ private struct SettingsSection<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            // §5.2: sections stop shouting — neutral icon + callout-weight title.
             HStack(spacing: 8) {
-                LifeOSIcon(icon).frame(width: 18, height: 18)
+                LifeOSIcon(icon)
+                    .foregroundStyle(LifeOSTokens.secondaryText)
+                    .frame(width: 18, height: 18)
                 Text(title)
+                    .foregroundStyle(LifeOSTokens.primaryText)
             }
-            .font(LifeOSFont.inter(15, weight: .semiBold))
-            .foregroundStyle(LifeOSTokens.accent)
+            .font(LifeOSFont.callout().weight(.semibold))
             content
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassCard()
+        .flatCard()
         .accessibilityElement(children: .contain)
     }
 }

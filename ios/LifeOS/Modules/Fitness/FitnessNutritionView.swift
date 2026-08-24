@@ -845,7 +845,7 @@ private struct NutritionSummaryValue: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 5) {
-                Circle().fill(hue.base).frame(width: 6, height: 6)
+                Circle().fill(LifeOSTokens.tertiaryText).frame(width: 6, height: 6)
                 Text(title).font(LifeOSFont.caption(9)).foregroundStyle(LifeOSTokens.tertiaryText).lineLimit(1)
             }
             Text(value).font(LifeOSFont.inter(13, weight: .semiBold)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.65)
@@ -931,6 +931,18 @@ private struct NutritionMacroDisplayToggle: View {
     }
 }
 
+
+/// §5.5: macro colors are data semantics keyed by name — protein accent,
+/// carbs success, fat warning. The legacy per-metric hue ramp is not used.
+private func nutritionMacroColor(name: String) -> Color {
+    switch name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+    case "protein": LifeOSTokens.accent
+    case "carbs", "carbohydrates": LifeOSTokens.success
+    case "fat": LifeOSTokens.warning
+    default: LifeOSTokens.secondaryText
+    }
+}
+
 private struct NutritionMacroDotRow: View {
     let macro: FitnessMacroValue
     let display: NutritionMacroDisplay
@@ -950,7 +962,7 @@ private struct NutritionMacroDotRow: View {
             HStack(spacing: 4) {
                 ForEach(0..<10, id: \.self) { index in
                     Circle()
-                        .fill(index < filledDots ? macro.hue.base : LifeOSTokens.quietBorder.opacity(0.75))
+                        .fill(index < filledDots ? nutritionMacroColor(name: macro.name) : LifeOSTokens.quietBorder.opacity(0.75))
                         .frame(width: 8, height: 8)
                 }
             }
@@ -1046,7 +1058,7 @@ private struct NutritionEnergyFact: View {
 
     var body: some View {
         HStack(spacing: 5) {
-            Circle().fill(hue.base).frame(width: 6, height: 6)
+            Circle().fill(LifeOSTokens.tertiaryText).frame(width: 6, height: 6)
             Text("\(title) \(value.map(String.init) ?? "—")")
                 .font(LifeOSFont.caption(10))
                 .monospacedDigit()
@@ -1068,7 +1080,7 @@ private struct NutritionEnergyScale: View {
                     let eatenWidth = width * CGFloat(eaten) / CGFloat(total)
                     let burnedWidth = width * CGFloat(burned) / CGFloat(total)
                     Capsule().fill(LifeOSTokens.success.opacity(0.52)).frame(width: min(width, CGFloat(eatenWidth)))
-                    Capsule().fill(LifeOSTokens.Hue.orange.base.opacity(0.7)).frame(width: min(width, CGFloat(burnedWidth)))
+                    Capsule().fill(LifeOSTokens.warning.opacity(0.7)).frame(width: min(width, CGFloat(burnedWidth)))
                 }
             }
         }
@@ -1136,12 +1148,12 @@ private struct NutritionContributionCell: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                Circle().fill(value == nil ? LifeOSTokens.tertiaryText : hue.base).frame(width: 6, height: 6)
+                Circle().fill(value == nil ? LifeOSTokens.tertiaryText : LifeOSTokens.secondaryText).frame(width: 6, height: 6)
                 Text(category).font(LifeOSFont.caption(10)).lineLimit(1)
             }
             if let value {
                 ProgressView(value: value)
-                    .tint(hue.base)
+                    .tint(LifeOSTokens.accent)
                 Text("\((value * 100).formatted(.number.precision(.fractionLength(0))))%")
                     .font(LifeOSFont.inter(12, weight: .semiBold)).monospacedDigit()
                 Text(detail ?? "Recorded input")
@@ -1428,7 +1440,7 @@ private struct NutritionSurfaceCard<Content: View>: View {
         .padding(15)
         .frame(maxWidth: .infinity, alignment: .leading)
         .glassCard()
-        .overlay(LifeOSTokens.cardShape.stroke(hovering ? accent.base.opacity(0.34) : Color.clear, lineWidth: hovering ? 1 : 0.75))
+        .overlay(LifeOSTokens.cardShape.stroke(hovering ? LifeOSTokens.strongBorder : Color.clear, lineWidth: 1))
 #if os(macOS)
         .onHover { hovering = $0 }
 #endif
@@ -1833,7 +1845,7 @@ private struct NutritionEnergyColumn: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Circle().fill(hue.base).frame(width: 6, height: 6)
+            Circle().fill(LifeOSTokens.tertiaryText).frame(width: 6, height: 6)
             Text(title).font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
             Text(value)
                 .font(LifeOSFont.inter(12, weight: .semiBold))
@@ -1876,7 +1888,7 @@ private struct FitnessMacroCard: View {
                             let progress = macro.target.flatMap { target in macro.value.map { min(1, $0 / max(target, 1)) } } ?? 0
                             ZStack(alignment: .leading) {
                                 Capsule().fill(LifeOSTokens.quietBorder.opacity(0.65))
-                                Capsule().fill(LinearGradient(colors: [macro.hue.base, macro.hue.glow], startPoint: .leading, endPoint: .trailing)).frame(width: proxy.size.width * progress)
+                                Capsule().fill(nutritionMacroColor(name: macro.name)).frame(width: proxy.size.width * progress)
                             }
                         }
                         .frame(height: 7)
@@ -3073,7 +3085,7 @@ private struct LifestyleColumn: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Circle().fill(hue.base).frame(width: 6, height: 6)
+            Circle().fill(LifeOSTokens.tertiaryText).frame(width: 6, height: 6)
             Text(title).font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
             Text(value)
                 .font(LifeOSFont.inter(11, weight: .semiBold))

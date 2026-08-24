@@ -20,6 +20,28 @@ final class LifeOSDesignSystemTests: XCTestCase {
         XCTAssertEqual(LifeOSTokens.Control.minimumTarget, 44)
     }
 
+    /// Quiet Machine §2.5/§4.1: no shadows at rest and exactly one hairline
+    /// border identity shared by every border alias.
+    func testVisualOverhaulShadowPolicyAndHairlineContract() {
+        XCTAssertEqual(LifeOSTokens.cardShadowRadius, 0)
+        XCTAssertEqual(LifeOSTokens.cardShadowX, 0)
+        XCTAssertEqual(LifeOSTokens.cardShadowY, 0)
+
+        // quietBorder/chartGrid are aliases of THE hairline; the retired
+        // opacity variants are gone (same instance ⇒ equal).
+        XCTAssertEqual(LifeOSTokens.quietBorder, LifeOSTokens.hairlineBorder)
+        XCTAssertEqual(LifeOSTokens.chartGrid, LifeOSTokens.hairlineBorder)
+        XCTAssertEqual(LifeOSTokens.hairlineBorder, LifeOSTokens.subtleBorder)
+
+        // One accent: teal `info` is retired as an alias of accent.
+        XCTAssertEqual(LifeOSTokens.info, LifeOSTokens.accent)
+
+        // Chart series semantics per §2.4.
+        XCTAssertEqual(LifeOSTokens.Series.estimate, LifeOSTokens.warning)
+        XCTAssertEqual(LifeOSTokens.Series.target, LifeOSTokens.success)
+        XCTAssertEqual(LifeOSTokens.Series.history, LifeOSTokens.metadataText)
+    }
+
     func testResponsiveMetricsKeepMobileAndWideDesktopContracts() {
         let phone = LifeOSResponsiveMetrics(width: 390)
         XCTAssertTrue(phone.isCompact)

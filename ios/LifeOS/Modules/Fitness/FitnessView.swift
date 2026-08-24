@@ -830,16 +830,17 @@ private struct FitnessHeader: View {
                 Spacer(minLength: 8)
 
                 Button(action: onSourceTap) {
+                    // §4.2: dot + overline, no tinted chip background.
                     HStack(spacing: 6) {
-                        Circle().fill(source.status.color).frame(width: 7, height: 7)
+                        Circle().fill(source.status.color).frame(width: 6, height: 6)
                         Text(source.status.label)
-                            .font(LifeOSFont.inter(11, weight: .semiBold))
+                            .font(LifeOSFont.overline())
+                            .tracking(0.8)
+                            .textCase(.uppercase)
                             .foregroundStyle(source.status.color)
                     }
                     .padding(.horizontal, 9)
                     .padding(.vertical, 6)
-                    .background(source.status.color.opacity(0.10), in: Capsule())
-                    .overlay(Capsule().stroke(source.status.color.opacity(0.24), lineWidth: 0.75))
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Health source status")
@@ -1031,11 +1032,10 @@ private struct FitnessSectionPicker: View {
                     .frame(width: 12, height: 12)
                     .rotationEffect(.degrees(90))
             }
-            .foregroundStyle(LifeOSTokens.accent)
+            .foregroundStyle(LifeOSTokens.primaryText)
             .padding(.horizontal, 11)
             .frame(height: 36, alignment: .leading)
-            .background(LifeOSTokens.accent.opacity(0.12), in: Capsule())
-            .overlay(Capsule().stroke(LifeOSTokens.accent.opacity(0.30), lineWidth: 0.75))
+            .background(LifeOSTokens.raised, in: Capsule())
             .padding(.horizontal, 16)
         }
         .menuStyle(.borderlessButton)
@@ -1057,11 +1057,10 @@ private struct FitnessSectionPicker: View {
                         .font(LifeOSFont.inter(12, weight: .semiBold))
                         .fixedSize(horizontal: true, vertical: false)
                 }
-                .foregroundStyle(selection == section ? LifeOSTokens.accent : LifeOSTokens.tertiaryText)
+                .foregroundStyle(selection == section ? LifeOSTokens.primaryText : LifeOSTokens.tertiaryText)
                 .padding(.horizontal, 11)
                 .padding(.vertical, 8)
-                .background(selection == section ? LifeOSTokens.accent.opacity(0.12) : LifeOSTokens.surface.opacity(0.48), in: Capsule())
-                .overlay(Capsule().stroke(selection == section ? LifeOSTokens.accent.opacity(0.30) : LifeOSTokens.quietBorder, lineWidth: 0.75))
+                .background(selection == section ? LifeOSTokens.raised : LifeOSTokens.surface.opacity(0.48), in: Capsule())
             }
             .buttonStyle(.plain)
             .background(GeometryReader { geometry in
@@ -1479,7 +1478,7 @@ private struct FitnessCoreReadinessHero: View {
                 }
                 Spacer(minLength: 8)
                 if let progress = metric.progress, metric.quality != .unavailable {
-                    FitnessRing(progress: progress, hue: metric.hue, size: 78)
+                    FitnessRing(progress: progress, hue: metric.hue, size: 78, color: FitnessRingPalette.threshold(progress))
                         .accessibilityHidden(true)
                 } else {
                     FitnessCoreUnavailableMark(size: 58)
@@ -1529,7 +1528,7 @@ private struct FitnessCoreMetricCard: View {
                 }
                 Spacer(minLength: 4)
                 if let progress = metric.progress, metric.quality != .unavailable {
-                    FitnessRing(progress: progress, hue: metric.hue, size: emphasis ? 58 : 48)
+                    FitnessRing(progress: progress, hue: metric.hue, size: emphasis ? 58 : 48, color: FitnessRingPalette.color(route: route, progress: progress))
                         .accessibilityHidden(true)
                 } else {
                     FitnessCoreUnavailableMark(size: 42)
@@ -1538,7 +1537,7 @@ private struct FitnessCoreMetricCard: View {
             if metric.trend.isEmpty {
                 FitnessCoreProvenance(metric: metric)
             } else {
-                FitnessCoreSparkline(values: metric.trend, hue: metric.hue)
+                FitnessCoreSparkline(values: metric.trend)
                 FitnessCoreProvenance(metric: metric)
             }
         }
@@ -1563,8 +1562,8 @@ private struct FitnessCoreNavigationCard<Content: View>: View {
             .glassCard()
             .overlay(
                 LifeOSTokens.cardShape.stroke(
-                    hovering ? accent.base.opacity(0.42) : Color.clear,
-                    lineWidth: hovering ? 1 : 0.75
+                    hovering ? LifeOSTokens.strongBorder : Color.clear,
+                    lineWidth: 1
                 )
             )
             .contentShape(LifeOSTokens.cardShape)
@@ -1584,11 +1583,11 @@ private struct FitnessCoreProvenance: View {
     var body: some View {
         HStack(spacing: 6) {
             Circle()
-                .fill(metric.quality == .unavailable ? LifeOSTokens.tertiaryText : metric.hue.base)
+                .fill((metric.quality == .demo ? LifeOSTokens.warning : LifeOSTokens.tertiaryText))
                 .frame(width: 6, height: 6)
             Text(metric.quality == .demo ? "Fixture" : metric.quality == .unavailable ? "Unavailable" : metric.quality.label)
                 .font(LifeOSFont.inter(10, weight: .semiBold))
-                .foregroundStyle(metric.quality == .unavailable ? LifeOSTokens.tertiaryText : metric.hue.base)
+                .foregroundStyle((metric.quality == .demo ? LifeOSTokens.warning : LifeOSTokens.tertiaryText))
             Text("·")
                 .foregroundStyle(Color.secondary)
             Text(compactDetail)
@@ -1625,14 +1624,20 @@ private struct FitnessCoreUnavailableMark: View {
 
 private struct FitnessCoreSparkline: View {
     let values: [Double]
-    let hue: LifeOSTokens.Hue
+    // §5.5: the trend sparkline is the one chromatic element on neutral
+    // metric cards — always accent. The legacy `hue` init arg is dropped.
+    var accent: Color = LifeOSTokens.accent
+
+    init(values: [Double]) {
+        self.values = values
+    }
 
     var body: some View {
         let normalized = FitnessTrendSeries(values: values)?.normalized ?? []
         HStack(alignment: .bottom, spacing: 4) {
             ForEach(Array(normalized.enumerated()), id: \.offset) { _, value in
                 RoundedRectangle(cornerRadius: 2, style: .continuous)
-                    .fill(hue.base.opacity(0.42 + value * 0.42))
+                    .fill(accent.opacity(0.42 + value * 0.42))
                     .frame(maxWidth: .infinity, minHeight: 4, maxHeight: 34)
                     .frame(height: max(4, min(34, CGFloat(value) * 30 + 4)))
             }
@@ -1678,7 +1683,7 @@ private struct FitnessCoreMiniMetric: View {
     var body: some View {
         HStack(spacing: 8) {
             Circle()
-                .fill(metric.quality == .unavailable ? LifeOSTokens.tertiaryText : metric.hue.base)
+                .fill((metric.quality == .demo ? LifeOSTokens.warning : LifeOSTokens.tertiaryText))
                 .frame(width: 7, height: 7)
             VStack(alignment: .leading, spacing: 2) {
                 Text(metric.title)
@@ -1756,9 +1761,9 @@ private struct FitnessCoreTimelineCard: View {
                     ForEach(items) { item in
                         HStack(spacing: 10) {
                             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(item.hue.base.opacity(0.14))
+                                .fill(LifeOSTokens.raised)
                                 .frame(width: 32, height: 32)
-                                .overlay(LifeOSIcon(item.icon).foregroundStyle(item.hue.base).frame(width: 15, height: 15))
+                                .overlay(LifeOSIcon(item.icon).foregroundStyle(LifeOSTokens.secondaryText).frame(width: 15, height: 15))
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(item.title)
                                     .font(LifeOSFont.inter(12, weight: .medium))
@@ -2172,7 +2177,7 @@ private struct FitnessCoreLoadTrendCard: View {
                     Text(card.metric.unit).font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
                 }
                 if let selectedSeries, !selectedSeries.isEmpty {
-                    FitnessCoreSparkline(values: selectedSeries, hue: card.metric.hue)
+                    FitnessCoreSparkline(values: selectedSeries)
                     Text("\(card.truth.label) · \(selectedRange.title) series")
                         .font(LifeOSFont.inter(10, weight: .semiBold))
                         .foregroundStyle(truthColor)
@@ -2194,7 +2199,7 @@ private struct FitnessCoreLoadTrendCard: View {
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(LifeOSTokens.screenCanvas.opacity(hovering || isExpanded || isFocused ? 0.72 : 0.38), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(hovering || isExpanded || isFocused ? card.metric.hue.base.opacity(0.44) : LifeOSTokens.hairlineBorder, lineWidth: 0.75))
+            .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(hovering || isExpanded || isFocused ? LifeOSTokens.strongBorder : LifeOSTokens.hairlineBorder, lineWidth: 1))
         }
         .buttonStyle(.plain)
 #if os(macOS)
@@ -2366,7 +2371,7 @@ private struct FitnessCoreRecoveryTrendButton: View {
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
                 if let series = card.series(for: range), !series.isEmpty {
-                    FitnessCoreSparkline(values: series, hue: card.metric.hue)
+                    FitnessCoreSparkline(values: series)
                 } else if card.metric.quality != .unavailable {
                     Text("Source series unavailable · range not relabelled")
                         .font(LifeOSFont.caption(10))
@@ -2864,7 +2869,7 @@ private struct FitnessCoreSleepTrendCard: View {
                     }
                 }
                 if let selectedSeries, !selectedSeries.isEmpty {
-                    FitnessCoreSparkline(values: selectedSeries, hue: card.metric.hue)
+                    FitnessCoreSparkline(values: selectedSeries)
                     if FitnessTrendSeries(values: selectedSeries) != nil {
                         Text(sourceContext(selectedSeries))
                             .font(LifeOSFont.caption(9))
@@ -2983,7 +2988,7 @@ private struct FitnessCoreTrendCard: View {
                     .foregroundStyle(metric.quality == .unavailable ? LifeOSTokens.tertiaryText : .primary)
             }
             if !metric.trend.isEmpty {
-                FitnessCoreSparkline(values: metric.trend, hue: metric.hue)
+                FitnessCoreSparkline(values: metric.trend)
             }
             Text(metric.quality == .unavailable
                  ? metric.detail
@@ -3076,7 +3081,7 @@ private struct FitnessCoreDetailHero: View {
                 }
                 Spacer(minLength: 0)
                 if let progress = metric.progress, metric.quality != .unavailable {
-                    FitnessRing(progress: progress, hue: metric.hue, size: 112)
+                    FitnessRing(progress: progress, hue: metric.hue, size: 112, color: FitnessRingPalette.color(route: route, progress: progress))
                         .accessibilityHidden(true)
                 } else {
                     FitnessCoreUnavailableMark(size: 66)
@@ -3150,7 +3155,7 @@ private struct FitnessCoreTrendDetail: View {
                 if metric.trend.isEmpty {
                     FitnessEmptyRow(title: "Trend unavailable", detail: "A trend needs source samples across a named window. Missing days are not converted to zero.", icon: .more)
                 } else {
-                    FitnessCoreSparkline(values: metric.trend, hue: metric.hue)
+                    FitnessCoreSparkline(values: metric.trend)
                     Text("Observed window · source samples are shown as supplied")
                         .font(LifeOSFont.caption(10))
                         .foregroundStyle(LifeOSTokens.tertiaryText)
@@ -3282,7 +3287,7 @@ private struct FitnessCoreStressScrubChart: View {
                         else { path.addLine(to: CGPoint(x: x, y: y)) }
                     }
                 }
-                .stroke(hue.base, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                .stroke(LifeOSTokens.accent, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
                 if values.indices.contains(selectedIndex) {
                     let x = values.count > 1 ? proxy.size.width * CGFloat(selectedIndex) / CGFloat(values.count - 1) : 0
                     let y = proxy.size.height * CGFloat(1 - min(max(values[selectedIndex], 0), 1))
@@ -3292,7 +3297,7 @@ private struct FitnessCoreStressScrubChart: View {
                     }
                     .stroke(LifeOSTokens.tertiaryText.opacity(0.55), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
                     Circle()
-                        .fill(hue.base)
+                        .fill(LifeOSTokens.accent)
                         .frame(width: 10, height: 10)
                         .offset(x: x - 5, y: y - 5)
                 }
@@ -3320,7 +3325,7 @@ private struct FitnessCoreStressScrubChart: View {
         .frame(height: 88)
         .overlay(
             RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .stroke(isFocused ? hue.base.opacity(0.9) : .clear, lineWidth: 1.5)
+                .stroke(isFocused ? LifeOSTokens.strongBorder : .clear, lineWidth: 1)
         )
         .accessibilityHidden(true)
     }
@@ -3359,9 +3364,9 @@ private struct FitnessCoreWorkoutDetail: View {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack(spacing: 10) {
                             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .fill(workout.hue.base.opacity(0.15))
+                                .fill(LifeOSTokens.raised)
                                 .frame(width: 42, height: 42)
-                                .overlay(LifeOSIcon(.fitness).foregroundStyle(workout.hue.base).frame(width: 19, height: 19))
+                                .overlay(LifeOSIcon(.fitness).foregroundStyle(LifeOSTokens.secondaryText).frame(width: 19, height: 19))
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(workout.name).font(LifeOSFont.header(17))
                                 Text(workout.kind).font(LifeOSFont.caption(11)).foregroundStyle(LifeOSTokens.tertiaryText)
@@ -3398,7 +3403,7 @@ private struct FitnessCoreHealthDetail: View {
                 ForEach(metrics) { metric in
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
                         Circle()
-                            .fill(metric.quality == .unavailable ? LifeOSTokens.tertiaryText : metric.hue.base)
+                            .fill((metric.quality == .demo ? LifeOSTokens.warning : LifeOSTokens.tertiaryText))
                             .frame(width: 7, height: 7)
                         Text(metric.title).font(LifeOSFont.inter(12, weight: .medium))
                         Spacer(minLength: 8)
@@ -3511,10 +3516,13 @@ private struct FitnessMetricCard: View {
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                     HStack(spacing: 6) {
-                        Circle().fill(metric.quality == .unavailable ? LifeOSTokens.tertiaryText : metric.hue.base).frame(width: 5, height: 5)
+                        // §4.2: the quality dot is a neutral marker; only a
+                        // demo fixture earns the warning semantic.
+                        let dotColor = metric.quality == .demo ? LifeOSTokens.warning : LifeOSTokens.tertiaryText
+                        Circle().fill(dotColor).frame(width: 5, height: 5)
                         Text(metric.quality.label)
                             .font(LifeOSFont.inter(10, weight: .semiBold))
-                            .foregroundStyle(metric.quality == .unavailable ? LifeOSTokens.tertiaryText : metric.hue.base)
+                            .foregroundStyle(dotColor)
                         Spacer(minLength: 0)
                     }
                 }
@@ -4612,11 +4620,7 @@ private struct FitnessActivitySummaryCard: View {
             }
             .overlay(
                     LifeOSTokens.cardShape
-                    .fill(LinearGradient(
-                        colors: [snapshot.activityTotal.hue.base.opacity(0.04), .clear],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ))
+                    .fill(Color.clear)
                     .allowsHitTesting(false)
             )
         }
@@ -4698,11 +4702,7 @@ private struct FitnessActivityMetricCard: View {
             }
             .overlay(
                     LifeOSTokens.cardShape
-                    .fill(LinearGradient(
-                        colors: [metric.hue.base.opacity(0.032), .clear],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ))
+                    .fill(Color.clear)
                     .allowsHitTesting(false)
             )
         }
@@ -4712,7 +4712,7 @@ private struct FitnessActivityMetricCard: View {
 #endif
         .overlay(
             LifeOSTokens.cardShape.stroke(
-                hovering ? metric.hue.base.opacity(0.40) : .clear,
+                hovering ? LifeOSTokens.strongBorder : .clear,
                 lineWidth: 1
             )
         )
@@ -4731,7 +4731,7 @@ private struct FitnessActivityCardHeader: View {
         HStack(spacing: 8) {
             LifeOSIcon(icon)
                 .frame(width: 16, height: 16)
-                .foregroundStyle(accent.base)
+                .foregroundStyle(LifeOSTokens.secondaryText)
             Text(title)
                 .font(LifeOSFont.header(14))
                 .lineLimit(1)
@@ -4796,12 +4796,12 @@ private struct FitnessActivityLineChart: View {
                         else { path.move(to: CGPoint(x: x, y: y)); started = true }
                     }
                 }
-                .stroke(accent.base, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                .stroke(LifeOSTokens.accent, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
                 if let lastOptional = values.last, let last = lastOptional {
                     let x = proxy.size.width
                     let y = proxy.size.height * CGFloat(1 - (last - lower) / range)
                     Circle()
-                        .fill(accent.base)
+                        .fill(LifeOSTokens.accent)
                         .frame(width: 8, height: 8)
                         .offset(x: max(0, x - 4), y: max(0, y - 4))
                 }
@@ -4809,13 +4809,13 @@ private struct FitnessActivityLineChart: View {
                     let x = chartX(for: selectedIndex, width: proxy.size.width)
                     let y = chartY(for: selectedPoint.value, lower: lower, range: range, height: proxy.size.height)
                     Rectangle()
-                        .fill(accent.base.opacity(0.22))
+                        .fill(LifeOSTokens.accent.opacity(0.22))
                         .frame(width: 1, height: proxy.size.height)
                         .position(x: x, y: proxy.size.height / 2)
                     Circle()
                         .fill(LifeOSTokens.screenCanvas)
                         .frame(width: 12, height: 12)
-                        .overlay(Circle().stroke(accent.base, lineWidth: 2))
+                        .overlay(Circle().stroke(LifeOSTokens.accent, lineWidth: 2))
                         .position(x: x, y: y)
                     chartTooltip(for: selectedPoint, at: CGPoint(x: x, y: y), chartSize: proxy.size)
                 }
@@ -5134,7 +5134,7 @@ private enum FitnessActivityMetricFormatter {
         case .unavailable: LifeOSTokens.tertiaryText
         case .calibrating: LifeOSTokens.warning
         case .observed: LifeOSTokens.success
-        case .demo: metric.hue.base
+        case .demo: LifeOSTokens.warning
         }
     }
 
@@ -5236,9 +5236,9 @@ private struct FitnessWorkoutRow: View {
     var body: some View {
         HStack(spacing: 10) {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(workout.hue.base.opacity(0.16))
+                .fill(LifeOSTokens.raised)
                 .frame(width: 35, height: 35)
-                .overlay(LifeOSIcon(.fitness).foregroundStyle(workout.hue.base).frame(width: 17, height: 17))
+                .overlay(LifeOSIcon(.fitness).foregroundStyle(LifeOSTokens.secondaryText).frame(width: 17, height: 17))
             VStack(alignment: .leading, spacing: 2) {
                 Text(workout.name).font(LifeOSFont.inter(13, weight: .semiBold))
                 Text("\(workout.kind) · \(workout.duration)").font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
@@ -5262,7 +5262,7 @@ private struct FitnessCompactMetric: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Circle().fill(metric.quality == .unavailable ? LifeOSTokens.tertiaryText : metric.hue.base).frame(width: 7, height: 7)
+            Circle().fill((metric.quality == .demo ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)).frame(width: 7, height: 7)
             VStack(alignment: .leading, spacing: 2) {
                 Text(metric.title).font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
                 HStack(alignment: .firstTextBaseline, spacing: 3) {
@@ -5506,23 +5506,47 @@ struct FitnessEmptyRow: View {
     }
 }
 
+/// Ring color policy (Quiet Machine §5.5): progress rings read accent; status
+/// rings (strain/load, recovery/readiness, sleep score) read success/warning/
+/// danger by threshold band. Stress is NOT a status per spec — it reads accent.
+private enum FitnessRingPalette {
+    static func color(route: FitnessCoreRoute, progress: Double) -> Color {
+        switch route {
+        case .load, .readiness, .sleep:
+            return threshold(progress)
+        case .stress, .energyReserve, .healthMonitor, .healthMetric, .workout:
+            return LifeOSTokens.Ring.progressArc
+        }
+    }
+
+    static func threshold(_ progress: Double) -> Color {
+        if progress >= 0.67 { return LifeOSTokens.success }
+        if progress >= 0.34 { return LifeOSTokens.warning }
+        return LifeOSTokens.danger
+    }
+}
+
 private struct FitnessRing: View {
     let progress: Double
     let hue: LifeOSTokens.Hue
     let size: CGFloat
+    /// Resolved arc color; defaults to the sanctioned accent.
+    var color: Color = LifeOSTokens.Ring.progressArc
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var displayedProgress = 0.0
 
+    /// Detail rings ≥90pt stroke 8; mid cards 6; minis 3. Solid, no gradient.
+    private var stroke: CGFloat {
+        size >= 90 ? 8 : (size >= 48 ? 6 : 3)
+    }
+
     var body: some View {
         ZStack {
-            Circle().stroke(LifeOSTokens.Ring.track, lineWidth: 6)
+            Circle().stroke(LifeOSTokens.Ring.track, lineWidth: stroke)
             Circle()
                 .trim(from: 0, to: displayedProgress)
-                .stroke(LifeOSTokens.Ring.progress(hue), style: StrokeStyle(lineWidth: 6, lineCap: .round))
+                .stroke(color, style: StrokeStyle(lineWidth: stroke, lineCap: .round))
                 .rotationEffect(.degrees(-90))
-            Circle()
-                .fill(hue.base.opacity(0.08))
-                .padding(9)
         }
         .frame(width: size, height: size)
         .task {

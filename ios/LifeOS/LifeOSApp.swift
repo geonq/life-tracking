@@ -624,7 +624,6 @@ private struct CompactTabBarItem: View {
     let reduceMotion: Bool
     let namespace: Namespace.ID
     let action: () -> Void
-    @State private var isPulsing = false
 
     var body: some View {
         Button(action: action) {
@@ -633,20 +632,22 @@ private struct CompactTabBarItem: View {
                     .font(.system(size: 17, weight: isSelected ? .semibold : .regular))
                     .symbolRenderingMode(.hierarchical)
                     .modifier(CompactTabSymbolTransition(enabled: !reduceMotion))
-                    .scaleEffect(isPulsing ? 0.78 : 1)
                     .frame(width: 20, height: 19)
                 Text(title)
-                    .font(LifeOSFont.inter(9.5, weight: isSelected ? .semiBold : .regular))
+                    .font(LifeOSFont.overline())
+                    .tracking(0.8)
+                    .textCase(.uppercase)
                     .lineLimit(1)
             }
-            .foregroundStyle(isSelected ? LifeOSTokens.accent : Color.secondary)
+            // Monochrome nav (§5.3): selection is brightness-based, not
+            // hue-based — primaryText on an elevated capsule, no border.
+            .foregroundStyle(isSelected ? LifeOSTokens.primaryText : LifeOSTokens.tertiaryText)
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
             .background {
                 if isSelected {
                     let indicator = Capsule()
-                        .fill(LifeOSTokens.surface)
-                        .overlay(Capsule().stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+                        .fill(LifeOSTokens.raised)
                     if reduceMotion {
                         indicator
                     } else {
@@ -662,22 +663,6 @@ private struct CompactTabBarItem: View {
         .accessibilityIdentifier("main-tab-\(tab.identifier)")
         .accessibilityAddTraits(isSelected ? .isSelected : [])
         .accessibilityValue(isSelected ? "Selected" : "")
-        .onChange(of: isSelected) { _, selected in
-            guard selected, !reduceMotion else {
-                isPulsing = false
-                return
-            }
-            // Set the compressed state immediately, then let the snappy token
-            // settle it back to rest for a restrained Instagram-like tap cue.
-            var transaction = Transaction()
-            transaction.animation = nil
-            withTransaction(transaction) {
-                isPulsing = true
-            }
-            withAnimation(LifeOSMotion.snappy) {
-                isPulsing = false
-            }
-        }
     }
 }
 

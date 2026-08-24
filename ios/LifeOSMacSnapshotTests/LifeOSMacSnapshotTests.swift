@@ -473,7 +473,7 @@ final class LifeOSMacSnapshotTests: XCTestCase {
 
     func testGlowRingSettledNormalSnapshot() {
         render(
-            GlowRing(progress: 0.72, hue: .blue, diameter: 148, lineWidth: 12) {
+            GlowRing(progress: 0.72, hue: .blue, diameter: 148, lineWidth: 8) {
                 Text("72%")
                     .font(.system(size: 28, weight: .bold, design: .rounded))
             }
@@ -487,7 +487,7 @@ final class LifeOSMacSnapshotTests: XCTestCase {
 
     func testGlowRingReduceMotionSnapshot() {
         render(
-            GlowRing(progress: 0.72, hue: .blue, diameter: 148, lineWidth: 12) {
+            GlowRing(progress: 0.72, hue: .blue, diameter: 148, lineWidth: 8) {
                 Text("72%")
                     .font(.system(size: 28, weight: .bold, design: .rounded))
             }

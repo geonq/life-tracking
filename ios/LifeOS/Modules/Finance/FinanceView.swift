@@ -1346,7 +1346,6 @@ private struct FinanceCategoryRing: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var revealProgress: Double = 0
-    @State private var revealHaloOpacity: Double = 0
 
     private var categoryID: String {
         categories.map { "\($0.id):\($0.fraction)" }.joined(separator: "|")
@@ -1356,14 +1355,6 @@ private struct FinanceCategoryRing: View {
         ZStack {
             Circle()
                 .stroke(LifeOSTokens.Ring.track, lineWidth: 14)
-
-            // Optional reveal halo. Exists only while the initial arc-draw-on is settling and
-            // is fully removed afterward — no persistent glow at rest.
-            if revealHaloOpacity > 0 {
-                categoryArcs
-                    .blur(radius: LifeOSTokens.Glow.blurRadius)
-                    .opacity(revealHaloOpacity)
-            }
 
             categoryArcs
 
@@ -1381,13 +1372,11 @@ private struct FinanceCategoryRing: View {
         .accessibilityValue(categories.map { "\($0.name) \(Int($0.fraction * 100)) percent" }.joined(separator: ", "))
         .task(id: "\(categoryID)-\(reduceMotion)") {
             if reduceMotion {
-                revealHaloOpacity = 0
                 revealProgress = 1
                 return
             }
 
             revealProgress = 0
-            revealHaloOpacity = LifeOSTokens.Glow.opacity * 0.42
             withAnimation(LifeOSMotion.ringReveal) { revealProgress = 1 }
 
             do {
@@ -1396,9 +1385,6 @@ private struct FinanceCategoryRing: View {
                 return
             }
             guard !Task.isCancelled else { return }
-            withAnimation(.easeOut(duration: 0.18)) {
-                revealHaloOpacity = 0
-            }
         }
     }
 

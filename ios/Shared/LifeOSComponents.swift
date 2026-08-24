@@ -301,18 +301,22 @@ public struct LifeOSStatusPill: View {
     }
 
     public var body: some View {
+        // Quiet Machine §4.2: semantic dot + overline text. No tinted
+        // capsule, no stroke — pills are for true status selectors only.
         HStack(spacing: LifeOSTokens.Space.xxs) {
+            Circle()
+                .fill(tone.foreground)
+                .frame(width: 6, height: 6)
             if let systemImage {
                 Image(systemName: systemImage)
                     .font(.system(size: 10, weight: .semibold))
             }
             Text(label)
-                .font(LifeOSFont.metadata())
+                .font(LifeOSFont.overline())
+                .tracking(0.8)
+                .textCase(.uppercase)
         }
         .foregroundStyle(tone.foreground)
-        .padding(.horizontal, LifeOSTokens.Space.sm)
-        .padding(.vertical, LifeOSTokens.Space.xxs)
-        .background(tone.background, in: Capsule())
         .accessibilityElement(children: .combine)
     }
 }

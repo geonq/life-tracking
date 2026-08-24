@@ -121,15 +121,52 @@ public enum LifeOSFont {
     }
 
     /// KPI/display value. Space Grotesk remains the display face.
+    /// Quiet Machine §3: 40 iOS / 48 macOS, Bold, −0.3 tracking at call site,
+    /// `.monospacedDigit()` mandatory.
     public static func kpi(_ size: CGFloat = {
 #if os(macOS)
-        52
+        48
 #else
-        44
+        40
 #endif
     }()) -> Font {
         roleFont(SpaceGrotesk.bold.rawValue, size: size, relativeTo: .largeTitle)
             .monospacedDigit()
+    }
+
+    /// Screen titles ("Overview", "Fitness"). SG Bold 34 / 30; apply
+    /// `.tracking(-0.5)` at the call site per §3.
+    public static func display(_ size: CGFloat = {
+#if os(macOS)
+        30
+#else
+        34
+#endif
+    }()) -> Font {
+        roleFont(SpaceGrotesk.bold.rawValue, size: size, relativeTo: .largeTitle)
+    }
+
+    /// Sheet and navigation headers. SG Medium 22 / 20; apply `.tracking(-0.2)`.
+    public static func title(_ size: CGFloat = {
+#if os(macOS)
+        20
+#else
+        22
+#endif
+    }()) -> Font {
+        roleFont(SpaceGrotesk.medium.rawValue, size: size, relativeTo: .title2)
+    }
+
+    /// Descriptions, secondary rows. Inter Regular 13 both platforms.
+    public static func callout(_ size: CGFloat = 13) -> Font {
+        roleFont(Inter.regular.rawValue, size: size, relativeTo: .subheadline)
+    }
+
+    /// Micro labels that replace tinted pills (§4.2). Inter SemiBold 10,
+    /// +0.8 tracking, uppercase — apply `.tracking(0.8)` + `.textCase(.uppercase)`
+    /// at the call site (Font cannot carry tracking).
+    public static func overline(_ size: CGFloat = 10) -> Font {
+        roleFont(Inter.semiBold.rawValue, size: size, relativeTo: .caption2)
     }
 
     /// Large page title.

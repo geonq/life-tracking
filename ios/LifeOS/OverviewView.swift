@@ -235,7 +235,7 @@ struct OverviewView: View {
 
             HStack(spacing: 8) {
                 Text("A quiet view of what matters now")
-                    .font(LifeOSFont.inter(13, weight: .regular))
+                    .font(LifeOSFont.callout())
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                 statusBadge
             }
@@ -250,7 +250,7 @@ struct OverviewView: View {
                 Spacer(minLength: 8)
             }
             Text("A quiet view of what matters now")
-                .font(LifeOSFont.inter(13, weight: .regular))
+                .font(LifeOSFont.callout())
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .lineLimit(2)
             statusBadge
@@ -260,17 +260,28 @@ struct OverviewView: View {
     }
 
     private var statusBadge: some View {
+        // §4.2 dot + overline — no tinted capsule. Color is a signal:
+        // warning for demo/stale/partial, tertiary when unavailable,
+        // success only when data is genuinely connected.
         let isDemo = snapshotStatusLabel.hasPrefix("DEMO")
         let isStale = snapshotStatusLabel.hasPrefix("STALE")
         let needsReview = snapshotStatusLabel.hasPrefix("PARTIAL")
-        let color = isDemo || isStale || needsReview ? LifeOSTokens.warning : LifeOSTokens.accent
-        return Text(snapshotStatusLabel)
-            .font(LifeOSFont.inter(9, weight: .semiBold))
-            .tracking(0.45)
-            .foregroundStyle(color)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 3)
-            .background(color.opacity(0.12), in: Capsule())
+        let unavailable = snapshotStatusLabel == "DATA UNAVAILABLE"
+        let color = isDemo || isStale || needsReview
+            ? LifeOSTokens.warning
+            : (unavailable ? LifeOSTokens.tertiaryText : LifeOSTokens.success)
+        return HStack(spacing: 6) {
+            Circle()
+                .fill(color)
+                .frame(width: 6, height: 6)
+            Text(snapshotStatusLabel)
+                .font(LifeOSFont.overline())
+                .tracking(0.8)
+                .textCase(.uppercase)
+                .foregroundStyle(color)
+                .lineLimit(1)
+        }
+        .accessibilityElement(children: .combine)
     }
 
     @ViewBuilder
@@ -653,42 +664,56 @@ private struct OverviewMetricCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: featured ? 16 : 14) {
-            HStack(spacing: 12) {
+            // §5.1: no icon tile — a bare tertiary icon aligned to the title.
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
                 LifeOSIcon(sectionIcon)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
                     .frame(width: 18, height: 18)
-                    .frame(width: LifeOSTokens.overviewIconTile, height: LifeOSTokens.overviewIconTile)
-                    .background(LifeOSTokens.Glass.tileGradient(), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(LifeOSTokens.Glass.edgeHighlight, lineWidth: LifeOSTokens.Glass.strokeWidth))
+                    .alignmentGuide(.firstTextBaseline) { dimensions in
+                        dimensions[.bottom]
+                    }
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text(title)
-                        .font(LifeOSFont.spaceGrotesk(featured ? 18 : 16, weight: .medium))
+                        .font(LifeOSFont.cardTitle())
+                .tracking(-0.1)
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                     Text(description)
-                        .font(LifeOSFont.inter(12.5, weight: .regular))
+                        .font(LifeOSFont.callout())
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .lineLimit(featured ? 1 : 2)
                 }
                 Spacer(minLength: 8)
                 if isPlainDemoStatus {
                     Circle()
-                        .fill(LifeOSTokens.Hue.amber.base)
+                        .fill(LifeOSTokens.warning)
                         .frame(width: 6, height: 6)
                         .accessibilityHidden(true)
                 }
                 LifeOSIcon(.chevronRight)
-                    .foregroundStyle(LifeOSTokens.Hue.blue.base)
-                    .frame(width: 14, height: 14)
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .frame(width: 12, height: 12)
+                    .alignmentGuide(.firstTextBaseline) { dimensions in
+                        dimensions[.bottom]
+                    }
             }
 
             if !isPlainDemoStatus {
-                Text(sourceStatus)
-                    .font(LifeOSFont.inter(10.5, weight: .medium))
-                    .foregroundStyle(sourceStatusColor)
-                    .lineLimit(section.kind == .health && healthIntegrityStatusPresent ? 2 : 1)
-                    .minimumScaleFactor(0.78)
+                // §4.2 status indicator: semantic dot + axis text. Amber only
+                // when the source is genuinely stale/partial/demo.
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(sourceStatusColor)
+                        .frame(width: 6, height: 6)
+                    Text(sourceStatus)
+                        .font(LifeOSFont.axis())
+                        .tracking(0.2)
+                        .foregroundStyle(sourceStatusColor)
+                        .lineLimit(section.kind == .health && healthIntegrityStatusPresent ? 2 : 1)
+                        .minimumScaleFactor(0.78)
+                }
+                .accessibilityElement(children: .combine)
             }
 
             if featured && section.kind == .llm {
@@ -702,8 +727,8 @@ private struct OverviewMetricCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(minHeight: featured ? 196 : 190, alignment: .topLeading)
         .glassCard(featured: featured)
-        .overlay(cardShape.stroke(hovering ? Color.primary.opacity(0.18) : Color.clear, lineWidth: 0.75))
-        .offset(y: hovering && !reduceMotion ? -1 : 0)
+        // §5.1 hover (macOS): border brightens to strongBorder; no offset lift.
+        .overlay(cardShape.stroke(hovering ? LifeOSTokens.strongBorder : Color.clear, lineWidth: 1))
         .animation(reduceMotion ? nil : LifeOSMotion.springSnappy, value: hovering)
 #if os(macOS)
         .onHover { hovering = $0 }
@@ -722,22 +747,23 @@ private struct OverviewMetricCard: View {
             HStack(alignment: .lastTextBaseline, spacing: 10) {
                 if let remaining = leadUsageSnapshot?.smallestObservedWindow?.usedPercent.map({ 1 - $0 }) {
                     Text("\(Int((remaining * 100).rounded()))")
-                        .font(LifeOSFont.inter(44, weight: .extraBold))
-                        .monospacedDigit()
+                        .font(LifeOSFont.kpi())
+                        .tracking(-0.3)
                         .foregroundStyle(.primary)
                     Text("% remaining")
-                        .font(LifeOSFont.inter(13, weight: .medium))
+                        .font(LifeOSFont.callout())
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .padding(.bottom, 6)
                 } else {
                     Text("—")
-                        .font(LifeOSFont.inter(44, weight: .extraBold))
+                        .font(LifeOSFont.kpi())
+                        .tracking(-0.3)
                         .foregroundStyle(.primary)
                 }
                 Spacer(minLength: 4)
                 VStack(alignment: .trailing, spacing: 2) {
                     Text(leadUsageSnapshot?.provider.displayName ?? "Usage")
-                        .font(LifeOSFont.inter(12, weight: .semiBold))
+                        .font(LifeOSFont.callout().weight(.semibold))
                         .foregroundStyle(.primary)
                     Text(usageTrendLabel)
                         .font(.caption2)
@@ -746,7 +772,7 @@ private struct OverviewMetricCard: View {
             }
 
             if usageTrendPoints.count >= 2 {
-                OverviewSparkline(points: usageTrendPoints, tint: LifeOSTokens.Series.actual)
+                OverviewSparkline(points: usageTrendPoints, tint: LifeOSTokens.accent)
                     .frame(height: 44)
             } else {
                 OverviewChartUnavailable(detail: usageChartDetail)
@@ -772,7 +798,7 @@ private struct OverviewMetricCard: View {
                     ValueMetric(value: clipperHomeMetricValue(containing: "Revenue"), label: "Revenue")
                 }
                 if let clipperTrend {
-                    OverviewSparkline(points: clipperTrend.points, tint: LifeOSTokens.info)
+                    OverviewSparkline(points: clipperTrend.points, tint: LifeOSTokens.accent)
                         .frame(height: 36)
                 } else {
                     OverviewChartUnavailable(detail: clipperChartDetail)
@@ -956,7 +982,7 @@ private struct OverviewSparkline: View {
                 y: .value("Value", point.value)
             )
             .foregroundStyle(tint)
-            .lineStyle(StrokeStyle(lineWidth: 1.75, lineCap: .round, lineJoin: .round))
+            .lineStyle(StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
             .interpolationMethod(.catmullRom)
         }
         .chartYScale(domain: yDomain)
@@ -1002,15 +1028,14 @@ private struct UsageMiniRing: View {
 
     var body: some View {
         VStack(spacing: 3) {
-            // The compact Usage preview follows the same blue-forward Usage token as
-            // the full screen; the provider name remains the identity cue.
-            GlowRing(progress: remaining ?? 0, hue: .blue, diameter: 38, lineWidth: 4) {
+            // §5.1 mini rings: plain accent arc, no halo, hairline track.
+            GlowRing(progress: remaining ?? 0, diameter: 38, lineWidth: 3) {
                 Text(remaining.map { "\(Int(($0 * 100).rounded()))" } ?? "—")
                     .font(.system(size: 10, weight: .bold, design: .rounded))
                     .monospacedDigit()
             }
             Text(provider.displayName)
-                .font(.system(size: 8.5, weight: .medium))
+                .font(LifeOSFont.axis())
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
@@ -1029,13 +1054,14 @@ private struct ValueMetric: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(value ?? "—")
-                .font(LifeOSFont.inter(20, weight: .extraBold))
-                .foregroundStyle(.primary)
+                .font(LifeOSFont.callout().weight(.semibold))
                 .monospacedDigit()
+                .foregroundStyle(.primary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.72)
             Text(label)
-                .font(LifeOSFont.inter(10.5, weight: .medium))
+                .font(LifeOSFont.axis())
+                .tracking(0.2)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .lineLimit(1)
         }
@@ -1103,19 +1129,26 @@ private struct ClipperAnalyticsView: View {
 
     private var heroCard: some View {
         VStack(alignment: .leading, spacing: 18) {
-            HStack(spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
                 LifeOSIcon(.clipper)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
                     .frame(width: 18, height: 18)
-                    .frame(width: LifeOSTokens.overviewIconTile, height: LifeOSTokens.overviewIconTile)
-                    .background(LifeOSTokens.Glass.tileGradient(), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(LifeOSTokens.Glass.edgeHighlight, lineWidth: LifeOSTokens.Glass.strokeWidth))
+                    .alignmentGuide(.firstTextBaseline) { dimensions in
+                        dimensions[.bottom]
+                    }
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Clipper Analytics")
-                        .font(LifeOSFont.spaceGrotesk(20, weight: .medium))
-                    Text(sourceStatus)
-                        .font(LifeOSFont.inter(11, weight: .medium))
-                        .foregroundStyle(sourceStatusColor)
+                        .font(LifeOSFont.title())
+                        .tracking(-0.2)
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(sourceStatusColor)
+                            .frame(width: 6, height: 6)
+                        Text(sourceStatus)
+                            .font(LifeOSFont.axis())
+                            .tracking(0.2)
+                            .foregroundStyle(sourceStatusColor)
+                    }
                 }
                 Spacer(minLength: 8)
                 refreshButton
@@ -1124,19 +1157,24 @@ private struct ClipperAnalyticsView: View {
             HStack(alignment: .bottom, spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(metricValue(containing: "Revenue") ?? "—")
-                        .font(.system(size: 42, weight: .bold, design: .rounded))
-                        .monospacedDigit()
+                        .font(LifeOSFont.kpi(42))
+                        .tracking(-0.3)
                     Text("Revenue this month")
-                        .font(.caption)
+                        .font(LifeOSFont.metadata())
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
                 Spacer(minLength: 12)
-                Text(snapshotBadge)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(sourceStatusColor)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 5)
-                    .background(Color.primary.opacity(0.06), in: Capsule())
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(sourceStatusColor)
+                        .frame(width: 6, height: 6)
+                    Text(snapshotBadge)
+                        .font(LifeOSFont.overline())
+                        .tracking(0.8)
+                        .textCase(.uppercase)
+                        .foregroundStyle(sourceStatusColor)
+                }
+                .accessibilityElement(children: .combine)
             }
 
             HStack(spacing: 14) {
@@ -1152,10 +1190,11 @@ private struct ClipperAnalyticsView: View {
     private func detailMetric(label: String, value: String?) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(value ?? "—")
-                .font(.system(size: 20, weight: .semibold, design: .rounded))
+                .font(LifeOSFont.callout().weight(.semibold))
                 .monospacedDigit()
             Text(label)
-                .font(.caption)
+                .font(LifeOSFont.axis())
+                .tracking(0.2)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1258,7 +1297,8 @@ private struct ClipperAnalyticsView: View {
     private func observedDetailCard<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(title)
-                .font(LifeOSFont.spaceGrotesk(16, weight: .medium))
+                .font(LifeOSFont.cardTitle())
+                .tracking(-0.1)
             content()
         }
         .padding(18)
@@ -1320,7 +1360,8 @@ private struct ClipperAnalyticsView: View {
     private func unavailableDetailCard(title: String, detail: String) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(title)
-                .font(LifeOSFont.spaceGrotesk(16, weight: .medium))
+                .font(LifeOSFont.cardTitle())
+                .tracking(-0.1)
             HStack(spacing: 10) {
                 LifeOSIcon(.clipper)
                     .frame(width: 15, height: 15)
@@ -1345,7 +1386,8 @@ private struct ClipperAnalyticsView: View {
     private func demoDetailCard(title: String, detail: String) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(title)
-                .font(LifeOSFont.spaceGrotesk(16, weight: .medium))
+                .font(LifeOSFont.cardTitle())
+                .tracking(-0.1)
             HStack(spacing: 10) {
                 LifeOSIcon(.clipper)
                     .frame(width: 15, height: 15)

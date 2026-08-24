@@ -17,9 +17,13 @@ import UIKit
 
 // MARK: - A. Progress Ring
 
-/// A progress ring with an optional, restrained one-shot reveal halo. The crisp arc is the
-/// resting state; the halo is mounted only while the initial reveal is settling and is removed
-/// afterward. Reduce Motion skips both the sweep and halo.
+/// A progress ring that sweeps in once with `LifeOSMotion.ringReveal` and ends
+/// crisp: no halo, no glow, no angular gradient (Quiet Machine §5.5/§2.4 —
+/// solid accent arcs only; status rings resolve a semantic color upstream).
+///
+/// `hue` is retained for source compatibility with un-migrated call sites and
+/// is IGNORED for rendering; new call sites should omit it via the convenience
+/// initializer below.
 public struct GlowRing<Center: View>: View {
     public let progress: Double
     public let hue: LifeOSTokens.Hue
@@ -29,17 +33,30 @@ public struct GlowRing<Center: View>: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var animatedProgress: Double = 0
-    @State private var revealHaloOpacity: Double = 0
 
     public init(
         progress: Double,
         hue: LifeOSTokens.Hue,
         diameter: CGFloat = 120,
-        lineWidth: CGFloat = 10,
+        lineWidth: CGFloat = 8,
         @ViewBuilder center: @escaping () -> Center = { EmptyView() }
     ) {
         self.progress = progress
         self.hue = hue
+        self.diameter = diameter
+        self.lineWidth = lineWidth
+        self.center = center
+    }
+
+    /// Preferred initializer: the arc renders solid accent.
+    public init(
+        progress: Double,
+        diameter: CGFloat = 120,
+        lineWidth: CGFloat = 8,
+        @ViewBuilder center: @escaping () -> Center = { EmptyView() }
+    ) {
+        self.progress = progress
+        self.hue = .blue
         self.diameter = diameter
         self.lineWidth = lineWidth
         self.center = center
@@ -51,28 +68,15 @@ public struct GlowRing<Center: View>: View {
 
     public var body: some View {
         ZStack {
-            // Track
+            // Track — the shared hairline token.
             Circle()
                 .stroke(LifeOSTokens.Ring.track, lineWidth: lineWidth)
 
-            // Optional reveal halo. This layer exists only during the one-shot load cue and
-            // fades out completely; settled rings contain no blurred duplicate.
-            if revealHaloOpacity > 0 {
-                Circle()
-                    .trim(from: 0, to: animatedProgress)
-                    .stroke(
-                        LifeOSTokens.Ring.progress(hue),
-                        style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
-                    )
-                    .blur(radius: LifeOSTokens.Glow.blurRadius)
-                    .opacity(revealHaloOpacity)
-            }
-
-            // Crisp progress arc.
+            // Crisp progress arc — one flat color, round caps.
             Circle()
                 .trim(from: 0, to: animatedProgress)
                 .stroke(
-                    LifeOSTokens.Ring.progress(hue),
+                    LifeOSTokens.Ring.progressArc,
                     style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
                 )
         }
@@ -86,25 +90,10 @@ public struct GlowRing<Center: View>: View {
         .accessibilityValue(Text(clampedTarget, format: .percent.precision(.fractionLength(0))))
         .task(id: "\(clampedTarget)-\(reduceMotion)") {
             if reduceMotion {
-                revealHaloOpacity = 0
                 animatedProgress = clampedTarget
                 return
             }
-
-            // Keep this cue bounded and cancellable. A data refresh cancels the old task and
-            // starts a new reveal; a settled view always ends with opacity exactly zero.
-            revealHaloOpacity = LifeOSTokens.Glow.opacity * 0.42
             withAnimation(LifeOSMotion.ringReveal) { animatedProgress = clampedTarget }
-
-            do {
-                try await Task.sleep(nanoseconds: 720_000_000)
-            } catch {
-                return
-            }
-            guard !Task.isCancelled else { return }
-            withAnimation(.easeOut(duration: 0.18)) {
-                revealHaloOpacity = 0
-            }
         }
     }
 }
@@ -151,12 +140,12 @@ public struct SpringPillSelector<T: Hashable, Label: View>: View {
                         .frame(minHeight: LifeOSTokens.Control.minimumTarget)
                         .background {
                             if isSelected {
+                                // Monochrome selection: brightness, not hue —
+                                // elevated fill only, no border stroke (§5.3).
                                 if reduceMotion {
-                                    Capsule().fill(LifeOSTokens.surface)
-                                        .overlay(Capsule().stroke(Color.primary.opacity(0.13), lineWidth: 0.75))
+                                    Capsule().fill(LifeOSTokens.raised)
                                 } else {
-                                    Capsule().fill(LifeOSTokens.surface)
-                                        .overlay(Capsule().stroke(Color.primary.opacity(0.13), lineWidth: 0.75))
+                                    Capsule().fill(LifeOSTokens.raised)
                                         .matchedGeometryEffect(id: highlightID, in: namespace)
                                 }
                             }

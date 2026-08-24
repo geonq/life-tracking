@@ -123,47 +123,54 @@ public extension Color {
     static let lifeOSTeal700 = Color(hex: 0x067878)
 
     // MARK: Module identity
-    // Calendar module color — sample exact value from Figma calendar frames (workstream 04/06).
-    // Placeholder warm coral-red, distinct from semantic `danger` red, until sampled.
+    // Calendar module color — RETIRED for app surfaces (today is marked by
+    // primary-text inversion per the Quiet Machine plan §5.6). Kept only until
+    // the widget targets migrate off it in the Phase 2 sweep.
     static let lifeOSCalendarRed = Color(hex: 0xE5433D)
 
     // Brand canvases
-    /// Neutral dark canvas #000000.
+    /// Neutral dark canvas #000000 (reserved for the tab-bar underlay).
     static let lifeOSDarkCanvas = Color(hex: 0x000000)
-    /// Neutral light canvas #F7F7F8.
-    static let lifeOSLightCanvas = Color(hex: 0xF7F7F8)
+    /// Neutral light canvas #FAFAFA.
+    static let lifeOSLightCanvas = Color(hex: 0xFAFAFA)
 
     /// Neutral structural roles used by the shared foundation.
-    static let lifeOSDarkSurface = Color(hex: 0x0B0B0C)
+    static let lifeOSDarkSurface = Color(hex: 0x131315)
     static let lifeOSLightSurface = Color(hex: 0xFFFFFF)
-    static let lifeOSDarkRaised = Color(hex: 0x151517)
-    static let lifeOSLightRaised = Color(hex: 0xF0F0F2)
-    static let lifeOSDarkFloatingOverlay = Color(hex: 0x1F1F22)
+    static let lifeOSDarkRaised = Color(hex: 0x1B1B1E)
+    static let lifeOSLightRaised = Color(hex: 0xF4F4F5)
+    static let lifeOSDarkFloatingOverlay = Color(hex: 0x232327)
     static let lifeOSLightFloatingOverlay = Color(hex: 0xFFFFFF)
 
     static let lifeOSPrimaryText = lifeOSAdaptiveColor(
-        darkRed: 0xF5/255, darkGreen: 0xF5/255, darkBlue: 0xF7/255,
-        lightRed: 0x11/255, lightGreen: 0x11/255, lightBlue: 0x13/255
+        darkRed: 0xF7/255, darkGreen: 0xF7/255, darkBlue: 0xF8/255,
+        lightRed: 0x10/255, lightGreen: 0x10/255, lightBlue: 0x12/255
     )
 
     static let lifeOSSecondaryText = lifeOSAdaptiveColor(
-        darkRed: 0xAD/255, darkGreen: 0xAD/255, darkBlue: 0xB4/255,
-        lightRed: 0x5C/255, lightGreen: 0x5C/255, lightBlue: 0x63/255
+        darkRed: 0xA1/255, darkGreen: 0xA1/255, darkBlue: 0xAA/255,
+        lightRed: 0x52/255, lightGreen: 0x52/255, lightBlue: 0x5B/255
     )
 
-    static let lifeOSMetadataText = lifeOSAdaptiveColor(
-        darkRed: 0x84/255, darkGreen: 0x84/255, darkBlue: 0x8C/255,
-        lightRed: 0x6D/255, lightGreen: 0x6D/255, lightBlue: 0x74/255
+    /// One value for both appearances — the reference surfaces do this.
+    static let lifeOSMetadataText = Color(red: 0x71/255, green: 0x71/255, blue: 0x7A/255)
+
+    /// Disabled text only.
+    static let lifeOSQuaternaryText = lifeOSAdaptiveColor(
+        darkRed: 0x52/255, darkGreen: 0x52/255, darkBlue: 0x5B/255,
+        lightRed: 0xA1/255, lightGreen: 0xA1/255, lightBlue: 0xAA/255
     )
 
+    /// THE hairline border (#232329 / #E4E4E7), solid, drawn at 1pt.
     static let lifeOSSubtleBorder = lifeOSAdaptiveColor(
-        darkRed: 0x17/255, darkGreen: 0x17/255, darkBlue: 0x1B/255,
-        lightRed: 0xE3/255, lightGreen: 0xE3/255, lightBlue: 0xE7/255
+        darkRed: 0x23/255, darkGreen: 0x23/255, darkBlue: 0x29/255,
+        lightRed: 0xE4/255, lightGreen: 0xE4/255, lightBlue: 0xE7/255
     )
 
+    /// Pressed/selected edges only.
     static let lifeOSStrongBorder = lifeOSAdaptiveColor(
-        darkRed: 0x29/255, darkGreen: 0x29/255, darkBlue: 0x2F/255,
-        lightRed: 0xD0/255, lightGreen: 0xD0/255, lightBlue: 0xD6/255
+        darkRed: 0x30/255, darkGreen: 0x30/255, darkBlue: 0x38/255,
+        lightRed: 0xD4/255, lightGreen: 0xD4/255, lightBlue: 0xD8/255
     )
 
     /// Observed chart blue: #3085FD in dark mode and #0253C4 in light mode.
@@ -179,23 +186,47 @@ public extension Color {
     )
 
     static let lifeOSNeutralCanvas = lifeOSAdaptiveColor(
-        darkRed: 0x00/255, darkGreen: 0x00/255, darkBlue: 0x00/255,
-        lightRed: 0xF7/255, lightGreen: 0xF7/255, lightBlue: 0xF8/255
+        darkRed: 0x0A/255, darkGreen: 0x0A/255, darkBlue: 0x0B/255,
+        lightRed: 0xFA/255, lightGreen: 0xFA/255, lightBlue: 0xFA/255
     )
 
     static let lifeOSNeutralSurface = lifeOSAdaptiveColor(
-        darkRed: 0x0B/255, darkGreen: 0x0B/255, darkBlue: 0x0C/255,
+        darkRed: 0x13/255, darkGreen: 0x13/255, darkBlue: 0x15/255,
         lightRed: 0xFF/255, lightGreen: 0xFF/255, lightBlue: 0xFF/255
     )
 
     static let lifeOSNeutralRaised = lifeOSAdaptiveColor(
-        darkRed: 0x15/255, darkGreen: 0x15/255, darkBlue: 0x17/255,
-        lightRed: 0xF0/255, lightGreen: 0xF0/255, lightBlue: 0xF2/255
+        darkRed: 0x1B/255, darkGreen: 0x1B/255, darkBlue: 0x1E/255,
+        lightRed: 0xF4/255, lightGreen: 0xF4/255, lightBlue: 0xF5/255
     )
 
     static let lifeOSNeutralFloatingOverlay = lifeOSAdaptiveColor(
-        darkRed: 0x1F/255, darkGreen: 0x1F/255, darkBlue: 0x22/255,
+        darkRed: 0x23/255, darkGreen: 0x23/255, darkBlue: 0x27/255,
         lightRed: 0xFF/255, lightGreen: 0xFF/255, lightBlue: 0xFF/255
+    )
+
+    /// Accent hover: lighter on dark, darker on light (inverted direction).
+    static let lifeOSAccentHover = lifeOSAdaptiveColor(
+        darkRed: 0x7A/255, darkGreen: 0xB2/255, darkBlue: 0xFF/255,
+        lightRed: 0x02/255, lightGreen: 0x47/255, lightBlue: 0xA8/255
+    )
+    static let lifeOSAccentPressed = lifeOSAdaptiveColor(
+        darkRed: 0x93/255, darkGreen: 0xC3/255, darkBlue: 0xFF/255,
+        lightRed: 0x01/255, lightGreen: 0x3C/255, lightBlue: 0x8C/255
+    )
+    /// Apple-dark green; calmer light green.
+    static let lifeOSSuccess = lifeOSAdaptiveColor(
+        darkRed: 0x30/255, darkGreen: 0xD1/255, darkBlue: 0x58/255,
+        lightRed: 0x1B/255, lightGreen: 0x9E/255, lightBlue: 0x52/255
+    )
+    /// Readable amber in both appearances.
+    static let lifeOSWarning = lifeOSAdaptiveColor(
+        darkRed: 0xFF/255, darkGreen: 0xB2/255, darkBlue: 0x24/255,
+        lightRed: 0xC2/255, lightGreen: 0x74/255, lightBlue: 0x03/255
+    )
+    static let lifeOSDanger = lifeOSAdaptiveColor(
+        darkRed: 0xFF/255, darkGreen: 0x45/255, darkBlue: 0x3A/255,
+        lightRed: 0xDC/255, lightGreen: 0x26/255, lightBlue: 0x26/255
     )
 }
 
@@ -279,8 +310,9 @@ public enum LifeOSTokens {
 
     /// Used for focus and primary data, never as structural chrome.
     public static let accent = Color.lifeOSFocusBlue
-    public static let accentHover = Color.lifeOSBlue700
-    public static let accentPressed = Color.lifeOSBlue800
+    /// Pressed reads lighter on dark, darker on light (inverted direction).
+    public static let accentHover = Color.lifeOSAccentHover
+    public static let accentPressed = Color.lifeOSAccentPressed
     public static let accentLight = Color.lifeOSBlue50
 
     public static let chartObserved = Color.lifeOSObservedBlue
@@ -289,66 +321,72 @@ public enum LifeOSTokens {
     public static let metadataText = Color.lifeOSMetadataText
     public static let subtleBorder = Color.lifeOSSubtleBorder
     public static let strongBorder = Color.lifeOSStrongBorder
+    /// Disabled text only — never for readable content.
+    public static let quaternaryText = Color.lifeOSQuaternaryText
 
-    /// success / positive / income / target-met → green 500 (#00B65D)
-    public static let success = Color.lifeOSGreen500
-    /// warning / near-limit / estimate → amber 500 (#DFBB00)
-    public static let warning = Color.lifeOSAmber500
-    /// danger / negative / over-limit / failed → red 500 (#E50019)
-    public static let danger  = Color.lifeOSRed500
-    /// info / secondary accent → teal 500 (#00B5B5)
-    public static let info = Color.lifeOSTeal500
-
-    // MARK: Status gradients (reveal → base), for rings (Bevel/Revolut signature)
-
-    public static let statusGradientGood = LinearGradient(
-        colors: [.lifeOSGreen400, .lifeOSGreen500],
-        startPoint: .top, endPoint: .bottom
-    )
-    public static let statusGradientWarn = LinearGradient(
-        colors: [.lifeOSAmber400, .lifeOSAmber500],
-        startPoint: .top, endPoint: .bottom
-    )
-    public static let statusGradientOver = LinearGradient(
-        colors: [.lifeOSRed400, .lifeOSRed500],
-        startPoint: .top, endPoint: .bottom
-    )
+    /// success / positive / income / target-met → Apple-dark green (calmer light green)
+    public static let success = Color.lifeOSSuccess
+    /// warning / near-limit / estimate → readable amber in both modes
+    public static let warning = Color.lifeOSWarning
+    /// danger / negative / over-limit / failed
+    public static let danger  = Color.lifeOSDanger
+    /// Retired teal — one accent only. Alias of `accent` kept for compile;
+    /// call sites migrate to `accent` (or a semantic) in the Phase 2 sweep.
+    /// Deliberately NOT `@available(deprecated)` yet: that would emit warnings
+    /// at every un-migrated call site and break the zero-new-warnings gate.
+    public static let info = accent
 
     // MARK: Series colors (Usage view: Target / Actual / Estimate / History)
 
     public enum Series {
-        /// Observed — blue (brand), solid.
+        /// Observed — accent blue, solid.
         public static let actual = LifeOSTokens.chartObserved
         /// Descriptive alias for new chart call sites. `actual` remains for compatibility.
         public static let observed = LifeOSTokens.chartObserved
-        /// Target pace — green, dashed.
-        public static let target = Color.lifeOSGreen500
-        /// Current estimate — amber/orange, dashed.
-        public static let estimate = Color.lifeOSOrange500
-        /// Past estimate / account history — grey, dotted.
+        /// Target pace — success green, dashed [6,4] at 1.25pt.
+        public static let target = LifeOSTokens.success
+        /// Current estimate — warning amber, dashed [3,3] at 1.5pt.
+        public static let estimate = LifeOSTokens.warning
+        /// Past estimate / account history — tertiary grey, dotted at 1.25pt.
         public static let history = LifeOSTokens.metadataText
     }
 
     // MARK: Ring tokens
 
     public enum Ring {
-        public static let track = Color.primary.opacity(0.08)
+        /// The hairline border doubles as the ring track — no per-color tracks.
+        public static let track = Color.lifeOSSubtleBorder
 
-        /// Angular gradient (reveal 400 → base 500) for a ring's progress arc, keyed by hue.
+        /// DEPRECATED visual policy: solid arcs replace angular reveal→base
+        /// gradients (Quiet Machine §2.4). Kept only until the widget targets
+        /// and FinanceView migrate; new call sites must stroke a solid color.
         public static func progress(_ hue: Hue) -> AngularGradient {
             AngularGradient(colors: [hue.glow, hue.base], center: .center)
         }
+
+        /// The sanctioned arc colors: progress rings read accent; status rings
+        /// read a semantic by threshold (FitnessView implements the bands).
+        public static var progressArc: Color { LifeOSTokens.accent }
     }
 
-    // MARK: Transient reveal halo
+    // MARK: Module identity
+    // RETIRED for app surfaces — today markers invert primary text instead.
+    // Alias kept until the Phase 2 widget sweep deletes the last consumers.
+    public static let calendarRed = Color.lifeOSCalendarRed
 
-    public enum Glow {
-        /// Blur radius for the optional one-shot load/reveal cue. Never use this for a
-        /// settled, static view or widget.
-        public static let blurRadius: CGFloat = 18
-        /// Peak opacity for the optional one-shot load/reveal cue. It is removed at rest.
-        public static let opacity: Double = 0.55
-    }
+    // Borders & quiescent states
+    /// THE border: solid hairline, 1pt (0.5pt inside charts).
+    public static let hairlineBorder = subtleBorder
+    public static let quietBorder = hairlineBorder
+    /// Chart gridlines: the same hairline, drawn at 0.5pt, horizontal only.
+    public static let chartGrid = hairlineBorder
+    public static let tertiaryText = metadataText
+
+    // Card visual styling — shadow policy: NONE at rest. Sheets rely on the
+    // system material; no `.shadow()` survives outside platform chrome.
+    public static let cardShadowRadius: CGFloat = 0
+    public static let cardShadowX: CGFloat = 0
+    public static let cardShadowY: CGFloat = 0
 
     /// A named hue ramp from the vivid palette, used to key gradients/rings/charts by module or
     /// semantic meaning without repeating raw color literals at call sites.
@@ -415,85 +453,6 @@ public enum LifeOSTokens {
             case .green: .lifeOSGreen700
             case .teal: .lifeOSTeal700
             }
-        }
-    }
-
-    // MARK: Module identity
-    // Calendar's identity color — sample exact value from Figma in the calendar workstream.
-    public static let calendarRed = Color.lifeOSCalendarRed
-
-    // Borders & quiescent states
-    public static let quietBorder = subtleBorder
-    public static let hairlineBorder = subtleBorder.opacity(0.82)
-    public static let chartGrid = subtleBorder.opacity(0.78)
-    public static let tertiaryText = metadataText
-
-    // Card visual styling
-    public static let cardShadowRadius: CGFloat = 0
-    public static let cardShadowX: CGFloat = 0
-    public static let cardShadowY: CGFloat = 0
-
-    // MARK: Liquid Glass (iOS 26-style card depth)
-    //
-    // Additive polish over the monochrome foundation: a soft top→bottom surface gradient,
-    // a hairline edge-light stroke, a frosted material layer, and a quiet shadow. Peak-chroma
-    // accents (Hue.base / semantic tokens) stay the only saturated color;
-    // the glass layer itself is neutral so it reads as depth, not tint.
-    public enum Glass {
-        /// Low-contrast surface gradient, top (lighter) → bottom (deeper). Composited under
-        /// the material so the frosted layer has a hint of directional light instead of a
-        /// flat tone.
-        public static func backgroundGradient(featured: Bool = false) -> LinearGradient {
-            LinearGradient(
-                colors: [
-                    surface.opacity(featured ? 0.98 : 0.95),
-                    surface.opacity(featured ? 0.88 : 0.84)
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        }
-
-        /// Frosted material composited over the gradient. Callers must fall back to a solid
-        /// surface (`fallbackFill`) when `accessibilityReduceTransparency` is true.
-        public static var material: Material { .ultraThinMaterial }
-
-        /// Solid replacement for `material` under Reduce Transparency — no blur, no
-        /// translucency, same gradient tone so the layout doesn't shift.
-        public static func fallbackFill(featured: Bool = false) -> LinearGradient {
-            backgroundGradient(featured: featured)
-        }
-
-        /// Hairline edge-light stroke: a soft white-opacity line that reads as glass-edge
-        /// catch-light in both appearances, layered above the neutral quietBorder tone.
-        public static let edgeHighlight = Color.white.opacity(0.16)
-
-        /// Combined stroke drawn on glass cards: a faint neutral border plus the edge
-        /// highlight, both hairline weight.
-        public static let strokeWidth: CGFloat = 0.5
-
-        /// Soft ambient shadow — depth, not a drop-shadow effect. Kept very low opacity so it
-        /// stays quiet on both light and dark canvases.
-        public static let shadowColor = Color.black.opacity(0.16)
-        public static let shadowRadius: CGFloat = 14
-        public static let shadowX: CGFloat = 0
-        public static let shadowY: CGFloat = 6
-
-        /// Subtle gradient for small components (icon tiles, badges, ring tracks) — low
-        /// contrast, never a loud fill. Neutral by default; pass a hue for a tinted tile.
-        public static func tileGradient(hue: Hue? = nil) -> LinearGradient {
-            if let hue {
-                return LinearGradient(
-                    colors: [hue.base.opacity(0.20), hue.base.opacity(0.08)],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-            }
-            return LinearGradient(
-                colors: [Color.primary.opacity(0.07), Color.primary.opacity(0.03)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
         }
     }
 
@@ -604,27 +563,40 @@ extension View {
         modifier(LifeOSCardModifier())
     }
 
-    /// Apply a branded pill badge style for status indicators.
+    /// Status indicator (Quiet Machine §4.2): a 6pt semantic dot plus
+    /// overline-style text in the same semantic color. No background, no
+    /// stroke — tinted capsules are retired. Uppercase per the overline role.
     func lifeOSStatusPill(color: Color, text: String) -> some View {
-        self.overlay {
-            Text(text)
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(color)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(color.opacity(0.14), in: LifeOSTokens.pillShape)
-                .overlay(LifeOSTokens.pillShape.stroke(color.opacity(0.22)))
+        self.overlay(alignment: .trailing) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(color)
+                    .frame(width: 6, height: 6)
+                Text(text)
+                    .font(LifeOSFont.overline())
+                    .tracking(0.8)
+                    .textCase(.uppercase)
+                    .foregroundStyle(color)
+                    .lineLimit(1)
+            }
+            .accessibilityElement(children: .combine)
         }
     }
 
-    /// iOS-26 "Liquid Glass" card surface: a soft top→bottom gradient, a frosted material
-    /// layer, a hairline edge-light stroke, and a quiet ambient shadow. Reusable across
-    /// screens — this is the one place the glass recipe lives.
-    ///
-    /// Falls back to a solid gradient fill (no material, no blur) when
-    /// `accessibilityReduceTransparency` is enabled, so content never becomes harder to read.
+    /// The Quiet Machine card: one flat surface fill + ONE solid hairline
+    /// border. No gradient, no material, no second stroke, no shadow, and no
+    /// reduce-transparency branch (the surface is opaque).
+    func flatCard(cornerRadius: CGFloat = LifeOSTokens.overviewCardCorner, featured: Bool = false) -> some View {
+        modifier(LifeOSFlatCardModifier(cornerRadius: cornerRadius, featured: featured))
+    }
+
+    /// DEPRECATED alias of `flatCard` (Quiet Machine §4.1). Kept only so
+    /// un-migrated call sites keep compiling during the Phase 2 sweep; every
+    /// call site should move to `flatCard`. Deliberately not annotated with
+    /// `@available(deprecated)` yet — that would emit warnings at every
+    /// remaining call site and break the zero-new-warnings gate.
     func glassCard(cornerRadius: CGFloat = LifeOSTokens.overviewCardCorner, featured: Bool = false) -> some View {
-        modifier(LifeOSGlassCardModifier(cornerRadius: cornerRadius, featured: featured))
+        flatCard(cornerRadius: cornerRadius, featured: featured)
     }
 }
 
@@ -637,10 +609,9 @@ private struct LifeOSCardModifier: ViewModifier {
     }
 }
 
-private struct LifeOSGlassCardModifier: ViewModifier {
+private struct LifeOSFlatCardModifier: ViewModifier {
     let cornerRadius: CGFloat
     let featured: Bool
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     private var shape: RoundedRectangle {
         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
@@ -648,24 +619,72 @@ private struct LifeOSGlassCardModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .background {
-                if reduceTransparency {
-                    shape.fill(LifeOSTokens.Glass.fallbackFill(featured: featured))
-                } else {
-                    ZStack {
-                        shape.fill(LifeOSTokens.Glass.backgroundGradient(featured: featured))
-                        shape.fill(LifeOSTokens.Glass.material)
-                    }
+            .background(featured ? LifeOSTokens.raised : LifeOSTokens.surface, in: shape)
+            .overlay(shape.stroke(LifeOSTokens.hairlineBorder, lineWidth: 1))
+            .contentShape(shape)
+    }
+}
+
+// MARK: - Button recipe (Quiet Machine §4.3)
+
+/// The three sanctioned button variants.
+///
+/// Primary   — accent fill, no border, white label in both appearances.
+/// Secondary — clear fill with a 1pt hairline border, primaryText label.
+/// Destructive — clear fill, no border, danger label.
+///
+/// Pressed state fills `strongBorder` (secondary) / `accentPressed` (primary).
+public struct LifeOSButtonStyle: ButtonStyle {
+    public enum Variant { case primary, secondary, destructive }
+
+    public let variant: Variant
+    @Environment(\.isEnabled) private var isEnabled
+
+    public init(_ variant: Variant = .secondary) {
+        self.variant = variant
+    }
+
+    public func makeBody(configuration: Configuration) -> some View {
+        let pressed = configuration.isPressed
+        return configuration.label
+            .font(LifeOSFont.control())
+            .foregroundStyle(labelColor(pressed: pressed))
+            .padding(.horizontal, LifeOSTokens.Space.md)
+            .frame(minHeight: LifeOSTokens.Control.standardHeight)
+            .background(
+                fillColor(pressed: pressed),
+                in: RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
+            )
+            .overlay {
+                if variant == .secondary {
+                    RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
+                        .stroke(LifeOSTokens.hairlineBorder, lineWidth: 1)
                 }
             }
-            .overlay(shape.stroke(LifeOSTokens.Glass.edgeHighlight, lineWidth: LifeOSTokens.Glass.strokeWidth))
-            .overlay(shape.stroke(LifeOSTokens.quietBorder, lineWidth: LifeOSTokens.Glass.strokeWidth))
-            .shadow(
-                color: reduceTransparency ? .clear : LifeOSTokens.Glass.shadowColor,
-                radius: LifeOSTokens.Glass.shadowRadius,
-                x: LifeOSTokens.Glass.shadowX,
-                y: LifeOSTokens.Glass.shadowY
-            )
-            .contentShape(shape)
+            .opacity(isEnabled ? 1 : 0.5)
+            .animation(LifeOSMotion.press, value: pressed)
+    }
+
+    private func fillColor(pressed: Bool) -> Color {
+        switch variant {
+        case .primary:
+            if pressed { return LifeOSTokens.accentPressed }
+            return isEnabled ? LifeOSTokens.accent : LifeOSTokens.strongBorder
+        case .secondary:
+            return pressed ? LifeOSTokens.strongBorder : .clear
+        case .destructive:
+            return pressed ? LifeOSTokens.strongBorder : .clear
+        }
+    }
+
+    private func labelColor(pressed: Bool) -> Color {
+        switch variant {
+        case .primary:
+            return .white
+        case .secondary:
+            return LifeOSTokens.primaryText
+        case .destructive:
+            return LifeOSTokens.danger
+        }
     }
 }
