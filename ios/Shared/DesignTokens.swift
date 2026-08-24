@@ -1,8 +1,49 @@
 import SwiftUI
 
+#if os(macOS)
+import AppKit
+#else
+import UIKit
+#endif
+
 // MARK: - Branded Color Palette
 
 public extension Color {
+    // Keep adaptive roles in this file so structural colors remain identical on
+    // both Apple targets without making Shared depend on an app-specific theme.
+#if os(macOS)
+    private static func lifeOSAdaptiveColor(
+        darkRed: Double,
+        darkGreen: Double,
+        darkBlue: Double,
+        lightRed: Double,
+        lightGreen: Double,
+        lightBlue: Double
+    ) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            return isDark
+                ? NSColor(srgbRed: CGFloat(darkRed), green: CGFloat(darkGreen), blue: CGFloat(darkBlue), alpha: 1)
+                : NSColor(srgbRed: CGFloat(lightRed), green: CGFloat(lightGreen), blue: CGFloat(lightBlue), alpha: 1)
+        })
+    }
+#else
+    private static func lifeOSAdaptiveColor(
+        darkRed: Double,
+        darkGreen: Double,
+        darkBlue: Double,
+        lightRed: Double,
+        lightGreen: Double,
+        lightBlue: Double
+    ) -> Color {
+        Color(uiColor: UIColor { traits in
+            traits.userInterfaceStyle == .dark
+                ? UIColor(red: CGFloat(darkRed), green: CGFloat(darkGreen), blue: CGFloat(darkBlue), alpha: 1)
+                : UIColor(red: CGFloat(lightRed), green: CGFloat(lightGreen), blue: CGFloat(lightBlue), alpha: 1)
+        })
+    }
+#endif
+
     /// Convenience initializer from a packed 24-bit hex value, e.g. `Color(hex: 0x036BFC)`.
     init(hex: UInt32) {
         self.init(
@@ -87,53 +128,146 @@ public extension Color {
     static let lifeOSCalendarRed = Color(hex: 0xE5433D)
 
     // Brand canvases
-    /// Deep dark blue canvas #000306.
-    static let lifeOSDarkCanvas = Color(red: 0x00/255, green: 0x03/255, blue: 0x06/255)
-    /// White with a super subtle blue tint #F0F6FF.
-    static let lifeOSLightCanvas = Color(red: 0xF0/255, green: 0xF6/255, blue: 0xFF/255)
+    /// Neutral dark canvas #000000.
+    static let lifeOSDarkCanvas = Color(hex: 0x000000)
+    /// Neutral light canvas #F7F7F8.
+    static let lifeOSLightCanvas = Color(hex: 0xF7F7F8)
+
+    /// Neutral structural roles used by the shared foundation.
+    static let lifeOSDarkSurface = Color(hex: 0x0B0B0C)
+    static let lifeOSLightSurface = Color(hex: 0xFFFFFF)
+    static let lifeOSDarkRaised = Color(hex: 0x151517)
+    static let lifeOSLightRaised = Color(hex: 0xF0F0F2)
+    static let lifeOSDarkFloatingOverlay = Color(hex: 0x1F1F22)
+    static let lifeOSLightFloatingOverlay = Color(hex: 0xFFFFFF)
+
+    static let lifeOSPrimaryText = lifeOSAdaptiveColor(
+        darkRed: 0xF5/255, darkGreen: 0xF5/255, darkBlue: 0xF7/255,
+        lightRed: 0x11/255, lightGreen: 0x11/255, lightBlue: 0x13/255
+    )
+
+    static let lifeOSSecondaryText = lifeOSAdaptiveColor(
+        darkRed: 0xAD/255, darkGreen: 0xAD/255, darkBlue: 0xB4/255,
+        lightRed: 0x5C/255, lightGreen: 0x5C/255, lightBlue: 0x63/255
+    )
+
+    static let lifeOSMetadataText = lifeOSAdaptiveColor(
+        darkRed: 0x84/255, darkGreen: 0x84/255, darkBlue: 0x8C/255,
+        lightRed: 0x6D/255, lightGreen: 0x6D/255, lightBlue: 0x74/255
+    )
+
+    static let lifeOSSubtleBorder = lifeOSAdaptiveColor(
+        darkRed: 0x17/255, darkGreen: 0x17/255, darkBlue: 0x1B/255,
+        lightRed: 0xE3/255, lightGreen: 0xE3/255, lightBlue: 0xE7/255
+    )
+
+    static let lifeOSStrongBorder = lifeOSAdaptiveColor(
+        darkRed: 0x29/255, darkGreen: 0x29/255, darkBlue: 0x2F/255,
+        lightRed: 0xD0/255, lightGreen: 0xD0/255, lightBlue: 0xD6/255
+    )
+
+    /// Observed chart blue: #3085FD in dark mode and #0253C4 in light mode.
+    static let lifeOSObservedBlue = lifeOSAdaptiveColor(
+        darkRed: 0x30/255, darkGreen: 0x85/255, darkBlue: 0xFD/255,
+        lightRed: 0x02/255, lightGreen: 0x53/255, lightBlue: 0xC4/255
+    )
+
+    /// Focus blue: #5DA0FD in dark mode and #0253C4 in light mode.
+    static let lifeOSFocusBlue = lifeOSAdaptiveColor(
+        darkRed: 0x5D/255, darkGreen: 0xA0/255, darkBlue: 0xFD/255,
+        lightRed: 0x02/255, lightGreen: 0x53/255, lightBlue: 0xC4/255
+    )
+
+    static let lifeOSNeutralCanvas = lifeOSAdaptiveColor(
+        darkRed: 0x00/255, darkGreen: 0x00/255, darkBlue: 0x00/255,
+        lightRed: 0xF7/255, lightGreen: 0xF7/255, lightBlue: 0xF8/255
+    )
+
+    static let lifeOSNeutralSurface = lifeOSAdaptiveColor(
+        darkRed: 0x0B/255, darkGreen: 0x0B/255, darkBlue: 0x0C/255,
+        lightRed: 0xFF/255, lightGreen: 0xFF/255, lightBlue: 0xFF/255
+    )
+
+    static let lifeOSNeutralRaised = lifeOSAdaptiveColor(
+        darkRed: 0x15/255, darkGreen: 0x15/255, darkBlue: 0x17/255,
+        lightRed: 0xF0/255, lightGreen: 0xF0/255, lightBlue: 0xF2/255
+    )
+
+    static let lifeOSNeutralFloatingOverlay = lifeOSAdaptiveColor(
+        darkRed: 0x1F/255, darkGreen: 0x1F/255, darkBlue: 0x22/255,
+        lightRed: 0xFF/255, lightGreen: 0xFF/255, lightBlue: 0xFF/255
+    )
 }
 
 // MARK: - Design Tokens
 
 public enum LifeOSTokens {
+    // MARK: Spacing and geometry
+
+    /// The only spacing steps used by the shared foundation.
+    public enum Space {
+        public static let xxs: CGFloat = 4
+        public static let xs: CGFloat = 8
+        public static let sm: CGFloat = 12
+        public static let md: CGFloat = 16
+        public static let lg: CGFloat = 20
+        public static let xl: CGFloat = 24
+        public static let xxl: CGFloat = 32
+        public static let xxxl: CGFloat = 40
+    }
+
+    /// Allowed corner radii. Capsules are used for status/selectors.
+    public enum Radius {
+        public static let control: CGFloat = 8
+        public static let card: CGFloat = 12
+        public static let hero: CGFloat = 16
+    }
+
+    /// Platform minimums for interactive controls and pointer targets.
+    public enum Control {
+#if os(macOS)
+        public static let minimumTarget: CGFloat = 28
+        public static let standardHeight: CGFloat = 32
+        public static let iconButton: CGFloat = 32
+#else
+        public static let minimumTarget: CGFloat = 44
+        public static let standardHeight: CGFloat = 44
+        public static let iconButton: CGFloat = 44
+#endif
+    }
+
+#if os(macOS)
+    /// macOS page gutter; wider windows use the 32pt breakpoint in the responsive metrics.
+    public static let pageGutter: CGFloat = 24
+#else
+    /// iPhone page gutter.
+    public static let pageGutter: CGFloat = 16
+#endif
+
+    public static let contentMaxWidth: CGFloat = 1240
+    public static let chartMaxWidth: CGFloat = 1440
+
+    // MARK: Legacy geometry aliases
+
     public static let pagePadding: CGFloat = 20
     public static let grid: CGFloat = 4
     public static let spacing: CGFloat = grid * 3
-    public static let corner: CGFloat = 12
-    public static let smallCorner: CGFloat = 8
+    public static let corner: CGFloat = Radius.card
+    public static let smallCorner: CGFloat = Radius.control
     public static let cardPadding: CGFloat = 16
     public static let iconFrame: CGFloat = 32
     public static let overviewContentInset: CGFloat = 40
     public static let overviewCardHeight: CGFloat = 80
-    public static let overviewCardGap: CGFloat = 14
-    public static let overviewCardCorner: CGFloat = 12
+    public static let overviewCardGap: CGFloat = Space.md
+    public static let overviewCardCorner: CGFloat = Radius.card
     public static let overviewIconTile: CGFloat = 36
 
     // MARK: Canvas & Surface (theme-aware)
 
-#if os(macOS)
-    public static let canvas = Color(nsColor: NSColor(name: nil) { appearance in
-        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            ? NSColor(srgbRed: 0x00/255, green: 0x03/255, blue: 0x06/255, alpha: 1)
-            : NSColor(srgbRed: 0xF0/255, green: 0xF6/255, blue: 0xFF/255, alpha: 1)
-    })
-    public static let surface = Color(nsColor: NSColor(name: nil) { appearance in
-        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            ? NSColor(srgbRed: 0x0B/255, green: 0x0E/255, blue: 0x13/255, alpha: 1)
-            : .white
-    })
-#else
-    public static let canvas = Color(uiColor: UIColor { traits in
-        traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0x00/255, green: 0x03/255, blue: 0x06/255, alpha: 1)
-            : UIColor(red: 0xF0/255, green: 0xF6/255, blue: 0xFF/255, alpha: 1)
-    })
-    public static let surface = Color(uiColor: UIColor { traits in
-        traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0x0B/255, green: 0x0E/255, blue: 0x13/255, alpha: 1)
-            : .white
-    })
-#endif
+    public static let canvas = Color.lifeOSNeutralCanvas
+    public static let surface = Color.lifeOSNeutralSurface
+    public static let raised = Color.lifeOSNeutralRaised
+    public static let floatingOverlay = Color.lifeOSNeutralFloatingOverlay
 
     public static let darkCanvas = Color.lifeOSDarkCanvas
     public static let lightCanvas = Color.lifeOSLightCanvas
@@ -143,11 +277,18 @@ public enum LifeOSTokens {
 
     // MARK: Semantic Colors
 
-    /// Used only for focus and primary data, never as structural chrome.
-    public static let accent = Color.lifeOSBlue600
+    /// Used for focus and primary data, never as structural chrome.
+    public static let accent = Color.lifeOSFocusBlue
     public static let accentHover = Color.lifeOSBlue700
     public static let accentPressed = Color.lifeOSBlue800
     public static let accentLight = Color.lifeOSBlue50
+
+    public static let chartObserved = Color.lifeOSObservedBlue
+    public static let primaryText = Color.lifeOSPrimaryText
+    public static let secondaryText = Color.lifeOSSecondaryText
+    public static let metadataText = Color.lifeOSMetadataText
+    public static let subtleBorder = Color.lifeOSSubtleBorder
+    public static let strongBorder = Color.lifeOSStrongBorder
 
     /// success / positive / income / target-met → green 500 (#00B65D)
     public static let success = Color.lifeOSGreen500
@@ -177,13 +318,15 @@ public enum LifeOSTokens {
 
     public enum Series {
         /// Observed — blue (brand), solid.
-        public static let actual = Color.lifeOSBlue500
+        public static let actual = LifeOSTokens.chartObserved
+        /// Descriptive alias for new chart call sites. `actual` remains for compatibility.
+        public static let observed = LifeOSTokens.chartObserved
         /// Target pace — green, dashed.
         public static let target = Color.lifeOSGreen500
-        /// Current estimate — vivid orange, dashed.
+        /// Current estimate — amber/orange, dashed.
         public static let estimate = Color.lifeOSOrange500
         /// Past estimate / account history — grey, dotted.
-        public static let history = LifeOSTokens.tertiaryText
+        public static let history = LifeOSTokens.metadataText
     }
 
     // MARK: Ring tokens
@@ -280,10 +423,10 @@ public enum LifeOSTokens {
     public static let calendarRed = Color.lifeOSCalendarRed
 
     // Borders & quiescent states
-    public static let quietBorder = Color.primary.opacity(0.11)
-    public static let hairlineBorder = Color.primary.opacity(0.07)
-    public static let chartGrid = Color.primary.opacity(0.075)
-    public static let tertiaryText = Color.secondary.opacity(0.72)
+    public static let quietBorder = subtleBorder
+    public static let hairlineBorder = subtleBorder.opacity(0.82)
+    public static let chartGrid = subtleBorder.opacity(0.78)
+    public static let tertiaryText = metadataText
 
     // Card visual styling
     public static let cardShadowRadius: CGFloat = 0
@@ -364,6 +507,10 @@ public enum LifeOSTokens {
         RoundedRectangle(cornerRadius: smallCorner, style: .continuous)
     }
 
+    public static var heroShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: Radius.hero, style: .continuous)
+    }
+
     public static var pillShape: Capsule {
         Capsule()
     }
@@ -372,6 +519,23 @@ public enum LifeOSTokens {
 // MARK: - Motion (Reduce Motion aware)
 
 public enum LifeOSMotion {
+    // MARK: Canonical micro interactions
+
+    /// Press feedback: short, user-triggered and never a decorative reveal.
+    public static let press = Animation.easeOut(duration: 0.08)
+
+    /// Release feedback: lets controls settle without a lift or scale effect.
+    public static let release = Animation.easeOut(duration: 0.18)
+
+    /// Pointer hover/focus feedback.
+    public static let hover = Animation.easeOut(duration: 0.12)
+
+    /// Named aliases make intent explicit at call sites while preserving the
+    /// existing canonical primitives below.
+    public static let selector = Animation.spring(response: 0.30, dampingFraction: 0.86)
+    public static let card = Animation.spring(response: 0.42, dampingFraction: 0.82)
+    public static let fingerTracking = Animation.interactiveSpring(response: 0.18, dampingFraction: 0.86)
+
     // MARK: Canonical tokens (03-motion-revolut.md "Canonical spring tokens")
 
     /// Primary — screen & card transitions. Smooth settle, barely-there life.
@@ -422,6 +586,13 @@ public enum LifeOSMotion {
 #else
         UIAccessibility.isReduceMotionEnabled
 #endif
+    }
+
+    /// Decorative reveals, morphs and loops are removed under Reduce Motion.
+    /// User-driven drag/scrub/scroll motion must remain direct and should not
+    /// be routed through this helper.
+    public static func decorative(_ animation: Animation, reduceMotion: Bool? = nil) -> Animation? {
+        (reduceMotion ?? Self.reduceMotion) ? nil : animation
     }
 }
 
@@ -498,9 +669,3 @@ private struct LifeOSGlassCardModifier: ViewModifier {
             .contentShape(shape)
     }
 }
-
-#if os(macOS)
-import AppKit
-#else
-import UIKit
-#endif

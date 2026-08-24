@@ -105,6 +105,85 @@ public enum LifeOSFont {
     public static func caption(_ size: CGFloat = 11) -> Font {
         inter(size, weight: .medium)
     }
+
+    // MARK: Semantic role aliases
+    //
+    // These aliases preserve the registered font families above while giving
+    // new surfaces a stable role vocabulary. `relativeTo` keeps the roles
+    // responsive to Dynamic Type without changing existing call sites.
+
+    private static func roleFont(
+        _ name: String,
+        size: CGFloat,
+        relativeTo textStyle: Font.TextStyle
+    ) -> Font {
+        .custom(name, size: size, relativeTo: textStyle)
+    }
+
+    /// KPI/display value. Space Grotesk remains the display face.
+    public static func kpi(_ size: CGFloat = {
+#if os(macOS)
+        52
+#else
+        44
+#endif
+    }()) -> Font {
+        roleFont(SpaceGrotesk.bold.rawValue, size: size, relativeTo: .largeTitle)
+            .monospacedDigit()
+    }
+
+    /// Large page title.
+    public static func pageTitle(_ size: CGFloat = {
+#if os(macOS)
+        28
+#else
+        32
+#endif
+    }()) -> Font {
+        roleFont(SpaceGrotesk.bold.rawValue, size: size, relativeTo: .largeTitle)
+    }
+
+    /// Section heading.
+    public static func sectionTitle(_ size: CGFloat = 20) -> Font {
+        roleFont(SpaceGrotesk.medium.rawValue, size: size, relativeTo: .title2)
+    }
+
+    /// Card heading.
+    public static func cardTitle(_ size: CGFloat = {
+#if os(macOS)
+        15
+#else
+        16
+#endif
+    }()) -> Font {
+        roleFont(SpaceGrotesk.medium.rawValue, size: size, relativeTo: .headline)
+    }
+
+    /// Body copy.
+    public static func bodyText(_ size: CGFloat = {
+#if os(macOS)
+        14
+#else
+        15
+#endif
+    }()) -> Font {
+        roleFont(Inter.regular.rawValue, size: size, relativeTo: .body)
+    }
+
+    /// Control label.
+    public static func control(_ size: CGFloat = 13) -> Font {
+        roleFont(Inter.semiBold.rawValue, size: size, relativeTo: .subheadline)
+    }
+
+    /// Metadata and source labels.
+    public static func metadata(_ size: CGFloat = 12) -> Font {
+        roleFont(Inter.medium.rawValue, size: size, relativeTo: .caption)
+    }
+
+    /// Axis and micro labels.
+    public static func axis(_ size: CGFloat = 11) -> Font {
+        roleFont(Inter.medium.rawValue, size: size, relativeTo: .caption2)
+    }
 }
 
 // MARK: - Runtime Font Registration

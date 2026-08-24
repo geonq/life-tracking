@@ -147,6 +147,8 @@ public struct SpringPillSelector<T: Hashable, Label: View>: View {
                     label(option, isSelected)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
+                        .frame(minWidth: LifeOSTokens.Control.minimumTarget)
+                        .frame(minHeight: LifeOSTokens.Control.minimumTarget)
                         .background {
                             if isSelected {
                                 if reduceMotion {
@@ -252,11 +254,10 @@ public struct ScrubBubble<Content: View>: View {
     public var body: some View {
         content()
             .font(.caption2.monospacedDigit())
-            .padding(.horizontal, 9)
-            .padding(.vertical, 7)
-            .background(LifeOSTokens.surface.opacity(0.96), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
-            .shadow(radius: 0)
+            .padding(.horizontal, LifeOSTokens.Space.xs)
+            .padding(.vertical, LifeOSTokens.Space.xs)
+            .background(LifeOSTokens.floatingOverlay.opacity(0.96), in: RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous).stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
             .position(x: x, y: y)
             .animation(reduceMotion ? nil : LifeOSMotion.track, value: x)
             .animation(reduceMotion ? nil : LifeOSMotion.track, value: y)
