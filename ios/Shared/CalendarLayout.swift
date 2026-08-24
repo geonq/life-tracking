@@ -792,6 +792,10 @@ public enum CalendarInteractionLayout {
     /// The editor receives the actual dragged interval; this is only the
     /// initial ghost before the finger expresses a longer/shorter range.
     public static let mobileSelectionDurationMinutes = 30
+    /// Hold time before an empty-grid press claims creation (Notion parity:
+    /// ~0.3 s). Owned here so gesture code and interaction tests reference one
+    /// pure value instead of a magic literal inside the view layer.
+    public static let creationPressHoldSeconds: Double = 0.3
 
     /// The reduced-motion month transition still communicates the panel
     /// change, but does so with a short opacity cross-fade rather than the

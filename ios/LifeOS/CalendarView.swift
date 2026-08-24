@@ -3855,19 +3855,21 @@ struct CalendarSearchView: View {
     @FocusState private var fieldFocused: Bool
 
     private var results: [CalendarItem] {
-        CalendarSearch.results(matching: query, in: items, calendar: calendar)
+        trimmedQuery.isEmpty
+            ? CalendarSearch.recentItems(in: items)
+            : CalendarSearch.results(matching: query, in: items, calendar: calendar)
     }
 
     var body: some View {
         NavigationStack {
             Group {
-                if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if items.isEmpty {
                     ContentUnavailableView(
-                        "Search events",
-                        systemImage: "magnifyingglass",
-                        description: Text("Find events and to-dos by title.")
+                        "No events yet",
+                        systemImage: "calendar",
+                        description: Text("Create your first event to see it here.")
                     )
-                } else if results.isEmpty {
+                } else if !trimmedQuery.isEmpty && results.isEmpty {
                     ContentUnavailableView(
                         "No matches",
                         systemImage: "questionmark.text.page",
@@ -3884,6 +3886,7 @@ struct CalendarSearchView: View {
                         .accessibilityIdentifier("calendar-search-result-\(item.id.uuidString)")
                     }
                     .listStyle(.plain)
+                    .safeAreaInset(edge: .top, spacing: 0) { listHeader }
                 }
             }
             .navigationTitle("Search")
@@ -3907,6 +3910,23 @@ struct CalendarSearchView: View {
 
     private var trimmedQuery: String {
         query.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var listHeader: some View {
+        HStack(spacing: 6) {
+            Image(systemName: trimmedQuery.isEmpty ? "clock" : "magnifyingglass")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(LifeOSTokens.tertiaryText)
+            Text(trimmedQuery.isEmpty ? "Recent" : "Matches")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(LifeOSTokens.tertiaryText)
+                .textCase(.uppercase)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(LifeOSTokens.canvas)
+        .accessibilityHidden(true)
     }
 
     private var searchField: some View {
@@ -3965,9 +3985,11 @@ struct CalendarSearchView: View {
         .contentShape(Rectangle())
     }
 
+    /// Date and time rendered in the item's own time zone so a result row
+    /// never silently relabels a cross-zone event into the device zone.
     private func resultSubtitle(_ item: CalendarItem) -> String {
         var style = Date.FormatStyle.dateTime.weekday(.abbreviated).month(.abbreviated).day().hour().minute()
-        style.timeZone = calendar.timeZone
+        style.timeZone = item.timeZoneIdentifier.flatMap(TimeZone.init(identifier:)) ?? calendar.timeZone
         return item.start.formatted(style)
     }
 }

@@ -517,6 +517,46 @@ public enum CalendarSearch {
     private static func normalized(_ value: String) -> String {
         value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
     }
+
+    /// The blank-query landing list: the most recently touched items first
+    /// (activity = the later of created/updated), capped at `limit`. Items
+    /// without any usable activity timestamp fall back to the next upcoming
+    /// starts so the section never lies about being "recent". Tombstones are
+    /// excluded in both branches; ties break deterministically by id.
+    public static func recentItems(
+        in items: [CalendarItem],
+        limit: Int = 5,
+        now: Date = .now
+    ) -> [CalendarItem] {
+        let visible = items.filter { !$0.isDeleted }
+        let boundedLimit = max(0, limit)
+        let withActivity = visible.filter { $0.createdAt > .distantPast || $0.updatedAt > .distantPast }
+        if !withActivity.isEmpty {
+            return Array(
+                withActivity
+                    .sorted { lhs, rhs in
+                        let lhsActivity = max(lhs.createdAt, lhs.updatedAt)
+                        let rhsActivity = max(rhs.createdAt, rhs.updatedAt)
+                        if lhsActivity != rhsActivity { return lhsActivity > rhsActivity }
+                        return lhs.id.uuidString < rhs.id.uuidString
+                    }
+                    .prefix(boundedLimit)
+            )
+        }
+        return Array(
+            visible
+                .filter { $0.start >= now }
+                .sorted { $0.start == $1.start ? $0.id.uuidString < $1.id.uuidString : $0.start < $1.start }
+                .prefix(boundedLimit)
+        )
+    }
+
+    /// The day the pager must show for a search result. Occurrence-aware
+    /// callers pass the derived occurrence; the anchor's start maps identically
+    /// because the pager operates on local calendar days.
+    public static func navigationDay(for item: CalendarItem, calendar: Calendar) -> Date {
+        calendar.startOfDay(for: item.start)
+    }
 }
 
 public struct CalendarSnapshot: Codable, Equatable, Sendable {

@@ -123,6 +123,90 @@ final class CalendarDomainTests: XCTestCase {
         XCTAssertTrue(CalendarSearch.results(matching: "nonexistent", in: [item]).isEmpty)
     }
 
+    func testRecentItemsRankByLatestActivityAndCapAtFive() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let day = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 8, day: 20, hour: 9)))
+        func dated(_ title: String, created: TimeInterval, updated: TimeInterval, startOffset: TimeInterval = 0) throws -> CalendarItem {
+            try CalendarItem(
+                title: title,
+                start: day.addingTimeInterval(startOffset),
+                end: day.addingTimeInterval(startOffset + 600),
+                createdAt: day.addingTimeInterval(created),
+                updatedAt: day.addingTimeInterval(updated)
+            )
+        }
+
+        // Activity is the later of created/updated: an old item edited
+        // yesterday outranks a new item never touched since creation.
+        let editedOld = try dated("edited old", created: -10_000, updated: -3_600)
+        let freshUntouched = try dated("fresh untouched", created: -7_200, updated: -7_200)
+        let justCreated = try dated("just created", created: -60, updated: -60)
+        let tombstoned = try dated("tombstoned", created: -30, updated: -30).deleting(at: day)
+        // Ties break deterministically by ascending id.
+        let tieA = try CalendarItem(
+            id: UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!,
+            title: "tie a",
+            start: day,
+            end: day.addingTimeInterval(600),
+            createdAt: day.addingTimeInterval(-5_000),
+            updatedAt: day.addingTimeInterval(-5_000)
+        )
+        let tieB = try CalendarItem(
+            id: UUID(uuidString: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")!,
+            title: "tie b",
+            start: day.addingTimeInterval(700),
+            end: day.addingTimeInterval(1_300),
+            createdAt: day.addingTimeInterval(-5_000),
+            updatedAt: day.addingTimeInterval(-5_000)
+        )
+
+        let recents = CalendarSearch.recentItems(
+            in: [freshUntouched, tombstoned, editedOld, justCreated, tieB, tieA],
+            limit: 5,
+            now: day
+        )
+
+        XCTAssertEqual(recents.map(\.title), ["just created", "edited old", "tie a", "tie b", "fresh untouched"])
+        XCTAssertEqual(recents.count, 5)
+    }
+
+    func testRecentItemsFallBackToNextUpcomingWithoutUsableTimestamps() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let now = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 8, day: 23, hour: 12)))
+        let distantPast = Date.distantPast
+        func stampless(_ title: String, start: Date) throws -> CalendarItem {
+            // createdAt == updatedAt == .distantPast models an import whose
+            // activity timestamps are unavailable.
+            try CalendarItem(id: UUID(), title: title, start: start, end: start.addingTimeInterval(600), createdAt: distantPast, updatedAt: distantPast)
+        }
+        let laterToday = try stampless("later today", start: now.addingTimeInterval(3_600))
+        let sooner = try stampless("sooner", start: now.addingTimeInterval(600))
+        let alreadyPast = try stampless("already past", start: now.addingTimeInterval(-600))
+
+        let recents = CalendarSearch.recentItems(
+            in: [laterToday, alreadyPast, sooner],
+            limit: 5,
+            now: now
+        )
+
+        XCTAssertEqual(recents.map(\.title), ["sooner", "later today"])
+    }
+
+    func testSearchNavigationDayMapsResultToPagerDayStart() throws {
+        let calendar = berlinCalendar()
+        let lateEvening = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 12, day: 31, hour: 23, minute: 45)))
+        let item = try CalendarItem(title: "Silvester", start: lateEvening, end: lateEvening.addingTimeInterval(900))
+
+        let navigationDay = CalendarSearch.navigationDay(for: item, calendar: calendar)
+
+        XCTAssertEqual(calendar.startOfDay(for: navigationDay), navigationDay)
+        XCTAssertEqual(calendar.component(.year, from: navigationDay), 2026)
+        XCTAssertEqual(calendar.component(.month, from: navigationDay), 12)
+        XCTAssertEqual(calendar.component(.day, from: navigationDay), 31)
+    }
+
     private func berlinCalendar() -> Calendar {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "Europe/Berlin")!

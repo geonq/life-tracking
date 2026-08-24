@@ -836,8 +836,37 @@ final class CalendarLayoutTests: XCTestCase {
         )
     }
 
-    func testPressDragCreationDraftsSnappedRangeFromDownwardMovement() throws {
-        let sample = try XCTUnwrap(CalendarInteractionLayout.creationPressDragSample(
+    /// Notion parity contract: the empty-grid press claims creation after
+    /// ~0.3 s. The gesture view references this constant, so pinning it here
+    /// prevents a silent regression to the slower 0.45 s hold.
+    func testPressCreationHoldThresholdIsNotionFast() {
+        XCTAssertEqual(CalendarInteractionLayout.creationPressHoldSeconds, 0.3, accuracy: 0.0001)
+    }
+
+    /// A simple tap (no drag) maps the tapped wall-clock position to a snapped
+    /// 30-minute default block anchored at that time. A 23:50 tap must keep
+    /// its anchor and cross midnight rather than being pulled back into the day.
+    func testSingleTapMapsToThirtyMinuteDefaultBlockAtTappedTime() throws {
+        let interval = try XCTUnwrap(
+            CalendarInteractionLayout.creationInterval(
+                day: dayStart,
+                verticalStart: 23 * 60 + 47,
+                verticalEnd: 23 * 60 + 47,
+                hourHeight: 60,
+                calendar: calendar,
+                defaultDurationMinutes: CalendarInteractionLayout.mobileSelectionDurationMinutes
+            )
+        )
+
+        XCTAssertEqual(calendar.component(.hour, from: interval.start), 23)
+        XCTAssertEqual(calendar.component(.minute, from: interval.start), 45)
+        XCTAssertEqual(
+            CalendarInteractionLayout.calendarMinutes(from: interval.start, to: interval.end, calendar: calendar),
+            30
+        )
+    }
+
+    func testPressDragCreationDraftsSnappedRangeFromDownwardMovement() throws {        let sample = try XCTUnwrap(CalendarInteractionLayout.creationPressDragSample(
             day: dayStart,
             anchorY: 9 * 60,
             currentY: 10 * 60,
