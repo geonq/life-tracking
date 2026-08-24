@@ -306,6 +306,173 @@ final class CalendarLayoutTests: XCTestCase {
         XCTAssertLessThan(created, calendar.date(byAdding: .day, value: 1, to: day)!)
     }
 
+    func testViewportAwareContentHeightLetsEveryHourReachTheViewportTop() {
+        let day = dayStart
+        // geonq's "vertical scroll stops around 13:00" was a max-offset
+        // clamp: with a fixed trailing buffer the deepest offset was
+        // axis + inset - viewport, so the topmost reachable hour sat at
+        // ~12:37 (38pt zoom) / ~15:59 (54pt default). Reserving at least one
+        // full viewport of trailing space must let the 24:00 endpoint itself
+        // travel to the top of the viewport at every hour height.
+        let occlusionStack = CalendarInteractionLayout.homeIndicatorSafeAreaHeight
+            + CalendarInteractionLayout.compactTabBarHeight
+            + CalendarInteractionLayout.quickActionsOverlayHeight
+        for hourHeight in [38.0, 54.0, 110.0] {
+            for viewport in [597.0, 679.0, 731.0] {
+                let axis = CalendarInteractionLayout.timelineHeight(
+                    days: [day], hourHeight: hourHeight, calendar: calendar
+                )
+                let content = CalendarInteractionLayout.timelineContentHeight(
+                    days: [day],
+                    hourHeight: hourHeight,
+                    calendar: calendar,
+                    viewportHeight: viewport
+                )
+                XCTAssertEqual(
+                    content,
+                    axis + max(CalendarInteractionLayout.timelineBottomInset, viewport),
+                    accuracy: 0.0001
+                )
+                let maxOffset = CalendarInteractionLayout.timelineMaximumScrollOffset(
+                    contentHeight: content,
+                    viewportHeight: viewport
+                )
+                XCTAssertGreaterThanOrEqual(
+                    maxOffset,
+                    axis,
+                    "24:00 must be able to reach the viewport top at hourHeight \(hourHeight)"
+                )
+                // Every wall-clock hour is scrollable into the viewport.
+                XCTAssertGreaterThanOrEqual(
+                    maxOffset,
+                    23 * hourHeight,
+                    "23:00 must be reachable at the top at hourHeight \(hourHeight)"
+                )
+                // At maximum scroll the endpoint clears every occluding layer.
+                XCTAssertGreaterThanOrEqual(
+                    maxOffset + viewport - axis,
+                    occlusionStack + CalendarInteractionLayout.endpointLabelClearance,
+                    "The 24:00 endpoint must sit above the floating chrome at hourHeight \(hourHeight)"
+                )
+            }
+        }
+        // Degenerate inputs stay finite and non-negative.
+        XCTAssertEqual(
+            CalendarInteractionLayout.timelineMaximumScrollOffset(contentHeight: 100, viewportHeight: 400),
+            0
+        )
+        XCTAssertEqual(
+            CalendarInteractionLayout.timelineMaximumScrollOffset(contentHeight: .nan, viewportHeight: 400),
+            0
+        )
+    }
+
+    func testPagerSettleDurationIsBoundedSpeedScaledAndBounceFree() {
+        // Idle releases take the full damped travel; hard flicks settle fast.
+        XCTAssertEqual(
+            CalendarInteractionLayout.pagerSettleDuration(normalizedVelocity: 0),
+            CalendarInteractionLayout.pagerIdleSettleDuration
+        )
+        XCTAssertEqual(
+            CalendarInteractionLayout.pagerSettleDuration(normalizedVelocity: 3),
+            CalendarInteractionLayout.pagerFlickSettleDuration
+        )
+        XCTAssertEqual(
+            CalendarInteractionLayout.pagerSettleDuration(normalizedVelocity: -3),
+            CalendarInteractionLayout.pagerFlickSettleDuration,
+            "Direction must not change the settle duration"
+        )
+        XCTAssertEqual(
+            CalendarInteractionLayout.pagerSettleDuration(normalizedVelocity: .nan),
+            CalendarInteractionLayout.pagerIdleSettleDuration
+        )
+        XCTAssertLessThan(
+            CalendarInteractionLayout.pagerSettleDuration(normalizedVelocity: 1.5),
+            CalendarInteractionLayout.pagerSettleDuration(normalizedVelocity: 0.5),
+            "Faster releases must settle no slower than slow ones"
+        )
+        XCTAssertTrue(
+            (CalendarInteractionLayout.pagerFlickSettleDuration...CalendarInteractionLayout.pagerIdleSettleDuration)
+                .contains(CalendarInteractionLayout.pagerSettleDuration(normalizedVelocity: 900))
+        )
+    }
+
+    func testPagerSettleVelocityPrefersTrackerMomentumAndFallsBackToProjection() {
+        XCTAssertEqual(
+            CalendarInteractionLayout.pagerSettleVelocity(
+                normalizedTrackerVelocity: -2.4,
+                hasTrackerMomentum: true,
+                projectionVelocity: 0
+            ),
+            -2.4
+        )
+        // A tracker without a real estimate must not mask the projection.
+        XCTAssertEqual(
+            CalendarInteractionLayout.pagerSettleVelocity(
+                normalizedTrackerVelocity: -2.4,
+                hasTrackerMomentum: false,
+                projectionVelocity: -1.1
+            ),
+            -1.1
+        )
+        // Sub-threshold tracker motion defers to the projection.
+        XCTAssertEqual(
+            CalendarInteractionLayout.pagerSettleVelocity(
+                normalizedTrackerVelocity: 0.1,
+                hasTrackerMomentum: true,
+                projectionVelocity: -0.9
+            ),
+            -0.9
+        )
+        // Both inputs are clamped to the bounded spring range.
+        XCTAssertEqual(
+            CalendarInteractionLayout.pagerSettleVelocity(
+                normalizedTrackerVelocity: 42,
+                hasTrackerMomentum: true,
+                projectionVelocity: 0
+            ),
+            3
+        )
+        XCTAssertEqual(
+            CalendarInteractionLayout.pagerSettleVelocity(
+                normalizedTrackerVelocity: .nan,
+                hasTrackerMomentum: true,
+                projectionVelocity: -5
+            ),
+            -3
+        )
+    }
+
+    func testPagerFingerVelocityTrackerEstimatesSignedPointsPerSecond() {
+        var tracker = CalendarPagerFingerVelocity()
+        XCTAssertFalse(tracker.hasEstimate)
+        // First sample only establishes the reference point.
+        tracker.sample(x: 0, timeSeconds: 100)
+        XCTAssertEqual(tracker.pixelsPerSecond, 0)
+        XCTAssertFalse(tracker.hasEstimate)
+
+        // -60pt over 0.1s -> -600pt/s (finger moving toward later dates).
+        tracker.sample(x: -60, timeSeconds: 100.1)
+        XCTAssertEqual(tracker.pixelsPerSecond, -600, accuracy: 0.0001)
+        XCTAssertTrue(tracker.hasEstimate)
+
+        // EMA smooths the next estimate instead of jumping.
+        tracker.sample(x: -120, timeSeconds: 100.25)
+        XCTAssertEqual(tracker.pixelsPerSecond, 0.55 * (-400) + 0.45 * (-600), accuracy: 0.0001)
+
+        // Sub-millisecond samples cannot divide by a near-zero interval.
+        let frozen = tracker.pixelsPerSecond
+        tracker.sample(x: -1_000, timeSeconds: 100.2501)
+        XCTAssertEqual(tracker.pixelsPerSecond, frozen)
+
+        // Non-finite input is ignored and reset clears everything.
+        tracker.sample(x: .nan, timeSeconds: 101)
+        XCTAssertEqual(tracker.pixelsPerSecond, frozen)
+        tracker.reset()
+        XCTAssertFalse(tracker.hasEstimate)
+        XCTAssertEqual(tracker.pixelsPerSecond, 0)
+    }
+
     func testAllDayLaneFollowsEntriesPlusOneCellRule() throws {
         let anchor = DateComponents(calendar: calendar, year: 2026, month: 7, day: 31).date!
         let day1 = calendar.date(byAdding: .day, value: 1, to: anchor)!
@@ -321,6 +488,17 @@ final class CalendarLayoutTests: XCTestCase {
         XCTAssertEqual(
             CalendarAllDayLayout.height(items: [], days: days, calendar: calendar),
             CalendarAllDayLayout.rowHeight
+        )
+
+        // One entry -> its own cell plus exactly one empty cell below it.
+        let lone = try CalendarItem(title: "Lone", start: anchor, end: day1)
+        XCTAssertEqual(
+            CalendarAllDayLayout.rowCount(items: [lone], days: days, calendar: calendar),
+            2
+        )
+        XCTAssertEqual(
+            CalendarAllDayLayout.height(items: [lone], days: days, calendar: calendar),
+            CalendarAllDayLayout.rowHeight * 2 + CalendarAllDayLayout.rowSpacing
         )
 
         let first = try CalendarItem(title: "First", start: anchor, end: day1)

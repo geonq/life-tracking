@@ -538,6 +538,53 @@ public struct CalendarPagerDragState: Equatable, Sendable {
     }
 }
 
+/// Timestamped exponential-moving-average of the pager finger's horizontal
+/// speed in points per second. `DragGesture` only exposes a predicted end
+/// translation whose implied velocity mixes distance and deceleration
+/// assumptions; sampling real timestamps keeps the settle duration honest
+/// for both slow drags and hard flicks. Pure value semantics keep it
+/// unit-testable without hosting a gesture.
+public struct CalendarPagerFingerVelocity: Equatable, Sendable {
+    public private(set) var pixelsPerSecond: Double = 0
+    /// True once at least one displacement sample exists to measure against.
+    public private(set) var hasReference = false
+    /// True once a real velocity estimate (two spaced samples) exists.
+    public var hasEstimate: Bool { estimateCount > 0 }
+    private var lastX: Double = 0
+    private var lastTime: Double = 0
+    private var estimateCount = 0
+
+    public init() {}
+
+    public mutating func reset() {
+        self = .init()
+    }
+
+    /// Incorporates one finger sample (drag translation x and a monotonic
+    /// timestamp in seconds) and returns the smoothed estimate.
+    @discardableResult
+    public mutating func sample(x: Double, timeSeconds: Double) -> Double {
+        guard x.isFinite, timeSeconds.isFinite else { return pixelsPerSecond }
+        guard hasReference else {
+            lastX = x
+            lastTime = timeSeconds
+            hasReference = true
+            return pixelsPerSecond
+        }
+        let dt = timeSeconds - lastTime
+        let dx = x - lastX
+        guard dt > 0.0005 else { return pixelsPerSecond }
+        lastX = x
+        lastTime = timeSeconds
+        let instant = dx / dt
+        pixelsPerSecond = estimateCount == 0
+            ? instant
+            : 0.55 * instant + 0.45 * pixelsPerSecond
+        estimateCount += 1
+        return pixelsPerSecond
+    }
+}
+
 /// Render ownership for a month drag. The source owner remains mounted and
 /// interactive until the gesture ends; the destination is only a visual ghost
 /// and never becomes a second gesture/accessibility surface.
@@ -850,6 +897,41 @@ public enum CalendarInteractionLayout {
         ).pageDelta
     }
 
+    /// Perceptual settle durations for the day strip. The settle is always a
+    /// critically damped duration-based spring (zero bounce); a hard flick
+    /// only shortens the travel time. Notion-like paging feels continuous
+    /// because the strip never lingers after a fast release.
+    public static let pagerIdleSettleDuration: Double = 0.34
+    public static let pagerFlickSettleDuration: Double = 0.20
+
+    /// Maps a bounded release velocity (page widths per second, sign ignored)
+    /// onto the settle duration. Slow drags get the full damped travel; hard
+    /// flicks settle in `pagerFlickSettleDuration`.
+    public static func pagerSettleDuration(normalizedVelocity: Double) -> Double {
+        guard normalizedVelocity.isFinite, normalizedVelocity != 0 else { return pagerIdleSettleDuration }
+        let speed = max(0, min(3, abs(normalizedVelocity)))
+        return pagerIdleSettleDuration - (pagerIdleSettleDuration - pagerFlickSettleDuration) * (speed / 3)
+    }
+
+    /// Picks the settle velocity for one release. The timestamped finger
+    /// tracker is the ground truth while it observed real motion; the drag's
+    /// predicted-end projection covers gestures too short for a stable
+    /// estimate. Both inputs are page widths per second, bounded to ±3.
+    public static func pagerSettleVelocity(
+        normalizedTrackerVelocity: Double,
+        hasTrackerMomentum: Bool,
+        projectionVelocity: Double
+    ) -> Double {
+        let clampedTracker = normalizedTrackerVelocity.isFinite
+            ? max(-3, min(3, normalizedTrackerVelocity))
+            : 0
+        if hasTrackerMomentum, abs(clampedTracker) >= 0.35 { return clampedTracker }
+        let clampedProjection = projectionVelocity.isFinite
+            ? max(-3, min(3, projectionVelocity))
+            : 0
+        return clampedProjection
+    }
+
     /// Projects the date under a native-width pager while the page is still
     /// moving. A horizontal offset of `-pageWidth` means that the next page is
     /// centred, so the header advances by the complete visible day window.
@@ -1062,6 +1144,39 @@ public enum CalendarInteractionLayout {
     /// for the final label/boundary.
     public static func timelineContentHeight(days: [Date], hourHeight: Double, calendar: Calendar) -> Double {
         timelineHeight(days: days, hourHeight: hourHeight, calendar: calendar) + timelineBottomInset
+    }
+
+    /// Viewport-aware scroll content height for the timed grid.
+    ///
+    /// The reported "vertical scroll stops around 13:00" regression was a
+    /// max-offset clamp, not a missing inset: with a fixed bottom buffer the
+    /// deepest reachable offset is `axis + inset - viewport`, so the topmost
+    /// reachable hour was `maxOffset / hourHeight` — about 12:37 at the
+    /// zoomed-out 38pt hour height and 15:59 at the default 54pt. Once the
+    /// viewport filled with late-day hours the scroll simply stopped, no
+    /// matter how much day was left. Reserving at least one full viewport of
+    /// trailing space lets the 24:00 endpoint itself travel to the top of the
+    /// viewport (`maxOffset >= axis`), so every wall-clock hour 00:00..24:00
+    /// can always be scrolled into view at any hour height and any occluding
+    /// chrome. The fixed inset remains the floor for very short viewports.
+    public static func timelineContentHeight(
+        days: [Date],
+        hourHeight: Double,
+        calendar: Calendar,
+        viewportHeight: Double
+    ) -> Double {
+        let axis = timelineHeight(days: days, hourHeight: hourHeight, calendar: calendar)
+        let safeViewport = viewportHeight.isFinite ? max(0, viewportHeight) : 0
+        return axis + max(timelineBottomInset, safeViewport)
+    }
+
+    /// Deepest scroll offset the timed grid will ever reach for the given
+    /// content and viewport. Exposed pure so tests can assert full-day
+    /// reachability without hosting a ScrollView.
+    public static func timelineMaximumScrollOffset(contentHeight: Double, viewportHeight: Double) -> Double {
+        let safeContent = contentHeight.isFinite ? max(0, contentHeight) : 0
+        let safeViewport = viewportHeight.isFinite ? max(0, viewportHeight) : 0
+        return max(0, safeContent - safeViewport)
     }
 
     public static func timelineHourLabel(
