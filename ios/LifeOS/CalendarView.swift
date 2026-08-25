@@ -1212,7 +1212,7 @@ private struct CalendarEditorTimeZoneChip: View {
             .padding(.vertical, 6)
             .background(Color.primary.opacity(0.07), in: Capsule())
         }
-        .accessibilityLabel("Timezone")
+        .accessibilityLabel(CalendarEditorStrings.timezone())
         .accessibilityValue(effectiveIdentifier)
         .accessibilityIdentifier("calendar-event-timezone")
     }
@@ -1235,6 +1235,78 @@ private struct CalendarEditorTimeZoneChip: View {
     }
 }
 #endif
+
+enum CalendarEditorStrings {
+    static func de(_ german: String, _ english: String, localeIdentifier: String = Locale.current.identifier) -> String {
+        localeIdentifier.hasPrefix("de") ? german : english
+    }
+
+    static func allDay(localeIdentifier: String = Locale.current.identifier) -> String {
+        de("Ganztägig", "All day", localeIdentifier: localeIdentifier)
+    }
+
+    static func timezone(localeIdentifier: String = Locale.current.identifier) -> String {
+        de("Zeitzone", "Timezone", localeIdentifier: localeIdentifier)
+    }
+
+    static func titlePlaceholder(localeIdentifier: String = Locale.current.identifier) -> String {
+        de("Titel", "Event title", localeIdentifier: localeIdentifier)
+    }
+
+    static func repeatLabel(localeIdentifier: String = Locale.current.identifier) -> String {
+        de("Wiederholen", "Repeat", localeIdentifier: localeIdentifier)
+    }
+
+    static func recurrenceNone(localeIdentifier: String = Locale.current.identifier) -> String {
+        de("Nie", "None", localeIdentifier: localeIdentifier)
+    }
+
+    static func recurrence(_ frequency: CalendarRecurrenceFrequency, localeIdentifier: String = Locale.current.identifier) -> String {
+        switch frequency {
+        case .daily: de("Täglich", "Daily", localeIdentifier: localeIdentifier)
+        case .weekly: de("Wöchentlich", "Weekly", localeIdentifier: localeIdentifier)
+        case .monthly: de("Monatlich", "Monthly", localeIdentifier: localeIdentifier)
+        case .yearly: de("Jährlich", "Yearly", localeIdentifier: localeIdentifier)
+        }
+    }
+
+    static func untilLabel(localeIdentifier: String = Locale.current.identifier) -> String {
+        de("Bis", "Until", localeIdentifier: localeIdentifier)
+    }
+
+    static func kindLabel(_ kind: CalendarItemKind, localeIdentifier: String = Locale.current.identifier) -> String {
+        switch kind {
+        case .event: de("Ereignis", "Event", localeIdentifier: localeIdentifier)
+        case .todo: de("Aufgabe", "To-do", localeIdentifier: localeIdentifier)
+        case .dailySchedule: de("Tagesplan", "Daily schedule", localeIdentifier: localeIdentifier)
+        }
+    }
+
+    static func status(_ progress: CalendarProgress, localeIdentifier: String = Locale.current.identifier) -> String {
+        switch progress {
+        case .planned: de("Geplant", "Planned", localeIdentifier: localeIdentifier)
+        case .inProgress: de("In Arbeit", "In progress", localeIdentifier: localeIdentifier)
+        case .done: de("Erledigt", "Done", localeIdentifier: localeIdentifier)
+        case .aborted: de("Abgebrochen", "Aborted", localeIdentifier: localeIdentifier)
+        }
+    }
+
+    static func markDone(localeIdentifier: String = Locale.current.identifier) -> String {
+        de("Als erledigt markieren", "Mark done", localeIdentifier: localeIdentifier)
+    }
+
+    static func deleteEvent(localeIdentifier: String = Locale.current.identifier) -> String {
+        de("Ereignis löschen", "Delete event", localeIdentifier: localeIdentifier)
+    }
+
+    static func cancel(localeIdentifier: String = Locale.current.identifier) -> String {
+        de("Abbrechen", "Cancel", localeIdentifier: localeIdentifier)
+    }
+
+    static func save(localeIdentifier: String = Locale.current.identifier) -> String {
+        de("Sichern", "Save", localeIdentifier: localeIdentifier)
+    }
+}
 
 /// Pure date translation used by the editor when its day property changes.
 /// Translating the existing interval, rather than rebuilding the end from its
@@ -1546,7 +1618,7 @@ struct CalendarEditor: View {
 
             Menu {
                 if let existing {
-                    Button("Delete event", role: .destructive) { requestDelete(existing) }
+                    Button(CalendarEditorStrings.deleteEvent(), role: .destructive) { requestDelete(existing) }
                         .accessibilityIdentifier("calendar-event-delete")
                 }
             } label: {
@@ -1604,11 +1676,11 @@ struct CalendarEditor: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button(CalendarEditorStrings.cancel()) { dismiss() }
                         .accessibilityIdentifier("calendar-event-cancel")
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save", action: commit)
+                    Button(CalendarEditorStrings.save(), action: commit)
                         .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || end <= start)
                         .accessibilityIdentifier("calendar-event-save")
                 }
@@ -1631,7 +1703,7 @@ struct CalendarEditor: View {
             editorStatusRow
 #if os(iOS)
             if let existing {
-                Button("Delete event", role: .destructive) { requestDelete(existing) }
+                Button(CalendarEditorStrings.deleteEvent(), role: .destructive) { requestDelete(existing) }
                     .padding(.top, 18)
                     .accessibilityIdentifier("calendar-event-delete")
             }
@@ -1657,7 +1729,7 @@ struct CalendarEditor: View {
             .scaleEffect(reduceMotion ? 1 : (isIconHovered ? 1.025 : 1))
 #endif
 
-            TextField("Event title", text: $title)
+            TextField(CalendarEditorStrings.titlePlaceholder(), text: $title)
                 .font(.system(size: 21, weight: .semibold))
                 .textFieldStyle(.plain)
                 .focused($titleFocused)
@@ -1686,12 +1758,12 @@ struct CalendarEditor: View {
                             status = .planned
                         }
                     } label: {
-                        Label(candidate.label, systemImage: candidate == .todo ? "checkmark.square" : (candidate == .dailySchedule ? "calendar.badge.clock" : "calendar"))
+                        Label(CalendarEditorStrings.kindLabel(candidate), systemImage: candidate == .todo ? "checkmark.square" : (candidate == .dailySchedule ? "calendar.badge.clock" : "calendar"))
                     }
                 }
             } label: {
                 HStack(spacing: 7) {
-                    Text(kind.label)
+                    Text(CalendarEditorStrings.kindLabel(kind))
                         .font(.system(size: 12, weight: .semibold))
                     Image(systemName: "chevron.up.chevron.down")
                         .font(.system(size: 10, weight: .semibold))
@@ -1714,7 +1786,7 @@ struct CalendarEditor: View {
                     .frame(width: 16, height: 16)
                     .foregroundStyle(.secondary)
                 if allDay {
-                    Text("All day")
+                    Text(CalendarEditorStrings.allDay())
                         .font(.system(size: 13, weight: .medium))
                     Spacer(minLength: 4)
                     Text(durationLabel)
@@ -1797,8 +1869,8 @@ struct CalendarEditor: View {
             HStack(spacing: 10) {
                 Spacer().frame(width: 26)
 #if os(macOS)
-                CalendarEditorInlineToggle(title: "All day", isOn: $allDay, identifier: "calendar-event-all-day")
-                CalendarEditorInlineToggle(title: "Timezone", isOn: $showTimezone, identifier: "calendar-event-timezone")
+                CalendarEditorInlineToggle(title: CalendarEditorStrings.allDay(), isOn: $allDay, identifier: "calendar-event-all-day")
+                CalendarEditorInlineToggle(title: CalendarEditorStrings.timezone(), isOn: $showTimezone, identifier: "calendar-event-timezone")
                 if showTimezone {
                     Text(TimeZone.current.identifier)
                         .font(.system(size: 11, weight: .medium))
@@ -1806,7 +1878,7 @@ struct CalendarEditor: View {
                         .lineLimit(1)
                 }
 #else
-                Toggle("All day", isOn: $allDay)
+                Toggle(CalendarEditorStrings.allDay(), isOn: $allDay)
                     .toggleStyle(.button)
                     .controlSize(.small)
                     .accessibilityIdentifier("calendar-event-all-day")
@@ -1836,20 +1908,20 @@ struct CalendarEditor: View {
                 Image(systemName: "repeat")
                     .frame(width: 16, height: 16)
                     .foregroundStyle(.secondary)
-                Text("Repeat")
+                Text(CalendarEditorStrings.repeatLabel())
                     .font(.system(size: 13, weight: .medium))
                 Spacer(minLength: 0)
                 Menu {
-                    Button("None") { repeatFrequency = nil }
+                    Button(CalendarEditorStrings.recurrenceNone()) { repeatFrequency = nil }
                     ForEach(CalendarRecurrenceFrequency.allCases, id: \.self) { candidate in
-                        Button(candidate.label) {
+                        Button(CalendarEditorStrings.recurrence(candidate)) {
                             repeatFrequency = candidate
                             if repeatInterval < 1 { repeatInterval = 1 }
                         }
                     }
                 } label: {
                     HStack(spacing: 7) {
-                        Text(repeatFrequency?.label ?? "None")
+                        Text(repeatFrequency.map { CalendarEditorStrings.recurrence($0) } ?? CalendarEditorStrings.recurrenceNone())
                             .font(.system(size: 12, weight: .semibold))
                         Image(systemName: "chevron.up.chevron.down")
                             .font(.system(size: 10, weight: .semibold))
@@ -1873,7 +1945,7 @@ struct CalendarEditor: View {
                 .accessibilityLabel("Repeat interval")
 
                 Toggle(isOn: $repeatUntilEnabled) {
-                    Text("Until")
+                    Text(CalendarEditorStrings.untilLabel())
                         .font(.system(size: 12, weight: .medium))
                 }
                 .toggleStyle(.switch)
@@ -1921,7 +1993,7 @@ struct CalendarEditor: View {
                 Button {
                     status = status == .done ? .planned : .done
                 } label: {
-                    Label(status == .done ? "Done" : "Mark done", systemImage: status == .done ? "checkmark.square.fill" : "square")
+                    Label(status == .done ? CalendarEditorStrings.status(.done) : CalendarEditorStrings.markDone(), systemImage: status == .done ? "checkmark.square.fill" : "square")
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -1949,12 +2021,14 @@ struct CalendarEditor: View {
     private var durationLabel: String {
         let seconds = max(0, end.timeIntervalSince(start))
         let minutes = Int(seconds / 60)
+        let hourUnit = CalendarEditorStrings.de("Std.", "hr")
+        let minuteUnit = CalendarEditorStrings.de("Min", "min")
         if minutes >= 60 {
             let hours = minutes / 60
             let remaining = minutes % 60
-            return remaining == 0 ? "\(hours) hr" : "\(hours) hr \(remaining) min"
+            return remaining == 0 ? "\(hours) \(hourUnit)" : "\(hours) \(hourUnit) \(remaining) \(minuteUnit)"
         }
-        return "\(minutes) min"
+        return "\(minutes) \(minuteUnit)"
     }
 
     private func setAllDayBounds(for date: Date) {
@@ -3690,7 +3764,7 @@ private struct CalendarEditorStatusPicker: View {
                     progress = status
                 } label: {
                     Label {
-                        Text(status.label)
+                        Text(CalendarEditorStrings.status(status))
                     } icon: {
                         LifeOSIcon(status.iconName)
                     }
@@ -3701,7 +3775,7 @@ private struct CalendarEditorStatusPicker: View {
                 Circle()
                     .fill(progress.color)
                     .frame(width: 7, height: 7)
-                Text(progress.label)
+                Text(CalendarEditorStrings.status(progress))
                     .font(.system(size: 12, weight: .semibold))
                     .lineLimit(1)
                 Image(systemName: "chevron.up.chevron.down")
@@ -3790,17 +3864,17 @@ struct CalendarCustomIconSheet: View {
                 Spacer(minLength: 0)
             }
             .padding(24)
-            .navigationTitle("Add custom icon")
+            .navigationTitle(CalendarEditorStrings.de("Eigenes Symbol hinzufügen", "Add custom icon"))
 #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
 #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button(CalendarEditorStrings.de("Abbrechen", "Cancel")) { dismiss() }
                         .accessibilityIdentifier("calendar-icon-cancel")
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") { save() }
+                    Button(CalendarEditorStrings.de("Sichern", "Save")) { save() }
                         .disabled(asset == nil || cleanedName.isEmpty)
                         .accessibilityIdentifier("calendar-icon-save")
                 }
@@ -3896,7 +3970,7 @@ struct CalendarSearchView: View {
 #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") { dismiss() }
+                    Button(CalendarEditorStrings.de("Fertig", "Done")) { dismiss() }
                 }
             }
             .safeAreaInset(edge: .top, spacing: 0) {
