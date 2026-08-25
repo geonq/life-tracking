@@ -227,7 +227,7 @@ private struct FitnessBiologicalAgeCard: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassCard()
+        .flatCard()
         .overlay(LifeOSTokens.cardShape.stroke(hovering ? LifeOSTokens.accent.opacity(0.30) : Color.clear, lineWidth: hovering ? 1 : 0.75))
         .onHover { hovering = $0 }
         .animation(reduceMotion ? nil : LifeOSMotion.snappy, value: hovering)
@@ -274,7 +274,7 @@ private struct FitnessBiologyMetricCard: View {
             }
             .padding(15)
             .frame(maxWidth: .infinity, minHeight: 118, alignment: .leading)
-            .glassCard()
+            .flatCard()
             .overlay(LifeOSTokens.cardShape.stroke(hovering ? LifeOSTokens.strongBorder : Color.clear, lineWidth: 1))
         }
         .buttonStyle(.plain)
@@ -435,7 +435,7 @@ private struct FitnessBiologyDetailHero: View {
             Spacer(minLength: 8)
         }
         .padding(16)
-        .glassCard()
+        .flatCard()
     }
 }
 
@@ -473,7 +473,7 @@ private struct FitnessBiologyTrendCard: View {
             }
         }
         .padding(16)
-        .glassCard()
+        .flatCard()
     }
 }
 
@@ -528,7 +528,7 @@ private struct FitnessBiologyEmptyTrendCard: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassCard()
+        .flatCard()
     }
 }
 
@@ -554,7 +554,7 @@ private struct FitnessBiologyProvenanceCard: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassCard()
+        .flatCard()
     }
 
     private func sourceRow(_ label: String, _ value: String) -> some View {

@@ -360,7 +360,7 @@ public struct CalendarWidgetView: View {
             HStack(alignment: .firstTextBaseline, spacing: 5) {
                 Text(monthTitle)
                     .font(.system(size: 15, weight: .bold))
-                    .foregroundStyle(usesTransparentTreatment ? .white : LifeOSTokens.calendarRed)
+                    .foregroundStyle(primaryForeground)
                     .lineLimit(1)
                 Text("\(weekLabel) \(isoWeek)")
                     .font(.system(size: 11))
@@ -405,14 +405,17 @@ public struct CalendarWidgetView: View {
     private func dayCell(_ day: Date) -> some View {
         let isToday = calendar.isDate(day, inSameDayAs: entry.date)
         let isCurrentMonth = isInDisplayedMonth(day)
+        // Today is marked by primary-text inversion (§5.6): filled square in
+        // primaryText, numeral in canvas color. Accented/transparent treatment
+        // already renders as a white square with a dark glyph.
         let textColor: Color = isToday
-            ? (usesTransparentTreatment ? .lifeOSBlack : .white)
+            ? (usesTransparentTreatment ? .lifeOSBlack : LifeOSTokens.canvas)
             : (isCurrentMonth ? primaryForeground : secondaryForeground.opacity(0.58))
 
         return ZStack {
             if isToday {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(usesTransparentTreatment ? Color.white : LifeOSTokens.calendarRed)
+                    .fill(usesTransparentTreatment ? Color.white : LifeOSTokens.primaryText)
             }
             Text(calendar.component(.day, from: day).description)
                 .font(.system(size: 10, weight: isToday ? .bold : .regular, design: .rounded))
@@ -432,7 +435,7 @@ public struct CalendarWidgetView: View {
                 Text(compactWeekdaySymbol(entry.date.formatted(.dateTime.locale(formatLocale).weekday(.abbreviated))))
                     .foregroundStyle(primaryForeground)
                 Text(entry.date, format: .dateTime.locale(formatLocale).day())
-                    .foregroundStyle(usesTransparentTreatment ? .white : LifeOSTokens.calendarRed)
+                    .foregroundStyle(primaryForeground)
             }
             .font(.system(size: 19, weight: .bold))
             .lineLimit(1)
@@ -464,7 +467,7 @@ public struct CalendarWidgetView: View {
     private func agendaRow(_ item: CalendarItem) -> some View {
         HStack(alignment: .top, spacing: 7) {
             RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                .fill(LifeOSTokens.Hue.green.base)
+                .fill(LifeOSTokens.accent)
                 .frame(width: 3, height: 28)
             VStack(alignment: .leading, spacing: 0) {
                 Text(item.title)

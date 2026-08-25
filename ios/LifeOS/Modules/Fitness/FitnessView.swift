@@ -1559,7 +1559,7 @@ private struct FitnessCoreNavigationCard<Content: View>: View {
             }
             .padding(13)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .glassCard()
+            .flatCard()
             .overlay(
                 LifeOSTokens.cardShape.stroke(
                     hovering ? LifeOSTokens.strongBorder : Color.clear,
@@ -2149,7 +2149,7 @@ private struct FitnessCoreLoadTrends: View {
 #endif
         }
         .padding(13)
-        .glassCard()
+        .flatCard()
     }
 }
 
@@ -2630,7 +2630,7 @@ private struct FitnessCoreSleepScheduleCard: View {
         }
         .padding(15)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassCard()
+        .flatCard()
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("fitness-sleep-schedule-card")
     }
@@ -2827,7 +2827,7 @@ private struct FitnessCoreSleepTrends: View {
             }
         }
         .padding(13)
-        .glassCard()
+        .flatCard()
         .accessibilityIdentifier("fitness-sleep-trends")
     }
 }
@@ -3469,7 +3469,7 @@ private struct FitnessSourceGateCard: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassCard()
+        .flatCard()
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("fitness-health-source-gate")
     }
@@ -5484,7 +5484,7 @@ struct FitnessCard<Content: View>: View {
         }
             .padding(15)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .glassCard()
+            .flatCard()
     }
 }
 

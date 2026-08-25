@@ -46,15 +46,20 @@ struct UsageTokenActivityView: View {
                 AxisMarks(values: .automatic(desiredCount: 4)) { value in
                     AxisValueLabel {
                         if let date = value.as(Date.self) {
-                            Text(date, format: .dateTime.weekday(.abbreviated).hour())
+                            let label = Text(date, format: .dateTime.weekday(.abbreviated).hour())
+                            label
+                                .font(LifeOSFont.axis())
+                                .foregroundStyle(LifeOSTokens.metadataText)
                         }
                     }
                 }
             }
             .chartYAxis {
                 AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { _ in
-                    AxisGridLine().foregroundStyle(LifeOSTokens.chartGrid)
-                    AxisValueLabel().foregroundStyle(.secondary)
+                    AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5)).foregroundStyle(LifeOSTokens.chartGrid)
+                    AxisValueLabel()
+                        .font(LifeOSFont.axis())
+                        .foregroundStyle(LifeOSTokens.metadataText)
                 }
             }
             .chartYScale(domain: 0...maxTokens)
@@ -109,7 +114,7 @@ struct UsageTokenActivityView: View {
 
             footer
         }
-        .glassCard()
+        .flatCard()
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(provider.displayName) token activity")
     }
@@ -125,7 +130,8 @@ struct UsageTokenActivityView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Text(totalTokens.formatted(.number.notation(.compactName)))
-                    .font(.system(size: 30, weight: .bold, design: .rounded))
+                    .font(LifeOSFont.kpi(30))
+                    .tracking(-0.3)
                     .monospacedDigit()
                 Text(activity.isEmpty ? "No hourly observations" : "\(activity.count) hourly observations")
                     .font(.caption2)

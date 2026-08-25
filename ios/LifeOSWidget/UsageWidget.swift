@@ -470,7 +470,7 @@ private struct UsageRingView: View {
                 Circle()
                     .trim(from: 0, to: clampedProgress)
                     .stroke(
-                        LifeOSTokens.Ring.progress(.blue),
+                        LifeOSTokens.Ring.progressArc,
                         style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
                     )
                     .rotationEffect(.degrees(-90))
@@ -631,13 +631,13 @@ struct LifeOSWidgetView: View {
                     if let secondary {
                         HStack(spacing: 4) {
                             Circle()
-                                .fill(LifeOSTokens.Hue.teal.base)
+                                .fill(chrome.tertiary)
                                 .frame(width: 5, height: 5)
                             Text(secondary.name)
                             Spacer(minLength: 1)
                             Text(secondaryPercentage)
                                 .monospacedDigit()
-                                .foregroundStyle(LifeOSTokens.Hue.teal.base)
+                                .foregroundStyle(chrome.tertiary)
                         }
                         .font(.system(size: 8, weight: .semibold))
                         .lineLimit(1)
@@ -799,38 +799,15 @@ private struct SharedUsageGraph: View {
                     let observedEnd = point(x: observedEndX, value: observedValue, width: graphWidth, height: graphHeight, inset: inset)
                     let end = point(x: 1, value: projected, width: graphWidth, height: graphHeight, inset: inset)
 
-                    var trend = Path()
-                    trend.move(to: start)
-                    trend.addLine(to: observedEnd)
-                    trend.addLine(to: end)
-
-                    var area = trend
-                    area.addLine(to: CGPoint(x: end.x, y: size.height - inset))
-                    area.addLine(to: CGPoint(x: start.x, y: size.height - inset))
-                    area.closeSubpath()
-                    context.fill(
-                        area,
-                        with: .linearGradient(
-                            Gradient(colors: [
-                                LifeOSTokens.Hue.blue.base.opacity(0.12),
-                                Color.clear
-                            ]),
-                            startPoint: CGPoint(x: 0, y: inset),
-                            endPoint: CGPoint(x: 0, y: size.height - inset)
-                        )
-                    )
+                    // No area fill below the 200pt chart-height threshold (§5.4).
 
                     var observed = Path()
                     observed.move(to: start)
                     observed.addLine(to: observedEnd)
                     context.stroke(
                         observed,
-                        with: .linearGradient(
-                            Gradient(colors: [LifeOSTokens.Hue.blue.base, LifeOSTokens.Hue.blue.glow]),
-                            startPoint: CGPoint(x: 0, y: 0),
-                            endPoint: CGPoint(x: size.width, y: 0)
-                        ),
-                        style: StrokeStyle(lineWidth: 2.2, lineCap: .round)
+                        with: .color(LifeOSTokens.Series.observed),
+                        style: StrokeStyle(lineWidth: 2, lineCap: .round)
                     )
 
                     var estimate = Path()
@@ -838,20 +815,13 @@ private struct SharedUsageGraph: View {
                     estimate.addLine(to: end)
                     context.stroke(
                         estimate,
-                        with: .linearGradient(
-                            Gradient(colors: [
-                                LifeOSTokens.Hue.blue.base.opacity(0.50),
-                                LifeOSTokens.Hue.blue.glow.opacity(0.50)
-                            ]),
-                            startPoint: CGPoint(x: 0, y: 0),
-                            endPoint: CGPoint(x: size.width, y: 0)
-                        ),
-                        style: StrokeStyle(lineWidth: 2.2, lineCap: .round, dash: [3, 3])
+                        with: .color(LifeOSTokens.Series.estimate),
+                        style: StrokeStyle(lineWidth: 1.5, lineCap: .round, dash: [3, 3])
                     )
                 }
 
                 Circle()
-                    .fill(LifeOSTokens.Hue.blue.base)
+                    .fill(LifeOSTokens.Series.observed)
                     .frame(width: 5, height: 5)
                     .position(newestPoint)
             }
@@ -930,7 +900,7 @@ private struct LifeOSUsageAccessoryCircularView: View {
     private var accessoryProgress: some View {
         switch displayState {
         case .live:
-            circularProgress(tint: LifeOSTokens.Hue.blue.base)
+            circularProgress(tint: LifeOSTokens.accent)
         case .retained:
             ZStack {
                 circularProgress(tint: LifeOSTokens.warning)

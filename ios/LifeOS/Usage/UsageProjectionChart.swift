@@ -191,38 +191,37 @@ struct UsageProjectionChart: View {
 
     private var referenceChart: some View {
         Chart {
+                // §5.4: no area fill below the 200pt chart-height threshold.
+
                 ForEach(actualPoints) { point in
-                    AreaMark(x: .value("Time", point.date), y: .value("Actual area", point.usedPercent))
-                        .foregroundStyle(actualAreaGradient)
-                        .interpolationMethod(.catmullRom)
                     LineMark(
                         x: .value("Time", point.date),
                         y: .value("Actual", point.usedPercent),
                         series: .value("Series", "Actual")
                     )
                     .foregroundStyle(LifeOSTokens.Series.actual)
-                    .lineStyle(StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
+                    .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
                     .interpolationMethod(.catmullRom)
                 }
 
                 ForEach(targetPoints) { point in
                     LineMark(x: .value("Time", point.date), y: .value("Target", point.usedPercent), series: .value("Series", "Target"))
                         .foregroundStyle(LifeOSTokens.Series.target)
-                        .lineStyle(StrokeStyle(lineWidth: 1.6, lineCap: .round, dash: [4, 3]))
+                        .lineStyle(StrokeStyle(lineWidth: 1.25, lineCap: .round, dash: [6, 4]))
                         .interpolationMethod(.catmullRom)
                 }
 
                 ForEach(historyPoints) { point in
                     LineMark(x: .value("Time", point.date), y: .value("History", point.usedPercent), series: .value("Series", "History"))
                         .foregroundStyle(LifeOSTokens.Series.history)
-                        .lineStyle(StrokeStyle(lineWidth: 1.4, lineCap: .round, dash: [1, 2]))
+                        .lineStyle(StrokeStyle(lineWidth: 1.25, lineCap: .round, dash: [1, 2]))
                         .interpolationMethod(.catmullRom)
                 }
 
                 ForEach(estimatePoints) { point in
                     LineMark(x: .value("Time", point.date), y: .value("Estimate", point.usedPercent), series: .value("Series", "Estimate"))
                         .foregroundStyle(LifeOSTokens.Series.estimate)
-                        .lineStyle(StrokeStyle(lineWidth: 1.6, lineCap: .round, dash: [2, 2]))
+                        .lineStyle(StrokeStyle(lineWidth: 1.5, lineCap: .round, dash: [3, 3]))
                         .interpolationMethod(.catmullRom)
                 }
 
@@ -260,9 +259,13 @@ struct UsageProjectionChart: View {
 
     private var yAxisMarks: some AxisContent {
         AxisMarks(values: [0, 0.25, 0.5, 0.75, 1]) { value in
-            AxisGridLine().foregroundStyle(LifeOSTokens.chartGrid)
+            AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5)).foregroundStyle(LifeOSTokens.chartGrid)
             AxisValueLabel {
-                if let number = value.as(Double.self) { Text(number, format: .percent.precision(.fractionLength(0))) }
+                if let number = value.as(Double.self) {
+                    Text(number, format: .percent.precision(.fractionLength(0)))
+                        .font(LifeOSFont.axis())
+                        .foregroundStyle(LifeOSTokens.metadataText)
+                }
             }
         }
     }
@@ -272,21 +275,18 @@ struct UsageProjectionChart: View {
         return AxisMarks(values: .automatic(desiredCount: isShortWindow ? 5 : 7)) { value in
             AxisValueLabel {
                 if let date = value.as(Date.self) {
-                    if isShortWindow {
-                        Text(date, format: .dateTime.hour().minute())
-                    } else {
-                        Text(date, format: .dateTime.weekday(.abbreviated).day())
+                    Group {
+                        if isShortWindow {
+                            Text(date, format: .dateTime.hour().minute())
+                        } else {
+                            Text(date, format: .dateTime.weekday(.abbreviated).day())
+                        }
                     }
+                    .font(LifeOSFont.axis())
+                    .foregroundStyle(LifeOSTokens.metadataText)
                 }
             }
         }
-    }
-
-    private var actualAreaGradient: LinearGradient {
-        LinearGradient(
-            colors: [LifeOSTokens.Series.actual.opacity(0.22), LifeOSTokens.Series.actual.opacity(0)],
-            startPoint: .top, endPoint: .bottom
-        )
     }
 
     private var legend: some View {

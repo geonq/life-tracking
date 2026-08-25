@@ -593,15 +593,18 @@ public struct CalendarView: View {
                         .foregroundStyle(.secondary)
                         .frame(width: 32, height: 32)
                 }
+                // Menus re-tint their label with the system accent; pin the
+                // neutral chrome color so the view-picker stays gray (§1).
+                .tint(LifeOSTokens.secondaryText)
                 .accessibilityLabel("Calendar view")
                 .accessibilityIdentifier("calendar-view-picker")
 
                 Button(action: goToToday) {
                     Text(Date.now, format: todayDayStyle)
                         .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(LifeOSTokens.canvas)
                         .frame(width: 34, height: 34)
-                        .background(Color.lifeOSCalendarRed, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                        .background(LifeOSTokens.primaryText, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Today")
@@ -1128,7 +1131,7 @@ private struct CalendarNextEventPill: View {
             HStack(spacing: 6) {
                 Image(systemName: "clock")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Color.lifeOSCalendarRed)
+                    .foregroundStyle(LifeOSTokens.secondaryText)
                 Text("Next: \(item.title) · \(timeLabel)")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.primary)
@@ -1137,8 +1140,7 @@ private struct CalendarNextEventPill: View {
             .padding(.horizontal, 12)
             .frame(height: 36)
             .background(.ultraThinMaterial, in: Capsule())
-            .overlay { Capsule().stroke(LifeOSTokens.quietBorder, lineWidth: 0.75) }
-            .shadow(color: .black.opacity(0.12), radius: 8, y: 2)
+            .overlay { Capsule().stroke(LifeOSTokens.hairlineBorder, lineWidth: 1) }
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Next event, \(item.title), \(timeLabel)")
@@ -1167,10 +1169,9 @@ private struct CalendarQuickCreateButton: View {
         Button(action: action) {
             LifeOSIcon(.add)
                 .frame(width: 22, height: 22)
-                .foregroundStyle(.white)
+                .foregroundStyle(LifeOSTokens.canvas)
                 .frame(width: 48, height: 48)
-                .background(Color.lifeOSCalendarRed, in: Circle())
-                .shadow(color: .black.opacity(0.16), radius: 10, y: 3)
+                .background(LifeOSTokens.primaryText, in: Circle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel("New event")

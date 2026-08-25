@@ -123,9 +123,10 @@ public extension Color {
     static let lifeOSTeal700 = Color(hex: 0x067878)
 
     // MARK: Module identity
-    // Calendar module color — RETIRED for app surfaces (today is marked by
-    // primary-text inversion per the Quiet Machine plan §5.6). Kept only until
-    // the widget targets migrate off it in the Phase 2 sweep.
+    // Calendar module color — RETIRED for app chrome and widget surfaces
+    // (today is marked by primary-text inversion per the Quiet Machine plan
+    // §5.6). Remaining consumers are inside CalendarView.swift editor/status
+    // UI, which is outside the Phase 2 header-chrome boundary.
     static let lifeOSCalendarRed = Color(hex: 0xE5433D)
 
     // Brand canvases
@@ -357,21 +358,16 @@ public enum LifeOSTokens {
         /// The hairline border doubles as the ring track — no per-color tracks.
         public static let track = Color.lifeOSSubtleBorder
 
-        /// DEPRECATED visual policy: solid arcs replace angular reveal→base
-        /// gradients (Quiet Machine §2.4). Kept only until the widget targets
-        /// and FinanceView migrate; new call sites must stroke a solid color.
-        public static func progress(_ hue: Hue) -> AngularGradient {
-            AngularGradient(colors: [hue.glow, hue.base], center: .center)
-        }
-
         /// The sanctioned arc colors: progress rings read accent; status rings
-        /// read a semantic by threshold (FitnessView implements the bands).
+        /// read a semantic by threshold (FitnessView implements the bands;
+        /// widget status rings mirror them via their local threshold helper).
         public static var progressArc: Color { LifeOSTokens.accent }
     }
 
     // MARK: Module identity
-    // RETIRED for app surfaces — today markers invert primary text instead.
-    // Alias kept until the Phase 2 widget sweep deletes the last consumers.
+    // RETIRED for chrome and widget surfaces — today markers invert primary
+    // text instead. Alias kept for the CalendarView.swift editor/status call
+    // sites that sit outside the Phase 2 boundary.
     public static let calendarRed = Color.lifeOSCalendarRed
 
     // Borders & quiescent states
@@ -590,11 +586,9 @@ extension View {
         modifier(LifeOSFlatCardModifier(cornerRadius: cornerRadius, featured: featured))
     }
 
-    /// DEPRECATED alias of `flatCard` (Quiet Machine §4.1). Kept only so
-    /// un-migrated call sites keep compiling during the Phase 2 sweep; every
-    /// call site should move to `flatCard`. Deliberately not annotated with
-    /// `@available(deprecated)` yet — that would emit warnings at every
-    /// remaining call site and break the zero-new-warnings gate.
+    /// DEPRECATED alias of `flatCard` (Quiet Machine §4.1). All call sites are
+    /// migrated; new code must use `flatCard` directly.
+    @available(*, deprecated, renamed: "flatCard")
     func glassCard(cornerRadius: CGFloat = LifeOSTokens.overviewCardCorner, featured: Bool = false) -> some View {
         flatCard(cornerRadius: cornerRadius, featured: featured)
     }

@@ -887,6 +887,6 @@ private struct StrengthSurfaceCard<Content: View>: View {
     var body: some View {
         content
             .padding(LifeOSTokens.cardPadding)
-            .glassCard()
+            .flatCard()
     }
 }

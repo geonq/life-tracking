@@ -54,11 +54,12 @@ public enum LifeOSChartSeriesKind: String, CaseIterable, Codable, Sendable {
     public var style: LifeOSChartSeriesStyle {
         switch self {
         case .observed:
-            LifeOSChartSeriesStyle(lineStyle: .solid, lineWidth: 2.25, areaOpacity: 0.14)
+            // §5.4: 2pt solid; flat 0.08 area (call sites drop the fill below 200pt height).
+            LifeOSChartSeriesStyle(lineStyle: .solid, lineWidth: 2, areaOpacity: 0.08)
         case .target:
             LifeOSChartSeriesStyle(lineStyle: .dashed, lineWidth: 1.25)
         case .estimate:
-            LifeOSChartSeriesStyle(lineStyle: .dashed, lineWidth: 1.75, dashPattern: [3, 3])
+            LifeOSChartSeriesStyle(lineStyle: .dashed, lineWidth: 1.5, dashPattern: [3, 3])
         case .history:
             LifeOSChartSeriesStyle(lineStyle: .dotted, lineWidth: 1.25)
         }

@@ -110,20 +110,17 @@ public struct FinanceView: View {
 
     private func financeHeader(snapshot: FinanceDisplaySnapshot) -> some View {
         HStack(alignment: .center, spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 13, style: .continuous)
-                    .fill(LifeOSTokens.success.opacity(0.14))
-                LifeOSIcon(.finance)
-                    .foregroundStyle(LifeOSTokens.success)
-                    .frame(width: 21, height: 21)
-            }
-            .frame(width: 44, height: 44)
+            // §5.1: bare icon, no tile — chrome stays gray, color is data.
+            LifeOSIcon(.finance)
+                .foregroundStyle(LifeOSTokens.tertiaryText)
+                .frame(width: 21, height: 21)
 
             VStack(alignment: .leading, spacing: 1) {
                 Text("Finance")
-                    .font(LifeOSFont.headerLarge(27))
+                    .font(LifeOSFont.display())
+                    .tracking(-0.5)
                 Text("Private overview")
-                    .font(LifeOSFont.inter(12))
+                    .font(LifeOSFont.metadata())
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
 
@@ -201,13 +198,13 @@ public struct FinanceView: View {
                 selection: $selectedDetail
             ) { detail, isSelected in
                 Text(detail.title)
-                    .font(LifeOSFont.inter(12, weight: isSelected ? .semiBold : .medium))
+                    .font(LifeOSFont.metadata().weight(isSelected ? .semibold : .medium))
                     .foregroundStyle(isSelected ? .primary : LifeOSTokens.tertiaryText)
                     .frame(maxWidth: .infinity)
             }
             .padding(4)
             .background(Color.primary.opacity(0.06), in: Capsule())
-            .overlay(Capsule().stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+            .overlay(Capsule().stroke(LifeOSTokens.hairlineBorder, lineWidth: 1))
             .accessibilityLabel("Finance detail")
             .accessibilityValue(selectedDetail.title)
 
@@ -236,7 +233,6 @@ public struct FinanceView: View {
                 value: snapshot.spent.valueText,
                 detail: snapshot.spent.detail,
                 icon: .budget,
-                hue: .blue,
                 progress: snapshot.spendProgress,
                 isUnavailable: snapshot.spent.isUnavailable
             )
@@ -245,7 +241,6 @@ public struct FinanceView: View {
                 value: snapshot.cashFlow.valueText,
                 detail: snapshot.cashFlow.detail,
                 icon: .revenue,
-                hue: .green,
                 progress: snapshot.cashFlow.progress,
                 isUnavailable: snapshot.cashFlow.isUnavailable
             )
@@ -254,7 +249,6 @@ public struct FinanceView: View {
                 value: snapshot.income.valueText,
                 detail: snapshot.income.detail,
                 icon: .revenue,
-                hue: .teal,
                 progress: nil,
                 isUnavailable: snapshot.income.isUnavailable
             )
@@ -263,7 +257,6 @@ public struct FinanceView: View {
                 value: snapshot.saved.valueText,
                 detail: snapshot.saved.detail,
                 icon: .savings,
-                hue: .violet,
                 progress: snapshot.savingsProgress,
                 isUnavailable: snapshot.saved.isUnavailable
             )
@@ -280,7 +273,6 @@ public struct FinanceView: View {
                 subtitle: "Across connected accounts",
                 metric: snapshot.spent,
                 points: snapshot.points(for: .spend, range: selectedRange),
-                accent: .blue,
                 selectedPoint: $selectedSpendPoint,
                 isDemo: snapshot.isDemo,
                 emptyDetail: "Spend history will appear after a reviewed account connection is available."
@@ -291,7 +283,6 @@ public struct FinanceView: View {
                 subtitle: "Deposits across connected accounts",
                 metric: snapshot.income,
                 points: snapshot.points(for: .income, range: selectedRange),
-                accent: .teal,
                 selectedPoint: $selectedIncomePoint,
                 isDemo: snapshot.isDemo,
                 emptyDetail: "Income history will appear after a reviewed account connection is available."
@@ -302,7 +293,6 @@ public struct FinanceView: View {
                 subtitle: "Money in minus money out",
                 metric: snapshot.cashFlow,
                 points: snapshot.points(for: .cashFlow, range: selectedRange),
-                accent: .green,
                 selectedPoint: $selectedCashFlowPoint,
                 isDemo: snapshot.isDemo,
                 emptyDetail: "Cash-flow history needs a connected source with transaction history."
@@ -313,7 +303,6 @@ public struct FinanceView: View {
                 subtitle: "Balance trend",
                 metric: snapshot.netWorth,
                 points: snapshot.points(for: .netWorth, range: selectedRange),
-                accent: .violet,
                 selectedPoint: $selectedNetWorthPoint,
                 isDemo: snapshot.isDemo,
                 emptyDetail: "Net-worth history is not available from the current Finance contract."
@@ -376,19 +365,18 @@ private struct FinanceStatusBadge: View {
     let snapshot: FinanceDisplaySnapshot
 
     var body: some View {
+        // §4.2 dot + overline — no tinted capsule. Color is a signal.
         HStack(spacing: 6) {
             Circle()
                 .fill(snapshot.statusColor)
-                .frame(width: 7, height: 7)
+                .frame(width: 6, height: 6)
             Text(snapshot.statusLabel)
-                .font(LifeOSFont.inter(10, weight: .bold))
-                .tracking(snapshot.isDemo ? 0.35 : 0)
+                .font(LifeOSFont.overline())
+                .tracking(0.8)
+                .textCase(.uppercase)
+                .lineLimit(1)
         }
         .foregroundStyle(snapshot.statusColor)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .background(snapshot.statusColor.opacity(0.12), in: Capsule())
-        .overlay(Capsule().stroke(snapshot.statusColor.opacity(0.22), lineWidth: 0.75))
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Finance data status")
         .accessibilityValue(snapshot.statusLabel)
@@ -403,14 +391,16 @@ private struct FinanceHeroCard: View {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Net worth")
-                        .font(LifeOSFont.inter(14, weight: .semiBold))
-                        .foregroundStyle(Color.primary.opacity(0.72))
+                        .font(LifeOSFont.overline())
+                        .tracking(0.8)
+                        .textCase(.uppercase)
+                        .foregroundStyle(LifeOSTokens.secondaryText)
                     Text(snapshot.netWorth.valueText)
-                        .font(LifeOSFont.spaceGrotesk(40, weight: .bold))
-                        .monospacedDigit()
+                        .font(LifeOSFont.kpi())
+                        .tracking(-0.3)
                         .numericTransition()
                     Text(snapshot.netWorth.detail)
-                        .font(LifeOSFont.inter(12))
+                        .font(LifeOSFont.metadata())
                         .foregroundStyle(snapshot.netWorth.isUnavailable ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)
                 }
 
@@ -419,7 +409,7 @@ private struct FinanceHeroCard: View {
                 if snapshot.netWorth.isUnavailable {
                     UnavailableMetricMark(label: "Not available")
                 } else {
-                    FinanceMiniSparkline(points: snapshot.netWorthPoints, hue: .violet)
+                    FinanceMiniSparkline(points: snapshot.netWorthPoints)
                         .frame(width: 132, height: 62)
                 }
             }
@@ -433,7 +423,7 @@ private struct FinanceHeroCard: View {
             }
 
             Text(snapshot.sourceDisclosure)
-                .font(LifeOSFont.inter(10, weight: .medium))
+                .font(LifeOSFont.axis())
                 .foregroundStyle(snapshot.isDemo ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
@@ -441,7 +431,7 @@ private struct FinanceHeroCard: View {
         }
         .padding(17)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassCard(featured: true)
+        .flatCard(featured: true)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Net worth")
         .accessibilityValue("\(snapshot.netWorth.accessibilityValue). Accounts \(snapshot.accounts.isEmpty ? "not available" : "\(snapshot.accounts.count) connected"). Updated \(snapshot.updatedLabel).")
@@ -455,10 +445,10 @@ private struct FinanceHeroFact: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title)
-                .font(LifeOSFont.inter(10, weight: .medium))
+                .font(LifeOSFont.axis())
                 .foregroundStyle(LifeOSTokens.tertiaryText)
             Text(value)
-                .font(LifeOSFont.inter(12, weight: .semiBold))
+                .font(LifeOSFont.control())
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
         }
@@ -473,10 +463,11 @@ private struct UnavailableMetricMark: View {
     var body: some View {
         VStack(alignment: .trailing, spacing: 7) {
             Text("—")
-                .font(LifeOSFont.spaceGrotesk(32, weight: .bold))
+                .font(LifeOSFont.kpi(32))
+                .tracking(-0.3)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
             Text(label)
-                .font(LifeOSFont.inter(10, weight: .semiBold))
+                .font(LifeOSFont.axis())
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 5)
@@ -492,7 +483,6 @@ private struct FinanceMetricCard: View {
     let value: String
     let detail: String
     let icon: LifeOSIconName
-    let hue: LifeOSTokens.Hue
     let progress: Double?
     let isUnavailable: Bool
 
@@ -502,19 +492,16 @@ private struct FinanceMetricCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                ZStack {
-                    Circle()
-                        .fill(hue.base.opacity(0.15))
-                    LifeOSIcon(icon)
-                        .foregroundStyle(hue.base)
-                        .frame(width: 17, height: 17)
-                }
-                .frame(width: 34, height: 34)
+                // §5.1: bare neutral icon — no tinted tile, no per-card hue.
+                LifeOSIcon(icon)
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .frame(width: 17, height: 17)
+                    .frame(width: 34, height: 34)
                 Spacer()
                 if let progress {
                     Circle()
                         .trim(from: 0, to: animatedProgress)
-                        .stroke(hue.base, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                        .stroke(LifeOSTokens.Ring.progressArc, style: StrokeStyle(lineWidth: 3, lineCap: .round))
                         .frame(width: 23, height: 23)
                         .rotationEffect(.degrees(-90))
                         .accessibilityHidden(true)
@@ -530,23 +517,22 @@ private struct FinanceMetricCard: View {
             }
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
-                    .font(LifeOSFont.inter(12, weight: .medium))
-                    .foregroundStyle(Color.primary.opacity(0.72))
+                    .font(LifeOSFont.metadata())
+                    .foregroundStyle(LifeOSTokens.secondaryText)
                 Text(value)
-                    .font(LifeOSFont.spaceGrotesk(25, weight: .bold))
-                    .monospacedDigit()
+                    .font(LifeOSFont.inter(17, weight: .semiBold).monospacedDigit())
                     .numericTransition()
                     .lineLimit(1)
                     .minimumScaleFactor(0.72)
                 Text(detail)
-                    .font(LifeOSFont.inter(10, weight: .medium))
+                    .font(LifeOSFont.axis())
                     .foregroundStyle(isUnavailable ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)
                     .lineLimit(2)
             }
         }
         .padding(14)
         .frame(maxWidth: .infinity, minHeight: 124, alignment: .leading)
-        .glassCard()
+        .flatCard()
         .accessibilityElement(children: .combine)
         .accessibilityLabel(title)
         .accessibilityValue("\(value). \(detail)")
@@ -560,7 +546,6 @@ private struct FinanceDetailChartCard: View {
     let subtitle: String
     let metric: FinanceDisplayMetric
     let points: [FinanceChartPoint]
-    let accent: LifeOSTokens.Hue
     @Binding var selectedPoint: Int?
     let isDemo: Bool
     let emptyDetail: String
@@ -570,15 +555,14 @@ private struct FinanceDetailChartCard: View {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(title)
-                        .font(LifeOSFont.header(17))
+                        .font(LifeOSFont.cardTitle())
                     Text(subtitle)
-                        .font(LifeOSFont.inter(11))
+                        .font(LifeOSFont.axis())
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
                 Spacer(minLength: 10)
                 Text(metric.valueText)
-                    .font(LifeOSFont.spaceGrotesk(23, weight: .bold))
-                    .monospacedDigit()
+                    .font(LifeOSFont.inter(17, weight: .semiBold).monospacedDigit())
                     .numericTransition()
             }
 
@@ -587,21 +571,19 @@ private struct FinanceDetailChartCard: View {
             } else {
                 FinanceLineChart(
                     points: points,
-                    accent: accent,
                     selectedPoint: $selectedPoint,
                     isDemo: isDemo
                 )
                 FinanceChartSelectionDetail(
                     points: points,
                     selectedPoint: $selectedPoint,
-                    accent: accent,
                     isDemo: isDemo
                 )
             }
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassCard()
+        .flatCard()
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("finance-detail-chart-\(title.lowercased().replacingOccurrences(of: " ", with: "-"))")
     }
@@ -625,11 +607,11 @@ private struct FinanceUnavailableChart: View {
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                     .frame(width: 15, height: 15)
                 Text("Not available")
-                    .font(LifeOSFont.inter(12, weight: .semiBold))
+                    .font(LifeOSFont.control())
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
             Text(detail)
-                .font(LifeOSFont.inter(11))
+                .font(LifeOSFont.axis())
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -795,7 +777,6 @@ private final class FinanceDirectionalScrubView: UIView {
 
 private struct FinanceLineChart: View {
     let points: [FinanceChartPoint]
-    let accent: LifeOSTokens.Hue
     @Binding var selectedPoint: Int?
     let isDemo: Bool
 
@@ -812,22 +793,11 @@ private struct FinanceLineChart: View {
             ZStack(alignment: .topLeading) {
                 FinanceChartGrid(zeroY: geometry.zeroY)
 
-                chartArea(using: geometry)
-                    .opacity(0.92)
-                    .mask(alignment: .leading) {
-                        Rectangle()
-                            .frame(width: max(size.width * drawn, 1), height: size.height)
-                    }
-
                 geometry.smoothPath()
                     .trim(from: 0, to: drawn)
                     .stroke(
-                        LinearGradient(
-                            colors: [accent.glow, accent.base],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        ),
-                        style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round)
+                        LifeOSTokens.Series.observed,
+                        style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round)
                     )
 
                 if let selected, points.indices.contains(selected) {
@@ -836,11 +806,11 @@ private struct FinanceLineChart: View {
                         path.move(to: CGPoint(x: position.x, y: 9))
                         path.addLine(to: CGPoint(x: position.x, y: size.height - 20))
                     }
-                    .stroke(Color.primary.opacity(0.18), style: StrokeStyle(lineWidth: 1, dash: [3, 4]))
+                    .stroke(LifeOSTokens.metadataText, style: StrokeStyle(lineWidth: 1, dash: [3, 4]))
 
                     Circle()
                         .fill(LifeOSTokens.surface)
-                        .overlay(Circle().stroke(accent.base, lineWidth: 2))
+                        .overlay(Circle().stroke(LifeOSTokens.Series.observed, lineWidth: 2))
                         .frame(width: 10, height: 10)
                         .position(position)
 
@@ -852,10 +822,10 @@ private struct FinanceLineChart: View {
                             Text(points[selected].valueText)
                                 .foregroundStyle(.primary)
                             Text(points[selected].dateLabel)
-                                .font(LifeOSFont.inter(9, weight: .medium))
+                                .font(LifeOSFont.axis())
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                             Text(isDemo ? "Demo · not live" : points[selected].sourceDisclosure)
-                                .font(LifeOSFont.inter(9, weight: .medium))
+                                .font(LifeOSFont.axis())
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                                 .lineLimit(1)
                                 .minimumScaleFactor(0.65)
@@ -931,17 +901,6 @@ private struct FinanceLineChart: View {
         .frame(height: 166)
     }
 
-    private func chartArea(using geometry: FinanceChartGeometry) -> some View {
-        FinanceAreaShape(geometry: geometry)
-        .fill(
-            LinearGradient(
-                colors: [accent.base.opacity(0.24), accent.base.opacity(0.01)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        )
-    }
-
     private func nearestIndex(for x: CGFloat, in size: CGSize) -> Int {
         guard points.count > 1 else { return 0 }
         let horizontalInset: CGFloat = 10
@@ -965,10 +924,12 @@ private struct FinanceChartGrid: View {
     var body: some View {
         GeometryReader { proxy in
             ZStack(alignment: .topLeading) {
+                // §5.4: horizontal gridlines only — the chart hairline at 0.5pt,
+                // with the zero baseline slightly stronger at 1pt.
                 VStack(spacing: 0) {
                     ForEach(0..<3, id: \.self) { index in
                         Rectangle()
-                            .fill(Color.primary.opacity(index == 2 ? 0.14 : 0.07))
+                            .fill(index == 2 ? LifeOSTokens.strongBorder : LifeOSTokens.chartGrid)
                             .frame(height: index == 2 ? 1 : 0.5)
                         if index < 2 { Spacer() }
                     }
@@ -980,28 +941,11 @@ private struct FinanceChartGrid: View {
                     path.move(to: CGPoint(x: 0, y: zeroY))
                     path.addLine(to: CGPoint(x: proxy.size.width, y: zeroY))
                 }
-                .stroke(Color.primary.opacity(0.26), lineWidth: 1)
+                .stroke(LifeOSTokens.hairlineBorder, lineWidth: 1)
             }
             .frame(width: proxy.size.width, height: proxy.size.height)
         }
         .allowsHitTesting(false)
-    }
-}
-
-private struct FinanceAreaShape: Shape {
-    let geometry: FinanceChartGeometry
-
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        guard !geometry.points.isEmpty else { return path }
-        let firstPoint = geometry.coordinate(for: 0)
-        let lastPoint = geometry.coordinate(for: geometry.points.count - 1)
-        path.move(to: CGPoint(x: firstPoint.x, y: geometry.zeroY))
-        path.addLine(to: firstPoint)
-        geometry.appendSmoothSegments(to: &path)
-        path.addLine(to: CGPoint(x: lastPoint.x, y: geometry.zeroY))
-        path.closeSubpath()
-        return path
     }
 }
 
@@ -1075,7 +1019,6 @@ private struct FinanceChartGeometry {
 private struct FinanceChartSelectionDetail: View {
     let points: [FinanceChartPoint]
     @Binding var selectedPoint: Int?
-    let accent: LifeOSTokens.Hue
     let isDemo: Bool
 
     private var safeIndex: Int {
@@ -1086,18 +1029,17 @@ private struct FinanceChartSelectionDetail: View {
         let point = points[safeIndex]
         HStack(alignment: .top, spacing: 10) {
             RoundedRectangle(cornerRadius: 2)
-                .fill(accent.base)
+                .fill(LifeOSTokens.Series.observed)
                 .frame(width: 4, height: 35)
             VStack(alignment: .leading, spacing: 3) {
                 Text(point.seriesTitle)
-                    .font(LifeOSFont.inter(11, weight: .semiBold))
-                    .foregroundStyle(accent.glow)
+                    .font(LifeOSFont.axis().weight(.semibold))
+                    .foregroundStyle(.primary)
                 Text(point.valueText)
-                    .font(LifeOSFont.spaceGrotesk(17, weight: .bold))
-                    .monospacedDigit()
+                    .font(LifeOSFont.inter(17, weight: .semiBold).monospacedDigit())
                     .numericTransition()
                 Text("\(point.dateLabel) · \(isDemo ? "Demo · not live" : point.sourceDisclosure)")
-                    .font(LifeOSFont.inter(10))
+                    .font(LifeOSFont.axis())
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                     .lineLimit(2)
             }
@@ -1139,7 +1081,7 @@ private struct FinanceAccountsCard: View {
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassCard()
+        .flatCard()
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("finance-accounts")
     }
@@ -1150,24 +1092,21 @@ private struct FinanceAccountRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            ZStack {
-                Circle().fill(account.hue.base.opacity(0.17))
-                LifeOSIcon(account.icon)
-                    .foregroundStyle(account.hue.base)
-                    .frame(width: 18, height: 18)
-            }
-            .frame(width: 36, height: 36)
+            // §5.1: bare neutral icon — account identity lives in the name.
+            LifeOSIcon(account.icon)
+                .foregroundStyle(LifeOSTokens.tertiaryText)
+                .frame(width: 18, height: 18)
+                .frame(width: 36, height: 36)
             VStack(alignment: .leading, spacing: 3) {
                 Text(account.name)
-                    .font(LifeOSFont.inter(13, weight: .semiBold))
+                    .font(LifeOSFont.control())
                 Text(account.detail)
-                    .font(LifeOSFont.inter(10))
+                    .font(LifeOSFont.axis())
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
             Spacer(minLength: 8)
             Text(account.balanceText)
-                .font(LifeOSFont.spaceGrotesk(16, weight: .bold))
-                .monospacedDigit()
+                .font(LifeOSFont.cardTitle().monospacedDigit())
         }
         .padding(.vertical, 8)
         .accessibilityElement(children: .combine)
@@ -1216,7 +1155,7 @@ private struct FinanceCategoriesCard: View {
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
                             VStack(alignment: .leading, spacing: 3) {
                                 Text("\(selectedCategory.name) transactions")
-                                    .font(LifeOSFont.inter(12, weight: .semiBold))
+                                    .font(LifeOSFont.control())
                                 let filteredTransactions = snapshot.filteredTransactions(
                                     category: selectedCategory.name,
                                     source: selectedSourceID,
@@ -1225,7 +1164,7 @@ private struct FinanceCategoriesCard: View {
                                 let filteredSpendCents = (try? FinanceTransactionTotals(transactions: filteredTransactions))?.spendingCents
                                 let filteredSpendLabel = filteredSpendCents.map { FinanceCurrencyFormatter.euro(cents: $0) } ?? "Unavailable"
                                 Text("\(filteredTransactions.count) · \(filteredSpendLabel) · \(selectedRange.accessibilityTitle)")
-                                    .font(LifeOSFont.inter(10, weight: .medium))
+                                    .font(LifeOSFont.axis())
                                     .foregroundStyle(LifeOSTokens.tertiaryText)
                                     .monospacedDigit()
                                     .numericTransition()
@@ -1238,12 +1177,12 @@ private struct FinanceCategoriesCard: View {
                                         Button(FinanceSourceLabel.display(source)) { selectedSourceID = source }
                                     }
                                 } label: {
-                                    Text(selectedSourceID.map(FinanceSourceLabel.display) ?? "All sources")
-                                        .font(LifeOSFont.inter(10, weight: .semiBold))
-                                        .foregroundStyle(.primary)
-                                        .padding(.horizontal, 9)
-                                        .padding(.vertical, 6)
-                                        .background(Color.primary.opacity(0.07), in: Capsule())
+                            Text(selectedSourceID.map(FinanceSourceLabel.display) ?? "All sources")
+                                .font(LifeOSFont.control())
+                                .foregroundStyle(.primary)
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 6)
+                                .background(Color.primary.opacity(0.07), in: Capsule())
                                 }
                                 .accessibilityLabel("Category source filter")
                                 .accessibilityValue(selectedSourceID.map(FinanceSourceLabel.display) ?? "All sources")
@@ -1272,7 +1211,7 @@ private struct FinanceCategoriesCard: View {
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassCard()
+        .flatCard()
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("finance-categories")
     }
@@ -1290,9 +1229,9 @@ private struct FinanceCategoriesCard: View {
                             .frame(width: 8, height: 8)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(category.name)
-                                .font(LifeOSFont.inter(11, weight: .medium))
+                                .font(LifeOSFont.axis().weight(.semibold))
                             Text("\(category.transactionCount) transaction\(category.transactionCount == 1 ? "" : "s") · \(category.sourceDisclosure)")
-                                .font(LifeOSFont.inter(9))
+                                .font(LifeOSFont.axis())
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                                 .lineLimit(1)
                                 .minimumScaleFactor(0.72)
@@ -1300,10 +1239,10 @@ private struct FinanceCategoriesCard: View {
                         Spacer(minLength: 4)
                         VStack(alignment: .trailing, spacing: 2) {
                             Text(category.amountText)
-                                .font(LifeOSFont.inter(11, weight: .semiBold))
+                                .font(LifeOSFont.axis().weight(.semibold))
                                 .monospacedDigit()
                             Text("\(Int(category.fraction * 100))%")
-                                .font(LifeOSFont.inter(9))
+                                .font(LifeOSFont.axis())
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                                 .monospacedDigit()
                         }
@@ -1360,11 +1299,10 @@ private struct FinanceCategoryRing: View {
 
             VStack(spacing: 1) {
                 Text("Spend")
-                    .font(LifeOSFont.inter(10, weight: .medium))
+                    .font(LifeOSFont.metadata())
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                 Text("100%")
-                    .font(LifeOSFont.spaceGrotesk(18, weight: .bold))
-                    .monospacedDigit()
+                    .font(LifeOSFont.cardTitle().monospacedDigit())
             }
         }
         .accessibilityElement(children: .ignore)
@@ -1390,6 +1328,8 @@ private struct FinanceCategoryRing: View {
 
     /// The per-category arc segments, trimmed by `revealProgress` so the whole ring sweeps
     /// on together during the one-shot reveal rather than each segment appearing pre-drawn.
+    /// Category hues are data semantics (sanctioned); strokes stay SOLID — no angular
+    /// gradients (§2.4).
     private var categoryArcs: some View {
         ForEach(Array(categories.enumerated()), id: \.element.id) { index, category in
             let start = categories.prefix(index).reduce(0.0) { $0 + $1.fraction }
@@ -1398,7 +1338,7 @@ private struct FinanceCategoryRing: View {
             Circle()
                 .trim(from: start + 0.006, to: max(revealedEnd - 0.006, start + 0.01))
                 .stroke(
-                    LifeOSTokens.Ring.progress(category.hue),
+                    category.hue.base,
                     style: StrokeStyle(lineWidth: 14, lineCap: .round)
                 )
                 .rotationEffect(.degrees(-90))
@@ -1411,15 +1351,16 @@ private struct FinanceTransactionRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Circle()
-                .fill(LifeOSTokens.success.opacity(0.14))
-                .overlay(LifeOSIcon(.finance).foregroundStyle(LifeOSTokens.success).padding(5))
+            // §5.1: bare neutral icon — no tinted tile.
+            LifeOSIcon(.finance)
+                .foregroundStyle(LifeOSTokens.tertiaryText)
+                .frame(width: 16, height: 16)
                 .frame(width: 30, height: 30)
             VStack(alignment: .leading, spacing: 2) {
                 Text(transaction.merchant)
-                    .font(LifeOSFont.inter(11, weight: .medium))
+                    .font(LifeOSFont.callout().weight(.semibold))
                 Text("\(transaction.title) · \(transaction.account) · \(FinanceSourceLabel.display(transaction.source)) · \(FinanceFreshnessLabel.text(transaction.provenance.freshness))")
-                    .font(LifeOSFont.inter(9))
+                    .font(LifeOSFont.axis())
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                     .lineLimit(2)
                     .minimumScaleFactor(0.72)
@@ -1427,10 +1368,10 @@ private struct FinanceTransactionRow: View {
             Spacer(minLength: 6)
             VStack(alignment: .trailing, spacing: 2) {
                 Text(FinanceCurrencyFormatter.signedEuro(cents: transaction.signedAmountCents))
-                    .font(LifeOSFont.inter(11, weight: .semiBold))
+                    .font(LifeOSFont.axis().weight(.semibold))
                     .monospacedDigit()
                 Text(FinanceDateFormatter.point(transaction.timestamp))
-                    .font(LifeOSFont.inter(9))
+                    .font(LifeOSFont.axis())
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
         }
@@ -1470,16 +1411,16 @@ private struct FinanceEmptyModuleRow: View {
                     .padding(.top, 2)
                 VStack(alignment: .leading, spacing: 4) {
                     Text(title)
-                        .font(LifeOSFont.inter(13, weight: .semiBold))
+                        .font(LifeOSFont.control())
                     Text(detail)
-                        .font(LifeOSFont.inter(11))
+                        .font(LifeOSFont.axis())
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
             if let actionTitle, let action {
                 Button(actionTitle, action: action)
-                    .font(LifeOSFont.inter(12, weight: .semiBold))
+                    .font(LifeOSFont.control())
                     .buttonStyle(.bordered)
                     .tint(LifeOSTokens.accent)
                     .accessibilityIdentifier("finance-open-connections")
@@ -1513,7 +1454,7 @@ private struct FinanceRangePills: View {
                     }
                 } label: {
                     Text(range.title)
-                        .font(LifeOSFont.inter(11, weight: selection == range ? .semiBold : .medium))
+                        .font(LifeOSFont.axis().weight(selection == range ? .semibold : .regular))
                         .foregroundStyle(selection == range ? .primary : (enabled ? LifeOSTokens.tertiaryText : LifeOSTokens.tertiaryText.opacity(0.42)))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 8)
@@ -1521,7 +1462,7 @@ private struct FinanceRangePills: View {
                             if selection == range {
                                 Capsule()
                                     .fill(LifeOSTokens.surface)
-                                    .overlay(Capsule().stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+                                    .overlay(Capsule().stroke(LifeOSTokens.hairlineBorder, lineWidth: 1))
                                     .matchedGeometryEffect(id: "finance.range.highlight", in: namespace)
                             }
                         }
@@ -1547,9 +1488,9 @@ private struct FinanceSectionHeader: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title)
-                .font(LifeOSFont.header(18))
+                .font(LifeOSFont.cardTitle())
             Text(subtitle)
-                .font(LifeOSFont.inter(11))
+                .font(LifeOSFont.axis())
                 .foregroundStyle(LifeOSTokens.tertiaryText)
         }
     }
@@ -1557,13 +1498,15 @@ private struct FinanceSectionHeader: View {
 
 private struct FinanceMiniSparkline: View {
     let points: [FinanceChartPoint]
-    let hue: LifeOSTokens.Hue
 
     var body: some View {
         GeometryReader { proxy in
                 let geometry = FinanceChartGeometry(points: points, size: proxy.size)
             geometry.smoothPath()
-                .stroke(hue.base, style: StrokeStyle(lineWidth: 2.25, lineCap: .round, lineJoin: .round))
+                .stroke(
+                    LifeOSTokens.Series.observed,
+                    style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round)
+                )
         }
         .accessibilityHidden(true)
     }
@@ -1649,8 +1592,7 @@ private struct FinanceDisplaySnapshot {
                 name: observation.name,
                 detail: observation.detail,
                 balanceCents: observation.balanceCents,
-                icon: .bankConnections,
-                hue: observation.source.localizedCaseInsensitiveContains("revolut") ? .blue : .teal
+                icon: .bankConnections
             )
         }
         netWorth = Self.overflowCheckedAccountTotal(accountObservations).map {
@@ -1842,9 +1784,9 @@ private struct FinanceDisplaySnapshot {
             }
         }
         let accounts = [
-            FinanceAccount(name: "Revolut Personal", detail: "Main account · synced today", balanceCents: 562_000, icon: .finance, hue: .blue),
-            FinanceAccount(name: "Revolut Savings", detail: "Vault · synced today", balanceCents: 244_000, icon: .savings, hue: .violet),
-            FinanceAccount(name: "Sparkasse", detail: "Checking · synced today", balanceCents: 50_000, icon: .bankConnections, hue: .teal)
+            FinanceAccount(name: "Revolut Personal", detail: "Main account · synced today", balanceCents: 562_000, icon: .finance),
+            FinanceAccount(name: "Revolut Savings", detail: "Vault · synced today", balanceCents: 244_000, icon: .savings),
+            FinanceAccount(name: "Sparkasse", detail: "Checking · synced today", balanceCents: 50_000, icon: .bankConnections)
         ]
         let accountBalanceCents = accounts.reduce(0) { $0 + $1.balanceCents }
         return FinanceDisplaySnapshot(
@@ -2093,22 +2035,19 @@ private struct FinanceAccount: Identifiable {
     let detail: String
     let balanceCents: Int
     let icon: LifeOSIconName
-    let hue: LifeOSTokens.Hue
 
     init(
         id: String = UUID().uuidString,
         name: String,
         detail: String,
         balanceCents: Int,
-        icon: LifeOSIconName,
-        hue: LifeOSTokens.Hue
+        icon: LifeOSIconName
     ) {
         self.id = id
         self.name = name
         self.detail = detail
         self.balanceCents = balanceCents
         self.icon = icon
-        self.hue = hue
     }
 
     var balanceText: String { FinanceCurrencyFormatter.euro(cents: balanceCents) }

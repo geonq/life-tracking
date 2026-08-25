@@ -90,9 +90,9 @@ struct FinanceImportCard: View {
         VStack(alignment: .leading, spacing: 13) {
             VStack(alignment: .leading, spacing: 3) {
                 Text("Import statement")
-                    .font(LifeOSFont.header(18))
+                    .font(LifeOSFont.cardTitle())
                 Text("Manually imported, on-device only")
-                    .font(LifeOSFont.inter(11))
+                    .font(LifeOSFont.axis())
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
 
@@ -104,11 +104,12 @@ struct FinanceImportCard: View {
                         LifeOSIcon(.importDocument).frame(width: 15, height: 15)
                         Text("Import statement (CSV)")
                     }
-                    .font(LifeOSFont.inter(12, weight: .semiBold))
+                    .font(LifeOSFont.control())
                     .padding(.horizontal, 13)
                     .padding(.vertical, 9)
-                    .background(LifeOSTokens.success.opacity(0.14), in: Capsule())
-                    .foregroundStyle(LifeOSTokens.success)
+                    // §4.3 Primary button: accent fill, white label, no tinted capsule.
+                    .foregroundStyle(Color.white)
+                    .background(LifeOSTokens.accent, in: RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .disabled(!model.hasStore)
@@ -118,7 +119,7 @@ struct FinanceImportCard: View {
                     isShowingImportedList = true
                 } label: {
                     Text(model.savedTransactions.isEmpty ? "No imported transactions" : "\(model.savedTransactions.count) imported")
-                        .font(LifeOSFont.inter(12, weight: .medium))
+                        .font(LifeOSFont.metadata())
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
                 .buttonStyle(.plain)
@@ -128,7 +129,7 @@ struct FinanceImportCard: View {
             }
 
             Text("A CSV file you pick stays on this device. Imported rows are never sent anywhere and are kept separate from connected-account data.")
-                .font(LifeOSFont.inter(10))
+                .font(LifeOSFont.axis())
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -144,7 +145,7 @@ struct FinanceImportCard: View {
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassCard()
+        .flatCard()
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("finance-import-card")
         .fileImporter(
@@ -263,14 +264,14 @@ private struct FinanceImportPreviewRow: View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
                 Text(transaction.description)
-                    .font(LifeOSFont.inter(12, weight: .medium))
+                    .font(LifeOSFont.metadata())
                 Text(FinanceImportDateFormatter.point(transaction.bookedAt))
-                    .font(LifeOSFont.inter(10))
+                    .font(LifeOSFont.axis())
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
             Spacer(minLength: 8)
             Text(FinanceImportCurrencyFormatter.signedEuro(cents: transaction.amountCents))
-                .font(LifeOSFont.inter(12, weight: .semiBold))
+                .font(LifeOSFont.control())
                 .foregroundStyle(transaction.isOutflow ? LifeOSTokens.danger : LifeOSTokens.success)
                 .monospacedDigit()
         }
@@ -353,9 +354,9 @@ private struct FinanceImportedEmptyState: View {
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .frame(width: 30, height: 30)
             Text("No imported transactions")
-                .font(LifeOSFont.inter(14, weight: .semiBold))
+                .font(LifeOSFont.control())
             Text("Import a CSV to see your transactions here.")
-                .font(LifeOSFont.inter(12))
+                .font(LifeOSFont.callout())
                 .foregroundStyle(LifeOSTokens.tertiaryText)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -416,7 +417,7 @@ private struct FinanceSpendingByCategorySection: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("Spending by category")
-                    .font(LifeOSFont.header(15))
+                    .font(LifeOSFont.cardTitle())
                 Spacer(minLength: 8)
                 if !monthGroups.isEmpty {
                     monthPicker
@@ -454,7 +455,7 @@ private struct FinanceSpendingByCategorySection: View {
         } label: {
             HStack(spacing: 4) {
                 Text(currentMonth.map(FinanceImportDateFormatter.month) ?? "")
-                    .font(LifeOSFont.inter(12, weight: .medium))
+                    .font(LifeOSFont.metadata())
                 LifeOSIcon(.chevronRight)
                     .frame(width: 9, height: 9)
                     .rotationEffect(.degrees(90))
@@ -494,10 +495,10 @@ private struct FinanceSpendTotalItem: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(label)
-                .font(LifeOSFont.inter(10))
+                .font(LifeOSFont.axis())
                 .foregroundStyle(LifeOSTokens.tertiaryText)
             Text(isSigned ? FinanceImportCurrencyFormatter.signedEuro(cents: signedValue) : FinanceImportCurrencyFormatter.magnitudeEuro(cents: cents))
-                .font(LifeOSFont.inter(13, weight: .semiBold))
+                .font(LifeOSFont.control())
                 .foregroundStyle(color)
                 .monospacedDigit()
         }
@@ -527,15 +528,15 @@ private struct FinanceCategorySpendRow: View {
                     .foregroundStyle(spend.category.hue.base)
                     .frame(width: 14, height: 14)
                 Text(spend.category.displayName)
-                    .font(LifeOSFont.inter(12, weight: .medium))
+                    .font(LifeOSFont.metadata())
                 Text("\(spend.count)")
-                    .font(LifeOSFont.inter(10))
+                    .font(LifeOSFont.axis())
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                 Spacer(minLength: 8)
                 Text(isPrimarilyIncome
                      ? FinanceImportCurrencyFormatter.signedEuro(cents: spend.inflowCents)
                      : FinanceImportCurrencyFormatter.signedEuro(cents: -spend.outflowCents))
-                    .font(LifeOSFont.inter(12, weight: .semiBold))
+                    .font(LifeOSFont.control())
                     .foregroundStyle(amountColor)
                     .monospacedDigit()
             }
@@ -574,7 +575,7 @@ private struct FinanceSpendingByCategoryEmptyState: View {
         Text(hasAnyImports
              ? "No imported transactions in this month."
              : "Import a CSV to see spending by category here.")
-            .font(LifeOSFont.inter(12))
+            .font(LifeOSFont.callout())
             .foregroundStyle(LifeOSTokens.tertiaryText)
             .accessibilityIdentifier("finance-spending-by-category-empty-state")
     }
@@ -666,7 +667,7 @@ private struct FinanceBudgetsSection: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("Budgets")
-                    .font(LifeOSFont.header(15))
+                    .font(LifeOSFont.cardTitle())
                 Spacer(minLength: 8)
                 if !monthGroups.isEmpty {
                     monthPicker
@@ -675,7 +676,7 @@ private struct FinanceBudgetsSection: View {
 
             if transactions.isEmpty {
                 Text("Import a CSV to set budgets against your spending.")
-                    .font(LifeOSFont.inter(12))
+                    .font(LifeOSFont.callout())
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                     .accessibilityIdentifier("finance-budgets-empty-state")
             } else {
@@ -722,7 +723,7 @@ private struct FinanceBudgetsSection: View {
         } label: {
             HStack(spacing: 4) {
                 Text(FinanceImportDateFormatter.month(currentMonth))
-                    .font(LifeOSFont.inter(12, weight: .medium))
+                    .font(LifeOSFont.metadata())
                 LifeOSIcon(.chevronRight)
                     .frame(width: 9, height: 9)
                     .rotationEffect(.degrees(90))
@@ -770,18 +771,18 @@ private struct FinanceCategoryBudgetRow: View {
                     .foregroundStyle(category.hue.base)
                     .frame(width: 14, height: 14)
                 Text(category.displayName)
-                    .font(LifeOSFont.inter(12, weight: .medium))
+                    .font(LifeOSFont.metadata())
                 Spacer(minLength: 8)
                 HStack(spacing: 3) {
                     Text("€")
-                        .font(LifeOSFont.inter(12))
+                        .font(LifeOSFont.callout())
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                     TextField("Limit", text: $limitText)
                         #if os(iOS)
                         .keyboardType(.numberPad)
                         #endif
                         .multilineTextAlignment(.trailing)
-                        .font(LifeOSFont.inter(12, weight: .semiBold))
+                        .font(LifeOSFont.control())
                         .frame(width: 56)
                         .focused($isFieldFocused)
                         .onSubmit(commitLimit)
@@ -813,23 +814,23 @@ private struct FinanceCategoryBudgetRow: View {
 
                 HStack(spacing: 6) {
                     Text(FinanceImportCurrencyFormatter.magnitudeEuro(cents: spentCents) + " of " + FinanceImportCurrencyFormatter.magnitudeEuro(cents: limitCents))
-                        .font(LifeOSFont.inter(10))
+                        .font(LifeOSFont.axis())
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                     Spacer(minLength: 8)
                     Text(isOverBudget
                          ? "Over by \(FinanceImportCurrencyFormatter.magnitudeEuro(cents: spentCents - limitCents))"
                          : "\(FinanceImportCurrencyFormatter.magnitudeEuro(cents: limitCents - spentCents)) remaining")
-                        .font(LifeOSFont.inter(10, weight: .semiBold))
+                        .font(LifeOSFont.axis().weight(.semibold))
                         .foregroundStyle(isOverBudget ? LifeOSTokens.danger : LifeOSTokens.success)
                     Button("Remove", role: .destructive, action: onRemove)
-                        .font(LifeOSFont.inter(10))
+                        .font(LifeOSFont.axis())
                         .buttonStyle(.plain)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .accessibilityIdentifier("finance-budget-remove-\(category.rawValue)")
                 }
             } else {
                 Text("No budget set")
-                    .font(LifeOSFont.inter(11))
+                    .font(LifeOSFont.axis())
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                     .accessibilityIdentifier("finance-budget-unset-\(category.rawValue)")
             }

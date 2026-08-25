@@ -854,7 +854,7 @@ private struct NutritionSummaryValue: View {
         .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
         .padding(.horizontal, 9)
         .padding(.vertical, 8)
-        .glassCard()
+        .flatCard()
     }
 }
 
@@ -1439,7 +1439,7 @@ private struct NutritionSurfaceCard<Content: View>: View {
         }
         .padding(15)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassCard()
+        .flatCard()
         .overlay(LifeOSTokens.cardShape.stroke(hovering ? LifeOSTokens.strongBorder : Color.clear, lineWidth: 1))
 #if os(macOS)
         .onHover { hovering = $0 }

@@ -123,7 +123,7 @@ public struct NextEventWidgetView: View {
     private func eventContent(_ item: CalendarItem, compact: Bool) -> some View {
         HStack(alignment: .top, spacing: compact ? 6 : 9) {
             RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                .fill(LifeOSTokens.Hue.green.base)
+                .fill(LifeOSTokens.accent)
                 .frame(width: 3, height: compact ? 40 : 74)
 
             VStack(alignment: .leading, spacing: compact ? 1 : 3) {

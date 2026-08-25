@@ -246,13 +246,15 @@ struct UsageView: View {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     if let remainingPercent {
                         Text("\(Int(remainingPercent.rounded()))")
-                            .font(.system(size: 44, weight: .bold, design: .rounded))
+                            .font(LifeOSFont.kpi())
+                            .tracking(-0.3)
                             .monospacedDigit()
                             .foregroundStyle(.primary)
                             .numericTransition()
                     } else {
                         Text("—")
-                            .font(.system(size: 44, weight: .bold, design: .rounded))
+                            .font(LifeOSFont.kpi())
+                            .tracking(-0.3)
                             .foregroundStyle(.primary)
                     }
                     Text(remainingPercent == nil ? "Not connected" : "% remaining")
@@ -475,6 +477,8 @@ struct UsageView: View {
             .background(Color.primary.opacity(0.06), in: Capsule())
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        // Menus re-tint their label with the system accent; pin neutral chrome (§1).
+        .foregroundStyle(LifeOSTokens.secondaryText)
         .accessibilityLabel("Provider switcher, currently \(selectedProvider.displayName), \(statusText(for: selectedProvider))")
     }
 
@@ -585,10 +589,11 @@ struct UsageLimitsCard: View {
             if let ringWindow {
                 // Usage owns one blue visual language; provider identity is carried by
                 // the account switcher and labels, never by a provider-specific ring hue.
-                GlowRing(progress: ringWindow.usedPercent ?? 0, hue: .blue, diameter: 148, lineWidth: 12) {
+                GlowRing(progress: ringWindow.usedPercent ?? 0, diameter: 148, lineWidth: 8) {
                     VStack(spacing: 3) {
                         Text(ringWindow.usedPercent.map { "\(Int(($0 * 100).rounded()))" } ?? "—")
-                            .font(.system(size: 34, weight: .bold, design: .rounded))
+                            .font(LifeOSFont.kpi(34))
+                            .tracking(-0.3)
                             .monospacedDigit()
                             .numericTransition()
                         if let percent = ringWindow.usedPercent {
@@ -638,34 +643,42 @@ struct UsageLimitsCard: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .glassCard(featured: true)
+        .flatCard(featured: true)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(snapshot.provider.displayName) usage limits")
     }
 
+    /// §4.2 dot + overline — no tinted capsule. Color is the semantic signal.
     private func statusPill(percent: Double) -> some View {
         let (text, color): (String, Color) = percent < 0.7
             ? ("Under normal", LifeOSTokens.success)
             : percent < 0.9 ? ("Near limit", LifeOSTokens.warning) : ("Over limit", LifeOSTokens.danger)
-        return Text(text)
-            .font(.caption2.weight(.semibold))
-            .foregroundStyle(color)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
-            .background(color.opacity(0.12), in: Capsule())
+        return HStack(spacing: 6) {
+            Circle()
+                .fill(color)
+                .frame(width: 6, height: 6)
+            Text(text)
+                .font(LifeOSFont.overline())
+                .tracking(0.8)
+                .textCase(.uppercase)
+                .foregroundStyle(color)
+                .lineLimit(1)
+        }
+        .accessibilityElement(children: .combine)
     }
 }
 
-/// §1d — slim bar for non-primary windows: 4pt Capsule, reveal/light->base gradient fill.
+/// §1d — slim bar for non-primary windows: 4pt Capsule, solid accent fill on
+/// the hairline ring track (no gradient).
 private struct UsageSlimBar: View {
     let value: Double
 
     var body: some View {
         GeometryReader { geometry in
             ZStack(alignment: .leading) {
-                Capsule().fill(Color.primary.opacity(0.07))
+                Capsule().fill(LifeOSTokens.Ring.track)
                 Capsule()
-                    .fill(LinearGradient(colors: [LifeOSTokens.Hue.blue.glow, LifeOSTokens.Hue.blue.base], startPoint: .leading, endPoint: .trailing))
+                    .fill(LifeOSTokens.Series.observed)
                     .frame(width: geometry.size.width * min(max(value, 0), 1))
             }
         }
@@ -733,7 +746,7 @@ struct UsageEmptyState: View {
             Text(detail).font(.caption).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassCard()
+        .flatCard()
         .accessibilityElement(children: .combine)
     }
 }
@@ -748,7 +761,7 @@ struct UsageModelMixCard: View {
             UsageCardHeader(title: "Model mix", subtitle: "Token composition by model", icon: .assistant)
             ModelCompositionChart(models: models)
         }
-        .glassCard()
+        .flatCard()
         .accessibilityElement(children: .contain)
     }
 }
@@ -856,9 +869,9 @@ struct UsageHeatmapCard: View {
                     case .corner:
                         Text("").frame(height: 12)
                     case .hourHeader(let hour):
-                        Text("\(hour)").font(.system(size: 8)).foregroundStyle(.secondary)
+                        Text("\(hour)").font(LifeOSFont.axis()).foregroundStyle(.secondary)
                     case .dayHeader(let weekday):
-                        Text(shortDay(weekday)).font(.system(size: 8)).foregroundStyle(.secondary)
+                        Text(shortDay(weekday)).font(LifeOSFont.axis()).foregroundStyle(.secondary)
                     case .cell(let cell):
                         heatmapCell(cell)
                     }
@@ -883,7 +896,7 @@ struct UsageHeatmapCard: View {
             .font(.caption2)
             .foregroundStyle(.secondary)
         }
-        .glassCard()
+        .flatCard()
         .animation(reduceMotion ? nil : LifeOSMotion.snappy, value: selectedCell?.id)
     }
 

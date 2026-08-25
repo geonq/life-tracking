@@ -230,7 +230,7 @@ private struct FutureModuleProgressRing: View {
             Circle()
                 .trim(from: 0, to: min(max(progress, 0), 1))
                 .stroke(
-                    LifeOSTokens.Ring.progress(.blue),
+                    LifeOSTokens.Ring.progressArc,
                     style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
                 )
                 .rotationEffect(.degrees(-90))
@@ -803,7 +803,8 @@ private struct NutritionDotMatrix: View {
     let metric: WidgetNutritionMetric
     let goal: WidgetNutritionMetric
     let date: Date
-    let hue: LifeOSTokens.Hue
+    /// Macro data semantics (§5.5): protein accent, carbs success, fat warning.
+    let color: Color
 
     private let columns = Array(repeating: GridItem(.fixed(4), spacing: 3), count: 8)
 
@@ -817,7 +818,7 @@ private struct NutritionDotMatrix: View {
             LazyVGrid(columns: columns, spacing: 3) {
                 ForEach(0..<40, id: \.self) { index in
                     Circle()
-                        .fill(index < filledDots ? hue.base : LifeOSTokens.quietBorder.opacity(0.55))
+                        .fill(index < filledDots ? color : LifeOSTokens.quietBorder.opacity(0.55))
                         .frame(width: 4, height: 4)
                 }
             }
@@ -910,18 +911,16 @@ struct NutritionOverviewWidgetView: View {
                         .font(.system(size: 8, weight: .medium))
                         .foregroundStyle(chrome.tertiary)
                 }
-                NutritionDotMatrix(title: "Fat", metric: entry.snapshot.nutrition.fatGrams, goal: entry.snapshot.nutrition.fatGoalGrams, date: entry.date, hue: .pink)
-                NutritionDotMatrix(title: "Carbs", metric: entry.snapshot.nutrition.carbsGrams, goal: entry.snapshot.nutrition.carbsGoalGrams, date: entry.date, hue: .orange)
-                NutritionDotMatrix(title: "Protein", metric: entry.snapshot.nutrition.proteinGrams, goal: entry.snapshot.nutrition.proteinGoalGrams, date: entry.date, hue: .blue)
+                NutritionDotMatrix(title: "Fat", metric: entry.snapshot.nutrition.fatGrams, goal: entry.snapshot.nutrition.fatGoalGrams, date: entry.date, color: LifeOSTokens.warning)
+                NutritionDotMatrix(title: "Carbs", metric: entry.snapshot.nutrition.carbsGrams, goal: entry.snapshot.nutrition.carbsGoalGrams, date: entry.date, color: LifeOSTokens.success)
+                NutritionDotMatrix(title: "Protein", metric: entry.snapshot.nutrition.proteinGrams, goal: entry.snapshot.nutrition.proteinGoalGrams, date: entry.date, color: LifeOSTokens.accent)
                 NutritionQualityRing(metric: entry.snapshot.nutrition.qualityScore, label: entry.snapshot.nutrition.qualityLabel, date: entry.date)
             }
             Divider().overlay(LifeOSTokens.quietBorder)
             NutritionWidgetQuickActions()
         }
         .padding(12)
-        .lifeOSWidgetContainer {
-            LinearGradient(colors: [LifeOSTokens.surface, LifeOSTokens.canvas], startPoint: .topLeading, endPoint: .bottomTrailing)
-        }
+        .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(URL(string: "lifeos://fitness/nutrition"))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Today's Nutrition, \(nutritionWidgetValue(entry.snapshot.nutrition.caloriesEaten, at: entry.date, unit: "kilocalories")); \(entry.snapshot.nutrition.provenanceLabel ?? nutritionWidgetStateText(entry.snapshot.nutritionDisplayState(at: entry.date)))")
@@ -968,7 +967,8 @@ private struct NutritionMacroGoalCell: View {
     let metric: WidgetNutritionMetric
     let goal: WidgetNutritionMetric
     let date: Date
-    let hue: LifeOSTokens.Hue
+    /// Macro data semantics (§5.5): protein accent, carbs success, fat warning.
+    let color: Color
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -999,7 +999,7 @@ private struct NutritionMacroGoalCell: View {
         ZStack {
             Circle().stroke(LifeOSTokens.quietBorder, lineWidth: 2.5)
             if let ratio {
-                Circle().trim(from: 0, to: ratio).stroke(hue.base, style: StrokeStyle(lineWidth: 2.5, lineCap: .round)).rotationEffect(.degrees(-90))
+                Circle().trim(from: 0, to: ratio).stroke(color, style: StrokeStyle(lineWidth: 2.5, lineCap: .round)).rotationEffect(.degrees(-90))
             }
         }
         .frame(width: 16, height: 16)
@@ -1044,9 +1044,9 @@ struct CaloriesMacrosWidgetView: View {
                     NutritionCalorieTrack(eaten: nutrition.caloriesEaten, goal: nutrition.calorieGoal, date: entry.date)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                NutritionMacroGoalCell(title: "Fat", metric: nutrition.fatGrams, goal: nutrition.fatGoalGrams, date: entry.date, hue: .pink)
-                NutritionMacroGoalCell(title: "Carbs", metric: nutrition.carbsGrams, goal: nutrition.carbsGoalGrams, date: entry.date, hue: .orange)
-                NutritionMacroGoalCell(title: "Protein", metric: nutrition.proteinGrams, goal: nutrition.proteinGoalGrams, date: entry.date, hue: .blue)
+                NutritionMacroGoalCell(title: "Fat", metric: nutrition.fatGrams, goal: nutrition.fatGoalGrams, date: entry.date, color: LifeOSTokens.warning)
+                NutritionMacroGoalCell(title: "Carbs", metric: nutrition.carbsGrams, goal: nutrition.carbsGoalGrams, date: entry.date, color: LifeOSTokens.success)
+                NutritionMacroGoalCell(title: "Protein", metric: nutrition.proteinGrams, goal: nutrition.proteinGoalGrams, date: entry.date, color: LifeOSTokens.accent)
             }
             Text("Goal period · today · \(nutritionWidgetStateText(entry.snapshot.nutritionDisplayState(at: entry.date)))")
                 .font(.system(size: 8, weight: .medium))
@@ -1054,9 +1054,7 @@ struct CaloriesMacrosWidgetView: View {
                 .lineLimit(1)
         }
         .padding(12)
-        .lifeOSWidgetContainer {
-            LinearGradient(colors: [LifeOSTokens.surface, LifeOSTokens.canvas], startPoint: .topLeading, endPoint: .bottomTrailing)
-        }
+        .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(URL(string: "lifeos://fitness/nutrition/goals"))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Calories and Macros, \(calorieStatus), goal \(nutritionWidgetValue(nutrition.calorieGoal, at: entry.date, unit: "kilocalories")); \(nutrition.provenanceLabel ?? nutritionWidgetStateText(entry.snapshot.nutritionDisplayState(at: entry.date)))")
@@ -1156,9 +1154,7 @@ struct NetEnergyWidgetView: View {
                 .lineLimit(1)
         }
         .padding(12)
-        .lifeOSWidgetContainer {
-            LinearGradient(colors: [LifeOSTokens.surface, LifeOSTokens.canvas], startPoint: .topLeading, endPoint: .bottomTrailing)
-        }
+        .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(URL(string: "lifeos://fitness/net-energy"))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Net Energy, \(balanceText); eaten and burned are independent aggregate observations; \(nutrition.provenanceLabel ?? nutritionWidgetStateText(entry.snapshot.nutritionDisplayState(at: entry.date)))")
@@ -1275,12 +1271,20 @@ private struct FitnessDemoBadge: View {
     }
 }
 
+/// Mirrors the app-side `FitnessRingPalette.threshold` bands so widget status
+/// rings read the same semantics as the Fitness screen (§5.5): ≥0.67 success,
+/// ≥0.34 warning, else danger.
+private func fitnessWidgetStatusColor(progress: Double) -> Color {
+    if progress >= 0.67 { return LifeOSTokens.success }
+    if progress >= 0.34 { return LifeOSTokens.warning }
+    return LifeOSTokens.danger
+}
+
 private struct FitnessRingCell: View {
     let title: String
     let metric: WidgetFitnessMetric
     let route: String
     let date: Date
-    let hue: LifeOSTokens.Hue
 
     @Environment(\.lifeOSWidgetChrome) private var chrome
 
@@ -1293,7 +1297,7 @@ private struct FitnessRingCell: View {
                     if let value = metric.value, fitnessWidgetState(metric, at: date) == .fresh || fitnessWidgetState(metric, at: date) == .stale {
                         Circle()
                             .trim(from: 0, to: min(1, max(0, value / 100)))
-                            .stroke(LifeOSTokens.Ring.progress(hue), style: StrokeStyle(lineWidth: 4, lineCap: .round))
+                            .stroke(fitnessWidgetStatusColor(progress: value / 100), style: StrokeStyle(lineWidth: 4, lineCap: .round))
                             .rotationEffect(.degrees(-90))
                         Text(value.formatted(.number.precision(.fractionLength(0))) + "%")
                             .font(.system(size: 9, weight: .bold, design: .rounded))
@@ -1362,18 +1366,16 @@ struct DailyOverviewWidgetView: View {
                 .padding(.horizontal, 7)
                 .padding(.vertical, 5)
                 .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                FitnessRingCell(title: "Strain", metric: fitness.strain, route: "lifeos://fitness/strain", date: entry.date, hue: .blue)
-                FitnessRingCell(title: "Recovery", metric: fitness.recovery, route: "lifeos://fitness/recovery", date: entry.date, hue: .green)
-                FitnessRingCell(title: "Sleep", metric: fitness.sleepScore, route: "lifeos://fitness/sleep", date: entry.date, hue: .violet)
+                FitnessRingCell(title: "Strain", metric: fitness.strain, route: "lifeos://fitness/strain", date: entry.date)
+                FitnessRingCell(title: "Recovery", metric: fitness.recovery, route: "lifeos://fitness/recovery", date: entry.date)
+                FitnessRingCell(title: "Sleep", metric: fitness.sleepScore, route: "lifeos://fitness/sleep", date: entry.date)
             }
             .padding(5)
             .background(LifeOSTokens.canvas.opacity(0.32), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(LifeOSTokens.quietBorder, lineWidth: 0.7))
         }
         .padding(10)
-        .lifeOSWidgetContainer {
-            LinearGradient(colors: [LifeOSTokens.surface, LifeOSTokens.canvas], startPoint: .topLeading, endPoint: .bottomTrailing)
-        }
+        .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(URL(string: "lifeos://fitness/daily-overview"))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Daily Overview\(fitnessWidgetDemoDisclosure(fitness)), \(entry.date.formatted(.dateTime.weekday(.wide).month(.wide).day())), strain \(fitnessWidgetValue(fitness.strain, at: entry.date)) percent, recovery \(fitnessWidgetValue(fitness.recovery, at: entry.date)) percent, sleep score \(fitnessWidgetValue(fitness.sleepScore, at: entry.date)) percent")
@@ -1478,9 +1480,7 @@ struct FitnessHealthMonitorWidgetView: View {
             }
         }
         .padding(11)
-        .lifeOSWidgetContainer {
-            LinearGradient(colors: [LifeOSTokens.surface, LifeOSTokens.canvas], startPoint: .topLeading, endPoint: .bottomTrailing)
-        }
+        .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(URL(string: "lifeos://fitness/health"))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Health Monitor\(fitnessWidgetDemoDisclosure(fitness)), six independent observations: respiration, heart rate, HRV, oxygen saturation, temperature, and sleep duration")
@@ -1513,17 +1513,17 @@ private struct FitnessStressChart: View {
                         else { path.addLine(to: CGPoint(x: x, y: y)) }
                     }
                 }
-                .stroke(LifeOSTokens.Ring.progress(.orange), style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                .stroke(LifeOSTokens.Series.observed, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
                 if let currentValue, trend.buckets.count > 1 {
                     let normalized = CGFloat(min(1, max(0, currentValue / 100)))
                     Circle()
-                        .fill(LifeOSTokens.Ring.progress(.orange))
+                        .fill(LifeOSTokens.Series.observed)
                         .frame(width: 8, height: 8)
                         .offset(x: max(0, proxy.size.width - 8), y: max(0, proxy.size.height * (1 - normalized) - 4))
                     Text(currentValue.formatted(.number.precision(.fractionLength(0))))
                         .font(.system(size: 8, weight: .bold, design: .rounded))
                         .monospacedDigit()
-                        .foregroundStyle(LifeOSTokens.Ring.progress(.orange))
+                        .foregroundStyle(LifeOSTokens.Series.observed)
                         .offset(x: max(0, proxy.size.width - 25), y: max(0, proxy.size.height * (1 - normalized) - 17))
                 }
                 Text("100")
@@ -1586,9 +1586,7 @@ struct FitnessStressWidgetView: View {
             .lineLimit(1)
         }
         .padding(10)
-        .lifeOSWidgetContainer {
-            LinearGradient(colors: [LifeOSTokens.surface, LifeOSTokens.canvas], startPoint: .topLeading, endPoint: .bottomTrailing)
-        }
+        .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(URL(string: "lifeos://fitness/stress"))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Stress\(fitnessWidgetDemoDisclosure(fitness)), current score \(fitnessWidgetValue(fitness.stressScore, at: entry.date)) out of 100, \(fitnessWidgetFreshness(fitness.stressScore, at: entry.date)); static intraday aggregate chart; open app to scrub")
@@ -1605,7 +1603,7 @@ private struct FitnessEnergySegments: View {
                 ForEach(0..<20, id: \.self) { index in
                     let isFilled = Double(index + 1) / 20.0 <= normalizedLevel
                     Capsule()
-                        .fill(isFilled ? LifeOSTokens.Hue.teal.base : LifeOSTokens.Ring.track)
+                        .fill(isFilled ? LifeOSTokens.Series.observed : LifeOSTokens.Ring.track)
                         .frame(width: max(2, (proxy.size.width - 38) / 20), height: 8)
                 }
             }
@@ -1658,15 +1656,13 @@ struct FitnessEnergyReserveWidgetView: View {
             }
             FitnessEnergySegments(level: energy.level.value)
             HStack(spacing: 7) {
-                FitnessEnergyChip(title: "Charged", value: energy.chargedPercent, date: entry.date, hue: .green)
-                FitnessEnergyChip(title: "Discharged", value: energy.dischargedPercent, date: entry.date, hue: .orange)
+                FitnessEnergyChip(title: "Charged", value: energy.chargedPercent, date: entry.date)
+                FitnessEnergyChip(title: "Discharged", value: energy.dischargedPercent, date: entry.date)
                 Spacer(minLength: 0)
             }
         }
         .padding(10)
-        .lifeOSWidgetContainer {
-            LinearGradient(colors: [LifeOSTokens.surface, LifeOSTokens.canvas], startPoint: .topLeading, endPoint: .bottomTrailing)
-        }
+        .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(URL(string: "lifeos://fitness/energy-reserve"))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Energy Reserve\(fitnessWidgetDemoDisclosure(fitness)), \(fitnessWidgetValue(energy.level, at: entry.date)) percent, \(lastChargedText(energy.lastChargedAt)), charged \(fitnessWidgetValue(energy.chargedPercent, at: entry.date)) percent, discharged \(fitnessWidgetValue(energy.dischargedPercent, at: entry.date)) percent, \(futureModuleAccessibilityState(state))")
@@ -1683,7 +1679,8 @@ private struct FitnessEnergyChip: View {
     let title: String
     let value: WidgetFitnessMetric
     let date: Date
-    let hue: LifeOSTokens.Hue
+
+    @Environment(\.lifeOSWidgetChrome) private var chrome
 
     var body: some View {
         let state = fitnessWidgetState(value, at: date)
@@ -1695,7 +1692,8 @@ private struct FitnessEnergyChip: View {
             return "\(sign)\(fitnessWidgetValue(value, at: date))%"
         }()
         HStack(spacing: 4) {
-            Circle().fill(hue.base).frame(width: 5, height: 5)
+            // Neutral legend dots — charge/discharge are facts, not statuses.
+            Circle().fill(chrome.tertiary).frame(width: 5, height: 5)
             Text("\(title) \(signedValue)")
                 .font(.system(size: 9, weight: .semibold, design: .rounded))
                 .monospacedDigit()

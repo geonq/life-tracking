@@ -493,7 +493,7 @@ private struct StressSurfaceCard<Content: View>: View {
     var body: some View {
         content
             .padding(16)
-            .glassCard(cornerRadius: 18)
+            .flatCard(cornerRadius: 18)
     }
 }
 

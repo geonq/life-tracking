@@ -726,7 +726,7 @@ private struct OverviewMetricCard: View {
         .padding(.vertical, featured ? 18 : 18)
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(minHeight: featured ? 196 : 190, alignment: .topLeading)
-        .glassCard(featured: featured)
+        .flatCard(featured: featured)
         // §5.1 hover (macOS): border brightens to strongBorder; no offset lift.
         .overlay(cardShape.stroke(hovering ? LifeOSTokens.strongBorder : Color.clear, lineWidth: 1))
         .animation(reduceMotion ? nil : LifeOSMotion.springSnappy, value: hovering)
@@ -1184,7 +1184,7 @@ private struct ClipperAnalyticsView: View {
         }
         .padding(22)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassCard()
+        .flatCard()
     }
 
     private func detailMetric(label: String, value: String?) -> some View {
@@ -1303,7 +1303,7 @@ private struct ClipperAnalyticsView: View {
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassCard()
+        .flatCard()
     }
 
     private func compactMetricRow(_ metrics: ClipperMetricSet) -> some View {
@@ -1379,7 +1379,7 @@ private struct ClipperAnalyticsView: View {
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassCard()
+        .flatCard()
         .accessibilityElement(children: .combine)
     }
 
@@ -1406,7 +1406,7 @@ private struct ClipperAnalyticsView: View {
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassCard()
+        .flatCard()
         .accessibilityElement(children: .combine)
     }
 
