@@ -154,14 +154,29 @@ public static class ServiceHostConfigValidator
         "PORT",
         "NODE_ENV",
         "USAGE_STORE_PATH",
+        "CLIPPER_STORE_PATH",
+        "LIFEOS_DATA_DIR",
+        "LIFEOS_SUPPLEMENT_CATALOG_PATH",
+        "LIFEOS_TAILSCALE_ALLOWED_LOGIN",
         "CLAUDE_INGEST_ENABLED",
         "CLAUDE_STATUSLINE_ENABLED",
         "CLAUDE_INGEST_SECRET_FILE",
         "CODEX_INGEST_ENABLED",
         "CODEX_INGEST_SECRET_FILE",
         "CODEX_LIVE_ENABLED",
+        "CLIPPER_INGEST_ENABLED",
+        "CLIPPER_INGEST_SECRET_FILE",
         "OPEN_FOOD_FACTS_ENABLED",
         "OPEN_FOOD_FACTS_CONTACT_EMAIL",
+        "GOOGLE_AI_STUDIO_ENABLED",
+        "GOOGLE_AI_STUDIO_API_KEY_FILE",
+        "GOOGLE_AI_STUDIO_FOOD_MODEL",
+        "GOOGLE_AI_STUDIO_FOOD_MODEL_VERSION",
+        "ENABLE_BANKING_APP_ID",
+        "ENABLE_BANKING_PRIVATE_KEY_PATH",
+        "ENABLE_BANKING_CERTIFICATE_PATH",
+        "ENABLE_BANKING_API_BASE_URL",
+        "ENABLE_BANKING_REDIRECT_URI",
         "SYSTEMROOT",
         "TEMP",
         "TMP",
@@ -378,6 +393,8 @@ public static class ServiceHostConfigValidator
         var result = new Dictionary<string, string>(StringComparer.Ordinal);
         var claudeEnabled = IsTrue(environment, "CLAUDE_INGEST_ENABLED") || IsTrue(environment, "CLAUDE_STATUSLINE_ENABLED");
         var codexEnabled = IsTrue(environment, "CODEX_INGEST_ENABLED");
+        var clipperEnabled = IsTrue(environment, "CLIPPER_INGEST_ENABLED");
+        var googleEnabled = IsTrue(environment, "GOOGLE_AI_STUDIO_ENABLED");
         var openFoodFactsEnabled = IsTrue(environment, "OPEN_FOOD_FACTS_ENABLED");
         foreach (var pair in environment)
         {
@@ -400,12 +417,14 @@ public static class ServiceHostConfigValidator
                 throw new ConfigValidationException("environment", "values must be safe strings or booleans");
             }
 
-            if (pair.Key is "CLAUDE_INGEST_SECRET_FILE" or "CODEX_INGEST_SECRET_FILE")
+            if (pair.Key is "CLAUDE_INGEST_SECRET_FILE" or "CODEX_INGEST_SECRET_FILE" or "CLIPPER_INGEST_SECRET_FILE" or "GOOGLE_AI_STUDIO_API_KEY_FILE")
             {
                 var required = pair.Key switch
                 {
                     "CLAUDE_INGEST_SECRET_FILE" => claudeEnabled,
                     "CODEX_INGEST_SECRET_FILE" => codexEnabled,
+                    "CLIPPER_INGEST_SECRET_FILE" => clipperEnabled,
+                    "GOOGLE_AI_STUDIO_API_KEY_FILE" => googleEnabled,
                     _ => false
                 };
                 if (required)
@@ -417,9 +436,17 @@ public static class ServiceHostConfigValidator
                     ValidateNonReparsePath(value, "environment");
                 }
             }
-            else if (pair.Key == "USAGE_STORE_PATH")
+            else if (pair.Key is "USAGE_STORE_PATH" or "CLIPPER_STORE_PATH" or "LIFEOS_DATA_DIR" or "LIFEOS_SUPPLEMENT_CATALOG_PATH")
             {
                 ValidateNonReparsePath(value, "environment");
+            }
+            else if (pair.Key is "ENABLE_BANKING_PRIVATE_KEY_PATH" or "ENABLE_BANKING_CERTIFICATE_PATH")
+            {
+                ValidateExistingFilePath(value, "environment");
+            }
+            else if (pair.Key is "ENABLE_BANKING_API_BASE_URL" or "ENABLE_BANKING_REDIRECT_URI")
+            {
+                ValidateHttpsUrl(value, "environment");
             }
             else if (pair.Key is "SYSTEMROOT" or "TEMP" or "TMP")
             {
@@ -433,7 +460,7 @@ public static class ServiceHostConfigValidator
             {
                 throw new ConfigValidationException("environment", "PORT must be between 1 and 65535");
             }
-            else if ((pair.Key is "CLAUDE_INGEST_ENABLED" or "CLAUDE_STATUSLINE_ENABLED" or "CODEX_INGEST_ENABLED" or "CODEX_LIVE_ENABLED" or "OPEN_FOOD_FACTS_ENABLED") && value is not ("true" or "false"))
+            else if ((pair.Key is "CLAUDE_INGEST_ENABLED" or "CLAUDE_STATUSLINE_ENABLED" or "CODEX_INGEST_ENABLED" or "CODEX_LIVE_ENABLED" or "CLIPPER_INGEST_ENABLED" or "GOOGLE_AI_STUDIO_ENABLED" or "OPEN_FOOD_FACTS_ENABLED") && value is not ("true" or "false"))
             {
                 throw new ConfigValidationException("environment", "the feature flag must be boolean");
             }
@@ -444,6 +471,10 @@ public static class ServiceHostConfigValidator
             else if (pair.Key == "NODE_ENV" && value != "production")
             {
                 throw new ConfigValidationException("environment", "NODE_ENV must be production");
+            }
+            else if (pair.Key is "GOOGLE_AI_STUDIO_FOOD_MODEL" or "GOOGLE_AI_STUDIO_FOOD_MODEL_VERSION" or "ENABLE_BANKING_APP_ID" or "LIFEOS_TAILSCALE_ALLOWED_LOGIN")
+            {
+                ValidateBoundedToken(value, "environment");
             }
             result.Add(pair.Key, value);
         }
@@ -513,6 +544,27 @@ public static class ServiceHostConfigValidator
         foreach (var path in paths)
         {
             ValidateExistingDirectoryPath(path, field);
+        }
+    }
+
+    private static void ValidateHttpsUrl(string value, string field)
+    {
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri)
+            || uri.Scheme != Uri.UriSchemeHttps
+            || string.IsNullOrEmpty(uri.Host)
+            || !string.IsNullOrEmpty(uri.UserInfo)
+            || !string.IsNullOrEmpty(uri.Fragment)
+            || value.Length > 2048)
+        {
+            throw new ConfigValidationException(field, "it must be a bounded HTTPS URL without credentials or fragments");
+        }
+    }
+
+    private static void ValidateBoundedToken(string value, string field)
+    {
+        if (value.Length is 0 or > 512 || value.Any(char.IsControl))
+        {
+            throw new ConfigValidationException(field, "it must be a bounded non-control string");
         }
     }
 

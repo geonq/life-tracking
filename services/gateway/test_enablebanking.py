@@ -270,10 +270,152 @@ def test_refresh_normalizes_realistic_account_and_transaction_shapes(tmp_path, m
     assert cached == summary
 
 
+def test_transaction_category_uses_provider_label_mcc_and_merchant_fallback(tmp_path, monkeypatch):
+    adapter = service(tmp_path, monkeypatch)
+    assert adapter._transaction_category({"category": "Health", "merchant_category_code": "5411"}) == "Health"
+    assert adapter._transaction_category({"merchant_category_code": "5814"}) == "Dining"
+    assert adapter._transaction_category({"creditor": {"name": "REWE Markt"}}) == "Groceries"
+    assert adapter._transaction_category({"merchant_category_code": "9999"}) == "Uncategorized"
+    assert adapter._transaction_category({
+        "credit_debit_indicator": "DBIT",
+        "creditor": {"name": "Hausverwaltung"},
+        "remittance_information_unstructured": ["Miete August"],
+    }) == "Bills"
+    assert adapter._transaction_category({
+        "credit_debit_indicator": "DBIT",
+        "creditor": {"name": "Überweisung an Freunde"},
+    }) == "Transfers"
+    assert adapter._transaction_category({
+        "credit_debit_indicator": "CRDT",
+        "debtor": {"name": "Employer"},
+        "remittance_information_unstructured": ["Gehalt"],
+    }) == "Income"
+    assert adapter._transaction_category({
+        "credit_debit_indicator": "DBIT",
+        "category": "Income",
+        "creditor": {"name": "Salary correction"},
+    }) == "Uncategorized"
+
+
 def test_refresh_fails_closed_on_aggregate_overflow(tmp_path, monkeypatch):
     adapter = service(tmp_path, monkeypatch)
     with pytest.raises(enablebanking.EnableBankingUnavailable):
         adapter._checked_add(main.FINANCE_MAX_SAFE_CENTS, 1)
+
+
+def test_provider_money_rejects_fractional_cents_instead_of_rounding(tmp_path, monkeypatch):
+    adapter = service(tmp_path, monkeypatch)
+    assert adapter._money_to_cents("12.340", "EUR", main.FINANCE_MAX_SAFE_CENTS) == 1234
+    with pytest.raises(enablebanking.EnableBankingUnavailable):
+        adapter._money_to_cents("12.345", "EUR", main.FINANCE_MAX_SAFE_CENTS)
+
+
+def test_refresh_follows_bounded_transaction_continuation_pages(tmp_path, monkeypatch):
+    adapter = service(tmp_path, monkeypatch)
+    adapter._save_connection({
+        "connectionId": "eb-flow",
+        "institutionId": "revolut_personal",
+        "sessionId": "session-1",
+        "linkedAt": "2026-01-01T00:00:00Z",
+    })
+    account_uid = "01234567-89ab-cdef-0123-456789abcdef"
+    today = datetime.now(timezone.utc).date().isoformat()
+    transaction = {
+        "transaction_id": "tx-page",
+        "transaction_amount": {"amount": "1.00", "currency": "EUR"},
+        "credit_debit_indicator": "DBIT",
+        "creditor": {"name": "REWE"},
+        "booking_date": today,
+    }
+    holder = QueueClient([
+        FakeResponse({"status": "AUTHORIZED", "accounts": [{"uid": account_uid, "name": "Main", "currency": "EUR"}]}),
+        FakeResponse({"balances": [{"balance_type": "CLAV", "balance_amount": {"amount": "10.00", "currency": "EUR"}}]}),
+        FakeResponse({"continuation_key": "page-2", "transactions": [transaction]}),
+        FakeResponse({"transactions": [transaction]}),
+    ])
+    monkeypatch.setattr(enablebanking.httpx, "AsyncClient", lambda **_: holder)
+
+    summary = run(adapter.refresh_summary())
+
+    assert len(summary["transactions"]["transactions"]) == 1
+    transaction_calls = [call for call in holder.calls if call[1].endswith("/transactions")]
+    assert transaction_calls[0][2]["params"]["date_from"] == transaction_calls[1][2]["params"]["date_from"]
+    assert transaction_calls[0][2]["params"]["date_to"] == transaction_calls[1][2]["params"]["date_to"]
+    assert transaction_calls[1][2]["params"]["continuation_key"] == "page-2"
+
+
+def test_duplicate_accounts_are_collapsed_but_conflicts_fail_closed(tmp_path, monkeypatch):
+    adapter = service(tmp_path, monkeypatch)
+    row = {
+        "id": "ebacct-duplicate",
+        "name": "revolut_personal · Main",
+        "detail": "EUR · Enable Banking",
+        "balanceCents": 1000,
+        "source": "enablebanking:revolut_personal",
+        "provenance": {"source": "enablebanking:revolut_personal", "observedAt": "2026-08-26T00:00:00Z", "freshness": "fresh", "quality": "observed", "connectorState": "healthy"},
+    }
+    assert adapter._deduplicate_accounts([row, dict(row)]) == [row]
+    with pytest.raises(enablebanking.EnableBankingUnavailable):
+        adapter._deduplicate_accounts([row, dict(row, balanceCents=2000)])
+
+
+def test_refresh_rejects_repeated_transaction_continuation_key(tmp_path, monkeypatch):
+    adapter = service(tmp_path, monkeypatch)
+    adapter._save_connection({
+        "connectionId": "eb-flow",
+        "institutionId": "revolut_personal",
+        "sessionId": "session-1",
+        "linkedAt": "2026-01-01T00:00:00Z",
+    })
+    account_uid = "01234567-89ab-cdef-0123-456789abcdef"
+    holder = QueueClient([
+        FakeResponse({"status": "AUTHORIZED", "accounts": [{"uid": account_uid, "name": "Main", "currency": "EUR"}]}),
+        FakeResponse({"balances": [{"balance_type": "CLAV", "balance_amount": {"amount": "10.00", "currency": "EUR"}}]}),
+        FakeResponse({"continuation_key": "same", "transactions": []}),
+        FakeResponse({"continuation_key": "same", "transactions": []}),
+    ])
+    monkeypatch.setattr(enablebanking.httpx, "AsyncClient", lambda **_: holder)
+
+    with pytest.raises(enablebanking.EnableBankingUnavailable):
+        run(adapter.refresh_summary())
+
+
+def test_refresh_fails_closed_on_malformed_transaction_row(tmp_path, monkeypatch):
+    adapter = service(tmp_path, monkeypatch)
+    adapter._save_connection({
+        "connectionId": "eb-flow",
+        "institutionId": "revolut_personal",
+        "sessionId": "session-1",
+        "linkedAt": "2026-01-01T00:00:00Z",
+    })
+    account_uid = "01234567-89ab-cdef-0123-456789abcdef"
+    holder = QueueClient([
+        FakeResponse({"status": "AUTHORIZED", "accounts": [{"uid": account_uid, "name": "Main", "currency": "EUR"}]}),
+        FakeResponse({"balances": [{"balance_type": "CLAV", "balance_amount": {"amount": "10.00", "currency": "EUR"}}]}),
+        FakeResponse({"transactions": [{"transaction_id": "missing-amount"}]}),
+    ])
+    monkeypatch.setattr(enablebanking.httpx, "AsyncClient", lambda **_: holder)
+
+    with pytest.raises(enablebanking.EnableBankingUnavailable):
+        run(adapter.refresh_summary())
+
+
+def test_duplicate_provider_rows_are_collapsed_but_conflicts_fail_closed(tmp_path, monkeypatch):
+    adapter = service(tmp_path, monkeypatch)
+    row = {
+        "id": "ebtx-duplicate",
+        "merchant": "REWE",
+        "title": "REWE",
+        "signedAmountCents": -1234,
+        "timestamp": "2026-08-26T00:00:00Z",
+        "account": "revolut_personal · Main",
+        "source": "enablebanking:revolut_personal",
+        "category": "Groceries",
+        "provenance": {"source": "enablebanking:revolut_personal", "observedAt": "2026-08-26T00:00:00Z", "freshness": "fresh", "quality": "observed", "connectorState": "healthy"},
+    }
+    assert adapter._deduplicate_transactions([row, dict(row)]) == [row]
+    with pytest.raises(enablebanking.EnableBankingUnavailable):
+        adapter._deduplicate_transactions([row, dict(row, signedAmountCents=-999)])
 
 
 def test_transaction_response_uses_larger_but_bounded_payload_limit(tmp_path, monkeypatch):

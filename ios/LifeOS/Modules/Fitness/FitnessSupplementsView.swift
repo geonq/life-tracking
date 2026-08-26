@@ -1,5 +1,20 @@
 import SwiftUI
 
+private func supplementAmountText(_ amount: Double) -> String {
+    let formatter = NumberFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.numberStyle = .decimal
+    formatter.maximumFractionDigits = 3
+    return formatter.string(from: NSNumber(value: amount)) ?? "—"
+}
+
+private func supplementFactsText(_ facts: [SupplementNutrientFact]) -> String {
+    facts.map { fact in
+        let basis = fact.labelBasisUnits.map { " · label basis \($0)" } ?? ""
+        return "\(fact.name): \(supplementAmountText(fact.amountPerUnit)) \(fact.unit)/unit\(basis)"
+    }.joined(separator: "\n")
+}
+
 private extension SupplementOccurrenceState {
     var fitnessLabel: String {
         rawValue.capitalized
@@ -20,6 +35,7 @@ private extension SupplementOccurrenceState {
 struct FitnessSupplementsView: View {
     let selectedDate: Date
     private let persistenceEnabled: Bool
+    private let catalogClient = TailscaleSyncClient()
     @Environment(\.scenePhase) private var scenePhase
     @State private var session: FitnessSupplementSession?
     @State private var sessionError: String?
@@ -150,7 +166,7 @@ struct FitnessSupplementsView: View {
             }
         }
         .sheet(isPresented: $showingAddSheet) {
-            FitnessAddSupplementSheet(persistenceEnabled: persistenceEnabled) { supplement in
+            FitnessAddSupplementSheet(persistenceEnabled: persistenceEnabled, catalogClient: catalogClient) { supplement in
                 guard var current = session else {
                     noticeIsError = true
                     notice = sessionError ?? "Supplement session is unavailable."
@@ -477,6 +493,12 @@ private struct FitnessSupplementProductCard: View {
                             .font(LifeOSFont.caption(10))
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                             .fixedSize(horizontal: false, vertical: true)
+                        if !supplement.nutrientFacts.isEmpty {
+                            Text(supplementFactsText(supplement.nutrientFacts))
+                                .font(LifeOSFont.caption(9))
+                                .foregroundStyle(LifeOSTokens.accent)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                         Text(doseLabel)
                             .font(LifeOSFont.caption(10))
                             .foregroundStyle(supplement.userDose == nil ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)
@@ -750,12 +772,23 @@ private struct FitnessSupplementCalendarOverlay: View {
 
 private struct FitnessAddSupplementSheet: View {
     let persistenceEnabled: Bool
+    let catalogClient: TailscaleSyncClient
     let onAdd: (FitnessSupplement) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
+    @State private var brand = "User-entered product"
     @State private var form = FitnessSupplement.Form.capsule
+    @State private var servingUnit = "capsule"
     @State private var strength = ""
     @State private var userDose = ""
+    @State private var nutrientFacts: [SupplementNutrientFact] = []
+    @State private var catalogQuery = ""
+    @State private var catalogResponse: SupplementCatalogResponse?
+    @State private var catalogLoading = false
+    @State private var catalogError: String?
+    @State private var selectedCatalogID: String?
+    @State private var selectedCatalogSourceDate: String?
+    @State private var catalogTask: Task<Void, Never>?
     @State private var hasReminderTime = true
     @State private var reminderTime = Date.now
     @State private var timingNote = ""
@@ -775,9 +808,11 @@ private struct FitnessAddSupplementSheet: View {
                         .font(LifeOSFont.headerLarge(22))
                     Text("LifeOS stores the product label and your chosen dose as facts. Leave the dose blank rather than accepting a generic recommendation.")
                         .font(LifeOSFont.body(12)).foregroundStyle(LifeOSTokens.tertiaryText)
+                    catalogSection
                     FitnessCard {
                         VStack(spacing: 11) {
                             FitnessSupplementField(title: "Product name", text: $name)
+                            FitnessSupplementField(title: "Brand", text: $brand)
                             Picker("Form", selection: $form) {
                                 ForEach(FitnessSupplement.Form.allCases, id: \.self) { option in
                                     Text(option.rawValue).tag(option)
@@ -785,7 +820,23 @@ private struct FitnessAddSupplementSheet: View {
                             }
                             .font(LifeOSFont.inter(13, weight: .medium))
                             FitnessSupplementField(title: "Label strength", text: $strength)
+                            FitnessSupplementField(title: "Inventory unit", text: $servingUnit)
+                            Text("This exact unit is used for stock and nutrient facts (for example tablet, capsule, serving, or ml). A catalog selection copies its source unit here; review it before saving.")
+                                .font(LifeOSFont.caption(9))
+                                .foregroundStyle(LifeOSTokens.tertiaryText)
+                                .fixedSize(horizontal: false, vertical: true)
                             FitnessSupplementField(title: "Your dose", text: $userDose)
+                            if !nutrientFacts.isEmpty {
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text("Exact nutrient facts per unit")
+                                        .font(LifeOSFont.caption(11))
+                                        .foregroundStyle(LifeOSTokens.accent)
+                                    Text(supplementFactsText(nutrientFacts))
+                                        .font(LifeOSFont.caption(10))
+                                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
                             FitnessSupplementField(title: "Inventory units / dose", text: $inventoryUnitsPerDose, numeric: true)
                             Toggle("Set a reminder time", isOn: $hasReminderTime)
                             if hasReminderTime {
@@ -838,7 +889,107 @@ private struct FitnessAddSupplementSheet: View {
 #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
 #endif
+            .onChange(of: catalogQuery) { _, _ in scheduleCatalogSearch() }
+            .onDisappear { catalogTask?.cancel() }
         }
+    }
+
+    private var catalogSection: some View {
+        FitnessCard {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Search exact product or nutrient")
+                    .font(LifeOSFont.header(14))
+                Text("Optional Windows catalog · reference facts only. Selecting a result copies the label values into this local form; review them before saving.")
+                    .font(LifeOSFont.caption(9))
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                TextField("e.g. folic acid, calcium, B12", text: $catalogQuery)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("supplement-catalog-search")
+                if catalogLoading {
+                    ProgressView("Searching reference catalog…")
+                        .font(LifeOSFont.caption(10))
+                }
+                if let catalogError {
+                    Text(catalogError)
+                        .font(LifeOSFont.caption(9))
+                        .foregroundStyle(LifeOSTokens.warning)
+                }
+                if let response = catalogResponse, !response.entries.isEmpty {
+                    ForEach(response.entries) { entry in
+                        Button {
+                            applyCatalogEntry(entry)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 3) {
+                                HStack {
+                                    Text(entry.name).font(LifeOSFont.control())
+                                    Spacer()
+                                    if selectedCatalogID == entry.id {
+                                        LifeOSIcon(.verified).foregroundStyle(LifeOSTokens.success)
+                                    }
+                                }
+                                Text("\(entry.brand) · \(entry.form.rawValue) · \(entry.servingUnit)")
+                                    .font(LifeOSFont.caption(9))
+                                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                                Text(supplementFactsText(entry.nutrients))
+                                    .font(LifeOSFont.caption(9))
+                                    .foregroundStyle(LifeOSTokens.accent)
+                                    .multilineTextAlignment(.leading)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 5)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("supplement-catalog-\(entry.id)")
+                    }
+                } else if !catalogQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !catalogLoading && catalogError == nil {
+                    Text("No catalog result. You can still enter the label facts manually.")
+                        .font(LifeOSFont.caption(9))
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                }
+            }
+        }
+        .opacity(persistenceEnabled ? 1 : 0.55)
+        .allowsHitTesting(persistenceEnabled)
+    }
+
+    private func scheduleCatalogSearch() {
+        catalogTask?.cancel()
+        catalogResponse = nil
+        catalogError = nil
+        let query = catalogQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard persistenceEnabled, query.count >= 2 else {
+            catalogLoading = false
+            return
+        }
+        catalogLoading = true
+        catalogTask = Task { @MainActor in
+            do {
+                try await Task.sleep(nanoseconds: 250_000_000)
+                guard !Task.isCancelled else { return }
+                let response = try await catalogClient.fetchSupplementCatalog(query: query)
+                guard !Task.isCancelled, query == catalogQuery.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
+                catalogResponse = response
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled else { return }
+                catalogError = "The Windows catalog is unavailable. Manual entry remains available."
+            }
+            catalogLoading = false
+        }
+    }
+
+    private func applyCatalogEntry(_ entry: SupplementCatalogEntry) {
+        selectedCatalogID = entry.id
+        selectedCatalogSourceDate = entry.sourceDate
+        name = entry.name
+        brand = entry.brand
+        form = FitnessSupplement.Form(rawValue: entry.form.rawValue.capitalized) ?? .other
+        servingUnit = entry.servingUnit
+        strength = entry.nutrients.map { "\($0.name) \(supplementAmountText($0.amountPerUnit)) \($0.unit)/\(entry.servingUnit)" }.joined(separator: "; ")
+        userDose = "1 \(entry.servingUnit)"
+        nutrientFacts = entry.nutrients
     }
 
     private func addLocally() {
@@ -847,19 +998,30 @@ private struct FitnessAddSupplementSheet: View {
             validationMessage = "Enter a product name to add a local record."
             return
         }
+        let trimmedServingUnit = servingUnit.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedServingUnit.isEmpty else {
+            validationMessage = "Enter the inventory unit used by one label dose, such as tablet or capsule."
+            return
+        }
         let parsedStock = max(0, Int(stock.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0)
         let parsedThreshold = max(0, Int(reorderThreshold.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0)
         let parsedLeadTime = Int(expectedLeadTimeDays.trimmingCharacters(in: .whitespacesAndNewlines)).map { max(0, $0) }
         let parsedUnits = max(1, Int(inventoryUnitsPerDose.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 1)
         let trimmedTimingNote = timingNote.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedStrength = strength.trimmingCharacters(in: .whitespacesAndNewlines)
         let supplement = FitnessSupplement(
             id: "local-\(UUID().uuidString)",
             name: trimmedName,
-            brand: "User-entered product",
+            brand: brand.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "User-entered product" : brand,
             form: form,
-            strength: strength.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Not entered" : strength,
-            servingUnit: form.inventoryUnit,
+            strength: trimmedStrength.isEmpty ? "Not entered" : trimmedStrength,
+            servingUnit: trimmedServingUnit,
             userDose: userDose.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : userDose,
+            nutrientFacts: nutrientFacts,
+            source: selectedCatalogID == nil ? .manual : .packageLabel,
+            productLabelNote: selectedCatalogSourceDate.flatMap {
+                try? SupplementProductLabelNote(text: supplementFactsText(nutrientFacts), sourceDate: $0)
+            },
             inventoryUnitsPerDose: parsedUnits,
             timing: hasReminderTime ? formattedReminderTime :
                 (trimmedTimingNote.isEmpty ? "Timing not entered" : trimmedTimingNote),

@@ -99,14 +99,18 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
         return try loadUnlocked()
     }
 
-    /// Appends the given transactions (already parsed and confirmed by the
-    /// user via the import preview) to the durable store.
+    /// Adds the given transactions (already parsed and confirmed by the user
+    /// via the import preview) to the durable store. Stable importer IDs make
+    /// retrying the same CSV idempotent; existing rows are retained exactly.
     public func add(_ transactions: [FinanceImportedTransaction]) throws {
         guard !transactions.isEmpty else { return }
         Self.processTransactionLock.lock()
         defer { Self.processTransactionLock.unlock() }
         var existing = try loadUnlocked()
-        existing.append(contentsOf: transactions)
+        var knownIDs = Set(existing.map(\.id))
+        let additions = transactions.filter { knownIDs.insert($0.id).inserted }
+        guard !additions.isEmpty else { return }
+        existing.append(contentsOf: additions)
         try saveUnlocked(existing)
     }
 
@@ -119,6 +123,21 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
             throw FinanceImportedTransactionStoreError.transactionNotFound
         }
         existing.remove(at: index)
+        try saveUnlocked(existing)
+    }
+
+    /// Persists a canonical category override for one imported transaction.
+    /// Passing `nil` clears the override and restores automatic categorizing
+    /// from the transaction description. The enum boundary prevents an
+    /// arbitrary provider label from becoming a saved LifeOS category.
+    public func setCategory(_ category: FinanceTransactionCategory?, for id: UUID) throws {
+        Self.processTransactionLock.lock()
+        defer { Self.processTransactionLock.unlock() }
+        var existing = try loadUnlocked()
+        guard let index = existing.firstIndex(where: { $0.id == id }) else {
+            throw FinanceImportedTransactionStoreError.transactionNotFound
+        }
+        existing[index].category = category?.rawValue
         try saveUnlocked(existing)
     }
 

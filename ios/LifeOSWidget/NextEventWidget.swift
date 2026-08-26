@@ -22,15 +22,22 @@ public struct NextEventWidgetView: View {
     }
 
     private var usesTransparentTreatment: Bool {
-        !showsWidgetContainerBackground || widgetRenderingMode != .fullColor
+        widgetChrome.usesTransparentTreatment
+    }
+
+    private var widgetChrome: LifeOSWidgetChrome {
+        LifeOSWidgetChrome.resolving(
+            showsContainerBackground: showsWidgetContainerBackground,
+            renderingMode: widgetRenderingMode
+        )
     }
 
     private var primaryForeground: Color {
-        usesTransparentTreatment ? .white : .primary
+        widgetChrome.hero
     }
 
     private var secondaryForeground: Color {
-        usesTransparentTreatment ? .white.opacity(0.76) : .secondary
+        widgetChrome.secondary
     }
 
     private var nextEvent: CalendarItem? {

@@ -1,5 +1,7 @@
 import asyncio
+import base64
 import copy
+import hashlib
 import json
 import os
 from datetime import datetime, timedelta, timezone
@@ -86,6 +88,30 @@ VALID_CLIPPER_UNAVAILABLE = {
         "quality": "unavailable",
         "connectorState": "unavailable",
     },
+}
+
+_CLIPPER_PROVENANCE = {
+    "source": "hermes-test-source",
+    "observedAt": CLIPPER_OBSERVED_AT,
+    "freshness": "fresh",
+    "quality": "observed",
+    "connectorState": "healthy",
+}
+_CLIPPER_METRICS = {
+    "views": {"availability": "observed", "value": 100, "provenance": _CLIPPER_PROVENANCE},
+    "subscribers": {"availability": "observed", "value": 10, "provenance": _CLIPPER_PROVENANCE},
+    "revenue": {"availability": "observed", "amountCents": 2500, "currency": "EUR", "provenance": _CLIPPER_PROVENANCE},
+}
+VALID_CLIPPER_OBSERVED = {
+    "schemaVersion": 1,
+    "availability": "observed",
+    "generatedAt": CLIPPER_OBSERVED_AT,
+    "currency": "EUR",
+    "metrics": _CLIPPER_METRICS,
+    "accounts": [],
+    "trends": [],
+    "breakdowns": [],
+    "provenance": {**_CLIPPER_PROVENANCE},
 }
 
 
@@ -596,6 +622,13 @@ def test_clipper_accepts_only_typed_unavailable_snapshot():
     assert response.headers["cache-control"] == "no-store"
 
 
+def test_clipper_accepts_a_strict_observed_snapshot():
+    with request_with(FakeResponse(json.dumps(VALID_CLIPPER_OBSERVED).encode())):
+        response = client.get("/clipper/summary", headers=AUTH)
+    assert response.status_code == 200
+    assert response.json() == VALID_CLIPPER_OBSERVED
+
+
 def test_clipper_requires_identity_and_get_only():
     assert client.get("/clipper/summary").status_code == 403
     assert client.post("/clipper/summary", headers=AUTH).status_code == 405
@@ -713,6 +746,26 @@ def test_claude_ingest_accepts_identity_only_and_forwards_allowlisted_json_to_ex
     assert options["content"] != json.dumps(VALID_CLAUDE_INGEST).encode()
     assert client_options["follow_redirects"] is False
     assert client_options["timeout"] == main.CLAUDE_INGEST_REQUEST_TIMEOUT
+
+
+def test_claude_ingest_forwards_only_a_validated_capture_timestamp(tmp_path, monkeypatch):
+    import main
+
+    configure_ingest_secret(tmp_path, monkeypatch)
+    calls = []
+    with patch("main.httpx.AsyncClient", lambda **kwargs: FakeIngestClient(calls, **kwargs)):
+        response = client.post(
+            CLAUDE_INGEST,
+            headers=ingest_headers(**{"X-Observed-At": "2026-08-12T05:00:00+00:00"}),
+            content=json.dumps(VALID_CLAUDE_INGEST).encode(),
+        )
+    assert response.status_code == 204
+    assert calls[0][1]["headers"]["X-Observed-At"] == "2026-08-12T05:00:00Z"
+    assert client.post(
+        CLAUDE_INGEST,
+        headers=ingest_headers(**{"X-Observed-At": "not-a-timestamp"}),
+        content=json.dumps(VALID_CLAUDE_INGEST).encode(),
+    ).status_code == 400
 
 
 def test_claude_ingest_identity_is_the_only_remote_auth_gate(tmp_path, monkeypatch):
@@ -986,11 +1039,115 @@ def test_loopback_upstream_clients_disable_ambient_proxy_environment(tmp_path, m
     assert all(item["follow_redirects"] is False for item in options)
 
 
+def test_nutrition_barcode_route_proxies_only_the_normalized_contract(monkeypatch):
+    barcode = "3017620422003"
+    fetched_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    payload = {
+        "schemaVersion": 1,
+        "state": "found",
+        "barcode": barcode,
+        "product": {"name": "Test product", "brand": "Test brand"},
+        "nutritionState": "complete",
+        "per100g": {"kcal": 100, "proteinGrams": 5, "carbsGrams": 10, "fatGrams": 2},
+        "provenance": {
+            "source": "openfoodfacts",
+            "apiVersion": "v3.6",
+            "apiURL": f"https://world.openfoodfacts.org/api/v3.6/product/{barcode}.json",
+            "productURL": f"https://world.openfoodfacts.org/product/{barcode}",
+            "fetchedAt": fetched_at,
+            "databaseLicense": "ODbL-1.0",
+            "contentLicense": "DbCL-1.0",
+            "attribution": "Product data from Open Food Facts.",
+            "dataQualityWarning": "Open Food Facts data is volunteer-sourced; accuracy, completeness, and reliability are not guaranteed.",
+        },
+    }
+    monkeypatch.setattr(main, "NUTRITION_BARCODE_UPSTREAM", "http://127.0.0.1:8787/api/nutrition/barcode")
+    with request_with(FakeResponse(json.dumps(payload).encode())):
+        response = client.get(f"/nutrition/barcode/{barcode}", headers=AUTH)
+    assert response.status_code == 200
+    assert response.json()["product"]["name"] == "Test product"
+    assert b"raw" not in response.content
+    assert response.headers["cache-control"] == "no-store"
+
+    invalid = client.get("/nutrition/barcode/not-a-barcode", headers=AUTH)
+    assert invalid.status_code == 400
+    assert invalid.json() == {"error": "invalid_barcode"}
+
+    malformed = {"schemaVersion": 1, "barcode": barcode, "raw": "provider payload"}
+    with request_with(FakeResponse(json.dumps(malformed).encode())):
+        response = client.get(f"/nutrition/barcode/{barcode}", headers=AUTH)
+    assert response.status_code == 503
+    assert b"provider payload" not in response.content
+
+
+def _photo_manifest_for_gateway(data: bytes):
+    encoded = base64.b64encode(data).decode("ascii")
+    return {
+        "schemaVersion": 1,
+        "mealID": "meal-1",
+        "requestID": "request-1",
+        "capturedAt": "2026-08-26T12:00:00Z",
+        "clientTimeZone": "Europe/Berlin",
+        "inferenceConsent": True,
+        "images": [{
+            "imageID": "image-1",
+            "mimeType": "image/png",
+            "byteLength": len(data),
+            "width": 1,
+            "height": 1,
+            "sanitized": True,
+            "inlineDataBase64": encoded,
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }],
+    }
+
+
+def test_photo_lineage_recomputes_digest_length_and_magic_before_forwarding():
+    data = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+    manifest = _photo_manifest_for_gateway(data)
+    assert main._photo_lineage(manifest) == (
+        "meal-1",
+        "request-1",
+        [{"imageID": "image-1", "sha256": hashlib.sha256(data).hexdigest()}],
+    )
+
+    forged_digest = json.loads(json.dumps(manifest))
+    forged_digest["images"][0]["sha256"] = "0" * 64
+    assert main._photo_lineage(forged_digest) is None
+
+    forged_length = json.loads(json.dumps(manifest))
+    forged_length["images"][0]["byteLength"] += 1
+    assert main._photo_lineage(forged_length) is None
+
+    forged_magic = json.loads(json.dumps(manifest))
+    forged_magic["images"][0]["mimeType"] = "image/jpeg"
+    assert main._photo_lineage(forged_magic) is None
+
+    forged_sanitized = json.loads(json.dumps(manifest))
+    forged_sanitized["images"][0]["sanitized"] = False
+    assert main._photo_lineage(forged_sanitized) is None
+
+
 def test_finance_summary_without_linked_connection_is_unavailable():
     response = client.get("/finance/summary", headers=AUTH)
     assert response.status_code == 503
     assert response.json() == {"error": "finance unavailable"}
     assert response.headers["cache-control"] == "no-store"
+
+
+def test_finance_response_bound_matches_native_read_limit():
+    small = main._finance_consent_response({"status": "ok"}, 200)
+    assert small.status_code == 200
+    assert small.body == b'{"status":"ok"}'
+
+    oversized = main._finance_consent_response(
+        {"payload": "x" * main.EnableBankingService.MAX_FINANCE_SUMMARY_SIZE},
+        200,
+    )
+    assert oversized.status_code == 503
+    assert oversized.body == b'{"error":"finance unavailable"}'
 
 
 def test_finance_summary_requires_identity_and_is_read_only():

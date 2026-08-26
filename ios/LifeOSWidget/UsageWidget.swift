@@ -440,6 +440,8 @@ private struct UsageRingView: View {
     let disclosure: UsageWidgetConnectorDisclosure
     let isPreview: Bool
 
+    @Environment(\.lifeOSWidgetChrome) private var chrome
+
     private var clampedProgress: Double {
         min(max(progress ?? 0, 0), 1)
     }
@@ -479,7 +481,7 @@ private struct UsageRingView: View {
             Text(heroText)
                 .font(.system(size: heroFontSize, weight: .bold, design: .rounded))
                 .monospacedDigit()
-                .foregroundStyle(progress == nil ? Color.secondary : Color.primary)
+                .foregroundStyle(progress == nil ? chrome.secondary : chrome.hero)
         }
         .frame(width: diameter, height: diameter)
         .accessibilityElement(children: .ignore)
@@ -756,7 +758,7 @@ private struct SharedUsageGraph: View {
             VStack(spacing: 3) {
                 Text(state.title)
                     .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(Color.secondary)
+                    .foregroundStyle(chrome.secondary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.75)
                 if !state.detail.isEmpty {

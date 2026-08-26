@@ -17,10 +17,20 @@ struct UsageTokenActivityView: View {
         _selectedID = State(initialValue: initialSelectedDate)
     }
 
-    private var totalTokens: Int { activity.reduce(0) { $0 + $1.tokens } }
+    private var orderedActivity: [UsageActivityPoint] {
+        activity.sorted { $0.date < $1.date }
+    }
+
+    private var activityRevealID: String {
+        orderedActivity
+            .map { "\($0.date.timeIntervalSinceReferenceDate):\($0.tokens)" }
+            .joined(separator: "|")
+    }
+
+    private var totalTokens: Int { orderedActivity.reduce(0) { $0 + $1.tokens } }
 
     private var maxTokens: Double {
-        Double(max(activity.map(\.tokens).max() ?? 0, 1))
+        Double(max(orderedActivity.map(\.tokens).max() ?? 0, 1))
     }
 
     var body: some View {
@@ -29,12 +39,12 @@ struct UsageTokenActivityView: View {
                 Text("Token activity").font(.subheadline.weight(.semibold))
                 Text("Hourly token totals from your \(provider.displayName) account.")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(LifeOSTokens.secondaryText)
             }
 
             summaryCard
 
-            Chart(activity) { point in
+            Chart(orderedActivity) { point in
                 BarMark(
                     x: .value("Time", point.date),
                     y: .value("Tokens", revealedTokens[point.date] ?? 0)
@@ -110,7 +120,7 @@ struct UsageTokenActivityView: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("\(provider.displayName) hourly token activity chart")
             .accessibilityValue(activityAccessibilitySummary)
-            .task(id: activity.map(\.date)) { await revealBars() }
+            .task(id: activityRevealID) { await revealBars() }
 
             footer
         }
@@ -128,14 +138,14 @@ struct UsageTokenActivityView: View {
                 }
                 Text("Hourly token totals")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(LifeOSTokens.secondaryText)
                 Text(totalTokens.formatted(.number.notation(.compactName)))
                     .font(LifeOSFont.kpi(30))
                     .tracking(-0.3)
                     .monospacedDigit()
                 Text(activity.isEmpty ? "No hourly observations" : "\(activity.count) hourly observations")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(LifeOSTokens.secondaryText)
             }
             Spacer(minLength: 12)
             VStack(alignment: .trailing, spacing: 6) {
@@ -144,17 +154,17 @@ struct UsageTokenActivityView: View {
             }
         }
         .padding(14)
-        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(LifeOSTokens.primaryText.opacity(0.045), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     private var updatedText: String {
-        guard let last = activity.last else { return "Not available" }
+        guard let last = orderedActivity.last else { return "Not available" }
         return last.date.formatted(.dateTime.month(.abbreviated).day().hour().minute())
     }
 
     private func statLine(label: String, value: String) -> some View {
         VStack(alignment: .trailing, spacing: 1) {
-            Text(label).font(.caption2).foregroundStyle(.secondary)
+            Text(label).font(.caption2).foregroundStyle(LifeOSTokens.secondaryText)
             Text(value).font(.caption2.weight(.semibold))
         }
     }
@@ -163,7 +173,7 @@ struct UsageTokenActivityView: View {
         HStack {
             Text(footerHintText)
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(LifeOSTokens.secondaryText)
             Spacer()
         }
     }
@@ -177,7 +187,7 @@ struct UsageTokenActivityView: View {
     }
 
     private var activityAccessibilitySummary: String {
-        guard let latest = activity.last else { return "No hourly observations are available." }
+        guard let latest = orderedActivity.last else { return "No hourly observations are available." }
         let total = totalTokens.formatted(.number.notation(.compactName))
         return "\(activity.count) hourly observations, totaling \(total) tokens. Latest point: \(latest.tokens.formatted(.number.notation(.compactName))) tokens at \(latest.date.formatted(.dateTime.month(.abbreviated).day().hour().minute()))."
     }
@@ -189,11 +199,11 @@ struct UsageTokenActivityView: View {
 
     private var selectedPoint: UsageActivityPoint? {
         guard let selectedID else { return nil }
-        return activity.first { $0.date == selectedID }
+        return orderedActivity.first { $0.date == selectedID }
     }
 
     private var chartXDomain: ClosedRange<Date> {
-        let dates = activity.map(\.date).sorted()
+        let dates = orderedActivity.map(\.date)
         guard let first = dates.first, let last = dates.last else {
             let now = Date()
             return now.addingTimeInterval(-1_800)...now.addingTimeInterval(1_800)
@@ -210,10 +220,14 @@ struct UsageTokenActivityView: View {
     @MainActor
     private func revealBars() async {
         revealedTokens = [:]
-        guard !activity.isEmpty else { return }
+        guard !orderedActivity.isEmpty else { return }
 
         if reduceMotion {
-            revealedTokens = Dictionary(uniqueKeysWithValues: activity.map { ($0.date, Double($0.tokens)) })
+            // Assignment is intentional: malformed/merged feeds with duplicate hour keys must
+            // remain renderable instead of trapping in Dictionary(uniqueKeysWithValues:).
+            revealedTokens = orderedActivity.reduce(into: [:]) { result, point in
+                result[point.date] = Double(point.tokens)
+            }
             return
         }
 
@@ -221,7 +235,7 @@ struct UsageTokenActivityView: View {
         // shared one-shot chartDraw easing. This is presentation-only state; source tokens stay
         // untouched in UsageActivityPoint.
         var previousStartDelay: UInt64 = 0
-        for (index, point) in activity.enumerated() {
+        for (index, point) in orderedActivity.enumerated() {
             let startDelay = UInt64(Double(index) * 0.015 * 1_000_000_000)
             if startDelay > previousStartDelay {
                 try? await Task.sleep(nanoseconds: startDelay - previousStartDelay)
@@ -235,8 +249,8 @@ struct UsageTokenActivityView: View {
     }
 
     private func selectClosest(to date: Date) {
-        guard !activity.isEmpty else { return }
-        let closest = activity.min { abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date)) }
+        guard !orderedActivity.isEmpty else { return }
+        let closest = orderedActivity.min { abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date)) }
         if let closestDate = closest?.date, closestDate != selectedID {
             ScrubBubble<EmptyView>.snapHaptic()
         }

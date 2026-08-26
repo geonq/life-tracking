@@ -1644,14 +1644,11 @@ private struct FinanceConnectionsSettingsView: View {
         }
     }
 
-    /// Only officially-oAuth'd and regulated open-banking connectors have a
-    /// gateway-mediated consent flow; manual-import connectors never get a
-    /// Connect button so this view cannot imply a live link that isn't real.
+    /// The current gateway-mediated consent flow is Enable Banking only.
+    /// Official OAuth connectors need their own reviewed server adapter; they
+    /// never get routed through the bank-consent endpoint by accident.
     private func supportsInAppConsent(_ method: FinanceAccessMethod) -> Bool {
-        switch method {
-        case .officialOAuth, .regulatedOpenBanking: true
-        case .manualImport: false
-        }
+        method.usesEnableBankingConsent
     }
 
     private var summaryColor: Color {

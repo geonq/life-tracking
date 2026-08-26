@@ -6,6 +6,7 @@ import UIKit
 #else
 import AppKit
 #endif
+import os
 
 private enum CalendarDisplayMode: Hashable {
     case timeline
@@ -13,6 +14,32 @@ private enum CalendarDisplayMode: Hashable {
     #if os(iOS)
     case week
     #endif
+}
+
+/// Debug-only timing for the parent work that can otherwise look like a
+/// pager-loading pause. Counts are intentionally content-free: no dates,
+/// titles, account data, or event payloads enter the trace.
+private enum CalendarViewDiagnostics {
+    private static let logger = Logger(subsystem: "com.hermes.lifeos", category: "calendar-parent")
+
+    static func event(
+        _ name: String,
+        sourceCount: Int = 0,
+        materializedCount: Int = 0,
+        duration: TimeInterval? = nil
+    ) {
+#if DEBUG
+        let durationText = duration.map { String(format: " durationMs=%.1f", $0 * 1_000) } ?? ""
+        logger.debug(
+            "\(name, privacy: .public) sourceCount=\(sourceCount, privacy: .public) materializedCount=\(materializedCount, privacy: .public)\(durationText, privacy: .public)"
+        )
+#else
+        _ = name
+        _ = sourceCount
+        _ = materializedCount
+        _ = duration
+#endif
+    }
 }
 
 private struct CalendarEditorPresentation: Identifiable {
@@ -54,6 +81,12 @@ public struct CalendarView: View {
     @ObservedObject private var coordinator: CalendarCoordinator
     @State private var selectedDate: Date
     @State private var headerDate: Date
+    /// Recurrence expansion is a snapshot concern, not a paging concern.
+    /// Keeping it keyed to the durable source prevents every one-day swipe
+    /// from re-expanding the full multi-year recurrence window on the main
+    /// actor while the pager is trying to accept the next gesture.
+    @State private var materializedDisplayItems: [CalendarItem]
+    @State private var materializedDisplayItemsSourceKey: String
     @State private var displayMode: CalendarDisplayMode = .timeline
     @State private var monthExpanded = false
     @State private var editorPresentation: CalendarEditorPresentation?
@@ -80,8 +113,15 @@ public struct CalendarView: View {
         requestNewEvent: Binding<Bool> = .constant(false)
     ) {
         let initialDate = selectedDate ?? .now
+        let initialItems = coordinator.snapshot.items.filter { !$0.isDeleted }
         _selectedDate = State(initialValue: initialDate)
         _headerDate = State(initialValue: initialDate)
+        _materializedDisplayItems = State(
+            initialValue: Self.expandDisplayItems(initialItems, calendar: calendar)
+        )
+        _materializedDisplayItemsSourceKey = State(
+            initialValue: Self.displayItemsSourceKey(for: initialItems)
+        )
         _displayMode = State(initialValue: startsInMonthMode ? .month : .timeline)
         _requestNewEvent = requestNewEvent
         self.externalSelectedDate = selectedDate
@@ -98,12 +138,58 @@ public struct CalendarView: View {
     /// recent history and any reachable month grid; the engine cap bounds the
     /// expansion regardless.
     private var displayItems: [CalendarItem] {
+        let sourceItems = visibleItems
+        let sourceKey = Self.displayItemsSourceKey(for: sourceItems)
+        guard sourceKey == materializedDisplayItemsSourceKey else {
+            // Keep the UI correct during the one render before `.task` installs
+            // the refreshed cache. This path is reached only after a durable
+            // source change; ordinary date paging stays on the cached branch.
+            return Self.expandDisplayItems(sourceItems, calendar: calendar)
+        }
+        return materializedDisplayItems
+    }
+
+    private var displayItemsSourceKey: String {
+        Self.displayItemsSourceKey(for: visibleItems)
+    }
+
+    private static func displayItemsSourceKey(for items: [CalendarItem]) -> String {
+        var hasher = Hasher()
+        for item in items.sorted(by: { $0.id.uuidString < $1.id.uuidString }) {
+            hasher.combine(item.id)
+            hasher.combine(item.title)
+            hasher.combine(item.kind.rawValue)
+            hasher.combine(item.icon)
+            hasher.combine(item.systemIconName)
+            // `updatedAt` is the authoritative revision for the asset bytes;
+            // do not base64/hash a potentially 256 KiB image on every body
+            // recomputation just to decide whether recurrence data changed.
+            hasher.combine(item.iconAsset?.format.rawValue)
+            hasher.combine(item.status.rawValue)
+            hasher.combine(item.start)
+            hasher.combine(item.end)
+            hasher.combine(item.timeZoneIdentifier)
+            hasher.combine(item.createdAt)
+            hasher.combine(item.updatedAt)
+            hasher.combine(item.deletedAt)
+            if let recurrence = item.recurrence {
+                hasher.combine(recurrence.frequency.rawValue)
+                hasher.combine(recurrence.interval)
+                hasher.combine(recurrence.until)
+            } else {
+                hasher.combine("no-recurrence")
+            }
+        }
+        return String(hasher.finalize())
+    }
+
+    private static func expandDisplayItems(_ items: [CalendarItem], calendar: Calendar) -> [CalendarItem] {
         let now = Date.now
         let window = DateInterval(
             start: calendar.date(byAdding: .year, value: -1, to: now) ?? now,
             end: calendar.date(byAdding: .year, value: 2, to: now) ?? now
         )
-        return visibleItems.flatMap { CalendarRecurrence.occurrences(of: $0, overlapping: window, calendar: calendar) }
+        return items.flatMap { CalendarRecurrence.occurrences(of: $0, overlapping: window, calendar: calendar) }
     }
 
     private var visibleHolidays: [CalendarHoliday] {
@@ -179,6 +265,25 @@ public struct CalendarView: View {
             if presentationID == nil {
                 timedCreationPreview = nil
             }
+        }
+        .task(id: displayItemsSourceKey) {
+            let snapshotReadStartedAt = Date.now
+            let sourceItems = visibleItems
+            CalendarViewDiagnostics.event(
+                "parent.snapshot.read",
+                sourceCount: sourceItems.count,
+                duration: Date.now.timeIntervalSince(snapshotReadStartedAt)
+            )
+            let recurrenceExpansionStartedAt = Date.now
+            let expandedItems = Self.expandDisplayItems(sourceItems, calendar: calendar)
+            CalendarViewDiagnostics.event(
+                "parent.recurrence.expand",
+                sourceCount: sourceItems.count,
+                materializedCount: expandedItems.count,
+                duration: Date.now.timeIntervalSince(recurrenceExpansionStartedAt)
+            )
+            materializedDisplayItems = expandedItems
+            materializedDisplayItemsSourceKey = Self.displayItemsSourceKey(for: sourceItems)
         }
         .sheet(isPresented: $isSearchPresented) {
             CalendarSearchView(
@@ -854,6 +959,11 @@ public struct CalendarView: View {
             headerDate = settled
             selectedDate = settled
         }
+        CalendarViewDiagnostics.event(
+            "parent.commit",
+            sourceCount: visibleItems.count,
+            materializedCount: materializedDisplayItems.count
+        )
     }
 
     private func retargetSelectedDate(_ date: Date) {

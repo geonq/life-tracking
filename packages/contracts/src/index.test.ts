@@ -113,11 +113,16 @@ const connectors = [
     provider: 'Manual CSV/PDF import', enabled: false, requiresExplicitOptIn: true,
     risk: 'manual_import_only', recommendation: 'Permanent manual CSV/PDF import only; do not use private APIs.',
   },
+  {
+    id: 'paypal_personal', displayName: 'PayPal Personal', accessMethod: 'official_oauth',
+    provider: 'Official PayPal Transaction Search API', enabled: false, requiresExplicitOptIn: true,
+    risk: 'account_eligibility_required', recommendation: 'Verify official reporting-scope eligibility before enabling.',
+  },
 ] as const;
 
 describe('finance connector safety contract', () => {
   it('accepts the complete disabled opt-in catalog', () => {
-    expect(FinanceConnectorCatalog.parse({ connectors }).connectors).toHaveLength(4);
+    expect(FinanceConnectorCatalog.parse({ connectors }).connectors).toHaveLength(5);
   });
 
   it('rejects enabled, non-opt-in, and unknown connector descriptions', () => {

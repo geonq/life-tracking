@@ -45,17 +45,15 @@ public struct FinanceSpendTotals: Equatable, Hashable, Sendable {
 
 // MARK: - Keyword-based categorizer
 
-/// A pure, stateless categorizer for `FinanceImportedTransaction` rows.
-/// Categorization is always computed on the fly from a small keyword
-/// ruleset — nothing is persisted, and an unmatched description is left
-/// `.uncategorized` rather than guessed. This mirrors the "honest empty"
-/// principle used across LifeOS: no fabricated category is ever better
-/// than an admitted "we don't know."
+/// A pure categorizer for `FinanceImportedTransaction` rows. When a saved
+/// source or user override exists it is honored; otherwise a small keyword
+/// ruleset assigns a category on the fly. An unmatched description is left
+/// `.uncategorized` rather than guessed.
 public enum FinanceCategorizer {
     /// One ruleset entry: a target category plus the case-insensitive
     /// substrings that, if found in a transaction's description, match it.
-    /// Kept as a small, readable, append-only table — extending the
-    /// ruleset (or making it user-editable) is deferred, not designed away.
+    /// Kept as a small, readable, append-only table. User corrections live on
+    /// the imported transaction and do not mutate this global ruleset.
     private struct Rule {
         let category: FinanceTransactionCategory
         let keywords: [String]
@@ -63,6 +61,13 @@ public enum FinanceCategorizer {
         /// agrees (`true` = inflow only, `false` = outflow only). `nil`
         /// matches either direction.
         let requiresInflow: Bool?
+    }
+
+    private static func normalized(_ value: String) -> String {
+        value.folding(
+            options: [.diacriticInsensitive, .caseInsensitive],
+            locale: Locale(identifier: "en_US_POSIX")
+        ).lowercased()
     }
 
     private static let rules: [Rule] = [
@@ -88,19 +93,18 @@ public enum FinanceCategorizer {
             "imbiss", "bistro", "pizzeria"
         ], requiresInflow: nil),
 
+        // Transfers must be checked before the short `uber` ride-hail token:
+        // folded German "Überweisung" otherwise contains that substring.
+        Rule(category: .transfers, keywords: [
+            "überweisung", "ueberweisung", "bank transfer", "sepa transfer"
+        ], requiresInflow: nil),
+
         // Transport — ride-hail, transit, rail, fuel.
         Rule(category: .transport, keywords: [
             "uber", "bolt", "free now", "freenow", "db ", "deutsche bahn",
             "bvg", "mvg", "vvo", "rmv", "hvv", "flixbus", "flixtrain",
             "ryanair", "lufthansa", "eurowings", "tankstelle", "shell",
             "aral", "esso", "sixt", "parkhaus", "parking"
-        ], requiresInflow: nil),
-
-        // Shopping — general retail / e-commerce.
-        Rule(category: .shopping, keywords: [
-            "amazon", "zalando", "otto.de", "ikea", "mediamarkt",
-            "saturn", "h&m", "zara", "decathlon", "dm-drogerie", "rossmann",
-            "müller", "mueller", "ebay", "shein", "temu"
         ], requiresInflow: nil),
 
         // Bills — utilities, rent, insurance, telecom.
@@ -117,6 +121,42 @@ public enum FinanceCategorizer {
             "adobe", "audible", "dazn", "paramount+"
         ], requiresInflow: nil),
 
+        // Shopping — general retail / e-commerce. Kept after subscriptions so
+        // the broad `amazon` token cannot swallow `amazon prime`.
+        Rule(category: .shopping, keywords: [
+            "amazon", "zalando", "otto.de", "ikea", "mediamarkt",
+            "saturn", "h&m", "zara", "decathlon", "dm-drogerie", "rossmann",
+            "müller", "mueller", "ebay", "shein", "temu"
+        ], requiresInflow: nil),
+
+        // Health — providers that do not supply a usable category.
+        Rule(category: .health, keywords: [
+            "apotheke", "pharmacy", "arzt", "doctor", "medical", "gesundheit",
+            "krankenhaus", "hospital", "zahnarzt", "dentist"
+        ], requiresInflow: nil),
+
+        // Travel — hotels, booking providers, and airports.
+        Rule(category: .travel, keywords: [
+            "booking.com", "airbnb", "hotel", "expedia", "travel", "reise",
+            "airport", "flughafen", "airline"
+        ], requiresInflow: nil),
+
+        // Fees and taxes are kept separate from generic bills.
+        Rule(category: .fees, keywords: [
+            "gebühr", "gebuehr", "bank fee", "service fee", "commission", "entgelt",
+            "overdraft", "kontoführung", "kontofuehrung"
+        ], requiresInflow: nil),
+        Rule(category: .taxes, keywords: [
+            "finanzamt", "steuer", "tax payment", "taxes"
+        ], requiresInflow: nil),
+
+        // Investments and transfers should not inflate ordinary shopping or
+        // income totals when a statement names them explicitly.
+        Rule(category: .investments, keywords: [
+            "trade republic", "scalable capital", "broker", "depot", "aktien", "etf",
+            "securities", "investment"
+        ], requiresInflow: nil),
+
         // Cash — ATM withdrawals.
         Rule(category: .cash, keywords: [
             "geldautomat", "atm", "bargeldauszahlung", "cash withdrawal"
@@ -128,16 +168,28 @@ public enum FinanceCategorizer {
     /// against `description`; direction (`amountCents` sign) is honored
     /// where a rule requires it (e.g. income rules only match inflows).
     /// Returns `.uncategorized` when nothing matches — never a guess.
-    public static func category(for description: String, amountCents: Int) -> FinanceTransactionCategory {
-        let normalized = description.lowercased()
+    public static func category(
+        for description: String,
+        amountCents: Int,
+        sourceCategory: String? = nil
+    ) -> FinanceTransactionCategory {
+        let normalized = normalized(description)
         guard !normalized.isEmpty else { return .uncategorized }
         let isInflow = amountCents > 0
+
+        // A recognized category explicitly supplied by the bank/CSV wins over
+        // merchant heuristics. Income remains direction-aware so a provider
+        // mistake cannot turn an outgoing payment into salary.
+        if let supplied = FinanceTransactionCategory.from(sourceCategory: sourceCategory),
+           supplied != .income || isInflow {
+            return supplied
+        }
 
         for rule in rules {
             if let requiresInflow = rule.requiresInflow, requiresInflow != isInflow {
                 continue
             }
-            if rule.keywords.contains(where: { normalized.contains($0) }) {
+            if rule.keywords.contains(where: { normalized.contains(Self.normalized($0)) }) {
                 return rule.category
             }
         }
@@ -156,7 +208,11 @@ public enum FinanceCategorizer {
         var countByCategory: [FinanceTransactionCategory: Int] = [:]
 
         for transaction in transactions {
-            let category = category(for: transaction.description, amountCents: transaction.amountCents)
+            let category = category(
+                for: transaction.description,
+                amountCents: transaction.amountCents,
+                sourceCategory: transaction.category
+            )
             countByCategory[category, default: 0] += 1
             if transaction.amountCents < 0 {
                 outflowByCategory[category, default: 0] += -transaction.amountCents

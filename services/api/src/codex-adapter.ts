@@ -3,7 +3,7 @@ import type { ChildProcess } from 'node:child_process';
 import { win32 } from 'node:path';
 
 export type CodexWindow = { minutes: number; usedPercent: number; resetAt?: string };
-export type CodexLiveResult = { connectorState: 'healthy' | 'unavailable' | 'rate_limited'; windows: CodexWindow[]; error?: string };
+export type CodexLiveResult = { connectorState: 'healthy' | 'unavailable' | 'rate_limited'; windows: CodexWindow[]; observedAt?: string; error?: string };
 export type Transport = ((request: Record<string, unknown>) => Promise<unknown>) & { close?: () => void };
 
 const supportedCodexMinutes = new Set([300, 10_080]);
@@ -19,10 +19,17 @@ const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v =
  * only this shape; rejecting every sibling is what prevents prompt/account/
  * path/token data from crossing into the API or history store.
  */
-export function parseCodexIngestPayload(input: unknown): CodexWindow[] {
-  if (!isObject(input) || Object.keys(input).length !== 1 || !Object.hasOwn(input, 'windows')
+export function parseCodexIngestEnvelope(input: unknown): { windows: CodexWindow[]; observedAt?: string } {
+  if (!isObject(input) || (Object.keys(input).length !== 1 && Object.keys(input).length !== 2) || !Object.hasOwn(input, 'windows')
+    || (Object.keys(input).length === 2 && !Object.hasOwn(input, 'observedAt'))
     || !Array.isArray(input.windows) || input.windows.length === 0 || input.windows.length > 2) {
     throw new Error('invalid_codex_payload');
+  }
+  let observedAt: string | undefined;
+  if (Object.hasOwn(input, 'observedAt')) {
+    if (typeof input.observedAt !== 'string' || input.observedAt.length > 64 || !Number.isFinite(Date.parse(input.observedAt))
+      || Date.parse(input.observedAt) > Date.now() + 5_000) throw new Error('invalid_codex_payload');
+    observedAt = new Date(input.observedAt).toISOString();
   }
   const seen = new Set<number>();
   const windows: CodexWindow[] = [];
@@ -51,7 +58,11 @@ export function parseCodexIngestPayload(input: unknown): CodexWindow[] {
     seen.add(minutes);
     windows.push({ minutes, usedPercent, ...(resetAt ? { resetAt } : {}) });
   }
-  return windows.sort((a, b) => a.minutes - b.minutes);
+  return { windows: windows.sort((a, b) => a.minutes - b.minutes), ...(observedAt ? { observedAt } : {}) };
+}
+
+export function parseCodexIngestPayload(input: unknown): CodexWindow[] {
+  return parseCodexIngestEnvelope(input).windows;
 }
 
 /** Map only the public RateLimitSnapshot fields. Unknown/sensitive fields are intentionally discarded. */
@@ -126,7 +137,7 @@ export function createCodexTransport(child: ChildProcess = spawnCodex()): Transp
 }
 
 export async function readCodexAppServer(transportFactory: () => Transport = () => createCodexTransport()): Promise<CodexLiveResult> {
-  let transport: Transport | undefined; try { transport = transportFactory(); await transport({ method: 'initialize', params: { clientInfo: { name: 'iphone-life-os', version: '0.1.0' } } }); const limits = await transport({ method: 'account/rateLimits/read', params: {} }); return mapCodexResponse(limits); } catch { return { connectorState: 'unavailable', windows: [], error: 'Codex connector unavailable' }; } finally { transport?.close?.(); }
+  let transport: Transport | undefined; try { transport = transportFactory(); await transport({ method: 'initialize', params: { clientInfo: { name: 'iphone-life-os', version: '0.1.0' } } }); const limits = await transport({ method: 'account/rateLimits/read', params: {} }); const result = mapCodexResponse(limits); return result.windows.length ? { ...result, observedAt: new Date().toISOString() } : result; } catch { return { connectorState: 'unavailable', windows: [], error: 'Codex connector unavailable' }; } finally { transport?.close?.(); }
 }
 
 export async function readCodexLive(transportFactory: () => Transport = () => createCodexTransport()): Promise<CodexLiveResult> {

@@ -1,5 +1,28 @@
 import Foundation
 import Combine
+#if canImport(WidgetKit)
+import WidgetKit
+#endif
+
+/// Tells the Usage widgets that their shared App Group snapshot changed.
+/// Usage is the only widget family whose provider reads `SharedSnapshotStore`
+/// directly rather than `FutureWidgetSnapshotStore`, so its writer owns this
+/// explicit reload contract.
+public enum UsageWidgetTimelineReloader {
+    public static let widgetKinds: [String] = [
+        "LifeOSWidget",
+        "LifeOSUsageSmallWidget",
+        "LifeOSUsageLockScreenWidget"
+    ]
+
+    public static func reload() {
+#if canImport(WidgetKit)
+        for kind in widgetKinds {
+            WidgetCenter.shared.reloadTimelines(ofKind: kind)
+        }
+#endif
+    }
+}
 
 public enum UsageLoadState: Equatable, Sendable {
     case demo
@@ -152,7 +175,13 @@ public final class UsageCoordinator: ObservableObject {
             warning: state == .observed ? nil : "Usage data \(state.label)",
             provenance: aggregateProvenance
         )
-        try? SharedSnapshotStore.write(snapshot)
+        do {
+            try SharedSnapshotStore.write(snapshot)
+            UsageWidgetTimelineReloader.reload()
+        } catch {
+            // The last good App Group snapshot remains the honest widget
+            // fallback. A later foreground/background refresh can retry it.
+        }
     }
 
     private func status(for provider: Provider) -> String {

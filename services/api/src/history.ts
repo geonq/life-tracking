@@ -44,6 +44,11 @@ export class UsageHistory {
         // statusline may be retried well after the previous request, so elapsed
         // time must not turn an identical observation into a duplicate sample.
         if (latest !== undefined && sameValues) continue;
+        // A delayed collector retry must never become the apparent current
+        // observation. This is deliberately per provider/window: a reset or a
+        // changed value is useful only when it was captured after the latest
+        // sample for that same quota window.
+        if (latest !== undefined && Date.parse(incoming.observedAt) <= Date.parse(latest.observedAt)) continue;
         nextEntries.push(incoming);
       }
 

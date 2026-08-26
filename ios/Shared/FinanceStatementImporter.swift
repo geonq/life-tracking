@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 // MARK: - Local, offline bank-statement CSV parsing
@@ -29,10 +30,38 @@ public struct FinanceImportResult: Equatable, Sendable {
 /// actually derive a date and amount for, and it never crashes on malformed
 /// input — malformed rows are counted and skipped.
 public enum FinanceStatementImporter {
+    public static let maximumInputBytes = 5 * 1024 * 1024
+
+    public enum Error: Swift.Error, Equatable, Sendable {
+        case inputTooLarge
+        case unsupportedEncoding
+    }
+
+    /// Decodes common bank-export encodings before parsing. Bank portals often
+    /// emit UTF-16 with a BOM even when the file is named `.csv`.
+    public static func parseCSV(data: Data) throws -> FinanceImportResult {
+        guard data.count <= maximumInputBytes else { throw Error.inputTooLarge }
+        for encoding in [
+            String.Encoding.utf8,
+            .utf16LittleEndian,
+            .utf16BigEndian,
+            .utf32LittleEndian,
+            .utf32BigEndian
+        ] {
+            if let text = String(data: data, encoding: encoding) {
+                return parseCSV(text)
+            }
+        }
+        throw Error.unsupportedEncoding
+    }
+
     /// Column header names (lowercased) recognized for each logical field.
     /// Trade Republic's own CSV export uses German headers ("Datum",
     /// "Beschreibung", "Betrag"); other exports commonly use English ones.
-    private static let dateHeaders: Set<String> = ["date", "datum", "buchungsdatum", "booking date", "wertstellung"]
+    private static let dateHeaders: Set<String> = [
+        "date", "datum", "buchungsdatum", "booking date", "wertstellung", "booking_date",
+        "timestamp", "datetime"
+    ]
     private static let amountHeaders: Set<String> = ["amount", "betrag", "wert", "value", "netto"]
     private static let descriptionHeaders: Set<String> = [
         "description", "beschreibung", "memo", "merchant", "verwendungszweck", "text", "empfänger/zahlungspflichtiger", "empfaenger"
@@ -46,13 +75,24 @@ public enum FinanceStatementImporter {
     /// makes card-purchase rows categorizable by `FinanceCategorizer`.
     private static let merchantHeaders: Set<String> = ["name", "counterparty_name", "counterparty", "payee", "merchant"]
     private static let categoryHeaders: Set<String> = ["category", "kategorie", "typ", "type"]
+    private static let providerIDHeaders: Set<String> = [
+        "transaction_id", "transaction id", "transactionid", "entry_reference", "entry reference",
+        "reference", "referenz", "transaktions-id", "transaktionsid"
+    ]
+    private static let accountHeaders: Set<String> = ["account", "account_id", "konto", "kontonummer", "iban"]
+    private static let currencyHeaders: Set<String> = ["currency", "waehrung", "währung", "curr"]
 
     public static func parseCSV(_ text: String) -> FinanceImportResult {
-        let lines = splitLines(text)
-        guard let firstLine = lines.first else { return .empty }
+        let records = splitRecords(text)
+        guard !records.isEmpty else { return .empty }
 
-        let delimiter = detectDelimiter(in: firstLine)
-        let rows = lines.map { splitRow($0, delimiter: delimiter) }
+        // Do not assume the first physical record is the header. Some bank
+        // exports put a comma-separated account/preamble line before a
+        // semicolon- or tab-delimited table. Choose the delimiter that
+        // actually produces a recognizable date+amount header, then fall
+        // back to the cheap first-line heuristic for a headerless file.
+        let delimiter = detectDelimiter(in: records)
+        let rows = records.map { splitRow($0, delimiter: delimiter) }
 
         guard let headerIndex = rows.firstIndex(where: { isHeaderRow($0) }) else {
             // No recognizable header: cannot map columns, so every row is
@@ -60,7 +100,7 @@ public enum FinanceStatementImporter {
             return FinanceImportResult(transactions: [], skippedRowCount: rows.count, detectedSource: .genericCSV)
         }
 
-        let header = rows[headerIndex].map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+        let header = rows[headerIndex].map { normalizedField($0).lowercased() }
         guard let dateColumn = firstIndex(of: dateHeaders, in: header),
               let amountColumn = firstIndex(of: amountHeaders, in: header) else {
             let dataRowCount = rows.count - headerIndex - 1
@@ -69,10 +109,19 @@ public enum FinanceStatementImporter {
         let descriptionColumn = firstIndex(of: descriptionHeaders, in: header)
         let merchantColumn = firstIndex(of: merchantHeaders, in: header)
         let categoryColumn = firstIndex(of: categoryHeaders, in: header)
-        let detectedSource: FinanceImportSource = header.contains("betrag") && header.contains("datum") ? .tradeRepublicCSV : .genericCSV
+        let providerIDColumn = firstIndex(of: providerIDHeaders, in: header)
+        let accountColumn = firstIndex(of: accountHeaders, in: header)
+        let currencyColumn = firstIndex(of: currencyHeaders, in: header)
+        // Detect Trade Republic CSV by either German headers (Betrag/Datum) or
+        // the characteristic English header layout (name, counterparty_name,
+        // original_amount, original_currency, fx_rate, mcc_code, etc.)
+        let isTradeRepublicGerman = header.contains("betrag") && header.contains("datum")
+        let isTradeRepublicEnglish = header.contains("counterparty_name") && header.contains("original_amount") && header.contains("fx_rate")
+        let detectedSource: FinanceImportSource = (isTradeRepublicGerman || isTradeRepublicEnglish) ? .tradeRepublicCSV : .genericCSV
 
         var transactions: [FinanceImportedTransaction] = []
         var skipped = 0
+        var fallbackIdentityOrdinals: [String: Int] = [:]
         let dataRows = rows[(headerIndex + 1)...]
 
         for row in dataRows {
@@ -80,15 +129,18 @@ public enum FinanceStatementImporter {
                 if !row.isEmpty { skipped += 1 }
                 continue
             }
-            let rawDate = row[dateColumn].trimmingCharacters(in: .whitespaces)
-            let rawAmount = row[amountColumn].trimmingCharacters(in: .whitespaces)
+            let rawDate = normalizedField(row[dateColumn])
+            let rawAmount = normalizedField(row[amountColumn])
             guard let bookedAt = parseDate(rawDate), let amountCents = parseAmountCents(rawAmount) else {
                 skipped += 1
                 continue
             }
-            let merchant = merchantColumn.flatMap { row.count > $0 ? row[$0].trimmingCharacters(in: .whitespaces) : nil }
-            let description = descriptionColumn.flatMap { row.count > $0 ? row[$0].trimmingCharacters(in: .whitespaces) : nil }
-            let category = categoryColumn.flatMap { row.count > $0 ? row[$0].trimmingCharacters(in: .whitespaces) : nil }
+            let merchant = merchantColumn.flatMap { row.count > $0 ? normalizedField(row[$0]) : nil }
+            let description = descriptionColumn.flatMap { row.count > $0 ? normalizedField(row[$0]) : nil }
+            let category = categoryColumn.flatMap { row.count > $0 ? normalizedField(row[$0]) : nil }
+            let providerID = providerIDColumn.flatMap { row.count > $0 ? normalizedField(row[$0]) : nil }
+            let account = accountColumn.flatMap { row.count > $0 ? normalizedField(row[$0]) : nil } ?? ""
+            let currency = currencyColumn.flatMap { row.count > $0 ? normalizedField(row[$0]) : nil } ?? "EUR"
             // Prefer the merchant column (e.g. TR's `name`) over the generic
             // description column, since the latter is often a non-specific
             // label like "TR Card Transaction". Falls back to description
@@ -102,8 +154,25 @@ public enum FinanceStatementImporter {
             } else {
                 resolvedDescription = "Imported transaction"
             }
+            let identity = fallbackIdentity(
+                source: detectedSource,
+                bookedAt: bookedAt,
+                amountCents: amountCents,
+                description: resolvedDescription,
+                category: category,
+                currency: currency,
+                account: account
+            )
+            let ordinal: Int
+            if providerID?.isEmpty == false {
+                ordinal = 0
+            } else {
+                ordinal = fallbackIdentityOrdinals[identity, default: 0]
+                fallbackIdentityOrdinals[identity] = ordinal + 1
+            }
             transactions.append(
                 FinanceImportedTransaction(
+                    id: stableID(source: detectedSource, providerID: providerID, identity: identity, ordinal: ordinal),
                     bookedAt: bookedAt,
                     amountCents: amountCents,
                     description: resolvedDescription,
@@ -118,18 +187,51 @@ public enum FinanceStatementImporter {
 
     // MARK: - Line/row splitting
 
-    private static func splitLines(_ text: String) -> [String] {
-        text
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-            .split(separator: "\n", omittingEmptySubsequences: true)
-            .map(String.init)
-            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+    private static func splitRecords(_ text: String) -> [String] {
+        let characters = Array(text)
+        var records: [String] = []
+        var current = ""
+        var inQuotes = false
+        var index = 0
+        while index < characters.count {
+            let character = characters[index]
+            if character == "\"" {
+                current.append(character)
+                if inQuotes, index + 1 < characters.count, characters[index + 1] == "\"" {
+                    current.append(characters[index + 1])
+                    index += 1
+                } else {
+                    inQuotes.toggle()
+                }
+            } else if !inQuotes, character == "\n" || character == "\r" {
+                if !current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { records.append(current) }
+                current = ""
+                if character == "\r", index + 1 < characters.count, characters[index + 1] == "\n" { index += 1 }
+            } else {
+                current.append(character)
+            }
+            index += 1
+        }
+        if !current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { records.append(current) }
+        return records
     }
 
-    private static func detectDelimiter(in headerLine: String) -> Character {
-        let semicolons = headerLine.filter { $0 == ";" }.count
-        let commas = headerLine.filter { $0 == "," }.count
+    private static func detectDelimiter(in records: [String]) -> Character {
+        let candidates: [Character] = [",", ";", "\t"]
+        let headerScores = candidates.map { delimiter in
+            (delimiter, records.prefix(32).reduce(into: 0) { score, record in
+                if isHeaderRow(splitRow(record, delimiter: delimiter)) { score += 1 }
+            })
+        }
+        if let best = headerScores.max(by: { lhs, rhs in lhs.1 < rhs.1 }), best.1 > 0 {
+            return best.0
+        }
+
+        let firstLine = records.first ?? ""
+        let semicolons = firstLine.filter { $0 == ";" }.count
+        let commas = firstLine.filter { $0 == "," }.count
+        let tabs = firstLine.filter { $0 == "\t" }.count
+        if tabs > semicolons && tabs > commas { return "\t" }
         return semicolons > commas ? ";" : ","
     }
 
@@ -140,38 +242,35 @@ public enum FinanceStatementImporter {
         var fields: [String] = []
         var current = ""
         var inQuotes = false
-        var iterator = line.makeIterator()
-        var pending: Character? = iterator.next()
-
-        while let char = pending {
-            if inQuotes {
-                if char == "\"" {
-                    var peekIterator = iterator
-                    if peekIterator.next() == "\"" {
-                        current.append("\"")
-                        iterator = peekIterator
-                    } else {
-                        inQuotes = false
-                    }
+        let characters = Array(line)
+        var index = 0
+        while index < characters.count {
+            let char = characters[index]
+            if char == "\"" {
+                if inQuotes, index + 1 < characters.count, characters[index + 1] == "\"" {
+                    current.append("\"")
+                    index += 1
                 } else {
-                    current.append(char)
+                    inQuotes.toggle()
                 }
-            } else if char == "\"" {
-                inQuotes = true
-            } else if char == delimiter {
+            } else if !inQuotes, char == delimiter {
                 fields.append(current)
                 current = ""
             } else {
                 current.append(char)
             }
-            pending = iterator.next()
+            index += 1
         }
         fields.append(current)
         return fields
     }
 
+    private static func normalizedField(_ value: String) -> String {
+        value.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\u{FEFF}")))
+    }
+
     private static func isHeaderRow(_ row: [String]) -> Bool {
-        let normalized = row.map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+        let normalized = row.map { normalizedField($0).lowercased() }
         return firstIndex(of: dateHeaders, in: normalized) != nil && firstIndex(of: amountHeaders, in: normalized) != nil
     }
 
@@ -193,7 +292,7 @@ public enum FinanceStatementImporter {
     }
 
     private static let dateFormatters: [DateFormatter] = {
-        let formats = ["yyyy-MM-dd", "dd.MM.yyyy", "dd/MM/yyyy", "yyyy/MM/dd"]
+        let formats = ["yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd", "dd.MM.yyyy", "dd/MM/yyyy", "yyyy/MM/dd"]
         return formats.map { format in
             let formatter = DateFormatter()
             formatter.dateFormat = format
@@ -206,7 +305,7 @@ public enum FinanceStatementImporter {
 
     /// Parses a EUR amount string into signed integer cents. Supports:
     /// - European format: `.` as thousands separator, `,` as decimal
-    ///   (`1.234,56` or `-12,50`)
+    ///   (`1.234,56`, `1 234,56`, or `-12,50`)
     /// - Plain format: `.` as decimal, no thousands separator (`1234.56`)
     /// Strips a trailing/leading `€`/`EUR` and surrounding whitespace.
     /// Returns `nil` (never a fabricated amount) if the string does not
@@ -215,15 +314,28 @@ public enum FinanceStatementImporter {
         var cleaned = raw
             .replacingOccurrences(of: "€", with: "")
             .replacingOccurrences(of: "EUR", with: "", options: .caseInsensitive)
+            .replacingOccurrences(of: "\u{00A0}", with: "")
+            .replacingOccurrences(of: "\u{202F}", with: "")
+            .replacingOccurrences(of: " ", with: "")
             .trimmingCharacters(in: .whitespaces)
         guard !cleaned.isEmpty else { return nil }
 
         var isNegative = false
-        if cleaned.hasPrefix("-") {
+        if cleaned.hasPrefix("(") && cleaned.hasSuffix(")") {
+            isNegative = true
+            cleaned.removeFirst()
+            cleaned.removeLast()
+        } else if cleaned.hasPrefix("-") {
             isNegative = true
             cleaned.removeFirst()
         } else if cleaned.hasPrefix("+") {
             cleaned.removeFirst()
+        } else if cleaned.hasSuffix("-") {
+            // Some European exports use a trailing minus, e.g. `12,50-`.
+            // Accept it only at the outer edge; any other misplaced sign is
+            // rejected by Decimal below rather than guessed.
+            isNegative = true
+            cleaned.removeLast()
         }
         cleaned = cleaned.trimmingCharacters(in: .whitespaces)
         guard !cleaned.isEmpty else { return nil }
@@ -247,7 +359,59 @@ public enum FinanceStatementImporter {
         var rounded = Decimal()
         var mutableCents = cents
         NSDecimalRound(&rounded, &mutableCents, 0, .plain)
-        guard let intCents = (rounded as NSDecimalNumber).intValue as Int?, rounded == Decimal(intCents) else { return nil }
+        // Bank exports must resolve to genuine cents. Do not silently turn a
+        // value such as 12.345 into 12.35; trailing zeroes remain valid.
+        guard rounded == cents else { return nil }
+        let intCents = (rounded as NSDecimalNumber).intValue
+        guard rounded == Decimal(intCents) else { return nil }
         return isNegative ? -abs(intCents) : intCents
+    }
+
+    private static func fallbackIdentity(
+        source: FinanceImportSource,
+        bookedAt: Date,
+        amountCents: Int,
+        description: String,
+        category: String?,
+        currency: String,
+        account: String
+    ) -> String {
+        [
+            "lifeos-finance-csv-v2",
+            source.rawValue,
+            String(format: "%.0f", bookedAt.timeIntervalSinceReferenceDate),
+            String(amountCents),
+            identityComponent(description),
+            identityComponent(category ?? ""),
+            identityComponent(currency),
+            identityComponent(account)
+        ].joined(separator: "\u{1F}")
+    }
+
+    private static func identityComponent(_ value: String) -> String {
+        value
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+            .lowercased()
+    }
+
+    private static func stableID(
+        source: FinanceImportSource,
+        providerID: String?,
+        identity: String,
+        ordinal: Int
+    ) -> UUID {
+        let stableIdentity = [
+            "lifeos-finance-csv-v2",
+            source.rawValue,
+            providerID.map(identityComponent) ?? identity,
+            String(ordinal)
+        ].joined(separator: "\u{1E}")
+        let digest = Array(SHA256.hash(data: Data(stableIdentity.utf8)).prefix(16))
+        return UUID(uuid: (
+            digest[0] & 0x0f | 0x50, digest[1], digest[2], digest[3],
+            digest[4] & 0x3f | 0x80, digest[5], digest[6], digest[7],
+            digest[8], digest[9], digest[10], digest[11], digest[12], digest[13], digest[14], digest[15]
+        ))
     }
 }

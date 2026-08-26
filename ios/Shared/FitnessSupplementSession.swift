@@ -43,6 +43,9 @@ public struct FitnessSupplement: Identifiable, Equatable, Sendable {
     public let strength: String
     public let servingUnit: String
     public let userDose: String?
+    public let nutrientFacts: [SupplementNutrientFact]
+    public let source: SupplementSource
+    public let productLabelNote: SupplementProductLabelNote?
     /// Number of inventory units consumed by one confirmed Taken occurrence.
     public let inventoryUnitsPerDose: Int
     public let timing: String
@@ -73,6 +76,9 @@ public struct FitnessSupplement: Identifiable, Equatable, Sendable {
         strength: String,
         servingUnit: String,
         userDose: String?,
+        nutrientFacts: [SupplementNutrientFact] = [],
+        source: SupplementSource = .manual,
+        productLabelNote: SupplementProductLabelNote? = nil,
         inventoryUnitsPerDose: Int = 1,
         timing: String,
         timingNote: String? = nil,
@@ -97,6 +103,9 @@ public struct FitnessSupplement: Identifiable, Equatable, Sendable {
         self.strength = strength
         self.servingUnit = servingUnit
         self.userDose = userDose
+        self.nutrientFacts = nutrientFacts
+        self.source = source
+        self.productLabelNote = productLabelNote
         self.inventoryUnitsPerDose = max(1, inventoryUnitsPerDose)
         self.timing = timing
         self.timingNote = timingNote
@@ -1051,11 +1060,11 @@ public struct FitnessSupplementSession: Equatable, Sendable {
                 strength: record.strength,
                 servingUnit: record.servingUnit,
                 userDose: dose,
+                nutrientFacts: record.nutrientFacts,
                 inventoryUnitsPerDose: record.inventoryUnitsPerDose,
                 schedule: schedule,
-                source: .manual,
-                // The durable record is a user-entered LifeOS product.  Do not
-                // persist the old “session-only” claim once a store is used.
+                source: record.source,
+                productLabelNote: record.productLabelNote,
                 notes: nil,
                 stockUnits: record.stockUnits,
                 reorderThreshold: record.reorderThreshold,

@@ -40,12 +40,29 @@ The Windows Codex collector is opt-in with `CODEX_INGEST_ENABLED=true` and an
 absolute, restrictive file-only `CODEX_INGEST_SECRET_FILE`. On Windows, keep
 the secret ACL readable only by the scheduled-task/API identity; Node cannot
 prove NTFS ACLs portably, so deployment must enforce that ACL. It posts the exact sanitized
-`{ "windows": [{ "minutes": 300|10080, "usedPercent": number, "resetAt"?: ISO }] }`
-shape to loopback `127.0.0.1:8787/api/usage/codex-ingest`; unknown fields,
-duplicate windows, malformed values, and oversized bodies are rejected. After
+`{ "windows": [{ "minutes": 300|10080, "usedPercent": number, "resetAt"?: ISO }], "observedAt"?: ISO }`
+shape to loopback `127.0.0.1:8787/api/usage/codex-ingest`; the optional
+`observedAt` is the collector capture time and cannot be in the future. Unknown
+fields, duplicate windows, malformed values, and oversized bodies are rejected. After
 `npm run build`, a scheduled task can invoke `npm run codex-collector` (or
 `node dist/codex-collector.js`). The collector prints only `success` or
 `unavailable` and never follows redirects or uses a proxy.
+
+The Claude uploader may include a local `X-Observed-At` capture timestamp;
+Node stores that observation time after validating it, rather than treating
+network receipt time as source time. History writes remain monotonic per
+provider/window, so a delayed changed sample cannot outrank a newer one.
+
+The Clipper route (`POST /api/clipper/ingest`) is a separate, explicit opt-in
+loopback boundary. It accepts only observed snapshots with a private file
+secret and a printable `Idempotency-Key`, persists a bounded 0600 envelope,
+and returns the newer stored snapshot when an older observation arrives. A
+successful post still does not claim that the native app has read it back.
+
+The Python gateway owns live Finance and Clipper read authorities. The Node
+`/api/finance/summary` route intentionally remains an unavailable compatibility
+response; the native client reads the authenticated gateway `/finance/summary`
+route instead.
 
 Keep `USAGE_STORE_PATH` in a dedicated API-writable directory. Startup rejects
 relative paths, missing or directly reparse-linked parents, unsafe POSIX modes,
@@ -94,3 +111,20 @@ code to the same lookup flow; denied/unavailable devices retain manual entry.
 A found result becomes an editable proposal; only an explicit confirmation may
 be turned into a `NutritionRecord`, and persistence is a separate local-store
 call. No camera frames are stored or uploaded.
+
+## Server-side food-photo proposals
+
+`POST /api/nutrition/photo-proposal` is an optional, proposal-only adapter. It
+accepts the native app's already-sanitized `FoodPhotoManifest`, sends the
+inline image data to Google's `generateContent` endpoint from the Windows
+server, and returns a strict `needs_confirmation` proposal. Enable it only
+with `GOOGLE_AI_STUDIO_ENABLED=true` and a server-side protected
+`GOOGLE_AI_STUDIO_API_KEY_FILE`; the adapter reads a bounded regular file and
+sends the key only in the upstream header. Raw `GOOGLE_AI_STUDIO_API_KEY`
+values are not accepted by the Windows host or adapter, and the key is never
+accepted by or returned to the iPhone. `GOOGLE_AI_STUDIO_FOOD_MODEL`
+and `GOOGLE_AI_STUDIO_FOOD_MODEL_VERSION` are optional bounded settings. The
+server rebuilds request lineage/provenance from the manifest and rejects
+unknown provider fields, mismatched image hashes, oversized bodies, and
+malformed model output. Confirming and saving a meal remains a separate local
+user action.

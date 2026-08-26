@@ -759,6 +759,38 @@ final class LifeOSUITests: XCTestCase {
         )
     }
 
+    func testCalendarRapidConsecutiveSwipesAdvanceEachDay() throws {
+        let calendarTab = app.buttons["Calendar"]
+        XCTAssertTrue(calendarTab.waitForExistence(timeout: 5))
+        XCTAssertTrue(tap(calendarTab, untilVisible: app.buttons["calendar-add"]))
+
+        let header = app.buttons["calendar-month-toggle"]
+        let today = Calendar.current.startOfDay(for: Date())
+        let twoDaysAhead = calendarISODate(Calendar.current.date(byAdding: .day, value: 2, to: today)!)
+        let pager = app.descendants(matching: .any)["calendar-pager"]
+        XCTAssertTrue(pager.waitForExistence(timeout: 5))
+
+        // The second swipe deliberately starts before the first spring's
+        // normal ~200–340ms settle window has elapsed. Each gesture must
+        // compose with the interrupted settle instead of resolving against
+        // the stale original page anchor.
+        pager.swipeLeft()
+        pager.swipeLeft()
+
+        XCTAssertTrue(
+            waitForCalendarHeaderValue(twoDaysAhead, element: header, timeout: 5),
+            "Two immediate left swipes must advance two local days; header=\(String(describing: header.value).debugDescription)"
+        )
+
+        let backToToday = calendarISODate(today)
+        pager.swipeRight()
+        pager.swipeRight()
+        XCTAssertTrue(
+            waitForCalendarHeaderValue(backToToday, element: header, timeout: 5),
+            "Two immediate right swipes must return to the original local day; header=\(String(describing: header.value).debugDescription)"
+        )
+    }
+
     func testCalendarResizeHandleChangesEndWithoutMovingStart() throws {
         app.terminate()
         app.launchArguments = baseLaunchArguments + ["-LifeOSForceDarkMode"]

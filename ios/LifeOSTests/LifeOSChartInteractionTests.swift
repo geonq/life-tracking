@@ -65,6 +65,22 @@ final class LifeOSChartInteractionTests: XCTestCase {
         XCTAssertEqual(selected.provenanceLabel, "Observed · Live source")
     }
 
+    func testUsageSelectionIdentitySeparatesObservedAndProjectedPoints() {
+        let base = Date(timeIntervalSince1970: 1_800_000_000)
+        let observed = UsageSelectionPoint(date: base, usedPercent: 0.4, isProjected: false)
+        let projected = UsageSelectionPoint(date: base, usedPercent: 0.6, isProjected: true)
+
+        XCTAssertNotEqual(observed.id, projected.id)
+        XCTAssertEqual(
+            UsageSelection.closestPoint(to: base, observed: [observed].map {
+                UsageProjectionPoint(date: $0.date, usedPercent: $0.usedPercent)
+            }, projected: [projected].map {
+                UsageProjectionPoint(date: $0.date, usedPercent: $0.usedPercent)
+            })?.id,
+            observed.id
+        )
+    }
+
     func testSelectionReturnsNoDataInsideExplicitGap() {
         let base = Date(timeIntervalSince1970: 1_800_000_000)
         let series = LifeOSChartSeries(

@@ -44,6 +44,21 @@ final class NutritionBarcodeTests: XCTestCase {
         XCTAssertNil(NutritionBarcodeValueParser.parse("5001", maximum: 5_000))
     }
 
+    func testPer100gNutritionScalesToTheAmountEaten() throws {
+        let per100g = try NutritionBarcodeMacros(
+            kcal: 539,
+            proteinGrams: 6.3,
+            carbsGrams: 57.5,
+            fatGrams: 30.9
+        )
+        let eaten = try per100g.scaledFromPer100g(forGrams: 15)
+        XCTAssertEqual(eaten.kcal!, 80.85, accuracy: 0.001)
+        XCTAssertEqual(eaten.proteinGrams!, 0.945, accuracy: 0.001)
+        XCTAssertEqual(eaten.carbsGrams!, 8.625, accuracy: 0.001)
+        XCTAssertEqual(eaten.fatGrams!, 4.635, accuracy: 0.001)
+        XCTAssertThrowsError(try per100g.scaledFromPer100g(forGrams: 5_000))
+    }
+
 #if os(iOS)
     func testCameraCaptureNormalizesOnlySupportedChecksumBarcodes() {
         XCTAssertEqual(NutritionBarcodeScannerCoordinator.normalizedCapture("042100005264"), "0042100005264")

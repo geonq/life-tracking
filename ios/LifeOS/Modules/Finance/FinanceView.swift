@@ -27,10 +27,10 @@ public struct FinanceView: View {
 
     @State private var selectedDetail: FinanceDetail = .spend
     @State private var selectedRange: FinanceRange = .month
-    @State private var selectedSpendPoint: Int?
-    @State private var selectedIncomePoint: Int?
-    @State private var selectedCashFlowPoint: Int?
-    @State private var selectedNetWorthPoint: Int?
+    @State private var selectedSpendPoint: String?
+    @State private var selectedIncomePoint: String?
+    @State private var selectedCashFlowPoint: String?
+    @State private var selectedNetWorthPoint: String?
     @State private var selectedCategoryID: String?
     @State private var selectedCategorySource: String?
     @State private var isRefreshing = false
@@ -311,10 +311,10 @@ public struct FinanceView: View {
     }
 
     private func selectLatestPoints(in snapshot: FinanceDisplaySnapshot) {
-        selectedSpendPoint = snapshot.points(for: .spend, range: selectedRange).indices.last
-        selectedIncomePoint = snapshot.points(for: .income, range: selectedRange).indices.last
-        selectedCashFlowPoint = snapshot.points(for: .cashFlow, range: selectedRange).indices.last
-        selectedNetWorthPoint = snapshot.points(for: .netWorth, range: selectedRange).indices.last
+        selectedSpendPoint = snapshot.points(for: .spend, range: selectedRange).last?.id
+        selectedIncomePoint = snapshot.points(for: .income, range: selectedRange).last?.id
+        selectedCashFlowPoint = snapshot.points(for: .cashFlow, range: selectedRange).last?.id
+        selectedNetWorthPoint = snapshot.points(for: .netWorth, range: selectedRange).last?.id
     }
 
     private func detail(for route: FinanceDetailRoute?) -> FinanceDetail {
@@ -546,7 +546,7 @@ private struct FinanceDetailChartCard: View {
     let subtitle: String
     let metric: FinanceDisplayMetric
     let points: [FinanceChartPoint]
-    @Binding var selectedPoint: Int?
+    @Binding var selectedPoint: String?
     let isDemo: Bool
     let emptyDetail: String
 
@@ -595,11 +595,11 @@ private struct FinanceUnavailableChart: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             RoundedRectangle(cornerRadius: 1)
-                .fill(Color.primary.opacity(0.10))
+                .fill(LifeOSTokens.primaryText.opacity(0.10))
                 .frame(height: 1)
                 .overlay(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 1)
-                        .fill(Color.primary.opacity(0.18))
+                        .fill(LifeOSTokens.primaryText.opacity(0.18))
                         .frame(width: 58, height: 2)
                 }
             HStack(spacing: 8) {
@@ -777,17 +777,32 @@ private final class FinanceDirectionalScrubView: UIView {
 
 private struct FinanceLineChart: View {
     let points: [FinanceChartPoint]
-    @Binding var selectedPoint: Int?
+    @Binding var selectedPoint: String?
     let isDemo: Bool
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var drawn: CGFloat = 0
     @FocusState private var chartIsFocused: Bool
 
+    private var chartDatasetID: String {
+        points
+            .map { "\($0.id):\($0.value)" }
+            .joined(separator: "|")
+    }
+
+    private var selectedDatum: FinanceChartPoint? {
+        guard let selectedPoint else { return nil }
+        return points.first { $0.id == selectedPoint }
+    }
+
+    private var selectedIndex: Int? {
+        guard let selectedPoint else { return nil }
+        return points.firstIndex { $0.id == selectedPoint }
+    }
+
     var body: some View {
         GeometryReader { proxy in
             let size = proxy.size
-            let selected = selectedPoint.map { min(max($0, 0), max(points.count - 1, 0)) }
             let geometry = FinanceChartGeometry(points: points, size: size)
 
             ZStack(alignment: .topLeading) {
@@ -800,8 +815,8 @@ private struct FinanceLineChart: View {
                         style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round)
                     )
 
-                if let selected, points.indices.contains(selected) {
-                    let position = geometry.coordinate(for: selected)
+                if let selectedIndex, points.indices.contains(selectedIndex) {
+                    let position = geometry.coordinate(for: selectedIndex)
                     Path { path in
                         path.move(to: CGPoint(x: position.x, y: 9))
                         path.addLine(to: CGPoint(x: position.x, y: size.height - 20))
@@ -819,12 +834,12 @@ private struct FinanceLineChart: View {
                         y: min(max(position.y - 30, 25), size.height - 26)
                     ) {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(points[selected].valueText)
-                                .foregroundStyle(.primary)
-                            Text(points[selected].dateLabel)
+                            Text(points[selectedIndex].valueText)
+                                .foregroundStyle(LifeOSTokens.primaryText)
+                            Text(points[selectedIndex].dateLabel)
                                 .font(LifeOSFont.axis())
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
-                            Text(isDemo ? "Demo · not live" : points[selected].sourceDisclosure)
+                            Text(isDemo ? "Demo · not live" : points[selectedIndex].sourceDisclosure)
                                 .font(LifeOSFont.axis())
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                                 .lineLimit(1)
@@ -850,13 +865,14 @@ private struct FinanceLineChart: View {
             }
 #else
             .simultaneousGesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { value in
-                        let index = nearestIndex(for: value.location.x, in: size)
-                        if selectedPoint != index {
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { value in
+                            let index = nearestIndex(for: value.location.x, in: size)
+                        let pointID = points[index].id
+                        if selectedPoint != pointID {
                             ScrubBubble<EmptyView>.snapHaptic()
                         }
-                        selectedPoint = index
+                        selectedPoint = pointID
                     }
             )
 #endif
@@ -867,21 +883,23 @@ private struct FinanceLineChart: View {
                 switch phase {
                 case .active(let location):
                     let index = nearestIndex(for: location.x, in: size)
-                    if selectedPoint != index {
+                    let pointID = points[index].id
+                    if selectedPoint != pointID {
                         ScrubBubble<EmptyView>.snapHaptic()
                     }
-                    selectedPoint = index
+                    selectedPoint = pointID
                 case .ended:
                     break
                 }
             }
             .onMoveCommand { direction in
                 guard !points.isEmpty else { return }
+                let currentIndex = selectedIndex ?? points.count - 1
                 switch direction {
                 case .left:
-                    selectedPoint = max((selectedPoint ?? points.count - 1) - 1, 0)
+                    selectedPoint = points[max(currentIndex - 1, 0)].id
                 case .right:
-                    selectedPoint = min((selectedPoint ?? 0) + 1, points.count - 1)
+                    selectedPoint = points[min(currentIndex + 1, points.count - 1)].id
                 default:
                     break
                 }
@@ -889,13 +907,20 @@ private struct FinanceLineChart: View {
 #endif
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("\(points.first?.seriesTitle ?? "Finance") chart")
-            .accessibilityValue(selected.map { points[$0].accessibilityValue } ?? "Swipe to inspect values")
-            .onAppear {
-                drawn = reduceMotion ? 1 : 0
-                guard !reduceMotion else { return }
-                withAnimation(LifeOSMotion.chartDraw) {
-                    drawn = 1
+            .accessibilityValue(selectedDatum?.accessibilityValue ?? "Swipe to inspect values")
+            .task(id: chartDatasetID) {
+                // The reveal belongs to the dataset, not to an unrelated parent redraw. Reset
+                // before a replacement series arrives so a refreshed chart never reuses a stale
+                // completed mask.
+                drawn = 0
+                if let selectedPoint, !points.contains(where: { $0.id == selectedPoint }) {
+                    self.selectedPoint = nil
                 }
+                guard !reduceMotion else {
+                    drawn = 1
+                    return
+                }
+                withAnimation(LifeOSMotion.chartDraw) { drawn = 1 }
             }
         }
         .frame(height: 166)
@@ -911,10 +936,11 @@ private struct FinanceLineChart: View {
 
     private func updateSelection(at x: CGFloat, in size: CGSize) {
         let index = nearestIndex(for: x, in: size)
-        if selectedPoint != index {
+        let pointID = points[index].id
+        if selectedPoint != pointID {
             ScrubBubble<EmptyView>.snapHaptic()
         }
-        selectedPoint = index
+        selectedPoint = pointID
     }
 }
 
@@ -1018,36 +1044,37 @@ private struct FinanceChartGeometry {
 
 private struct FinanceChartSelectionDetail: View {
     let points: [FinanceChartPoint]
-    @Binding var selectedPoint: Int?
+    @Binding var selectedPoint: String?
     let isDemo: Bool
 
-    private var safeIndex: Int {
-        min(max(selectedPoint ?? max(points.count - 1, 0), 0), max(points.count - 1, 0))
+    private var point: FinanceChartPoint? {
+        selectedPoint.flatMap { id in points.first { $0.id == id } } ?? points.last
     }
 
     var body: some View {
-        let point = points[safeIndex]
-        HStack(alignment: .top, spacing: 10) {
-            RoundedRectangle(cornerRadius: 2)
-                .fill(LifeOSTokens.Series.observed)
-                .frame(width: 4, height: 35)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(point.seriesTitle)
-                    .font(LifeOSFont.axis().weight(.semibold))
-                    .foregroundStyle(.primary)
-                Text(point.valueText)
-                    .font(LifeOSFont.inter(17, weight: .semiBold).monospacedDigit())
-                    .numericTransition()
-                Text("\(point.dateLabel) · \(isDemo ? "Demo · not live" : point.sourceDisclosure)")
-                    .font(LifeOSFont.axis())
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
-                    .lineLimit(2)
+        if let point {
+            HStack(alignment: .top, spacing: 10) {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(LifeOSTokens.Series.observed)
+                    .frame(width: 4, height: 35)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(point.seriesTitle)
+                        .font(LifeOSFont.axis().weight(.semibold))
+                        .foregroundStyle(LifeOSTokens.primaryText)
+                    Text(point.valueText)
+                        .font(LifeOSFont.inter(17, weight: .semiBold).monospacedDigit())
+                        .numericTransition()
+                    Text("\(point.dateLabel) · \(isDemo ? "Demo · not live" : point.sourceDisclosure)")
+                        .font(LifeOSFont.axis())
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .lineLimit(2)
+                }
+                Spacer(minLength: 8)
             }
-            Spacer(minLength: 8)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Selected \(point.seriesTitle) value")
+            .accessibilityValue(point.accessibilityValue)
         }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Selected \(point.seriesTitle) value")
-        .accessibilityValue(point.accessibilityValue)
     }
 }
 
@@ -2002,12 +2029,13 @@ private struct FinanceDisplayMetric {
 }
 
 private struct FinanceChartPoint: Identifiable {
-    let id = UUID()
     let date: Date
     let value: Int
     let seriesTitle: String
     let sourceLabel: String
     let freshness: FinancePayloadFreshness
+
+    var id: String { "\(seriesTitle)|\(date.timeIntervalSinceReferenceDate)" }
 
     init(
         date: Date,

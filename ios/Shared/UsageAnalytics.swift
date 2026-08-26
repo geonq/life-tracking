@@ -191,6 +191,12 @@ public struct UsageSelectionPoint: Equatable, Sendable {
     public let date: Date
     public let usedPercent: Double
     public let isProjected: Bool
+
+    /// Stable selection identity. Selection must survive a source reorder or refresh;
+    /// array offsets are presentation details and are not valid IDs.
+    public var id: String {
+        "\(isProjected ? "projected" : "observed")|\(date.timeIntervalSinceReferenceDate)"
+    }
 }
 
 public enum UsageSelection {
@@ -205,7 +211,13 @@ public enum UsageSelection {
             UsageSelectionPoint(date: $0.date, usedPercent: $0.usedPercent, isProjected: true)
         }
         return candidates.min {
-            abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date))
+            let leftDistance = abs($0.date.timeIntervalSince(date))
+            let rightDistance = abs($1.date.timeIntervalSince(date))
+            guard leftDistance == rightDistance else { return leftDistance < rightDistance }
+            if $0.isProjected != $1.isProjected {
+                return !$0.isProjected
+            }
+            return $0.date < $1.date
         }
     }
 

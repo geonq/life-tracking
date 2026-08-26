@@ -73,11 +73,14 @@ struct OverviewView: View {
             .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
             .refreshable { await refreshAction?() }
             .navigationDestination(isPresented: $showingUsage) {
-                UsageView(
-                    snapshots: usageSnapshots,
-                    analytics: usageAnalytics,
-                    state: usageState,
-                    refreshAction: refreshAction
+                zoomTransitioned(
+                    UsageView(
+                        snapshots: usageSnapshots,
+                        analytics: usageAnalytics,
+                        state: usageState,
+                        refreshAction: refreshAction
+                    ),
+                    sourceID: OverviewSectionKind.llm.rawValue
                 )
             }
             .navigationDestination(item: $selectedDetail) { destination in
@@ -290,16 +293,25 @@ struct OverviewView: View {
         case .llm:
             if openDestination != nil {
                 Button {
-                    showingUsage = true
+                    if reduceMotion {
+                        showingUsage = true
+                    } else {
+                        withAnimation(LifeOSMotion.heroMorph) {
+                            showingUsage = true
+                        }
+                    }
                 } label: {
-                    OverviewMetricCard(
-                        section: section,
-                        featured: featured,
-                        usageSnapshots: usageSnapshots,
-                        usageAnalytics: usageAnalytics,
-                        fitnessSnapshot: fitnessSnapshot,
-                        financeSummary: financeSummary,
-                        financeState: financeState
+                    zoomSource(
+                        OverviewMetricCard(
+                            section: section,
+                            featured: featured,
+                            usageSnapshots: usageSnapshots,
+                            usageAnalytics: usageAnalytics,
+                            fitnessSnapshot: fitnessSnapshot,
+                            financeSummary: financeSummary,
+                            financeState: financeState
+                        ),
+                        id: section.kind.rawValue
                     )
                 }
                 .buttonStyle(.plain)
@@ -750,6 +762,7 @@ private struct OverviewMetricCard: View {
                         .font(LifeOSFont.kpi())
                         .tracking(-0.3)
                         .foregroundStyle(.primary)
+                        .numericTransition()
                     Text("% remaining")
                         .font(LifeOSFont.callout())
                         .foregroundStyle(LifeOSTokens.tertiaryText)
@@ -963,6 +976,45 @@ private struct OverviewSparkline: View {
     let points: [OverviewChartPoint]
     let tint: Color
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var selectedDate: Date?
+
+    private var orderedPoints: [OverviewChartPoint] {
+        points.sorted { $0.date < $1.date }
+    }
+
+    private var chartDatasetID: String {
+        orderedPoints
+            .map { "\($0.date.timeIntervalSinceReferenceDate):\($0.value)" }
+            .joined(separator: "|")
+    }
+
+    private var selectedPoint: OverviewChartPoint? {
+        guard let selectedDate else { return nil }
+        return orderedPoints.first { $0.date == selectedDate }
+    }
+
+    private var selectedPointValueText: String {
+        selectedPoint?.value.formatted(.number.precision(.fractionLength(0...2))) ?? ""
+    }
+
+    private var selectedPointDateText: String {
+        guard let date = selectedPoint?.date else { return "" }
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        return formatter.string(from: date)
+    }
+
+    private var selectedPointIndex: Int {
+        guard !orderedPoints.isEmpty else { return 0 }
+        guard let selectedDate else { return orderedPoints.count - 1 }
+        return orderedPoints.firstIndex { $0.date == selectedDate } ?? orderedPoints.count - 1
+    }
+
+    private var trendAccessibilityValue: String {
+        guard let point = selectedPoint ?? orderedPoints.last else { return "No observations" }
+        return point.value.formatted(.number.precision(.fractionLength(0...2)))
+    }
 
     private var yDomain: ClosedRange<Double> {
         let values = points.map(\.value)
@@ -976,7 +1028,7 @@ private struct OverviewSparkline: View {
     }
 
     var body: some View {
-        Chart(points) { point in
+        Chart(orderedPoints) { point in
             LineMark(
                 x: .value("Time", point.date),
                 y: .value("Value", point.value)
@@ -984,19 +1036,111 @@ private struct OverviewSparkline: View {
             .foregroundStyle(tint)
             .lineStyle(StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
             .interpolationMethod(.catmullRom)
+
+            if selectedDate == point.date {
+                RuleMark(x: .value("Selected time", point.date))
+                    .foregroundStyle(LifeOSTokens.metadataText.opacity(0.7))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 3]))
+                PointMark(
+                    x: .value("Selected time", point.date),
+                    y: .value("Selected value", point.value)
+                )
+                .foregroundStyle(tint)
+                .symbolSize(32)
+            }
         }
         .chartYScale(domain: yDomain)
         .chartYAxis(.hidden)
         .chartXAxis(.hidden)
-        .chartPlotStyle { plot in
-            plot.background(Color.clear)
+        .chartOverlay { proxy in
+            GeometryReader { geometry in
+                if let plotFrame = proxy.plotFrame {
+                    let frame = geometry[plotFrame]
+                    Rectangle()
+                        .fill(.clear)
+                        .contentShape(Rectangle())
+#if os(iOS)
+                        .gesture(DragGesture(minimumDistance: 0).onChanged { value in
+                            let locationX = value.location.x
+                            let plotOriginX = frame.origin.x
+                            let x = locationX - plotOriginX
+                            if let date: Date = proxy.value(atX: x) { selectClosest(to: date) }
+                        })
+                        .onTapGesture { location in
+                            let locationX = location.x
+                            let plotOriginX = frame.origin.x
+                            let x = locationX - plotOriginX
+                            if let date: Date = proxy.value(atX: x) { selectClosest(to: date) }
+                        }
+#elseif os(macOS)
+                        .onContinuousHover(coordinateSpace: .local) { phase in
+                            if case .active(let location) = phase {
+                                let locationX = location.x
+                                let plotOriginX = frame.origin.x
+                                let x = locationX - plotOriginX
+                                if let date: Date = proxy.value(atX: x) { selectClosest(to: date) }
+                            }
+                        }
+#endif
+                    if let selectedPoint,
+                       let x = proxy.position(forX: selectedPoint.date),
+                       let y = proxy.position(forY: selectedPoint.value) {
+                        ScrubBubble(
+                            x: frame.origin.x + x,
+                            y: min(max(frame.origin.y + y - 24, 16), frame.maxY - 18)
+                        ) {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(selectedPointValueText)
+                                Text(selectedPointDateText)
+                                    .font(.caption2)
+                                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                            }
+                        }
+                        .allowsHitTesting(false)
+                    }
+                }
+            }
         }
+        .chartPlotStyle { plot in
+            LifeOSChartDrawReveal(content: plot.background(Color.clear))
+        }
+        .chartDrawOn(id: chartDatasetID)
         .transaction { transaction in
             if reduceMotion { transaction.animation = nil }
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Trend")
-        .accessibilityValue(points.last.map { String(format: "%.2f", $0.value) } ?? "No observations")
+        .accessibilityValue(trendAccessibilityValue)
+        .accessibilityHint(orderedPoints.count > 1 ? "Swipe left or right to inspect dates." : "")
+        .accessibilityAdjustableAction { direction in
+            guard !orderedPoints.isEmpty else { return }
+            let currentIndex = selectedPointIndex
+            let nextIndex: Int
+            switch direction {
+            case .increment:
+                nextIndex = min(currentIndex + 1, orderedPoints.count - 1)
+            case .decrement:
+                nextIndex = max(currentIndex - 1, 0)
+            @unknown default:
+                nextIndex = currentIndex
+            }
+            selectedDate = orderedPoints[nextIndex].date
+        }
+        .task(id: chartDatasetID) {
+            if let selectedDate, !orderedPoints.contains(where: { $0.date == selectedDate }) {
+                self.selectedDate = nil
+            }
+            if reduceMotion { return }
+        }
+    }
+
+    private func selectClosest(to date: Date) {
+        guard let nearest = orderedPoints.min(by: {
+            abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date))
+        }) else { return }
+        guard selectedDate != nearest.date else { return }
+        ScrubBubble<EmptyView>.snapHaptic()
+        selectedDate = nearest.date
     }
 }
 

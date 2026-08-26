@@ -575,9 +575,35 @@ private struct StrengthStateBadge: View {
 
 private struct StrengthProgressChart: View {
     let points: [FitnessStrengthProgressPoint]
+    @State private var selectedDate: Date?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var orderedPoints: [FitnessStrengthProgressPoint] {
+        points.sorted { $0.date < $1.date }
+    }
+
+    private var chartDatasetID: String {
+        orderedPoints.map { "\($0.date.timeIntervalSinceReferenceDate):\($0.kilograms)" }.joined(separator: "|")
+    }
+
+    private var selectedPoint: FitnessStrengthProgressPoint? {
+        guard let selectedDate else { return nil }
+        return orderedPoints.first { $0.date == selectedDate }
+    }
+
+    private var selectionSeries: LifeOSChartSeries {
+        LifeOSChartSeries(
+            id: "strength-progress",
+            label: "Strength progress",
+            kind: .observed,
+            points: orderedPoints.map { LifeOSChartPoint(timestamp: $0.date, value: $0.kilograms) },
+            source: "Strength source",
+            provenance: .observed
+        )
+    }
 
     var body: some View {
-        Chart(points) { point in
+        Chart(orderedPoints) { point in
             AreaMark(x: .value("Date", point.date), y: .value("Kilograms", point.kilograms))
                 .foregroundStyle(
                     LinearGradient(
@@ -592,6 +618,19 @@ private struct StrengthProgressChart: View {
             PointMark(x: .value("Date", point.date), y: .value("Kilograms", point.kilograms))
                 .foregroundStyle(LifeOSTokens.info)
                 .symbolSize(22)
+            if let selectedPoint {
+                RuleMark(x: .value("Selected date", selectedPoint.date))
+                    .foregroundStyle(LifeOSTokens.tertiaryText.opacity(0.45))
+                    .lineStyle(StrokeStyle(lineWidth: 0.75, dash: [3, 3]))
+                PointMark(x: .value("Selected value", selectedPoint.date), y: .value("Selected kilograms", selectedPoint.kilograms))
+                    .foregroundStyle(LifeOSTokens.surface)
+                    .symbolSize(52)
+                    .annotation(position: .overlay) {
+                        Circle()
+                            .fill(LifeOSTokens.info)
+                            .frame(width: 8, height: 8)
+                    }
+            }
         }
         .chartYAxis {
             AxisMarks(position: .leading) { value in
@@ -608,10 +647,86 @@ private struct StrengthProgressChart: View {
             }
         }
         .chartPlotStyle { plot in
-            plot.background(LifeOSTokens.canvas.opacity(0.22), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            LifeOSChartDrawReveal(content: plot)
+                .background(LifeOSTokens.canvas.opacity(0.22), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
+        .chartOverlay { proxy in
+            GeometryReader { geometry in
+                if let plotFrame = proxy.plotFrame {
+                    let frame = geometry[plotFrame]
+                    Rectangle()
+                        .fill(.clear)
+                        .contentShape(Rectangle())
+#if os(iOS)
+                        .gesture(DragGesture(minimumDistance: 0).onChanged { value in
+                            select(date: proxy.value(atX: value.location.x - frame.origin.x))
+                        })
+                        .onTapGesture { location in
+                            select(date: proxy.value(atX: location.x - frame.origin.x))
+                        }
+#elseif os(macOS)
+                        .onContinuousHover(coordinateSpace: .local) { phase in
+                            switch phase {
+                            case .active(let location):
+                                select(date: proxy.value(atX: location.x - frame.origin.x))
+                            case .ended:
+                                selectedDate = nil
+                            }
+                        }
+#endif
+                    if let selectedPoint,
+                       let x = proxy.position(forX: selectedPoint.date),
+                       let y = proxy.position(forY: selectedPoint.kilograms) {
+                        ScrubBubble(x: frame.origin.x + x, y: max(18, frame.origin.y + y - 24)) {
+                            Text("\(selectedPoint.kilograms.formatted(.number.precision(.fractionLength(1)))) kg")
+                        }
+                        .allowsHitTesting(false)
+                    }
+                }
+            }
+        }
+        .chartDrawOn(id: chartDatasetID)
+        .frame(minHeight: 120)
+        .task(id: chartDatasetID) {
+            guard let selectedDate else { return }
+            if !orderedPoints.contains(where: { $0.date == selectedDate }) {
+                self.selectedDate = nil
+            }
+        }
+        .animation(reduceMotion ? nil : LifeOSMotion.track, value: selectedDate)
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel("Strength progress chart")
-        .accessibilityValue("\(points.count) source-backed observations")
+        .accessibilityValue(accessibilityValue)
+        .accessibilityHint("Drag or tap to inspect an exact date and value")
+        .accessibilityAdjustableAction { direction in
+            guard !orderedPoints.isEmpty else { return }
+            let current = selectedDate.flatMap { date in orderedPoints.firstIndex { $0.date == date } }
+            let next: Int
+            switch direction {
+            case .increment:
+                next = min(orderedPoints.count - 1, (current ?? -1) + 1)
+            case .decrement:
+                next = max(0, (current ?? orderedPoints.count) - 1)
+            @unknown default:
+                return
+            }
+            selectedDate = orderedPoints[next].date
+        }
+    }
+
+    private var accessibilityValue: String {
+        guard let selectedPoint else {
+            return orderedPoints.isEmpty
+                ? "No source-backed observations are available."
+                : "\(orderedPoints.count) source-backed observations; no point selected."
+        }
+        return "Selected \(selectedPoint.date.formatted(.dateTime.month(.abbreviated).day())), \(selectedPoint.kilograms.formatted(.number.precision(.fractionLength(1)))) kilograms."
+    }
+
+    private func select(date: Date?) {
+        guard let date,
+              let selected = LifeOSChartKit.nearestSelection(in: [selectionSeries], to: date) else { return }
+        selectedDate = selected.point.timestamp
     }
 }
 

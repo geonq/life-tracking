@@ -361,7 +361,7 @@ public struct FitnessBiologyMetricDetailView: View {
     public let initialRange: FitnessBiologyRange
 
     @State private var range: FitnessBiologyRange
-    @State private var selectedIndex: Int?
+    @State private var selectedPointDate: Date?
 
     public init(metric: FitnessBiologyMetric, selectedDate: Date, initialRange: FitnessBiologyRange = .thirtyDays) {
         self.metric = metric
@@ -396,7 +396,7 @@ public struct FitnessBiologyMetricDetailView: View {
                     FitnessBiologyDetailHero(metric: metric)
 
                     if points.count > 1 {
-                        FitnessBiologyTrendCard(metric: metric, points: points, selectedIndex: $selectedIndex)
+                        FitnessBiologyTrendCard(metric: metric, points: points, selectedDate: $selectedPointDate)
                     } else {
                         FitnessBiologyEmptyTrendCard(metric: metric, pointCount: points.count)
                     }
@@ -407,7 +407,7 @@ public struct FitnessBiologyMetricDetailView: View {
         }
         .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
         .navigationTitle(metric.title)
-        .onChange(of: range) { _, _ in selectedIndex = nil }
+        .onChange(of: range) { _, _ in selectedPointDate = nil }
         .accessibilityIdentifier("fitness-biology-detail-\(metric.id.rawValue)")
     }
 }
@@ -442,7 +442,7 @@ private struct FitnessBiologyDetailHero: View {
 private struct FitnessBiologyTrendCard: View {
     let metric: FitnessBiologyMetric
     let points: [FitnessBiologySample]
-    @Binding var selectedIndex: Int?
+    @Binding var selectedDate: Date?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -454,10 +454,9 @@ private struct FitnessBiologyTrendCard: View {
                     .font(LifeOSFont.caption(10))
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
-            FitnessBiologyTrendChart(points: points, hue: metric.id.hue, selectedIndex: $selectedIndex)
+            FitnessBiologyTrendChart(points: points, hue: metric.id.hue, selectedDate: $selectedDate)
                 .frame(height: 190)
-            if let selectedIndex, points.indices.contains(selectedIndex) {
-                let point = points[selectedIndex]
+            if let selectedDate, let point = points.first(where: { $0.date == selectedDate }) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(point.date, format: .dateTime.month(.abbreviated).day())
                     Spacer()
@@ -480,17 +479,26 @@ private struct FitnessBiologyTrendCard: View {
 private struct FitnessBiologyTrendChart: View {
     let points: [FitnessBiologySample]
     let hue: LifeOSTokens.Hue
-    @Binding var selectedIndex: Int?
+    @Binding var selectedDate: Date?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var orderedPoints: [FitnessBiologySample] {
+        points.sorted { $0.date < $1.date }
+    }
+
+    private var chartDatasetID: String {
+        orderedPoints.map { "\($0.date.timeIntervalSinceReferenceDate):\($0.value)" }.joined(separator: "|")
+    }
 
     var body: some View {
         GeometryReader { geometry in
             ZStack(alignment: .topLeading) {
-                FitnessBiologyChartGeometry.path(for: points, in: geometry.size)
-                    .stroke(LifeOSTokens.accent, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
-                if let selectedIndex, points.indices.contains(selectedIndex) {
-                    let point = points[selectedIndex]
-                    let location = FitnessBiologyChartGeometry.location(for: point, points: points, in: geometry.size)
+                LifeOSChartDrawReveal(content: ZStack(alignment: .topLeading) {
+                    FitnessBiologyChartGeometry.path(for: orderedPoints, in: geometry.size)
+                        .stroke(LifeOSTokens.accent, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                })
+                if let selectedDate, let point = orderedPoints.first(where: { $0.date == selectedDate }) {
+                    let location = FitnessBiologyChartGeometry.location(for: point, points: orderedPoints, in: geometry.size)
                     Rectangle()
                         .fill(LifeOSTokens.tertiaryText.opacity(0.28))
                         .frame(width: 1, height: geometry.size.height)
@@ -505,11 +513,17 @@ private struct FitnessBiologyTrendChart: View {
             .contentShape(Rectangle())
             .gesture(DragGesture(minimumDistance: 0).onChanged { gesture in
                 let x = min(max(gesture.location.x, 0), geometry.size.width)
-                selectedIndex = FitnessBiologyChartGeometry.closestIndex(forX: x, points: points, in: geometry.size)
+                if let index = FitnessBiologyChartGeometry.closestIndex(forX: x, points: orderedPoints, in: geometry.size),
+                   orderedPoints.indices.contains(index) {
+                    selectedDate = orderedPoints[index].date
+                } else {
+                    selectedDate = nil
+                }
             })
         }
-        .animation(reduceMotion ? nil : LifeOSMotion.track, value: selectedIndex)
-        .accessibilityLabel("\(points.count)-point trend chart")
+        .chartDrawOn(id: chartDatasetID)
+        .animation(reduceMotion ? nil : LifeOSMotion.track, value: selectedDate)
+        .accessibilityLabel("\(orderedPoints.count)-point trend chart")
     }
 }
 

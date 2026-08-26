@@ -35,18 +35,24 @@ final class FinanceImportViewModel: ObservableObject {
             let secured = url.startAccessingSecurityScopedResource()
             defer { if secured { url.stopAccessingSecurityScopedResource() } }
             do {
-                let text = try String(contentsOf: url, encoding: .utf8)
-                pendingResult = FinanceStatementImporter.parseCSV(text)
+                let resourceValues = try url.resourceValues(forKeys: [.fileSizeKey, .isDirectoryKey])
+                guard resourceValues.isDirectory != true,
+                      let fileSize = resourceValues.fileSize,
+                      fileSize <= FinanceStatementImporter.maximumInputBytes else {
+                    throw FinanceStatementImporter.Error.inputTooLarge
+                }
+                let data = try Data(contentsOf: url)
+                pendingResult = try FinanceStatementImporter.parseCSV(data: data)
             } catch {
                 errorMessage = "The file could not be read as text: \(error.localizedDescription)"
             }
         }
     }
 
-    func confirmImport() {
-        guard let store, let pendingResult else { return }
+    func confirmImport(_ transactions: [FinanceImportedTransaction]) {
+        guard let store, !transactions.isEmpty else { return }
         do {
-            try store.add(pendingResult.transactions)
+            try store.add(transactions)
             savedTransactions = try store.all()
             self.pendingResult = nil
         } catch {
@@ -62,6 +68,16 @@ final class FinanceImportViewModel: ObservableObject {
         guard let store else { return }
         do {
             try store.remove(id: id)
+            savedTransactions = try store.all()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func setCategory(_ category: FinanceTransactionCategory?, for id: UUID) {
+        guard let store else { return }
+        do {
+            try store.setCategory(category, for: id)
             savedTransactions = try store.all()
         } catch {
             errorMessage = error.localizedDescription
@@ -159,7 +175,11 @@ struct FinanceImportCard: View {
             get: { model.pendingResult.map(FinanceImportPreviewSheetItem.init) },
             set: { newValue in if newValue == nil { model.discardPending() } }
         )) { item in
-            FinanceImportPreviewView(result: item.result, onConfirm: model.confirmImport, onCancel: model.discardPending)
+            FinanceImportPreviewView(
+                result: item.result,
+                onConfirm: { transactions in model.confirmImport(transactions) },
+                onCancel: model.discardPending
+            )
         }
         .sheet(isPresented: $isShowingImportedList) {
             FinanceImportedTransactionsListView(model: model)
@@ -187,12 +207,24 @@ private struct FinanceImportPreviewSheetItem: Identifiable {
 /// until the user explicitly taps Import.
 private struct FinanceImportPreviewView: View {
     let result: FinanceImportResult
-    let onConfirm: () -> Void
+    let onConfirm: ([FinanceImportedTransaction]) -> Void
     let onCancel: () -> Void
     @Environment(\.dismiss) private var dismiss
+    @State private var workingTransactions: [FinanceImportedTransaction]
+
+    init(
+        result: FinanceImportResult,
+        onConfirm: @escaping ([FinanceImportedTransaction]) -> Void,
+        onCancel: @escaping () -> Void
+    ) {
+        self.result = result
+        self.onConfirm = onConfirm
+        self.onCancel = onCancel
+        _workingTransactions = State(initialValue: result.transactions)
+    }
 
     private var previewRows: [FinanceImportedTransaction] {
-        Array(result.transactions.prefix(20))
+        Array(workingTransactions.prefix(20))
     }
 
     var body: some View {
@@ -229,7 +261,13 @@ private struct FinanceImportPreviewView: View {
                 } else {
                     Section("Preview (first \(previewRows.count))") {
                         ForEach(previewRows) { transaction in
-                            FinanceImportPreviewRow(transaction: transaction)
+                            FinanceImportPreviewRow(
+                                transaction: transaction,
+                                onCategoryChange: { category in
+                                    guard let index = workingTransactions.firstIndex(where: { $0.id == transaction.id }) else { return }
+                                    workingTransactions[index].category = category?.rawValue
+                                }
+                            )
                         }
                     }
                 }
@@ -247,10 +285,10 @@ private struct FinanceImportPreviewView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Import") {
-                        onConfirm()
+                        onConfirm(workingTransactions)
                         dismiss()
                     }
-                    .disabled(result.transactions.isEmpty)
+                    .disabled(workingTransactions.isEmpty)
                 }
             }
         }
@@ -259,6 +297,15 @@ private struct FinanceImportPreviewView: View {
 
 private struct FinanceImportPreviewRow: View {
     let transaction: FinanceImportedTransaction
+    var onCategoryChange: ((FinanceTransactionCategory?) -> Void)? = nil
+
+    private var effectiveCategory: FinanceTransactionCategory {
+        FinanceCategorizer.category(
+            for: transaction.description,
+            amountCents: transaction.amountCents,
+            sourceCategory: transaction.category
+        )
+    }
 
     var body: some View {
         HStack {
@@ -274,6 +321,27 @@ private struct FinanceImportPreviewRow: View {
                 .font(LifeOSFont.control())
                 .foregroundStyle(transaction.isOutflow ? LifeOSTokens.danger : LifeOSTokens.success)
                 .monospacedDigit()
+            if let onCategoryChange {
+                Menu {
+                    Button("Automatic") { onCategoryChange(nil) }
+                    Divider()
+                    ForEach(FinanceTransactionCategory.allCases, id: \.self) { category in
+                        Button(category.displayName) { onCategoryChange(category) }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        LifeOSIcon(effectiveCategory.iconName)
+                            .frame(width: 12, height: 12)
+                        Text(effectiveCategory.displayName)
+                            .font(LifeOSFont.axis())
+                            .lineLimit(1)
+                    }
+                    .foregroundStyle(effectiveCategory.hue.base)
+                }
+                .accessibilityLabel("Category")
+                .accessibilityValue(effectiveCategory.displayName)
+                .accessibilityIdentifier("finance-import-category-\(transaction.id.uuidString)")
+            }
         }
     }
 }
@@ -305,7 +373,12 @@ private struct FinanceImportedTransactionsListView: View {
                         ForEach(groupedByMonth, id: \.key) { group in
                             Section(FinanceImportDateFormatter.month(group.key)) {
                                 ForEach(group.transactions) { transaction in
-                                    FinanceImportPreviewRow(transaction: transaction)
+                                    FinanceImportPreviewRow(
+                                        transaction: transaction,
+                                        onCategoryChange: { category in
+                                            model.setCategory(category, for: transaction.id)
+                                        }
+                                    )
                                 }
                                 .onDelete { offsets in
                                     for index in offsets {

@@ -936,6 +936,20 @@ public enum CalendarInteractionLayout {
         return clampedProjection
     }
 
+    /// Converts the rendered offset into the coordinate system of an
+    /// interrupted settle's target page. The content must not jump when a
+    /// second swipe grabs the strip before the first spring has completed:
+    /// changing the logical anchor by the pending target moves the strip's
+    /// virtual columns by one page, so the offset changes by the inverse
+    /// amount. The caller still applies its normal physical reach clamp.
+    static func pagerRebasedOffsetAfterInterrupt(
+        currentOffset: Double,
+        interruptedTargetOffset: Double
+    ) -> Double {
+        guard currentOffset.isFinite, interruptedTargetOffset.isFinite else { return 0 }
+        return currentOffset - interruptedTargetOffset
+    }
+
     /// Projects the date under a native-width pager while the page is still
     /// moving. A horizontal offset of `-pageWidth` means that the next page is
     /// centred, so the header advances by the complete visible day window.

@@ -230,19 +230,38 @@ public struct CalendarWidgetView: View {
     }
 
     private var usesTransparentTreatment: Bool {
-        !showsWidgetContainerBackground || widgetRenderingMode != .fullColor
+        widgetChrome.usesTransparentTreatment
+    }
+
+    private var widgetChrome: LifeOSWidgetChrome {
+        LifeOSWidgetChrome.resolving(
+            showsContainerBackground: showsWidgetContainerBackground,
+            renderingMode: widgetRenderingMode
+        )
     }
 
     private var primaryForeground: Color {
-        usesTransparentTreatment ? .white : .primary
+        widgetChrome.hero
     }
 
     private var secondaryForeground: Color {
-        usesTransparentTreatment ? .white.opacity(0.76) : .secondary
+        widgetChrome.secondary
     }
 
     private var tertiaryForeground: Color {
-        usesTransparentTreatment ? .white.opacity(0.53) : LifeOSTokens.tertiaryText
+        widgetChrome.tertiary
+    }
+
+    /// Contrast-sensitive controls must keep their foreground and fill in
+    /// opposite color roles. `widgetAccentable` is intentionally not used for
+    /// these layers: WidgetKit may remap both an accentable glyph and its
+    /// accentable surface to the same tinted color.
+    private var contrastFill: Color {
+        usesTransparentTreatment ? .white : LifeOSTokens.primaryText
+    }
+
+    private var contrastForeground: Color {
+        usesTransparentTreatment ? .lifeOSBlack : LifeOSTokens.canvas
     }
 
     private var monthDays: [Date] {
@@ -406,24 +425,21 @@ public struct CalendarWidgetView: View {
         let isToday = calendar.isDate(day, inSameDayAs: entry.date)
         let isCurrentMonth = isInDisplayedMonth(day)
         // Today is marked by primary-text inversion (§5.6): filled square in
-        // primaryText, numeral in canvas color. Accented/transparent treatment
-        // already renders as a white square with a dark glyph.
+        // the primary-text role, numeral in the canvas role. The same explicit
+        // pair is used for transparent/tinted treatment so WidgetKit cannot
+        // collapse both layers into one system accent color.
         let textColor: Color = isToday
-            ? (usesTransparentTreatment ? .lifeOSBlack : LifeOSTokens.canvas)
+            ? contrastForeground
             : (isCurrentMonth ? primaryForeground : secondaryForeground.opacity(0.58))
 
         return ZStack {
             if isToday {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(usesTransparentTreatment ? Color.white : LifeOSTokens.primaryText)
+                    .fill(contrastFill)
             }
             Text(calendar.component(.day, from: day).description)
                 .font(.system(size: 10, weight: isToday ? .bold : .regular, design: .rounded))
                 .foregroundStyle(textColor)
-                // In accented/tinted mode the system renders unmarked views in the
-                // default (white) group. Keep the white today square in that group,
-                // but put its glyph in the accent group so it remains distinguishable.
-                .widgetAccentable(usesTransparentTreatment && isToday)
         }
         .frame(width: dayCellSize, height: dayCellSize)
         .accessibilityLabel(day.formatted(.dateTime.locale(formatLocale).month().day()) + (isToday ? ", today" : ""))
@@ -486,15 +502,11 @@ public struct CalendarWidgetView: View {
     private var plusButton: some View {
         ZStack {
             Circle()
-                .fill(usesTransparentTreatment ? Color.white : Color.white.opacity(0.14))
+                .fill(contrastFill)
             Text("+")
                 .font(.system(size: 30, weight: .light))
-                .foregroundStyle(usesTransparentTreatment ? Color.lifeOSBlack : Color.white)
+                .foregroundStyle(contrastForeground)
                 .offset(y: -1)
-                // The circle intentionally stays in the default group (white in
-                // clear/tinted mode); the glyph is accentable so it cannot disappear
-                // into that fill.
-                .widgetAccentable(usesTransparentTreatment)
         }
         .frame(width: 34, height: 34)
     }

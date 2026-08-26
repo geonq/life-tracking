@@ -184,13 +184,17 @@ public struct DrawOnProgress: DynamicProperty {
     }
 }
 
-private struct ChartDrawOnModifier: ViewModifier {
+private struct ChartDrawOnModifier<ID: Equatable>: ViewModifier {
+    let id: ID
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var drawn: CGFloat = 0
 
     func body(content: Content) -> some View {
         content
-            .task {
+            .task(id: id) {
+                // Reset synchronously before revealing a new dataset. The identity is supplied
+                // by the chart's source data, so unrelated parent redraws do not restart motion.
+                drawn = 0
                 if reduceMotion {
                     drawn = 1
                 } else {
@@ -203,6 +207,37 @@ private struct ChartDrawOnModifier: ViewModifier {
 
 private struct LifeOSChartDrawnKey: EnvironmentKey {
     static let defaultValue: CGFloat = 1
+}
+
+/// Masks only the rendered chart subtree with the progress supplied by
+/// `chartDrawOn(id:)`. Keeping the environment read inside this view matters:
+/// a parent view must not capture a child-modified environment value while it
+/// is building its body. Axes, labels, tooltips, and accessibility content can
+/// therefore remain available while the plotted pixels reveal from left to
+/// right.
+public struct LifeOSChartDrawReveal<Content: View>: View {
+    private let content: Content
+    @Environment(\.lifeOSChartDrawn) private var drawn
+
+    public init(content: Content) {
+        self.content = content
+    }
+
+    public var body: some View {
+        content
+            .mask(alignment: .leading) {
+                GeometryReader { geometry in
+                    Rectangle()
+                        .fill(.white)
+                        .frame(
+                            width: geometry.size.width * min(max(drawn, 0), 1),
+                            height: geometry.size.height,
+                            alignment: .leading
+                        )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                }
+            }
+    }
 }
 
 extension EnvironmentValues {
@@ -218,7 +253,19 @@ extension View {
     /// descendants via `\.lifeOSChartDrawn`. Instant under Reduce-Motion. See
     /// `03-motion-revolut.md` §C — animate the stroke/mask, not the underlying y-values.
     public func chartDrawOn() -> some View {
-        modifier(ChartDrawOnModifier())
+        chartDrawOn(id: true)
+    }
+
+    /// Drives the reveal once for each source-data identity. Pass a stable value derived from
+    /// the plotted dataset so refreshes reset the mask, while parent redraws do not replay it.
+    public func chartDrawOn<ID: Equatable>(id: ID) -> some View {
+        modifier(ChartDrawOnModifier(id: id))
+    }
+
+    /// Applies the current draw-on mask inside the view subtree. Use this on
+    /// plotted marks/path content, not on the surrounding labels or tooltip.
+    public func chartDrawReveal() -> some View {
+        LifeOSChartDrawReveal(content: self)
     }
 }
 

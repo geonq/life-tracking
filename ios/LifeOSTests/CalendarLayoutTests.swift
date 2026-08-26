@@ -125,6 +125,34 @@ final class CalendarLayoutTests: XCTestCase {
         XCTAssertEqual(cancelledShortDrag, .init(pageDelta: 0, normalizedVelocity: 0))
     }
 
+    func testPagerInterruptRebasesOffsetIntoTheIncomingPageCoordinateSpace() {
+        XCTAssertEqual(
+            CalendarInteractionLayout.pagerRebasedOffsetAfterInterrupt(
+                currentOffset: -84,
+                interruptedTargetOffset: -113
+            ),
+            29,
+            accuracy: 0.0001
+        )
+        XCTAssertEqual(
+            CalendarInteractionLayout.pagerRebasedOffsetAfterInterrupt(
+                currentOffset: 84,
+                interruptedTargetOffset: 113
+            ),
+            -29,
+            accuracy: 0.0001
+        )
+        XCTAssertEqual(
+            CalendarInteractionLayout.pagerRebasedOffsetAfterInterrupt(
+                currentOffset: -113,
+                interruptedTargetOffset: -113
+            ),
+            0,
+            accuracy: 0.0001,
+            "A grab at the end of the spring must already be at the incoming page's rest position"
+        )
+    }
+
     func testReducedMotionMonthExpansionUsesShortOpacityCrossfade() {
         switch CalendarInteractionLayout.monthExpansionMotionPolicy(reduceMotion: true) {
         case .opacityCrossfade(let duration):

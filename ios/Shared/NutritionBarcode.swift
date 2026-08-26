@@ -125,6 +125,23 @@ public struct NutritionBarcodeMacros: Codable, Equatable, Sendable {
         try validate(per100g: false)
     }
 
+    /// Converts label values expressed per 100 g into the amount actually
+    /// eaten. The returned values use the confirmation/record bounds, so an
+    /// unusually large portion fails closed instead of overflowing a meal
+    /// record or being silently clamped.
+    public func scaledFromPer100g(forGrams grams: Double) throws -> Self {
+        guard grams.isFinite, grams >= 0, grams <= 5_000 else {
+            throw NutritionBarcodeInputError.invalidProposal
+        }
+        let factor = grams / 100
+        return try Self(
+            kcal: kcal.map { $0 * factor },
+            proteinGrams: proteinGrams.map { $0 * factor },
+            carbsGrams: carbsGrams.map { $0 * factor },
+            fatGrams: fatGrams.map { $0 * factor }
+        )
+    }
+
     fileprivate func validate(per100g: Bool) throws {
         guard kcal != nil || proteinGrams != nil || carbsGrams != nil || fatGrams != nil else { throw NutritionBarcodeInputError.invalidResponse }
         let kcalLimit = per100g ? 1_000.0 : 5_000.0

@@ -2,23 +2,36 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { constants as fsConstants } from 'node:fs';
 import { access, lstat, open } from 'node:fs/promises';
 import { dirname, isAbsolute, resolve } from 'node:path';
-import { ClipperSnapshot, FinanceConnectorCatalog, FinanceSummary as FinanceSummarySchema, UnifiedUsage, parseCodexFixture, parseOverview, fixtures, normalizeWindow, type UsageWindow, unavailableClipperSnapshot } from '@iphone-life-os/contracts';
-import { parseCodexIngestPayload, readCodexLive } from './codex-adapter.js';
+import { FinanceConnectorCatalog, FinanceSummary as FinanceSummarySchema, UnifiedUsage, parseCodexFixture, parseOverview, fixtures, normalizeWindow, type UsageWindow } from '@iphone-life-os/contracts';
+import { parseCodexIngestEnvelope, readCodexLive } from './codex-adapter.js';
 import { UsageHistory } from './history.js';
 import { projectUsage } from './projection.js';
 import { constantTimeEqual, ingestClaudeStatusline, validClaudeContentType, MAX_BODY_BYTES } from './claude-ingest.js';
 import { financeConnectors } from './finance-connectors.js';
 import { readIngestSecretFile } from './ingest-secret.js';
 import { createConfiguredOpenFoodFactsClient, type OpenFoodFactsClient } from './open-food-facts.js';
+import {
+  createConfiguredNutritionPhotoProposalClient,
+  NUTRITION_PHOTO_MAX_BODY_BYTES,
+  NutritionPhotoProposalError,
+  type NutritionPhotoProposalClient,
+} from './nutrition-photo.js';
 import { CALENDAR_MAX_BYTES, CalendarStore, CalendarStoreError, type CalendarResource, type CalendarStoreErrorCode } from './calendar-store.js';
+import { CLIPPER_MAX_BYTES, ClipperStore, ClipperStoreError } from './clipper-store.js';
 
 function usageStorePath(): string | undefined {
   const configured = process.env.USAGE_STORE_PATH;
   if (configured !== undefined && (!configured || configured.includes('\0') || !isAbsolute(configured))) return undefined;
   return resolve(configured ?? 'usage-history.jsonl');
 }
+function clipperStorePath(): string | undefined {
+  const configured = process.env.CLIPPER_STORE_PATH;
+  if (configured !== undefined && (!configured || configured.includes('\0') || !isAbsolute(configured))) return undefined;
+  return resolve(configured ?? 'clipper-snapshot.json');
+}
 const history = () => new UsageHistory(usageStorePath() ?? resolve('usage-history.jsonl'));
 const defaultCalendarStore = new CalendarStore();
+const defaultClipperStore = new ClipperStore(clipperStorePath());
 const json = (res: ServerResponse, status: number, value: unknown) => { res.statusCode = status; res.end(JSON.stringify(value)); };
 
 /**
@@ -58,6 +71,8 @@ async function claudeIngestSecret(): Promise<string | undefined> {
 const claudeIngestEnabled = () => process.env.CLAUDE_INGEST_ENABLED === 'true' || process.env.CLAUDE_STATUSLINE_ENABLED === 'true';
 const codexIngestEnabled = () => process.env.CODEX_INGEST_ENABLED === 'true';
 const codexIngestSecret = () => readIngestSecretFile(process.env.CODEX_INGEST_SECRET_FILE);
+const clipperIngestEnabled = () => process.env.CLIPPER_INGEST_ENABLED === 'true';
+const clipperIngestSecret = () => readIngestSecretFile(process.env.CLIPPER_INGEST_SECRET_FILE);
 
 /** Validate the store's parent/file identity and contents without mutating it. */
 async function validateUsageStore(): Promise<boolean> {
@@ -100,6 +115,8 @@ async function validateUsageStore(): Promise<boolean> {
 export async function validateStartupConfiguration(): Promise<boolean> {
   if (claudeIngestEnabled() && (await claudeIngestSecret()) === undefined) return false;
   if (codexIngestEnabled() && (await codexIngestSecret()) === undefined) return false;
+  if (clipperIngestEnabled() && (await clipperIngestSecret()) === undefined) return false;
+  if (process.env.CLIPPER_STORE_PATH !== undefined && clipperStorePath() === undefined) return false;
   return validateUsageStore();
 }
 const unavailableFinanceSummary = () => {
@@ -142,11 +159,19 @@ async function ingest(req: IncomingMessage, res: ServerResponse) {
   if (!validClaudeContentType(req.headers['content-type'])) return json(res, 415, { error: 'content_type' });
   let parsed: unknown;
   try { parsed = JSON.parse(await body(req)); } catch (error) { return json(res, error instanceof Error && error.message === 'body_too_large' ? 413 : 400, { error: error instanceof Error ? error.message : 'invalid_json' }); }
-  const windows = ingestClaudeStatusline(parsed);
-  const observedAt = new Date().toISOString();
+  const observedHeader = req.headers['x-observed-at'];
+  let observedAt = new Date().toISOString();
+  if (Array.isArray(observedHeader) || (observedHeader !== undefined && typeof observedHeader !== 'string')
+    || (typeof observedHeader === 'string' && (observedHeader.length > 64 || !Number.isFinite(Date.parse(observedHeader))
+      || Date.parse(observedHeader) > Date.now() + 5_000))) {
+    return json(res, 400, { error: 'invalid_request' });
+  }
+  if (typeof observedHeader === 'string') observedAt = new Date(observedHeader).toISOString();
+  const windows = ingestClaudeStatusline(parsed, observedAt);
   const observed = windows.filter(window => window.availability === 'observed' && window.usedPercent !== undefined);
   if (!observed.length) return json(res, 422, { error: 'usage_unavailable' });
-  const connector = observed.some(window => window.provenance.connectorState === 'rate_limited') ? 'rate_limited' : 'healthy';
+  const connector = observed.some(window => window.provenance.connectorState === 'refresh_due') ? 'refresh_due'
+    : observed.some(window => window.provenance.connectorState === 'rate_limited') ? 'rate_limited' : 'healthy';
   const validated = UnifiedUsage.parse({ generatedAt: observedAt, windows: observed, estimates: [],
     connectors: {
       codex: 'unavailable', claude: connector,
@@ -176,12 +201,31 @@ async function ingestCodex(req: IncomingMessage, res: ServerResponse) {
     return json(res, error instanceof Error && error.message === 'body_too_large' ? 413 : 400, { error: 'invalid_request' });
   }
   let windows;
+  let observedAt: string;
   try {
-    windows = parseCodexIngestPayload(parsed);
+    const envelope = parseCodexIngestEnvelope(parsed);
+    windows = envelope.windows;
+    const suppliedObservedAt = envelope.observedAt;
+    observedAt = suppliedObservedAt ?? new Date().toISOString();
+    const normalizedWindows = windows.map(window => normalizeWindow(
+      { usedPercent: window.usedPercent, ...(window.resetAt ? { resetAt: window.resetAt } : {}) },
+      'codex', window.minutes === 300 ? 'five_hour' : 'seven_day', 'codex-app-server', observedAt,
+    ));
+    const connector = normalizedWindows.some(window => window.provenance.connectorState === 'refresh_due') ? 'refresh_due'
+      : normalizedWindows.some(window => window.provenance.connectorState === 'rate_limited') ? 'rate_limited' : 'healthy';
+    try {
+      UnifiedUsage.parse({ generatedAt: observedAt, windows: normalizedWindows, estimates: [], connectors: {
+        codex: connector,
+        claude: 'unavailable', glm: 'unavailable', deepseek: 'unavailable', google_ai_studio: 'unavailable',
+      } });
+    } catch {
+      return json(res, 400, { error: 'invalid_request' });
+    }
+    // Keep the captured observation time in history; generatedAt above is
+    // validated against the same bounded timestamp contract as all usage.
   } catch {
     return json(res, 400, { error: 'invalid_request' });
   }
-  const observedAt = new Date().toISOString();
   try {
     await history().addMany(windows.map(window => ({
       provider: 'codex' as const,
@@ -195,6 +239,42 @@ async function ingestCodex(req: IncomingMessage, res: ServerResponse) {
     return json(res, 503, { error: 'unavailable' });
   }
   return json(res, 200, { ok: true });
+}
+
+async function ingestClipper(req: IncomingMessage, res: ServerResponse, store: ClipperStore) {
+  if (!loopback(req)) return json(res, 403, { error: 'loopback_only' });
+  const expected = await clipperIngestSecret();
+  const auth = req.headers.authorization || '';
+  if (!expected || !auth.startsWith('Bearer ') || !constantTimeEqual(auth.slice(7), expected)) {
+    return json(res, 401, { error: 'unauthorized' });
+  }
+  if (req.headers['content-type'] !== 'application/json') return json(res, 415, { error: 'content_type' });
+  const key = req.headers['idempotency-key'];
+  if (Array.isArray(key)) return json(res, 400, { error: 'invalid_idempotency_key' });
+  let payload: string;
+  try {
+    payload = await body(req, CLIPPER_MAX_BYTES);
+  } catch (error) {
+    return json(res, error instanceof Error && error.message === 'body_too_large' ? 413 : 400, { error: 'invalid_request' });
+  }
+  try {
+    const outcome = await store.ingest(key, payload);
+    if (outcome.kind === 'replay') res.setHeader('x-lifeos-idempotent-replay', 'true');
+    if (outcome.kind === 'stale') res.setHeader('x-lifeos-stale-ingest', 'true');
+    return json(res, 200, outcome.snapshot);
+  } catch (error) {
+    const code = error instanceof ClipperStoreError ? error.code : 'storage_unavailable';
+    const status: Record<string, number> = {
+      missing_idempotency_key: 400,
+      invalid_idempotency_key: 400,
+      invalid_json: 400,
+      invalid_snapshot: 422,
+      idempotency_key_reuse: 409,
+      idempotency_store_full: 503,
+      storage_unavailable: 503,
+    };
+    return json(res, status[code] ?? 503, { error: code });
+  }
 }
 
 function barcodeInput(url: string): string | undefined {
@@ -217,6 +297,36 @@ async function lookupBarcode(req: IncomingMessage, res: ServerResponse, client: 
     return json(res, 200, await client.lookup(input));
   } catch {
     return json(res, 400, { error: 'invalid_barcode' });
+  }
+}
+
+async function nutritionPhotoProposal(
+  req: IncomingMessage,
+  res: ServerResponse,
+  client: NutritionPhotoProposalClient,
+) {
+  if (!loopback(req)) return json(res, 403, { error: 'loopback_only' });
+  if (req.headers['content-type'] !== 'application/json') return json(res, 415, { error: 'content_type' });
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await body(req, NUTRITION_PHOTO_MAX_BODY_BYTES));
+  } catch (error) {
+    return json(res, error instanceof Error && error.message === 'body_too_large' ? 413 : 400, { error: 'invalid_request' });
+  }
+  try {
+    return json(res, 200, await client.generate(parsed));
+  } catch (error) {
+    if (error instanceof NutritionPhotoProposalError) {
+      const status: Record<NutritionPhotoProposalError['code'], number> = {
+        configuration_unavailable: 503,
+        request_invalid: 400,
+        provider_unavailable: 503,
+        provider_response_invalid: 502,
+        response_too_large: 502,
+      };
+      return json(res, status[error.code], { error: error.code });
+    }
+    return json(res, 503, { error: 'provider_unavailable' });
   }
 }
 
@@ -278,9 +388,13 @@ export async function app(
   readLive: typeof readCodexLive = readCodexLive,
   barcodeClient?: OpenFoodFactsClient,
   calendarStore?: CalendarStore,
+  clipperStore?: ClipperStore,
+  nutritionPhotoClient?: NutritionPhotoProposalClient,
 ) {
   const configuredBarcodeClient = barcodeClient ?? createConfiguredOpenFoodFactsClient();
   const configuredCalendarStore = calendarStore ?? defaultCalendarStore;
+  const configuredClipperStore = clipperStore ?? defaultClipperStore;
+  const configuredNutritionPhotoClient = nutritionPhotoClient ?? createConfiguredNutritionPhotoProposalClient();
   res.setHeader('content-type', 'application/json'); res.setHeader('cache-control', 'no-store');
   if (req.method === 'POST' && (req.url === '/api/usage/claude-ingest' || req.url === '/api/claude/statusline')) {
     if (process.env.CLAUDE_INGEST_ENABLED !== 'true' && process.env.CLAUDE_STATUSLINE_ENABLED !== 'true') return json(res, 404, { error: 'disabled' });
@@ -289,6 +403,13 @@ export async function app(
   if (req.method === 'POST' && req.url === '/api/usage/codex-ingest') {
     if (!codexIngestEnabled()) return json(res, 404, { error: 'disabled' });
     return ingestCodex(req, res);
+  }
+  if (req.method === 'POST' && req.url === '/api/clipper/ingest') {
+    if (!clipperIngestEnabled()) return json(res, 404, { error: 'disabled' });
+    return ingestClipper(req, res, configuredClipperStore);
+  }
+  if (req.method === 'POST' && (req.url === '/api/nutrition/photo-proposal' || req.url === '/nutrition/photo-proposal')) {
+    return nutritionPhotoProposal(req, res, configuredNutritionPhotoClient);
   }
   if (req.url === '/api/calendar' || req.url === '/calendar') {
     return calendar(req, res, configuredCalendarStore);
@@ -314,7 +435,13 @@ export async function app(
   if (req.url === '/api/codex/live') return json(res, 200, await readLive());
   if (req.url === '/api/finance/connectors') return json(res, 200, FinanceConnectorCatalog.parse({ connectors: financeConnectors }));
   if (req.url === '/api/finance/summary') return json(res, 200, unavailableFinanceSummary());
-  if (req.url === '/api/clipper/summary') return json(res, 200, ClipperSnapshot.parse(unavailableClipperSnapshot()));
+  if (req.url === '/api/clipper/summary') {
+    try {
+      return json(res, 200, await configuredClipperStore.get());
+    } catch {
+      return json(res, 503, { error: 'clipper_unavailable' });
+    }
+  }
   if (req.url === '/api/usage') {
     const now = new Date().toISOString();
     const codex = process.env.CODEX_LIVE_ENABLED === 'true'
@@ -322,10 +449,14 @@ export async function app(
       : { connectorState: 'unavailable' as const, windows: [] };
     const store = history();
     const windows: UsageWindow[] = [];
+    // A direct Codex read carries the source capture time. Keep that
+    // timestamp through normalization so delayed reads become stale instead
+    // of being relabeled as fresh at HTTP response time.
+    const codexObservedAt = codex.observedAt ?? now;
     for (const item of codex.windows) {
       const kind = item.minutes === 300 ? 'five_hour' : item.minutes === 10_080 ? 'seven_day' : undefined;
       if (!kind) continue;
-      const window = normalizeWindow({ usedPercent: item.usedPercent, resetsAt: item.resetAt }, 'codex', kind, 'codex-app-server', now);
+      const window = normalizeWindow({ usedPercent: item.usedPercent, resetsAt: item.resetAt }, 'codex', kind, 'codex-app-server', codexObservedAt);
       if (window.usedPercent !== undefined) windows.push(window);
     }
     const estimates = [];
@@ -380,9 +511,19 @@ export function createApiServer(
   readLive: typeof readCodexLive = readCodexLive,
   barcodeClient?: OpenFoodFactsClient,
   calendarStore: CalendarStore = new CalendarStore(),
+  clipperStore: ClipperStore = defaultClipperStore,
+  nutritionPhotoClient?: NutritionPhotoProposalClient,
 ) {
   const configuredBarcodeClient = barcodeClient ?? createConfiguredOpenFoodFactsClient();
-  return createServer((req, res) => app(req, res, readLive, configuredBarcodeClient, calendarStore));
+  return createServer((req, res) => app(
+    req,
+    res,
+    readLive,
+    configuredBarcodeClient,
+    calendarStore,
+    clipperStore,
+    nutritionPhotoClient,
+  ));
 }
 
 export type ApiRuntime = {
@@ -405,12 +546,20 @@ export type StartApiServerOptions = {
   readLive?: typeof readCodexLive;
   runtime?: ApiRuntime;
   calendarStore?: CalendarStore;
+  clipperStore?: ClipperStore;
+  nutritionPhotoClient?: NutritionPhotoProposalClient;
 };
 
 /** Validate, bind only to loopback, and install one idempotent graceful shutdown path. */
 export async function startApiServer(options: StartApiServerOptions = {}): Promise<StartedApiServer> {
   if (!(await validateStartupConfiguration())) throw new Error('startup_configuration_invalid');
-  const server = createApiServer(options.readLive ?? readCodexLive, undefined, options.calendarStore);
+  const server = createApiServer(
+    options.readLive ?? readCodexLive,
+    undefined,
+    options.calendarStore,
+    options.clipperStore,
+    options.nutritionPhotoClient,
+  );
   const port = options.port ?? Number(process.env.PORT || 8787);
   try {
     await new Promise<void>((resolveListen, rejectListen) => {

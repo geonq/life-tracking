@@ -47,6 +47,18 @@ final class FinanceImportedTransactionStoreTests: XCTestCase {
         XCTAssertEqual(loaded.first?.amountCents, -4590)
     }
 
+    func testAddingSameStableIDTwiceIsIdempotent() throws {
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        let store = try FinanceImportedTransactionStore(url: url)
+        let id = UUID()
+        let first = FinanceImportedTransaction(id: id, bookedAt: now, amountCents: -100, description: "Rewe", source: .genericCSV, importedAt: now)
+        let retry = FinanceImportedTransaction(id: id, bookedAt: now, amountCents: -100, description: "Rewe", source: .genericCSV, importedAt: now.addingTimeInterval(60))
+        try store.add([first, first])
+        try store.add([retry])
+        XCTAssertEqual(try store.all(), [first])
+    }
+
     // MARK: 2. Honest empty when absent
 
     func testMissingFileDecodesToHonestEmptyState() throws {
@@ -107,6 +119,20 @@ final class FinanceImportedTransactionStoreTests: XCTestCase {
         XCTAssertThrowsError(try store.remove(id: UUID())) { error in
             XCTAssertEqual(error as? FinanceImportedTransactionStoreError, .transactionNotFound)
         }
+    }
+
+    func testCategoryOverridePersistsAndCanReturnToAutomatic() throws {
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        let store = try FinanceImportedTransactionStore(url: url)
+        let imported = transaction(description: "Unknown merchant")
+        try store.add([imported])
+
+        try store.setCategory(.groceries, for: imported.id)
+        XCTAssertEqual(try store.all().first?.category, FinanceTransactionCategory.groceries.rawValue)
+
+        try store.setCategory(nil, for: imported.id)
+        XCTAssertNil(try store.all().first?.category)
     }
 
     func testClearAllRemovesEveryTransaction() throws {

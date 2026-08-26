@@ -84,6 +84,20 @@ const SupplementDose = z.object({
 }).strict();
 export type SupplementDose = z.infer<typeof SupplementDose>;
 
+const supplementNutrientUnit = z.enum(['g', 'mg', 'µg', 'mcg', 'ml', 'IU', 'kcal']);
+
+/** Exact label fact, normalized to one product unit (tablet/capsule/etc.). */
+export const SupplementNutrientFact = z.object({
+  nutrientID: SupplementID,
+  name: boundedText(120),
+  amountPerUnit: z.number().finite().positive().max(1_000_000),
+  unit: supplementNutrientUnit,
+  /** The label's daily-dose basis, kept separate from amountPerUnit. */
+  labelBasisUnits: z.number().int().positive().max(1_000_000).optional(),
+  nrvPercent: z.number().finite().nonnegative().max(10_000).optional(),
+}).strict();
+export type SupplementNutrientFact = z.infer<typeof SupplementNutrientFact>;
+
 export const SupplementSource = z.enum(['manual', 'package_label', 'imported']);
 export type SupplementSource = z.infer<typeof SupplementSource>;
 
@@ -102,6 +116,7 @@ export const SupplementPlan = z.object({
   strength: boundedText(80),
   servingUnit: boundedText(32),
   userDose: SupplementDose.optional(),
+  nutrientFacts: z.array(SupplementNutrientFact).max(64).optional(),
   inventoryUnitsPerDose: z.number().finite().int().min(1).max(maxInventoryUnits),
   schedule: SupplementSchedule,
   source: SupplementSource,
@@ -119,6 +134,9 @@ export const SupplementPlan = z.object({
 }).strict().superRefine((value, context) => {
   if (value.schedule.notificationPreference === 'disabled' && value.reminderEnabled) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ['reminderEnabled'], message: 'disabled notification preference cannot enable reminders' });
+  }
+  if (value.nutrientFacts !== undefined && new Set(value.nutrientFacts.map(fact => fact.nutrientID)).size !== value.nutrientFacts.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['nutrientFacts'], message: 'nutrient facts must have unique identifiers' });
   }
 });
 export type SupplementPlan = z.infer<typeof SupplementPlan>;

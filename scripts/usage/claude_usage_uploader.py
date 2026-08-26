@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import contextlib
 import fcntl
 import os
@@ -227,15 +228,18 @@ def _opener() -> urllib.request.OpenerDirector:
     )
 
 
-def post_payload(payload: dict[str, Any], endpoint: str, opener: Any = None) -> bool:
+def post_payload(payload: dict[str, Any], endpoint: str, opener: Any = None, observed_at: str | None = None) -> bool:
     try:
         endpoint = validate_endpoint(endpoint)
         payload = validate_payload(payload)
         body = canonical_json(payload)
+        headers = {"Content-Type": "application/json"}
+        if observed_at is not None:
+            headers["X-Observed-At"] = observed_at
         request = urllib.request.Request(
             endpoint,
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method="POST",
         )
     except Exception:
@@ -271,12 +275,13 @@ def process_once(spool_path: Path, config_path: Path, opener: Any = None) -> str
             if prepared is None:
                 return UNAVAILABLE
             claim, payload = prepared
+            observed_at = datetime.datetime.fromtimestamp(claim.stat().st_mtime, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
             try:
                 endpoint = load_endpoint(config_path)
             except Exception:
                 # The valid claim remains available for a later config retry.
                 return UNAVAILABLE
-            if not post_payload(payload, endpoint, opener):
+            if not post_payload(payload, endpoint, opener, observed_at):
                 # Network and non-2xx server failures retain this claim.
                 return UNAVAILABLE
             _remove_claim(claim)

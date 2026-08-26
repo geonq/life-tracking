@@ -461,6 +461,78 @@ public struct SupplementDose: Codable, Equatable, Sendable {
     }
 }
 
+/// A user- or label-supplied nutrient fact normalized to one product unit.
+/// `labelBasisUnits` preserves the label's daily-dose basis separately, e.g.
+/// 800 mg calcium per 2 tablets becomes 400 mg per tablet with basis 2.
+/// This is a tracking fact, never a dose recommendation.
+public struct SupplementNutrientFact: Codable, Equatable, Hashable, Identifiable, Sendable {
+    public let nutrientID: String
+    public let name: String
+    public let amountPerUnit: Double
+    public let unit: String
+    public let labelBasisUnits: Int?
+    public let nrvPercent: Double?
+
+    public var id: String { nutrientID }
+
+    private enum CodingKeys: String, CodingKey {
+        case nutrientID, name, amountPerUnit, unit, labelBasisUnits, nrvPercent
+    }
+
+    public init(
+        nutrientID: String,
+        name: String,
+        amountPerUnit: Double,
+        unit: String,
+        labelBasisUnits: Int? = nil,
+        nrvPercent: Double? = nil
+    ) throws {
+        self.nutrientID = nutrientID
+        self.name = name
+        self.amountPerUnit = amountPerUnit
+        self.unit = unit
+        self.labelBasisUnits = labelBasisUnits
+        self.nrvPercent = nrvPercent
+        try validate()
+    }
+
+    public init(from decoder: Decoder) throws {
+        try rejectUnknownSupplementKeys(decoder, allowed: [
+            "nutrientID", "name", "amountPerUnit", "unit", "labelBasisUnits", "nrvPercent"
+        ])
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        nutrientID = try container.decode(String.self, forKey: .nutrientID)
+        name = try container.decode(String.self, forKey: .name)
+        amountPerUnit = try container.decode(Double.self, forKey: .amountPerUnit)
+        unit = try container.decode(String.self, forKey: .unit)
+        labelBasisUnits = try decodeSupplementOptional(Int.self, forKey: .labelBasisUnits, from: container)
+        nrvPercent = try decodeSupplementOptional(Double.self, forKey: .nrvPercent, from: container)
+        try validate()
+    }
+
+    public func validate(now: Date = .now) throws {
+        _ = now
+        try SupplementValidation.validateOpaqueID(nutrientID, field: "nutrientID")
+        try SupplementValidation.validateText(name, field: "nutrient.name", max: 120)
+        guard amountPerUnit.isFinite, amountPerUnit > 0, amountPerUnit <= 1_000_000 else {
+            throw SupplementValidationError.invalidBounds("nutrient.amountPerUnit")
+        }
+        guard ["g", "mg", "µg", "mcg", "ml", "IU", "kcal"].contains(unit) else {
+            throw SupplementValidationError.invalidText("nutrient.unit")
+        }
+        if let labelBasisUnits {
+            guard (1...1_000_000).contains(labelBasisUnits) else {
+                throw SupplementValidationError.invalidBounds("nutrient.labelBasisUnits")
+            }
+        }
+        if let nrvPercent {
+            guard nrvPercent.isFinite, (0...10_000).contains(nrvPercent) else {
+                throw SupplementValidationError.invalidBounds("nutrient.nrvPercent")
+            }
+        }
+    }
+}
+
 public enum SupplementSource: String, Codable, CaseIterable, Equatable, Sendable {
     case manual
     case packageLabel = "package_label"
@@ -494,6 +566,89 @@ public struct SupplementProductLabelNote: Codable, Equatable, Sendable {
     }
 }
 
+/// Reference-only result from the Windows catalog. The catalog is searchable
+/// convenience data; selecting a row still requires the user to confirm what
+/// belongs to their own product before it becomes a local plan.
+public struct SupplementCatalogEntry: Codable, Equatable, Hashable, Identifiable, Sendable {
+    public let id: String
+    public let name: String
+    public let brand: String
+    public let productIdentifier: String?
+    public let form: SupplementForm
+    public let servingUnit: String
+    public let source: SupplementSource
+    public let sourceDate: String
+    public let nutrients: [SupplementNutrientFact]
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, brand, productIdentifier, form, servingUnit, source, sourceDate, nutrients
+    }
+
+    public init(from decoder: Decoder) throws {
+        try rejectUnknownSupplementKeys(decoder, allowed: [
+            "id", "name", "brand", "productIdentifier", "form", "servingUnit", "source", "sourceDate", "nutrients"
+        ])
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        brand = try container.decode(String.self, forKey: .brand)
+        productIdentifier = try decodeSupplementOptional(String.self, forKey: .productIdentifier, from: container)
+        form = try container.decode(SupplementForm.self, forKey: .form)
+        servingUnit = try container.decode(String.self, forKey: .servingUnit)
+        source = try container.decode(SupplementSource.self, forKey: .source)
+        sourceDate = try container.decode(String.self, forKey: .sourceDate)
+        nutrients = try container.decode([SupplementNutrientFact].self, forKey: .nutrients)
+        try validate()
+    }
+
+    public func validate(now: Date = .now) throws {
+        _ = now
+        try SupplementValidation.validateOpaqueID(id, field: "catalog.id")
+        try SupplementValidation.validateText(name, field: "catalog.name", max: 160)
+        try SupplementValidation.validateText(brand, field: "catalog.brand", max: 120)
+        if let productIdentifier {
+            try SupplementValidation.validateText(productIdentifier, field: "catalog.productIdentifier", max: 128)
+        }
+        try SupplementValidation.validateText(servingUnit, field: "catalog.servingUnit", max: 32)
+        try SupplementValidation.validateDateOnly(sourceDate, field: "catalog.sourceDate")
+        guard nutrients.count <= 64 else { throw SupplementValidationError.invalidBounds("catalog.nutrients") }
+        guard Set(nutrients.map(\.nutrientID)).count == nutrients.count else {
+            throw SupplementValidationError.duplicateIdentifier("catalog.nutrientID")
+        }
+        try nutrients.forEach { try $0.validate(now: now) }
+    }
+}
+
+public struct SupplementCatalogResponse: Codable, Equatable, Sendable {
+    public static let currentSchemaVersion = 1
+    public let schemaVersion: Int
+    public let query: String
+    public let entries: [SupplementCatalogEntry]
+
+    private enum CodingKeys: String, CodingKey { case schemaVersion, query, entries }
+
+    public init(from decoder: Decoder) throws {
+        try rejectUnknownSupplementKeys(decoder, allowed: ["schemaVersion", "query", "entries"])
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        query = try container.decode(String.self, forKey: .query)
+        entries = try container.decode([SupplementCatalogEntry].self, forKey: .entries)
+        try validate()
+    }
+
+    public func validate(now: Date = .now) throws {
+        _ = now
+        guard schemaVersion == Self.currentSchemaVersion else {
+            throw SupplementValidationError.unsupportedSchemaVersion(schemaVersion)
+        }
+        guard query.utf16.count <= 120 else { throw SupplementValidationError.invalidText("catalog.query") }
+        guard entries.count <= 20, Set(entries.map(\.id)).count == entries.count else {
+            throw SupplementValidationError.invalidBounds("catalog.entries")
+        }
+        try entries.forEach { try $0.validate(now: now) }
+    }
+}
+
 public struct SupplementPlan: Codable, Equatable, Identifiable, Sendable {
     public let id: String
     public let name: String
@@ -503,6 +658,7 @@ public struct SupplementPlan: Codable, Equatable, Identifiable, Sendable {
     public let strength: String
     public let servingUnit: String
     public let userDose: SupplementDose?
+    public let nutrientFacts: [SupplementNutrientFact]
     public let inventoryUnitsPerDose: Int
     public let schedule: SupplementSchedule
     public let source: SupplementSource
@@ -519,7 +675,7 @@ public struct SupplementPlan: Codable, Equatable, Identifiable, Sendable {
     public var updatedAt: Date
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, brand, productIdentifier, form, strength, servingUnit, userDose,
+        case id, name, brand, productIdentifier, form, strength, servingUnit, userDose, nutrientFacts,
              inventoryUnitsPerDose, schedule, source, productLabelNote, notes, stockUnits,
              reorderThreshold, expectedLeadTimeDays, expiryDate, supplier, reminderEnabled,
              lockScreenRedacted, revision, updatedAt
@@ -534,6 +690,7 @@ public struct SupplementPlan: Codable, Equatable, Identifiable, Sendable {
         strength: String,
         servingUnit: String,
         userDose: SupplementDose? = nil,
+        nutrientFacts: [SupplementNutrientFact] = [],
         inventoryUnitsPerDose: Int,
         schedule: SupplementSchedule,
         source: SupplementSource,
@@ -557,6 +714,7 @@ public struct SupplementPlan: Codable, Equatable, Identifiable, Sendable {
         self.strength = strength
         self.servingUnit = servingUnit
         self.userDose = userDose
+        self.nutrientFacts = nutrientFacts
         self.inventoryUnitsPerDose = inventoryUnitsPerDose
         self.schedule = schedule
         self.source = source
@@ -576,7 +734,7 @@ public struct SupplementPlan: Codable, Equatable, Identifiable, Sendable {
 
     public init(from decoder: Decoder) throws {
         try rejectUnknownSupplementKeys(decoder, allowed: [
-            "id", "name", "brand", "productIdentifier", "form", "strength", "servingUnit", "userDose",
+            "id", "name", "brand", "productIdentifier", "form", "strength", "servingUnit", "userDose", "nutrientFacts",
             "inventoryUnitsPerDose", "schedule", "source", "productLabelNote", "notes", "stockUnits",
             "reorderThreshold", "expectedLeadTimeDays", "expiryDate", "supplier", "reminderEnabled",
             "lockScreenRedacted", "revision", "updatedAt"
@@ -590,6 +748,7 @@ public struct SupplementPlan: Codable, Equatable, Identifiable, Sendable {
         strength = try container.decode(String.self, forKey: .strength)
         servingUnit = try container.decode(String.self, forKey: .servingUnit)
         userDose = try decodeSupplementOptional(SupplementDose.self, forKey: .userDose, from: container)
+        nutrientFacts = try decodeSupplementOptional([SupplementNutrientFact].self, forKey: .nutrientFacts, from: container) ?? []
         inventoryUnitsPerDose = try container.decode(Int.self, forKey: .inventoryUnitsPerDose)
         schedule = try container.decode(SupplementSchedule.self, forKey: .schedule)
         source = try container.decode(SupplementSource.self, forKey: .source)
@@ -617,6 +776,11 @@ public struct SupplementPlan: Codable, Equatable, Identifiable, Sendable {
         try SupplementValidation.validateText(strength, field: "strength", max: 80)
         try SupplementValidation.validateText(servingUnit, field: "servingUnit", max: 32)
         try userDose?.validate(now: now)
+        guard nutrientFacts.count <= 64,
+              Set(nutrientFacts.map(\.nutrientID)).count == nutrientFacts.count else {
+            throw SupplementValidationError.duplicateIdentifier("nutrientFacts.nutrientID")
+        }
+        try nutrientFacts.forEach { try $0.validate(now: now) }
         guard (1...SupplementValidation.maximumInventoryUnits).contains(inventoryUnitsPerDose) else {
             throw SupplementValidationError.invalidBounds("inventoryUnitsPerDose")
         }

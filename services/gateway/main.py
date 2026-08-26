@@ -19,7 +19,10 @@ Serve terminates HTTPS and forwards to it. Never bind this backend to 0.0.0.0:
 calendar and tax-document data must stay unreachable without the Serve layer.
 """
 import asyncio
+import base64
+import binascii
 import json
+import hashlib
 import math
 import mimetypes
 import os
@@ -35,6 +38,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, Web
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 from enablebanking import EnableBankingService
+from supplement_catalog import SupplementCatalogInvalidQuery, SupplementCatalogService, SupplementCatalogUnavailable
 
 
 def _is_allowed_upstream(value: str, expected_path: str) -> bool:
@@ -100,6 +104,8 @@ DATA_DIR = Path(os.environ.get("LIFEOS_DATA_DIR", Path(__file__).parent / "data"
 CALENDAR_PATH = DATA_DIR / "calendar.json"
 DOCUMENTS_INDEX_PATH = DATA_DIR / "documents.json"
 DOCUMENTS_DIR = DATA_DIR / "documents"
+SUPPLEMENT_CATALOG_PATH = Path(os.environ.get("LIFEOS_SUPPLEMENT_CATALOG_PATH", DATA_DIR / "supplements.sqlite3"))
+supplement_catalog = SupplementCatalogService(SUPPLEMENT_CATALOG_PATH)
 
 CLAUDE_INGEST_UPSTREAM = "http://127.0.0.1:8787/api/usage/claude-ingest"
 CLAUDE_INGEST_MAX_BODY_SIZE = 16 * 1024
@@ -119,12 +125,24 @@ ALLOWED_TAILSCALE_LOGIN = _required_tailscale_login()
 USAGE_UPSTREAM = os.environ.get("LIFEOS_USAGE_UPSTREAM", "http://127.0.0.1:8787/api/usage")
 FINANCE_UPSTREAM = os.environ.get("LIFEOS_FINANCE_UPSTREAM", "http://127.0.0.1:8787/api/finance/summary")
 CLIPPER_UPSTREAM = os.environ.get("LIFEOS_CLIPPER_UPSTREAM", "http://127.0.0.1:8787/api/clipper/summary")
+NUTRITION_BARCODE_UPSTREAM = os.environ.get(
+    "LIFEOS_NUTRITION_BARCODE_UPSTREAM",
+    "http://127.0.0.1:8787/api/nutrition/barcode",
+)
+NUTRITION_PHOTO_UPSTREAM = os.environ.get(
+    "LIFEOS_NUTRITION_PHOTO_UPSTREAM",
+    "http://127.0.0.1:8787/api/nutrition/photo-proposal",
+)
 if not _is_allowed_upstream(USAGE_UPSTREAM, "/api/usage"):
     raise RuntimeError("LIFEOS_USAGE_UPSTREAM must be an exact loopback HTTP endpoint")
 if not _is_allowed_upstream(FINANCE_UPSTREAM, "/api/finance/summary"):
     raise RuntimeError("LIFEOS_FINANCE_UPSTREAM must be an exact loopback HTTP endpoint")
 if not _is_allowed_upstream(CLIPPER_UPSTREAM, "/api/clipper/summary"):
     raise RuntimeError("LIFEOS_CLIPPER_UPSTREAM must be an exact loopback HTTP endpoint")
+if not _is_allowed_upstream(NUTRITION_BARCODE_UPSTREAM, "/api/nutrition/barcode"):
+    raise RuntimeError("LIFEOS_NUTRITION_BARCODE_UPSTREAM must be an exact loopback HTTP endpoint")
+if not _is_allowed_upstream(NUTRITION_PHOTO_UPSTREAM, "/api/nutrition/photo-proposal"):
+    raise RuntimeError("LIFEOS_NUTRITION_PHOTO_UPSTREAM must be an exact loopback HTTP endpoint")
 # Maximum response size from upstream (1 MB)
 USAGE_MAX_RESPONSE_SIZE = 1 * 1024 * 1024
 # Strict per-operation timeout plus an outer wall-clock deadline.
@@ -133,6 +151,15 @@ USAGE_TOTAL_TIMEOUT = 6.0
 CLIPPER_MAX_RESPONSE_SIZE = 1 * 1024 * 1024
 CLIPPER_REQUEST_TIMEOUT = httpx.Timeout(5.0, connect=2.0)
 CLIPPER_TOTAL_TIMEOUT = 6.0
+NUTRITION_PHOTO_MAX_BODY_SIZE = 30 * 1024 * 1024
+NUTRITION_PHOTO_MAX_RESPONSE_SIZE = 1 * 1024 * 1024
+NUTRITION_PHOTO_MAX_IMAGE_BYTES = 20 * 1024 * 1024
+NUTRITION_PHOTO_MAX_IMAGE_COUNT = 3
+NUTRITION_PHOTO_MAX_IMAGE_DIMENSION = 12_000
+NUTRITION_PHOTO_MAX_IMAGE_PIXELS = 40_000_000
+NUTRITION_PHOTO_REQUEST_TIMEOUT = httpx.Timeout(40.0, connect=2.0)
+NUTRITION_PHOTO_TOTAL_TIMEOUT = 45.0
+NUTRITION_PHOTO_BODY_TIMEOUT = 45.0
 DOCUMENT_MAX_UPLOAD_SIZE = int(os.environ.get("LIFEOS_DOCUMENT_MAX_UPLOAD_SIZE", 64 * 1024 * 1024))
 DOCUMENT_READ_CHUNK_SIZE = 1024 * 1024
 DOCUMENT_ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".heic"}
@@ -343,6 +370,7 @@ def _read_ingest_secret() -> str | None:
 
 CLAUDE_INGEST_WINDOWS = {"five_hour", "seven_day"}
 CLAUDE_INGEST_FIELDS = {"used_percentage", "resets_at"}
+CLAUDE_INGEST_OBSERVED_HEADER = "x-observed-at"
 
 
 def _sanitize_claude_ingest_payload(data: object) -> dict:
@@ -789,17 +817,112 @@ def _is_clipper_observed_timestamp(value) -> bool:
         return False
 
 
-def _validate_clipper_unavailable_snapshot(data: object) -> bool:
-    """Accept only the unavailable branch of the reviewed Clipper contract.
+def _validate_clipper_provenance(value: object, *, top_level: bool) -> bool:
+    if not isinstance(value, dict) or set(value) != _CLIPPER_PROVENANCE_FIELDS:
+        return False
+    if (
+        not isinstance(value["source"], str)
+        or not value["source"].strip()
+        or not _is_clipper_observed_timestamp(value["observedAt"])
+    ):
+        return False
+    if value["quality"] == "unavailable":
+        return (
+            value["freshness"] == "unknown"
+            and value["connectorState"] not in {"healthy", "refresh_due"}
+        )
+    allowed_quality = {"observed", "partial"} if top_level else {"observed"}
+    if value["quality"] not in allowed_quality or value["freshness"] not in {"fresh", "stale"}:
+        return False
+    try:
+        observed_at = datetime.fromisoformat(value["observedAt"].replace("Z", "+00:00"))
+        age = datetime.now(timezone.utc) - observed_at
+    except (OverflowError, OSError, ValueError):
+        return False
+    expected_freshness = "fresh" if age <= timedelta(minutes=15) else "stale"
+    expected_connector = "healthy" if expected_freshness == "fresh" else "refresh_due"
+    return value["freshness"] == expected_freshness and value["connectorState"] == expected_connector
 
-    Observed metrics, accounts, trends, and breakdowns intentionally remain
-    outside this gateway's accepted surface until a connector is separately
-    reviewed.  Reconstructing the exact unavailable shape also prevents an
-    otherwise-valid-looking payload from carrying unreviewed sibling fields.
-    """
+
+def _validate_clipper_metric(value: object, *, revenue: bool) -> bool:
+    if not isinstance(value, dict) or "availability" not in value or "provenance" not in value:
+        return False
+    if value["availability"] == "unavailable":
+        expected = {"availability", "provenance"} | ({"currency"} if revenue else set())
+        return set(value) == expected and (not revenue or value["currency"] == "EUR") and _validate_clipper_provenance(value["provenance"], top_level=False)
+    if value["availability"] != "observed":
+        return False
+    expected = {"availability", "provenance", "amountCents", "currency"} if revenue else {"availability", "provenance", "value"}
+    if set(value) != expected or not _validate_clipper_provenance(value["provenance"], top_level=False):
+        return False
+    amount = value["amountCents"] if revenue else value["value"]
+    return (
+        isinstance(amount, int)
+        and not isinstance(amount, bool)
+        and 0 <= amount <= FINANCE_MAX_SAFE_CENTS
+        and (not revenue or value["currency"] == "EUR")
+    )
+
+
+def _validate_clipper_metrics(value: object) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == {"views", "subscribers", "revenue"}
+        and _validate_clipper_metric(value["views"], revenue=False)
+        and _validate_clipper_metric(value["subscribers"], revenue=False)
+        and _validate_clipper_metric(value["revenue"], revenue=True)
+    )
+
+
+def _validate_clipper_breakdown(value: object) -> bool:
+    if not isinstance(value, dict) or set(value) != {"id", "label", "periodStart", "periodEnd", "metrics"}:
+        return False
+    if (
+        not isinstance(value["id"], str) or not value["id"].strip()
+        or not isinstance(value["label"], str) or not value["label"].strip()
+        or not _is_iso8601(value["periodStart"]) or not _is_iso8601(value["periodEnd"])
+        or not _validate_clipper_metrics(value["metrics"])
+    ):
+        return False
+    try:
+        return datetime.fromisoformat(value["periodEnd"].replace("Z", "+00:00")) > datetime.fromisoformat(value["periodStart"].replace("Z", "+00:00"))
+    except (OverflowError, OSError, ValueError):
+        return False
+
+
+def _validate_clipper_bot(value: object) -> bool:
+    if not isinstance(value, dict) or set(value) != {"id", "name", "metrics", "breakdowns"}:
+        return False
+    if not isinstance(value["id"], str) or not value["id"].strip() or not isinstance(value["name"], str) or not value["name"].strip() or not _validate_clipper_metrics(value["metrics"]):
+        return False
+    breakdowns = value["breakdowns"]
+    return isinstance(breakdowns, list) and all(_validate_clipper_breakdown(item) for item in breakdowns) and len({item["id"] for item in breakdowns}) == len(breakdowns)
+
+
+def _validate_clipper_account(value: object) -> bool:
+    if not isinstance(value, dict) or set(value) != {"id", "name", "metrics", "bots", "breakdowns"}:
+        return False
+    if not isinstance(value["id"], str) or not value["id"].strip() or not isinstance(value["name"], str) or not value["name"].strip() or not _validate_clipper_metrics(value["metrics"]):
+        return False
+    bots = value["bots"]
+    breakdowns = value["breakdowns"]
+    return (
+        isinstance(bots, list) and all(_validate_clipper_bot(item) for item in bots)
+        and len({item["id"] for item in bots}) == len(bots)
+        and isinstance(breakdowns, list) and all(_validate_clipper_breakdown(item) for item in breakdowns)
+        and len({item["id"] for item in breakdowns}) == len(breakdowns)
+    )
+
+
+def _clipper_metric_is_observed(metrics: dict) -> bool:
+    return any(metrics[key].get("availability") == "observed" for key in ("views", "subscribers", "revenue"))
+
+
+def _validate_clipper_unavailable_snapshot(data: object) -> bool:
+    """Validate the unavailable branch of the shared Clipper contract."""
     if not isinstance(data, dict) or set(data) != _CLIPPER_SNAPSHOT_FIELDS:
         return False
-    if _contains_sensitive(data):
+    if _contains_sensitive_finance(data):
         return False
     if (
         isinstance(data["schemaVersion"], bool)
@@ -810,18 +933,67 @@ def _validate_clipper_unavailable_snapshot(data: object) -> bool:
     ):
         return False
 
-    provenance = data["provenance"]
-    if not isinstance(provenance, dict) or set(provenance) != _CLIPPER_PROVENANCE_FIELDS:
+    return _validate_clipper_provenance(data["provenance"], top_level=True)
+
+
+def _validate_clipper_observed_snapshot(data: object) -> bool:
+    if not isinstance(data, dict) or set(data) != {
+        "schemaVersion", "availability", "generatedAt", "currency", "metrics",
+        "accounts", "trends", "breakdowns", "provenance",
+    }:
         return False
-    connector_state = provenance["connectorState"]
-    return (
-        isinstance(provenance["source"], str)
-        and bool(provenance["source"].strip())
-        and _is_clipper_observed_timestamp(provenance["observedAt"])
-        and provenance["freshness"] == "unknown"
-        and provenance["quality"] == "unavailable"
-        and _is_choice(connector_state, CONNECTOR_STATES - {"healthy", "refresh_due"})
+    if _contains_sensitive_finance(data) or data["schemaVersion"] != 1 or isinstance(data["schemaVersion"], bool) or data["availability"] != "observed" or data["currency"] != "EUR" or not _is_clipper_observed_timestamp(data["generatedAt"]):
+        return False
+    if not _validate_clipper_provenance(data["provenance"], top_level=True) or not _validate_clipper_metrics(data["metrics"]):
+        return False
+    accounts = data["accounts"]
+    trends = data["trends"]
+    breakdowns = data["breakdowns"]
+    if not isinstance(accounts, list) or not all(_validate_clipper_account(item) for item in accounts) or len({item["id"] for item in accounts}) != len(accounts):
+        return False
+    if not isinstance(breakdowns, list) or not all(_validate_clipper_breakdown(item) for item in breakdowns) or len({item["id"] for item in breakdowns}) != len(breakdowns):
+        return False
+    if not isinstance(trends, list):
+        return False
+    for trend in trends:
+        if not isinstance(trend, dict) or set(trend) != {"at", "metrics"} or not _is_clipper_observed_timestamp(trend["at"]) or not _validate_clipper_metrics(trend["metrics"]):
+            return False
+    has_detail = _clipper_metric_is_observed(data["metrics"]) or any(
+        _clipper_metric_is_observed(account["metrics"])
+        or any(_clipper_metric_is_observed(bot["metrics"]) or any(_clipper_metric_is_observed(item["metrics"]) for item in bot["breakdowns"]) for bot in account["bots"])
+        or any(_clipper_metric_is_observed(item["metrics"]) for item in account["breakdowns"])
+        for account in accounts
     )
+    if not has_detail:
+        return False
+
+    generated = datetime.fromisoformat(data["generatedAt"].replace("Z", "+00:00"))
+    timestamps = [data["provenance"]["observedAt"]]
+    def add_metrics(metrics: dict) -> None:
+        timestamps.extend(metrics[key]["provenance"]["observedAt"] for key in ("views", "subscribers", "revenue"))
+    add_metrics(data["metrics"])
+    for account in accounts:
+        add_metrics(account["metrics"])
+        for bot in account["bots"]:
+            add_metrics(bot["metrics"])
+            for item in bot["breakdowns"]: add_metrics(item["metrics"])
+        for item in account["breakdowns"]: add_metrics(item["metrics"])
+    for trend in trends:
+        timestamps.append(trend["at"])
+        add_metrics(trend["metrics"])
+    for item in breakdowns: add_metrics(item["metrics"])
+    try:
+        return all(datetime.fromisoformat(value.replace("Z", "+00:00")) <= generated + timedelta(seconds=5) for value in timestamps)
+    except (OverflowError, OSError, ValueError):
+        return False
+
+
+def _validate_clipper_snapshot(data: object) -> bool:
+    if isinstance(data, dict) and data.get("availability") == "unavailable":
+        return _validate_clipper_unavailable_snapshot(data)
+    if isinstance(data, dict) and data.get("availability") == "observed":
+        return _validate_clipper_observed_snapshot(data)
+    return False
 
 
 enable_banking = EnableBankingService(
@@ -849,8 +1021,22 @@ async def _read_bounded_finance_request(request: Request) -> bytes:
     return bytes(body)
 
 
-def _finance_consent_response(payload: dict, status_code: int) -> JSONResponse:
-    return JSONResponse(payload, status_code=status_code, headers={"Cache-Control": "no-store"})
+def _finance_consent_response(payload: dict, status_code: int) -> Response:
+    """Return a compact Finance envelope within the native client's bound."""
+    try:
+        body = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError):
+        body = b'{"error":"finance unavailable"}'
+        status_code = 503
+    if len(body) > EnableBankingService.MAX_FINANCE_SUMMARY_SIZE:
+        body = b'{"error":"finance unavailable"}'
+        status_code = 503
+    return Response(
+        content=body,
+        status_code=status_code,
+        media_type="application/json",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 def _finance_callback_page(linked: bool) -> Response:
@@ -1093,7 +1279,11 @@ async def _proxy_validated_json(
                         if len(body) + len(chunk) > max_response_size:
                             return Response(content=error, media_type="application/json", status_code=503)
                         body.extend(chunk)
-                    upstream_data = json.loads(body, object_pairs_hook=_reject_duplicate_keys)
+                    upstream_data = json.loads(
+                        body,
+                        object_pairs_hook=_reject_duplicate_keys,
+                        parse_constant=_reject_nonfinite_constant,
+                    )
                     if not validator(upstream_data):
                         return Response(content=error, media_type="application/json", status_code=503)
                     canonical = json.dumps(
@@ -1154,6 +1344,18 @@ async def _proxy_claude_ingest(request: Request) -> Response:
     except _ClaudeIngestRequestError as exc:
         return _claude_ingest_input_error(exc.status_code)
 
+    observed_header = request.headers.get(CLAUDE_INGEST_OBSERVED_HEADER)
+    observed_at = None
+    if observed_header is not None:
+        if not isinstance(observed_header, str) or len(observed_header) > 64:
+            return _claude_ingest_input_error(400)
+        try:
+            parsed_observed_at = datetime.fromisoformat(observed_header.replace("Z", "+00:00"))
+            if parsed_observed_at.tzinfo is None or parsed_observed_at > datetime.now(timezone.utc) + timedelta(seconds=5):
+                return _claude_ingest_input_error(400)
+            observed_at = parsed_observed_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        except (TypeError, ValueError, OverflowError):
+            return _claude_ingest_input_error(400)
     observed = any("used_percentage" in window for window in sanitized["rate_limits"].values())
     if not observed:
         return JSONResponse({"error": "usage_unavailable"}, status_code=422)
@@ -1172,6 +1374,7 @@ async def _proxy_claude_ingest(request: Request) -> Response:
                     headers={
                         "Authorization": f"Bearer {secret}",
                         "Content-Type": "application/json",
+                        **({"X-Observed-At": observed_at} if observed_at is not None else {}),
                     },
                 ) as upstream:
                     if not 200 <= upstream.status_code < 300:
@@ -1194,6 +1397,398 @@ async def _proxy_claude_ingest(request: Request) -> Response:
     return Response(status_code=204)
 
 
+class _NutritionPhotoRequestError(Exception):
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+
+
+async def _read_nutrition_photo_body(request: Request) -> bytes:
+    try:
+        async with asyncio.timeout(NUTRITION_PHOTO_BODY_TIMEOUT):
+            raw_length = request.headers.get("content-length")
+            if raw_length is not None:
+                try:
+                    content_length = int(raw_length)
+                except ValueError as exc:
+                    raise _NutritionPhotoRequestError(400) from exc
+                if content_length < 0 or content_length > NUTRITION_PHOTO_MAX_BODY_SIZE:
+                    raise _NutritionPhotoRequestError(413)
+            body = bytearray()
+            async for chunk in request.stream():
+                if len(body) + len(chunk) > NUTRITION_PHOTO_MAX_BODY_SIZE:
+                    raise _NutritionPhotoRequestError(413)
+                body.extend(chunk)
+            return bytes(body)
+    except TimeoutError as exc:
+        raise _NutritionPhotoRequestError(408) from exc
+
+
+def _photo_lineage(manifest: object) -> tuple[str, str, list[dict[str, str]]] | None:
+    """Validate the photo bytes at the trusted gateway boundary.
+
+    The client supplies a manifest for provenance, but its claimed digest,
+    length, and MIME type are not trusted. Recompute those values here before
+    forwarding any image to the provider. This keeps a forged manifest from
+    binding a different byte payload to an apparently valid proposal.
+    """
+    if not isinstance(manifest, dict):
+        return None
+    meal_id = manifest.get("mealID")
+    request_id = manifest.get("requestID")
+    images = manifest.get("images")
+    if (
+        not isinstance(meal_id, str)
+        or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9_-]{0,127})?", meal_id)
+        or not isinstance(request_id, str)
+        or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9_-]{0,127})?", request_id)
+        or not isinstance(images, list)
+        or not 1 <= len(images) <= NUTRITION_PHOTO_MAX_IMAGE_COUNT
+    ):
+        return None
+    hashes: list[dict[str, str]] = []
+    seen: set[str] = set()
+    total_bytes = 0
+    for image in images:
+        if not isinstance(image, dict):
+            return None
+        image_id = image.get("imageID")
+        mime_type = image.get("mimeType")
+        byte_length = image.get("byteLength")
+        encoded = image.get("inlineDataBase64")
+        digest = image.get("sha256")
+        if (
+            not isinstance(image_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9_-]{0,127})?", image_id)
+            or mime_type not in {"image/jpeg", "image/png", "image/heic", "image/webp"}
+            or image.get("sanitized") is not True
+            or isinstance(byte_length, bool)
+            or not isinstance(byte_length, int)
+            or not 1 <= byte_length <= NUTRITION_PHOTO_MAX_IMAGE_BYTES
+            or not isinstance(encoded, str)
+            or not encoded
+            or not isinstance(digest, str)
+            or not re.fullmatch(r"[A-Fa-f0-9]{64}", digest)
+            or image_id in seen
+        ):
+            return None
+        try:
+            decoded = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error):
+            return None
+        if (
+            base64.b64encode(decoded).decode("ascii") != encoded
+            or len(decoded) != byte_length
+            or hashlib.sha256(decoded).hexdigest() != digest.casefold()
+            or not _nutrition_photo_magic_matches(mime_type, decoded)
+        ):
+            return None
+        width = image.get("width")
+        height = image.get("height")
+        if (
+            isinstance(width, bool)
+            or not isinstance(width, int)
+            or not 1 <= width <= NUTRITION_PHOTO_MAX_IMAGE_DIMENSION
+            or isinstance(height, bool)
+            or not isinstance(height, int)
+            or not 1 <= height <= NUTRITION_PHOTO_MAX_IMAGE_DIMENSION
+            or width * height > NUTRITION_PHOTO_MAX_IMAGE_PIXELS
+        ):
+            return None
+        total_bytes += byte_length
+        if total_bytes > NUTRITION_PHOTO_MAX_IMAGE_BYTES:
+            return None
+        seen.add(image_id)
+        hashes.append({"imageID": image_id, "sha256": digest.lower()})
+    return meal_id, request_id, hashes
+
+
+def _nutrition_photo_magic_matches(mime_type: str, data: bytes) -> bool:
+    if mime_type == "image/jpeg":
+        return data.startswith(b"\xff\xd8\xff")
+    if mime_type == "image/png":
+        return data.startswith(b"\x89PNG\r\n\x1a\n")
+    if mime_type == "image/webp":
+        return len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP"
+    if mime_type == "image/heic":
+        if len(data) < 12 or data[4:8] != b"ftyp":
+            return False
+        brands = [data[8:12]]
+        brands.extend(data[index:index + 4] for index in range(16, len(data) - 3, 4))
+        return any(brand in {b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1"} for brand in brands)
+    return False
+
+
+def _validate_nutrition_photo_proposal(data: object, lineage: tuple[str, str, list[dict[str, str]]]) -> bool:
+    """Validate the response envelope before it leaves the private gateway.
+
+    The Node adapter performs the complete contract validation. This second,
+    intentionally small check prevents a misconfigured upstream from
+    returning a different request's proposal or an arbitrary JSON document.
+    """
+    if not isinstance(data, dict):
+        return False
+    allowed = {
+        "schemaVersion", "mealID", "proposalID", "requestID", "state",
+        "generatedAt", "provenance", "items", "totals", "flags", "uncertaintyNotes",
+    }
+    if set(data) != allowed:
+        return False
+    if (
+        data.get("schemaVersion") != 1
+        or data.get("mealID") != lineage[0]
+        or data.get("requestID") != lineage[1]
+        or data.get("state") != "needs_confirmation"
+        or not isinstance(data.get("items"), list)
+        or not data["items"]
+        or not isinstance(data.get("totals"), dict)
+        or not isinstance(data.get("flags"), list)
+        or "needs_confirmation" not in data["flags"]
+    ):
+        return False
+    provenance = data.get("provenance")
+    if not isinstance(provenance, dict):
+        return False
+    if set(provenance) != {
+        "provider", "modelIdentifier", "modelVersion", "policyVersion",
+        "requestTimestamp", "sanitizedImageHashes",
+    }:
+        return False
+    received_hashes = provenance.get("sanitizedImageHashes")
+    if received_hashes != lineage[2]:
+        return False
+    if _contains_sensitive({"proposal": data}):
+        return False
+    return True
+
+
+def _is_valid_nutrition_barcode(value: object) -> bool:
+    if not isinstance(value, str) or not re.fullmatch(r"(?:\d{8}|\d{13})", value):
+        return False
+    check_digit = int(value[-1])
+    total = 0
+    weight = 3
+    for character in reversed(value[:-1]):
+        total += int(character) * weight
+        weight = 1 if weight == 3 else 3
+    return (10 - (total % 10)) % 10 == check_digit
+
+
+def _validate_nutrition_barcode_provenance(value: object) -> bool:
+    required = {
+        "source", "apiVersion", "apiURL", "fetchedAt", "databaseLicense",
+        "contentLicense", "attribution", "dataQualityWarning",
+    }
+    if not isinstance(value, dict) or not required.issubset(value) or not set(value).issubset(required | {"productURL"}):
+        return False
+    if (
+        value["source"] != "openfoodfacts"
+        or value["apiVersion"] != "v3.6"
+        or value["databaseLicense"] != "ODbL-1.0"
+        or value["contentLicense"] != "DbCL-1.0"
+        or value["dataQualityWarning"] != "Open Food Facts data is volunteer-sourced; accuracy, completeness, and reliability are not guaranteed."
+        or not isinstance(value["attribution"], str)
+        or not 1 <= len(value["attribution"]) <= 500
+        or not _is_usage_observed_timestamp(value["fetchedAt"])
+    ):
+        return False
+    for key in ("apiURL", "productURL"):
+        if key not in value:
+            continue
+        if not isinstance(value[key], str) or len(value[key]) > 2_048:
+            return False
+        try:
+            parsed = urlsplit(value[key])
+        except ValueError:
+            return False
+        if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+            return False
+    return True
+
+
+def _validate_nutrition_barcode_macros(value: object, *, per_100g: bool) -> bool:
+    if not isinstance(value, dict):
+        return False
+    allowed = {"kcal", "proteinGrams", "carbsGrams", "fatGrams"}
+    if not set(value).issubset(allowed) or not value:
+        return False
+    for key, number in value.items():
+        maximum = 1_000 if per_100g and key == "kcal" else 100 if per_100g else 5_000 if key == "kcal" else 2_000
+        if not _is_number(number) or number < 0 or number > maximum:
+            return False
+    return True
+
+
+def _validate_nutrition_barcode_payload(data: object, expected_barcode: str) -> bool:
+    if not isinstance(data, dict) or data.get("schemaVersion") != 1 or data.get("barcode") != expected_barcode:
+        return False
+    if not _validate_nutrition_barcode_provenance(data.get("provenance")):
+        return False
+    state = data.get("state")
+    common = {"schemaVersion", "barcode", "provenance", "state"}
+    if state == "not_found":
+        return set(data) == common
+    if state == "unavailable":
+        if not set(data).issubset(common | {"reason", "retryAfterSeconds"}) or data.get("reason") not in {
+            "upstream_timeout", "upstream_rate_limited", "upstream_unavailable",
+            "upstream_redirect", "upstream_oversized", "invalid_response", "configuration_unavailable",
+        }:
+            return False
+        retry_after = data.get("retryAfterSeconds")
+        return retry_after is None or (
+            isinstance(retry_after, int) and not isinstance(retry_after, bool) and 0 <= retry_after <= 3_600
+        )
+    if state != "found" or not set(data).issubset(common | {
+        "product", "nutritionState", "per100g", "perServing", "qualityFlags"
+    }):
+        return False
+    product = data.get("product")
+    if not isinstance(product, dict) or not set(product).issubset({
+        "name", "brand", "quantity", "servingSize", "countriesTags"
+    }):
+        return False
+    for key in ("name", "brand", "quantity", "servingSize"):
+        if key in product and (not isinstance(product[key], str) or not 1 <= len(product[key].strip()) <= 240):
+            return False
+    if "countriesTags" in product:
+        tags = product["countriesTags"]
+        if not isinstance(tags, list) or len(tags) > 50 or not all(
+            isinstance(tag, str) and 1 <= len(tag.strip()) <= 120 for tag in tags
+        ):
+            return False
+    per_100g = data.get("per100g")
+    per_serving = data.get("perServing")
+    if per_100g is None and per_serving is None:
+        has_nutrition = False
+    else:
+        has_nutrition = True
+        if per_100g is not None and not _validate_nutrition_barcode_macros(per_100g, per_100g=True):
+            return False
+        if per_serving is not None and not _validate_nutrition_barcode_macros(per_serving, per_100g=False):
+            return False
+    flags = data.get("qualityFlags", [])
+    if not isinstance(flags, list) or len(flags) > 2 or len(set(flags)) != len(flags) or not all(
+        flag in {"provider_quality_error", "provider_quality_warning"} for flag in flags
+    ):
+        return False
+    nutrition_state = data.get("nutritionState")
+    if nutrition_state not in {"complete", "partial", "unreliable", "unavailable"}:
+        return False
+    complete_basis = any(
+        isinstance(basis, dict)
+        and {"kcal", "proteinGrams", "carbsGrams", "fatGrams"}.issubset(basis)
+        for basis in (per_100g, per_serving)
+    )
+    if nutrition_state == "unavailable":
+        return not has_nutrition and not flags
+    if not has_nutrition:
+        return False
+    if nutrition_state == "complete":
+        return complete_basis and not flags
+    if nutrition_state == "partial":
+        return not complete_basis and not flags
+    return nutrition_state == "unreliable" and bool(flags)
+
+
+@app.get("/nutrition/barcode/{barcode}")
+async def get_nutrition_barcode(barcode: str) -> Response:
+    """Proxy the normalized barcode contract through the authenticated gateway."""
+    if not _is_valid_nutrition_barcode(barcode):
+        return JSONResponse({"error": "invalid_barcode"}, status_code=400)
+    upstream_url = f"{NUTRITION_BARCODE_UPSTREAM}/{barcode}"
+    return await _proxy_validated_json(
+        upstream_url,
+        lambda payload: _validate_nutrition_barcode_payload(payload, barcode),
+        "nutrition",
+        max_response_size=256 * 1024,
+        request_timeout=httpx.Timeout(5.0, connect=2.0),
+        total_timeout=6.0,
+    )
+
+
+@app.post("/nutrition/photo-proposal")
+async def post_nutrition_photo_proposal(request: Request) -> Response:
+    if request.headers.get("content-type", "").lower().split(";", 1)[0].strip() != "application/json":
+        return JSONResponse({"error": "invalid_request"}, status_code=415)
+    try:
+        body = await _read_nutrition_photo_body(request)
+        manifest = json.loads(
+            body.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite_constant,
+        )
+        lineage = _photo_lineage(manifest)
+        if lineage is None:
+            raise _NutritionPhotoRequestError(400)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return JSONResponse({"error": "invalid_request"}, status_code=400)
+    except _NutritionPhotoRequestError as exc:
+        error = "request_too_large" if exc.status_code == 413 else "request_timeout" if exc.status_code == 408 else "invalid_request"
+        return JSONResponse({"error": error}, status_code=exc.status_code)
+
+    try:
+        async with asyncio.timeout(NUTRITION_PHOTO_TOTAL_TIMEOUT):
+            async with httpx.AsyncClient(
+                timeout=NUTRITION_PHOTO_REQUEST_TIMEOUT,
+                follow_redirects=False,
+                trust_env=False,
+            ) as client:
+                async with client.stream(
+                    "POST",
+                    NUTRITION_PHOTO_UPSTREAM,
+                    content=body,
+                    headers={"Content-Type": "application/json"},
+                ) as upstream:
+                    if upstream.status_code != 200:
+                        return JSONResponse({"error": "nutrition_unavailable"}, status_code=503)
+                    content_length = upstream.headers.get("content-length")
+                    if content_length is not None:
+                        try:
+                            declared_length = int(content_length)
+                        except (TypeError, ValueError):
+                            return JSONResponse({"error": "nutrition_unavailable"}, status_code=502)
+                        if declared_length < 0 or declared_length > NUTRITION_PHOTO_MAX_RESPONSE_SIZE:
+                            return JSONResponse({"error": "nutrition_unavailable"}, status_code=502)
+                    response_body = bytearray()
+                    async for chunk in upstream.aiter_bytes():
+                        if len(response_body) + len(chunk) > NUTRITION_PHOTO_MAX_RESPONSE_SIZE:
+                            return JSONResponse({"error": "nutrition_unavailable"}, status_code=502)
+                        response_body.extend(chunk)
+                    proposal = json.loads(
+                        response_body,
+                        object_pairs_hook=_reject_duplicate_keys,
+                        parse_constant=_reject_nonfinite_constant,
+                    )
+                    if not _validate_nutrition_photo_proposal(proposal, lineage):
+                        return JSONResponse({"error": "nutrition_unavailable"}, status_code=502)
+                    canonical = json.dumps(proposal, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+                    return Response(
+                        content=canonical,
+                        media_type="application/json",
+                        headers={"Cache-Control": "no-store"},
+                    )
+    except Exception:
+        return JSONResponse({"error": "nutrition_unavailable"}, status_code=503)
+
+
+@app.get("/supplements/catalog")
+async def get_supplement_catalog(request: Request) -> Response:
+    """Search the Windows reference catalog without exposing SQLite itself."""
+    try:
+        payload = supplement_catalog.search(
+            request.query_params.get("q"),
+            request.query_params.get("limit"),
+        )
+    except SupplementCatalogInvalidQuery:
+        return JSONResponse({"error": "invalid_request"}, status_code=400)
+    except SupplementCatalogUnavailable:
+        return JSONResponse({"error": "supplement_catalog_unavailable"}, status_code=503)
+    return Response(
+        content=json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode(),
+        media_type="application/json",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @app.get("/usage")
 async def get_usage() -> Response:
     return await _proxy_validated_json(USAGE_UPSTREAM, _validate_usage_payload, "usage")
@@ -1204,9 +1799,11 @@ async def get_finance_summary() -> Response:
     try:
         payload = await enable_banking.refresh_summary()
     except Exception:
-        payload = enable_banking.load_cached_summary()
-        if payload is None:
-            return _finance_consent_response({"error": "finance unavailable"}, 503)
+        # Never relabel a prior observation as a fresh HTTP 200 response after
+        # a failed refresh. The existing contract has no explicit partial
+        # state, so this boundary fails closed until a tested stale-envelope
+        # transformation is introduced.
+        return _finance_consent_response({"error": "finance unavailable"}, 503)
     return _finance_consent_response(payload, 200)
 
 
@@ -1214,7 +1811,7 @@ async def get_finance_summary() -> Response:
 async def get_clipper_summary() -> Response:
     return await _proxy_validated_json(
         CLIPPER_UPSTREAM,
-        _validate_clipper_unavailable_snapshot,
+        _validate_clipper_snapshot,
         "clipper",
         max_response_size=CLIPPER_MAX_RESPONSE_SIZE,
         request_timeout=CLIPPER_REQUEST_TIMEOUT,

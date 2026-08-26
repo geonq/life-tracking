@@ -13,7 +13,7 @@ struct UsageProjectionChart: View {
     let window: UsageWindow?
     let analytics: UsageAnalyticsSnapshot
 
-    @State private var selectedIndex: Int?
+    @State private var selectedID: String?
     @State private var pinnedRangeStart: Date?
     @State private var zoomFactor: Double = 1
 
@@ -88,8 +88,8 @@ struct UsageProjectionChart: View {
     }
 
     private var selectedPoint: UsageSelectionPoint? {
-        guard let selectedIndex, allSelectablePoints.indices.contains(selectedIndex) else { return nil }
-        return allSelectablePoints[selectedIndex]
+        guard let selectedID else { return nil }
+        return allSelectablePoints.first { $0.id == selectedID }
     }
 
     private var chartDomain: ClosedRange<Date> {
@@ -157,7 +157,7 @@ struct UsageProjectionChart: View {
                 // Do not invent a default observation. The hero is sourced from the selected
                 // window, while analytics can contain a different observation cadence. A scrub
                 // point appears only after the user explicitly chooses one.
-                selectedIndex = nil
+                selectedID = nil
                 pinnedRangeStart = nil
                 zoomFactor = 1
             }
@@ -172,7 +172,9 @@ struct UsageProjectionChart: View {
     }
 
     private var selectionDomainID: String {
-        let pointIDs = allSelectablePoints.map { "\($0.date.timeIntervalSinceReferenceDate)-\($0.isProjected)" }
+        let pointIDs = allSelectablePoints.map {
+            "\($0.date.timeIntervalSinceReferenceDate)-\($0.isProjected)-\($0.usedPercent)"
+        }
         return "\(window?.id ?? "none")|\(pointIDs.joined(separator: ","))"
     }
 
@@ -227,7 +229,7 @@ struct UsageProjectionChart: View {
 
                 if let selectedPoint {
                     RuleMark(x: .value("Selected", selectedPoint.date))
-                        .foregroundStyle(Color.primary.opacity(0.18))
+                        .foregroundStyle(LifeOSTokens.primaryText.opacity(0.18))
                         .lineStyle(StrokeStyle(lineWidth: 0.75))
                     PointMark(x: .value("Selected time", selectedPoint.date), y: .value("Selected usage", selectedPoint.usedPercent))
                         .symbolSize(46)
@@ -244,18 +246,13 @@ struct UsageProjectionChart: View {
             .chartYAxis { yAxisMarks }
             .chartXAxis { xAxisMarks }
             .chartPlotStyle { plot in
-                plot.mask(alignment: .leading) {
-                    GeometryReader { geometry in
-                        Rectangle()
-                            .fill(.white)
-                            .frame(width: geometry.size.width * chartDrawProgress)
-                    }
-                }
+                // Read the draw progress inside the Chart plot subtree. A
+                // parent view cannot capture a child-modified environment
+                // value while building its own body.
+                LifeOSChartDrawReveal(content: plot)
             }
-            .chartDrawOn()
+            .chartDrawOn(id: selectionDomainID)
     }
-
-    @Environment(\.lifeOSChartDrawn) private var chartDrawProgress
 
     private var yAxisMarks: some AxisContent {
         AxisMarks(values: [0, 0.25, 0.5, 0.75, 1]) { value in
@@ -321,7 +318,7 @@ struct UsageProjectionChart: View {
                             .font(.caption.weight(.semibold))
                         Text(selectedPoint.date, format: .dateTime.month(.abbreviated).day().hour().minute())
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(LifeOSTokens.secondaryText)
                     }
                     Text("\(provider.displayName) · \(qualityTag)")
                         .font(.caption2)
@@ -330,13 +327,13 @@ struct UsageProjectionChart: View {
             } else {
                 Text(scrubHintText)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(LifeOSTokens.secondaryText)
             }
             Spacer(minLength: 8)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
-        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(LifeOSTokens.primaryText.opacity(0.045), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     private var scrubHintText: String {
@@ -358,11 +355,17 @@ struct UsageProjectionChart: View {
 
     private func selectClosest(to date: Date) {
         guard !allSelectablePoints.isEmpty else { return }
-        let closest = allSelectablePoints.enumerated().min {
-            abs($0.element.date.timeIntervalSince(date)) < abs($1.element.date.timeIntervalSince(date))
+        let closest = allSelectablePoints.min {
+            let leftDistance = abs($0.date.timeIntervalSince(date))
+            let rightDistance = abs($1.date.timeIntervalSince(date))
+            guard leftDistance == rightDistance else { return leftDistance < rightDistance }
+            if $0.isProjected != $1.isProjected {
+                return !$0.isProjected
+            }
+            return $0.date < $1.date
         }
-        if let closest, closest.offset != selectedIndex {
-            selectedIndex = closest.offset
+        if let closest, closest.id != selectedID {
+            selectedID = closest.id
             ScrubBubble<EmptyView>.snapHaptic()
         }
     }
@@ -408,9 +411,9 @@ struct UsageProjectionChart: View {
 
     private func metaRowContent(label: String, value: String) -> some View {
         HStack {
-            Text(label).foregroundStyle(.secondary)
+            Text(label).foregroundStyle(LifeOSTokens.secondaryText)
             Spacer()
-            Text(value).foregroundStyle(.primary)
+            Text(value).foregroundStyle(LifeOSTokens.primaryText)
         }
         .font(.caption)
     }
@@ -422,7 +425,7 @@ struct UsageProjectionChart: View {
                 Text(label)
             }
             .font(.caption)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(LifeOSTokens.secondaryText)
         }
         .buttonStyle(.plain)
     }

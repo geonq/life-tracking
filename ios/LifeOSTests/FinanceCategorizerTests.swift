@@ -37,6 +37,11 @@ final class FinanceCategorizerTests: XCTestCase {
         XCTAssertEqual(FinanceCategorizer.category(for: "Vodafone GmbH", amountCents: -3999), .bills)
     }
 
+    func testGermanDiacriticsMatchFeesAndTransfersWithoutUberCollision() {
+        XCTAssertEqual(FinanceCategorizer.category(for: "Bankgebühr Kontoführung", amountCents: -399), .fees)
+        XCTAssertEqual(FinanceCategorizer.category(for: "Überweisung an Vermieter", amountCents: -85000), .transfers)
+    }
+
     // MARK: 2. English / international merchant keyword matching
 
     func testEnglishSubscriptionKeywordsMatchSubscriptions() {
@@ -47,6 +52,10 @@ final class FinanceCategorizerTests: XCTestCase {
     func testEnglishShoppingKeywordsMatchShopping() {
         XCTAssertEqual(FinanceCategorizer.category(for: "AMAZON.DE MARKETPLACE", amountCents: -5499), .shopping)
         XCTAssertEqual(FinanceCategorizer.category(for: "Zalando SE", amountCents: -7999), .shopping)
+    }
+
+    func testSpecificSubscriptionWinsOverBroadAmazonShoppingRule() {
+        XCTAssertEqual(FinanceCategorizer.category(for: "Amazon Prime", amountCents: -899), .subscriptions)
     }
 
     func testEnglishTransportKeywordsMatchTransport() {
@@ -91,6 +100,24 @@ final class FinanceCategorizerTests: XCTestCase {
         XCTAssertEqual(FinanceCategorizer.category(for: "Transfer from J. Schmidt", amountCents: 15000), .uncategorized)
     }
 
+    func testRecognizedStatementCategoryWinsOverMerchantHeuristic() {
+        XCTAssertEqual(
+            FinanceCategorizer.category(for: "Unknown merchant", amountCents: -1200, sourceCategory: "Food"),
+            .groceries
+        )
+        XCTAssertEqual(
+            FinanceCategorizer.category(for: "Amazon Marketplace", amountCents: -1200, sourceCategory: "Health"),
+            .health
+        )
+    }
+
+    func testIncomeSourceCategoryDoesNotOverrideOutflowDirection() {
+        XCTAssertNotEqual(
+            FinanceCategorizer.category(for: "Unknown", amountCents: -1200, sourceCategory: "Income"),
+            .income
+        )
+    }
+
     // MARK: 5. Summary totals — integer cents, in/out/net
 
     func testSummaryAggregatesOutflowInflowAndCountPerCategory() {
@@ -111,6 +138,18 @@ final class FinanceCategorizerTests: XCTestCase {
         XCTAssertEqual(income.inflowCents, 300000)
         XCTAssertEqual(income.outflowCents, 0)
         XCTAssertEqual(income.count, 1)
+    }
+
+    func testSummaryUsesImportedSourceCategory() {
+        let imported = FinanceImportedTransaction(
+            bookedAt: now,
+            amountCents: -2_000,
+            description: "Unknown merchant",
+            category: "Health",
+            source: .genericCSV,
+            importedAt: now
+        )
+        XCTAssertEqual(FinanceCategorizer.summary(for: [imported]).first?.category, .health)
     }
 
     func testSummarySortedByAbsoluteSpendDescending() {

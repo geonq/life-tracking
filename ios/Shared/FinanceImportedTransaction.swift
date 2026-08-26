@@ -32,8 +32,9 @@ public struct FinanceImportedTransaction: Codable, Equatable, Identifiable, Send
     public let amountCents: Int
     /// Merchant or memo text as found in the statement row.
     public let description: String
-    /// Optional category, if the statement (or a future manual edit) supplies
-    /// one. `nil` is honest "not categorized," not a fabricated default.
+    /// Optional provider category or canonical user override. `nil` means the
+    /// description should be categorized automatically; it is not a
+    /// fabricated default.
     public var category: String?
     public let source: FinanceImportSource
     /// When this row was imported into LifeOS (not when it was booked).

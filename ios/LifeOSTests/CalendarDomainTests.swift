@@ -1073,3 +1073,95 @@ final class CalendarDomainTests: XCTestCase {
 #endif
     }
 }
+
+final class CalendarEditorStringLocalizationTests: XCTestCase {
+    func testGermanLocaleResolvesEveryEditorSheetString() {
+        XCTAssertEqual(CalendarEditorStrings.allDay(localeIdentifier: "de_DE"), "Ganztägig")
+        XCTAssertEqual(CalendarEditorStrings.timezone(localeIdentifier: "de_DE"), "Zeitzone")
+        XCTAssertEqual(CalendarEditorStrings.titlePlaceholder(localeIdentifier: "de_DE"), "Titel")
+        XCTAssertEqual(CalendarEditorStrings.repeatLabel(localeIdentifier: "de_DE"), "Wiederholen")
+        XCTAssertEqual(CalendarEditorStrings.recurrenceNone(localeIdentifier: "de_DE"), "Nie")
+        XCTAssertEqual(CalendarEditorStrings.untilLabel(localeIdentifier: "de_DE"), "Bis")
+        XCTAssertEqual(CalendarEditorStrings.markDone(localeIdentifier: "de_DE"), "Als erledigt markieren")
+        XCTAssertEqual(CalendarEditorStrings.deleteEvent(localeIdentifier: "de_DE"), "Ereignis löschen")
+        XCTAssertEqual(CalendarEditorStrings.cancel(localeIdentifier: "de_DE"), "Abbrechen")
+        XCTAssertEqual(CalendarEditorStrings.save(localeIdentifier: "de_DE"), "Sichern")
+    }
+
+    func testEnglishLocalePreservesExistingEditorSheetCopy() {
+        XCTAssertEqual(CalendarEditorStrings.allDay(localeIdentifier: "en_US"), "All day")
+        XCTAssertEqual(CalendarEditorStrings.timezone(localeIdentifier: "en_US"), "Timezone")
+        XCTAssertEqual(CalendarEditorStrings.titlePlaceholder(localeIdentifier: "en_US"), "Event title")
+        XCTAssertEqual(CalendarEditorStrings.repeatLabel(localeIdentifier: "en_US"), "Repeat")
+        XCTAssertEqual(CalendarEditorStrings.recurrenceNone(localeIdentifier: "en_US"), "None")
+        XCTAssertEqual(CalendarEditorStrings.untilLabel(localeIdentifier: "en_US"), "Until")
+        XCTAssertEqual(CalendarEditorStrings.markDone(localeIdentifier: "en_US"), "Mark done")
+        XCTAssertEqual(CalendarEditorStrings.deleteEvent(localeIdentifier: "en_US"), "Delete event")
+        XCTAssertEqual(CalendarEditorStrings.cancel(localeIdentifier: "en_US"), "Cancel")
+        XCTAssertEqual(CalendarEditorStrings.save(localeIdentifier: "en_US"), "Save")
+    }
+
+    func testRecurrenceFrequencyLabelsAreLocalized() {
+        let german = [
+            CalendarRecurrenceFrequency.daily: "Täglich",
+            .weekly: "Wöchentlich",
+            .monthly: "Monatlich",
+            .yearly: "Jährlich"
+        ]
+        for (frequency, expected) in german {
+            XCTAssertEqual(CalendarEditorStrings.recurrence(frequency, localeIdentifier: "de_DE"), expected)
+            XCTAssertEqual(CalendarEditorStrings.recurrence(frequency, localeIdentifier: "en_US"), frequency.label)
+        }
+    }
+
+    func testItemKindLabelsAreLocalized() {
+        let german = [
+            CalendarItemKind.event: "Ereignis",
+            .todo: "Aufgabe",
+            .dailySchedule: "Tagesplan"
+        ]
+        for (kind, expected) in german {
+            XCTAssertEqual(CalendarEditorStrings.kindLabel(kind, localeIdentifier: "de_DE"), expected)
+            XCTAssertEqual(CalendarEditorStrings.kindLabel(kind, localeIdentifier: "en_US"), kind.label)
+        }
+    }
+
+    func testProgressStatusLabelsAreLocalized() {
+        let german = [
+            CalendarProgress.planned: "Geplant",
+            .inProgress: "In Arbeit",
+            .done: "Erledigt",
+            .aborted: "Abgebrochen"
+        ]
+        for (progress, expected) in german {
+            XCTAssertEqual(CalendarEditorStrings.status(progress, localeIdentifier: "de_DE"), expected)
+            XCTAssertEqual(CalendarEditorStrings.status(progress, localeIdentifier: "en_US"), progress.label)
+        }
+    }
+
+    func testAnyGermanRegionPrefixResolvesGermanWhileOthersFallBackToEnglish() {
+        for identifier in ["de", "de_AT", "de_CH"] {
+            XCTAssertEqual(CalendarEditorStrings.allDay(localeIdentifier: identifier), "Ganztägig")
+        }
+        for identifier in ["en", "en_GB", "fr_FR", "es_ES", "ja_JP"] {
+            XCTAssertEqual(CalendarEditorStrings.allDay(localeIdentifier: identifier), "All day")
+        }
+    }
+
+    func testDurationUnitsUseGermanAbbreviations() {
+        XCTAssertTrue(CalendarLayoutDurationProbe.hourUnit(localeIdentifier: "de_DE").hasPrefix("Std"))
+        XCTAssertTrue(CalendarLayoutDurationProbe.minuteUnit(localeIdentifier: "de_DE").hasPrefix("Min"))
+        XCTAssertEqual(CalendarLayoutDurationProbe.hourUnit(localeIdentifier: "en_US"), "hr")
+        XCTAssertEqual(CalendarLayoutDurationProbe.minuteUnit(localeIdentifier: "en_US"), "min")
+    }
+}
+
+enum CalendarLayoutDurationProbe {
+    static func hourUnit(localeIdentifier: String) -> String {
+        CalendarEditorStrings.de("Std.", "hr", localeIdentifier: localeIdentifier)
+    }
+
+    static func minuteUnit(localeIdentifier: String) -> String {
+        CalendarEditorStrings.de("Min", "min", localeIdentifier: localeIdentifier)
+    }
+}

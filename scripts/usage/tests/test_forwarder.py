@@ -283,6 +283,12 @@ class UploaderTests(unittest.TestCase):
         self.assertEqual(opener.timeout, uploader.REQUEST_TIMEOUT_SECONDS)
         self.assertTrue(opener.response.closed)
 
+    def test_process_once_forwards_claim_capture_time_without_putting_it_in_the_body(self) -> None:
+        opener = _CaptureOpener()
+        self.assertEqual(uploader.process_once(self.spool, self.config, opener), uploader.SENT)
+        self.assertEqual(opener.request.get_header("X-observed-at")[-1:], "Z")
+        self.assertNotIn("observed", opener.request.data.decode("utf-8"))
+
     def test_spool_allowlist_rejects_secrets_and_nonfinite_or_duplicate_json(self) -> None:
         bad_values = (
             '{"rate_limits":{"five_hour":{"used_percentage":NaN}}}',

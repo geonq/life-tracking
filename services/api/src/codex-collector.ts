@@ -3,7 +3,7 @@
 import { request as httpRequest, type RequestOptions } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
-import { parseCodexIngestPayload, readCodexAppServer, type CodexLiveResult, type CodexWindow } from './codex-adapter.js';
+import { parseCodexIngestEnvelope, parseCodexIngestPayload, readCodexAppServer, type CodexLiveResult, type CodexWindow } from './codex-adapter.js';
 import { readIngestSecretFile } from './ingest-secret.js';
 
 const COLLECTOR_PORT = 8787;
@@ -13,7 +13,7 @@ const MAX_RESPONSE_BYTES = 16 * 1024;
 type RequestFactory = (options: RequestOptions, callback: (response: import('node:http').IncomingMessage) => void) => import('node:http').ClientRequest;
 type CollectorDependencies = {
   read?: () => Promise<CodexLiveResult>;
-  post?: (payload: { windows: CodexWindow[] }, secret: string) => Promise<void>;
+  post?: (payload: { windows: CodexWindow[]; observedAt?: string }, secret: string) => Promise<void>;
   secret?: () => Promise<string | undefined>;
 };
 
@@ -27,12 +27,13 @@ function collectorWindows(result: CodexLiveResult): CodexWindow[] {
 }
 
 export async function postCodexPayload(
-  payload: { windows: CodexWindow[] },
+  payload: { windows: CodexWindow[]; observedAt?: string },
   secret: string,
   port = COLLECTOR_PORT,
   requestFactory: RequestFactory = httpRequest,
 ): Promise<void> {
-  const encoded = Buffer.from(JSON.stringify({ windows: parseCodexIngestPayload(payload) }), 'utf8');
+  const envelope = parseCodexIngestEnvelope(payload);
+  const encoded = Buffer.from(JSON.stringify(envelope), 'utf8');
   await new Promise<void>((resolveRequest, rejectRequest) => {
     let settled = false;
     const fail = () => {
@@ -87,7 +88,7 @@ export async function runCodexCollector(dependencies: CollectorDependencies = {}
   const result = await (dependencies.read ?? readCodexAppServer)();
   if (!result.windows.length) throw new Error('collector_unavailable');
   const windows = collectorWindows(result);
-  await (dependencies.post ?? ((payload, token) => postCodexPayload(payload, token)))({ windows }, secret);
+  await (dependencies.post ?? ((payload, token) => postCodexPayload(payload, token)))({ windows, ...(result.observedAt ? { observedAt: result.observedAt } : {}) }, secret);
 }
 
 export async function main(): Promise<number> {

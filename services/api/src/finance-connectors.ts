@@ -41,4 +41,14 @@ export const financeConnectors = [
     risk: 'manual_import_only',
     recommendation: 'Permanent manual CSV/PDF import only; do not use private APIs or imply a live connector.',
   },
+  {
+    id: 'paypal_personal',
+    displayName: 'PayPal Personal',
+    accessMethod: 'official_oauth',
+    provider: 'Official PayPal Transaction Search API',
+    enabled: false,
+    requiresExplicitOptIn: true,
+    risk: 'account_eligibility_required',
+    recommendation: 'Verify account and reporting-scope eligibility, then implement server-side OAuth and Transaction Search; otherwise keep PayPal unavailable or use a manual export.',
+  },
 ] as const satisfies readonly FinanceConnectorDescriptor[];

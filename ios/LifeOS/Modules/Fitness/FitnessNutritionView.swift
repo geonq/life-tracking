@@ -2040,6 +2040,13 @@ private struct FitnessFoodReviewSheet: View {
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
     @State private var photoSelectionGeneration = 0
     @State private var photoLoadTask: Task<Void, Never>?
+    @State private var photoProposalTask: Task<Void, Never>?
+    @State private var photoProposal: FoodEstimateProposal?
+    @State private var photoProposalLoading = false
+    @State private var photoProposalError: String?
+    @State private var photoMealSaved = false
+    @State private var photoMealID = "photo-meal-\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())"
+    @State private var photoRequestID = "photo-request-\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())"
     @State private var mealName = "Meal"
     @State private var calories = ""
     @State private var protein = ""
@@ -2085,10 +2092,12 @@ private struct FitnessFoodReviewSheet: View {
                         VStack(alignment: .leading, spacing: 7) {
                             Text("Privacy and accuracy boundary")
                                 .font(LifeOSFont.header(14))
-                            Text("Sanitized photos would go device → private Windows LifeOS gateway → Google only after a future send. Nothing has left this device now. No estimate has been returned.")
+                            Text(photoProposal == nil
+                                ? "Sanitized photos go device → private Windows LifeOS gateway → Google only after you consent and tap Analyze. Nothing has left this device yet."
+                                : "The gateway returned an assistive proposal. Review every item and portion before anything is saved locally.")
                                 .font(LifeOSFont.body(12))
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
-                            Text(isDemo ? "DEMO PROPOSAL · fixture-only; no photo was uploaded" : "NO RESPONSE · nothing has left this device")
+                            Text(isDemo ? "DEMO PROPOSAL · fixture-only; no photo was uploaded" : (photoProposal == nil ? "READY FOR REVIEW · no photo has left this device" : "PROPOSAL ONLY · not a confirmed meal"))
                                 .font(LifeOSFont.caption(10))
                                 .foregroundStyle(LifeOSTokens.warning)
                         }
@@ -2097,6 +2106,7 @@ private struct FitnessFoodReviewSheet: View {
                     }
                     if method == .photo {
                         photoPreparationCard
+                        photoProposalCard
                         if isDemo {
                             demoProposalFields
                         }
@@ -2201,6 +2211,11 @@ private struct FitnessFoodReviewSheet: View {
             photoSelectionGeneration &+= 1
             photoLoadTask?.cancel()
             photoLoadTask = nil
+            photoProposalTask?.cancel()
+            photoProposalTask = nil
+            photoProposal = nil
+            photoProposalError = nil
+            photoProposalLoading = false
             photoPreparation.clear()
             selectedPhotoItems.removeAll()
         }
@@ -2350,6 +2365,16 @@ private struct FitnessFoodReviewSheet: View {
                 .accessibilityIdentifier("nutrition-barcode-basis")
                 FitnessEditableField(title: "Product name", text: $barcodeProductName)
                 FitnessEditableField(title: "Grams (optional)", text: $barcodeGrams, numeric: true)
+                    .onChange(of: barcodeGrams) { _, _ in
+                        applyBarcodeBasis(barcodeBasis, found: found)
+                    }
+                Text(barcodeBasis == .per100g
+                    ? "Enter the grams you ate; the kcal and macros below scale from the provider's per-100-g values."
+                    : "Grams are recorded as eaten amount. Per-serving values are not scaled unless the provider supplies a serving-weight conversion.")
+                    .font(LifeOSFont.caption(9))
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("nutrition-barcode-grams-help")
                 FitnessEditableField(title: "Calories (kcal)", text: $barcodeCalories, numeric: true)
                 FitnessEditableField(title: "Protein (g)", text: $barcodeProtein, numeric: true)
                 FitnessEditableField(title: "Carbohydrates (g)", text: $barcodeCarbohydrates, numeric: true)
@@ -2468,10 +2493,18 @@ private struct FitnessFoodReviewSheet: View {
     }
 
     private func applyBarcodeValues(_ values: NutritionBarcodeMacros) {
-        barcodeCalories = values.kcal.map(formatNutritionValue) ?? ""
-        barcodeProtein = values.proteinGrams.map(formatNutritionValue) ?? ""
-        barcodeCarbohydrates = values.carbsGrams.map(formatNutritionValue) ?? ""
-        barcodeFat = values.fatGrams.map(formatNutritionValue) ?? ""
+        let displayedValues: NutritionBarcodeMacros
+        if barcodeBasis == .per100g,
+           let grams = NutritionBarcodeValueParser.parse(barcodeGrams, maximum: 5_000),
+           let scaled = try? values.scaledFromPer100g(forGrams: grams) {
+            displayedValues = scaled
+        } else {
+            displayedValues = values
+        }
+        barcodeCalories = displayedValues.kcal.map(formatNutritionValue) ?? ""
+        barcodeProtein = displayedValues.proteinGrams.map(formatNutritionValue) ?? ""
+        barcodeCarbohydrates = displayedValues.carbsGrams.map(formatNutritionValue) ?? ""
+        barcodeFat = displayedValues.fatGrams.map(formatNutritionValue) ?? ""
     }
 
     private func applyBarcodeBasis(_ basis: NutritionBarcodeBasis, found: NutritionBarcodeFound) {
@@ -2578,6 +2611,7 @@ private struct FitnessFoodReviewSheet: View {
         case .invalidBarcode: return "Enter a checksum-valid EAN-8, EAN-13, or UPC-A barcode."
         case .httpError(let status): return "The authenticated gateway returned HTTP \(status). No values are available."
         case .responseTooLarge: return "The gateway response exceeded the safety bound. No values are available."
+        case .requestTooLarge: return "The selected photos exceed the upload safety bound. No photo was sent."
         case .invalidResponse: return "The gateway returned an invalid barcode response. No values are available."
         case .invalidServerURL: return "The LifeOS server URL is not approved. No lookup was attempted."
         case .invalidInstitutionId, .invalidConnectionId, .invalidConsentURL,
@@ -2735,16 +2769,205 @@ private struct FitnessFoodReviewSheet: View {
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                Button("Send unavailable") {}
-                    .buttonStyle(.borderedProminent)
-                    .tint(LifeOSTokens.accent)
-                    .disabled(true)
-                    .accessibilityIdentifier("food-photo-send-unavailable")
-                Text("Nothing has left this device now. The private Windows LifeOS gateway and future Google send are unavailable.")
-                    .font(LifeOSFont.caption(9))
-                    .foregroundStyle(LifeOSTokens.warning)
-                    .fixedSize(horizontal: false, vertical: true)
+                Button(photoProposalLoading ? "Analyzing photos…" : (photoProposal == nil ? "Analyze sanitized photos" : "Analyze again")) {
+                    sendPhotosForAnalysis()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(LifeOSTokens.accent)
+                .disabled(isDemo || photoPreparation.state != .ready || !photoPreparation.explicitConsent || photoProposalLoading)
+                .accessibilityIdentifier("food-photo-send")
+                if let photoProposalError {
+                    Text(photoProposalError)
+                        .font(LifeOSFont.caption(9))
+                        .foregroundStyle(LifeOSTokens.warning)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("food-photo-send-error")
+                } else {
+                    Text(isDemo
+                        ? "Demo mode does not send photos."
+                        : "The gateway uses its server-side Google AI Studio key. No key is stored in the app, and the response remains a proposal until you confirm it.")
+                        .font(LifeOSFont.caption(9))
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
+        }
+    }
+
+    @ViewBuilder
+    private var photoProposalCard: some View {
+        if let photoProposal {
+            FitnessCard {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text("Review proposal")
+                            .font(LifeOSFont.header(14))
+                        Spacer()
+                        Text(photoProposal.flags.map(photoFlagLabel).joined(separator: " · "))
+                            .font(LifeOSFont.caption(9))
+                            .foregroundStyle(LifeOSTokens.warning)
+                            .multilineTextAlignment(.trailing)
+                    }
+                    Text("Google AI Studio · \(photoProposal.provenance.modelIdentifier) · proposal only")
+                        .font(LifeOSFont.caption(9))
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                    ForEach(photoProposal.items, id: \.itemID) { item in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(item.estimatedLabel)
+                                .font(LifeOSFont.control())
+                            Text("\(photoRange(item.grams, suffix: "g")) · \(photoRange(item.calories, suffix: "kcal"))")
+                                .font(LifeOSFont.caption(10))
+                                .foregroundStyle(LifeOSTokens.tertiaryText)
+                            Text("\(item.confidence.rawValue.capitalized) confidence · \(item.unit.rawValue)")
+                                .font(LifeOSFont.caption(9))
+                                .foregroundStyle(item.confidence == .low ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)
+                        }
+                        .padding(.vertical, 3)
+                    }
+                    Divider().overlay(LifeOSTokens.hairlineBorder)
+                    Text("Total · \(photoRange(photoProposal.totals.grams, suffix: "g")) · \(photoRange(photoProposal.totals.calories, suffix: "kcal"))")
+                        .font(LifeOSFont.control())
+                    Text("Nothing is saved until you confirm this proposal. The selected range midpoint is used for the durable local meal record.")
+                        .font(LifeOSFont.caption(9))
+                        .foregroundStyle(LifeOSTokens.warning)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button(photoMealSaved ? "Saved locally" : "Confirm estimate & save locally") {
+                        confirmPhotoProposal()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(LifeOSTokens.success)
+                    .disabled(photoMealSaved || nutritionMealStore == nil || photoProposalLoading)
+                    .accessibilityIdentifier("food-photo-confirm")
+                }
+            }
+        }
+    }
+
+    private func sendPhotosForAnalysis() {
+        guard !isDemo, photoPreparation.state == .ready, photoPreparation.explicitConsent, !photoProposalLoading else { return }
+        let manifest: FoodPhotoManifest
+        do {
+            manifest = try photoPreparation.makeManifest(
+                mealID: photoMealID,
+                requestID: photoRequestID,
+                capturedAt: ISO8601DateFormatter().string(from: .now),
+                clientTimeZone: TimeZone.current.identifier
+            )
+        } catch {
+            photoProposalError = "The sanitized photo manifest is not ready. Select the photos again; nothing was sent."
+            return
+        }
+
+        photoProposalTask?.cancel()
+        photoProposalError = nil
+        photoProposalLoading = true
+        photoProposalTask = Task { @MainActor in
+            defer {
+                photoProposalLoading = false
+                photoProposalTask = nil
+            }
+            do {
+                let proposal = try await barcodeClient.fetchFoodPhotoProposal(manifest)
+                guard !Task.isCancelled else { return }
+                photoProposal = proposal
+                stage = .needsConfirmation
+            } catch let error as TailscaleSyncError {
+                guard !Task.isCancelled else { return }
+                photoProposalError = photoProposalErrorMessage(error)
+            } catch {
+                guard !Task.isCancelled else { return }
+                photoProposalError = "The gateway returned an invalid food proposal. Nothing was saved."
+            }
+        }
+    }
+
+    private func confirmPhotoProposal() {
+        guard let proposal = photoProposal, let nutritionMealStore, !photoMealSaved else { return }
+        do {
+            let items = try proposal.items.map { item in
+                try FoodConfirmedItem(
+                    itemID: item.itemID,
+                    label: item.estimatedLabel,
+                    quantity: item.quantity,
+                    unit: item.unit,
+                    grams: item.grams.estimate,
+                    calories: item.calories.estimate,
+                    protein: item.protein.estimate,
+                    carbs: item.carbs.estimate,
+                    fat: item.fat.estimate,
+                    fiber: item.fiber?.estimate
+                )
+            }
+            let totals = try FoodConfirmedTotals(
+                grams: proposal.totals.grams.estimate,
+                calories: proposal.totals.calories.estimate,
+                protein: proposal.totals.protein.estimate,
+                carbs: proposal.totals.carbs.estimate,
+                fat: proposal.totals.fat.estimate,
+                fiber: proposal.totals.fiber?.estimate
+            )
+            let now = Date.now
+            let timestamp = ISO8601DateFormatter().string(from: now)
+            let confirmation = try FoodConfirmationRequest(
+                mealID: proposal.mealID,
+                requestID: proposal.requestID,
+                proposalID: proposal.proposalID,
+                action: .confirm,
+                mealName: "Photo meal",
+                mealAt: timestamp,
+                items: items,
+                totals: totals,
+                confirmedAt: timestamp
+            )
+            _ = try validateFoodConfirmationAgainstProposal(confirmation, proposal, now: now)
+            let meal = NutritionMeal(
+                loggedAt: now,
+                timeZoneIdentifier: TimeZone.current.identifier,
+                name: "Photo meal",
+                kcal: Int(proposal.totals.calories.estimate.rounded()),
+                proteinGrams: Int(proposal.totals.protein.estimate.rounded()),
+                carbGrams: Int(proposal.totals.carbs.estimate.rounded()),
+                fatGrams: Int(proposal.totals.fat.estimate.rounded()),
+                journalNote: "Confirmed from a Google AI Studio food-photo proposal; midpoint values saved.",
+                provenance: .confirmedFromPhoto
+            )
+            try nutritionMealStore.addConfirmed(meal)
+            photoMealSaved = true
+            stage = .confirmed
+            savedMessage = "Photo proposal confirmed and saved locally · midpoint values used."
+            onMealSaved()
+        } catch {
+            photoProposalError = "The proposal could not be confirmed safely. Nothing was saved."
+        }
+    }
+
+    private func photoRange(_ range: FoodEstimateRange, suffix: String) -> String {
+        let estimate = formatNutritionValue(range.estimate)
+        let minimum = formatNutritionValue(range.min)
+        let maximum = formatNutritionValue(range.max)
+        return abs(range.min - range.max) < 0.01 ? "\(estimate) \(suffix)" : "\(estimate) \(suffix) · \(minimum)–\(maximum)"
+    }
+
+    private func photoFlagLabel(_ flag: FoodEstimateFlag) -> String {
+        switch flag {
+        case .needsConfirmation: "Needs confirmation"
+        case .mixedDish: "Mixed dish"
+        case .unknownPortion: "Portion uncertain"
+        case .hiddenOil: "Oil uncertain"
+        case .lowConfidence: "Low confidence"
+        case .wideInterval: "Wide range"
+        }
+    }
+
+    private func photoProposalErrorMessage(_ error: TailscaleSyncError) -> String {
+        switch error {
+        case .notConfigured: return "LifeOS server is not configured. No photo was sent."
+        case .invalidServerURL: return "The LifeOS server URL is not approved. No photo was sent."
+        case .requestTooLarge: return "The selected photos exceed the upload safety bound. No photo was sent."
+        case .responseTooLarge: return "The proposal exceeded the response safety bound. Nothing was saved."
+        case .httpError(503): return "Google AI Studio is not configured or temporarily unavailable on the private gateway."
+        case .httpError(let status): return "The authenticated gateway returned HTTP \(status). Nothing was saved."
+        default: return "The photo proposal could not be loaded. Nothing was saved."
         }
     }
 

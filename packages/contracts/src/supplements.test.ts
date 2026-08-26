@@ -5,6 +5,7 @@ import {
   SupplementOccurrenceActionRequest,
   SupplementOccurrenceActionResponse,
   SupplementCorrection,
+  SupplementNutrientFact,
   SupplementPlan,
   SupplementSnapshot,
 } from './supplements.js';
@@ -76,6 +77,18 @@ describe('supplement contracts', () => {
     expect(() => SupplementPlan.parse({ ...plan, userDose: { amount: 1.2345, unit: 'capsule' } })).toThrow();
     expect(() => SupplementPlan.parse({ ...plan, userDose: { amount: 0, unit: 'capsule' } })).toThrow();
     expect(SupplementPlan.parse({ ...plan, userDose: { amount: 1.234, unit: 'capsule' } }).userDose?.amount).toBe(1.234);
+  });
+
+  it('keeps exact nutrient amounts per unit separate from the label daily-dose basis', () => {
+    const calcium = {
+      nutrientID: 'calcium', name: 'Calcium', amountPerUnit: 400, unit: 'mg', labelBasisUnits: 2, nrvPercent: 100,
+    } as const;
+    expect(SupplementNutrientFact.parse(calcium).amountPerUnit).toBe(400);
+    expect(SupplementPlan.parse({ ...plan, nutrientFacts: [calcium] }).nutrientFacts?.[0].labelBasisUnits).toBe(2);
+    expect(() => SupplementNutrientFact.parse({ ...calcium, unit: 'serving' })).toThrow();
+    expect(() => SupplementNutrientFact.parse({ ...calcium, amountPerUnit: 0 })).toThrow();
+    expect(() => SupplementNutrientFact.parse({ ...calcium, nutrientID: 'vitamin/../calcium' })).toThrow();
+    expect(() => SupplementPlan.parse({ ...plan, nutrientFacts: [calcium, calcium] })).toThrow();
   });
 
   it('enforces occurrence state timestamps', () => {

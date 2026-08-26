@@ -40,6 +40,18 @@ final class FinanceStatementImporterTests: XCTestCase {
         XCTAssertEqual(components.day, 14)
     }
 
+    func testParsesRegularAndNarrowNoBreakSpaceThousandsSeparators() {
+        let csv = """
+        Datum;Beschreibung;Betrag
+        14.08.2026;Regular grouped;1 234,56
+        15.08.2026;Narrow grouped;1 234,57 EUR
+        """
+        let result = FinanceStatementImporter.parseCSV(csv)
+
+        XCTAssertEqual(result.skippedRowCount, 0)
+        XCTAssertEqual(result.transactions.map(\.amountCents), [123_456, 123_457])
+    }
+
     // MARK: 2. ISO date + plain decimal amount (English-style header)
 
     func testParsesISODatesAndPlainDecimalAmounts() {
@@ -146,6 +158,108 @@ final class FinanceStatementImporterTests: XCTestCase {
         2026-08-01,Groceries,-20.00
         """)
         XCTAssertNil(withoutCategory.transactions.first?.category)
+    }
+
+    func testUTF16BOMAndUTF8BOMExportsAreAccepted() throws {
+        let text = "date,description,amount\n2026-08-01,Apotheke,-12.50\n"
+        let utf16 = try XCTUnwrap(text.data(using: .utf16LittleEndian))
+        let utf16WithBOM = Data([0xFF, 0xFE]) + utf16
+        let utf16Result = try FinanceStatementImporter.parseCSV(data: utf16WithBOM)
+        XCTAssertEqual(utf16Result.transactions.count, 1)
+        XCTAssertEqual(utf16Result.transactions.first?.amountCents, -1250)
+
+        let utf8WithBOM = Data([0xEF, 0xBB, 0xBF]) + Data(text.utf8)
+        let utf8Result = try FinanceStatementImporter.parseCSV(data: utf8WithBOM)
+        XCTAssertEqual(utf8Result.transactions.count, 1)
+    }
+
+    func testQuotedMultilineDescriptionRemainsOneCSVRecord() {
+        let result = FinanceStatementImporter.parseCSV("""
+        date,description,amount
+        2026-08-01,"Merchant, note\nsecond line",-12.50
+        """)
+        XCTAssertEqual(result.skippedRowCount, 0)
+        XCTAssertEqual(result.transactions.count, 1)
+        XCTAssertEqual(result.transactions.first?.description, "Merchant, note\nsecond line")
+    }
+
+    func testParsingSameCSVProducesStableIDs() {
+        let csv = "date,description,amount\n2026-08-01,Rewe,-12.50\n"
+        let first = FinanceStatementImporter.parseCSV(csv)
+        let second = FinanceStatementImporter.parseCSV(csv)
+        XCTAssertEqual(first.transactions.map(\.id), second.transactions.map(\.id))
+    }
+
+    func testParenthesizedAmountIsNegative() {
+        let result = FinanceStatementImporter.parseCSV("""
+        date,description,amount
+        2026-08-01,Refund adjustment,(12.50)
+        """)
+        XCTAssertEqual(result.transactions.first?.amountCents, -1250)
+    }
+
+    func testPreambleDoesNotStealDelimiterFromSemicolonHeader() {
+        let result = FinanceStatementImporter.parseCSV("""
+        Export generated, account metadata
+        Datum;Beschreibung;Betrag
+        14.08.2026;Preamble-safe merchant;12,50
+        """)
+
+        XCTAssertEqual(result.skippedRowCount, 0)
+        XCTAssertEqual(result.transactions.count, 1)
+        XCTAssertEqual(result.transactions.first?.description, "Preamble-safe merchant")
+        XCTAssertEqual(result.transactions.first?.amountCents, 1250)
+    }
+
+    func testTabDelimitedAndTrailingNegativeAmountAreAccepted() {
+        let result = FinanceStatementImporter.parseCSV("""
+        date\tdescription\tamount
+        2026-08-01\tTab merchant\t12,50-
+        """)
+
+        XCTAssertEqual(result.skippedRowCount, 0)
+        XCTAssertEqual(result.transactions.count, 1)
+        XCTAssertEqual(result.transactions.first?.amountCents, -1250)
+    }
+
+    func testFractionalCentIsRejectedInsteadOfRounded() {
+        let result = FinanceStatementImporter.parseCSV("""
+        date,description,amount
+        2026-08-01,Precise,-12.345
+        2026-08-02,Trailing zero,-12.340
+        """)
+
+        XCTAssertEqual(result.transactions.count, 1)
+        XCTAssertEqual(result.skippedRowCount, 1)
+        XCTAssertEqual(result.transactions.first?.amountCents, -1234)
+    }
+
+    func testStableIDsIgnoreHeaderOrderAndPreserveDuplicateMultiset() {
+        let first = FinanceStatementImporter.parseCSV("""
+        date,description,amount,category,account
+        2026-08-01,Rewe,-12.50,Groceries,Main
+        2026-08-01,Rewe,-12.50,Groceries,Main
+        """)
+        let reordered = FinanceStatementImporter.parseCSV("""
+        account,amount,category,description,date
+        Main,-12.50,Groceries,Rewe,2026-08-01
+        Main,-12.50,Groceries,Rewe,2026-08-01
+        """)
+
+        XCTAssertEqual(Set(first.transactions.map(\.id)), Set(reordered.transactions.map(\.id)))
+    }
+
+    func testProviderTransactionIDWinsOverRowPosition() {
+        let first = FinanceStatementImporter.parseCSV("""
+        date,description,amount,transaction_id
+        2026-08-01,Rewe,-12.50,provider-1
+        """)
+        let reordered = FinanceStatementImporter.parseCSV("""
+        transaction_id,amount,description,date
+        provider-1,-12.50,Rewe,2026-08-01
+        """)
+
+        XCTAssertEqual(first.transactions.map(\.id), reordered.transactions.map(\.id))
     }
 
     // MARK: 9. Real Trade Republic 23-column export: merchant (`name`) wins

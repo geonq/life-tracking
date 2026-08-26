@@ -10,7 +10,7 @@ public struct FitnessStressDetailView: View {
 
     @State private var selectedKind: FitnessStressSeriesKind = .overall
     @State private var selectedRange: FitnessTrendRange?
-    @State private var selectedSampleIndex = 0
+    @State private var selectedSampleID: String?
 
     public init(
         snapshot: FitnessStressSnapshot = .unavailable,
@@ -57,10 +57,10 @@ public struct FitnessStressDetailView: View {
 #endif
         .onChange(of: selectedKind) { _, kind in
             selectedRange = snapshot.windows(for: kind).first?.range
-            selectedSampleIndex = max(0, (selectedSeries?.samples.count ?? 1) - 1)
+            selectedSampleID = snapshot.day(for: selectedDate)?.series(for: kind).samples.last?.id
         }
         .onChange(of: selectedDate) { _, _ in
-            selectedSampleIndex = max(0, (selectedSeries?.samples.count ?? 1) - 1)
+            selectedSampleID = selectedSeries?.samples.last?.id
         }
         .accessibilityIdentifier("fitness-stress-detail")
     }
@@ -306,9 +306,8 @@ public struct FitnessStressDetailView: View {
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                     }
                     Spacer(minLength: 8)
-                    if let series = selectedSeries, !series.samples.isEmpty,
-                       series.samples.indices.contains(selectedSampleIndex) {
-                        let sample = series.samples[selectedSampleIndex]
+                    if let series = selectedSeries,
+                       let sample = series.samples.first(where: { $0.id == selectedSampleID }) {
                         Text(sample.value, format: .number.precision(.fractionLength(0...1)))
                             .font(LifeOSFont.spaceGrotesk(23, weight: .bold))
                             .monospacedDigit()
@@ -318,10 +317,9 @@ public struct FitnessStressDetailView: View {
                     FitnessStressSeriesChart(
                         samples: series.samples,
                         scale: series.scale,
-                        selectedIndex: $selectedSampleIndex
+                        selectedID: $selectedSampleID
                     )
-                    if series.samples.indices.contains(selectedSampleIndex) {
-                        let sample = series.samples[selectedSampleIndex]
+                    if let sample = series.samples.first(where: { $0.id == selectedSampleID }) {
                         Text("Selected \(sample.timestamp, format: .dateTime.hour().minute()) · \(formatNumber(sample.value)) \(series.scale?.unit ?? "source units")")
                             .font(LifeOSFont.caption(10))
                             .foregroundStyle(LifeOSTokens.tertiaryText)
@@ -575,7 +573,24 @@ private struct StressStateBadge: View {
 private struct FitnessStressSeriesChart: View {
     let samples: [FitnessStressSample]
     let scale: FitnessStressScale?
-    @Binding var selectedIndex: Int
+    @Binding var selectedID: String?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var orderedSamples: [FitnessStressSample] {
+        samples.sorted { lhs, rhs in
+            if lhs.timestamp == rhs.timestamp { return lhs.id < rhs.id }
+            return lhs.timestamp < rhs.timestamp
+        }
+    }
+
+    private var chartDatasetID: String {
+        orderedSamples.map { "\($0.id):\($0.value)" }.joined(separator: "|")
+    }
+
+    private var selectedIndex: Int? {
+        guard let selectedID else { return nil }
+        return orderedSamples.firstIndex { $0.id == selectedID }
+    }
 
     private let plotHeight: CGFloat = 132
     private let yAxisWidth: CGFloat = 42
@@ -597,17 +612,19 @@ private struct FitnessStressSeriesChart: View {
 
                 GeometryReader { proxy in
                     ZStack(alignment: .topLeading) {
-                        stressGrid
-                        Path { path in
-                            guard samples.count > 1 else { return }
-                            for (index, sample) in samples.enumerated() {
-                                let point = CGPoint(x: x(for: index, width: proxy.size.width), y: y(for: sample.value, height: proxy.size.height))
-                                if index == 0 { path.move(to: point) } else { path.addLine(to: point) }
+                        LifeOSChartDrawReveal(content: ZStack(alignment: .topLeading) {
+                            stressGrid
+                            Path { path in
+                                guard orderedSamples.count > 1 else { return }
+                                for (index, sample) in orderedSamples.enumerated() {
+                                    let point = CGPoint(x: x(for: index, width: proxy.size.width), y: y(for: sample.value, height: proxy.size.height))
+                                    if index == 0 { path.move(to: point) } else { path.addLine(to: point) }
+                                }
                             }
-                        }
-                        .stroke(LifeOSTokens.accent, style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
-                        if samples.indices.contains(selectedIndex) {
-                            let sample = samples[selectedIndex]
+                            .stroke(LifeOSTokens.accent, style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
+                        })
+                        if let selectedIndex, orderedSamples.indices.contains(selectedIndex) {
+                            let sample = orderedSamples[selectedIndex]
                             let x = x(for: selectedIndex, width: proxy.size.width)
                             let y = y(for: sample.value, height: proxy.size.height)
                             Path { path in
@@ -623,7 +640,8 @@ private struct FitnessStressSeriesChart: View {
                     }
                     .contentShape(Rectangle())
                     .gesture(DragGesture(minimumDistance: 0).onChanged { gesture in
-                        selectedIndex = stressScrubIndex(locationX: gesture.location.x, width: proxy.size.width, count: samples.count)
+                        let index = stressScrubIndex(locationX: gesture.location.x, width: proxy.size.width, count: orderedSamples.count)
+                        selectedID = orderedSamples.indices.contains(index) ? orderedSamples[index].id : nil
                     })
                 }
                 .frame(height: plotHeight)
@@ -635,7 +653,7 @@ private struct FitnessStressSeriesChart: View {
                     ZStack(alignment: .topLeading) {
                         ForEach(Array(xTickIndices.enumerated()), id: \.offset) { tickIndex, sampleIndex in
                             let alignment: Alignment = tickIndex == 0 ? .leading : (tickIndex == xTickIndices.count - 1 ? .trailing : .center)
-                            Text(samples[sampleIndex].timestamp, format: .dateTime.hour().minute())
+                            Text(orderedSamples[sampleIndex].timestamp, format: .dateTime.hour().minute())
                                 .font(LifeOSFont.caption(9))
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                                 .frame(width: 48, alignment: alignment)
@@ -647,11 +665,39 @@ private struct FitnessStressSeriesChart: View {
             .frame(height: 14)
         }
         .frame(height: plotHeight + 19)
-        .accessibilityHidden(true)
+        .chartDrawOn(id: chartDatasetID)
+        .task(id: chartDatasetID) {
+            if let selectedID, orderedSamples.contains(where: { $0.id == selectedID }) { return }
+            self.selectedID = orderedSamples.last?.id
+        }
+        .animation(reduceMotion ? nil : LifeOSMotion.track, value: selectedID)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Stress source samples chart")
+        .accessibilityValue(accessibilityValue)
+        .accessibilityHint("Drag or adjust to inspect an exact source sample")
+        .accessibilityAdjustableAction { direction in
+            guard !orderedSamples.isEmpty else { return }
+            let current = selectedIndex ?? (direction == .increment ? -1 : orderedSamples.count)
+            let next: Int
+            switch direction {
+            case .increment: next = min(orderedSamples.count - 1, current + 1)
+            case .decrement: next = max(0, current - 1)
+            @unknown default: return
+            }
+            selectedID = orderedSamples[next].id
+        }
+    }
+
+    private var accessibilityValue: String {
+        guard let selectedIndex, orderedSamples.indices.contains(selectedIndex) else {
+            return orderedSamples.isEmpty ? "No source samples are available." : "No sample selected."
+        }
+        let sample = orderedSamples[selectedIndex]
+        return "Selected \(sample.timestamp.formatted(.dateTime.hour().minute())), \(formatNumber(sample.value)) source units."
     }
 
     private var axisValues: [Double] {
-        let values = samples.map(\.value)
+        let values = orderedSamples.map(\.value)
         guard !values.isEmpty else { return [] }
         let minimum = scale?.minimum ?? values.min() ?? 0
         let maximum = scale?.maximum ?? values.max() ?? minimum
@@ -660,16 +706,16 @@ private struct FitnessStressSeriesChart: View {
     }
 
     private var xTickIndices: [Int] {
-        guard !samples.isEmpty else { return [] }
-        let count = min(4, samples.count)
+        guard !orderedSamples.isEmpty else { return [] }
+        let count = min(4, orderedSamples.count)
         guard count > 1 else { return [0] }
         return (0..<count).map { index in
-            Int((Double(index) * Double(samples.count - 1) / Double(count - 1)).rounded())
+            Int((Double(index) * Double(orderedSamples.count - 1) / Double(count - 1)).rounded())
         }
     }
 
     private var observedRange: (minimum: Double, maximum: Double) {
-        let values = samples.map(\.value)
+        let values = orderedSamples.map(\.value)
         return (values.min() ?? 0, values.max() ?? 1)
     }
 
@@ -685,8 +731,8 @@ private struct FitnessStressSeriesChart: View {
     }
 
     private func x(for index: Int, width: CGFloat) -> CGFloat {
-        guard samples.count > 1 else { return width / 2 }
-        return width * CGFloat(index) / CGFloat(samples.count - 1)
+        guard orderedSamples.count > 1 else { return width / 2 }
+        return width * CGFloat(index) / CGFloat(orderedSamples.count - 1)
     }
 
     private func clampedLabelX(for index: Int, width: CGFloat) -> CGFloat {

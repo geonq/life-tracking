@@ -2,6 +2,9 @@ import SwiftUI
 import Combine
 import ImageIO
 import UniformTypeIdentifiers
+#if DEBUG
+import os
+#endif
 #if os(iOS)
 import UIKit
 #else
@@ -728,6 +731,25 @@ public struct CalendarTimelineView: View {
 }
 
 #if os(iOS)
+#if DEBUG
+/// Debug-only diagnostics for the rapid-swipe acceptance gate. This records
+/// timing and state shape, not dates, titles, or event content, so a trace can
+/// be shared without leaking calendar data. Release builds compile the calls
+/// away.
+private enum CalendarPagerDiagnostics {
+    private static let logger = Logger(subsystem: "com.hermes.lifeos", category: "calendar-pager")
+
+    static func event(_ name: String, generation: Int, offset: CGFloat, visibleDayCount: Int, duration: TimeInterval? = nil) {
+        let durationText = duration.map { String(format: " durationMs=%.1f", $0 * 1_000) } ?? ""
+        logger.debug("\(name, privacy: .public) generation=\(generation, privacy: .public) offset=\(offset, privacy: .public) visibleDays=\(visibleDayCount, privacy: .public)\(durationText, privacy: .public)")
+    }
+}
+#else
+private enum CalendarPagerDiagnostics {
+    static func event(_ name: String, generation: Int, offset: CGFloat, visibleDayCount: Int, duration: TimeInterval? = nil) {}
+}
+#endif
+
 /// Reports the live horizontal position of the sliding day strip. The strip
 /// moves under the finger and under the settle animation; sampling its
 /// rendered frame is what keeps the header preview continuous across both,
@@ -801,6 +823,7 @@ private struct CalendarPagedTimeline: View {
     @State private var pagerDragAxisIsHorizontal: Bool?
     @State private var pagerGeneration = 0
     @State private var pendingSettle: CalendarPagerPendingSettle?
+    @State private var settleStartedAt: Date?
     /// Finger-space reference for 1:1 tracking. The strip position maps as
     /// `referenceOffset + (translation - referenceTranslation)` so locking the
     /// horizontal axis (and interrupting a settle) never snaps the strip to
@@ -1078,6 +1101,12 @@ private struct CalendarPagedTimeline: View {
                 guard let firstDay else { return }
                 let target = calendar.startOfDay(for: firstDay)
                 guard !calendar.isDate(target, inSameDayAs: pageAnchor) else { return }
+                CalendarPagerDiagnostics.event(
+                    "parent.days-window-changed",
+                    generation: pagerGeneration,
+                    offset: horizontalDragOffset,
+                    visibleDayCount: visibleDayCount
+                )
                 cancelStripImmediately(to: target)
             }
             .onChange(of: interactionSession.eventMoveActive) { _, isActive in
@@ -1128,6 +1157,7 @@ private struct CalendarPagedTimeline: View {
             dragReferenceOffset = 0
             liveStripDragOffset = 0
             fingerVelocity.reset()
+            settleStartedAt = nil
         }
     }
 
@@ -1147,6 +1177,7 @@ private struct CalendarPagedTimeline: View {
             dragReferenceOffset = 0
             liveStripDragOffset = 0
             fingerVelocity.reset()
+            settleStartedAt = nil
             lastPreviewCallbackDate = pageAnchor
         }
         // Restore the compact header even if an event long-press wins while
@@ -1220,19 +1251,52 @@ private struct CalendarPagedTimeline: View {
             horizontalDragActive = true
             pagerGeneration += 1
             fingerVelocity.reset()
-            if pendingSettle != nil {
+            CalendarPagerDiagnostics.event(
+                "gesture.horizontal.begin",
+                generation: pagerGeneration,
+                offset: horizontalDragOffset,
+                visibleDayCount: visibleDayCount
+            )
+            if let settle = pendingSettle {
                 // A new grab interrupts an in-flight settle. Adopt the last
                 // geometry-sampled position so the strip continues from the
                 // exact pixels on screen — the Notion "the strip is always
                 // under my finger" contract — instead of snapping to the
                 // fresh gesture's raw translation.
-                let adopted = max(-columnWidth * 1.6, min(columnWidth * 1.6, liveStripDragOffset))
+                let rebased = CalendarInteractionLayout.pagerRebasedOffsetAfterInterrupt(
+                    currentOffset: Double(liveStripDragOffset),
+                    interruptedTargetOffset: Double(settle.targetOffset)
+                )
+                let adopted = max(-columnWidth * 1.6, min(columnWidth * 1.6, CGFloat(rebased)))
+                let committedAnchor = calendar.startOfDay(for: settle.nextAnchor)
+                CalendarPagerDiagnostics.event(
+                    "gesture.horizontal.interrupt-settle",
+                    generation: pagerGeneration,
+                    offset: adopted,
+                    visibleDayCount: visibleDayCount
+                )
                 var transaction = Transaction()
                 transaction.animation = nil
                 transaction.disablesAnimations = true
                 withTransaction(transaction) {
                     pendingSettle = nil
+                    // Advance the logical anchor at interruption time. The
+                    // parent must receive the same commit immediately; the
+                    // child now resolves the next gesture against the page
+                    // that was already moving into view. Otherwise a short
+                    // second drag could leave child and parent on different
+                    // dates after the next zero-page settle.
+                    pageAnchor = committedAnchor
                     horizontalDragOffset = adopted
+                    liveStripDragOffset = adopted
+                }
+                if settle.dayDelta != 0 {
+                    // This is the first swipe's terminal commit. A second
+                    // gesture has claimed the strip, so waiting for the
+                    // interrupted spring's stale timer would replay the old
+                    // anchor and make parent-owned state lag behind the
+                    // pixels already entering view.
+                    onCommitDateChange?(committedAnchor)
                 }
             }
             dragReferenceTranslation = translation.width
@@ -1329,6 +1393,13 @@ private struct CalendarPagedTimeline: View {
             normalizedVelocity: normalizedVelocity
         )
         pendingSettle = settle
+        settleStartedAt = Date.now
+        CalendarPagerDiagnostics.event(
+            "settle.begin",
+            generation: settle.generation,
+            offset: horizontalDragOffset,
+            visibleDayCount: visibleDayCount
+        )
         if reduceMotion {
             var transaction = Transaction()
             transaction.animation = nil
@@ -1346,6 +1417,11 @@ private struct CalendarPagedTimeline: View {
             let duration = CalendarInteractionLayout.pagerSettleDuration(
                 normalizedVelocity: settle.normalizedVelocity
             )
+            // Geometry normally refreshes this every rendered frame. Seed it
+            // with the release position as well, so an immediate second grab
+            // still has a meaningful position if the next preference sample
+            // has not arrived yet.
+            liveStripDragOffset = horizontalDragOffset
             withAnimation(.spring(duration: duration, bounce: 0)) {
                 horizontalDragOffset = targetOffset
             }
@@ -1406,7 +1482,16 @@ private struct CalendarPagedTimeline: View {
     private func completeSettle(_ settle: CalendarPagerPendingSettle) {
         guard pendingSettle?.generation == settle.generation,
               pagerGeneration == settle.generation else { return }
+        let settleDuration = settleStartedAt.map { Date.now.timeIntervalSince($0) }
+        CalendarPagerDiagnostics.event(
+            "settle.complete",
+            generation: settle.generation,
+            offset: settle.targetOffset,
+            visibleDayCount: visibleDayCount,
+            duration: settleDuration
+        )
         pendingSettle = nil
+        settleStartedAt = nil
 
         var transaction = Transaction()
         transaction.animation = nil
@@ -1415,6 +1500,7 @@ private struct CalendarPagedTimeline: View {
             // The strip's pixels at the settled offset are identical after
             // re-anchoring, so this swap cannot produce a visible jump.
             horizontalDragOffset = 0
+            liveStripDragOffset = 0
             pageAnchor = calendar.startOfDay(for: settle.nextAnchor)
         }
         if settle.dayDelta == 0 {

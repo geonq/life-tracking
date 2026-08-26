@@ -4765,46 +4765,70 @@ private struct FitnessActivityLineChart: View {
     let accent: LifeOSTokens.Hue
     let yAxisLabel: String
     var targetBand: (Double, Double)? = nil
-    @State private var selectedIndex: Int?
+    /// Selection is keyed to the source date rather than an array offset.
+    /// Refreshes can reorder or replace points; the user's selected day must
+    /// not silently jump to a different observation.
+    @State private var selectedPointID: Date?
+
+    private var orderedPoints: [FitnessActivitySeriesPoint] {
+        points.sorted { $0.date < $1.date }
+    }
+
+    private var chartDatasetID: String {
+        let values = orderedPoints.map { point in
+            let value = point.value.map { String($0) } ?? "gap"
+            return "\(point.date.timeIntervalSinceReferenceDate):\(value)"
+        }
+        let band = targetBand.map { "|band:\($0.0):\($0.1)" } ?? ""
+        return values.joined(separator: "|") + band
+    }
+
+    private var selectedIndex: Int? {
+        guard let selectedPointID else { return nil }
+        return orderedPoints.firstIndex { $0.date == selectedPointID }
+    }
 
     var body: some View {
         GeometryReader { proxy in
-            let values = points.map(\.value)
+            let plotPoints = orderedPoints
+            let values = plotPoints.map(\.value)
             let observed = values.compactMap { $0 }
             let lower = min(observed.min() ?? 0, targetBand?.0 ?? .greatestFiniteMagnitude)
             let upper = max(observed.max() ?? 1, targetBand?.1 ?? 0)
             let range = max(upper - lower, 1)
             ZStack(alignment: .topLeading) {
-                if let targetBand {
-                    let top = proxy.size.height * CGFloat(1 - (targetBand.1 - lower) / range)
-                    let bottom = proxy.size.height * CGFloat(1 - (targetBand.0 - lower) / range)
-                    Rectangle()
-                        .fill(LifeOSTokens.success.opacity(0.12))
-                        .frame(height: max(0, bottom - top))
-                        .offset(y: max(0, top))
-                }
-                Path { path in
-                    var started = false
-                    for (index, value) in values.enumerated() {
-                        guard let value, proxy.size.width > 0 else {
-                            started = false
-                            continue
-                        }
-                        let x = proxy.size.width * CGFloat(index) / CGFloat(max(values.count - 1, 1))
-                        let y = proxy.size.height * CGFloat(1 - (value - lower) / range)
-                        if started { path.addLine(to: CGPoint(x: x, y: y)) }
-                        else { path.move(to: CGPoint(x: x, y: y)); started = true }
+                LifeOSChartDrawReveal(content: ZStack(alignment: .topLeading) {
+                    if let targetBand {
+                        let top = proxy.size.height * CGFloat(1 - (targetBand.1 - lower) / range)
+                        let bottom = proxy.size.height * CGFloat(1 - (targetBand.0 - lower) / range)
+                        Rectangle()
+                            .fill(LifeOSTokens.success.opacity(0.12))
+                            .frame(height: max(0, bottom - top))
+                            .offset(y: max(0, top))
                     }
-                }
-                .stroke(LifeOSTokens.accent, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
-                if let lastOptional = values.last, let last = lastOptional {
-                    let x = proxy.size.width
-                    let y = proxy.size.height * CGFloat(1 - (last - lower) / range)
-                    Circle()
-                        .fill(LifeOSTokens.accent)
-                        .frame(width: 8, height: 8)
-                        .offset(x: max(0, x - 4), y: max(0, y - 4))
-                }
+                    Path { path in
+                        var started = false
+                        for (index, value) in values.enumerated() {
+                            guard let value, proxy.size.width > 0 else {
+                                started = false
+                                continue
+                            }
+                            let x = proxy.size.width * CGFloat(index) / CGFloat(max(values.count - 1, 1))
+                            let y = proxy.size.height * CGFloat(1 - (value - lower) / range)
+                            if started { path.addLine(to: CGPoint(x: x, y: y)) }
+                            else { path.move(to: CGPoint(x: x, y: y)); started = true }
+                        }
+                    }
+                    .stroke(LifeOSTokens.accent, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                    if let lastOptional = values.last, let last = lastOptional {
+                        let x = proxy.size.width
+                        let y = proxy.size.height * CGFloat(1 - (last - lower) / range)
+                        Circle()
+                            .fill(LifeOSTokens.accent)
+                            .frame(width: 8, height: 8)
+                            .offset(x: max(0, x - 4), y: max(0, y - 4))
+                    }
+                })
                 if let selectedPoint, let selectedIndex {
                     let x = chartX(for: selectedIndex, width: proxy.size.width)
                     let y = chartY(for: selectedPoint.value, lower: lower, range: range, height: proxy.size.height)
@@ -4829,21 +4853,32 @@ private struct FitnessActivityLineChart: View {
             .simultaneousGesture(
                 DragGesture(minimumDistance: 0, coordinateSpace: .local)
                     .onChanged { value in
-                        selectedIndex = nearestIndex(toX: value.location.x, width: proxy.size.width)
+                        if let index = nearestIndex(toX: value.location.x, width: proxy.size.width) {
+                            selectedPointID = plotPoints[index].date
+                        }
                     }
             )
 #if os(macOS)
             .onContinuousHover(coordinateSpace: .local) { phase in
                 switch phase {
                 case .active(let location):
-                    selectedIndex = nearestIndex(toX: location.x, width: proxy.size.width)
+                    if let index = nearestIndex(toX: location.x, width: proxy.size.width) {
+                        selectedPointID = plotPoints[index].date
+                    }
                 case .ended:
-                    selectedIndex = nil
+                    selectedPointID = nil
                 }
             }
 #endif
         }
         .frame(minHeight: 82)
+        .chartDrawOn(id: chartDatasetID)
+        .task(id: chartDatasetID) {
+            guard let selectedPointID else { return }
+            if !orderedPoints.contains(where: { $0.date == selectedPointID && $0.value != nil }) {
+                self.selectedPointID = nil
+            }
+        }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(yAxisLabel) trend")
         .accessibilityValue(accessibilityValue)
@@ -4858,22 +4893,22 @@ private struct FitnessActivityLineChart: View {
             case .decrement: next = max(0, current - 1)
             @unknown default: next = current
             }
-            selectedIndex = indices[next]
+            selectedPointID = orderedPoints[indices[next]].date
         }
     }
 
     private var selectableIndices: [Int] {
-        points.indices.filter { points[$0].value != nil }
+        orderedPoints.indices.filter { orderedPoints[$0].value != nil }
     }
 
     private var selectedPoint: FitnessActivitySeriesPoint? {
-        guard let selectedIndex, points.indices.contains(selectedIndex) else { return nil }
-        return points[selectedIndex].value == nil ? nil : points[selectedIndex]
+        guard let selectedPointID else { return nil }
+        return orderedPoints.first { $0.date == selectedPointID && $0.value != nil }
     }
 
     private var accessibilityValue: String {
         guard let selectedPoint else {
-            return points.compactMap(\.value).isEmpty
+            return orderedPoints.compactMap(\.value).isEmpty
                 ? "Unavailable"
                 : "Observed source points; no point selected"
         }
@@ -4883,12 +4918,12 @@ private struct FitnessActivityLineChart: View {
     private func nearestIndex(toX x: CGFloat, width: CGFloat) -> Int? {
         guard width > 0, !selectableIndices.isEmpty else { return nil }
         let normalized = min(max(x / width, 0), 1)
-        let raw = normalized * CGFloat(max(points.count - 1, 1))
+        let raw = normalized * CGFloat(max(orderedPoints.count - 1, 1))
         return selectableIndices.min { abs(CGFloat($0) - raw) < abs(CGFloat($1) - raw) }
     }
 
     private func chartX(for index: Int, width: CGFloat) -> CGFloat {
-        width * CGFloat(index) / CGFloat(max(points.count - 1, 1))
+        width * CGFloat(index) / CGFloat(max(orderedPoints.count - 1, 1))
     }
 
     private func chartY(for value: Double?, lower: Double, range: Double, height: CGFloat) -> CGFloat {

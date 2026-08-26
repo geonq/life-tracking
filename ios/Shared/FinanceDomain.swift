@@ -41,12 +41,20 @@ public enum FinanceConnectorKind: String, Codable, CaseIterable, Equatable, Send
     case revolutPersonal = "revolut_personal"
     case revolutBusiness = "revolut_business"
     case tradeRepublic = "trade_republic"
+    case paypalPersonal = "paypal_personal"
 }
 
 public enum FinanceAccessMethod: String, Codable, Equatable, Sendable {
     case officialOAuth = "official_oauth"
     case regulatedOpenBanking = "regulated_open_banking"
     case manualImport = "manual_import"
+
+    /// The current native consent client speaks the Enable Banking flow only.
+    /// Keeping this rule in the shared domain prevents an official OAuth
+    /// connector such as PayPal from being routed to `/finance/connect`.
+    public var usesEnableBankingConsent: Bool {
+        self == .regulatedOpenBanking
+    }
 }
 
 public enum FinanceConnectorRisk: String, Codable, Equatable, Sendable {
@@ -139,7 +147,10 @@ public struct FinanceConnectorCatalog: Decodable, Equatable, Sendable {
               recommendation: "Register an eligible Revolut Business app and complete official OAuth before enabling; Revolut review may delay access."),
         .init(kind: .tradeRepublic, displayName: "Trade Republic", accessMethod: .manualImport,
               provider: "Manual CSV/PDF import", risk: .manualImportOnly,
-              recommendation: "Permanent manual CSV/PDF import only; do not use private APIs or imply a live connector.")
+              recommendation: "Permanent manual CSV/PDF import only; do not use private APIs or imply a live connector."),
+        .init(kind: .paypalPersonal, displayName: "PayPal Personal", accessMethod: .officialOAuth,
+              provider: "Official PayPal Transaction Search API", risk: .accountEligibilityRequired,
+              recommendation: "Verify account and reporting-scope eligibility, then implement server-side OAuth and Transaction Search; otherwise keep PayPal unavailable or use a manual export.")
     ]
 
     public init(from decoder: Decoder) throws {

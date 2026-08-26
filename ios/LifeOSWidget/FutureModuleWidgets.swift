@@ -54,6 +54,11 @@ private struct LifeOSWidgetContainerModifier<Background: View>: ViewModifier {
             .containerBackground(for: .widget) {
                 chrome.usesTransparentTreatment ? AnyView(Color.clear) : AnyView(background)
             }
+            // Establish one inherited hero role for any metric text that does
+            // not need a more specific semantic treatment. This keeps tinted,
+            // vibrant, and clear widgets from falling back to system `.primary`
+            // over an arbitrary wallpaper.
+            .foregroundStyle(chrome.hero)
             .environment(\.lifeOSWidgetChrome, chrome)
     }
 }
@@ -773,13 +778,15 @@ private enum NutritionWidgetAction: String, CaseIterable, Identifiable {
 }
 
 private struct NutritionWidgetQuickActions: View {
+    @Environment(\.lifeOSWidgetChrome) private var chrome
+
     var body: some View {
         HStack(spacing: 0) {
             ForEach(NutritionWidgetAction.allCases) { action in
                 Link(destination: action.url) {
                     Image(systemName: action.systemName)
                         .font(.system(size: 16, weight: .medium))
-                        .foregroundStyle(.primary.opacity(0.82))
+                        .foregroundStyle(chrome.hero.opacity(0.82))
                         .frame(maxWidth: .infinity, minHeight: 26)
                         .contentShape(Rectangle())
                 }
@@ -814,7 +821,7 @@ private struct NutritionDotMatrix: View {
         VStack(spacing: 3) {
             Text(title)
                 .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(.primary.opacity(0.82))
+                .foregroundStyle(chrome.hero.opacity(0.82))
             LazyVGrid(columns: columns, spacing: 3) {
                 ForEach(0..<40, id: \.self) { index in
                     Circle()
@@ -1091,7 +1098,7 @@ private struct NutritionSignedBalanceScale: View {
                     }
                     if let balance, balance.isFinite {
                         let clamped = max(-500, min(500, balance))
-                        Circle().fill(.primary).frame(width: 11, height: 11).offset(x: max(0, min(width - 11, (clamped + 500) / 1_000 * width - 5.5)), y: 1)
+                        Circle().fill(chrome.hero).frame(width: 11, height: 11).offset(x: max(0, min(width - 11, (clamped + 500) / 1_000 * width - 5.5)), y: 1)
                     }
                 }
             }
@@ -1409,7 +1416,7 @@ private struct FitnessHealthMetricCell: View {
                     .frame(height: 42)
                     if let value = metric.value, fitnessWidgetState(metric, at: date) == .fresh || fitnessWidgetState(metric, at: date) == .stale {
                         Circle()
-                            .fill(.primary)
+                            .fill(chrome.hero)
                             .frame(width: 11, height: 11)
                             // Keep the marker's centre inside the track even
                             // at 0 and 100; this is position, never a score.

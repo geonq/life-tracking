@@ -48,10 +48,12 @@ created or modified by this repository.
 - The endpoint must be HTTPS, have a hostname ending in `.ts.net`, use only
   port `8420` or `443`, and have exactly `/usage/claude-ingest` with no
   userinfo, query, or fragment. TLS uses the platform trust store.
-- The POST has only `Content-Type: application/json` as an application
-  header. No Authorization header, cookie, redirect following, response-body
-  logging, or sensitive error output is used. A timeout or network/server
-  failure only produces `CLAUDE USAGE unavailable` and a nonfatal exit.
+- The POST has `Content-Type: application/json` and, when sent by the
+  uploader, a locally derived `X-Observed-At` capture timestamp. The gateway
+  validates and normalizes that timestamp before forwarding it to Node. No
+  Authorization header, cookie, redirect following, response-body logging, or
+  sensitive error output is used. A timeout or network/server failure only
+  produces `CLAUDE USAGE unavailable` and a nonfatal exit.
 
 The launchd plist, endpoint identity, credentials, and installation remain
 deliberately unspecified and not-yet-installed.

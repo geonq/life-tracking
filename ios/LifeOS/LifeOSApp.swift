@@ -223,6 +223,9 @@ struct LifeOSApp: App {
                     await clipperCoordinator.refresh()
                     await healthKitFitnessRepository.refresh()
                     publishWidgetSnapshots()
+#if os(iOS)
+                    LifeOSBackgroundRefresh.schedule()
+#endif
                 }
             }
             .onAppear {
@@ -237,13 +240,22 @@ struct LifeOSApp: App {
                         await autoRequestHealthReadAccessIfNeeded()
                         await healthKitFitnessRepository.refresh()
                         publishWidgetSnapshots()
+#if os(iOS)
+                        LifeOSBackgroundRefresh.schedule()
+#endif
                     }
                 case .inactive:
                     healthKitController.appInactive()
                 case .background:
                     healthKitController.applicationDidEnterBackground()
+#if os(iOS)
+                    LifeOSBackgroundRefresh.schedule()
+#endif
                 @unknown default:
                     healthKitController.applicationDidEnterBackground()
+#if os(iOS)
+                    LifeOSBackgroundRefresh.schedule()
+#endif
                 }
             }
 #if os(iOS)
@@ -266,7 +278,31 @@ struct LifeOSApp: App {
                 publishWidgetSnapshots()
             }
         }
+#if os(iOS)
+        .backgroundTask(.appRefresh(LifeOSBackgroundRefresh.identifier)) {
+            await performBackgroundRefresh()
+        }
+#endif
     }
+
+#if os(iOS)
+    @MainActor
+    private func performBackgroundRefresh() async {
+        guard !usesVisualFixtures else { return }
+        defer { LifeOSBackgroundRefresh.schedule() }
+
+        // Keep the short app-refresh window useful by progressing the
+        // independent network-backed coordinators together. Each coordinator
+        // retains the last observed value and marks it stale on failure.
+        async let calendar: Void = calendarCoordinator.manualRefresh()
+        async let usage: Void = usageCoordinator.refresh()
+        async let finance: Void = financeCoordinator.refresh()
+        async let clipper: Void = clipperCoordinator.refresh()
+        async let fitness: Void = healthKitFitnessRepository.refresh()
+        _ = await (calendar, usage, finance, clipper, fitness)
+        publishWidgetSnapshots()
+    }
+#endif
 
     /// Maps confirmed Finance/Fitness/Nutrition state into a
     /// `FutureWidgetSnapshot` and requests a coalesced widget reload. This is

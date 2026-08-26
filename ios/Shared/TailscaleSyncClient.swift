@@ -7,6 +7,7 @@ public enum TailscaleSyncError: Error, Equatable, Sendable {
     case invalidResponse
     case httpError(Int)
     case responseTooLarge
+    case requestTooLarge
     case invalidInstitutionId
     case invalidConnectionId
     case invalidConsentURL
@@ -152,6 +153,8 @@ public actor TailscaleSyncClient {
     private static let backoffSteps: [UInt64] = [2, 5, 15, 30] // seconds, capped
     private static let maximumReadOnlyResponseBytes = 1_048_576
     static let maximumCalendarResourceBytes = 256 * 1024
+    static let maximumNutritionPhotoRequestBytes = 30 * 1024 * 1024
+    static let maximumNutritionPhotoResponseBytes = 1 * 1024 * 1024
     static let calendarTimeout: TimeInterval = 8
 
     public init(
@@ -312,13 +315,25 @@ public actor TailscaleSyncClient {
         return request
     }
 
-    /// Builds the one POST this client ever issues: bank consent initiation.
+    /// Builds the POST used for bank consent initiation.
     /// Still carries no Authorization or Tailscale identity header -- the
     /// tailnet transport is the only authentication boundary, unchanged from
     /// every read-only request.
     nonisolated static func bankConsentRequest(url: URL, institutionId: String) -> URLRequest? {
         guard let validatedId = validatedInstitutionId(institutionId),
               let body = try? JSONSerialization.data(withJSONObject: ["institutionId": validatedId]) else { return nil }
+        var request = Self.gatewayRequest(url: url)
+        request.httpMethod = "POST"
+        request.httpBody = body
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        return request
+    }
+
+    /// Builds the authenticated-by-tailnet photo inference request. The body
+    /// is already sanitized by `FoodPhotoPreparationCoordinator`; this helper
+    /// only enforces the transport bound and never adds a provider key.
+    nonisolated static func foodPhotoProposalRequest(url: URL, body: Data) -> URLRequest? {
+        guard body.count <= maximumNutritionPhotoRequestBytes else { return nil }
         var request = Self.gatewayRequest(url: url)
         request.httpMethod = "POST"
         request.httpBody = body
@@ -471,7 +486,7 @@ public actor TailscaleSyncClient {
                 return .authenticationRejected
             case .httpError(let status) where status == 408 || status == 429 || (500...599).contains(status):
                 return .serverUnavailable
-            case .invalidBarcode, .invalidResponse, .responseTooLarge, .httpError,
+            case .invalidBarcode, .invalidResponse, .responseTooLarge, .requestTooLarge, .httpError,
                  .invalidInstitutionId, .invalidConnectionId, .invalidConsentURL,
                  .connectionAlreadyLinking, .gatewayNotConfigured:
                 return .invalidResponse
@@ -535,6 +550,38 @@ public actor TailscaleSyncClient {
         }
     }
 
+    // MARK: - Optional food-photo proposal
+
+    /// Sends only a locally sanitized manifest to the private gateway. The
+    /// gateway owns Google AI Studio credentials and returns a proposal only;
+    /// no meal is persisted by this call.
+    public func fetchFoodPhotoProposal(_ manifest: FoodPhotoManifest) async throws -> FoodEstimateProposal {
+        let body: Data
+        do {
+            body = try JSONEncoder().encode(manifest)
+        } catch {
+            throw TailscaleSyncError.invalidResponse
+        }
+        guard body.count <= Self.maximumNutritionPhotoRequestBytes else {
+            throw TailscaleSyncError.requestTooLarge
+        }
+        let url = try baseURL().appendingPathComponent("nutrition").appendingPathComponent("photo-proposal")
+        guard let request = Self.foodPhotoProposalRequest(url: url, body: body) else {
+            throw TailscaleSyncError.requestTooLarge
+        }
+        let (data, response) = try await Self.performBoundedMutating(
+            session: session,
+            request: request,
+            maximumBytes: Self.maximumNutritionPhotoResponseBytes
+        )
+        try Self.checkHTTPStatus(response)
+        do {
+            return try JSONDecoder.lifeOS.decode(FoodEstimateProposal.self, from: data)
+        } catch {
+            throw TailscaleSyncError.invalidResponse
+        }
+    }
+
     // MARK: - Read-only finance summary
 
     /// Reads the Tailscale-identity-verified Python gateway route. The gateway
@@ -543,6 +590,33 @@ public actor TailscaleSyncClient {
     public func fetchFinanceSummary() async throws -> FinanceSummary {
         let data = try await fetchBoundedReadOnly(pathComponents: ["finance", "summary"])
         return try FinanceSummary.decode(data)
+    }
+
+    // MARK: - Read-only supplement reference catalog
+
+    /// Searches the private Windows reference catalog. Results contain only
+    /// source-labeled product/nutrient facts; the catalog is not a dose or
+    /// interaction recommendation service and nothing is persisted by this call.
+    public func fetchSupplementCatalog(query: String, limit: Int = 20) async throws -> SupplementCatalogResponse {
+        let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty, normalized.utf16.count <= 120, (1...20).contains(limit) else {
+            throw TailscaleSyncError.invalidResponse
+        }
+        var components = URLComponents(
+            url: try baseURL().appendingPathComponent("supplements").appendingPathComponent("catalog"),
+            resolvingAgainstBaseURL: false
+        )
+        components?.queryItems = [
+            URLQueryItem(name: "q", value: normalized),
+            URLQueryItem(name: "limit", value: String(limit)),
+        ]
+        guard let url = components?.url else { throw TailscaleSyncError.invalidResponse }
+        let data = try await fetchBoundedReadOnly(url: url)
+        do {
+            return try JSONDecoder.lifeOSSupplement.decode(SupplementCatalogResponse.self, from: data)
+        } catch {
+            throw TailscaleSyncError.invalidResponse
+        }
     }
 
     // MARK: - Bank consent initiation (the only mutating, parameterized gateway calls)
@@ -605,9 +679,9 @@ public actor TailscaleSyncClient {
         return state
     }
 
-    /// Sends the one bounded, non-GET request this client ever issues. Mirrors
-    /// the read-only bound (same byte cap, same Content-Length preflight) so
-    /// the mutating path carries no weaker guarantee than the GET paths.
+    /// Sends a bounded, non-GET request. Mirrors the read-only bound (same byte
+    /// cap, same Content-Length preflight) so mutating paths carry no weaker
+    /// guarantee than the GET paths.
     nonisolated private static func performBoundedMutating(
         session: URLSession,
         request: URLRequest,
@@ -643,6 +717,10 @@ public actor TailscaleSyncClient {
         let url = try pathComponents.reduce(baseURL()) { partial, component in
             partial.appendingPathComponent(component)
         }
+        return try await fetchBoundedReadOnly(url: url)
+    }
+
+    private func fetchBoundedReadOnly(url: URL) async throws -> Data {
         return try await Self.performBoundedReadOnly(session: session, request: request(url: url),
                                                      maximumBytes: Self.maximumReadOnlyResponseBytes)
     }

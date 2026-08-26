@@ -25,8 +25,12 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qsl, urlsplit
+from zoneinfo import ZoneInfo
 
 import httpx
+
+
+BUSINESS_TIME_ZONE = ZoneInfo("Europe/Berlin")
 
 
 class EnableBankingUnavailable(Exception):
@@ -54,6 +58,12 @@ class EnableBankingService:
     # bound while remaining safely bounded. Account details, balances, auth,
     # and session responses continue to use MAX_RESPONSE_SIZE.
     MAX_TRANSACTION_RESPONSE_SIZE = 1 * 1024 * 1024
+    # The final normalized envelope must fit the native client's bounded
+    # read-only response contract. Provider pages may be larger while being
+    # fetched, but the cached/returned snapshot may not be.
+    MAX_FINANCE_SUMMARY_SIZE = 1 * 1024 * 1024
+    MAX_TRANSACTION_PAGES = 64
+    MAX_TRANSACTIONS_PER_ACCOUNT = 5_000
     MAX_ASPSP_RESPONSE_SIZE = 4 * 1024 * 1024
     REQUEST_TIMEOUT = httpx.Timeout(5.0, connect=2.0)
     TOTAL_TIMEOUT = 8.0
@@ -250,7 +260,7 @@ class EnableBankingService:
         self._atomic_write_json(self._connections_path(), {"connections": existing[-32:]})
 
     def load_cached_summary(self) -> dict | None:
-        value = self._read_bounded_json_file(self._summary_path(), 4 * 1024 * 1024)
+        value = self._read_bounded_json_file(self._summary_path(), self.MAX_FINANCE_SUMMARY_SIZE)
         return value if isinstance(value, dict) and self._validate_finance_payload(value) else None
 
     def _http_client(self) -> httpx.AsyncClient:
@@ -735,9 +745,12 @@ class EnableBankingService:
         if currency != "EUR" or not isinstance(amount, str) or len(amount) > 64:
             raise EnableBankingUnavailable("unsupported money value")
         try:
-            parsed = Decimal(amount).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            raw = Decimal(amount)
+            parsed = raw.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         except (InvalidOperation, ValueError):
             raise EnableBankingUnavailable("invalid money value")
+        if raw != parsed:
+            raise EnableBankingUnavailable("money value has fractional cents")
         cents = int(parsed * 100)
         if abs(cents) > max_safe_cents:
             raise EnableBankingUnavailable("money value out of range")
@@ -762,13 +775,108 @@ class EnableBankingService:
             return None
         return parsed.isoformat().replace("+00:00", "Z")
 
-    @staticmethod
-    def _transaction_category(transaction: dict) -> str:
-        categories = {
-            "5411": "Groceries", "5541": "Transport", "5812": "Dining",
-            "5814": "Dining", "5912": "Health", "7011": "Travel", "8011": "Health",
+    @classmethod
+    def _transaction_category(cls, transaction: dict) -> str:
+        aliases = {
+            "food": "Groceries", "grocery": "Groceries", "groceries": "Groceries",
+            "lebensmittel": "Groceries", "supermarket": "Groceries", "supermarkt": "Groceries",
+            "dining": "Dining", "restaurant": "Dining", "restaurants": "Dining",
+            "food and dining": "Dining", "essen": "Dining",
+            "transport": "Transport", "transportation": "Transport",
+            "public transport": "Transport", "mobility": "Transport", "verkehr": "Transport",
+            "shopping": "Shopping", "retail": "Shopping", "online shopping": "Shopping",
+            "bill": "Bills", "bills": "Bills", "utilities": "Bills",
+            "household": "Bills", "home": "Bills", "housing": "Bills", "rent": "Bills",
+            "wohnen": "Bills", "miete": "Bills", "rechnungen": "Bills",
+            "subscription": "Subscriptions", "subscriptions": "Subscriptions",
+            "health": "Health", "healthcare": "Health", "medical": "Health",
+            "travel": "Travel", "reisen": "Travel", "reise": "Travel",
+            "transfer": "Transfers", "transfers": "Transfers", "bank transfer": "Transfers",
+            "fee": "Fees", "fees": "Fees", "tax": "Taxes", "taxes": "Taxes",
+            "investment": "Investments", "investments": "Investments",
+            "income": "Income", "salary": "Income", "wages": "Income", "gehalt": "Income", "lohn": "Income",
+            "cash": "Cash", "cash withdrawal": "Cash", "atm": "Cash", "bargeld": "Cash",
+            "other": "Uncategorized", "unknown": "Uncategorized", "uncategorized": "Uncategorized",
         }
-        return categories.get(str(transaction.get("merchant_category_code") or ""), "Uncategorized")
+        is_inflow = transaction.get("credit_debit_indicator") == "CRDT"
+        supplied = transaction.get("category") or transaction.get("transaction_category")
+        if isinstance(supplied, str):
+            key = re.sub(r"[^a-z0-9]+", " ", supplied.casefold()).strip()
+            if key in aliases:
+                mapped = aliases[key]
+                # A provider occasionally labels an outgoing payment as income.
+                # Direction is authoritative for that one category.
+                if mapped != "Income" or is_inflow:
+                    return mapped
+
+        raw_mcc = str(transaction.get("merchant_category_code") or "")
+        try:
+            mcc = int(raw_mcc)
+        except (TypeError, ValueError):
+            mcc = 0
+        categories = {
+            "5411": "Groceries", "5422": "Groceries", "5441": "Groceries",
+            "5451": "Groceries", "5462": "Groceries", "5499": "Groceries",
+            "5541": "Transport", "5542": "Transport", "4111": "Transport",
+            "4121": "Transport", "4131": "Transport", "4789": "Transport",
+            "7512": "Transport", "5812": "Dining", "5813": "Dining", "5814": "Dining",
+            "5912": "Health", "7011": "Travel", "4722": "Travel", "4511": "Travel",
+            "8011": "Health",
+        }
+        if raw_mcc in categories:
+            return categories[raw_mcc]
+        if 3000 <= mcc <= 3999:
+            return "Travel"
+        if 8021 <= mcc <= 8099:
+            return "Health"
+
+        party_names = []
+        for party_key in ("creditor", "debtor"):
+            party = transaction.get(party_key)
+            if isinstance(party, dict) and isinstance(party.get("name"), str):
+                party_names.append(party["name"])
+        context_fields = (
+            "remittance_information_unstructured",
+            "remittance_information_structured",
+            "remittance_information",
+            "additional_information",
+            "reference",
+            "end_to_end_id",
+        )
+        context_values = []
+        for field in context_fields:
+            value = transaction.get(field)
+            if isinstance(value, str):
+                context_values.append(value)
+            elif isinstance(value, list):
+                context_values.extend(item for item in value if isinstance(item, str))
+        merchant_key = " ".join(party_names + context_values).casefold()
+        merchant_rules = (
+            # Direction-sensitive rules run before generic merchant rules so a
+            # refund/salary is not hidden under the merchant's usual category.
+            ("Income", ("gehalt", "lohn", "salary", "payroll", "erstattung", "refund", "reimbursement", "gutschrift")),
+            # Check transfers before `uber`: folded "Überweisung" contains the
+            # short ride-hailing token.
+            ("Transfers", ("überweisung", "ueberweisung", "bank transfer", "sepa transfer", "kontoübertrag")),
+            ("Fees", ("gebühr", "gebuehr", "bank fee", "service fee", "entgelt", "commission")),
+            ("Taxes", ("finanzamt", "steuer", "tax payment", "taxes")),
+            ("Investments", ("trade republic", "scalable capital", "broker", "depot", "aktien", "etf", "securities")),
+            ("Cash", ("geldautomat", "bargeldauszahlung", "cash withdrawal", "atm")),
+            ("Groceries", ("rewe", "aldi", "lidl", "edeka", "kaufland", "penny", "netto", "denns", "alnatura", "supermarkt")),
+            ("Dining", ("restaurant", "lieferando", "wolt", "mcdonald", "starbucks", "café", "cafe", "imbiss", "bistro")),
+            ("Transport", ("deutsche bahn", "bvg", "uber", "bolt", "tankstelle", "shell", "aral", "esso", "parkhaus")),
+            ("Subscriptions", ("netflix", "spotify", "disney", "amazon prime", "icloud", "youtube premium")),
+            ("Bills", ("miete", "rent", "stromrechnung", "electricity", "stadtwerke", "vodafone", "telekom", "o2", "versicherung", "insurance", "internet", "wasser", "heizung")),
+            ("Shopping", ("amazon", "zalando", "ikea", "mediamarkt", "saturn", "otto")),
+            ("Health", ("apotheke", "pharmacy", "arzt", "doctor", "medical", "gesundheit", "zahnarzt", "dentist")),
+            ("Travel", ("booking.com", "airbnb", "hotel", "expedia", "flughafen", "airport", "airline")),
+        )
+        for category, keywords in merchant_rules:
+            if category == "Income" and not is_inflow:
+                continue
+            if any(keyword.casefold() in merchant_key for keyword in keywords):
+                return category
+        return "Uncategorized"
 
     def _normalize_transaction(
         self,
@@ -778,16 +886,16 @@ class EnableBankingService:
         account_label: str,
         account_uid: str,
         observed_at: str,
-    ) -> dict | None:
+    ) -> dict:
         if not isinstance(transaction, dict) or not isinstance(transaction.get("transaction_amount"), dict):
-            return None
+            raise EnableBankingUnavailable("invalid provider transaction row")
         amount = transaction["transaction_amount"]
         try:
             magnitude = abs(self._money_to_cents(
                 amount.get("amount"), amount.get("currency"), self._max_safe_cents
             ))
         except EnableBankingUnavailable:
-            return None
+            raise EnableBankingUnavailable("invalid provider transaction amount")
         indicator = transaction.get("credit_debit_indicator")
         if indicator == "DBIT":
             signed_amount = -magnitude
@@ -796,7 +904,7 @@ class EnableBankingService:
             signed_amount = magnitude
             party_key = "debtor"
         else:
-            return None
+            raise EnableBankingUnavailable("invalid provider transaction direction")
         party = transaction.get(party_key)
         merchant = self._provider_text(party.get("name") if isinstance(party, dict) else None)
         timestamp = (
@@ -805,7 +913,7 @@ class EnableBankingService:
             or self._provider_date(transaction.get("transaction_date"))
         )
         if timestamp is None:
-            return None
+            raise EnableBankingUnavailable("invalid provider transaction date")
         raw_identity = transaction.get("transaction_id") or transaction.get("entry_reference")
         if not isinstance(raw_identity, str) or not raw_identity:
             raw_identity = json.dumps(transaction, sort_keys=True, separators=(",", ":"))
@@ -831,6 +939,40 @@ class EnableBankingService:
             "category": self._transaction_category(transaction),
             "provenance": provenance,
         }
+
+    @staticmethod
+    def _deduplicate_transactions(rows: list[dict]) -> list[dict]:
+        """Collapse exact retries and reject conflicting stable identities."""
+        by_id: dict[str, dict] = {}
+        ordered: list[dict] = []
+        for row in rows:
+            transaction_id = row.get("id") if isinstance(row, dict) else None
+            if not isinstance(transaction_id, str) or not transaction_id:
+                raise EnableBankingUnavailable("normalized transaction has no stable id")
+            existing = by_id.get(transaction_id)
+            if existing is None:
+                by_id[transaction_id] = row
+                ordered.append(row)
+            elif existing != row:
+                raise EnableBankingUnavailable("conflicting duplicate provider transaction")
+        return ordered
+
+    @staticmethod
+    def _deduplicate_accounts(rows: list[dict]) -> list[dict]:
+        """Collapse exact repeated account observations and reject conflicts."""
+        by_id: dict[str, dict] = {}
+        ordered: list[dict] = []
+        for row in rows:
+            account_id = row.get("id") if isinstance(row, dict) else None
+            if not isinstance(account_id, str) or not account_id:
+                raise EnableBankingUnavailable("normalized account has no stable id")
+            existing = by_id.get(account_id)
+            if existing is None:
+                by_id[account_id] = row
+                ordered.append(row)
+            elif existing != row:
+                raise EnableBankingUnavailable("conflicting duplicate provider account")
+        return ordered
 
     @staticmethod
     def _account_uid(account: object) -> str | None:
@@ -914,30 +1056,55 @@ class EnableBankingService:
             })
             date_to = datetime.now(timezone.utc).date()
             date_from = date_to - timedelta(days=180)
-            transaction_payload = await self._get_account_json(
-                client,
-                credentials,
-                token,
-                uid,
-                "transactions",
-                params={"date_from": date_from.isoformat(), "date_to": date_to.isoformat()},
-            )
-            transactions = transaction_payload.get("transactions")
-            if not isinstance(transactions, list):
-                continue
-            for transaction in transactions[:500]:
-                normalized = self._normalize_transaction(
-                    transaction,
-                    institution_id=connection["institutionId"],
-                    account_label=account_label,
-                    account_uid=uid,
-                    observed_at=observed_at,
+            transaction_params = {
+                "date_from": date_from.isoformat(),
+                "date_to": date_to.isoformat(),
+            }
+            continuation_key: str | None = None
+            seen_continuations: set[str] = set()
+            account_transaction_count = 0
+            for _ in range(self.MAX_TRANSACTION_PAGES):
+                page_params = {
+                    **transaction_params,
+                    **({"continuation_key": continuation_key} if continuation_key is not None else {}),
+                }
+                transaction_payload = await self._get_account_json(
+                    client, credentials, token, uid, "transactions", params=page_params
                 )
-                if normalized is not None:
-                    transaction_rows.append(normalized)
+                transactions = transaction_payload.get("transactions")
+                if not isinstance(transactions, list):
+                    raise EnableBankingUnavailable("invalid transaction page")
+                account_transaction_count += len(transactions)
+                if account_transaction_count > self.MAX_TRANSACTIONS_PER_ACCOUNT:
+                    raise EnableBankingUnavailable("transaction history exceeds bound")
+                for transaction in transactions:
+                    normalized = self._normalize_transaction(
+                        transaction,
+                        institution_id=connection["institutionId"],
+                        account_label=account_label,
+                        account_uid=uid,
+                        observed_at=observed_at,
+                    )
+                    if normalized is not None:
+                        transaction_rows.append(normalized)
+                next_continuation = transaction_payload.get("continuation_key")
+                if next_continuation is None:
+                    break
+                if (
+                    not isinstance(next_continuation, str)
+                    or not next_continuation
+                    or len(next_continuation) > 512
+                    or any(ord(char) < 0x21 or ord(char) == 0x7F for char in next_continuation)
+                    or next_continuation in seen_continuations
+                ):
+                    raise EnableBankingUnavailable("invalid transaction continuation")
+                seen_continuations.add(next_continuation)
+                continuation_key = next_continuation
+            else:
+                raise EnableBankingUnavailable("transaction pagination exceeds bound")
         if not account_rows:
             raise EnableBankingUnavailable("no usable EUR account balances")
-        return account_rows, transaction_rows
+        return account_rows, self._deduplicate_transactions(transaction_rows)
 
     def _metric(self, amount_cents: int | None, *, source: str, observed_at: str) -> dict:
         if amount_cents is None:
@@ -995,6 +1162,10 @@ class EnableBankingService:
                 all_transactions.extend(transactions)
         if not all_accounts:
             raise EnableBankingUnavailable("no linked account data")
+        all_accounts = self._deduplicate_accounts(all_accounts)
+        all_transactions = self._deduplicate_transactions(all_transactions)
+        all_accounts.sort(key=lambda row: row["id"])
+        all_transactions.sort(key=lambda row: (row["timestamp"], row["id"]))
         account_sources = {row["source"] for row in all_accounts}
         account_source = (
             next(iter(account_sources))
@@ -1007,8 +1178,9 @@ class EnableBankingService:
             if len(transaction_sources) == 1
             else "derived-transaction-snapshot"
         )
-        current_month = datetime.now(timezone.utc).strftime("%Y-%m")
+        current_month = datetime.now(BUSINESS_TIME_ZONE).strftime("%Y-%m")
         monthly_income = 0
+        fixed_costs = 0
         spent = 0
         for transaction in all_transactions:
             if not transaction["timestamp"].startswith(current_month):
@@ -1017,7 +1189,10 @@ class EnableBankingService:
             if amount > 0:
                 monthly_income = self._checked_add(monthly_income, amount)
             elif amount < 0:
-                spent = self._checked_add(spent, -amount)
+                outflow = -amount
+                spent = self._checked_add(spent, outflow)
+                if transaction["category"] in {"Bills", "Subscriptions"}:
+                    fixed_costs = self._checked_add(fixed_costs, outflow)
         observed_provenance = {
             "source": transaction_source,
             "observedAt": observed_at,
@@ -1032,7 +1207,7 @@ class EnableBankingService:
                 monthly_income, source=transaction_source, observed_at=observed_at
             ),
             "fixedCosts": self._metric(
-                None, source="no-authorized-finance-source", observed_at=observed_at
+                fixed_costs, source=transaction_source, observed_at=observed_at
             ),
             "discretionaryBuffer": self._metric(
                 None, source="no-authorized-finance-source", observed_at=observed_at
@@ -1063,5 +1238,8 @@ class EnableBankingService:
         }
         if not self._validate_finance_payload(summary):
             raise EnableBankingUnavailable("normalized finance payload failed validation")
+        serialized = json.dumps(summary, separators=(",", ":"), sort_keys=True, allow_nan=False).encode("utf-8")
+        if len(serialized) > self.MAX_FINANCE_SUMMARY_SIZE:
+            raise EnableBankingUnavailable("normalized finance summary exceeds response bound")
         self._atomic_write_json(self._summary_path(), summary)
         return summary

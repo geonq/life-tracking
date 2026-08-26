@@ -77,6 +77,48 @@ public sealed class ServiceHostTests
         Assert.Throws<ConfigValidationException>(() => ServiceHostConfigLoader.ParseAndValidate(Encoding.UTF8.GetBytes(nonBoolean)));
     }
 
+    [Fact]
+    public void ConfigValidationAcceptsRuntimeDataAndSecretFileBindingsWithoutRawSecrets()
+    {
+        using var fixture = TestFixture.Create();
+        var environment = new Dictionary<string, object>
+        {
+            ["PORT"] = 8787,
+            ["NODE_ENV"] = "production",
+            ["USAGE_STORE_PATH"] = fixture.StorePath,
+            ["CLIPPER_STORE_PATH"] = fixture.StorePath,
+            ["LIFEOS_DATA_DIR"] = fixture.Root,
+            ["LIFEOS_SUPPLEMENT_CATALOG_PATH"] = fixture.StorePath,
+            ["LIFEOS_TAILSCALE_ALLOWED_LOGIN"] = "operator@example.test",
+            ["CLIPPER_INGEST_ENABLED"] = true,
+            ["CLIPPER_INGEST_SECRET_FILE"] = fixture.SecretPath,
+            ["GOOGLE_AI_STUDIO_ENABLED"] = true,
+            ["GOOGLE_AI_STUDIO_API_KEY_FILE"] = fixture.SecretPath,
+            ["GOOGLE_AI_STUDIO_FOOD_MODEL"] = "gemini-2.5-flash",
+            ["GOOGLE_AI_STUDIO_FOOD_MODEL_VERSION"] = "generate-content-json-v1",
+            ["ENABLE_BANKING_APP_ID"] = "lifeos-test-app",
+            ["ENABLE_BANKING_PRIVATE_KEY_PATH"] = fixture.SecretPath,
+            ["ENABLE_BANKING_CERTIFICATE_PATH"] = fixture.SecretPath,
+            ["ENABLE_BANKING_API_BASE_URL"] = "https://api.enablebanking.com",
+            ["ENABLE_BANKING_REDIRECT_URI"] = "https://lifeos.example.test/callback",
+        };
+        var valid = fixture.ValidJson().Replace(
+            "\"environment\":{}",
+            $"\"environment\":{JsonSerializer.Serialize(environment)}",
+            StringComparison.Ordinal);
+
+        var options = ServiceHostConfigLoader.ParseAndValidate(Encoding.UTF8.GetBytes(valid));
+
+        Assert.Equal("true", options.Environment["GOOGLE_AI_STUDIO_ENABLED"]);
+        Assert.Equal(fixture.SecretPath, options.Environment["GOOGLE_AI_STUDIO_API_KEY_FILE"]);
+
+        var rawKey = fixture.ValidJson().Replace(
+            "\"environment\":{}",
+            "\"environment\":{\"GOOGLE_AI_STUDIO_API_KEY\":\"raw-secret\"}",
+            StringComparison.Ordinal);
+        Assert.Throws<ConfigValidationException>(() => ServiceHostConfigLoader.ParseAndValidate(Encoding.UTF8.GetBytes(rawKey)));
+    }
+
     [Theory]
     [InlineData("S-1-5-18", true)]
     [InlineData("S-1-5-32-544", true)]
