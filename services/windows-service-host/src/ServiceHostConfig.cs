@@ -479,6 +479,30 @@ public static class ServiceHostConfigValidator
             result.Add(pair.Key, value);
         }
 
+        if (clipperEnabled && (!result.TryGetValue("CLIPPER_INGEST_SECRET_FILE", out var clipperSecretPath) || string.IsNullOrWhiteSpace(clipperSecretPath)))
+        {
+            throw new ConfigValidationException("environment", "CLIPPER_INGEST_SECRET_FILE is required when CLIPPER_INGEST_ENABLED is true");
+        }
+
+        if (googleEnabled && (!result.TryGetValue("GOOGLE_AI_STUDIO_API_KEY_FILE", out var googleKeyPath) || string.IsNullOrWhiteSpace(googleKeyPath)))
+        {
+            throw new ConfigValidationException("environment", "GOOGLE_AI_STUDIO_API_KEY_FILE is required when GOOGLE_AI_STUDIO_ENABLED is true");
+        }
+
+        var bankingNames = new[]
+        {
+            "ENABLE_BANKING_APP_ID",
+            "ENABLE_BANKING_PRIVATE_KEY_PATH",
+            "ENABLE_BANKING_CERTIFICATE_PATH",
+            "ENABLE_BANKING_API_BASE_URL",
+            "ENABLE_BANKING_REDIRECT_URI"
+        };
+        var configuredBankingCount = bankingNames.Count(result.ContainsKey);
+        if (configuredBankingCount is not 0 and not 5)
+        {
+            throw new ConfigValidationException("environment", "Enable Banking app id, key, certificate, API base URL, and redirect URI must be configured together");
+        }
+
         if (openFoodFactsEnabled && !result.ContainsKey("OPEN_FOOD_FACTS_CONTACT_EMAIL"))
         {
             throw new ConfigValidationException("environment", "OPEN_FOOD_FACTS_CONTACT_EMAIL is required when OPEN_FOOD_FACTS_ENABLED is true");
@@ -553,6 +577,7 @@ public static class ServiceHostConfigValidator
             || uri.Scheme != Uri.UriSchemeHttps
             || string.IsNullOrEmpty(uri.Host)
             || !string.IsNullOrEmpty(uri.UserInfo)
+            || !string.IsNullOrEmpty(uri.Query)
             || !string.IsNullOrEmpty(uri.Fragment)
             || value.Length > 2048)
         {

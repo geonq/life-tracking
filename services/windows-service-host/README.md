@@ -49,9 +49,12 @@ rejects unknown or duplicate properties. All fields below are required:
 ```
 
 `environment` is an explicit allowlist. Supported service API keys include
-`PORT`, `NODE_ENV`, `USAGE_STORE_PATH`, the `*_ENABLED` and `*_LIVE_ENABLED`
-flags, `CLAUDE_INGEST_SECRET_FILE`, `CODEX_INGEST_SECRET_FILE`, and the
-runtime path keys `SYSTEMROOT`, `TEMP`, `TMP`, and `PATH`. The optional
+`PORT`, `NODE_ENV`, `USAGE_STORE_PATH`, `CLIPPER_STORE_PATH`, the `*_ENABLED`
+and `*_LIVE_ENABLED` flags, `CLAUDE_INGEST_SECRET_FILE`,
+`CODEX_INGEST_SECRET_FILE`, `CLIPPER_INGEST_SECRET_FILE`,
+`GOOGLE_AI_STUDIO_API_KEY_FILE`, the optional bounded Google model settings,
+the `LIFEOS_SUPPLEMENT_CATALOG_PATH` and Enable Banking file/URL settings, and
+the runtime path keys `SYSTEMROOT`, `TEMP`, `TMP`, and `PATH`. The optional
 Open Food Facts integration adds exactly two names: `OPEN_FOOD_FACTS_ENABLED`
 (the literal boolean `true`/`false`) and
 `OPEN_FOOD_FACTS_CONTACT_EMAIL`. When the flag is `true`, the contact field is

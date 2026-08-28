@@ -85,6 +85,8 @@ class XcodeGenInvariantTests(unittest.TestCase):
             (project / "project.pbxproj").write_text("pbx", encoding="utf-8")
             (project / "xcuserdata/user.xcuserdatad").mkdir(parents=True)
             (project / "xcuserdata/user.xcuserdatad/settings").write_text("local", encoding="utf-8")
+            (project / "project.xcworkspace/xcuserdata/user.xcuserdatad").mkdir(parents=True)
+            (project / "project.xcworkspace/xcuserdata/user.xcuserdatad/state").write_text("local", encoding="utf-8")
             package = project / "project.xcworkspace/xcshareddata/swiftpm"
             package.mkdir(parents=True)
             (package / "Package.resolved").write_text("local", encoding="utf-8")

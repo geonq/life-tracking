@@ -1,18 +1,20 @@
 # Claude Code usage forwarder
 
 This directory contains a small, stdlib-only Mac helper for forwarding the
-rate-limit fields that Claude Code exposes to its status-line command. It is
-not installed yet: no `~/.claude` file, launch agent, or endpoint has been
-created or modified by this repository.
+rate-limit fields that Claude Code exposes to its status-line command. The
+repository also contains a safe, explicit installer; it does not modify
+`~/.claude` unless run with `--apply`.
 
 ## Intended flow
 
 1. Claude Code invokes `claude_statusline_collector.py --spool PATH` as its
-   status-line command and sends its JSON status object on stdin.
+   status-line command and sends its JSON status object on stdin. Claude Code
+   documents these fields as `rate_limits.five_hour` and `rate_limits.seven_day`;
+   they are available to Claude.ai Pro/Max subscribers after the first response.
 2. The collector keeps one private JSON slot at `PATH`, replacing it
    atomically with mode `0600` on each valid sample. It prints a short status
    such as `CLAUDE USAGE 5h 12.5% · 7d 80%`.
-3. A future per-user `launchd` job invokes
+3. A per-user `launchd` job invokes
    `claude_usage_uploader.py --spool PATH --config CONFIG` periodically.
    The uploader atomically renames the latest slot to a fixed private
    `PATH`-sibling claim before sending. A valid claim is retried first; a 2xx
@@ -25,9 +27,44 @@ created or modified by this repository.
    {"endpoint":"https://your-device.your-tailnet.ts.net:8420/usage/claude-ingest"}
    ```
 
-   The placeholder above is not a real endpoint or identity. The intended
-   service is a Tailscale Serve HTTPS endpoint on port `8420` (or `443`) with
-   the exact path `/usage/claude-ingest`.
+   The configured LifeOS endpoint is
+   `https://geonqserver.tail5f8789.ts.net:8420/usage/claude-ingest`. The
+   installer defaults to this exact approved host but validates any override
+   against the same HTTPS/Tailscale/path policy.
+
+## Install on the Mac that runs Claude Code
+
+From the repository root, preview the paths first:
+
+```sh
+python3 scripts/usage/install_claude_forwarder.py
+```
+
+Apply the configuration after reviewing the dry run:
+
+```sh
+python3 scripts/usage/install_claude_forwarder.py --apply --load-agent
+```
+
+The installer merges only the `statusLine` setting into the existing
+`~/.claude/settings.json`, saves a private pre-change backup, writes a private
+endpoint config and spool directory under `~/.lifeos/claude-usage`, and loads
+`com.lifeos.claude-usage-uploader`. It never writes an API key or bearer token.
+`--load-agent` is optional; without it, the plist is written but not loaded.
+The uploader runs at login and every 60 seconds. The status line intentionally
+does not use a periodic refresh: rerunning it without a new Claude response
+would make an old quota sample look newly observed. After the next Claude
+response, verify the chain with:
+
+```sh
+python3 scripts/usage/claude_usage_uploader.py \
+  --spool "$HOME/.lifeos/claude-usage/claude-usage.json" \
+  --config "$HOME/.lifeos/claude-usage/endpoint.json"
+```
+
+Then the LifeOS API must return an observed Claude window from `/api/usage`.
+An absent `rate_limits` object is reported as unavailable; the forwarder never
+turns missing data into zero.
 
 ## Privacy and trust boundary
 
@@ -55,8 +92,10 @@ created or modified by this repository.
   sensitive error output is used. A timeout or network/server failure only
   produces `CLAUDE USAGE unavailable` and a nonfatal exit.
 
-The launchd plist, endpoint identity, credentials, and installation remain
-deliberately unspecified and not-yet-installed.
+The endpoint identity and Tailscale Serve remain runtime prerequisites. The
+installer cannot manufacture a Claude.ai subscription response or prove a
+Windows gateway from this Mac; the final acceptance step must observe a real
+Claude window in `/api/usage`.
 
 ## Local verification
 

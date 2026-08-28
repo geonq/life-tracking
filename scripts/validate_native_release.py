@@ -2,10 +2,12 @@
 """Validate source-safe and release-injected native LifeOS invariants.
 
 The checked-in XcodeGen spec is intentionally a development-safe source of
-truth: it has an empty sync allowlist, an unknown provisioning mode, and a
-team-owned App Group placeholder.  Those values are useful because a local
-unsigned build must fail closed.  A release lane must inject real values from
-its signing environment and is rejected if any of those values remain.
+truth: it has an exact private Tailscale sync allowlist, an unknown
+provisioning mode, and a team-owned App Group placeholder. The private host is
+safe to pin because the client still requires HTTPS, a `.ts.net` hostname, and
+the gateway's Tailscale identity enforcement. A release lane must inject real
+App Group and provisioning values from its signing environment and is rejected
+if any of those values remain unresolved.
 
 This module deliberately uses only the Python standard library so it can run
 on a clean GitHub-hosted macOS runner before any project build starts.
@@ -26,7 +28,9 @@ IOS = ROOT / "ios"
 
 EXPECTED_APP_GROUP_SOURCE = "group.com.hermes.lifeos.REPLACE_WITH_TEAM_CONFIGURED_ID"
 EXPECTED_PROVISIONING_SOURCE = "unknown"
-EXPECTED_SYNC_ALLOWLIST_SOURCE = ""
+EXPECTED_SYNC_ALLOWLIST_SOURCE = "geonqserver.tail5f8789.ts.net"
+EXPECTED_CODE_SIGN_STYLE_SOURCE = "Automatic"
+EXPECTED_DEVELOPMENT_TEAM_SOURCE = "8F6VSCQ9SZ"
 
 EXPECTED_IOS_PRIMARY = ("home", "calendar", "finance", "fitness", "more")
 EXPECTED_MAC_PRIMARY = ("home", "calendar", "finance", "fitness", "tax", "settings")
@@ -169,6 +173,8 @@ def _reject_signed_source_values(project: str) -> None:
     app_group = _project_setting(project, "APP_GROUP_IDENTIFIER")
     provisioning = _project_setting(project, "PROVISIONING_MODE")
     allowlist = _project_setting(project, "LIFEOS_SYNC_APPROVED_HOSTS")
+    signing_style = _project_setting(project, "CODE_SIGN_STYLE")
+    development_team = _project_setting(project, "DEVELOPMENT_TEAM")
 
     if app_group != EXPECTED_APP_GROUP_SOURCE:
         _fail(
@@ -178,7 +184,11 @@ def _reject_signed_source_values(project: str) -> None:
     if provisioning != EXPECTED_PROVISIONING_SOURCE:
         _fail("source PROVISIONING_MODE must remain unknown/fail-closed")
     if allowlist != EXPECTED_SYNC_ALLOWLIST_SOURCE:
-        _fail("source LIFEOS_SYNC_APPROVED_HOSTS must remain empty/fail-closed")
+        _fail("source LIFEOS_SYNC_APPROVED_HOSTS must remain the exact approved private host")
+    if signing_style != EXPECTED_CODE_SIGN_STYLE_SOURCE:
+        _fail("source CODE_SIGN_STYLE must remain Automatic")
+    if development_team != EXPECTED_DEVELOPMENT_TEAM_SOURCE:
+        _fail("source DEVELOPMENT_TEAM must remain the selected Apple team")
 
 
 def _reject_source_fixture_build_flags(project: str) -> None:

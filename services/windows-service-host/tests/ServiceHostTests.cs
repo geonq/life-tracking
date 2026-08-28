@@ -119,6 +119,41 @@ public sealed class ServiceHostTests
         Assert.Throws<ConfigValidationException>(() => ServiceHostConfigLoader.ParseAndValidate(Encoding.UTF8.GetBytes(rawKey)));
     }
 
+    [Fact]
+    public void ConfigValidationRequiresDependentProviderBindings()
+    {
+        using var fixture = TestFixture.Create();
+        var valid = fixture.ValidJson();
+
+        foreach (var enabledFlag in new[] { "CLIPPER_INGEST_ENABLED", "GOOGLE_AI_STUDIO_ENABLED" })
+        {
+            var missingSecret = valid.Replace(
+                "\"environment\":{}",
+                $"\"environment\":{{\"{enabledFlag}\":true}}",
+                StringComparison.Ordinal);
+            Assert.Throws<ConfigValidationException>(() => ServiceHostConfigLoader.ParseAndValidate(Encoding.UTF8.GetBytes(missingSecret)));
+        }
+
+        var partialBanking = valid.Replace(
+            "\"environment\":{}",
+            "\"environment\":{\"ENABLE_BANKING_APP_ID\":\"lifeos-test-app\"}",
+            StringComparison.Ordinal);
+        Assert.Throws<ConfigValidationException>(() => ServiceHostConfigLoader.ParseAndValidate(Encoding.UTF8.GetBytes(partialBanking)));
+
+        var bankingWithQuery = valid.Replace(
+            "\"environment\":{}",
+            $"\"environment\":{JsonSerializer.Serialize(new Dictionary<string, object>
+            {
+                ["ENABLE_BANKING_APP_ID"] = "lifeos-test-app",
+                ["ENABLE_BANKING_PRIVATE_KEY_PATH"] = fixture.SecretPath,
+                ["ENABLE_BANKING_CERTIFICATE_PATH"] = fixture.SecretPath,
+                ["ENABLE_BANKING_API_BASE_URL"] = "https://api.enablebanking.com?unexpected=1",
+                ["ENABLE_BANKING_REDIRECT_URI"] = "https://lifeos.example.test/callback",
+            })}",
+            StringComparison.Ordinal);
+        Assert.Throws<ConfigValidationException>(() => ServiceHostConfigLoader.ParseAndValidate(Encoding.UTF8.GetBytes(bankingWithQuery)));
+    }
+
     [Theory]
     [InlineData("S-1-5-18", true)]
     [InlineData("S-1-5-32-544", true)]

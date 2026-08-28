@@ -70,6 +70,7 @@ class NativeCalendarSourceParserTests(unittest.TestCase):
                 "LifeOS/CalendarView.swift",
                 "LifeOS/Modules",
                 "LifeOS/TaxDocumentsView.swift",
+                "LifeOS/WidgetSnapshotPublisher.swift",
             ],
             "LifeOSMacWidget": [
                 "LifeOSMacWidget",

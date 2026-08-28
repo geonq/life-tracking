@@ -184,7 +184,7 @@ def _canonical_files(project: Path) -> dict[str, bytes]:
         relative = path.relative_to(project).as_posix()
         # These are machine-local or package-resolution products. They are
         # intentionally ignored and are not part of generated-project drift.
-        if relative.startswith("xcuserdata/"):
+        if relative.startswith("xcuserdata/") or "/xcuserdata/" in relative:
             continue
         if relative == "project.xcworkspace/xcshareddata/swiftpm/Package.resolved":
             continue

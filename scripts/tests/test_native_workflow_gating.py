@@ -31,17 +31,13 @@ class NativeWorkflowGatingTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.source = WORKFLOW.read_text(encoding="utf-8")
 
-    def test_push_is_default_branch_only_and_pull_requests_are_explicit(self) -> None:
-        self.assertRegex(self.source, r"(?ms)^  push:\n    branches:\n      - main\n")
-        self.assertIn("types: [opened, synchronize, reopened]", self.source)
+    def test_native_validation_is_manual_only(self) -> None:
+        self.assertNotRegex(self.source, r"(?ms)^  push:\n")
+        self.assertNotIn("pull_request:", self.source)
+        self.assertIn("  workflow_dispatch:", self.source)
         self.assertNotIn("dorny/paths-filter", self.source)
-        self.assertIn('      - "docs/**"', self.source)
-        self.assertIn('      - "scripts/tests/**"', self.source)
-        self.assertIn('      - "scripts/validate_acceptance_registry.py"', self.source)
 
-    def test_docs_and_registry_changes_have_a_non_xcode_contract_job(self) -> None:
-        self.assertIn('      - "docs/**"', self.source)
-        self.assertIn('      - "scripts/tests/**"', self.source)
+    def test_manual_runs_have_a_non_xcode_contract_job(self) -> None:
         self.assertIn("  contract-check:\n", self.source)
         self.assertIn("name: Registry and source contracts", self.source)
         self.assertIn("scripts/validate_acceptance_registry.py", self.source)
@@ -93,7 +89,7 @@ class NativeWorkflowGatingTests(unittest.TestCase):
     def test_source_only_tests_do_not_force_native_matrix(self) -> None:
         classifier = self.source.split("          while IFS= read -r path; do", 1)[1].split("          done <", 1)[0]
         self.assertNotIn("scripts/tests/*", classifier)
-        self.assertIn('      - "scripts/tests/**"', self.source)
+        self.assertIn("scripts/native_lane_manifest.json", classifier)
 
 
 if __name__ == "__main__":

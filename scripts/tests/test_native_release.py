@@ -16,7 +16,7 @@ TEST_APPROVED_HOST = "ci-test." + "ts.net"
 
 
 class NativeReleaseInvariantTests(unittest.TestCase):
-    def test_checked_in_source_remains_fail_closed(self) -> None:
+    def test_checked_in_source_uses_exact_approved_sync_host(self) -> None:
         validate_source(ROOT)
 
     def test_release_accepts_explicit_injected_values(self) -> None:
