@@ -72,17 +72,6 @@ struct OverviewView: View {
 #endif
             .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
             .refreshable { await refreshAction?() }
-            .navigationDestination(isPresented: $showingUsage) {
-                zoomTransitioned(
-                    UsageView(
-                        snapshots: usageSnapshots,
-                        analytics: usageAnalytics,
-                        state: usageState,
-                        refreshAction: refreshAction
-                    ),
-                    sourceID: OverviewSectionKind.llm.rawValue
-                )
-            }
             .navigationDestination(item: $selectedDetail) { destination in
                 switch destination {
                 case .clipper:
@@ -293,26 +282,25 @@ struct OverviewView: View {
         case .llm:
             if openDestination != nil {
                 Button {
-                    if reduceMotion {
-                        showingUsage = true
-                    } else {
-                        withAnimation(LifeOSMotion.heroMorph) {
-                            showingUsage = true
-                        }
-                    }
+                    // Usage is a top-level iOS route. Mutating the binding
+                    // directly keeps the action deterministic on device;
+                    // route-level animation is owned by LifeOSApp.
+                    showingUsage = true
                 } label: {
-                    zoomSource(
-                        OverviewMetricCard(
-                            section: section,
-                            featured: featured,
-                            usageSnapshots: usageSnapshots,
-                            usageAnalytics: usageAnalytics,
-                            fitnessSnapshot: fitnessSnapshot,
-                            financeSummary: financeSummary,
-                            financeState: financeState
-                        ),
-                        id: section.kind.rawValue
+                    let card = OverviewMetricCard(
+                        section: section,
+                        featured: featured,
+                        usageSnapshots: usageSnapshots,
+                        usageAnalytics: usageAnalytics,
+                        fitnessSnapshot: fitnessSnapshot,
+                        financeSummary: financeSummary,
+                        financeState: financeState
                     )
+                    if openDestination == nil {
+                        zoomSource(card, id: section.kind.rawValue)
+                    } else {
+                        card
+                    }
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("account-usage-link")
@@ -787,6 +775,10 @@ private struct OverviewMetricCard: View {
             if usageTrendPoints.count >= 2 {
                 OverviewSparkline(points: usageTrendPoints, tint: LifeOSTokens.accent)
                     .frame(height: 44)
+                    // This chart is a summary inside a tappable card. Its
+                    // detail view owns chart scrubbing; letting this overlay
+                    // hit-test would swallow the card's navigation tap.
+                    .allowsHitTesting(false)
             } else {
                 OverviewChartUnavailable(detail: usageChartDetail)
                     .frame(minHeight: 44)
@@ -813,6 +805,7 @@ private struct OverviewMetricCard: View {
                 if let clipperTrend {
                     OverviewSparkline(points: clipperTrend.points, tint: LifeOSTokens.accent)
                         .frame(height: 36)
+                        .allowsHitTesting(false)
                 } else {
                     OverviewChartUnavailable(detail: clipperChartDetail)
                         .frame(minHeight: 40)
@@ -1027,6 +1020,17 @@ private struct OverviewSparkline: View {
         return max(0, minimum - padding)...maximum + padding
     }
 
+    private var chartXDomain: ClosedRange<Date> {
+        guard let first = orderedPoints.first?.date,
+              let last = orderedPoints.last?.date,
+              last > first else {
+            let now = Date.now
+            return now.addingTimeInterval(-60)...now.addingTimeInterval(60)
+        }
+        let padding = max(last.timeIntervalSince(first) * 0.02, 60)
+        return first.addingTimeInterval(-padding)...last.addingTimeInterval(padding)
+    }
+
     var body: some View {
         Chart(orderedPoints) { point in
             LineMark(
@@ -1050,6 +1054,7 @@ private struct OverviewSparkline: View {
             }
         }
         .chartYScale(domain: yDomain)
+        .chartXScale(domain: chartXDomain)
         .chartYAxis(.hidden)
         .chartXAxis(.hidden)
         .chartOverlay { proxy in
@@ -1060,25 +1065,32 @@ private struct OverviewSparkline: View {
                         .fill(.clear)
                         .contentShape(Rectangle())
 #if os(iOS)
-                        .gesture(DragGesture(minimumDistance: 0).onChanged { value in
-                            let locationX = value.location.x
-                            let plotOriginX = frame.origin.x
-                            let x = locationX - plotOriginX
-                            if let date: Date = proxy.value(atX: x) { selectClosest(to: date) }
+                        .simultaneousGesture(DragGesture(minimumDistance: LifeOSDirectionalClassifier.minimumDistance).onChanged { value in
+                            guard LifeOSDirectionalClassifier.classify(value.translation) == .horizontal,
+                                  let date = LifeOSChartKit.timestamp(
+                                      forPlotX: value.location.x,
+                                      in: frame,
+                                      domain: chartXDomain
+                                  ) else { return }
+                            selectClosest(to: date)
                         })
                         .onTapGesture { location in
-                            let locationX = location.x
-                            let plotOriginX = frame.origin.x
-                            let x = locationX - plotOriginX
-                            if let date: Date = proxy.value(atX: x) { selectClosest(to: date) }
+                            guard let date = LifeOSChartKit.timestamp(
+                                forPlotX: location.x,
+                                in: frame,
+                                domain: chartXDomain
+                            ) else { return }
+                            selectClosest(to: date)
                         }
 #elseif os(macOS)
                         .onContinuousHover(coordinateSpace: .local) { phase in
                             if case .active(let location) = phase {
-                                let locationX = location.x
-                                let plotOriginX = frame.origin.x
-                                let x = locationX - plotOriginX
-                                if let date: Date = proxy.value(atX: x) { selectClosest(to: date) }
+                                guard let date = LifeOSChartKit.timestamp(
+                                    forPlotX: location.x,
+                                    in: frame,
+                                    domain: chartXDomain
+                                ) else { return }
+                                selectClosest(to: date)
                             }
                         }
 #endif
@@ -1087,7 +1099,8 @@ private struct OverviewSparkline: View {
                        let y = proxy.position(forY: selectedPoint.value) {
                         ScrubBubble(
                             x: frame.origin.x + x,
-                            y: min(max(frame.origin.y + y - 24, 16), frame.maxY - 18)
+                            y: frame.origin.y + y,
+                            bounds: frame
                         ) {
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(selectedPointValueText)
@@ -1135,12 +1148,11 @@ private struct OverviewSparkline: View {
     }
 
     private func selectClosest(to date: Date) {
-        guard let nearest = orderedPoints.min(by: {
-            abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date))
-        }) else { return }
-        guard selectedDate != nearest.date else { return }
+        let chartPoints = orderedPoints.map { LifeOSChartPoint(timestamp: $0.date, value: $0.value) }
+        guard let nearest = LifeOSChartKit.nearestPoint(in: chartPoints, to: date) else { return }
+        guard selectedDate != nearest.timestamp else { return }
         ScrubBubble<EmptyView>.snapHaptic()
-        selectedDate = nearest.date
+        selectedDate = nearest.timestamp
     }
 }
 

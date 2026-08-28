@@ -116,26 +116,33 @@ struct UsageProjectionChart: View {
                         let frame = geometry[plotFrame]
                         Rectangle().fill(.clear).contentShape(Rectangle())
 #if os(iOS)
-                            .gesture(DragGesture(minimumDistance: 0).onChanged { value in
-                                let x = value.location.x - frame.origin.x
-                                if let date: Date = proxy.value(atX: x) {
-                                    selectClosest(to: date)
-                                }
+                            .simultaneousGesture(DragGesture(minimumDistance: LifeOSDirectionalClassifier.minimumDistance).onChanged { value in
+                                guard LifeOSDirectionalClassifier.classify(value.translation) == .horizontal,
+                                      let date = LifeOSChartKit.timestamp(
+                                          forPlotX: value.location.x,
+                                          in: frame,
+                                          domain: chartDomain
+                                      ) else { return }
+                                selectClosest(to: date)
                             })
                             .onTapGesture { location in
-                                let x = location.x - frame.origin.x
-                                if let date: Date = proxy.value(atX: x) {
-                                    selectClosest(to: date)
-                                }
+                                guard let date = LifeOSChartKit.timestamp(
+                                    forPlotX: location.x,
+                                    in: frame,
+                                    domain: chartDomain
+                                ) else { return }
+                                selectClosest(to: date)
                             }
 #elseif os(macOS)
                             .onContinuousHover(coordinateSpace: .local) { phase in
                                 switch phase {
                                 case .active(let location):
-                                    let x = location.x - frame.origin.x
-                                    if let date: Date = proxy.value(atX: x) {
-                                        selectClosest(to: date)
-                                    }
+                                    guard let date = LifeOSChartKit.timestamp(
+                                        forPlotX: location.x,
+                                        in: frame,
+                                        domain: chartDomain
+                                    ) else { return }
+                                    selectClosest(to: date)
                                 case .ended:
                                     break
                                 }
@@ -144,7 +151,11 @@ struct UsageProjectionChart: View {
                         if let selectedPoint,
                            let x = proxy.position(forX: selectedPoint.date),
                            let y = proxy.position(forY: selectedPoint.usedPercent) {
-                            ScrubBubble(x: frame.origin.x + x, y: max(18, frame.origin.y + y - 26)) {
+                            ScrubBubble(
+                                x: frame.origin.x + x,
+                                y: frame.origin.y + y,
+                                bounds: frame
+                            ) {
                                 Text("\(Int((1 - selectedPoint.usedPercent) * 100))% remaining")
                             }
                             .allowsHitTesting(false)
@@ -354,19 +365,53 @@ struct UsageProjectionChart: View {
     }
 
     private func selectClosest(to date: Date) {
-        guard !allSelectablePoints.isEmpty else { return }
-        let closest = allSelectablePoints.min {
-            let leftDistance = abs($0.date.timeIntervalSince(date))
-            let rightDistance = abs($1.date.timeIntervalSince(date))
-            guard leftDistance == rightDistance else { return leftDistance < rightDistance }
-            if $0.isProjected != $1.isProjected {
-                return !$0.isProjected
-            }
-            return $0.date < $1.date
-        }
-        if let closest, closest.id != selectedID {
-            selectedID = closest.id
+        guard let closest = LifeOSChartKit.nearestSelection(in: selectableSeries, to: date) else { return }
+        let selection = UsageSelectionPoint(
+            date: closest.point.timestamp,
+            usedPercent: closest.point.value ?? 0,
+            isProjected: closest.kind == .estimate
+        )
+        if selection.id != selectedID {
+            selectedID = selection.id
             ScrubBubble<EmptyView>.snapHaptic()
+        }
+    }
+
+    private var selectableSeries: [LifeOSChartSeries] {
+        var result: [LifeOSChartSeries] = []
+        if !actualPoints.isEmpty {
+            result.append(
+                LifeOSChartSeries(
+                    id: "actual",
+                    label: "Actual",
+                    kind: .observed,
+                    points: actualPoints.map { LifeOSChartPoint(timestamp: $0.date, value: $0.usedPercent) },
+                    source: analytics.provenance.source,
+                    provenance: chartProvenance
+                )
+            )
+        }
+        if !estimatePoints.isEmpty {
+            result.append(
+                LifeOSChartSeries(
+                    id: "estimate",
+                    label: "Estimate",
+                    kind: .estimate,
+                    points: estimatePoints.map { LifeOSChartPoint(timestamp: $0.date, value: $0.usedPercent) },
+                    source: analytics.provenance.source,
+                    provenance: .estimated
+                )
+            )
+        }
+        return result
+    }
+
+    private var chartProvenance: LifeOSChartProvenance {
+        switch analytics.provenance.quality {
+        case .observed: .observed
+        case .estimated: .estimated
+        case .demo: .demo
+        case .unavailable: .unavailable
         }
     }
 

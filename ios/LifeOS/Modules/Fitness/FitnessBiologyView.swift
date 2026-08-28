@@ -454,7 +454,7 @@ private struct FitnessBiologyTrendCard: View {
                     .font(LifeOSFont.caption(10))
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
-            FitnessBiologyTrendChart(points: points, hue: metric.id.hue, selectedDate: $selectedDate)
+            FitnessBiologyTrendChart(points: points, hue: metric.id.hue, metricTitle: metric.title, metricUnit: metric.unit.label, selectedDate: $selectedDate)
                 .frame(height: 190)
             if let selectedDate, let point = points.first(where: { $0.date == selectedDate }) {
                 HStack(alignment: .firstTextBaseline) {
@@ -479,6 +479,8 @@ private struct FitnessBiologyTrendCard: View {
 private struct FitnessBiologyTrendChart: View {
     let points: [FitnessBiologySample]
     let hue: LifeOSTokens.Hue
+    let metricTitle: String
+    let metricUnit: String
     @Binding var selectedDate: Date?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -488,6 +490,11 @@ private struct FitnessBiologyTrendChart: View {
 
     private var chartDatasetID: String {
         orderedPoints.map { "\($0.date.timeIntervalSinceReferenceDate):\($0.value)" }.joined(separator: "|")
+    }
+
+    private var selectedIndex: Int? {
+        guard let selectedDate else { return nil }
+        return orderedPoints.firstIndex { $0.date == selectedDate }
     }
 
     var body: some View {
@@ -511,7 +518,8 @@ private struct FitnessBiologyTrendChart: View {
                 }
             }
             .contentShape(Rectangle())
-            .gesture(DragGesture(minimumDistance: 0).onChanged { gesture in
+            .simultaneousGesture(DragGesture(minimumDistance: LifeOSDirectionalClassifier.minimumDistance).onChanged { gesture in
+                guard LifeOSDirectionalClassifier.classify(gesture.translation) == .horizontal else { return }
                 let x = min(max(gesture.location.x, 0), geometry.size.width)
                 if let index = FitnessBiologyChartGeometry.closestIndex(forX: x, points: orderedPoints, in: geometry.size),
                    orderedPoints.indices.contains(index) {
@@ -523,7 +531,29 @@ private struct FitnessBiologyTrendChart: View {
         }
         .chartDrawOn(id: chartDatasetID)
         .animation(reduceMotion ? nil : LifeOSMotion.track, value: selectedDate)
-        .accessibilityLabel("\(orderedPoints.count)-point trend chart")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(metricTitle) trend chart")
+        .accessibilityValue(accessibilityValue)
+        .accessibilityHint("Swipe up or down to inspect adjacent samples.")
+        .accessibilityAdjustableAction { direction in
+            guard !orderedPoints.isEmpty else { return }
+            let current = selectedIndex ?? (direction == .increment ? -1 : orderedPoints.count)
+            let next: Int
+            switch direction {
+            case .increment: next = min(orderedPoints.count - 1, current + 1)
+            case .decrement: next = max(0, current - 1)
+            @unknown default: return
+            }
+            selectedDate = orderedPoints[next].date
+        }
+    }
+
+    private var accessibilityValue: String {
+        guard let index = selectedIndex, orderedPoints.indices.contains(index) else {
+            return orderedPoints.isEmpty ? "Unavailable" : "Observed samples; no sample selected"
+        }
+        let point = orderedPoints[index]
+        return "Selected \(point.date.formatted(date: .abbreviated, time: .omitted)), \(point.value.formatted(.number.precision(.fractionLength(0...2)))) \(metricUnit)"
     }
 }
 
@@ -584,6 +614,13 @@ private struct FitnessBiologyProvenanceCard: View {
 }
 
 private enum FitnessBiologyChartGeometry {
+    private static func x(for date: Date, points: [FitnessBiologySample], width: CGFloat, inset: CGFloat) -> CGFloat {
+        guard let first = points.first?.date, let last = points.last?.date else { return inset }
+        let span = max(last.timeIntervalSince(first), 1)
+        let fraction = min(max(date.timeIntervalSince(first) / span, 0), 1)
+        return inset + width * CGFloat(fraction)
+    }
+
     static func path(for points: [FitnessBiologySample], in size: CGSize) -> Path {
         guard points.count > 1 else { return Path() }
         let values = points.map(\.value)
@@ -594,17 +631,25 @@ private enum FitnessBiologyChartGeometry {
         let width = max(size.width - inset * 2, 1)
         let height = max(size.height - inset * 2, 1)
         var path = Path()
+        var previousDate: Date?
         for (index, point) in points.enumerated() {
-            let x = inset + width * CGFloat(index) / CGFloat(max(points.count - 1, 1))
+            let x = x(for: point.date, points: points, width: width, inset: inset)
             let normalized = (point.value - minValue) / spread
             let y = inset + height * CGFloat(1 - normalized)
-            if index == 0 { path.move(to: CGPoint(x: x, y: y)) } else { path.addLine(to: CGPoint(x: x, y: y)) }
+            let location = CGPoint(x: x, y: y)
+            let hasGap = previousDate.map { abs(point.date.timeIntervalSince($0)) > 36 * 60 * 60 } ?? false
+            if index == 0 || hasGap {
+                path.move(to: location)
+            } else {
+                path.addLine(to: location)
+            }
+            previousDate = point.date
         }
         return path
     }
 
     static func location(for point: FitnessBiologySample, points: [FitnessBiologySample], in size: CGSize) -> CGPoint {
-        guard let index = points.firstIndex(of: point), points.count > 1 else { return CGPoint(x: size.width / 2, y: size.height / 2) }
+        guard points.firstIndex(of: point) != nil, points.count > 1 else { return CGPoint(x: size.width / 2, y: size.height / 2) }
         let values = points.map(\.value)
         let minValue = values.min() ?? 0
         let maxValue = values.max() ?? 1
@@ -612,7 +657,7 @@ private enum FitnessBiologyChartGeometry {
         let inset: CGFloat = 8
         let width = max(size.width - inset * 2, 1)
         let height = max(size.height - inset * 2, 1)
-        let x = inset + width * CGFloat(index) / CGFloat(points.count - 1)
+        let x = x(for: point.date, points: points, width: width, inset: inset)
         let y = inset + height * CGFloat(1 - (point.value - minValue) / spread)
         return CGPoint(x: x, y: y)
     }
@@ -621,8 +666,11 @@ private enum FitnessBiologyChartGeometry {
         guard !points.isEmpty else { return nil }
         let inset: CGFloat = 8
         let width = max(size.width - inset * 2, 1)
-        let normalized = min(max((x - inset) / width, 0), 1)
-        return min(max(Int((normalized * CGFloat(points.count - 1)).rounded()), 0), points.count - 1)
+        return points.indices.min { left, right in
+            let leftX = self.x(for: points[left].date, points: points, width: width, inset: inset)
+            let rightX = self.x(for: points[right].date, points: points, width: width, inset: inset)
+            return abs(leftX - x) < abs(rightX - x)
+        }
     }
 }
 

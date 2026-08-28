@@ -4813,20 +4813,20 @@ private struct FitnessActivityLineChart: View {
                                 started = false
                                 continue
                             }
-                            let x = proxy.size.width * CGFloat(index) / CGFloat(max(values.count - 1, 1))
+                            let x = chartX(for: plotPoints[index].date, width: proxy.size.width)
                             let y = proxy.size.height * CGFloat(1 - (value - lower) / range)
                             if started { path.addLine(to: CGPoint(x: x, y: y)) }
                             else { path.move(to: CGPoint(x: x, y: y)); started = true }
                         }
                     }
                     .stroke(LifeOSTokens.accent, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
-                    if let lastOptional = values.last, let last = lastOptional {
-                        let x = proxy.size.width
+                    if let lastIndex = values.lastIndex(where: { $0 != nil }), let last = values[lastIndex] {
+                        let x = chartX(for: plotPoints[lastIndex].date, width: proxy.size.width)
                         let y = proxy.size.height * CGFloat(1 - (last - lower) / range)
                         Circle()
                             .fill(LifeOSTokens.accent)
                             .frame(width: 8, height: 8)
-                            .offset(x: max(0, x - 4), y: max(0, y - 4))
+                            .position(x: x, y: y)
                     }
                 })
                 if let selectedPoint, let selectedIndex {
@@ -4851,8 +4851,9 @@ private struct FitnessActivityLineChart: View {
             }
             .contentShape(Rectangle())
             .simultaneousGesture(
-                DragGesture(minimumDistance: 0, coordinateSpace: .local)
+                DragGesture(minimumDistance: LifeOSDirectionalClassifier.minimumDistance, coordinateSpace: .local)
                     .onChanged { value in
+                        guard LifeOSDirectionalClassifier.classify(value.translation) == .horizontal else { return }
                         if let index = nearestIndex(toX: value.location.x, width: proxy.size.width) {
                             selectedPointID = plotPoints[index].date
                         }
@@ -4917,13 +4918,24 @@ private struct FitnessActivityLineChart: View {
 
     private func nearestIndex(toX x: CGFloat, width: CGFloat) -> Int? {
         guard width > 0, !selectableIndices.isEmpty else { return nil }
-        let normalized = min(max(x / width, 0), 1)
-        let raw = normalized * CGFloat(max(orderedPoints.count - 1, 1))
-        return selectableIndices.min { abs(CGFloat($0) - raw) < abs(CGFloat($1) - raw) }
+        return selectableIndices.min { left, right in
+            abs(chartX(for: orderedPoints[left].date, width: width) - x)
+                < abs(chartX(for: orderedPoints[right].date, width: width) - x)
+        }
     }
 
     private func chartX(for index: Int, width: CGFloat) -> CGFloat {
-        width * CGFloat(index) / CGFloat(max(orderedPoints.count - 1, 1))
+        guard orderedPoints.indices.contains(index) else { return width / 2 }
+        return chartX(for: orderedPoints[index].date, width: width)
+    }
+
+    private func chartX(for date: Date, width: CGFloat) -> CGFloat {
+        guard let first = orderedPoints.first?.date, let last = orderedPoints.last?.date else {
+            return width / 2
+        }
+        let span = max(last.timeIntervalSince(first), 1)
+        let fraction = min(max(date.timeIntervalSince(first) / span, 0), 1)
+        return width * CGFloat(fraction)
     }
 
     private func chartY(for value: Double?, lower: Double, range: Double, height: CGFloat) -> CGFloat {

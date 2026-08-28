@@ -831,7 +831,8 @@ private struct FinanceLineChart: View {
 
                     ScrubBubble(
                         x: min(max(position.x, 44), size.width - 44),
-                        y: min(max(position.y - 30, 25), size.height - 26)
+                        y: position.y,
+                        bounds: CGRect(origin: .zero, size: size)
                     ) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(points[selectedIndex].valueText)
@@ -908,6 +909,26 @@ private struct FinanceLineChart: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("\(points.first?.seriesTitle ?? "Finance") chart")
             .accessibilityValue(selectedDatum?.accessibilityValue ?? "Swipe to inspect values")
+            .accessibilityHint("Swipe up or down to inspect adjacent data points.")
+            .accessibilityAdjustableAction { direction in
+                guard !points.isEmpty else { return }
+                let currentIndex = selectedIndex ?? points.count - 1
+                let nextIndex: Int
+                switch direction {
+                case .increment:
+                    nextIndex = min(currentIndex + 1, points.count - 1)
+                case .decrement:
+                    nextIndex = max(currentIndex - 1, 0)
+                @unknown default:
+                    return
+                }
+                guard points.indices.contains(nextIndex) else { return }
+                let pointID = points[nextIndex].id
+                if selectedPoint != pointID {
+                    ScrubBubble<EmptyView>.snapHaptic()
+                    selectedPoint = pointID
+                }
+            }
             .task(id: chartDatasetID) {
                 // The reveal belongs to the dataset, not to an unrelated parent redraw. Reset
                 // before a replacement series arrives so a refreshed chart never reuses a stale
@@ -931,7 +952,13 @@ private struct FinanceLineChart: View {
         let horizontalInset: CGFloat = 10
         let width = max(size.width - horizontalInset * 2, 1)
         let fraction = min(max((x - horizontalInset) / width, 0), 1)
-        return min(max(Int((fraction * CGFloat(points.count - 1)).rounded()), 0), points.count - 1)
+        guard let firstDate = points.first?.date, let lastDate = points.last?.date else { return 0 }
+        let span = max(lastDate.timeIntervalSince(firstDate), 1)
+        let targetDate = firstDate.addingTimeInterval(span * TimeInterval(fraction))
+        return points.indices.min { left, right in
+            abs(points[left].date.timeIntervalSince(targetDate))
+                < abs(points[right].date.timeIntervalSince(targetDate))
+        } ?? 0
     }
 
     private func updateSelection(at x: CGFloat, in size: CGSize) {
@@ -984,6 +1011,9 @@ private struct FinanceChartGeometry {
     private let bottomInset: CGFloat = 23
 
     private var values: [Double] { points.map { Double($0.value) } }
+    private var firstDate: Date { points.first?.date ?? .now }
+    private var lastDate: Date { points.last?.date ?? firstDate }
+    private var dateSpan: TimeInterval { max(lastDate.timeIntervalSince(firstDate), 1) }
     private var minimum: Double { min(values.min() ?? 0, 0) }
     private var maximum: Double { max(values.max() ?? 0, 0) }
     private var spread: Double { max(maximum - minimum, 1) }
@@ -993,7 +1023,9 @@ private struct FinanceChartGeometry {
     func coordinate(for index: Int, value: Double? = nil) -> CGPoint {
         let width = max(size.width - horizontalInset * 2, 1)
         let height = max(size.height - topInset - bottomInset, 1)
-        let x = horizontalInset + width * CGFloat(index) / CGFloat(max(points.count - 1, 1))
+        let date = points.indices.contains(index) ? points[index].date : firstDate
+        let fraction = min(max(date.timeIntervalSince(firstDate) / dateSpan, 0), 1)
+        let x = horizontalInset + width * CGFloat(fraction)
         let rawValue = value ?? (points.indices.contains(index) ? Double(points[index].value) : 0)
         let normalized = min(max((rawValue - minimum) / spread, 0), 1)
         return CGPoint(x: x, y: topInset + height * (1 - CGFloat(normalized)))
@@ -1016,6 +1048,14 @@ private struct FinanceChartGeometry {
             let previous = coordinate(for: max(index - 1, 0))
             let current = coordinate(for: index)
             let next = coordinate(for: index + 1)
+
+            // A sparse bank history must retain its real time domain. Do not
+            // imply an observed trend across an unobserved multi-day interval.
+            if points[index + 1].date.timeIntervalSince(points[index].date) > 36 * 60 * 60 {
+                path.move(to: next)
+                continue
+            }
+
             let following = coordinate(for: min(index + 2, points.count - 1))
             let control1 = CGPoint(
                 x: current.x + (next.x - previous.x) / 6,
@@ -1627,7 +1667,9 @@ private struct FinanceDisplaySnapshot {
         } ?? .unavailable("Not available")
         categories = transactionTotals?.categoryObservations.map(FinanceCategory.init) ?? []
         netWorthPoints = []
-        spendPoints = []
+        spendPoints = transactionTotals.flatMap { _ in
+            Self.transactionPoints(transactionRows, title: "Spend", series: .spending)
+        } ?? []
         incomePoints = transactionTotals.flatMap { _ in
             Self.transactionPoints(transactionRows, title: "Income", series: .income)
         } ?? []
@@ -1937,15 +1979,7 @@ private struct FinanceDisplaySnapshot {
         range: FinanceRange
     ) -> [FinanceTransactionObservation] {
         guard let latest = transactions.map(\.timestamp).max() else { return [] }
-        let calendar = Calendar.current
-        let start: Date?
-        switch range {
-        case .week: start = calendar.date(byAdding: .day, value: -7, to: latest)
-        case .month: start = calendar.date(byAdding: .day, value: -31, to: latest)
-        case .halfYear: start = calendar.date(byAdding: .day, value: -180, to: latest)
-        case .year: start = calendar.date(byAdding: .day, value: -365, to: latest)
-        case .max: start = nil
-        }
+        let start = calendarWindowStart(for: range, latest: latest)
         return FinanceTransactionFilter(
             category: category,
             source: source,
@@ -1990,11 +2024,11 @@ private struct FinanceDisplaySnapshot {
         }
         guard source.count > 1 else { return [] }
         switch range {
-        case .week: return hasDistinctHistory(source, days: 7) ? Array(source.suffix(min(source.count, 7))) : []
-        case .month: return source
-        case .halfYear: return hasDistinctHistory(source, days: 180) ? source : []
-        case .year: return hasDistinctHistory(source, days: 365) ? source : []
-        case .max: return hasDistinctHistory(source, days: 365) ? source : []
+        case .week: return points(in: source, calendarDays: 7)
+        case .month: return points(in: source, calendarDays: 31)
+        case .halfYear: return points(in: source, calendarDays: 180)
+        case .year: return points(in: source, calendarDays: 365)
+        case .max: return source
         }
     }
 
@@ -2002,9 +2036,43 @@ private struct FinanceDisplaySnapshot {
         Set(FinanceRange.allCases.filter { !points(for: detail, range: $0).isEmpty })
     }
 
+    private func points(in source: [FinanceChartPoint], calendarDays: Int) -> [FinanceChartPoint] {
+        guard let latest = source.map(\.date).max(),
+              let start = Calendar.current.date(
+                  byAdding: .day,
+                  value: -(calendarDays - 1),
+                  to: Calendar.current.startOfDay(for: latest)
+              ),
+              hasDistinctHistory(source, days: calendarDays) else { return [] }
+        return source.filter { $0.date >= start && $0.date <= latest }
+    }
+
     private func hasDistinctHistory(_ points: [FinanceChartPoint], days: Int) -> Bool {
-        guard let first = points.first?.date, let last = points.last?.date else { return false }
-        return last.timeIntervalSince(first) >= TimeInterval(days * 24 * 60 * 60)
+        let calendar = Calendar.current
+        guard let first = points.map(\.date).min(), let last = points.map(\.date).max() else { return false }
+        let firstDay = calendar.startOfDay(for: first)
+        let lastDay = calendar.startOfDay(for: last)
+        let coveredDays = calendar.dateComponents([.day], from: firstDay, to: lastDay).day ?? 0
+        // The range is inclusive: seven calendar dates span six day
+        // boundaries. Calendar arithmetic stays correct over DST changes.
+        return coveredDays >= days - 1
+    }
+
+    private func calendarWindowStart(for range: FinanceRange, latest: Date) -> Date? {
+        let calendar = Calendar.current
+        let calendarDays: Int
+        switch range {
+        case .week: calendarDays = 7
+        case .month: calendarDays = 31
+        case .halfYear: calendarDays = 180
+        case .year: calendarDays = 365
+        case .max: return nil
+        }
+        return calendar.date(
+            byAdding: .day,
+            value: -(calendarDays - 1),
+            to: calendar.startOfDay(for: latest)
+        )
     }
 }
 

@@ -118,6 +118,21 @@ final class FinanceCategorizerTests: XCTestCase {
         )
     }
 
+    func testCommonGermanAndProviderCategoryLabelsNormalizeToCanonicalValues() {
+        XCTAssertEqual(
+            FinanceCategorizer.category(for: "Unknown merchant", amountCents: -1200, sourceCategory: "Food & Dining"),
+            .dining
+        )
+        XCTAssertEqual(
+            FinanceCategorizer.category(for: "Unknown merchant", amountCents: -1200, sourceCategory: "Gebühren"),
+            .fees
+        )
+        XCTAssertEqual(
+            FinanceCategorizer.category(for: "Unknown merchant", amountCents: -1200, sourceCategory: "Überweisung"),
+            .transfers
+        )
+    }
+
     // MARK: 5. Summary totals — integer cents, in/out/net
 
     func testSummaryAggregatesOutflowInflowAndCountPerCategory() {

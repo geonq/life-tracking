@@ -2364,7 +2364,11 @@ private struct FitnessFoodReviewSheet: View {
                 .onChange(of: barcodeBasis) { _, basis in applyBarcodeBasis(basis, found: found) }
                 .accessibilityIdentifier("nutrition-barcode-basis")
                 FitnessEditableField(title: "Product name", text: $barcodeProductName)
-                FitnessEditableField(title: "Grams (optional)", text: $barcodeGrams, numeric: true)
+                FitnessEditableField(
+                    title: barcodeBasis == .per100g ? "Grams eaten (required)" : "Grams (optional)",
+                    text: $barcodeGrams,
+                    numeric: true
+                )
                     .onChange(of: barcodeGrams) { _, _ in
                         applyBarcodeBasis(barcodeBasis, found: found)
                     }
@@ -2547,6 +2551,10 @@ private struct FitnessFoodReviewSheet: View {
         let grams = NutritionBarcodeValueParser.parse(barcodeGrams, maximum: 5_000)
         if !barcodeGrams.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && grams == nil {
             barcodeError = "Enter a valid non-negative grams value (comma or dot decimals; up to 3 decimal places)."
+            return
+        }
+        guard barcodeBasis != .per100g || grams != nil else {
+            barcodeError = "Enter how many grams you ate before confirming per-100-g nutrition."
             return
         }
         let confirmation = NutritionBarcodeConfirmation(

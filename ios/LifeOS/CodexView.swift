@@ -65,6 +65,7 @@ struct UsageView: View {
     let snapshots: [ProviderSnapshot]
     let state: UsageLoadState
     let refreshAction: (() async -> Void)?
+    private let onBack: (() -> Void)?
     private let analytics: [UsageAnalyticsSnapshot]
 
     @State private var selectedProvider: Provider
@@ -74,10 +75,17 @@ struct UsageView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dismiss) private var dismiss
 
-    init(snapshots: [ProviderSnapshot], analytics: [UsageAnalyticsSnapshot], state: UsageLoadState = .observed, refreshAction: (() async -> Void)? = nil) {
+    init(
+        snapshots: [ProviderSnapshot],
+        analytics: [UsageAnalyticsSnapshot],
+        state: UsageLoadState = .observed,
+        refreshAction: (() async -> Void)? = nil,
+        onBack: (() -> Void)? = nil
+    ) {
         self.snapshots = snapshots
         self.state = state
         self.refreshAction = refreshAction
+        self.onBack = onBack
         self.analytics = analytics
         _selectedProvider = State(initialValue: snapshots.first?.provider ?? .codex)
     }
@@ -192,7 +200,7 @@ struct UsageView: View {
 
 #if os(iOS)
     private var backButton: some View {
-        Button { dismiss() } label: {
+        Button { onBack?() ?? dismiss() } label: {
             LifeOSIcon(.chevronLeft)
                 .frame(width: 15, height: 15)
                 .frame(width: 34, height: 34)

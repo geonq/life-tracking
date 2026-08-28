@@ -529,6 +529,10 @@ public enum LifeOSMotion {
     /// Smooth ease for opacity and offset transitions.
     public static let ease = Animation.easeInOut(duration: 0.24)
 
+    /// Top-level tab changes use a short cross-fade; the tab bar itself remains
+    /// mounted so navigation never produces duplicate or jumping chrome.
+    public static let tabCrossfade = Animation.easeInOut(duration: 0.16)
+
     /// Slightly longer ease for push/navigation.
     public static let easeNavigate = Animation.easeInOut(duration: 0.34)
 

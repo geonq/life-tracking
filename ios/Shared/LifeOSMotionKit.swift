@@ -277,13 +277,26 @@ extension View {
 public struct ScrubBubble<Content: View>: View {
     public let x: CGFloat
     public let y: CGFloat
+    /// The plot bounds in the same coordinate space as `x`/`y`. When supplied,
+    /// the bubble measures its rendered size and stays inside those bounds.
+    public let bounds: CGRect?
+    public let inset: CGFloat
     private let content: () -> Content
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var measuredSize: CGSize = .zero
 
-    public init(x: CGFloat, y: CGFloat, @ViewBuilder content: @escaping () -> Content) {
+    public init(
+        x: CGFloat,
+        y: CGFloat,
+        bounds: CGRect? = nil,
+        inset: CGFloat = 8,
+        @ViewBuilder content: @escaping () -> Content
+    ) {
         self.x = x
         self.y = y
+        self.bounds = bounds
+        self.inset = inset
         self.content = content
     }
 
@@ -294,9 +307,38 @@ public struct ScrubBubble<Content: View>: View {
             .padding(.vertical, LifeOSTokens.Space.xs)
             .background(LifeOSTokens.floatingOverlay.opacity(0.96), in: RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous).stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
-            .position(x: x, y: y)
+            .background {
+                GeometryReader { geometry in
+                    Color.clear.preference(key: ScrubBubbleSizeKey.self, value: geometry.size)
+                }
+            }
+            .onPreferenceChange(ScrubBubbleSizeKey.self) { measuredSize = $0 }
+            // The bounded frame is applied to the actual content, not only to
+            // the position calculation. This keeps Dynamic Type and long
+            // source labels from escaping the plot or the widget card.
+            .frame(width: renderedFrame?.width, height: renderedFrame?.height)
+            .clipped()
+            .position(x: renderedPosition.x, y: renderedPosition.y)
             .animation(reduceMotion ? nil : LifeOSMotion.track, value: x)
             .animation(reduceMotion ? nil : LifeOSMotion.track, value: y)
+    }
+
+    private var renderedPosition: CGPoint {
+        renderedFrame.map { CGPoint(x: $0.midX, y: $0.midY) } ?? CGPoint(x: x, y: y)
+    }
+
+    private var renderedFrame: CGRect? {
+        guard let bounds else { return nil }
+
+        // A conservative first-frame estimate prevents a flash outside the
+        // plot before the real content size preference arrives.
+        let size = measuredSize == .zero ? CGSize(width: 120, height: 34) : measuredSize
+        return LifeOSChartKit.boundedTooltipFrame(
+            anchor: CGPoint(x: x, y: y),
+            size: size,
+            in: bounds,
+            inset: inset
+        )
     }
 
     /// Fires a light impact haptic when the scrubbed point changes. Call from `.onChange` of
@@ -306,6 +348,17 @@ public struct ScrubBubble<Content: View>: View {
         let generator = UIImpactFeedbackGenerator(style: .light)
         generator.impactOccurred()
 #endif
+    }
+}
+
+private struct ScrubBubbleSizeKey: PreferenceKey {
+    static let defaultValue: CGSize = .zero
+
+    static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
+        let next = nextValue()
+        if next.width > 0, next.height > 0 {
+            value = next
+        }
     }
 }
 

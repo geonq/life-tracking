@@ -137,6 +137,20 @@ final class NutritionBarcodeTests: XCTestCase {
         let after = try await store.load()
         XCTAssertEqual(after, [record])
 
+        let missingGrams = NutritionBarcodeConfirmation(
+            proposalID: proposal.proposalID, barcode: proposal.barcode, basis: .per100g,
+            mealAt: fetchedAt, productName: "Edited name", grams: nil,
+            kcal: 500, proteinGrams: 6, carbsGrams: 50, fatGrams: 25, confirmedAt: fetchedAt
+        )
+        XCTAssertThrowsError(try NutritionBarcodeFlow.confirm(missingGrams, for: proposal, now: now))
+
+        let zeroGrams = NutritionBarcodeConfirmation(
+            proposalID: proposal.proposalID, barcode: proposal.barcode, basis: .per100g,
+            mealAt: fetchedAt, productName: "Edited name", grams: 0,
+            kcal: 500, proteinGrams: 6, carbsGrams: 50, fatGrams: 25, confirmedAt: fetchedAt
+        )
+        XCTAssertThrowsError(try NutritionBarcodeFlow.confirm(zeroGrams, for: proposal, now: now))
+
         let emptyConfirmation = NutritionBarcodeConfirmation(
             proposalID: proposal.proposalID, barcode: proposal.barcode, basis: .per100g,
             mealAt: fetchedAt, productName: "Edited name", grams: 100,

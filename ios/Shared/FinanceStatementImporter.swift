@@ -131,6 +131,11 @@ public enum FinanceStatementImporter {
             }
             let rawDate = normalizedField(row[dateColumn])
             let rawAmount = normalizedField(row[amountColumn])
+            let currency = currencyColumn.flatMap { row.count > $0 ? normalizedField(row[$0]) : nil } ?? "EUR"
+            guard currency.isEmpty || currency.caseInsensitiveCompare("EUR") == .orderedSame else {
+                skipped += 1
+                continue
+            }
             guard let bookedAt = parseDate(rawDate), let amountCents = parseAmountCents(rawAmount) else {
                 skipped += 1
                 continue
@@ -140,7 +145,6 @@ public enum FinanceStatementImporter {
             let category = categoryColumn.flatMap { row.count > $0 ? normalizedField(row[$0]) : nil }
             let providerID = providerIDColumn.flatMap { row.count > $0 ? normalizedField(row[$0]) : nil }
             let account = accountColumn.flatMap { row.count > $0 ? normalizedField(row[$0]) : nil } ?? ""
-            let currency = currencyColumn.flatMap { row.count > $0 ? normalizedField(row[$0]) : nil } ?? "EUR"
             // Prefer the merchant column (e.g. TR's `name`) over the generic
             // description column, since the latter is often a non-specific
             // label like "TR Card Transaction". Falls back to description
@@ -285,13 +289,36 @@ public enum FinanceStatementImporter {
     /// nothing matches.
     private static func parseDate(_ raw: String) -> Date? {
         guard !raw.isEmpty else { return nil }
+        // Trade Republic and other exports may emit a complete ISO-8601
+        // timestamp, including fractional seconds and an explicit UTC/offset
+        // suffix. Keep the date-only formatters below for bank statements
+        // whose dates are intentionally local calendar dates.
+        if let date = iso8601FractionalFormatter.date(from: raw)
+            ?? iso8601Formatter.date(from: raw) {
+            return date
+        }
         for formatter in dateFormatters {
             if let date = formatter.date(from: raw) { return date }
         }
         return nil
     }
 
+    private static let iso8601FractionalFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    private static let iso8601Formatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+
     private static let dateFormatters: [DateFormatter] = {
+        // Keep the timezone-less ISO timestamp used by Trade Republic's
+        // `datetime` column. ISO8601DateFormatter intentionally requires an
+        // explicit timezone, while this export's timestamp is a local value.
         let formats = ["yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd", "dd.MM.yyyy", "dd/MM/yyyy", "yyyy/MM/dd"]
         return formats.map { format in
             let formatter = DateFormatter()
@@ -344,8 +371,16 @@ public enum FinanceStatementImporter {
         let hasDot = cleaned.contains(".")
         var normalized: String
         if hasComma && hasDot {
-            // European: '.' thousands, ',' decimal.
-            normalized = cleaned.replacingOccurrences(of: ".", with: "").replacingOccurrences(of: ",", with: ".")
+            // Whichever separator occurs last is the decimal separator. This
+            // handles both German `1.234,56` and English `1,234.56` exports;
+            // the other separator is grouping and is removed.
+            if let comma = cleaned.lastIndex(of: ","), let dot = cleaned.lastIndex(of: "."), comma > dot {
+                guard validMixedSeparatorAmount(cleaned, decimalSeparator: ",", groupingSeparator: ".") else { return nil }
+                normalized = cleaned.replacingOccurrences(of: ".", with: "").replacingOccurrences(of: ",", with: ".")
+            } else {
+                guard validMixedSeparatorAmount(cleaned, decimalSeparator: ".", groupingSeparator: ",") else { return nil }
+                normalized = cleaned.replacingOccurrences(of: ",", with: "")
+            }
         } else if hasComma {
             // Only comma present: treat as the decimal separator.
             normalized = cleaned.replacingOccurrences(of: ",", with: ".")
@@ -365,6 +400,17 @@ public enum FinanceStatementImporter {
         let intCents = (rounded as NSDecimalNumber).intValue
         guard rounded == Decimal(intCents) else { return nil }
         return isNegative ? -abs(intCents) : intCents
+    }
+
+    private static func validMixedSeparatorAmount(_ value: String, decimalSeparator: Character, groupingSeparator: Character) -> Bool {
+        let parts = value.split(separator: decimalSeparator, omittingEmptySubsequences: false)
+        guard parts.count == 2, parts[1].count == 1 || parts[1].count == 2 else { return false }
+        let integer = String(parts[0])
+        guard !integer.isEmpty else { return false }
+        let groups = integer.split(separator: groupingSeparator, omittingEmptySubsequences: false)
+        guard groups.allSatisfy({ !$0.isEmpty && $0.allSatisfy(\.isNumber) }) else { return false }
+        if groups.count == 1 { return true }
+        return groups[0].count <= 3 && groups.dropFirst().allSatisfy { $0.count == 3 }
     }
 
     private static func fallbackIdentity(

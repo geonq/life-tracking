@@ -2,6 +2,33 @@ import Foundation
 import WidgetKit
 import SwiftUI
 
+/// The calendar's semantic contrast controls must remain legible in iOS 18's
+/// tinted widget mode. WidgetKit otherwise remaps both a fill and its label to
+/// the same tint, even when SwiftUI supplied opposite foreground/background
+/// colors. The full-color override is available for image content, so use an
+/// SF Symbol for the two control surfaces and keep all other widget content
+/// eligible for the user's chosen tint.
+private extension Image {
+    @ViewBuilder
+    func lifeOSCalendarContrastRendering() -> some View {
+#if os(iOS)
+        if #available(iOS 18.0, *) {
+            self.widgetAccentedRenderingMode(.fullColor)
+        } else {
+            self
+        }
+#elseif os(macOS)
+        if #available(macOS 15.0, *) {
+            self.widgetAccentedRenderingMode(.fullColor)
+        } else {
+            self
+        }
+#else
+        self
+#endif
+    }
+}
+
 /// Shared, widget-only projection of persisted calendar items.
 ///
 /// `CalendarSnapshot.items(on:)` intentionally exposes stored anchors. Widgets
@@ -257,11 +284,15 @@ public struct CalendarWidgetView: View {
     /// these layers: WidgetKit may remap both an accentable glyph and its
     /// accentable surface to the same tinted color.
     private var contrastFill: Color {
-        usesTransparentTreatment ? .white : LifeOSTokens.primaryText
+        // These controls are intentionally fixed high-contrast pixels. An
+        // adaptive/text role can be remapped by WidgetKit's tinted treatment,
+        // collapsing the numeral into its marker; black-on-white remains
+        // legible in dark, light, tinted, clear, and vibrant placements.
+        .white
     }
 
     private var contrastForeground: Color {
-        usesTransparentTreatment ? .lifeOSBlack : LifeOSTokens.canvas
+        .black
     }
 
     private var monthDays: [Date] {
@@ -434,8 +465,11 @@ public struct CalendarWidgetView: View {
 
         return ZStack {
             if isToday {
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(contrastFill)
+                Image(systemName: "square.fill")
+                    .lifeOSCalendarContrastRendering()
+                    .font(.system(size: dayCellSize))
+                    .foregroundStyle(contrastFill)
+                    .frame(width: dayCellSize, height: dayCellSize)
             }
             Text(calendar.component(.day, from: day).description)
                 .font(.system(size: 10, weight: isToday ? .bold : .regular, design: .rounded))
@@ -501,12 +535,14 @@ public struct CalendarWidgetView: View {
 
     private var plusButton: some View {
         ZStack {
-            Circle()
-                .fill(contrastFill)
-            Text("+")
-                .font(.system(size: 30, weight: .light))
+            Image(systemName: "circle.fill")
+                .lifeOSCalendarContrastRendering()
+                .font(.system(size: 34))
+                .foregroundStyle(contrastFill)
+            Image(systemName: "plus")
+                .lifeOSCalendarContrastRendering()
+                .font(.system(size: 18, weight: .semibold))
                 .foregroundStyle(contrastForeground)
-                .offset(y: -1)
         }
         .frame(width: 34, height: 34)
     }

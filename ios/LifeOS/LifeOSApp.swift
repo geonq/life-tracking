@@ -56,6 +56,7 @@ struct LifeOSApp: App {
     @State private var showingUsage = false
     @State private var requestingNewCalendarEvent = false
     @State private var selectedModuleRoute: LifeOSDeepLink?
+    @State private var initialLiveLoadFinished = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
     private let usesVisualFixtures: Bool
@@ -125,27 +126,42 @@ struct LifeOSApp: App {
                 ZStack(alignment: .topLeading) {
                     switch selection {
                     case .home:
-                        OverviewView(
-                            snapshot: usesVisualFixtures
-                                ? DemoDataProvider.overview
-                                : OverviewSnapshot.production(clipper: clipperCoordinator.snapshot),
-                            usageSnapshots: usesVisualFixtures ? DemoDataProvider.providers : usageCoordinator.providers,
-                            usageAnalytics: usesVisualFixtures ? DemoUsageAnalytics.snapshots : usageCoordinator.analytics,
-                            usageState: usesVisualFixtures ? .demo : usageCoordinator.state,
-                            refreshAction: usesVisualFixtures ? nil : {
-                                await calendarCoordinator.manualRefresh()
-                                await usageCoordinator.refresh()
-                                await financeCoordinator.refresh()
-                                await clipperCoordinator.refresh()
-                            },
-                            clipperRefreshAction: usesVisualFixtures ? nil : { await clipperCoordinator.refresh() },
-                            clipperState: usesVisualFixtures ? .demo : clipperCoordinator.state,
-                            fitnessSnapshot: usesVisualFixtures ? .demo : homeFitnessSnapshot,
-                            financeSummary: usesVisualFixtures ? nil : financeCoordinator.summary,
-                            financeState: usesVisualFixtures ? .demo : financeCoordinator.state,
-                            openDestination: navigate,
-                            showingUsage: $showingUsage
-                        )
+                        if showingUsage {
+                            UsageView(
+                                snapshots: usesVisualFixtures ? DemoDataProvider.providers : usageCoordinator.providers,
+                                analytics: usesVisualFixtures ? DemoUsageAnalytics.snapshots : usageCoordinator.analytics,
+                                state: usesVisualFixtures ? .demo : usageCoordinator.state,
+                                refreshAction: usesVisualFixtures ? nil : { await usageCoordinator.refresh() },
+                                onBack: {
+                                    withAnimation(reduceMotion ? nil : LifeOSMotion.heroMorph) {
+                                        showingUsage = false
+                                        selectedModuleRoute = nil
+                                    }
+                                }
+                            )
+                        } else {
+                            OverviewView(
+                                snapshot: usesVisualFixtures
+                                    ? DemoDataProvider.overview
+                                    : OverviewSnapshot.production(clipper: clipperCoordinator.snapshot),
+                                usageSnapshots: usesVisualFixtures ? DemoDataProvider.providers : usageCoordinator.providers,
+                                usageAnalytics: usesVisualFixtures ? DemoUsageAnalytics.snapshots : usageCoordinator.analytics,
+                                usageState: usesVisualFixtures ? .demo : usageCoordinator.state,
+                                refreshAction: usesVisualFixtures ? nil : {
+                                    await calendarCoordinator.manualRefresh()
+                                    await usageCoordinator.refresh()
+                                    await financeCoordinator.refresh()
+                                    await clipperCoordinator.refresh()
+                                },
+                                clipperRefreshAction: usesVisualFixtures ? nil : { await clipperCoordinator.refresh() },
+                                clipperState: usesVisualFixtures ? .demo : clipperCoordinator.state,
+                                fitnessSnapshot: usesVisualFixtures ? .demo : homeFitnessSnapshot,
+                                financeSummary: usesVisualFixtures ? nil : financeCoordinator.summary,
+                                financeState: usesVisualFixtures ? .demo : financeCoordinator.state,
+                                openDestination: navigate,
+                                showingUsage: $showingUsage
+                            )
+                        }
                     case .calendar:
                         CalendarView(coordinator: calendarCoordinator, requestNewEvent: $requestingNewCalendarEvent)
                     case .finance:
@@ -181,11 +197,10 @@ struct LifeOSApp: App {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .id(selection)
                 .transition(reduceMotion ? .opacity : tabContentTransition)
-                .animation(reduceMotion ? nil : LifeOSMotion.primary, value: selection)
+                .animation(reduceMotion ? nil : LifeOSMotion.tabCrossfade, value: selection)
 
                 if !showingUsage {
                     CompactTabBar(selection: $selection) { tab in
-                        updateTabDirection(for: tab)
                         // A manual tab change starts a fresh top-level route.
                         // Deep links supply their own route context immediately
                         // before changing selection, so they do not pass here.
@@ -222,8 +237,9 @@ struct LifeOSApp: App {
                     await financeCoordinator.refresh()
                     await clipperCoordinator.refresh()
                     await healthKitFitnessRepository.refresh()
-                    publishWidgetSnapshots()
+                    await publishWidgetSnapshots()
 #if os(iOS)
+                    initialLiveLoadFinished = true
                     LifeOSBackgroundRefresh.schedule()
 #endif
                 }
@@ -238,8 +254,7 @@ struct LifeOSApp: App {
                     Task { @MainActor in
                         await healthKitController.refreshStatus()
                         await autoRequestHealthReadAccessIfNeeded()
-                        await healthKitFitnessRepository.refresh()
-                        publishWidgetSnapshots()
+                        await refreshNetworkBackedDataAfterForeground()
 #if os(iOS)
                         LifeOSBackgroundRefresh.schedule()
 #endif
@@ -261,21 +276,21 @@ struct LifeOSApp: App {
 #if os(iOS)
             .onChange(of: healthKitFitnessRepository.projection, initial: true) { _, projection in
                 updateHomeFitnessSnapshot(from: projection)
-                publishWidgetSnapshots()
+                Task { @MainActor in await publishWidgetSnapshots() }
             }
             .onChange(of: healthKitController.snapshot.observerCompletionSequence) { _, _ in
                 guard !usesVisualFixtures else { return }
                 Task { @MainActor in
                     await healthKitFitnessRepository.refresh()
-                    publishWidgetSnapshots()
+                    await publishWidgetSnapshots()
                 }
             }
 #endif
             .onChange(of: financeCoordinator.summary) { _, _ in
-                publishWidgetSnapshots()
+                Task { @MainActor in await publishWidgetSnapshots() }
             }
             .onChange(of: financeCoordinator.state) { _, _ in
-                publishWidgetSnapshots()
+                Task { @MainActor in await publishWidgetSnapshots() }
             }
         }
 #if os(iOS)
@@ -286,6 +301,23 @@ struct LifeOSApp: App {
     }
 
 #if os(iOS)
+    /// Reconcile all remote-backed projections whenever the app returns to the
+    /// foreground. The initial scene task owns first load; this gate prevents
+    /// an activation callback from racing that load and letting an empty local
+    /// calendar overwrite a freshly pulled remote snapshot.
+    @MainActor
+    private func refreshNetworkBackedDataAfterForeground() async {
+        guard !usesVisualFixtures, initialLiveLoadFinished else { return }
+
+        async let calendar: Void = calendarCoordinator.manualRefresh()
+        async let usage: Void = usageCoordinator.refresh()
+        async let finance: Void = financeCoordinator.refresh()
+        async let clipper: Void = clipperCoordinator.refresh()
+        async let fitness: Void = healthKitFitnessRepository.refresh()
+        _ = await (calendar, usage, finance, clipper, fitness)
+        await publishWidgetSnapshots()
+    }
+
     @MainActor
     private func performBackgroundRefresh() async {
         guard !usesVisualFixtures else { return }
@@ -300,7 +332,7 @@ struct LifeOSApp: App {
         async let clipper: Void = clipperCoordinator.refresh()
         async let fitness: Void = healthKitFitnessRepository.refresh()
         _ = await (calendar, usage, finance, clipper, fitness)
-        publishWidgetSnapshots()
+        await publishWidgetSnapshots()
     }
 #endif
 
@@ -315,7 +347,7 @@ struct LifeOSApp: App {
     /// `CalendarCoordinator.sharedStorageAvailable`'s existing gate, so a
     /// build without a provisioned App Group does not do wasted work on
     /// every state change.
-    private func publishWidgetSnapshots() {
+    private func publishWidgetSnapshots() async {
         guard !usesVisualFixtures,
               FutureWidgetSnapshotStore.url() != nil else { return }
 
@@ -325,43 +357,33 @@ struct LifeOSApp: App {
         let fitnessProjection = healthKitFitnessRepository.projection
 #endif
         let now = Date.now
-        let publisher = widgetSnapshotPublisher
-
-        // `publisher` is an actor: this detached task is still off-main, and
-        // a burst of near-simultaneous calls to `publishWidgetSnapshots()`
-        // each spawn their own task here, but every one of them ultimately
-        // calls `publish` on the SAME actor instance, so the actor's mailbox
-        // serializes the compare-write-reload step across the whole burst —
-        // only a genuine content change results in a write + reload.
-        Task.detached(priority: .utility) {
-            let finance = WidgetSnapshotPublisher.mapFinance(summary: financeSummary, state: financeState, now: now)
+        let finance = WidgetSnapshotPublisher.mapFinance(summary: financeSummary, state: financeState, now: now)
 #if os(iOS)
-            let fitness = WidgetSnapshotPublisher.mapFitness(projection: fitnessProjection, now: now)
-            let fitnessWidgets = WidgetSnapshotPublisher.mapFitnessWidgets(
-                projection: fitnessProjection,
-                selectedDate: now,
-                now: now
-            )
+        let fitness = WidgetSnapshotPublisher.mapFitness(projection: fitnessProjection, now: now)
+        let fitnessWidgets = WidgetSnapshotPublisher.mapFitnessWidgets(
+            projection: fitnessProjection,
+            selectedDate: now,
+            now: now
+        )
 #else
-            let fitness = WidgetSnapshotPublisher.mapFitness(now: now)
-            let fitnessWidgets = WidgetSnapshotPublisher.mapFitnessWidgets(now: now)
+        let fitness = WidgetSnapshotPublisher.mapFitness(now: now)
+        let fitnessWidgets = WidgetSnapshotPublisher.mapFitnessWidgets(now: now)
 #endif
-            let nutrition: WidgetSafeNutritionSummary
-            if let mealStore = try? NutritionMealStore(), let goalStore = try? NutritionGoalStore() {
-                nutrition = WidgetSnapshotPublisher.mapNutrition(mealStore: mealStore, goalStore: goalStore, on: now, calendar: .current)
-            } else {
-                nutrition = .unavailable()
-            }
-
-            await publisher.publish(
-                finance: finance,
-                fitness: fitness,
-                fitnessWidgets: fitnessWidgets,
-                nutrition: nutrition,
-                privacyMode: .summaryAllowed,
-                now: now
-            )
+        let nutrition: WidgetSafeNutritionSummary
+        if let mealStore = try? NutritionMealStore(), let goalStore = try? NutritionGoalStore() {
+            nutrition = WidgetSnapshotPublisher.mapNutrition(mealStore: mealStore, goalStore: goalStore, on: now, calendar: .current)
+        } else {
+            nutrition = .unavailable()
         }
+
+        await widgetSnapshotPublisher.publish(
+            finance: finance,
+            fitness: fitness,
+            fitnessWidgets: fitnessWidgets,
+            nutrition: nutrition,
+            privacyMode: .summaryAllowed,
+            now: now
+        )
     }
 
 #if os(iOS)
@@ -394,20 +416,7 @@ struct LifeOSApp: App {
 #endif
 
     private var tabContentTransition: AnyTransition {
-        let offset = CGFloat(tabTransitionDirection * 18)
-        return AnyTransition.asymmetric(
-            insertion: .offset(x: offset).combined(with: .opacity),
-            removal: .opacity
-        )
-    }
-
-    @State private var tabTransitionDirection = 1
-
-    private func updateTabDirection(for tab: LifeOSAppTab) {
-        guard tab != selection else { return }
-        let oldIndex = LifeOSAppTab.allCases.firstIndex(of: selection) ?? 0
-        let newIndex = LifeOSAppTab.allCases.firstIndex(of: tab) ?? oldIndex
-        tabTransitionDirection = newIndex >= oldIndex ? 1 : -1
+        .opacity
     }
 
     private func navigate(_ destination: LifeOSDeepLink) {
@@ -449,7 +458,6 @@ struct LifeOSApp: App {
     }
 
     private func selectTab(_ tab: LifeOSAppTab) {
-        updateTabDirection(for: tab)
         selection = tab
     }
 
@@ -629,8 +637,7 @@ private struct CompactTabBar: View {
             tab: tab,
             title: title,
             isSelected: selection == tab,
-            reduceMotion: reduceMotion,
-            namespace: namespace
+            reduceMotion: reduceMotion
         ) {
             guard selection != tab else { return }
 
@@ -650,7 +657,6 @@ private struct CompactTabBar: View {
         }
     }
 
-    @Namespace private var namespace
 }
 
 private struct CompactTabBarItem: View {
@@ -658,7 +664,6 @@ private struct CompactTabBarItem: View {
     let title: String
     let isSelected: Bool
     let reduceMotion: Bool
-    let namespace: Namespace.ID
     let action: () -> Void
 
     var body: some View {
@@ -675,22 +680,9 @@ private struct CompactTabBarItem: View {
                     .textCase(.uppercase)
                     .lineLimit(1)
             }
-            // Monochrome nav (§5.3): selection is brightness-based, not
-            // hue-based — primaryText on an elevated capsule, no border.
-            .foregroundStyle(isSelected ? LifeOSTokens.primaryText : LifeOSTokens.tertiaryText)
+            .foregroundStyle(isSelected ? LifeOSTokens.accent : LifeOSTokens.tertiaryText)
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
-            .background {
-                if isSelected {
-                    let indicator = Capsule()
-                        .fill(LifeOSTokens.raised)
-                    if reduceMotion {
-                        indicator
-                    } else {
-                        indicator.matchedGeometryEffect(id: "main-tab-indicator", in: namespace)
-                    }
-                }
-            }
             .frame(maxWidth: .infinity, minHeight: 44)
             .contentShape(Rectangle())
         }

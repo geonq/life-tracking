@@ -40,7 +40,7 @@ public enum FinanceTransactionCategory: String, Codable, CaseIterable, Hashable,
         switch key {
         case "food", "foods", "grocery", "groceries", "groceries and food", "lebensmittel", "supermarket", "supermarkt":
             return .groceries
-        case "dining", "restaurant", "restaurants", "food and dining", "essen":
+        case "dining", "restaurant", "restaurants", "food and dining", "food dining", "food drink", "food drinks", "essen":
             return .dining
         case "transport", "transportation", "public transport", "mobility", "verkehr":
             return .transport
@@ -56,13 +56,13 @@ public enum FinanceTransactionCategory: String, Codable, CaseIterable, Hashable,
             return .travel
         case "transfer", "transfers", "bank transfer", "bank transfers", "ueberweisung", "uberweisung":
             return .transfers
-        case "fee", "fees", "charges", "bank fee", "bank fees", "gebuehr", "gebuhren", "entgelt":
+        case "fee", "fees", "charges", "bank fee", "bank fees", "gebuehr", "gebuhr", "gebuhren", "entgelt":
             return .fees
         case "tax", "taxes", "steuer", "steuern":
             return .taxes
         case "investment", "investments", "investing", "brokerage", "wertpapiere", "aktien", "etf":
             return .investments
-        case "income", "salary", "salaries", "wages", "gehalt", "lohn":
+        case "income", "salary", "salaries", "wages", "gehalt", "lohn", "rente", "pension":
             return .income
         case "cash", "cash withdrawal", "atm", "bargeld", "bargeldauszahlung":
             return .cash

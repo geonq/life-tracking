@@ -1995,7 +1995,8 @@ private struct HealthDevicesSettingsView: View {
 
 private struct SyncStorageSettingsView: View {
     private let syncClient = TailscaleSyncClient()
-    @AppStorage(TailscaleSyncClient.serverURLDefaultsKey) private var syncServerURL = ""
+    @AppStorage(TailscaleSyncClient.serverURLDefaultsKey)
+    private var syncServerURL = TailscaleSyncClient.configuredDefaultServerURL()
     @AppStorage("LifeOS.Sync.LastSuccess") private var lastSyncTimestamp: Double = 0
     @State private var connectionPreflight: TailscaleConnectionPreflightState?
     @State private var isCheckingConnection = false
@@ -2152,6 +2153,13 @@ private struct SyncStorageSettingsView: View {
         }
         .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
         .navigationTitle("Sync & Storage")
+        .onAppear {
+            let fallback = TailscaleSyncClient.configuredDefaultServerURL()
+            if syncServerURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               !fallback.isEmpty {
+                syncServerURL = fallback
+            }
+        }
         .task(id: syncServerURL) {
             cancelConnectionPreflight()
             connectionPreflight = nil

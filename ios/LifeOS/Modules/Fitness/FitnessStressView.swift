@@ -617,15 +617,19 @@ private struct FitnessStressSeriesChart: View {
                             Path { path in
                                 guard orderedSamples.count > 1 else { return }
                                 for (index, sample) in orderedSamples.enumerated() {
-                                    let point = CGPoint(x: x(for: index, width: proxy.size.width), y: y(for: sample.value, height: proxy.size.height))
-                                    if index == 0 { path.move(to: point) } else { path.addLine(to: point) }
+                                    let point = CGPoint(x: x(for: sample.timestamp, width: proxy.size.width), y: y(for: sample.value, height: proxy.size.height))
+                                    if index == 0 || orderedSamples[index - 1].timestamp.timeIntervalSince(sample.timestamp).magnitude > 36 * 60 * 60 {
+                                        path.move(to: point)
+                                    } else {
+                                        path.addLine(to: point)
+                                    }
                                 }
                             }
                             .stroke(LifeOSTokens.accent, style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
                         })
                         if let selectedIndex, orderedSamples.indices.contains(selectedIndex) {
                             let sample = orderedSamples[selectedIndex]
-                            let x = x(for: selectedIndex, width: proxy.size.width)
+                            let x = x(for: sample.timestamp, width: proxy.size.width)
                             let y = y(for: sample.value, height: proxy.size.height)
                             Path { path in
                                 path.move(to: CGPoint(x: x, y: 0))
@@ -639,8 +643,9 @@ private struct FitnessStressSeriesChart: View {
                         }
                     }
                     .contentShape(Rectangle())
-                    .gesture(DragGesture(minimumDistance: 0).onChanged { gesture in
-                        let index = stressScrubIndex(locationX: gesture.location.x, width: proxy.size.width, count: orderedSamples.count)
+                    .simultaneousGesture(DragGesture(minimumDistance: LifeOSDirectionalClassifier.minimumDistance).onChanged { gesture in
+                        guard LifeOSDirectionalClassifier.classify(gesture.translation) == .horizontal else { return }
+                        let index = stressScrubIndex(locationX: gesture.location.x, width: proxy.size.width, samples: orderedSamples)
                         selectedID = orderedSamples.indices.contains(index) ? orderedSamples[index].id : nil
                     })
                 }
@@ -657,7 +662,7 @@ private struct FitnessStressSeriesChart: View {
                                 .font(LifeOSFont.caption(9))
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                                 .frame(width: 48, alignment: alignment)
-                                .position(x: clampedLabelX(for: sampleIndex, width: proxy.size.width), y: 7)
+                                .position(x: clampedLabelX(for: orderedSamples[sampleIndex].timestamp, width: proxy.size.width), y: 7)
                         }
                     }
                 }
@@ -730,13 +735,16 @@ private struct FitnessStressSeriesChart: View {
         }
     }
 
-    private func x(for index: Int, width: CGFloat) -> CGFloat {
-        guard orderedSamples.count > 1 else { return width / 2 }
-        return width * CGFloat(index) / CGFloat(orderedSamples.count - 1)
+    private func x(for timestamp: Date, width: CGFloat) -> CGFloat {
+        guard let first = orderedSamples.first?.timestamp,
+              let last = orderedSamples.last?.timestamp else { return width / 2 }
+        let span = max(last.timeIntervalSince(first), 1)
+        let fraction = min(max(timestamp.timeIntervalSince(first) / span, 0), 1)
+        return width * CGFloat(fraction)
     }
 
-    private func clampedLabelX(for index: Int, width: CGFloat) -> CGFloat {
-        min(max(24, x(for: index, width: width)), max(24, width - 24))
+    private func clampedLabelX(for timestamp: Date, width: CGFloat) -> CGFloat {
+        min(max(24, x(for: timestamp, width: width)), max(24, width - 24))
     }
 
     private func y(for value: Double, height: CGFloat) -> CGFloat {
@@ -890,10 +898,14 @@ private struct StressCoverageLegend: View {
     }
 }
 
-private func stressScrubIndex(locationX: CGFloat, width: CGFloat, count: Int) -> Int {
-    guard count > 1, width > 0 else { return 0 }
-    let normalized = min(1, max(0, locationX / width))
-    return min(count - 1, max(0, Int((normalized * CGFloat(count - 1)).rounded())))
+private func stressScrubIndex(locationX: CGFloat, width: CGFloat, samples: [FitnessStressSample]) -> Int {
+    guard !samples.isEmpty, width > 0 else { return 0 }
+    guard let first = samples.first?.timestamp, let last = samples.last?.timestamp else { return 0 }
+    let span = max(last.timeIntervalSince(first), 1)
+    let target = first.addingTimeInterval(span * Double(min(1, max(0, locationX / width))))
+    return samples.indices.min { lhs, rhs in
+        abs(samples[lhs].timestamp.timeIntervalSince(target)) < abs(samples[rhs].timestamp.timeIntervalSince(target))
+    } ?? 0
 }
 
 private func formatNumber(_ value: Double) -> String {

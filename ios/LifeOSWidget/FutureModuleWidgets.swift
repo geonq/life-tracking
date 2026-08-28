@@ -373,12 +373,14 @@ struct SpendRingWidgetView: View {
             Spacer(minLength: 0)
             if let spend = entry.snapshot.finance.spendCents,
                entry.snapshot.financeDisplayState(at: entry.date) == .fresh || entry.snapshot.financeDisplayState(at: entry.date) == .stale {
-                ZStack {
-                    FutureModuleTrackRing(diameter: 64, lineWidth: 6)
+                VStack(spacing: 4) {
                     Text(futureModuleCurrency(spend))
                         .font(.system(size: 17, weight: .bold, design: .rounded))
                         .foregroundStyle(chrome.hero)
                         .minimumScaleFactor(0.65)
+                    Text("Observed spend")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(chrome.tertiary)
                 }
                 Text(futureModuleStateText(entry.snapshot.financeDisplayState(at: entry.date)))
                     .font(.system(size: 10, weight: .medium))

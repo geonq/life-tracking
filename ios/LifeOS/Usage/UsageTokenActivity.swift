@@ -81,20 +81,33 @@ struct UsageTokenActivityView: View {
 
                         Rectangle().fill(.clear).contentShape(Rectangle())
 #if os(iOS)
-                            .gesture(DragGesture(minimumDistance: 0).onChanged { value in
-                                let x = value.location.x - frame.origin.x
-                                if let date: Date = proxy.value(atX: x) { selectClosest(to: date) }
+                            .simultaneousGesture(DragGesture(minimumDistance: LifeOSDirectionalClassifier.minimumDistance).onChanged { value in
+                                guard LifeOSDirectionalClassifier.classify(value.translation) == .horizontal,
+                                      let date = LifeOSChartKit.timestamp(
+                                          forPlotX: value.location.x,
+                                          in: frame,
+                                          domain: chartXDomain
+                                      ) else { return }
+                                selectClosest(to: date)
                             })
                             .onTapGesture { location in
-                                let x = location.x - frame.origin.x
-                                if let date: Date = proxy.value(atX: x) { selectClosest(to: date) }
+                                guard let date = LifeOSChartKit.timestamp(
+                                    forPlotX: location.x,
+                                    in: frame,
+                                    domain: chartXDomain
+                                ) else { return }
+                                selectClosest(to: date)
                             }
 #elseif os(macOS)
                             .onContinuousHover(coordinateSpace: .local) { phase in
                                 switch phase {
                                 case .active(let location):
-                                    let x = location.x - frame.origin.x
-                                    if let date: Date = proxy.value(atX: x) { selectClosest(to: date) }
+                                    guard let date = LifeOSChartKit.timestamp(
+                                        forPlotX: location.x,
+                                        in: frame,
+                                        domain: chartXDomain
+                                    ) else { return }
+                                    selectClosest(to: date)
                                 case .ended:
                                     break
                                 }
@@ -103,7 +116,11 @@ struct UsageTokenActivityView: View {
                         if let selectedPoint,
                            let x = proxy.position(forX: selectedPoint.date) {
                             let y = proxy.position(forY: Double(selectedPoint.tokens)) ?? frame.origin.y
-                            ScrubBubble(x: frame.origin.x + x, y: max(18, frame.origin.y + y - 26)) {
+                            ScrubBubble(
+                                x: frame.origin.x + x,
+                                y: frame.origin.y + y,
+                                bounds: frame
+                            ) {
                                 VStack(alignment: .leading, spacing: 1) {
                                     Text(selectedPoint.tokens.formatted(.number.notation(.compactName)) + " tokens")
                                     Text(selectedPoint.date, format: .dateTime.weekday(.abbreviated).hour().minute())
@@ -249,11 +266,13 @@ struct UsageTokenActivityView: View {
     }
 
     private func selectClosest(to date: Date) {
-        guard !orderedActivity.isEmpty else { return }
-        let closest = orderedActivity.min { abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date)) }
-        if let closestDate = closest?.date, closestDate != selectedID {
+        let points = orderedActivity.map {
+            LifeOSChartPoint(timestamp: $0.date, value: Double($0.tokens))
+        }
+        guard let closest = LifeOSChartKit.nearestPoint(in: points, to: date) else { return }
+        if closest.timestamp != selectedID {
             ScrubBubble<EmptyView>.snapHaptic()
         }
-        selectedID = closest?.date
+        selectedID = closest.timestamp
     }
 }

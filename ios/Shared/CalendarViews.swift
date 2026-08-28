@@ -1101,6 +1101,14 @@ private struct CalendarPagedTimeline: View {
                 guard let firstDay else { return }
                 let target = calendar.startOfDay(for: firstDay)
                 guard !calendar.isDate(target, inSameDayAs: pageAnchor) else { return }
+                // A committed settle intentionally updates the parent's day
+                // window before the strip reaches its visual target. That
+                // window change is part of the active generation, not an
+                // external retarget, so do not cancel the in-flight pixels.
+                if let pendingSettle,
+                   calendar.isDate(target, inSameDayAs: pendingSettle.nextAnchor) {
+                    return
+                }
                 CalendarPagerDiagnostics.event(
                     "parent.days-window-changed",
                     generation: pagerGeneration,
@@ -1290,14 +1298,9 @@ private struct CalendarPagedTimeline: View {
                     horizontalDragOffset = adopted
                     liveStripDragOffset = adopted
                 }
-                if settle.dayDelta != 0 {
-                    // This is the first swipe's terminal commit. A second
-                    // gesture has claimed the strip, so waiting for the
-                    // interrupted spring's stale timer would replay the old
-                    // anchor and make parent-owned state lag behind the
-                    // pixels already entering view.
-                    onCommitDateChange?(committedAnchor)
-                }
+                // The accepted settle committed the parent date at gesture
+                // release. Do not issue a second commit from an interrupted
+                // animation; the active generation owns the logical page.
             }
             dragReferenceTranslation = translation.width
             dragReferenceOffset = horizontalDragOffset
@@ -1400,6 +1403,15 @@ private struct CalendarPagedTimeline: View {
             offset: horizontalDragOffset,
             visibleDayCount: visibleDayCount
         )
+        if dayDelta != 0 {
+            // Data ownership advances as soon as the gesture is accepted. The
+            // strip animation is presentation-only and already has its
+            // neighbouring column mounted, so a second swipe never waits for
+            // animation completion or a sequential day read.
+            let committedAnchor = calendar.startOfDay(for: nextAnchor)
+            onPreviewDateChange?(committedAnchor)
+            onCommitDateChange?(committedAnchor)
+        }
         if reduceMotion {
             var transaction = Transaction()
             transaction.animation = nil
@@ -1426,7 +1438,11 @@ private struct CalendarPagedTimeline: View {
                 horizontalDragOffset = targetOffset
             }
             let generation = settle.generation
-            DispatchQueue.main.asyncAfter(deadline: .now() + duration + 0.2) {
+            // The geometry preference normally completes the settle on the
+            // exact target frame. Keep only a short dropped-preference
+            // cushion here: a 200 ms tail made rapid swipes wait roughly
+            // half a second before the pager left pendingSettle.
+            DispatchQueue.main.asyncAfter(deadline: .now() + duration + 0.06) {
                 guard let pendingSettle, pendingSettle.generation == generation else { return }
                 completeSettle(pendingSettle)
             }
@@ -1511,7 +1527,6 @@ private struct CalendarPagedTimeline: View {
             return
         }
         onPreviewDateChange?(pageAnchor)
-        onCommitDateChange?(pageAnchor)
     }
 
     private func dayHeaderStrip(days: [Date], columnWidth: CGFloat, containerWidth: CGFloat) -> some View {
@@ -2011,7 +2026,17 @@ private struct CalendarDayTimeline: View {
     }
 
     private var timedItems: [CalendarItem] {
-        items.filter { !CalendarAllDayLayout.isAllDay($0, calendar: calendar) }
+        // The pager owns several neighbouring columns and recomputes their
+        // placement while the finger moves. Keep each layout pass bounded to
+        // events that can actually render in this day. A cross-day move still
+        // carries its source item so the provisional layout can place the
+        // destination ghost correctly while the event is being dragged.
+        let movingItemID = interactionSession.eventMovePreview?.item.id
+        return items.filter { item in
+            guard !CalendarAllDayLayout.isAllDay(item, calendar: calendar) else { return false }
+            if item.id == movingItemID { return true }
+            return !item.isDeleted && item.start < interval.end && item.end > interval.start
+        }
     }
 
     private var basePlacements: [CalendarEventPlacement] {

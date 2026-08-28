@@ -68,6 +68,32 @@ final class FinanceStatementImporterTests: XCTestCase {
         XCTAssertEqual(result.transactions.last?.amountCents, 1200)
     }
 
+    func testParsesFullISO8601DatesWithFractionalSecondsAndTimezone() {
+        let result = FinanceStatementImporter.parseCSV("""
+        datetime,description,amount
+        2026-08-01T10:15:30.123Z,UTC merchant,-4.50
+        2026-08-02T11:00:00+02:00,Offset merchant,1.25
+        """)
+
+        XCTAssertEqual(result.transactions.count, 2)
+        XCTAssertEqual(result.skippedRowCount, 0)
+        XCTAssertEqual(result.transactions.map(\.amountCents), [-450, 125])
+    }
+
+    func testParsesBothEuropeanAndEnglishGroupedAmounts() {
+        let european = FinanceStatementImporter.parseCSV("""
+        date;description;amount
+        2026-08-01;European;-1.234,56
+        """)
+        let english = FinanceStatementImporter.parseCSV("""
+        date,description,amount
+        2026-08-02,English,"1,234.56"
+        """)
+
+        XCTAssertEqual(european.transactions.first?.amountCents, -123_456)
+        XCTAssertEqual(english.transactions.first?.amountCents, 123_456)
+    }
+
     // MARK: 3. Trade Republic-style layout (semicolon delimiter, German headers)
 
     func testParsesTradeRepublicStyleLayout() {
@@ -102,6 +128,20 @@ final class FinanceStatementImporterTests: XCTestCase {
         XCTAssertEqual(result.transactions.first?.description, "Valid row")
         // Two malformed rows (bad date, bad amount) plus one short row.
         XCTAssertEqual(result.skippedRowCount, 3)
+    }
+
+    func testMalformedGroupingAndNonEURRowsAreSkipped() {
+        let csv = """
+        date,description,amount,currency
+        2026-08-01,Valid,"1,234.56",EUR
+        2026-08-02,Bad grouping,"1,2,3.45",EUR
+        2026-08-03,Foreign,-10.00,USD
+        """
+        let result = FinanceStatementImporter.parseCSV(csv)
+
+        XCTAssertEqual(result.transactions.count, 1)
+        XCTAssertEqual(result.transactions.first?.amountCents, 123_456)
+        XCTAssertEqual(result.skippedRowCount, 2)
     }
 
     // MARK: 5. Empty input yields an empty result, not a crash

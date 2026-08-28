@@ -389,6 +389,51 @@ public enum LifeOSChartKit {
         selectionResult(in: [series], to: timestamp, expectedCadence: expectedCadence).selectedDatum?.point
     }
 
+    /// Selects the nearest point from one value series. This keeps simple
+    /// charts on the same timestamp-aware selection path as multi-series
+    /// charts, including duplicate resolution and explicit-gap handling.
+    public static func nearestPoint(
+        in points: [LifeOSChartPoint],
+        to timestamp: Date,
+        expectedCadence: TimeInterval? = nil
+    ) -> LifeOSChartPoint? {
+        let series = LifeOSChartSeries(
+            id: "selection",
+            label: "Selection",
+            kind: .observed,
+            points: points,
+            source: "",
+            provenance: .observed
+        )
+        return nearestDatum(in: series, to: timestamp, expectedCadence: expectedCadence)
+    }
+
+    /// Converts an overlay location in the chart's coordinate space into a
+    /// timestamp on the explicit x-domain. The input is clamped to the plot,
+    /// so touches on an axis or a rounded chart edge still select the nearest
+    /// real point instead of silently clearing the bubble.
+    public static func timestamp(
+        forPlotX locationX: CGFloat,
+        in plotFrame: CGRect,
+        domain: ClosedRange<Date>
+    ) -> Date? {
+        let lower = domain.lowerBound
+        let upper = domain.upperBound
+        let span = upper.timeIntervalSince(lower)
+        guard locationX.isFinite,
+              plotFrame.minX.isFinite,
+              plotFrame.width.isFinite,
+              plotFrame.width > 0,
+              span.isFinite,
+              span > 0 else {
+            return nil
+        }
+
+        let localX = min(max(locationX - plotFrame.minX, 0), plotFrame.width)
+        let fraction = Double(localX / plotFrame.width)
+        return lower.addingTimeInterval(span * fraction)
+    }
+
     /// Selects the nearest datum across series, explicitly preserving no-data
     /// gaps as a result instead of crossing them to a distant point.
     public static func selectionResult(
@@ -547,14 +592,18 @@ public enum LifeOSChartKit {
         inset: CGFloat = 8
     ) -> CGRect {
         let safeInset = max(0, inset)
-        let availableWidth = max(0, bounds.width - safeInset * 2)
-        let availableHeight = max(0, bounds.height - safeInset * 2)
-        let width = min(max(0, size.width), availableWidth)
-        let height = min(max(0, size.height), availableHeight)
-        let minimumX = bounds.minX + safeInset
-        let minimumY = bounds.minY + safeInset
-        let maximumX = max(minimumX, bounds.maxX - safeInset - width)
-        let maximumY = max(minimumY, bounds.maxY - safeInset - height)
+        let horizontalInset = min(safeInset, max(0, bounds.width / 2))
+        let verticalInset = min(safeInset, max(0, bounds.height / 2))
+        let availableWidth = max(0, bounds.width - horizontalInset * 2)
+        let availableHeight = max(0, bounds.height - verticalInset * 2)
+        let requestedWidth = size.width.isFinite ? max(0, size.width) : 0
+        let requestedHeight = size.height.isFinite ? max(0, size.height) : 0
+        let width = min(requestedWidth, availableWidth)
+        let height = min(requestedHeight, availableHeight)
+        let minimumX = bounds.minX + horizontalInset
+        let minimumY = bounds.minY + verticalInset
+        let maximumX = max(minimumX, bounds.maxX - horizontalInset - width)
+        let maximumY = max(minimumY, bounds.maxY - verticalInset - height)
         let proposedX = anchor.x - width / 2
         let proposedY = anchor.y - height - safeInset
 

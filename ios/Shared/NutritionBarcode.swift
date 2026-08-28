@@ -433,8 +433,9 @@ public struct NutritionRecord: Codable, Equatable, Identifiable, Sendable {
               confirmedDate >= fetchedDate,
               mealDate <= confirmedDate.addingTimeInterval(5),
               kcal != nil || proteinGrams != nil || carbsGrams != nil || fatGrams != nil else { throw NutritionBarcodeInputError.invalidProposal }
+        if basis == .per100g && (grams == nil || grams! <= 0) { throw NutritionBarcodeInputError.invalidProposal }
         if let productName, productName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || productName.utf8.count > 240 { throw NutritionBarcodeInputError.invalidProposal }
-        if let grams, !grams.isFinite || grams < 0 || grams > 5_000 { throw NutritionBarcodeInputError.invalidProposal }
+        if let grams, !grams.isFinite || grams <= 0 || grams > 5_000 { throw NutritionBarcodeInputError.invalidProposal }
         if let kcal, !kcal.isFinite || kcal < 0 || kcal > 5_000 { throw NutritionBarcodeInputError.invalidProposal }
         for value in [proteinGrams, carbsGrams, fatGrams] {
             if let value, !value.isFinite || value < 0 || value > 2_000 { throw NutritionBarcodeInputError.invalidProposal }
@@ -449,7 +450,7 @@ public enum NutritionBarcodeFlow {
               NutritionBarcodeNormalizer.normalize(confirmation.barcode) == confirmation.barcode else { throw NutritionBarcodeInputError.invalidProposal }
         switch confirmation.basis {
         case .per100g:
-            guard proposal.per100g != nil else { throw NutritionBarcodeInputError.invalidProposal }
+            guard proposal.per100g != nil, let grams = confirmation.grams, grams > 0 else { throw NutritionBarcodeInputError.invalidProposal }
         case .perServing:
             guard proposal.perServing != nil else { throw NutritionBarcodeInputError.invalidProposal }
         }
@@ -458,7 +459,7 @@ public enum NutritionBarcodeFlow {
               let generatedDate = NutritionBarcodeISO8601.date(proposal.provenance.fetchedAt),
               mealDate <= now.addingTimeInterval(5), confirmedDate <= now.addingTimeInterval(5), confirmedDate >= generatedDate else { throw NutritionBarcodeInputError.invalidProposal }
         if let name = confirmation.productName, name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || name.utf8.count > 240 { throw NutritionBarcodeInputError.invalidProposal }
-        if let grams = confirmation.grams, !grams.isFinite || grams < 0 || grams > 5_000 { throw NutritionBarcodeInputError.invalidProposal }
+        if let grams = confirmation.grams, !grams.isFinite || grams <= 0 || grams > 5_000 { throw NutritionBarcodeInputError.invalidProposal }
         if let kcal = confirmation.kcal, !kcal.isFinite || kcal < 0 || kcal > 5_000 { throw NutritionBarcodeInputError.invalidProposal }
         for value in [confirmation.proteinGrams, confirmation.carbsGrams, confirmation.fatGrams] {
             if let value, !value.isFinite || value < 0 || value > 2_000 { throw NutritionBarcodeInputError.invalidProposal }

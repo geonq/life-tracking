@@ -602,6 +602,17 @@ private struct StrengthProgressChart: View {
         )
     }
 
+    private var chartXDomain: ClosedRange<Date> {
+        guard let first = orderedPoints.first?.date,
+              let last = orderedPoints.last?.date,
+              last > first else {
+            let now = Date.now
+            return now.addingTimeInterval(-60)...now.addingTimeInterval(60)
+        }
+        let padding = max(last.timeIntervalSince(first) * 0.02, 60)
+        return first.addingTimeInterval(-padding)...last.addingTimeInterval(padding)
+    }
+
     var body: some View {
         Chart(orderedPoints) { point in
             AreaMark(x: .value("Date", point.date), y: .value("Kilograms", point.kilograms))
@@ -646,6 +657,7 @@ private struct StrengthProgressChart: View {
                 AxisTick().foregroundStyle(.clear)
             }
         }
+        .chartXScale(domain: chartXDomain)
         .chartPlotStyle { plot in
             LifeOSChartDrawReveal(content: plot)
                 .background(LifeOSTokens.canvas.opacity(0.22), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -658,17 +670,33 @@ private struct StrengthProgressChart: View {
                         .fill(.clear)
                         .contentShape(Rectangle())
 #if os(iOS)
-                        .gesture(DragGesture(minimumDistance: 0).onChanged { value in
-                            select(date: proxy.value(atX: value.location.x - frame.origin.x))
+                        .simultaneousGesture(DragGesture(minimumDistance: LifeOSDirectionalClassifier.minimumDistance).onChanged { value in
+                            guard LifeOSDirectionalClassifier.classify(value.translation) == .horizontal,
+                                  let date = LifeOSChartKit.timestamp(
+                                      forPlotX: value.location.x,
+                                      in: frame,
+                                      domain: chartXDomain
+                                  ) else { return }
+                            select(date: date)
                         })
                         .onTapGesture { location in
-                            select(date: proxy.value(atX: location.x - frame.origin.x))
+                            guard let date = LifeOSChartKit.timestamp(
+                                forPlotX: location.x,
+                                in: frame,
+                                domain: chartXDomain
+                            ) else { return }
+                            select(date: date)
                         }
 #elseif os(macOS)
                         .onContinuousHover(coordinateSpace: .local) { phase in
                             switch phase {
                             case .active(let location):
-                                select(date: proxy.value(atX: location.x - frame.origin.x))
+                                guard let date = LifeOSChartKit.timestamp(
+                                    forPlotX: location.x,
+                                    in: frame,
+                                    domain: chartXDomain
+                                ) else { return }
+                                select(date: date)
                             case .ended:
                                 selectedDate = nil
                             }
@@ -677,7 +705,11 @@ private struct StrengthProgressChart: View {
                     if let selectedPoint,
                        let x = proxy.position(forX: selectedPoint.date),
                        let y = proxy.position(forY: selectedPoint.kilograms) {
-                        ScrubBubble(x: frame.origin.x + x, y: max(18, frame.origin.y + y - 24)) {
+                        ScrubBubble(
+                            x: frame.origin.x + x,
+                            y: frame.origin.y + y,
+                            bounds: frame
+                        ) {
                             Text("\(selectedPoint.kilograms.formatted(.number.precision(.fractionLength(1)))) kg")
                         }
                         .allowsHitTesting(false)

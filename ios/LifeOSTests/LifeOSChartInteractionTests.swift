@@ -183,6 +183,55 @@ final class LifeOSChartInteractionTests: XCTestCase {
         XCTAssertTrue(bounds.insetBy(dx: 8, dy: 8).contains(frame))
     }
 
+    func testTimestampMappingClampsOverlayToExplicitDomain() throws {
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let end = start.addingTimeInterval(3_600)
+        let plot = CGRect(x: 20, y: 10, width: 180, height: 120)
+
+        let before = try XCTUnwrap(
+            LifeOSChartKit.timestamp(forPlotX: 0, in: plot, domain: start...end)
+        )
+        let middle = try XCTUnwrap(
+            LifeOSChartKit.timestamp(forPlotX: plot.midX, in: plot, domain: start...end)
+        )
+        let after = try XCTUnwrap(
+            LifeOSChartKit.timestamp(forPlotX: 400, in: plot, domain: start...end)
+        )
+
+        XCTAssertEqual(before, start)
+        XCTAssertEqual(middle, start.addingTimeInterval(1_800))
+        XCTAssertEqual(after, end)
+    }
+
+    func testNearestPointUsesSharedTimestampSelectionForSimpleSeries() throws {
+        let base = Date(timeIntervalSince1970: 1_800_000_000)
+        let selected = try XCTUnwrap(
+            LifeOSChartKit.nearestPoint(
+                in: [
+                    LifeOSChartPoint(timestamp: base, value: 1),
+                    LifeOSChartPoint(timestamp: base.addingTimeInterval(600), value: 2)
+                ],
+                to: base.addingTimeInterval(450)
+            )
+        )
+
+        XCTAssertEqual(selected.timestamp, base.addingTimeInterval(600))
+        XCTAssertEqual(selected.value, 2)
+    }
+
+    func testTooltipFrameFitsEvenWhenInsetExceedsTinyBounds() {
+        let bounds = CGRect(x: 0, y: 0, width: 10, height: 10)
+        let frame = LifeOSChartKit.boundedTooltipFrame(
+            anchor: CGPoint(x: 5, y: 5),
+            size: CGSize(width: 80, height: 40),
+            in: bounds,
+            inset: 20
+        )
+
+        XCTAssertTrue(bounds.contains(frame))
+        XCTAssertEqual(frame.size, .zero)
+    }
+
     func testAccessibilitySummaryKeepsProvenanceVisible() {
         let summary = LifeOSChartAccessibilitySummary(
             title: "Usage",
