@@ -121,9 +121,11 @@ CLAUDE_INGEST_SECRET_FILENAME = "claude-ingest.secret"
 
 ALLOWED_TAILSCALE_LOGIN = _required_tailscale_login()
 
-# Upstream configuration for read-only data endpoints
+# Upstream configuration for read-only data endpoints. Finance is deliberately
+# absent: `/finance/summary` is owned by the direct Enable Banking adapter
+# below, so an unused environment override must not create a second or
+# misleading source of truth.
 USAGE_UPSTREAM = os.environ.get("LIFEOS_USAGE_UPSTREAM", "http://127.0.0.1:8787/api/usage")
-FINANCE_UPSTREAM = os.environ.get("LIFEOS_FINANCE_UPSTREAM", "http://127.0.0.1:8787/api/finance/summary")
 CLIPPER_UPSTREAM = os.environ.get("LIFEOS_CLIPPER_UPSTREAM", "http://127.0.0.1:8787/api/clipper/summary")
 NUTRITION_BARCODE_UPSTREAM = os.environ.get(
     "LIFEOS_NUTRITION_BARCODE_UPSTREAM",
@@ -135,8 +137,6 @@ NUTRITION_PHOTO_UPSTREAM = os.environ.get(
 )
 if not _is_allowed_upstream(USAGE_UPSTREAM, "/api/usage"):
     raise RuntimeError("LIFEOS_USAGE_UPSTREAM must be an exact loopback HTTP endpoint")
-if not _is_allowed_upstream(FINANCE_UPSTREAM, "/api/finance/summary"):
-    raise RuntimeError("LIFEOS_FINANCE_UPSTREAM must be an exact loopback HTTP endpoint")
 if not _is_allowed_upstream(CLIPPER_UPSTREAM, "/api/clipper/summary"):
     raise RuntimeError("LIFEOS_CLIPPER_UPSTREAM must be an exact loopback HTTP endpoint")
 if not _is_allowed_upstream(NUTRITION_BARCODE_UPSTREAM, "/api/nutrition/barcode"):
@@ -1433,6 +1433,21 @@ def _photo_lineage(manifest: object) -> tuple[str, str, list[dict[str, str]]] | 
     """
     if not isinstance(manifest, dict):
         return None
+    required_manifest_keys = {
+        "schemaVersion", "mealID", "requestID", "capturedAt",
+        "clientTimeZone", "inferenceConsent", "images",
+    }
+    allowed_manifest_keys = required_manifest_keys | {"userContext"}
+    if not required_manifest_keys.issubset(manifest) or set(manifest) - allowed_manifest_keys:
+        return None
+    if "userContext" in manifest:
+        user_context = manifest["userContext"]
+        allowed_context_keys = {
+            "plateDiameterMm", "knownReference", "portionWeightGrams",
+            "packageLabelContext", "note",
+        }
+        if not isinstance(user_context, dict) or set(user_context) - allowed_context_keys:
+            return None
     meal_id = manifest.get("mealID")
     request_id = manifest.get("requestID")
     images = manifest.get("images")
@@ -1450,6 +1465,11 @@ def _photo_lineage(manifest: object) -> tuple[str, str, list[dict[str, str]]] | 
     total_bytes = 0
     for image in images:
         if not isinstance(image, dict):
+            return None
+        if set(image) != {
+            "imageID", "mimeType", "byteLength", "width", "height",
+            "sanitized", "inlineDataBase64", "sha256",
+        }:
             return None
         image_id = image.get("imageID")
         mime_type = image.get("mimeType")
@@ -1799,11 +1819,13 @@ async def get_finance_summary() -> Response:
     try:
         payload = await enable_banking.refresh_summary()
     except Exception:
-        # Never relabel a prior observation as a fresh HTTP 200 response after
-        # a failed refresh. The existing contract has no explicit partial
-        # state, so this boundary fails closed until a tested stale-envelope
-        # transformation is introduced.
-        return _finance_consent_response({"error": "finance unavailable"}, 503)
+        # Keep the last validated banking observation available during a
+        # provider outage. `load_cached_summary` preserves its source time and
+        # converts only age-inconsistent observed provenance to stale/
+        # refresh_due; malformed or incomplete cache state still fails closed.
+        payload = enable_banking.load_cached_summary()
+        if payload is None:
+            return _finance_consent_response({"error": "finance unavailable"}, 503)
     return _finance_consent_response(payload, 200)
 
 

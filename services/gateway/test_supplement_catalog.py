@@ -83,4 +83,3 @@ def test_catalog_rejects_unbounded_queries_and_missing_database(tmp_path):
         service.search("x" * 121)
     with pytest.raises(SupplementCatalogUnavailable):
         SupplementCatalogService(tmp_path / "missing.sqlite3").search("calcium")
-

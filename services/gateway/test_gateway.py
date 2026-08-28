@@ -1129,11 +1129,49 @@ def test_photo_lineage_recomputes_digest_length_and_magic_before_forwarding():
     forged_sanitized["images"][0]["sanitized"] = False
     assert main._photo_lineage(forged_sanitized) is None
 
+    forged_manifest_key = json.loads(json.dumps(manifest))
+    forged_manifest_key["unexpected"] = "must not cross boundary"
+    assert main._photo_lineage(forged_manifest_key) is None
+
+    forged_image_key = json.loads(json.dumps(manifest))
+    forged_image_key["images"][0]["unexpected"] = "must not cross boundary"
+    assert main._photo_lineage(forged_image_key) is None
+
+    with_context = json.loads(json.dumps(manifest))
+    with_context["userContext"] = {"portionWeightGrams": 120.0}
+    assert main._photo_lineage(with_context) is not None
+
+    forged_context_key = json.loads(json.dumps(manifest))
+    forged_context_key["userContext"] = {"secret": "must not cross boundary"}
+    assert main._photo_lineage(forged_context_key) is None
+
 
 def test_finance_summary_without_linked_connection_is_unavailable():
     response = client.get("/finance/summary", headers=AUTH)
     assert response.status_code == 503
     assert response.json() == {"error": "finance unavailable"}
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_finance_summary_returns_validated_cached_observation_on_refresh_failure(monkeypatch):
+    observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    cached = copy.deepcopy(VALID_FINANCE)
+    cached["generatedAt"] = observed_at
+    for key in main.FINANCE_METRICS:
+        cached[key]["provenance"]["observedAt"] = observed_at
+
+    class CachedFinance:
+        async def refresh_summary(self):
+            raise RuntimeError("provider unavailable")
+
+        def load_cached_summary(self):
+            return cached
+
+    monkeypatch.setattr(main, "enable_banking", CachedFinance())
+    response = client.get("/finance/summary", headers=AUTH)
+
+    assert response.status_code == 200
+    assert response.json() == cached
     assert response.headers["cache-control"] == "no-store"
 
 

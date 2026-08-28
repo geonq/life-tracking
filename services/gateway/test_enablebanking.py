@@ -2,7 +2,7 @@ import asyncio
 import json
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -186,6 +186,12 @@ def test_start_rejects_consent_url_fragment_and_expires_flow(tmp_path, monkeypat
     assert run(adapter.status("expired-flow")) == {"state": "expired"}
 
 
+def test_unknown_provider_session_state_fails_closed(tmp_path, monkeypatch):
+    adapter = service(tmp_path, monkeypatch)
+    assert adapter._session_state("A_NEW_PROVIDER_STATE") == "error"
+    assert adapter._session_state(None) == "error"
+
+
 def test_callback_exchanges_code_and_persists_only_opaque_connection(tmp_path, monkeypatch):
     adapter = service(tmp_path, monkeypatch)
     adapter.consent_flows["eb-flow"] = {
@@ -270,6 +276,154 @@ def test_refresh_normalizes_realistic_account_and_transaction_shapes(tmp_path, m
     assert cached == summary
 
 
+def test_refresh_fails_closed_when_provider_returns_malformed_account(tmp_path, monkeypatch):
+    adapter = service(tmp_path, monkeypatch)
+    adapter._save_connection({
+        "connectionId": "eb-flow",
+        "institutionId": "revolut_personal",
+        "sessionId": "session-1",
+        "linkedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    })
+    holder = QueueClient([
+        FakeResponse({"status": "AUTHORIZED", "accounts": [{"uid": "not-a-provider-account"}]}),
+    ])
+    monkeypatch.setattr(enablebanking.httpx, "AsyncClient", lambda **_: holder)
+
+    with pytest.raises(enablebanking.EnableBankingUnavailable):
+        run(adapter.refresh_summary())
+
+
+def test_relinking_same_institution_replaces_stored_connection(tmp_path, monkeypatch):
+    adapter = service(tmp_path, monkeypatch)
+    adapter._save_connection({
+        "connectionId": "eb-original",
+        "institutionId": "revolut_personal",
+        "sessionId": "session-original",
+        "linkedAt": "2026-01-01T00:00:00Z",
+    })
+    adapter._save_connection({
+        "connectionId": "eb-relinked",
+        "institutionId": "revolut_personal",
+        "sessionId": "session-relinked",
+        "linkedAt": "2026-08-28T00:00:00Z",
+    })
+
+    connections = adapter._load_connections()
+
+    matching = [c for c in connections if c["institutionId"] == "revolut_personal"]
+    assert len(matching) == 1
+    assert matching[0]["connectionId"] == "eb-relinked"
+    assert matching[0]["sessionId"] == "session-relinked"
+
+
+def test_refresh_fails_closed_when_persisted_store_mixes_valid_and_malformed_records(tmp_path, monkeypatch):
+    adapter = service(tmp_path, monkeypatch)
+    adapter._save_connection({
+        "connectionId": "eb-good",
+        "institutionId": "revolut_personal",
+        "sessionId": "session-good",
+        "linkedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    })
+    path = tmp_path / "enablebanking-connections.json"
+    payload = json.loads(path.read_text())
+    payload["connections"].append({
+        "connectionId": "eb-bad",
+        "institutionId": "sparkasse_leipzig",
+        "linkedAt": "2026-08-26T00:00:00Z",
+    })
+    path.write_text(json.dumps(payload))
+    cached = tmp_path / "finance-summary.json"
+    cached.write_text('{"sentinel":"prior"}')
+
+    with pytest.raises(enablebanking.EnableBankingUnavailable):
+        run(adapter.refresh_summary())
+    assert cached.read_text() == '{"sentinel":"prior"}'
+
+
+def test_cached_summary_becomes_truthfully_stale_after_provider_outage(tmp_path, monkeypatch):
+    adapter = service(tmp_path, monkeypatch)
+    adapter._save_connection({
+        "connectionId": "eb-flow",
+        "institutionId": "revolut_personal",
+        "sessionId": "session-1",
+        "linkedAt": "2026-01-01T00:00:00Z",
+    })
+    observed_at = (datetime.now(timezone.utc) - main.FINANCE_STALE_AFTER - timedelta(minutes=1)).isoformat().replace("+00:00", "Z")
+    # Start from a complete, provider-shaped summary and age every observed
+    # provenance field without changing its data values.
+    summary = {
+        "generatedAt": observed_at,
+        "currency": "EUR",
+        "monthlyIncome": {"availability": "observed", "amountCents": 1000, "provenance": {"source": "revolut_personal", "observedAt": observed_at, "freshness": "fresh", "quality": "observed", "connectorState": "healthy"}},
+        "fixedCosts": {"availability": "observed", "amountCents": 100, "provenance": {"source": "revolut_personal", "observedAt": observed_at, "freshness": "fresh", "quality": "observed", "connectorState": "healthy"}},
+        "discretionaryBuffer": {"availability": "unavailable", "provenance": {"source": "no-authorized-finance-source", "observedAt": observed_at, "freshness": "unknown", "quality": "unavailable", "connectorState": "unavailable"}},
+        "spent": {"availability": "observed", "amountCents": 200, "provenance": {"source": "revolut_personal", "observedAt": observed_at, "freshness": "fresh", "quality": "observed", "connectorState": "healthy"}},
+        "savingsGoal": {"availability": "unavailable", "provenance": {"source": "no-authorized-finance-source", "observedAt": observed_at, "freshness": "unknown", "quality": "unavailable", "connectorState": "unavailable"}},
+        "saved": {"availability": "unavailable", "provenance": {"source": "no-authorized-finance-source", "observedAt": observed_at, "freshness": "unknown", "quality": "unavailable", "connectorState": "unavailable"}},
+    }
+    cached = tmp_path / "finance-summary.json"
+    cached.write_text(json.dumps(summary))
+
+    loaded = adapter.load_cached_summary()
+
+    assert loaded is not None
+    assert loaded["generatedAt"] == observed_at
+    for key in ("monthlyIncome", "fixedCosts", "spent"):
+        assert loaded[key]["provenance"]["freshness"] == "stale"
+        assert loaded[key]["provenance"]["connectorState"] == "refresh_due"
+    assert main._validate_finance_payload(loaded)
+
+
+def test_cached_summary_backfills_new_merchant_categories_without_overwriting_labels(tmp_path, monkeypatch):
+    adapter = service(tmp_path, monkeypatch)
+    adapter._save_connection({
+        "connectionId": "eb-flow",
+        "institutionId": "revolut_personal",
+        "sessionId": "session-1",
+        "linkedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    })
+    observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    row = {
+        "id": "ebtx-cache-category",
+        "merchant": "EDEKA Gerstmann",
+        "title": "EDEKA Gerstmann",
+        "signedAmountCents": -589,
+        "timestamp": observed_at,
+        "account": "revolut_personal · Main",
+        "source": "enablebanking:revolut_personal",
+        "category": "Uncategorized",
+        "provenance": {
+            "source": "enablebanking:revolut_personal",
+            "observedAt": observed_at,
+            "freshness": "fresh",
+            "quality": "observed",
+            "connectorState": "healthy",
+        },
+    }
+    summary = {
+        "generatedAt": observed_at,
+        "currency": "EUR",
+        "monthlyIncome": {"availability": "observed", "amountCents": 0, "provenance": {"source": "enablebanking:revolut_personal", "observedAt": observed_at, "freshness": "fresh", "quality": "observed", "connectorState": "healthy"}},
+        "fixedCosts": {"availability": "observed", "amountCents": 0, "provenance": {"source": "enablebanking:revolut_personal", "observedAt": observed_at, "freshness": "fresh", "quality": "observed", "connectorState": "healthy"}},
+        "discretionaryBuffer": {"availability": "unavailable", "provenance": {"source": "no-authorized-finance-source", "observedAt": observed_at, "freshness": "unknown", "quality": "unavailable", "connectorState": "unavailable"}},
+        "spent": {"availability": "observed", "amountCents": 589, "provenance": {"source": "enablebanking:revolut_personal", "observedAt": observed_at, "freshness": "fresh", "quality": "observed", "connectorState": "healthy"}},
+        "savingsGoal": {"availability": "unavailable", "provenance": {"source": "no-authorized-finance-source", "observedAt": observed_at, "freshness": "unknown", "quality": "unavailable", "connectorState": "unavailable"}},
+        "saved": {"availability": "unavailable", "provenance": {"source": "no-authorized-finance-source", "observedAt": observed_at, "freshness": "unknown", "quality": "unavailable", "connectorState": "unavailable"}},
+        "transactions": {
+            "availability": "observed",
+            "transactions": [row],
+            "provenance": {"source": "derived-transaction-snapshot", "observedAt": observed_at, "freshness": "fresh", "quality": "observed", "connectorState": "healthy"},
+        },
+    }
+    (tmp_path / "finance-summary.json").write_text(json.dumps(summary))
+
+    loaded = adapter.load_cached_summary()
+
+    assert loaded is not None
+    assert loaded["transactions"]["transactions"][0]["category"] == "Groceries"
+    assert main._validate_finance_payload(loaded)
+
+
 def test_transaction_category_uses_provider_label_mcc_and_merchant_fallback(tmp_path, monkeypatch):
     adapter = service(tmp_path, monkeypatch)
     assert adapter._transaction_category({"category": "Health", "merchant_category_code": "5411"}) == "Health"
@@ -295,6 +449,19 @@ def test_transaction_category_uses_provider_label_mcc_and_merchant_fallback(tmp_
         "category": "Income",
         "creditor": {"name": "Salary correction"},
     }) == "Uncategorized"
+
+
+def test_transaction_category_normalizes_provider_labels_direction_and_mcc_padding(tmp_path, monkeypatch):
+    adapter = service(tmp_path, monkeypatch)
+    assert adapter._transaction_category({"category": "Food & Dining"}) == "Dining"
+    assert adapter._transaction_category({"category": "Gebühren"}) == "Fees"
+    assert adapter._transaction_category({"category": "Überweisung"}) == "Transfers"
+    assert adapter._transaction_category({"credit_debit_indicator": "crdt", "category": "Rente"}) == "Income"
+    assert adapter._transaction_category({"merchant_category_code": "05411"}) == "Groceries"
+    assert adapter._transaction_category({
+        "credit_debit_indicator": "DBIT",
+        "creditor": {"name": "Uber Eats"},
+    }) == "Dining"
 
 
 def test_refresh_fails_closed_on_aggregate_overflow(tmp_path, monkeypatch):

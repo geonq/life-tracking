@@ -18,6 +18,7 @@ import os
 import re
 import secrets
 import time
+import unicodedata
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -92,6 +93,10 @@ class EnableBankingService:
         "revolut_personal": (("LT", "Revolut"), ("GB", "Revolut")),
     }
     KNOWN_INSTITUTION_IDS = frozenset(INSTITUTION_CATALOG)
+    # This is the only retired record that may be ignored during migration.
+    # Unknown or malformed current records fail closed instead of producing a
+    # misleading partial Finance snapshot.
+    RETIRED_INSTITUTION_IDS = frozenset({"SANDBOXFINANCE_SINST_DE"})
     SENSITIVE_PROVIDER_TEXT = re.compile(
         r"(?:bearer\s+\S+|-----BEGIN\s+[^-]*PRIVATE KEY-----|"
         r"[A-Z]{2}\d{2}[A-Z0-9]{10,34}|(?<!\d)\d{8,}(?!\d))",
@@ -230,24 +235,34 @@ class EnableBankingService:
         if not isinstance(raw, dict) or set(raw) != {"connections"} or not isinstance(raw["connections"], list):
             return []
         result: list[dict] = []
+        seen_connection_ids: set[str] = set()
+        seen_institution_ids: set[str] = set()
         for value in raw["connections"]:
-            if not isinstance(value, dict) or set(value) != {
+            if not isinstance(value, dict):
+                raise EnableBankingUnavailable("connection store contains a malformed record")
+            # Explicitly retired sandbox records are safe to skip. Every other
+            # record must remain complete and recognized, or the aggregate is
+            # rejected rather than silently publishing a valid subset.
+            if value.get("institutionId") in self.RETIRED_INSTITUTION_IDS:
+                continue
+            if set(value) != {
                 "connectionId", "institutionId", "sessionId", "linkedAt"
             }:
-                continue
+                raise EnableBankingUnavailable("connection store contains a malformed record")
             if not all(isinstance(value[field], str) and value[field] for field in value):
-                continue
+                raise EnableBankingUnavailable("connection store contains a malformed record")
             if not self.CONNECTION_ID_PATTERN.fullmatch(value["connectionId"]):
-                continue
+                raise EnableBankingUnavailable("connection store contains an invalid connection id")
             if not self.INSTITUTION_ID_PATTERN.fullmatch(value["institutionId"]):
-                continue
-            # Ignore opaque records from retired/sandbox connectors. A single
-            # invalid legacy session must not make current live connections
-            # disappear from the aggregate summary.
+                raise EnableBankingUnavailable("connection store contains an invalid institution id")
             if value["institutionId"] not in self.KNOWN_INSTITUTION_IDS:
-                continue
+                raise EnableBankingUnavailable("connection store contains an unknown institution")
             if not self.PROVIDER_ID_PATTERN.fullmatch(value["sessionId"]):
-                continue
+                raise EnableBankingUnavailable("connection store contains an invalid provider session")
+            if value["connectionId"] in seen_connection_ids or value["institutionId"] in seen_institution_ids:
+                raise EnableBankingUnavailable("connection store contains a duplicate connection")
+            seen_connection_ids.add(value["connectionId"])
+            seen_institution_ids.add(value["institutionId"])
             result.append(value)
         return result
 
@@ -255,13 +270,96 @@ class EnableBankingService:
         existing = [
             value for value in self._load_connections()
             if value["connectionId"] != connection["connectionId"]
+            and value["institutionId"] != connection["institutionId"]
         ]
         existing.append(connection)
         self._atomic_write_json(self._connections_path(), {"connections": existing[-32:]})
 
     def load_cached_summary(self) -> dict | None:
         value = self._read_bounded_json_file(self._summary_path(), self.MAX_FINANCE_SUMMARY_SIZE)
-        return value if isinstance(value, dict) and self._validate_finance_payload(value) else None
+        if not isinstance(value, dict):
+            return None
+        repaired = self._repair_cached_summary_categories(value)
+        if self._validate_finance_payload(repaired):
+            return repaired
+
+        # A previously valid snapshot eventually becomes age-inconsistent:
+        # its stored observations still say `fresh`, while the provider may
+        # now be unreachable. Reconstruct only the reviewed provenance fields
+        # as stale/refresh_due, retain every original amount/row/timestamp,
+        # and validate the complete result again before exposing it. This
+        # never turns malformed or partial disk state into a usable snapshot.
+        stale = self._mark_cached_summary_stale(repaired)
+        return stale if self._validate_finance_payload(stale) else None
+
+    @classmethod
+    def _repair_cached_summary_categories(cls, value: object) -> object:
+        """Backfill safe merchant categories in older normalized snapshots.
+
+        A valid cache may outlive the deployment that created it. Re-running
+        only rows explicitly labeled ``Uncategorized`` lets a newer category
+        vocabulary improve that cache without overwriting a provider label or
+        a future user override. The result is still passed through the full
+        finance validator before it can be returned.
+        """
+        if not isinstance(value, dict):
+            return value
+        transactions = value.get("transactions")
+        if not isinstance(transactions, dict) or not isinstance(transactions.get("transactions"), list):
+            return value
+
+        changed = False
+        repaired_rows: list[object] = []
+        for row in transactions["transactions"]:
+            if not isinstance(row, dict) or row.get("category") != "Uncategorized":
+                repaired_rows.append(row)
+                continue
+            amount = row.get("signedAmountCents")
+            merchant = row.get("merchant") or row.get("title")
+            if not isinstance(amount, int) or isinstance(amount, bool) or not isinstance(merchant, str):
+                repaired_rows.append(row)
+                continue
+            party_key = "debtor" if amount > 0 else "creditor"
+            derived = cls._transaction_category({
+                "credit_debit_indicator": "CRDT" if amount > 0 else "DBIT",
+                party_key: {"name": merchant},
+            })
+            if derived == "Uncategorized":
+                repaired_rows.append(row)
+                continue
+            repaired_rows.append({**row, "category": derived})
+            changed = True
+
+        if not changed:
+            return value
+        return {
+            **value,
+            "transactions": {
+                **transactions,
+                "transactions": repaired_rows,
+            },
+        }
+
+    @classmethod
+    def _mark_cached_summary_stale(cls, value: object) -> object:
+        """Mark observed nested Finance provenance stale without relabeling data."""
+        if isinstance(value, list):
+            return [cls._mark_cached_summary_stale(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+
+        result = {
+            key: cls._mark_cached_summary_stale(child)
+            for key, child in value.items()
+        }
+        provenance = result.get("provenance")
+        if isinstance(provenance, dict) and provenance.get("quality") == "observed":
+            result["provenance"] = {
+                **provenance,
+                "freshness": "stale",
+                "connectorState": "refresh_due",
+            }
+        return result
 
     def _http_client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
@@ -537,7 +635,10 @@ class EnableBankingService:
         return data
 
     def _session_state(self, raw: object) -> str:
-        return self.SESSION_STATUS_MAP.get(str(raw or "").strip().upper(), "link_opened")
+        # Unknown provider states are not proof that authorization is still in
+        # progress. Keep the lifecycle fail-closed until a reviewed provider
+        # state is added to the map.
+        return self.SESSION_STATUS_MAP.get(str(raw or "").strip().upper(), "error")
 
     def _expire_flows(self) -> None:
         now = time.monotonic()
@@ -778,30 +879,31 @@ class EnableBankingService:
     @classmethod
     def _transaction_category(cls, transaction: dict) -> str:
         aliases = {
-            "food": "Groceries", "grocery": "Groceries", "groceries": "Groceries",
-            "lebensmittel": "Groceries", "supermarket": "Groceries", "supermarkt": "Groceries",
+            "food": "Groceries", "foods": "Groceries", "grocery": "Groceries", "groceries": "Groceries",
+            "groceries and food": "Groceries", "lebensmittel": "Groceries", "supermarket": "Groceries", "supermarkt": "Groceries",
             "dining": "Dining", "restaurant": "Dining", "restaurants": "Dining",
-            "food and dining": "Dining", "essen": "Dining",
+            "food and dining": "Dining", "food dining": "Dining", "food drink": "Dining", "food drinks": "Dining", "essen": "Dining",
             "transport": "Transport", "transportation": "Transport",
-            "public transport": "Transport", "mobility": "Transport", "verkehr": "Transport",
-            "shopping": "Shopping", "retail": "Shopping", "online shopping": "Shopping",
+            "public transport": "Transport", "mobility": "Transport", "verkehr": "Transport", "travel transport": "Transport",
+            "shopping": "Shopping", "retail": "Shopping", "online shopping": "Shopping", "einkaufen": "Shopping",
             "bill": "Bills", "bills": "Bills", "utilities": "Bills",
-            "household": "Bills", "home": "Bills", "housing": "Bills", "rent": "Bills",
+            "household": "Bills", "home": "Bills", "housing": "Bills", "rent": "Bills", "utilities household": "Bills",
             "wohnen": "Bills", "miete": "Bills", "rechnungen": "Bills",
-            "subscription": "Subscriptions", "subscriptions": "Subscriptions",
-            "health": "Health", "healthcare": "Health", "medical": "Health",
-            "travel": "Travel", "reisen": "Travel", "reise": "Travel",
-            "transfer": "Transfers", "transfers": "Transfers", "bank transfer": "Transfers",
-            "fee": "Fees", "fees": "Fees", "tax": "Taxes", "taxes": "Taxes",
-            "investment": "Investments", "investments": "Investments",
-            "income": "Income", "salary": "Income", "wages": "Income", "gehalt": "Income", "lohn": "Income",
+            "subscription": "Subscriptions", "subscriptions": "Subscriptions", "recurring": "Subscriptions", "abonnement": "Subscriptions", "abos": "Subscriptions",
+            "health": "Health", "healthcare": "Health", "medical": "Health", "pharmacy": "Health", "medizin": "Health", "apotheke": "Health",
+            "travel": "Travel", "reisen": "Travel", "reise": "Travel", "hotels": "Travel", "hotel": "Travel",
+            "transfer": "Transfers", "transfers": "Transfers", "bank transfer": "Transfers", "bank transfers": "Transfers", "ueberweisung": "Transfers", "uberweisung": "Transfers",
+            "fee": "Fees", "fees": "Fees", "charges": "Fees", "bank fee": "Fees", "bank fees": "Fees", "gebuehr": "Fees", "gebuehren": "Fees", "gebuhr": "Fees", "gebuhren": "Fees", "entgelt": "Fees",
+            "tax": "Taxes", "taxes": "Taxes", "steuer": "Taxes", "steuern": "Taxes",
+            "investment": "Investments", "investments": "Investments", "investing": "Investments", "brokerage": "Investments", "wertpapiere": "Investments", "aktien": "Investments", "etf": "Investments",
+            "income": "Income", "salary": "Income", "salaries": "Income", "wages": "Income", "gehalt": "Income", "lohn": "Income", "rente": "Income", "pension": "Income",
             "cash": "Cash", "cash withdrawal": "Cash", "atm": "Cash", "bargeld": "Cash",
             "other": "Uncategorized", "unknown": "Uncategorized", "uncategorized": "Uncategorized",
         }
-        is_inflow = transaction.get("credit_debit_indicator") == "CRDT"
+        is_inflow = str(transaction.get("credit_debit_indicator") or "").upper() == "CRDT"
         supplied = transaction.get("category") or transaction.get("transaction_category")
         if isinstance(supplied, str):
-            key = re.sub(r"[^a-z0-9]+", " ", supplied.casefold()).strip()
+            key = cls._category_key(supplied)
             if key in aliases:
                 mapped = aliases[key]
                 # A provider occasionally labels an outgoing payment as income.
@@ -823,8 +925,8 @@ class EnableBankingService:
             "5912": "Health", "7011": "Travel", "4722": "Travel", "4511": "Travel",
             "8011": "Health",
         }
-        if raw_mcc in categories:
-            return categories[raw_mcc]
+        if raw_mcc in categories or str(mcc) in categories:
+            return categories.get(raw_mcc, categories[str(mcc)])
         if 3000 <= mcc <= 3999:
             return "Travel"
         if 8021 <= mcc <= 8099:
@@ -850,7 +952,7 @@ class EnableBankingService:
                 context_values.append(value)
             elif isinstance(value, list):
                 context_values.extend(item for item in value if isinstance(item, str))
-        merchant_key = " ".join(party_names + context_values).casefold()
+        merchant_key = cls._category_key(" ".join(party_names + context_values))
         merchant_rules = (
             # Direction-sensitive rules run before generic merchant rules so a
             # refund/salary is not hidden under the merchant's usual category.
@@ -863,7 +965,7 @@ class EnableBankingService:
             ("Investments", ("trade republic", "scalable capital", "broker", "depot", "aktien", "etf", "securities")),
             ("Cash", ("geldautomat", "bargeldauszahlung", "cash withdrawal", "atm")),
             ("Groceries", ("rewe", "aldi", "lidl", "edeka", "kaufland", "penny", "netto", "denns", "alnatura", "supermarkt")),
-            ("Dining", ("restaurant", "lieferando", "wolt", "mcdonald", "starbucks", "café", "cafe", "imbiss", "bistro")),
+            ("Dining", ("restaurant", "lieferando", "uber eats", "ubereats", "wolt", "mcdonald", "starbucks", "café", "cafe", "imbiss", "bistro")),
             ("Transport", ("deutsche bahn", "bvg", "uber", "bolt", "tankstelle", "shell", "aral", "esso", "parkhaus")),
             ("Subscriptions", ("netflix", "spotify", "disney", "amazon prime", "icloud", "youtube premium")),
             ("Bills", ("miete", "rent", "stromrechnung", "electricity", "stadtwerke", "vodafone", "telekom", "o2", "versicherung", "insurance", "internet", "wasser", "heizung")),
@@ -874,9 +976,15 @@ class EnableBankingService:
         for category, keywords in merchant_rules:
             if category == "Income" and not is_inflow:
                 continue
-            if any(keyword.casefold() in merchant_key for keyword in keywords):
+            if any(cls._category_key(keyword) in merchant_key for keyword in keywords):
                 return category
         return "Uncategorized"
+
+    @staticmethod
+    def _category_key(value: str) -> str:
+        """Normalize provider text like Swift's diacritic-insensitive matcher."""
+        folded = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
+        return re.sub(r"[^a-z0-9]+", " ", folded.casefold()).strip()
 
     def _normalize_transaction(
         self,
@@ -999,7 +1107,7 @@ class EnableBankingService:
         for index, account in enumerate(session_accounts, start=1):
             uid = self._account_uid(account)
             if uid is None:
-                continue
+                raise EnableBankingUnavailable("provider session contains an invalid account")
             details = account if isinstance(account, dict) else {}
             if not details.get("name") or not details.get("currency"):
                 fetched = await self._get_account_json(
@@ -1009,7 +1117,7 @@ class EnableBankingService:
                     details = fetched
             currency = details.get("currency")
             if currency != "EUR":
-                continue
+                raise EnableBankingUnavailable("provider account is not EUR")
             account_name = self._provider_text(details.get("name"), maximum=96)
             account_label = f"{connection['institutionId']} · {account_name or f'Account {index}'}"
             balances = await self._get_account_json(
@@ -1017,7 +1125,7 @@ class EnableBankingService:
             )
             balance_items = balances.get("balances")
             if not isinstance(balance_items, list):
-                continue
+                raise EnableBankingUnavailable("provider account has no valid balances")
             preferred = sorted(
                 (item for item in balance_items if isinstance(item, dict)),
                 key=lambda item: 0 if item.get("balance_type") == "CLAV" else 1,
@@ -1035,7 +1143,7 @@ class EnableBankingService:
                     continue
                 break
             if balance_cents is None:
-                continue
+                raise EnableBankingUnavailable("provider account has no valid EUR balance")
             source = f"enablebanking:{connection['institutionId']}"
             provenance = {
                 "source": source,

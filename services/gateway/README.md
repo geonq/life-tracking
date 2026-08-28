@@ -12,8 +12,17 @@ Live Finance is owned here through the Enable Banking adapter and exposed via
 the authenticated `/finance/summary` route. Transaction pages follow bounded
 `continuation_key` values, including empty intermediate pages; malformed,
 repeated, or over-limit pagination fails closed instead of presenting a
-partial ledger as complete. PayPal remains a separate official-eligibility
-gate and is not enabled by this source alone.
+partial ledger as complete. A failed refresh can serve the last complete,
+validated snapshot; its original observation time is retained and aged
+observations are marked `stale`/`refresh_due`, while malformed cache state
+still fails closed. PayPal remains a separate official-eligibility gate and
+is not enabled by this source alone.
+
+When loading an older valid snapshot, the adapter conservatively re-runs the
+current merchant categorizer only for rows still labeled `Uncategorized`; it
+does not overwrite any explicit category. The complete repaired snapshot is
+validated again before it is returned. This lets a deployment repair a stale
+category vocabulary even when the provider is temporarily unavailable.
 
 The authenticated `GET /nutrition/barcode/<ean>` route proxies only the
 normalized Open Food Facts contract from the loopback Node API. It validates
@@ -44,3 +53,10 @@ the package's daily-dose basis. Populate this database from reviewed label
 facts on Windows. The app only copies a selected result into a local,
 user-confirmed plan; no medical recommendation or interaction check is
 performed.
+
+The tracked `supplement_catalog_seed.sql` contains facts transcribed from the
+four package-label photos supplied for the initial catalog. It intentionally
+leaves the electrolyte product's nutrient list empty because the photo does
+not show the per-tablet calcium/magnesium split. Apply the schema and seed on
+the Windows host as an operator action; the presence of this SQL file is not
+deployment proof that the catalog is populated.
