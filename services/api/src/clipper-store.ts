@@ -43,12 +43,61 @@ function bytesFor(input: string | Buffer): Buffer {
   return Buffer.isBuffer(input) ? Buffer.from(input) : Buffer.from(input, 'utf8');
 }
 
+/**
+ * JSON.parse deliberately keeps the last value for a repeated object key.
+ * That is unsafe at an ingestion boundary because two producers can interpret
+ * the same bytes differently. Scan the already-syntax-validated JSON and
+ * compare decoded key values so escaped aliases such as `source` and
+ * `sour\\u0063e` are duplicates too.
+ */
+function hasDuplicateObjectKeys(source: string): boolean {
+  const stack: Array<Set<string> | undefined> = [];
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (character === '{') {
+      stack.push(new Set());
+      continue;
+    }
+    if (character === '[') {
+      stack.push(undefined);
+      continue;
+    }
+    if (character === '}' || character === ']') {
+      stack.pop();
+      continue;
+    }
+    if (character !== '"') continue;
+
+    const start = index;
+    index += 1;
+    while (index < source.length) {
+      if (source[index] === '\\') {
+        index += 2;
+        continue;
+      }
+      if (source[index] === '"') break;
+      index += 1;
+    }
+
+    let cursor = index + 1;
+    while (cursor < source.length && /\s/.test(source[cursor]!)) cursor += 1;
+    const keys = stack.at(-1);
+    if (source[cursor] !== ':' || keys === undefined) continue;
+    const key = JSON.parse(source.slice(start, index + 1)) as string;
+    if (keys.has(key)) return true;
+    keys.add(key);
+  }
+  return false;
+}
+
 function parseSnapshot(input: string | Buffer): { snapshot: Snapshot; bytes: Buffer } {
   const bytes = bytesFor(input);
   if (bytes.byteLength > CLIPPER_MAX_BYTES) throw new ClipperStoreError('body_too_large');
+  const source = bytes.toString('utf8');
   let parsed: unknown;
   try {
-    parsed = JSON.parse(bytes.toString('utf8'));
+    parsed = JSON.parse(source);
+    if (hasDuplicateObjectKeys(source)) throw new Error('duplicate_json_key');
   } catch {
     throw new ClipperStoreError('invalid_json');
   }
@@ -252,7 +301,9 @@ export class ClipperStore {
       await descriptor?.close().catch(() => undefined);
     }
     try {
-      const envelope = JSON.parse(bytes.toString('utf8')) as Partial<StoreEnvelope>;
+      const source = bytes.toString('utf8');
+      const envelope = JSON.parse(source) as Partial<StoreEnvelope>;
+      if (hasDuplicateObjectKeys(source)) throw new Error('duplicate_json_key');
       if (Object.keys(envelope).length !== 3
           || !Object.hasOwn(envelope, 'schemaVersion')
           || !Object.hasOwn(envelope, 'snapshot')

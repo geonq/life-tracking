@@ -19,6 +19,18 @@ const postClaudePayload = (port: number, secret: string, payload: unknown, extra
     response.on('end', () => resolve({ status: response.statusCode!, body: value })); });
   req.end(JSON.stringify(payload));
 });
+const postCodexPayload = (port: number, secret: string, payload: unknown) => new Promise<{ status: number; body: string }>(resolve => {
+  const req = request({ port, path: '/api/usage/codex-ingest', method: 'POST', headers: {
+    authorization: `Bearer ${secret}`, 'content-type': 'application/json',
+  } }, response => { let value = ''; response.on('data', chunk => value += chunk);
+    response.on('end', () => resolve({ status: response.statusCode!, body: value })); });
+  req.end(JSON.stringify(payload));
+});
+const getUsage = (port: number) => new Promise<{ status: number; body: any }>(resolve => {
+  const req = request({ port, path: '/api/usage', method: 'GET' }, response => { let value = ''; response.on('data', chunk => value += chunk);
+    response.on('end', () => resolve({ status: response.statusCode!, body: JSON.parse(value) })); });
+  req.end();
+});
 const listenApiServer = (server: ReturnType<typeof createApiServer>) => new Promise<void>((resolve, reject) => {
   const onError = (error: Error) => { server.removeListener('error', onError); reject(error); };
   server.once('error', onError);
@@ -481,6 +493,70 @@ describe('HTTP API', () => {
     expect(JSON.parse(result.body).windows[0].provenance.observedAt).toBe(observedAt);
     expect(future).toEqual({ status: 400, body: '{"error":"invalid_request"}' });
     expect(JSON.parse(await readFile(storePath, 'utf8')).observedAt).toBe(observedAt);
+  });
+
+  it('round-trips observed Claude and Codex windows through one combined usage read', async () => {
+    const previous = {
+      store: process.env.USAGE_STORE_PATH,
+      claudeEnabled: process.env.CLAUDE_INGEST_ENABLED,
+      claudeSecret: process.env.CLAUDE_INGEST_SECRET,
+      claudeSecretFile: process.env.CLAUDE_INGEST_SECRET_FILE,
+      codexEnabled: process.env.CODEX_INGEST_ENABLED,
+      codexSecretFile: process.env.CODEX_INGEST_SECRET_FILE,
+      codexLive: process.env.CODEX_LIVE_ENABLED,
+    };
+    const directory = await mkdtemp(join(tmpdir(), 'usage-dual-provider-'));
+    const storePath = join(directory, 'history.jsonl');
+    const claudeSecretPath = join(directory, 'claude.secret');
+    const codexSecretPath = join(directory, 'codex.secret');
+    const claudeSecret = 'c'.repeat(32);
+    const codexSecret = 'x'.repeat(32);
+    let server: ReturnType<typeof createApiServer> | undefined;
+    try {
+      process.env.USAGE_STORE_PATH = storePath;
+      process.env.CLAUDE_INGEST_ENABLED = 'true';
+      delete process.env.CLAUDE_INGEST_SECRET;
+      process.env.CLAUDE_INGEST_SECRET_FILE = claudeSecretPath;
+      process.env.CODEX_INGEST_ENABLED = 'true';
+      process.env.CODEX_INGEST_SECRET_FILE = codexSecretPath;
+      delete process.env.CODEX_LIVE_ENABLED;
+      await writeFile(claudeSecretPath, claudeSecret, { mode: 0o600 });
+      await writeFile(codexSecretPath, codexSecret, { mode: 0o600 });
+      server = createApiServer();
+      await listenApiServer(server);
+      const address = server.address();
+      if (!address || typeof address === 'string') throw Error('no address');
+
+      const claude = await postClaudePayload(address.port, claudeSecret, {
+        rate_limits: { five_hour: { used_percentage: 17, resets_at: 1_786_777_259 } },
+      });
+      const codex = await postCodexPayload(address.port, codexSecret, {
+        windows: [{ minutes: 10_080, usedPercent: 29, resetAt: '2026-08-15T07:00:59Z' }],
+      });
+      const usage = await getUsage(address.port);
+
+      expect(claude.status).toBe(200);
+      expect(codex.status).toBe(200);
+      expect(usage.status).toBe(200);
+      expect(usage.body.connectors).toMatchObject({ claude: 'healthy', codex: 'healthy' });
+      expect(usage.body.windows).toEqual(expect.arrayContaining([
+        expect.objectContaining({ provider: 'claude', window: 'five_hour', usedPercent: 17,
+          availability: 'observed', provenance: expect.objectContaining({ quality: 'observed' }) }),
+        expect.objectContaining({ provider: 'codex', window: 'seven_day', usedPercent: 29,
+          availability: 'observed', provenance: expect.objectContaining({ quality: 'observed' }) }),
+      ]));
+      const lines = (await readFile(storePath, 'utf8')).trim().split(/\r?\n/);
+      expect(lines).toHaveLength(2);
+    } finally {
+      if (server) await closeApiServer(server);
+      if (previous.store === undefined) delete process.env.USAGE_STORE_PATH; else process.env.USAGE_STORE_PATH = previous.store;
+      if (previous.claudeEnabled === undefined) delete process.env.CLAUDE_INGEST_ENABLED; else process.env.CLAUDE_INGEST_ENABLED = previous.claudeEnabled;
+      if (previous.claudeSecret === undefined) delete process.env.CLAUDE_INGEST_SECRET; else process.env.CLAUDE_INGEST_SECRET = previous.claudeSecret;
+      if (previous.claudeSecretFile === undefined) delete process.env.CLAUDE_INGEST_SECRET_FILE; else process.env.CLAUDE_INGEST_SECRET_FILE = previous.claudeSecretFile;
+      if (previous.codexEnabled === undefined) delete process.env.CODEX_INGEST_ENABLED; else process.env.CODEX_INGEST_ENABLED = previous.codexEnabled;
+      if (previous.codexSecretFile === undefined) delete process.env.CODEX_INGEST_SECRET_FILE; else process.env.CODEX_INGEST_SECRET_FILE = previous.codexSecretFile;
+      if (previous.codexLive === undefined) delete process.env.CODEX_LIVE_ENABLED; else process.env.CODEX_LIVE_ENABLED = previous.codexLive;
+    }
   });
 
   it('returns a bounded 503 and preserves corrupt history bytes', async () => {

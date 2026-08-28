@@ -92,6 +92,9 @@ describe('Google food-photo proposal adapter', () => {
         receivedKey = String((init?.headers as Record<string, string>)['x-goog-api-key']);
         const request = JSON.parse(String(init?.body));
         expect(request.contents[0].parts[1].inline_data.data).toBe('AA==');
+        expect(request.generationConfig.temperature).toBe(0.1);
+        expect(request.generationConfig.responseSchema.properties.items.type).toBe('ARRAY');
+        expect(request.generationConfig.responseSchema.properties.totals.required).toContain('calories');
         return new Response(JSON.stringify({
           candidates: [{ content: { parts: [{ text: JSON.stringify(providerBody) }] } }],
         }), { status: 200, headers: { 'content-type': 'application/json' } });

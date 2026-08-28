@@ -2,7 +2,7 @@
 
 import { request as httpRequest, type RequestOptions } from 'node:http';
 import { fileURLToPath } from 'node:url';
-import { resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 import { parseCodexIngestEnvelope, parseCodexIngestPayload, readCodexAppServer, type CodexLiveResult, type CodexWindow } from './codex-adapter.js';
 import { readIngestSecretFile } from './ingest-secret.js';
 
@@ -91,9 +91,22 @@ export async function runCodexCollector(dependencies: CollectorDependencies = {}
   await (dependencies.post ?? ((payload, token) => postCodexPayload(payload, token)))({ windows, ...(result.observedAt ? { observedAt: result.observedAt } : {}) }, secret);
 }
 
+function secretFileArgument(argv: string[]): string | undefined {
+  if (argv.length === 0) return undefined;
+  if (argv.length !== 2 || argv[0] !== '--secret-file' || !isAbsolute(argv[1]!)) {
+    throw new Error('collector_unavailable');
+  }
+  return resolve(argv[1]!);
+}
+
 export async function main(): Promise<number> {
   try {
-    await runCodexCollector();
+    const secretFile = secretFileArgument(process.argv.slice(2));
+    await runCodexCollector({
+      // The scheduled task receives only this absolute path. The secret
+      // itself remains file-backed and is never placed in task XML/arguments.
+      secret: () => readIngestSecretFile(secretFile ?? process.env.CODEX_INGEST_SECRET_FILE),
+    });
     process.stdout.write('success\n');
     return 0;
   } catch {

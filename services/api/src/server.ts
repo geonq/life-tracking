@@ -460,17 +460,21 @@ export async function app(
       if (window.usedPercent !== undefined) windows.push(window);
     }
     const estimates = [];
-    for (const provider of ['claude', 'codex'] as const) {
-      for (const kind of ['five_hour', 'seven_day'] as const) {
-        const samples = await store.list(provider, kind === 'five_hour' ? 300 : 10080);
-        if (samples.length) {
-          const latest = samples.at(-1)!;
-          if (!windows.some(window => window.provider === provider && window.window === kind)) {
-            windows.push(normalizeWindow(latest, provider, kind, provider === 'claude' ? 'claude.ai-statusline' : 'codex-app-server', latest.observedAt));
+    try {
+      for (const provider of ['claude', 'codex'] as const) {
+        for (const kind of ['five_hour', 'seven_day'] as const) {
+          const samples = await store.list(provider, kind === 'five_hour' ? 300 : 10080);
+          if (samples.length) {
+            const latest = samples.at(-1)!;
+            if (!windows.some(window => window.provider === provider && window.window === kind)) {
+              windows.push(normalizeWindow(latest, provider, kind, provider === 'claude' ? 'claude.ai-statusline' : 'codex-app-server', latest.observedAt));
+            }
+            estimates.push(projectUsage(samples));
           }
-          estimates.push(projectUsage(samples));
         }
       }
+    } catch {
+      return json(res, 503, { error: 'usage_store_unavailable' });
     }
     const claudeEnabled = claudeIngestEnabled();
     const claudeStates = windows

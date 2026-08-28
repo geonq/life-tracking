@@ -59,6 +59,24 @@ describe('ClipperStore', () => {
     await expect(store.ingest('bad key', JSON.stringify(snapshot))).rejects.toMatchObject({ code: 'invalid_idempotency_key' });
   });
 
+  it('rejects duplicate JSON keys, including escaped-equivalent provenance keys', async () => {
+    const store = new ClipperStore();
+    const duplicateTopLevel = JSON.stringify(snapshot).replace(
+      '"availability":"observed"',
+      '"availability":"unavailable","availability":"observed"',
+    );
+    const duplicateNested = JSON.stringify(snapshot).replace(
+      '"source":"hermes-test-source"',
+      '"source":"untrusted","sour\\u0063e":"hermes-test-source"',
+    );
+
+    await expect(store.ingest('duplicate-top-level', duplicateTopLevel))
+      .rejects.toMatchObject({ code: 'invalid_json' });
+    await expect(store.ingest('duplicate-nested', duplicateNested))
+      .rejects.toMatchObject({ code: 'invalid_json' });
+    expect((await store.get()).availability).toBe('unavailable');
+  });
+
   it('persists the latest snapshot and the idempotency journal across reload', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'lifeos-clipper-store-'));
     const path = join(directory, 'clipper-snapshot.json');
@@ -146,6 +164,19 @@ describe('ClipperStore', () => {
     const store = new ClipperStore(path);
     await expect(store.get()).rejects.toBeInstanceOf(ClipperStoreError);
     await expect(store.get()).rejects.toBeInstanceOf(ClipperStoreError);
+  });
+
+  it('rejects a durable envelope with duplicate keys instead of accepting last-key-wins state', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'lifeos-clipper-duplicate-envelope-'));
+    const path = join(directory, 'clipper-snapshot.json');
+    const envelope = JSON.stringify({ schemaVersion: 1, snapshot, idempotency: [] }).replace(
+      '"schemaVersion":1',
+      '"schemaVersion":2,"schemaVersion":1',
+    );
+    await writeFile(path, envelope, { mode: 0o600 });
+
+    await expect(new ClipperStore(path).get())
+      .rejects.toMatchObject({ code: 'storage_unavailable' });
   });
 
   it('rejects a non-private durable store before parsing its contents', async () => {

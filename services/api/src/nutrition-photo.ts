@@ -31,6 +31,65 @@ const MAX_MODEL_NAME_LENGTH = 128;
 
 export const NUTRITION_PHOTO_MAX_BODY_BYTES = MAX_REQUEST_BYTES;
 
+const foodRangeSchema = {
+  type: 'OBJECT',
+  properties: {
+    estimate: { type: 'NUMBER' },
+    min: { type: 'NUMBER' },
+    max: { type: 'NUMBER' },
+  },
+  required: ['estimate', 'min', 'max'],
+} as const;
+
+// Keep the provider constrained to the same shape that the local Zod boundary
+// accepts. The local parser remains authoritative because the provider schema
+// cannot express all interval, nutrition, and lineage invariants.
+const googleFoodResponseSchema = {
+  type: 'OBJECT',
+  properties: {
+    items: {
+      type: 'ARRAY',
+      items: {
+        type: 'OBJECT',
+        properties: {
+          itemID: { type: 'STRING' },
+          enteredLabel: { type: 'STRING' },
+          estimatedLabel: { type: 'STRING' },
+          labelSource: { type: 'STRING', enum: ['recognized', 'assumed'] },
+          quantity: { type: 'NUMBER' },
+          unit: { type: 'STRING', enum: ['g', 'kg', 'ml', 'l', 'oz', 'lb', 'serving', 'portion', 'piece', 'slice', 'cup', 'tbsp', 'tsp'] },
+          grams: foodRangeSchema,
+          calories: foodRangeSchema,
+          protein: foodRangeSchema,
+          carbs: foodRangeSchema,
+          fat: foodRangeSchema,
+          fiber: foodRangeSchema,
+          confidence: { type: 'STRING', enum: ['low', 'medium', 'high'] },
+          uncertaintyNotes: { type: 'ARRAY', items: { type: 'STRING' } },
+          alternatives: { type: 'ARRAY', items: { type: 'STRING' } },
+          flags: { type: 'ARRAY', items: { type: 'STRING', enum: FoodEstimateFlag.options } },
+        },
+        required: ['itemID', 'estimatedLabel', 'labelSource', 'quantity', 'unit', 'grams', 'calories', 'protein', 'carbs', 'fat', 'confidence'],
+      },
+    },
+    totals: {
+      type: 'OBJECT',
+      properties: {
+        grams: foodRangeSchema,
+        calories: foodRangeSchema,
+        protein: foodRangeSchema,
+        carbs: foodRangeSchema,
+        fat: foodRangeSchema,
+        fiber: foodRangeSchema,
+      },
+      required: ['grams', 'calories', 'protein', 'carbs', 'fat'],
+    },
+    flags: { type: 'ARRAY', items: { type: 'STRING', enum: FoodEstimateFlag.options } },
+    uncertaintyNotes: { type: 'ARRAY', items: { type: 'STRING' } },
+  },
+  required: ['items', 'totals', 'flags'],
+} as const;
+
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
 export type NutritionPhotoProposalClientOptions = {
@@ -252,6 +311,7 @@ export class GoogleFoodPhotoProposalClient implements NutritionPhotoProposalClie
       }],
       generationConfig: {
         responseMimeType: 'application/json',
+        responseSchema: googleFoodResponseSchema,
         temperature: 0.1,
       },
     });

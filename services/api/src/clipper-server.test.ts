@@ -69,6 +69,15 @@ describe('Clipper ingest HTTP boundary', () => {
       expect(reuse.statusCode).toBe(409);
       expect(reuse.json).toEqual({ error: 'idempotency_key_reuse' });
 
+      const ambiguous = body.replace(
+        '"source":"hermes"',
+        '"source":"untrusted","sour\\u0063e":"hermes"',
+      );
+      const duplicate = await call(store, ambiguous, { ...headers, 'idempotency-key': 'duplicate-json-key' });
+      expect(duplicate.statusCode).toBe(400);
+      expect(duplicate.json).toEqual({ error: 'invalid_json' });
+      expect(await store.get()).toEqual(snapshot);
+
       const olderAt = new Date(Date.now() - 60_000).toISOString();
       const older = {
         ...snapshot,

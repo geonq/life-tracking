@@ -4,7 +4,7 @@ import { chmod, mkdir, mkdtemp, readFile, stat, symlink, writeFile } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApiServer, validateStartupConfiguration } from './server.js';
-import { postCodexPayload, runCodexCollector } from './codex-collector.js';
+import { main as collectorMain, postCodexPayload, runCodexCollector } from './codex-collector.js';
 
 type ResponseValue = { status: number; body: string };
 const post = (port: number, secret: string, payload: string, contentType = 'application/json') => new Promise<ResponseValue>(resolve => {
@@ -76,6 +76,28 @@ async function configuredServer(readLive: Parameters<typeof createApiServer>[0] 
 }
 
 describe('sanitized Codex collector boundary', () => {
+  it('accepts only an absolute secret-file task argument and keeps env fallback intact', async () => {
+    const previousArgv = process.argv;
+    const previousSecretFile = process.env.CODEX_INGEST_SECRET_FILE;
+    const directory = await mkdtemp(join(tmpdir(), 'usage-collector-args-'));
+    const secretPath = join(directory, 'codex.secret');
+    try {
+      await writeFile(secretPath, 'd'.repeat(32), { mode: 0o600 });
+      process.argv = ['node', 'codex-collector', '--secret-file', secretPath];
+      process.env.CODEX_INGEST_SECRET_FILE = join(directory, 'missing-secret');
+      // The live app-server is intentionally unavailable in this test. A
+      // valid path must therefore get as far as the collector read, not fail
+      // argument parsing; main reports the bounded unavailable result.
+      expect(await collectorMain()).toBe(1);
+      process.argv = ['node', 'codex-collector', '--secret-file', 'relative.secret'];
+      expect(await collectorMain()).toBe(1);
+    } finally {
+      process.argv = previousArgv;
+      if (previousSecretFile === undefined) delete process.env.CODEX_INGEST_SECRET_FILE;
+      else process.env.CODEX_INGEST_SECRET_FILE = previousSecretFile;
+    }
+  });
+
   it('rejects wrong credentials and every malformed/extra/type/duplicate shape without writing', async () => {
     const fixture = await configuredServer();
     const valid = JSON.stringify({ windows: [{ minutes: 300, usedPercent: 12, resetAt: '2026-08-12T05:00:00Z' }] });

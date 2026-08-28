@@ -122,6 +122,33 @@ describe('Open Food Facts barcode adapter', () => {
     }
   });
 
+  it('applies the deadline while consuming a slow response body', async () => {
+    let signal: AbortSignal | undefined;
+    const client = new OpenFoodFactsClient({
+      contactEmail: 'lifeos-test@example.com',
+      timeoutMs: 10,
+      fetch: async (_input, init) => {
+        signal = init?.signal as AbortSignal;
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            signal!.addEventListener('abort', () => {
+              const error = new Error('body aborted');
+              error.name = 'AbortError';
+              controller.error(error);
+            }, { once: true });
+          },
+        });
+        return new Response(body, { status: 200 });
+      },
+    });
+
+    await expect(client.lookup(barcode)).resolves.toMatchObject({
+      state: 'unavailable',
+      reason: 'upstream_timeout',
+    });
+    expect(signal?.aborted).toBe(true);
+  });
+
   it('requires explicit contact configuration, caches products, and backs off after 429', async () => {
     let requests = 0;
     const noContact = new OpenFoodFactsClient({ fetch: async () => { requests += 1; return jsonResponse(200, germanProduct); } });

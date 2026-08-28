@@ -74,12 +74,9 @@ export class UsageHistory {
   }
 
   async list(provider?: Entry['provider'], durationMinutes?: number): Promise<Entry[]> {
-    let entries: Entry[];
-    try {
-      entries = await this.readStrict();
-    } catch {
-      return [];
-    }
+    // A corrupt or unexpectedly replaced store is an availability failure,
+    // not an empty history. Callers must preserve that distinction.
+    const entries = await this.readStrict();
     return entries
       .filter(item => (!provider || item.provider === provider) && (!durationMinutes || item.durationMinutes === durationMinutes))
       .filter(item => this.now() - Date.parse(item.observedAt) <= this.maxAgeMs)

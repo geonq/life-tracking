@@ -295,25 +295,27 @@ export class OpenFoodFactsClient {
           redirect: 'manual',
           signal: controller.signal,
         });
+        if (response.status === 404) {
+          result = NutritionBarcodeLookup.parse({ schemaVersion: 1, state: 'not_found', barcode, provenance: provenance(barcode, new Date(this.now()).toISOString()) });
+          this.backoffLevel = 0;
+          this.backoffUntil = 0;
+        } else if (response.status === 429 || response.status === 503) {
+          const reason: NutritionBarcodeReason = response.status === 429 ? 'upstream_rate_limited' : 'upstream_unavailable';
+          result = unavailable(barcode, reason, new Date(this.now()).toISOString(), this.applyBackoff());
+        } else if (response.status >= 300 && response.status < 400) {
+          result = unavailable(barcode, 'upstream_redirect', new Date(this.now()).toISOString());
+        } else if (!response.ok) {
+          result = unavailable(barcode, 'upstream_unavailable', new Date(this.now()).toISOString());
+        } else {
+          const payload = JSON.parse(await readBoundedBody(response, this.maxResponseBytes)) as unknown;
+          result = mapProduct(barcode, payload, new Date(this.now()).toISOString());
+          this.backoffLevel = 0;
+          this.backoffUntil = 0;
+        }
       } finally {
+        // The deadline covers headers and body consumption. Clearing it after
+        // fetch() alone lets a slow upstream stream hold the request open.
         clearTimeout(timer);
-      }
-      if (response.status === 404) {
-        result = NutritionBarcodeLookup.parse({ schemaVersion: 1, state: 'not_found', barcode, provenance: provenance(barcode, new Date(this.now()).toISOString()) });
-        this.backoffLevel = 0;
-        this.backoffUntil = 0;
-      } else if (response.status === 429 || response.status === 503) {
-        const reason: NutritionBarcodeReason = response.status === 429 ? 'upstream_rate_limited' : 'upstream_unavailable';
-        result = unavailable(barcode, reason, new Date(this.now()).toISOString(), this.applyBackoff());
-      } else if (response.status >= 300 && response.status < 400) {
-        result = unavailable(barcode, 'upstream_redirect', new Date(this.now()).toISOString());
-      } else if (!response.ok) {
-        result = unavailable(barcode, 'upstream_unavailable', new Date(this.now()).toISOString());
-      } else {
-        const payload = JSON.parse(await readBoundedBody(response, this.maxResponseBytes)) as unknown;
-        result = mapProduct(barcode, payload, new Date(this.now()).toISOString());
-        this.backoffLevel = 0;
-        this.backoffUntil = 0;
       }
     } catch (error) {
       const reason: NutritionBarcodeReason = error instanceof Error && error.message === 'response_too_large'
