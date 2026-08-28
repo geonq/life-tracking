@@ -180,7 +180,15 @@ public actor TailscaleSyncClient {
     }
 
     private var serverURLString: String {
-        defaults.string(forKey: Self.serverURLDefaultsKey) ?? ""
+        // The signed build owns the approved hostname in Info.plist. Use its
+        // canonical Tailscale Serve origin when the user has not overridden
+        // it yet, so a fresh install is configured instead of opening in the
+        // misleading "server URL missing" state.
+        if let saved = defaults.string(forKey: Self.serverURLDefaultsKey),
+           !saved.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return saved
+        }
+        return Self.configuredDefaultServerURL()
     }
 
     private func baseURL() throws -> URL {
@@ -197,6 +205,11 @@ public actor TailscaleSyncClient {
             guard Self.validatedTailnetHost(host) != nil else { return nil }
             return host
         })
+    }
+
+    static func configuredDefaultServerURL(bundle: Bundle = .main) -> String {
+        guard let host = configuredApprovedHosts(bundle: bundle).sorted().first else { return "" }
+        return "https://\(host):8420"
     }
 
     static func validatedServerURL(_ rawValue: String, approvedHosts: Set<String>) -> URL? {

@@ -13,6 +13,8 @@ settings:
     SWIFT_VERSION: 5.9
     MARKETING_VERSION: 0.2.0
     CURRENT_PROJECT_VERSION: 2
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: 8F6VSCQ9SZ
     APP_GROUP_IDENTIFIER: group.com.hermes.lifeos.REPLACE_WITH_TEAM_CONFIGURED_ID
     PROVISIONING_MODE: unknown
 targets:
@@ -31,8 +33,7 @@ targets:
       ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon-iOS
       INFOPLIST_FILE: LifeOS/Info.plist
       CODE_SIGN_ENTITLEMENTS: LifeOS/LifeOS.entitlements
-      # A signed local/CI Release configuration must inject the exact private
-      # `.ts.net` host. Missing configuration intentionally fails closed.
+      # Keep the iOS client aligned with the current Windows gateway host.
       LIFEOS_SYNC_APPROVED_HOSTS: "geonqserver.tail5f8789.ts.net"
     dependencies:
       - target: LifeOSWidget
@@ -99,7 +100,7 @@ targets:
       ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon-Mac
       INFOPLIST_FILE: LifeOSMac/Info.plist
       CODE_SIGN_ENTITLEMENTS: LifeOSMac/LifeOSMac.entitlements
-      # Same release gate as iOS; never commit the private MagicDNS hostname.
+      # Keep the Mac client aligned with the current Windows gateway host.
       LIFEOS_SYNC_APPROVED_HOSTS: "geonqserver.tail5f8789.ts.net"
     dependencies:
       - target: LifeOSMacWidget
