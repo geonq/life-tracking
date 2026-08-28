@@ -59,11 +59,13 @@ Run the Release pair with isolated per-platform DerivedData and result bundles:
 Hosted simulator results do not verify real-device signing, App Group
 entitlements, peer discovery, or WidgetKit placement.
 
-The checked-in project settings are intentionally development-safe: the App
-Group is a team-owned placeholder, `PROVISIONING_MODE` is `unknown`, and the
-sync allowlist is empty. Do not replace those values in source. A signed
-release environment must create an ephemeral xcodebuild-settings/xcconfig file
-with its own approved values and run:
+The checked-in project settings use automatic signing with the selected Apple
+team (`8F6VSCQ9SZ`) and the approved private Tailscale host, so XcodeGen does
+not reset the team or Sync & Storage configuration after edits. The App Group
+remains a team-owned placeholder and `PROVISIONING_MODE` is `unknown` until
+the real signed entitlement/profile is verified. A signed release environment
+must create an ephemeral xcodebuild-settings/xcconfig file with any additional
+release values and run:
 
 ```sh
 python3 -B scripts/validate_native_release.py \
@@ -89,4 +91,5 @@ xcodebuild -project ios/LifeOS.xcodeproj -scheme LifeOS -configuration Debug -sd
 - Apple Personal Team profiles expire after seven days and must be reprovisioned. The installed Life OS app cannot sign or reinstall itself. Xcode can rebuild/reinstall, AltStore can refresh while AltServer is reachable, and SideStore documents an on-device VPN-based refresh workflow; each is external to Life OS.
 - Planned convenience workflow: an iPhone Shortcut may invoke one fixed Mac-side developer-refresh command. The Mac command must independently verify the paired target is physically connected over USB before it builds, signs, and installs with Xcode tooling; it must accept no arbitrary command or signing input from the phone. This does not change the seven-day Personal Team limit and remains unimplemented until the exact Team, App Group, device, and signed settings are supplied and validated.
 - Widgets read only atomically replaced snapshots from their local App Group and fall back to an explicit unavailable/demo state. Cross-device synchronization is separate from the widget container and must be validated on signed iPhone/Mac builds.
+- When the iOS app returns to the foreground after its initial live load, it concurrently refreshes Calendar, Usage, Finance, Clipper, Fitness, and then republishes widget snapshots. This is a foreground reconciliation path, not proof of OS background execution; WidgetKit background refresh still requires signed-device evidence.
 - Required macOS gates: XcodeGen generation, simulator build/tests, signed device install, App Group atomic-write test, WidgetKit systemMedium rendering/privacy review, and HealthKit permission/sync test. None are claimed here.

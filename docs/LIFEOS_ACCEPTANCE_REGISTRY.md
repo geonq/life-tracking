@@ -46,7 +46,7 @@ hash—no percentage is valid.
   tracked repository content. Remote `https://` evidence is not accepted.
   This is unconditional; the legacy CLI path switch cannot disable it.
 
-Frozen registry SHA-256: `ea542047364ce17e318de9f15814d40159d3f87ffe3e0d0a0615922055237b4a`
+Frozen registry SHA-256: `bbea06f1f1d0cc874c8ac605cba920fd4a539b2286baaaf73e0cb7299cbd87c1`
 
 ## Machine contract
 
@@ -365,7 +365,7 @@ integration evidence before that domain is live-enabled.
   "state": "FROZEN",
   "implementation_baseline_commit": "f24388a82649a54ba5c9cf6567420c2d34b63fa6",
   "registry_producing_commit": null,
-  "frozen_registry_sha256": "ea542047364ce17e318de9f15814d40159d3f87ffe3e0d0a0615922055237b4a",
+  "frozen_registry_sha256": "bbea06f1f1d0cc874c8ac605cba920fd4a539b2286baaaf73e0cb7299cbd87c1",
   "freeze_manifest": {
     "leaf_ids": [
       "BF-0382",
