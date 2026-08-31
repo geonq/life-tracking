@@ -9,8 +9,41 @@ import XCTest
 final class LifeOSMacSnapshotTests: XCTestCase {
     private let frame = CGSize(width: 1512, height: 982)
 
+    func testVisualFixtureHostCreatesZeroLiveNetworkTasks() {
+        XCTAssertEqual(
+            ProcessInfo.processInfo.environment["LIFEOS_VISUAL_FIXTURES"],
+            "1",
+            "LifeOSMac snapshot TestAction must pass LIFEOS_VISUAL_FIXTURES=1 to the hosted app."
+        )
+        XCTAssertTrue(
+            ProcessInfo.processInfo.arguments.contains("-LifeOSVisualFixtures")
+                || ProcessInfo.processInfo.environment["LIFEOS_VISUAL_FIXTURES"] == "1",
+            "Snapshot test hosts must launch LifeOSMac in explicit visual-fixture mode."
+        )
+        XCTAssertEqual(
+            LifeOSNetworkTaskAudit.shared.createdTaskCount,
+            0,
+            "Visual fixture startup must not create a Tailscale HTTP or WebSocket task."
+        )
+
+        let coordinator = CalendarCoordinator(
+            initialSnapshot: CalendarVisualFixtures.snapshot(),
+            usesVisualFixtures: true
+        )
+        coordinator.startSync()
+        coordinator.stopSync()
+        XCTAssertEqual(
+            LifeOSNetworkTaskAudit.shared.createdTaskCount,
+            0,
+            "Constructing or starting a fixture CalendarCoordinator must remain offline."
+        )
+    }
+
     func testOverviewSnapshot() {
-        let coordinator = CalendarCoordinator(initialSnapshot: CalendarVisualFixtures.snapshot())
+        let coordinator = CalendarCoordinator(
+            initialSnapshot: CalendarVisualFixtures.snapshot(),
+            usesVisualFixtures: true
+        )
         render(LifeOSMacRootView(calendarCoordinator: coordinator, usesVisualFixtures: true, usageCoordinator: UsageCoordinator()), named: "LifeOSMacRootView-overview")
     }
 
@@ -68,7 +101,10 @@ final class LifeOSMacSnapshotTests: XCTestCase {
         route: LifeOSDeepLink? = nil,
         showingUsage: Bool = false
     ) -> AnyView {
-        let coordinator = CalendarCoordinator(initialSnapshot: CalendarVisualFixtures.snapshot())
+        let coordinator = CalendarCoordinator(
+            initialSnapshot: CalendarVisualFixtures.snapshot(),
+            usesVisualFixtures: true
+        )
         return AnyView(LifeOSMacRootView(
             calendarCoordinator: coordinator,
             usesVisualFixtures: true,
@@ -83,7 +119,8 @@ final class LifeOSMacSnapshotTests: XCTestCase {
     func testCalendarSnapshot() {
         let anchor = visualFixtureAnchor
         let coordinator = CalendarCoordinator(
-            initialSnapshot: CalendarVisualFixtures.snapshot(anchor: anchor, calendar: visualFixtureCalendar)
+            initialSnapshot: CalendarVisualFixtures.snapshot(anchor: anchor, calendar: visualFixtureCalendar),
+            usesVisualFixtures: true
         )
         render(
             CalendarView(selectedDate: anchor, calendar: visualFixtureCalendar, coordinator: coordinator),
@@ -94,7 +131,8 @@ final class LifeOSMacSnapshotTests: XCTestCase {
     func testCalendarMonthSnapshot() {
         let anchor = visualFixtureAnchor
         let coordinator = CalendarCoordinator(
-            initialSnapshot: CalendarVisualFixtures.snapshot(anchor: anchor, calendar: visualFixtureCalendar)
+            initialSnapshot: CalendarVisualFixtures.snapshot(anchor: anchor, calendar: visualFixtureCalendar),
+            usesVisualFixtures: true
         )
         render(
             CalendarView(
@@ -526,7 +564,8 @@ final class LifeOSMacSnapshotTests: XCTestCase {
     func testDarkModeSnapshots() {
         let anchor = visualFixtureAnchor
         let coordinator = CalendarCoordinator(
-            initialSnapshot: CalendarVisualFixtures.snapshot(anchor: anchor, calendar: visualFixtureCalendar)
+            initialSnapshot: CalendarVisualFixtures.snapshot(anchor: anchor, calendar: visualFixtureCalendar),
+            usesVisualFixtures: true
         )
         render(LifeOSMacRootView(calendarCoordinator: coordinator, usesVisualFixtures: true, usageCoordinator: UsageCoordinator()), named: "LifeOSMacRootView-overview-dark", colorScheme: .dark)
         render(UsageView(snapshots: DemoDataProvider.providers, analytics: DemoUsageAnalytics.snapshots, state: .demo), named: "UsageView-dark", colorScheme: .dark)

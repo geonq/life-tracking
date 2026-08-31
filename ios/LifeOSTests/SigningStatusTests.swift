@@ -36,4 +36,32 @@ final class SigningStatusTests: XCTestCase {
         XCTAssertNil(status.daysRemaining)
         XCTAssertFalse(status.canSelfRenew)
     }
+
+    func testUnknownProvisioningModeCannotBorrowAValidExpirationDate() {
+        let status = SigningStatus(
+            mode: .unknown,
+            expirationDate: now.addingTimeInterval(30 * 86_400),
+            now: now
+        )
+
+        XCTAssertEqual(status.state, .unknown)
+        XCTAssertNil(status.daysRemaining)
+        XCTAssertFalse(status.metadataIsComplete)
+        XCTAssertEqual(status.stateTitle, "Signing expiration unavailable")
+    }
+
+    func testSigningPresentationNamesItsEvidenceBoundary() {
+        let status = SigningStatus(
+            mode: .developerProgram,
+            expirationDate: now.addingTimeInterval(10 * 86_400),
+            now: now
+        )
+
+        XCTAssertEqual(status.modeTitle, "Apple Developer Program")
+        XCTAssertEqual(status.stateTitle, "Signing: 10 days remaining")
+        XCTAssertTrue(status.metadataIsComplete)
+        XCTAssertTrue(status.evidenceBoundary.contains("entitlements"))
+        XCTAssertTrue(status.evidenceBoundary.contains("physical device"))
+        XCTAssertFalse(status.evidenceBoundary.contains("token"))
+    }
 }

@@ -38,6 +38,19 @@ private enum LifeOSAppTab: Hashable, CaseIterable {
         case .more: "ellipsis.circle.fill"
         }
     }
+
+    /// Each primary destination gets a quiet identity accent. The selected
+    /// state also uses a filled symbol and an accessibility selection trait,
+    /// so the palette is wayfinding rather than a color-only status signal.
+    var accent: Color {
+        switch self {
+        case .home: LifeOSTokens.Module.usage
+        case .calendar: LifeOSTokens.Module.calendar
+        case .finance: LifeOSTokens.Module.finance
+        case .fitness: LifeOSTokens.Module.fitness
+        case .more: LifeOSTokens.Module.tasks
+        }
+    }
 }
 
 @main
@@ -527,6 +540,11 @@ struct LifeOSApp: App {
         let report = await healthKitController.requestReadAuthorization()
         if report.promptCompleted == true {
             UserDefaults.standard.set(true, forKey: Self.healthReadPromptCompletedKey)
+            // Read and write permissions remain separate in the controller,
+            // but the one explicit Health setup action requests both reviewed
+            // typed sets so the app cannot ship with a read-only runtime while
+            // advertising the HealthKit update capability.
+            _ = await healthKitController.requestWriteAuthorization()
         }
     }
 
@@ -675,19 +693,22 @@ private struct CompactTabBarItem: View {
                     .modifier(CompactTabSymbolTransition(enabled: !reduceMotion))
                     .frame(width: 20, height: 19)
                 Text(title)
-                    .font(LifeOSFont.overline())
-                    .tracking(0.8)
-                    .textCase(.uppercase)
+                    .font(LifeOSFont.navigationLabel())
                     .lineLimit(1)
             }
-            .foregroundStyle(isSelected ? LifeOSTokens.accent : LifeOSTokens.tertiaryText)
+            .foregroundStyle(isSelected ? tab.accent : LifeOSTokens.tertiaryText)
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
             .frame(maxWidth: .infinity, minHeight: 44)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(isSelected ? LifeOSTokens.Module.surface(tab.accent, opacity: 0.14) : .clear)
+            )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(title)
+        .accessibilityHint("Switches to \(title)")
         .accessibilityIdentifier("main-tab-\(tab.identifier)")
         .accessibilityAddTraits(isSelected ? .isSelected : [])
         .accessibilityValue(isSelected ? "Selected" : "")

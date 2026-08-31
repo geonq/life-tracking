@@ -75,6 +75,7 @@ final class WidgetSnapshotPublisherTests: XCTestCase {
         ]
         let accounts: [[String: Any]] = balances.enumerated().map { index, balance in
             [
+                "availability": "observed",
                 "id": "sparkasse-(index)", "name": "Sparkasse Leipzig (index + 1)",
                 "detail": "Checking", "balanceCents": balance,
                 "source": "sparkasse_leipzig", "provenance": accountProvenance

@@ -1,6 +1,7 @@
 import SwiftUI
 #if os(iOS)
 import SafariServices
+import UIKit
 #elseif os(macOS)
 import AppKit
 #endif
@@ -123,7 +124,6 @@ struct HealthReadAccessSettings: Equatable, Sendable {
     }
 
     var detail: String {
-        if let errorDescription, !errorDescription.isEmpty { return errorDescription }
         switch state {
         case .unavailable:
             return "HealthKit transport is not available in this app context."
@@ -181,10 +181,377 @@ extension HealthReadAccessSettings {
                 state = .error
             }
         }
-        return Self(state: state, errorDescription: snapshot.errorDescription)
+        // HealthKit error descriptions originate at an OS/framework boundary
+        // and are not a support-safe diagnostic channel.  The Settings copy
+        // uses the fixed state detail above rather than rendering a raw
+        // localized error that could contain private implementation data.
+        return Self(state: state)
     }
 }
 #endif
+
+/// A deliberately small failure vocabulary for Settings.  Error bodies,
+/// endpoints, account identifiers, and provider messages are never rendered
+/// or copied; callers may retain only the class and its recovery guidance.
+enum SettingsFailureClass: String, Equatable, Sendable {
+    case configuration
+    case authentication
+    case authorization
+    case expired
+    case refreshRequired
+    case revoked
+    case rateLimited
+    case unavailable
+    case invalidResponse
+    case unknown
+
+    var title: String {
+        switch self {
+        case .configuration: "Configuration required"
+        case .authentication: "Identity rejected"
+        case .authorization: "Authorization required"
+        case .expired: "Session expired"
+        case .refreshRequired: "Refresh required"
+        case .revoked: "Connection revoked"
+        case .rateLimited: "Retry later"
+        case .unavailable: "Service unavailable"
+        case .invalidResponse: "Response rejected"
+        case .unknown: "Attention required"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .configuration:
+            "The approved gateway or provider configuration is missing. No connection was changed."
+        case .authentication:
+            "The gateway rejected this device identity. No credential was changed."
+        case .authorization:
+            "The provider needs an explicit authorization step before it can be used."
+        case .expired:
+            "The provider session expired. Start a fresh consent or authorization flow."
+        case .refreshRequired:
+            "The retained observation needs a fresh read before it can be treated as current."
+        case .revoked:
+            "The provider connection was revoked. Reconnect through the gateway to restore it."
+        case .rateLimited:
+            "The provider asked the gateway to slow down. Wait, then retry the read-only refresh."
+        case .unavailable:
+            "The gateway or provider could not be reached. Existing observations remain source-labelled."
+        case .invalidResponse:
+            "The response failed the typed boundary checks. No returned data was accepted."
+        case .unknown:
+            "The operation did not complete. Retry; only a redacted failure class is retained."
+        }
+    }
+
+    var recoveryTitle: String {
+        switch self {
+        case .configuration, .authorization, .expired, .revoked:
+            "Review setup"
+        case .refreshRequired, .authentication, .unavailable, .rateLimited, .invalidResponse, .unknown:
+            "Retry"
+        }
+    }
+
+    var isRetryable: Bool {
+        switch self {
+        case .refreshRequired, .authentication, .unavailable, .rateLimited, .invalidResponse, .unknown:
+            true
+        case .configuration, .authorization, .expired, .revoked:
+            false
+        }
+    }
+
+    static func classify(_ error: Error?) -> Self {
+        guard let error else { return .unknown }
+        if let syncError = error as? TailscaleSyncError {
+            switch syncError {
+            case .notConfigured, .invalidServerURL, .gatewayNotConfigured:
+                return .configuration
+            case .httpError(401), .httpError(403):
+                return .authentication
+            case .httpError(408), .httpError(429):
+                return syncError == .httpError(429) ? .rateLimited : .unavailable
+            case .httpError(let status) where (500...599).contains(status):
+                return .unavailable
+            case .connectionAlreadyLinking:
+                return .authorization
+            case .invalidInstitutionId, .invalidConnectionId, .invalidConsentURL,
+                 .invalidBarcode, .invalidResponse, .responseTooLarge, .requestTooLarge:
+                return .invalidResponse
+            case .httpError:
+                return .unknown
+            }
+        }
+        if let urlError = error as? URLError {
+            return urlError.code == .timedOut ? .unavailable : .unavailable
+        }
+        return .unknown
+    }
+
+    /// Coordinator error strings are untrusted input.  This classifier may
+    /// inspect a few coarse keywords but never returns the original message.
+    static func classify(untrustedMessage: String?) -> Self {
+        guard let message = untrustedMessage?.lowercased(), !message.isEmpty else { return .unknown }
+        if message.contains("reauth")
+            || message.contains("authorization")
+            || message.contains("consent") {
+            return .authorization
+        }
+        if message.contains("401") || message.contains("403") || message.contains("auth") {
+            return .authentication
+        }
+        if message.contains("429") || message.contains("rate") || message.contains("limit") {
+            return .rateLimited
+        }
+        if message.contains("expired") || message.contains("expiry") {
+            return .expired
+        }
+        if message.contains("revok") {
+            return .revoked
+        }
+        if message.contains("config") || message.contains("not configured") {
+            return .configuration
+        }
+        if message.contains("unavailable") || message.contains("network") || message.contains("timeout") {
+            return .unavailable
+        }
+        if message.contains("response") || message.contains("decode") || message.contains("invalid") {
+            return .invalidResponse
+        }
+        return .unknown
+    }
+}
+
+/// State exposed by a connection row.  Observation quality and connector
+/// lifecycle are intentionally separate: a stale retained observation is not
+/// the same thing as a healthy provider, and a revoked connector is not merely
+/// an empty row.
+enum SettingsProviderLifecycle: String, Equatable, Sendable {
+    case unavailable
+    case authorized
+    case refreshDue
+    case reauthRequired
+    case revoked
+    case rateLimited
+    case failed
+
+    var title: String {
+        switch self {
+        case .unavailable: "Unavailable"
+        case .authorized: "Authorized"
+        case .refreshDue: "Refresh due"
+        case .reauthRequired: "Re-auth required"
+        case .revoked: "Revoked"
+        case .rateLimited: "Rate limited"
+        case .failed: "Connection error"
+        }
+    }
+
+    var failureClass: SettingsFailureClass? {
+        switch self {
+        case .unavailable: .unavailable
+        case .authorized: nil
+        case .refreshDue: .refreshRequired
+        case .reauthRequired: .authorization
+        case .revoked: .revoked
+        case .rateLimited: .rateLimited
+        case .failed: .unknown
+        }
+    }
+
+    var canRetry: Bool {
+        switch self {
+        case .authorized, .reauthRequired, .revoked: false
+        case .unavailable, .refreshDue, .rateLimited, .failed: true
+        }
+    }
+
+    var retryTitle: String {
+        switch self {
+        case .reauthRequired, .revoked: "Review authorization"
+        case .refreshDue, .rateLimited: "Retry refresh"
+        case .unavailable, .failed: "Retry connection"
+        case .authorized: "Refresh"
+        }
+    }
+
+    var recoveryDetail: String {
+        switch self {
+        case .authorized:
+            "The gateway has an authorized provider session; each observation keeps its own freshness."
+        case .refreshDue:
+            "The last provider observation is retained, but a read-only refresh is due."
+        case .reauthRequired:
+            "The provider needs authorization again. Raw credentials remain on the Windows gateway."
+        case .revoked:
+            "The provider connection was revoked. Reconnect through its reviewed gateway flow."
+        case .rateLimited:
+            "The provider is rate limiting requests. Wait before retrying; no data is fabricated."
+        case .failed:
+            "The provider request failed. Retry the read-only refresh; the client keeps no raw error body."
+        case .unavailable:
+            "No validated provider session or observation is available."
+        }
+    }
+
+    static func resolve(
+        snapshot: ProviderSnapshot?,
+        connector: ConnectorState?
+    ) -> Self {
+        let connector = connector ?? snapshot?.provenance.connector ?? .unavailable
+        switch connector {
+        case .reauthRequired: return .reauthRequired
+        case .revoked: return .revoked
+        case .rateLimited: return .rateLimited
+        case .error: return .failed
+        case .disabled, .unavailable: return .unavailable
+        case .refreshDue: return .refreshDue
+        case .healthy:
+            return snapshot?.provenance.quality == .observed ? .authorized : .unavailable
+        }
+    }
+}
+
+extension TailscaleConnectionPreflightState {
+    var settingsTitle: String {
+        switch self {
+        case .reachable: "Windows gateway reachable"
+        case .configurationRequired: "Secure configuration required"
+        case .authenticationRejected: "Tailscale device identity rejected"
+        case .serverUnavailable: "Windows gateway unavailable"
+        case .networkUnavailable: "Tailscale network unavailable"
+        case .invalidResponse: "Gateway response rejected"
+        }
+    }
+
+    var settingsDetail: String {
+        switch self {
+        case .reachable:
+            "The approved gateway accepted the read-only request with Tailscale device identity. This does not prove that any provider is connected."
+        case .configurationRequired:
+            "The signed approved-host configuration or HTTPS server URL is missing or invalid."
+        case .authenticationRejected:
+            "The gateway is reachable, but it rejected this device's Tailscale identity. No credential was changed."
+        case .serverUnavailable:
+            "The approved gateway returned a temporary server or rate-limit failure. Check the Windows services, then retry."
+        case .networkUnavailable:
+            "The approved gateway could not be reached. Check Tailscale on this device and the Windows PC, then retry."
+        case .invalidResponse:
+            "The response did not satisfy the fail-closed transport contract. No returned data was accepted."
+        }
+    }
+
+    var settingsIsRetryable: Bool {
+        self != .configurationRequired
+    }
+}
+
+/// The app-side phases around the gateway-owned bank callback.  The callback
+/// itself stays on Windows; the phone only stores the validated opaque link,
+/// observes Safari dismissal, and polls the gateway for its authoritative
+/// state.
+enum BankConsentLifecyclePhase: String, Equatable, Sendable {
+    case idle
+    case opening
+    case awaitingConsent
+    case returningFromConsent
+    case checking
+    case linked
+    case expired
+    case alreadyLinking
+    case gatewayNotConfigured
+    case failed
+
+    var title: String {
+        switch self {
+        case .idle: "Not started"
+        case .opening: "Opening consent"
+        case .awaitingConsent: "Consent pending"
+        case .returningFromConsent: "Returning from consent"
+        case .checking: "Checking status"
+        case .linked: "Linked"
+        case .expired: "Consent expired"
+        case .alreadyLinking: "Already linking"
+        case .gatewayNotConfigured: "Gateway not configured"
+        case .failed: "Connection error"
+        }
+    }
+
+    var canRetry: Bool {
+        switch self {
+        case .opening, .checking, .linked: false
+        case .idle, .awaitingConsent, .returningFromConsent, .expired,
+             .alreadyLinking, .gatewayNotConfigured, .failed: true
+        }
+    }
+}
+
+/// Copyable diagnostics contain only enum states and safe counts.  The report
+/// is intentionally useful for support while being useless as a credential or
+/// provider-data export.
+struct SettingsRedactedDiagnostics: Equatable, Sendable {
+    let gateway: TailscaleConnectionPreflightState?
+    let providers: [SettingsProviderLifecycle]
+    let finance: FinanceSettingsReadiness?
+    let health: HealthReadAccessSettings.State?
+    let appGroup: AppGroupSettingsState?
+    let signing: SigningStatus?
+    let failure: SettingsFailureClass?
+
+    init(
+        gateway: TailscaleConnectionPreflightState? = nil,
+        providers: [SettingsProviderLifecycle] = [],
+        finance: FinanceSettingsReadiness? = nil,
+        health: HealthReadAccessSettings.State? = nil,
+        appGroup: AppGroupSettingsState? = nil,
+        signing: SigningStatus? = nil,
+        failure: SettingsFailureClass? = nil
+    ) {
+        self.gateway = gateway
+        self.providers = providers
+        self.finance = finance
+        self.health = health
+        self.appGroup = appGroup
+        self.signing = signing
+        self.failure = failure
+    }
+
+    var summary: String {
+        lines.joined(separator: " · ")
+    }
+
+    var text: String {
+        (["LifeOS redacted diagnostics"] + lines + [
+            "No endpoints, URLs, account identifiers, balances, provider payloads, credentials, tokens, or raw error text are included."
+        ]).joined(separator: "\n")
+    }
+
+    private var lines: [String] {
+        var result: [String] = []
+        if let gateway {
+            result.append("gateway=\(gateway.rawValue)")
+        }
+        if !providers.isEmpty {
+            let counts = Dictionary(grouping: providers, by: \.rawValue)
+                .map { "\($0.key):\($0.value.count)" }
+                .sorted()
+                .joined(separator: ",")
+            result.append("providers=\(counts)")
+        }
+        if let finance { result.append("finance=\(finance.rawValue)") }
+        if let health { result.append("health=\(String(describing: health))") }
+        if let appGroup { result.append("app_group=\(appGroup.rawValue)") }
+        if let signing {
+            result.append("signing_mode=\(signing.mode.rawValue)")
+            result.append("signing_state=\(signing.state.rawValue)")
+        }
+        if let failure { result.append("failure=\(failure.rawValue)") }
+        if result.isEmpty { result.append("scope=not_checked") }
+        return result
+    }
+}
 
 private let settingsFinanceSourceLabel = "Windows finance gateway observation"
 private let settingsFinanceTransactionSourceLabel = "Windows finance transaction observation"
@@ -212,6 +579,7 @@ enum SettingsProviderConnectionState: String, Equatable, Sendable {
 struct ProviderConnectionSettings: Identifiable, Equatable, Sendable {
     let provider: Provider
     let state: SettingsProviderConnectionState
+    let lifecycle: SettingsProviderLifecycle
     let freshness: Freshness
     let connector: ConnectorState
     let source: String
@@ -230,6 +598,7 @@ struct ProviderConnectionSettings: Identifiable, Equatable, Sendable {
             return Self(
                 provider: provider,
                 state: .unavailable,
+                lifecycle: .resolve(snapshot: nil, connector: connector),
                 freshness: .unavailable,
                 connector: connector ?? .unavailable,
                 source: "No validated provider observation",
@@ -265,6 +634,7 @@ struct ProviderConnectionSettings: Identifiable, Equatable, Sendable {
         return Self(
             provider: provider,
             state: resolvedState,
+            lifecycle: .resolve(snapshot: snapshot, connector: resolvedConnector),
             freshness: freshness,
             connector: resolvedConnector,
             source: settingsProviderSourceLabel(provider),
@@ -634,12 +1004,12 @@ struct SettingsView: View {
 
     private var categories: [SettingsCategory] {
         [
-            .init(id: "providers", title: "AI providers", subtitle: "Codex, Claude, GLM, DeepSeek, Google AI Studio", readiness: .providers(usageSettings.readiness), icon: .assistant),
-            .init(id: "finance", title: "Bank connections", subtitle: "Sparkasse, Revolut Personal / Business, Trade Republic, and consent", readiness: .finance(financeSettings.readiness), icon: .bankConnections),
-            .init(id: "clipper", title: "Clipper", subtitle: "Transit capture via the Windows gateway source", readiness: clipperReadiness, icon: .clipper),
-            .init(id: "health", title: "Health & devices", subtitle: "Helio → Zepp → Apple Health / HealthKit", readiness: .healthRead(healthReadAccess.state), icon: .health),
-            .init(id: "sync", title: "Sync & storage", subtitle: "Tailscale device identity, Windows authority, and local data", readiness: .identityPending, icon: .refresh),
-            .init(id: "privacy", title: "Privacy & security", subtitle: "Local safeguards, signing, and unresolved server gates", readiness: .localSafeguards, icon: .security)
+            .init(id: "providers", title: "AI providers", subtitle: "Codex, Claude, GLM, DeepSeek, Google AI Studio", readiness: .providers(usageSettings.readiness), icon: .assistant, color: LifeOSTokens.Module.usage),
+            .init(id: "finance", title: "Bank connections", subtitle: "Sparkasse, Revolut Personal / Business, Trade Republic, and consent", readiness: .finance(financeSettings.readiness), icon: .bankConnections, color: LifeOSTokens.Module.finance),
+            .init(id: "clipper", title: "Clipper", subtitle: "Transit capture via the Windows gateway source", readiness: clipperReadiness, icon: .clipper, color: LifeOSTokens.Module.business),
+            .init(id: "health", title: "Health & devices", subtitle: "Helio → Zepp → Apple Health / HealthKit", readiness: .healthRead(healthReadAccess.state), icon: .health, color: LifeOSTokens.Module.fitness),
+            .init(id: "sync", title: "Sync & storage", subtitle: "Tailscale device identity, Windows authority, and local data", readiness: .identityPending, icon: .refresh, color: LifeOSTokens.Module.tax),
+            .init(id: "privacy", title: "Privacy & security", subtitle: "Local safeguards, signing, and unresolved server gates", readiness: .localSafeguards, icon: .security, color: LifeOSTokens.warning)
         ]
     }
 
@@ -790,6 +1160,7 @@ private struct SettingsCategory: Identifiable {
     let subtitle: String
     let readiness: SettingsReadiness
     let icon: LifeOSIconName
+    let color: Color
 }
 
 private enum SettingsReadiness: Equatable {
@@ -867,9 +1238,9 @@ private struct SettingsHubCard: View {
         HStack(alignment: .top, spacing: 12) {
             ZStack {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(LifeOSTokens.accent.opacity(0.12))
+                    .fill(category.color.opacity(0.13))
                 LifeOSIcon(category.icon)
-                    .foregroundStyle(LifeOSTokens.accent)
+                    .foregroundStyle(category.color)
                     .frame(width: 20, height: 20)
             }
             .frame(width: 40, height: 40)
@@ -905,7 +1276,7 @@ private struct SettingsHubCard: View {
         .frame(maxWidth: .infinity, minHeight: 124, alignment: .leading)
         .background(
             LinearGradient(
-                colors: [LifeOSTokens.surface, LifeOSTokens.accent.opacity(isHovering || isFocused ? 0.045 : 0.018)],
+                colors: [LifeOSTokens.surface, category.color.opacity(isHovering || isFocused ? 0.06 : 0.022)],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             ),
@@ -913,7 +1284,7 @@ private struct SettingsHubCard: View {
         )
         .overlay(
             LifeOSTokens.cardShape.stroke(
-                isHovering || isFocused ? LifeOSTokens.accent.opacity(0.38) : LifeOSTokens.quietBorder,
+                isHovering || isFocused ? category.color.opacity(0.48) : LifeOSTokens.quietBorder,
                 lineWidth: isHovering || isFocused ? 1 : 0.75
             )
         )
@@ -934,13 +1305,16 @@ private struct SettingsHubCard: View {
 struct ProviderConnectionsSettingsView: View {
     let snapshot: UsageSettingsSnapshot
     let refreshAction: (() async -> Void)?
+    let revokeAction: ((Provider) async -> Void)?
 
     init(
         snapshot: UsageSettingsSnapshot = .unavailable,
-        refreshAction: (() async -> Void)? = nil
+        refreshAction: (() async -> Void)? = nil,
+        revokeAction: ((Provider) async -> Void)? = nil
     ) {
         self.snapshot = snapshot
         self.refreshAction = refreshAction
+        self.revokeAction = revokeAction
     }
 
     var body: some View {
@@ -957,10 +1331,19 @@ struct ProviderConnectionsSettingsView: View {
                             SettingsStatusRow(
                                 title: provider.provider.displayName,
                                 detail: providerDetail(provider),
-                                status: provider.state.title,
-                                icon: .usage,
-                                statusColor: providerColor(provider.state)
+                                status: provider.lifecycle.title,
+                                icon: providerIdentityIcon(provider.provider),
+                                statusColor: providerLifecycleColor(provider.lifecycle),
+                                iconColor: providerIdentityColor(provider.provider),
+                                iconAccessibilityLabel: "\(provider.provider.displayName) provider identity"
                             )
+                            if provider.lifecycle != .authorized {
+                                SettingsProviderRecoveryRow(
+                                    provider: provider,
+                                    refreshAction: refreshAction,
+                                    revokeAction: revokeAction
+                                )
+                            }
                             if provider.id != snapshot.providers.last?.id {
                                 Divider().padding(.leading, 38)
                             }
@@ -1010,7 +1393,14 @@ struct ProviderConnectionsSettingsView: View {
                     .accessibilityIdentifier("settings-provider-refresh")
                 }
 
-                TruthfulSetupNote(text: "Provider rows reflect only UsageCoordinator observations and connector state. Provider keys remain on the Windows Hermes server; there is no paste, reveal, or copy path for raw keys.")
+                SettingsDiagnosticsView(
+                    diagnostics: SettingsRedactedDiagnostics(
+                        providers: snapshot.providers.map(\.lifecycle),
+                        failure: snapshot.errorMessage.map { SettingsFailureClass.classify(untrustedMessage: $0) }
+                    )
+                )
+
+                TruthfulSetupNote(text: "Provider rows reflect only UsageCoordinator observations and connector state. Provider keys remain on the Windows Hermes server; there is no paste, reveal, or copy path for raw keys. Revoke and reauthorization remain gateway-owned; this client never receives a raw token.")
             }
             .frame(maxWidth: 760, alignment: .leading)
             .padding(LifeOSTokens.pagePadding)
@@ -1023,15 +1413,16 @@ struct ProviderConnectionsSettingsView: View {
         let source = "Source: \(provider.sourceDetail)"
         let freshness = "Freshness: \(freshnessTitle(provider.freshness))"
         let connector = "Connector: \(connectorTitle(provider.connector))"
+        let lifecycle = "Lifecycle: \(provider.lifecycle.title)"
         switch provider.state {
         case .observed:
-            return "\(source) · \(freshness) · \(connector)"
+            return "\(lifecycle) · \(source) · \(freshness) · \(connector)"
         case .partial:
-            return "\(source) · \(freshness) · some windows are unavailable"
+            return "\(lifecycle) · \(source) · \(freshness) · some windows are unavailable"
         case .stale:
-            return "\(source) · last observed \(observedAtLabel(provider.observedAt)) · \(connector)"
+            return "\(lifecycle) · \(source) · last observed \(observedAtLabel(provider.observedAt)) · \(connector)"
         case .unavailable:
-            return "\(source) · no current observation"
+            return "\(lifecycle) · \(source) · no current observation"
         }
     }
 
@@ -1061,11 +1452,32 @@ struct ProviderConnectionsSettingsView: View {
         }
     }
 
-    private func providerColor(_ state: SettingsProviderConnectionState) -> Color {
-        switch state {
-        case .observed: LifeOSTokens.success
-        case .partial: LifeOSTokens.info
-        case .stale, .unavailable: LifeOSTokens.warning
+    private func providerIdentityIcon(_ provider: Provider) -> LifeOSIconName {
+        switch provider {
+        case .codex: .usage
+        case .claude: .assistant
+        case .glm: .graphUp
+        case .deepseek: .search
+        case .googleAIStudio: .business
+        }
+    }
+
+    private func providerIdentityColor(_ provider: Provider) -> Color {
+        switch provider {
+        case .codex: LifeOSTokens.accent
+        case .claude: .lifeOSOrange500
+        case .glm: .lifeOSViolet500
+        case .deepseek: .lifeOSTeal500
+        case .googleAIStudio: .lifeOSPink500
+        }
+    }
+
+    private func providerLifecycleColor(_ lifecycle: SettingsProviderLifecycle) -> Color {
+        switch lifecycle {
+        case .authorized: LifeOSTokens.success
+        case .refreshDue: LifeOSTokens.info
+        case .reauthRequired, .revoked, .rateLimited, .failed, .unavailable:
+            LifeOSTokens.warning
         }
     }
 
@@ -1075,6 +1487,69 @@ struct ProviderConnectionsSettingsView: View {
         case .partial: LifeOSTokens.info
         case .loading, .stale, .unavailable: LifeOSTokens.warning
         }
+    }
+}
+
+private struct SettingsProviderRecoveryRow: View {
+    let provider: ProviderConnectionSettings
+    let refreshAction: (() async -> Void)?
+    let revokeAction: ((Provider) async -> Void)?
+    @State private var isRunning = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(provider.lifecycle.recoveryDetail)
+                .font(LifeOSFont.inter(11))
+                .foregroundStyle(LifeOSTokens.tertiaryText)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 10) {
+                if provider.lifecycle.canRetry, let refreshAction {
+                    Button {
+                        guard !isRunning else { return }
+                        isRunning = true
+                        Task {
+                            await refreshAction()
+                            isRunning = false
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            if isRunning {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                LifeOSIcon(.refresh).frame(width: 13, height: 13)
+                            }
+                            Text(provider.lifecycle.retryTitle)
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(LifeOSTokens.accent)
+                    .disabled(isRunning)
+                    .accessibilityIdentifier("settings-provider-retry-\(provider.provider.rawValue)")
+                }
+
+                if provider.lifecycle != .unavailable {
+                    if let revokeAction {
+                        Button("Revoke", role: .destructive) {
+                            Task { await revokeAction(provider.provider) }
+                        }
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("settings-provider-revoke-\(provider.provider.rawValue)")
+                    } else {
+                        HStack(spacing: 6) {
+                            LifeOSIcon(.security).frame(width: 13, height: 13)
+                            Text("Revoke in gateway")
+                        }
+                            .font(LifeOSFont.inter(11, weight: .semiBold))
+                            .foregroundStyle(LifeOSTokens.tertiaryText)
+                            .accessibilityLabel("Revoke is managed by the Windows gateway")
+                    }
+                }
+            }
+        }
+        .padding(.leading, 38)
+        .padding(.bottom, 10)
+        .accessibilityElement(children: .contain)
     }
 }
 
@@ -1112,11 +1587,12 @@ struct ClipperConnectionSettingsView: View {
                             )
                         }
                         if let errorMessage, !errorMessage.isEmpty {
+                            let failure = SettingsFailureClass.classify(untrustedMessage: errorMessage)
                             Divider().padding(.leading, 38)
                             SettingsStatusRow(
                                 title: "Last error",
-                                detail: errorMessage,
-                                status: "Attention",
+                                detail: failure.detail,
+                                status: failure.title,
                                 icon: .warning,
                                 statusColor: LifeOSTokens.warning
                             )
@@ -1163,6 +1639,12 @@ struct ClipperConnectionSettingsView: View {
                     .disabled(state == .loading)
                     .accessibilityIdentifier("settings-clipper-refresh")
                 }
+
+                SettingsDiagnosticsView(
+                    diagnostics: SettingsRedactedDiagnostics(
+                        failure: errorMessage.map { SettingsFailureClass.classify(untrustedMessage: $0) }
+                    )
+                )
 
                 TruthfulSetupNote(text: "Rows reflect only ClipperCoordinator observations. No demo or placeholder transit data exists outside explicit fixture builds; unavailable means not connected.")
             }
@@ -1229,12 +1711,28 @@ private enum BankConsentRowState: Equatable {
     case idle
     case openingConsent
     case awaitingConsent(BankConsentLink)
+    case returningFromConsent(BankConsentLink)
     case checkingStatus(BankConsentLink)
     case linked
     case expired
     case alreadyLinking
     case gatewayNotConfigured
     case error
+
+    var lifecyclePhase: BankConsentLifecyclePhase {
+        switch self {
+        case .idle: .idle
+        case .openingConsent: .opening
+        case .awaitingConsent: .awaitingConsent
+        case .returningFromConsent: .returningFromConsent
+        case .checkingStatus: .checking
+        case .linked: .linked
+        case .expired: .expired
+        case .alreadyLinking: .alreadyLinking
+        case .gatewayNotConfigured: .gatewayNotConfigured
+        case .error: .failed
+        }
+    }
 }
 
 @MainActor
@@ -1288,8 +1786,22 @@ private final class BankConsentRowController: ObservableObject {
 #endif
     }
 
-    func refreshStatus() {
+    /// Safari dismissal is only a local callback boundary. It does not mean
+    /// that the bank linked successfully; the gateway must still be polled.
+    func consentDidDismiss() {
         guard case .awaitingConsent(let link) = state else { return }
+        state = .returningFromConsent(link)
+        refreshStatus()
+    }
+
+    func refreshStatus() {
+        let link: BankConsentLink
+        switch state {
+        case .awaitingConsent(let pending), .returningFromConsent(let pending):
+            link = pending
+        default:
+            return
+        }
         task?.cancel()
         state = .checkingStatus(link)
         task = Task { [client] in
@@ -1339,19 +1851,19 @@ private final class BankConsentRowController: ObservableObject {
 private struct BankConsentConnectRow: View {
     let descriptor: FinanceConnectorDescriptor
     let syncClient: TailscaleSyncClient
-    let gatewayConfigured: Bool
+    let gatewayPreflight: TailscaleConnectionPreflightState?
     let onLinked: (() async -> Void)?
     @StateObject private var controller: BankConsentRowController
 
     init(
         descriptor: FinanceConnectorDescriptor,
         syncClient: TailscaleSyncClient,
-        gatewayConfigured: Bool,
+        gatewayPreflight: TailscaleConnectionPreflightState?,
         onLinked: (() async -> Void)? = nil
     ) {
         self.descriptor = descriptor
         self.syncClient = syncClient
-        self.gatewayConfigured = gatewayConfigured
+        self.gatewayPreflight = gatewayPreflight
         self.onLinked = onLinked
         _controller = StateObject(wrappedValue: BankConsentRowController(
             client: syncClient,
@@ -1388,10 +1900,15 @@ private struct BankConsentConnectRow: View {
                 LifeOSIcon(statusIcon)
                     .frame(width: 13, height: 13)
                     .foregroundStyle(statusColor)
-                Text(statusDetail)
-                    .font(LifeOSFont.inter(11))
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
-                    .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(controller.state.lifecyclePhase.title)
+                        .font(LifeOSFont.inter(11, weight: .semiBold))
+                        .foregroundStyle(statusColor)
+                    Text(statusDetail)
+                        .font(LifeOSFont.inter(11))
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .accessibilityElement(children: .combine)
             .accessibilityIdentifier("settings-finance-connect-status-\(descriptor.kind.rawValue)")
@@ -1410,20 +1927,22 @@ private struct BankConsentConnectRow: View {
         .padding(.bottom, 10)
 #if os(iOS)
         .sheet(isPresented: $controller.showSafari, onDismiss: {
-            controller.refreshStatus()
+            controller.consentDidDismiss()
         }) {
             if case .awaitingConsent(let link) = controller.state {
                 BankConsentSafariView(url: link.consentUrl)
             } else if case .checkingStatus(let link) = controller.state {
                 BankConsentSafariView(url: link.consentUrl)
+            } else if case .returningFromConsent(let link) = controller.state {
+                BankConsentSafariView(url: link.consentUrl)
             }
         }
 #endif
         .onAppear {
-            if gatewayConfigured { controller.restorePendingConsent() }
+            if gatewayReady { controller.restorePendingConsent() }
         }
-        .onChange(of: gatewayConfigured) { _, isConfigured in
-            if isConfigured {
+        .onChange(of: gatewayPreflight) { _, _ in
+            if gatewayReady {
                 controller.restorePendingConsent()
             } else {
                 controller.reset()
@@ -1437,25 +1956,29 @@ private struct BankConsentConnectRow: View {
 
     private var isBusy: Bool {
         switch controller.state {
-        case .openingConsent, .checkingStatus: true
+        case .openingConsent, .returningFromConsent, .checkingStatus: true
         default: false
         }
     }
 
+    private var gatewayReady: Bool { gatewayPreflight == .reachable }
+
     private var canTap: Bool {
-        guard gatewayConfigured, !isBusy else { return false }
+        guard gatewayReady, !isBusy else { return false }
         switch controller.state {
-        case .linked: return false
+        case .linked, .alreadyLinking, .gatewayNotConfigured: return false
         default: return true
         }
     }
 
     private var buttonLabel: String {
-        if !gatewayConfigured { return "Gateway required" }
+        guard let gatewayPreflight else { return "Check gateway first" }
+        guard gatewayPreflight == .reachable else { return "Gateway unavailable" }
         switch controller.state {
         case .idle, .error, .expired: return "Connect"
         case .openingConsent: return "Opening consent…"
         case .awaitingConsent: return "Continue consent"
+        case .returningFromConsent: return "Verifying callback…"
         case .checkingStatus: return "Checking status…"
         case .linked: return "Linked"
         case .alreadyLinking: return "Already linking"
@@ -1480,8 +2003,11 @@ private struct BankConsentConnectRow: View {
     }
 
     private var statusDetail: String {
-        if !gatewayConfigured {
-            return "The Tailscale gateway is not configured or unreachable. Configure Sync & Storage before connecting."
+        guard let gatewayPreflight else {
+            return "Run the read-only gateway preflight before opening a consent page."
+        }
+        guard gatewayPreflight == .reachable else {
+            return "\(gatewayPreflight.settingsTitle). \(gatewayPreflight.settingsDetail)"
         }
         switch controller.state {
         case .idle:
@@ -1490,10 +2016,12 @@ private struct BankConsentConnectRow: View {
             return "Requesting a one-time consent link from the gateway."
         case .awaitingConsent:
             return "Waiting on the bank's consent page. Re-check status once you finish or return to the app."
+        case .returningFromConsent:
+            return "The bank page closed. The gateway callback is still being verified; no link is assumed."
         case .checkingStatus:
             return "Checking the connection state with the gateway."
         case .linked:
-            return "The gateway reports this connection as linked."
+            return "The gateway reports this connection as linked. Refresh is read-only; revoke remains gateway-owned."
         case .expired:
             return "The consent link expired before it was completed. Tap Connect to request a new one."
         case .alreadyLinking:
@@ -1511,7 +2039,8 @@ private struct FinanceConnectionsSettingsView: View {
     let refreshAction: (() async -> Void)?
     private let catalog = FinanceConnectorCatalog.defaults
     private let syncClient = TailscaleSyncClient()
-    @State private var gatewayConfigured = false
+    @State private var gatewayPreflight: TailscaleConnectionPreflightState?
+    @State private var isCheckingGateway = false
     @State private var gatewayPreflightTask: Task<Void, Never>?
 
     init(
@@ -1537,7 +2066,9 @@ private struct FinanceConnectionsSettingsView: View {
                                 detail: snapshot.summaryDetail,
                                 status: snapshot.readiness.title,
                                 icon: .finance,
-                                statusColor: summaryColor
+                                statusColor: summaryColor,
+                                iconColor: Color.lifeOSFinanceGreen,
+                                iconAccessibilityLabel: "Finance summary"
                             )
                             Divider().padding(.leading, 38)
                             SettingsStatusRow(
@@ -1547,8 +2078,42 @@ private struct FinanceConnectionsSettingsView: View {
                                 icon: .documents,
                                 statusColor: snapshot.transactionsAvailability == .observed
                                     ? LifeOSTokens.success
-                                    : LifeOSTokens.warning
+                                    : LifeOSTokens.warning,
+                                iconColor: LifeOSTokens.info,
+                                iconAccessibilityLabel: "Transaction observations"
                             )
+                    }
+                }
+
+                SettingsSection(title: "Gateway preflight", icon: .security) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        SettingsStatusRow(
+                            title: "Read-only secure gateway check",
+                            detail: gatewayPreflightDetail,
+                            status: gatewayPreflightTitle,
+                            icon: gatewayPreflight == .reachable ? .verified : .security,
+                            statusColor: gatewayPreflight == .reachable ? LifeOSTokens.success : LifeOSTokens.warning,
+                            iconColor: gatewayPreflight == .reachable ? LifeOSTokens.success : LifeOSTokens.warning,
+                            iconAccessibilityLabel: "Secure gateway preflight"
+                        )
+
+                        Button {
+                            runGatewayPreflight()
+                        } label: {
+                            HStack(spacing: 7) {
+                                if isCheckingGateway {
+                                    ProgressView().controlSize(.small)
+                                } else {
+                                    LifeOSIcon(.refresh).frame(width: 14, height: 14)
+                                }
+                                Text(isCheckingGateway ? "Checking secure gateway…" : "Re-check secure gateway")
+                            }
+                            .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(LifeOSTokens.accent)
+                        .disabled(isCheckingGateway)
+                        .accessibilityIdentifier("settings-finance-gateway-preflight")
                     }
                 }
 
@@ -1577,17 +2142,19 @@ private struct FinanceConnectionsSettingsView: View {
                         ForEach(catalog) { descriptor in
                             VStack(spacing: 0) {
                                 SettingsStatusRow(
-                                    title: descriptor.displayName,
+                                        title: descriptor.displayName,
                                     detail: "\(accessMethodTitle(descriptor.accessMethod)) · \(descriptor.recommendation)",
                                     status: gateTitle(descriptor.risk),
-                                    icon: .finance,
-                                    statusColor: LifeOSTokens.warning
+                                    icon: connectorIcon(descriptor.kind),
+                                    statusColor: connectorRiskColor(descriptor.risk),
+                                    iconColor: connectorColor(descriptor.kind),
+                                    iconAccessibilityLabel: "\(descriptor.displayName) connection"
                                 )
                                 if supportsInAppConsent(descriptor.accessMethod) {
                                     BankConsentConnectRow(
                                         descriptor: descriptor,
                                         syncClient: syncClient,
-                                        gatewayConfigured: gatewayConfigured,
+                                        gatewayPreflight: gatewayPreflight,
                                         onLinked: refreshAction
                                     )
                                 }
@@ -1598,6 +2165,13 @@ private struct FinanceConnectionsSettingsView: View {
                         }
                     }
                 }
+
+                SettingsDiagnosticsView(
+                    diagnostics: SettingsRedactedDiagnostics(
+                        gateway: gatewayPreflight,
+                        finance: snapshot.readiness
+                    )
+                )
 
                 NavigationLink {
                     SyncStorageSettingsView()
@@ -1632,16 +2206,42 @@ private struct FinanceConnectionsSettingsView: View {
         .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
         .navigationTitle("Bank & Finance")
         .task {
-            gatewayPreflightTask?.cancel()
-            gatewayPreflightTask = Task {
-                let result = await syncClient.checkConnection()
-                guard !Task.isCancelled else { return }
-                gatewayConfigured = (result == .reachable)
-            }
+            runGatewayPreflight()
         }
         .onDisappear {
             gatewayPreflightTask?.cancel()
+            gatewayPreflightTask = nil
+            isCheckingGateway = false
         }
+    }
+
+    private func runGatewayPreflight() {
+        guard !isCheckingGateway else { return }
+        gatewayPreflightTask?.cancel()
+        isCheckingGateway = true
+        gatewayPreflight = nil
+        gatewayPreflightTask = Task { @MainActor in
+            let result = await syncClient.checkConnection()
+            guard !Task.isCancelled else { return }
+            gatewayPreflight = result
+            isCheckingGateway = false
+        }
+    }
+
+    private var gatewayPreflightTitle: String {
+        if isCheckingGateway { return "Checking" }
+        guard let gatewayPreflight else { return "Not checked" }
+        return gatewayPreflight.settingsTitle
+    }
+
+    private var gatewayPreflightDetail: String {
+        if isCheckingGateway {
+            return "One bounded read-only request is in flight; no finance or bank connection is changed."
+        }
+        guard let gatewayPreflight else {
+            return "Run the read-only preflight before opening a bank consent page."
+        }
+        return gatewayPreflight.settingsDetail
     }
 
     /// The current gateway-mediated consent flow is Enable Banking only.
@@ -1671,6 +2271,36 @@ private struct FinanceConnectionsSettingsView: View {
         case .consentRequired: "Consent-based connector"
         case .accountEligibilityRequired: "Eligibility + OAuth required"
         case .manualImportOnly: "Manual import only"
+        }
+    }
+
+    private func connectorIcon(_ kind: FinanceConnectorKind) -> LifeOSIconName {
+        switch kind {
+        case .sparkasse: .bankConnections
+        case .revolutPersonal: .finance
+        case .revolutBusiness: .business
+        case .tradeRepublic: .investments
+        case .paypalPersonal: .cashFlow
+        }
+    }
+
+    /// Identity color differentiates connectors; the adjacent status dot and
+    /// status text remain reserved for connection/risk state.
+    private func connectorColor(_ kind: FinanceConnectorKind) -> Color {
+        switch kind {
+        case .sparkasse: .lifeOSFinanceGreen
+        case .revolutPersonal: .lifeOSTeal500
+        case .revolutBusiness: LifeOSTokens.Module.business
+        case .tradeRepublic: .lifeOSPurple500
+        case .paypalPersonal: .lifeOSBlue500
+        }
+    }
+
+    private func connectorRiskColor(_ risk: FinanceConnectorRisk) -> Color {
+        switch risk {
+        case .consentRequired: LifeOSTokens.warning
+        case .accountEligibilityRequired: LifeOSTokens.info
+        case .manualImportOnly: LifeOSTokens.secondaryText
         }
     }
 }
@@ -2147,6 +2777,10 @@ private struct SyncStorageSettingsView: View {
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+
+                SettingsDiagnosticsView(
+                    diagnostics: SettingsRedactedDiagnostics(gateway: connectionPreflight)
+                )
             }
             .frame(maxWidth: 760, alignment: .leading)
             .padding(LifeOSTokens.pagePadding)
@@ -2310,15 +2944,22 @@ private struct PrivacySecuritySettingsView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
+                SettingsDiagnosticsView(
+                    diagnostics: SettingsRedactedDiagnostics(
+                        appGroup: appGroup.state,
+                        signing: signing
+                    )
+                )
+
                 SettingsSection(title: "Signing", icon: signingIcon) {
                     SettingsStatusRow(
                         title: "Code signing",
-                        detail: "\(signingModeLabel) · \(signing.guidance)",
-                        status: signingLabel,
+                        detail: "\(signing.modeTitle) · \(signing.guidance)",
+                        status: signing.stateTitle,
                         icon: signingIcon,
                         statusColor: signingColor
                     )
-                    Text("Automatic self-signing is unavailable by Apple platform design.")
+                    Text("Automatic self-signing is unavailable by Apple platform design. \(signing.evidenceBoundary)")
                         .font(LifeOSFont.inter(12))
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
@@ -2329,29 +2970,6 @@ private struct PrivacySecuritySettingsView: View {
         }
         .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
         .navigationTitle("Privacy & Security")
-    }
-
-    private var signingLabel: String {
-        guard let days = signing.daysRemaining else { return "Signing expiration unavailable" }
-        switch signing.state {
-        case .expired:
-            return "Signing expired"
-        case .expiringSoon:
-            return "Signing expiring: \(days) day\(days == 1 ? "" : "s") remaining"
-        case .valid:
-            return "Signing: \(days) day\(days == 1 ? "" : "s") remaining"
-        case .unknown:
-            return "Signing expiration unavailable"
-        }
-    }
-
-    private var signingModeLabel: String {
-        switch signing.mode {
-        case .personalTeam: "Personal Team"
-        case .developerProgram: "Apple Developer Program"
-        case .sideloaded: "Sideloaded profile"
-        case .unknown: "Signing mode unavailable"
-        }
     }
 
     private var signingIcon: LifeOSIconName {
@@ -2392,13 +3010,37 @@ private struct SettingsStatusRow: View {
     let status: String
     let icon: LifeOSIconName
     let statusColor: Color
+    let iconColor: Color
+    let iconAccessibilityLabel: String?
+
+    init(
+        title: String,
+        detail: String,
+        status: String,
+        icon: LifeOSIconName,
+        statusColor: Color,
+        iconColor: Color = LifeOSTokens.tertiaryText,
+        iconAccessibilityLabel: String? = nil
+    ) {
+        self.title = title
+        self.detail = detail
+        self.status = status
+        self.icon = icon
+        self.statusColor = statusColor
+        self.iconColor = iconColor
+        self.iconAccessibilityLabel = iconAccessibilityLabel
+    }
 
     var body: some View {
         HStack(spacing: 10) {
-            LifeOSIcon(icon)
-                .foregroundStyle(LifeOSTokens.tertiaryText)
-                .frame(width: 18, height: 18)
-                .accessibilityHidden(true)
+            ZStack {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(iconColor.opacity(0.12))
+                LifeOSIcon(icon)
+                    .foregroundStyle(iconColor)
+            }
+            .frame(width: 28, height: 28)
+            .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(LifeOSFont.inter(14, weight: .semiBold))
@@ -2422,7 +3064,7 @@ private struct SettingsStatusRow: View {
         .padding(.vertical, 10)
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("settings-status-\(accessibilityID)")
-        .accessibilityLabel(Text("\(title) · \(status)"))
+        .accessibilityLabel(Text("\(title) · \(status)\(iconAccessibilityLabel.map { " · \($0)" } ?? "")"))
         .accessibilityValue(Text("\(status). \(detail)"))
     }
 
@@ -2432,6 +3074,54 @@ private struct SettingsStatusRow: View {
             .replacingOccurrences(of: " ", with: "-")
             .replacingOccurrences(of: "/", with: "-")
             .replacingOccurrences(of: "→", with: "-")
+    }
+}
+
+private struct SettingsDiagnosticsView: View {
+    let diagnostics: SettingsRedactedDiagnostics
+    @State private var didCopy = false
+
+    var body: some View {
+        SettingsSection(title: "Safe diagnostics", icon: .documents) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(diagnostics.summary)
+                    .font(LifeOSFont.inter(12, weight: .semiBold))
+                    .foregroundStyle(LifeOSTokens.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .accessibilityIdentifier("settings-redacted-diagnostics-summary")
+
+                Text("Only lifecycle states and failure classes are included. URLs, endpoints, account data, balances, provider payloads, credentials, tokens, and raw error text are excluded.")
+                    .font(LifeOSFont.metadata())
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button {
+                    copyDiagnostics()
+                } label: {
+                    HStack(spacing: 7) {
+                        LifeOSIcon(didCopy ? .verified : .documents)
+                            .frame(width: 14, height: 14)
+                        Text(didCopy ? "Copied redacted summary" : "Copy redacted diagnostics")
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .tint(LifeOSTokens.accent)
+                .accessibilityIdentifier("settings-copy-redacted-diagnostics")
+                .accessibilityHint(Text("Copies only lifecycle states and safe failure classes; no secrets or provider data."))
+            }
+        }
+    }
+
+    private func copyDiagnostics() {
+#if os(iOS)
+        UIPasteboard.general.string = diagnostics.text
+#elseif os(macOS)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(diagnostics.text, forType: .string)
+#endif
+        didCopy = true
     }
 }
 

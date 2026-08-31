@@ -9,6 +9,18 @@
     }
   ],
   "defaultOptions" : {
+    "commandLineArguments" : [
+      {
+        "argument" : "-LifeOSVisualFixtures",
+        "enabled" : true
+      }
+    ],
+    "environmentVariableEntries" : [
+      {
+        "key" : "LIFEOS_VISUAL_FIXTURES",
+        "value" : "1"
+      }
+    ],
     "codeCoverage" : false,
     "targetForVariableExpansion" : {
       "containerPath" : "container:LifeOS.xcodeproj",

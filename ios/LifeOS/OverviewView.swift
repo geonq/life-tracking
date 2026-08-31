@@ -228,7 +228,7 @@ struct OverviewView: View {
             HStack(spacing: 8) {
                 Text("A quiet view of what matters now")
                     .font(LifeOSFont.callout())
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .foregroundStyle(LifeOSTokens.secondaryText)
                 statusBadge
             }
         }
@@ -243,7 +243,7 @@ struct OverviewView: View {
             }
             Text("A quiet view of what matters now")
                 .font(LifeOSFont.callout())
-                .foregroundStyle(LifeOSTokens.tertiaryText)
+                .foregroundStyle(LifeOSTokens.secondaryText)
                 .lineLimit(2)
             statusBadge
         }
@@ -662,12 +662,20 @@ private struct OverviewMetricCard: View {
         }
     }
 
+    private var sectionAccent: Color {
+        switch section.kind {
+        case .llm: LifeOSTokens.Module.usage
+        case .clipper: LifeOSTokens.Module.business
+        case .health: LifeOSTokens.Module.fitness
+        case .finance: LifeOSTokens.Module.finance
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: featured ? 16 : 14) {
-            // §5.1: no icon tile — a bare tertiary icon aligned to the title.
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 LifeOSIcon(sectionIcon)
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .foregroundStyle(sectionAccent)
                     .frame(width: 18, height: 18)
                     .alignmentGuide(.firstTextBaseline) { dimensions in
                         dimensions[.bottom]
@@ -681,7 +689,7 @@ private struct OverviewMetricCard: View {
                         .lineLimit(1)
                     Text(description)
                         .font(LifeOSFont.callout())
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .foregroundStyle(LifeOSTokens.secondaryText)
                         .lineLimit(featured ? 1 : 2)
                 }
                 Spacer(minLength: 8)
@@ -767,13 +775,13 @@ private struct OverviewMetricCard: View {
                         .font(LifeOSFont.callout().weight(.semibold))
                         .foregroundStyle(.primary)
                     Text(usageTrendLabel)
-                        .font(.caption2)
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .font(LifeOSFont.axis())
+                        .foregroundStyle(LifeOSTokens.secondaryText)
                 }
             }
 
             if usageTrendPoints.count >= 2 {
-                OverviewSparkline(points: usageTrendPoints, tint: LifeOSTokens.accent)
+                OverviewSparkline(points: usageTrendPoints, tint: LifeOSTokens.Module.usage)
                     .frame(height: 44)
                     // This chart is a summary inside a tappable card. Its
                     // detail view owns chart scrubbing; letting this overlay
@@ -803,7 +811,7 @@ private struct OverviewMetricCard: View {
                     ValueMetric(value: clipperHomeMetricValue(containing: "Revenue"), label: "Revenue")
                 }
                 if let clipperTrend {
-                    OverviewSparkline(points: clipperTrend.points, tint: LifeOSTokens.accent)
+                    OverviewSparkline(points: clipperTrend.points, tint: LifeOSTokens.Module.business)
                         .frame(height: 36)
                         .allowsHitTesting(false)
                 } else {
@@ -820,8 +828,8 @@ private struct OverviewMetricCard: View {
                         }
                     }
                     Text(fitnessSnapshot.source.freshness)
-                        .font(.caption2)
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .font(LifeOSFont.axis())
+                        .foregroundStyle(LifeOSTokens.secondaryText)
                         .lineLimit(1)
                         .minimumScaleFactor(0.7)
                 } else if section.provenance.quality == .demo {
@@ -840,8 +848,8 @@ private struct OverviewMetricCard: View {
                         }
                     }
                     Text(financeState == .stale ? "Stale source · refresh required" : "Observed finance summary")
-                        .font(.caption2)
-                        .foregroundStyle(financeState == .stale ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)
+                        .font(LifeOSFont.axis())
+                        .foregroundStyle(financeState == .stale ? LifeOSTokens.warning : LifeOSTokens.secondaryText)
                         .lineLimit(1)
                         .minimumScaleFactor(0.72)
                 } else if section.provenance.quality == .demo {

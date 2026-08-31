@@ -56,6 +56,8 @@
     <string>Life OS uses the camera only to scan a food barcode; no camera frames are stored or uploaded.</string>
     <key>NSHealthShareUsageDescription</key>
     <string>Life OS reads only the Health categories you select to show source-backed fitness, sleep, activity, hydration, and caffeine data.</string>
+    <key>NSHealthUpdateUsageDescription</key>
+    <string>Life OS writes only the health values you explicitly choose to record, such as hydration, caffeine, and body measurements.</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_lifeos-calendar._tcp</string>

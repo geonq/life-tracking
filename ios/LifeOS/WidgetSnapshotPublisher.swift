@@ -221,14 +221,19 @@ extension WidgetSnapshotPublisher {
               !accounts.isEmpty else {
             return []
         }
-        return accounts.filter { isUsableObservedProvenance($0.provenance) }
+        return accounts.filter {
+            $0.availability == .observed
+                && $0.balanceCents != nil
+                && isUsableObservedProvenance($0.provenance)
+        }
     }
 
     private static func overflowCheckedAccountTotal(_ accounts: [FinanceAccountObservation]) -> Int? {
         guard !accounts.isEmpty else { return nil }
         var total = 0
         for account in accounts {
-            let (next, overflowed) = total.addingReportingOverflow(account.balanceCents)
+            guard let balanceCents = account.balanceCents else { return nil }
+            let (next, overflowed) = total.addingReportingOverflow(balanceCents)
             guard !overflowed,
                   next >= -maximumFinanceCents,
                   next <= maximumFinanceCents else {

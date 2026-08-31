@@ -17,8 +17,8 @@ struct LifeOSMacApp: App {
     private let widgetSnapshotPublisher = WidgetSnapshotPublisher()
 
     init() {
+        let enabled = Self.visualFixturesEnabled
         LifeOSFontRegistrar.registerBundledFonts()
-        let enabled = ProcessInfo.processInfo.arguments.contains("-LifeOSVisualFixtures")
         usesVisualFixtures = enabled
         let cachedUsage = enabled ? nil : SharedSnapshotStore.read()
         _usageCoordinator = StateObject(wrappedValue: UsageCoordinator(
@@ -37,6 +37,15 @@ struct LifeOSMacApp: App {
                 usesVisualFixtures: enabled
             )
         )
+    }
+
+    /// TestAction supplies the environment flag before the hosted app is
+    /// initialized. Keep the argument form for existing UI-test launchers,
+    /// while making the scheme/test-plan environment the deterministic gate
+    /// for unit-test hosts.
+    private static var visualFixturesEnabled: Bool {
+        ProcessInfo.processInfo.arguments.contains("-LifeOSVisualFixtures")
+            || ProcessInfo.processInfo.environment["LIFEOS_VISUAL_FIXTURES"] == "1"
     }
 
     var body: some Scene {
@@ -175,7 +184,7 @@ struct LifeOSMacRootView: View {
         _showingUsage = State(initialValue: initiallyShowingUsage || initialRoute == .usage)
     }
 
-    var body: some View {
+    private var rootLayout: some View {
         HStack(spacing: 0) {
             sidebar
             Rectangle()
@@ -191,13 +200,26 @@ struct LifeOSMacRootView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    var body: some View {
+        Group {
+            if usesVisualFixtures {
+                // Snapshot hosts are AppKit views, not a SwiftUI Scene. Keep
+                // external-event registration out of that fixture path so
+                // tests stay offline and do not emit scene-lifecycle warnings.
+                rootLayout
+            } else {
+                rootLayout
+                    .onOpenURL { url in
+                        guard let destination = LifeOSDeepLink(url: url) else { return }
+                        navigate(to: destination)
+                    }
+            }
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(LifeOSTokens.screenCanvas)
         .animation(reduceMotion ? nil : LifeOSMotion.easeNavigate, value: selection)
-        .onOpenURL { url in
-            guard let destination = LifeOSDeepLink(url: url) else { return }
-            navigate(to: destination)
-        }
         .sheet(isPresented: $showingCommandPalette) {
             LifeOSMacCommandPalette(selection: $selection, selectedRoute: $selectedRoute)
                 .frame(width: 560, height: 420)
@@ -385,11 +407,19 @@ struct LifeOSMacRootView: View {
                     Spacer(minLength: 0)
                 }
             }
-            .foregroundStyle(selected ? Color.primary : Color.secondary)
+            .foregroundStyle(selected ? Color.primary : LifeOSTokens.secondaryText)
+            .overlay(alignment: .leading) {
+                if selected {
+                    Capsule(style: .continuous)
+                        .fill(module.accent)
+                        .frame(width: 3, height: 18)
+                        .accessibilityHidden(true)
+                }
+            }
             .padding(.horizontal, 10)
             .frame(height: 34)
             .background(
-                selected ? LifeOSTokens.accent.opacity(0.12) : Color.clear,
+                selected ? LifeOSTokens.Module.surface(module.accent, opacity: 0.12) : Color.clear,
                 in: RoundedRectangle(cornerRadius: 7, style: .continuous)
             )
             .frame(maxWidth: .infinity, alignment: sidebarCollapsed ? .center : .leading)
@@ -473,13 +503,15 @@ private struct LifeOSMacCommandPalette: View {
                             dismiss()
                         } label: {
                             HStack(spacing: 10) {
-                                LifeOSIcon(module.icon).frame(width: 17, height: 17)
+                                LifeOSIcon(module.icon)
+                                    .foregroundStyle(module.accent)
+                                    .frame(width: 17, height: 17)
                                 Text(module.title)
-                                    .font(LifeOSFont.inter(13, weight: .medium))
+                                    .font(LifeOSFont.navigationLabel(13))
                                 Spacer()
                                 if !module.hasWorkingView {
                                     Text("Not connected")
-                                        .font(LifeOSFont.inter(11))
+                                        .font(LifeOSFont.metadata())
                                         .foregroundStyle(LifeOSTokens.tertiaryText)
                                 }
                             }

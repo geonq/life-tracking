@@ -62,6 +62,20 @@ public enum LifeOSModule: String, CaseIterable, Hashable, Identifiable, Sendable
         }
     }
 
+    public var accent: Color {
+        switch self {
+        case .home: LifeOSTokens.Module.usage
+        case .finance, .bankConnections, .investments: LifeOSTokens.Module.finance
+        case .calendar: LifeOSTokens.Module.calendar
+        case .fitness: LifeOSTokens.Module.fitness
+        case .tasks, .grocery, .shopping: LifeOSTokens.Module.tasks
+        case .tax, .business, .documents: LifeOSTokens.Module.tax
+        case .aiUsage: LifeOSTokens.Module.usage
+        case .reports: LifeOSTokens.Module.business
+        case .settings: LifeOSTokens.secondaryText
+        }
+    }
+
     public var subtitle: String {
         switch self {
         case .home: "A quiet view of what matters now"
@@ -280,19 +294,20 @@ public struct LifeOSModuleLandingView: View {
         HStack(alignment: .top, spacing: 14) {
             ZStack {
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(LifeOSTokens.accent.opacity(0.12))
+                    .fill(module.accent.opacity(0.12))
                 LifeOSIcon(module.icon)
-                    .foregroundStyle(LifeOSTokens.accent)
+                    .foregroundStyle(module.accent)
                     .frame(width: 24, height: 24)
             }
             .frame(width: 52, height: 52)
 
             VStack(alignment: .leading, spacing: 5) {
                 Text(module.title)
-                    .font(LifeOSFont.spaceGrotesk(28, weight: .bold))
+                    .font(LifeOSFont.pageTitle(30))
+                    .tracking(-0.35)
                 Text(module.subtitle)
-                    .font(LifeOSFont.inter(14))
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .font(LifeOSFont.supportingText())
+                    .foregroundStyle(LifeOSTokens.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -302,20 +317,19 @@ public struct LifeOSModuleLandingView: View {
     private var statusCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                Circle()
-                    .fill(LifeOSTokens.warning)
-                    .frame(width: 8, height: 8)
-                Text("Not connected")
-                    .font(LifeOSFont.inter(13, weight: .semiBold))
-                    .foregroundStyle(LifeOSTokens.warning)
+                LifeOSStatusPill(
+                    label: "Not connected",
+                    tone: .warning,
+                    systemImage: "exclamationmark.circle"
+                )
             }
             Text(module.unavailableMessage)
-                .font(LifeOSFont.inter(14))
-                .foregroundStyle(.primary)
+                .font(LifeOSFont.bodyText())
+                .foregroundStyle(LifeOSTokens.primaryText)
                 .fixedSize(horizontal: false, vertical: true)
             Text("Unavailable values stay unavailable until a reviewed source is available.")
-                .font(LifeOSFont.inter(12))
-                .foregroundStyle(LifeOSTokens.tertiaryText)
+                .font(LifeOSFont.metadata())
+                .foregroundStyle(LifeOSTokens.secondaryText)
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -441,14 +455,14 @@ public struct LifeOSMoreModulesView: View {
         } label: {
             HStack(spacing: 14) {
                 LifeOSIcon(module.icon)
-                    .foregroundStyle(LifeOSTokens.accent)
+                    .foregroundStyle(module.accent)
                     .frame(width: 22, height: 22)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(module.title)
-                        .font(LifeOSFont.inter(15, weight: .semiBold))
+                        .font(LifeOSFont.navigationLabel(15))
                         .foregroundStyle(.primary)
                     Text(module.hasWorkingView ? "Open" : "Not connected")
-                        .font(LifeOSFont.inter(12))
+                        .font(LifeOSFont.metadata())
                         .foregroundStyle(module.hasWorkingView ? LifeOSTokens.success : LifeOSTokens.tertiaryText)
                 }
                 Spacer(minLength: 12)

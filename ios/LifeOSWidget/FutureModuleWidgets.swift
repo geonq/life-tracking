@@ -156,18 +156,26 @@ private func futureModuleAccessibilityState(_ state: WidgetAggregateAvailability
 private struct FutureModuleWidgetHeader: View {
     let title: String
     let icon: LifeOSIconName
+    let accent: Color
 
     @Environment(\.lifeOSWidgetChrome) private var chrome
 
+    init(title: String, icon: LifeOSIconName, accent: Color = LifeOSTokens.accent) {
+        self.title = title
+        self.icon = icon
+        self.accent = accent
+    }
+
     var body: some View {
+        let iconColor = chrome.usesTransparentTreatment ? chrome.secondary : accent
         HStack(spacing: 7) {
             LifeOSIcon(icon)
                 .frame(width: 16, height: 16)
-                .foregroundStyle(chrome.tertiary)
+                .foregroundStyle(iconColor)
             Text(title)
-                .font(.system(size: 13, weight: .semibold))
+                .font(LifeOSFont.widgetHeader())
                 .foregroundStyle(chrome.hero)
-            Spacer(minLength: 0)
+                Spacer(minLength: 0)
         }
     }
 }
@@ -318,7 +326,7 @@ struct NetWorthWidgetView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            FutureModuleWidgetHeader(title: "Net Worth", icon: .savings)
+            FutureModuleWidgetHeader(title: "Net Worth", icon: .netWorth, accent: LifeOSTokens.Module.finance)
 
             if let netWorth = entry.snapshot.finance.netWorthCents,
                entry.snapshot.financeDisplayState(at: entry.date) == .fresh || entry.snapshot.financeDisplayState(at: entry.date) == .stale {
@@ -368,7 +376,7 @@ struct SpendRingWidgetView: View {
 
     var body: some View {
         VStack(spacing: 8) {
-            FutureModuleWidgetHeader(title: "Spend", icon: .budget)
+            FutureModuleWidgetHeader(title: "Spend", icon: .spending, accent: LifeOSTokens.Module.finance)
 
             Spacer(minLength: 0)
             if let spend = entry.snapshot.finance.spendCents,
@@ -428,7 +436,7 @@ struct CashFlowWidgetView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            FutureModuleWidgetHeader(title: "Cash Flow", icon: .revenue)
+            FutureModuleWidgetHeader(title: "Cash Flow", icon: .cashFlow, accent: LifeOSTokens.Module.finance)
 
             if let cashFlow = entry.snapshot.finance.cashFlowCents,
                entry.snapshot.financeDisplayState(at: entry.date) == .fresh || entry.snapshot.financeDisplayState(at: entry.date) == .stale {
@@ -480,7 +488,7 @@ struct HealthMonitorWidgetView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            FutureModuleWidgetHeader(title: "Health Monitor", icon: .health)
+            FutureModuleWidgetHeader(title: "Health Monitor", icon: .health, accent: LifeOSTokens.Module.fitness)
 
             if let health = entry.snapshot.fitness.healthScore,
                entry.snapshot.fitnessDisplayState(at: entry.date) == .fresh || entry.snapshot.fitnessDisplayState(at: entry.date) == .stale {
@@ -542,7 +550,7 @@ struct RecoveryRingWidgetView: View {
             HStack(spacing: 5) {
                 LifeOSIcon(.heartRate)
                     .frame(width: 14, height: 14)
-                    .foregroundStyle(chrome.tertiary)
+                    .foregroundStyle(chrome.usesTransparentTreatment ? chrome.secondary : LifeOSTokens.Module.fitness)
                 Text("Recovery")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(chrome.hero)
@@ -593,7 +601,7 @@ struct TasksSmallWidgetView: View {
 
     var body: some View {
         VStack(spacing: 8) {
-            FutureModuleWidgetHeader(title: "Today's Tasks", icon: .done)
+            FutureModuleWidgetHeader(title: "Today's Tasks", icon: .tasks, accent: LifeOSTokens.Module.tasks)
 
             Spacer(minLength: 0)
             FutureModuleUnavailableHero(
@@ -626,7 +634,7 @@ struct TasksMediumWidgetView: View {
 
     var body: some View {
         HStack(spacing: 14) {
-            FutureModuleWidgetHeader(title: "Today's Tasks", icon: .done)
+            FutureModuleWidgetHeader(title: "Today's Tasks", icon: .tasks, accent: LifeOSTokens.Module.tasks)
                 .frame(maxWidth: 132, alignment: .topLeading)
 
             Divider()
@@ -732,9 +740,13 @@ private struct NutritionWidgetHeader: View {
     @Environment(\.lifeOSWidgetChrome) private var chrome
 
     var body: some View {
+        let iconColor = chrome.usesTransparentTreatment ? chrome.secondary : LifeOSTokens.Module.nutrition
         HStack(alignment: .firstTextBaseline, spacing: 7) {
+            LifeOSIcon(.grocery)
+                .frame(width: 15, height: 15)
+                .foregroundStyle(iconColor)
             Text(title)
-                .font(.system(size: 13, weight: .bold, design: .rounded))
+                .font(LifeOSFont.widgetHeader())
                 .foregroundStyle(chrome.hero)
                 .lineLimit(1)
             Spacer(minLength: 4)
@@ -1247,16 +1259,24 @@ func fitnessWidgetDemoDisclosure(_ fitness: WidgetSafeFitnessWidgetsSummary) -> 
 private struct FitnessCompactWidgetHeader: View {
     let title: String
     let icon: LifeOSIconName
+    let accent: Color
 
     @Environment(\.lifeOSWidgetChrome) private var chrome
 
+    init(title: String, icon: LifeOSIconName, accent: Color = LifeOSTokens.Module.fitness) {
+        self.title = title
+        self.icon = icon
+        self.accent = accent
+    }
+
     var body: some View {
+        let iconColor = chrome.usesTransparentTreatment ? chrome.secondary : accent
         HStack(spacing: 5) {
             LifeOSIcon(icon)
                 .frame(width: 12, height: 12)
-                .foregroundStyle(chrome.tertiary)
+                .foregroundStyle(iconColor)
             Text(title)
-                .font(.system(size: 11, weight: .semibold))
+                .font(LifeOSFont.widgetHeader(11))
                 .foregroundStyle(chrome.hero)
             Spacer(minLength: 0)
         }
@@ -1476,7 +1496,7 @@ struct FitnessHealthMonitorWidgetView: View {
         let fitness = entry.snapshot.fitnessWidgets
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                FutureModuleWidgetHeader(title: "Health Monitor", icon: .health)
+                FutureModuleWidgetHeader(title: "Health Monitor", icon: .health, accent: LifeOSTokens.Module.fitness)
                 if fitness.isDemoFixture { FitnessDemoBadge() }
             }
             HStack(alignment: .top, spacing: 2) {
@@ -1571,7 +1591,7 @@ struct FitnessStressWidgetView: View {
         } ?? Array(repeating: "—", count: 4)
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .center, spacing: 7) {
-                FutureModuleWidgetHeader(title: "Stress", icon: .health)
+                FutureModuleWidgetHeader(title: "Stress", icon: .health, accent: LifeOSTokens.Module.fitness)
                 if fitness.isDemoFixture { FitnessDemoBadge() }
                 Spacer(minLength: 0)
                 Text(fitnessWidgetFreshness(fitness.stressScore, at: entry.date))
@@ -1641,7 +1661,7 @@ struct FitnessEnergyReserveWidgetView: View {
         let state = energy.displayState(at: entry.date)
         VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .firstTextBaseline, spacing: 7) {
-                FitnessCompactWidgetHeader(title: "Energy Reserve", icon: .fitness)
+                FitnessCompactWidgetHeader(title: "Energy Reserve", icon: .fitness, accent: LifeOSTokens.Module.fitness)
                 if fitness.isDemoFixture { FitnessDemoBadge(compact: true) }
                 Spacer(minLength: 0)
                 Text(futureModuleStateText(state))
