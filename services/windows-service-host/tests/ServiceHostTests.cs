@@ -90,6 +90,7 @@ public sealed class ServiceHostTests
             ["LIFEOS_DATA_DIR"] = fixture.Root,
             ["LIFEOS_SUPPLEMENT_CATALOG_PATH"] = fixture.StorePath,
             ["LIFEOS_TAILSCALE_ALLOWED_LOGIN"] = "operator@example.test",
+            ["LIFEOS_TAILSCALE_SERVICE_NAME"] = "Tailscale",
             ["CLIPPER_INGEST_ENABLED"] = true,
             ["CLIPPER_INGEST_SECRET_FILE"] = fixture.SecretPath,
             ["GOOGLE_AI_STUDIO_ENABLED"] = true,
@@ -117,6 +118,22 @@ public sealed class ServiceHostTests
             "\"environment\":{\"GOOGLE_AI_STUDIO_API_KEY\":\"raw-secret\"}",
             StringComparison.Ordinal);
         Assert.Throws<ConfigValidationException>(() => ServiceHostConfigLoader.ParseAndValidate(Encoding.UTF8.GetBytes(rawKey)));
+    }
+
+    [Fact]
+    public void ConfigValidationRejectsTailscaleServiceNamesTheLauncherCannotProve()
+    {
+        using var fixture = TestFixture.Create();
+        var valid = fixture.ValidJson();
+
+        foreach (var serviceName in new[] { "Tailscale/evil", new string('a', 81) })
+        {
+            var invalid = valid.Replace(
+                "\"environment\":{}",
+                $"\"environment\":{{\"LIFEOS_TAILSCALE_SERVICE_NAME\":{JsonSerializer.Serialize(serviceName)}}}",
+                StringComparison.Ordinal);
+            Assert.Throws<ConfigValidationException>(() => ServiceHostConfigLoader.ParseAndValidate(Encoding.UTF8.GetBytes(invalid)));
+        }
     }
 
     [Fact]

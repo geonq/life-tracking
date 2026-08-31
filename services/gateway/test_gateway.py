@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -14,13 +15,15 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 os.environ["LIFEOS_TAILSCALE_ALLOWED_LOGIN"] = "test-user@example.com"
+os.environ["LIFEOS_TAILSCALE_EDGE_TOKEN"] = "e" * 64
 
 import main
 from main import app
 
 client = TestClient(app)
 TAILSCALE_IDENTITY = {"Tailscale-User-Login": "test-user@example.com"}
-AUTH = dict(TAILSCALE_IDENTITY)
+EDGE_AUTH = {"X-LifeOS-Trusted-Edge": "e" * 64, **TAILSCALE_IDENTITY}
+AUTH = dict(EDGE_AUTH)
 USAGE_OBSERVED_AT = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat().replace("+00:00", "Z")
 VALID = {
     "generatedAt": USAGE_OBSERVED_AT,
@@ -273,8 +276,293 @@ def test_http_requires_exact_single_tailscale_login():
     ).status_code == 403
 
 
+def test_canonical_serve_identity_without_trusted_edge_cannot_authorize():
+    assert client.get("/usage", headers=TAILSCALE_IDENTITY).status_code == 403
+    assert client.get(
+        "/usage",
+        headers={**TAILSCALE_IDENTITY, "X-LifeOS-Trusted-Edge": "wrong-" + "e" * 64},
+    ).status_code == 403
+    assert client.get(
+        "/usage",
+        headers=[
+            ("Tailscale-User-Login", "test-user@example.com"),
+            ("X-LifeOS-Trusted-Edge", "e" * 64),
+            ("X-LifeOS-Trusted-Edge", "e" * 64),
+        ],
+    ).status_code == 403
+
+
+def test_forged_alternate_identity_headers_cannot_authorize_protected_routes():
+    forged_headers = [
+        {"Authorization": "Bearer old-transitional-token"},
+        {"X-Tailscale-User-Login": "test-user@example.com"},
+        {"X-Forwarded-User": "test-user@example.com"},
+        {"Remote-User": "test-user@example.com"},
+        {"Tailscale-User-Name": "test-user@example.com"},
+        {
+            "Tailscale-User-Login": "other-user@example.com",
+            "Tailscale-User-Name": "test-user@example.com",
+            "Authorization": "Bearer old-transitional-token",
+        },
+    ]
+    for headers in forged_headers:
+        assert client.get("/health", headers=headers).status_code == 200
+        assert client.get("/usage", headers=headers).status_code == 403
+
+    assert client.get(
+        "/usage",
+        headers=[
+            ("Tailscale-User-Login", "test-user@example.com"),
+            ("Tailscale-User-Login", "other-user@example.com"),
+        ],
+    ).status_code == 403
+
+
 def test_health_probe_remains_available_without_identity_or_bearer():
     assert client.get("/health").status_code == 200
+
+
+def test_calendar_uses_versioned_etag_if_match_and_bounded_idempotent_replay(tmp_path, monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "CALENDAR_PATH", tmp_path / "calendar.json")
+    initial = client.get("/calendar", headers=AUTH)
+    assert initial.status_code == 200
+    assert initial.json() == {"schemaVersion": 1, "items": []}
+    assert re.fullmatch(r'"calendar-v1-r0-[0-9a-f]{64}"', initial.headers["etag"])
+    assert initial.headers["x-lifeos-schema-version"] == "1"
+    assert initial.headers["x-lifeos-revision"] == "0"
+
+    first_body = {"schemaVersion": 1, "items": [{"id": "event-1", "isDeleted": False}]}
+    first_headers = {
+        **AUTH,
+        "content-type": "application/json",
+        "if-match": initial.headers["etag"],
+        "idempotency-key": "calendar-write-1",
+    }
+    accepted = client.put("/calendar", headers=first_headers, content=json.dumps(first_body))
+    assert accepted.status_code == 200
+    assert accepted.json() == first_body
+    assert accepted.headers["x-lifeos-revision"] == "1"
+    assert accepted.headers["etag"] != initial.headers["etag"]
+    assert (tmp_path / "calendar.json.meta.json").is_file()
+
+    stale = client.put(
+        "/calendar",
+        headers={**first_headers, "idempotency-key": "calendar-stale"},
+        content=json.dumps({"schemaVersion": 1, "items": [{"id": "stale"}]}),
+    )
+    assert stale.status_code == 412
+    assert stale.content == accepted.content
+    assert stale.headers["etag"] == accepted.headers["etag"]
+
+    for _ in range(10):
+        replay = client.put("/calendar", headers=first_headers, content=json.dumps(first_body))
+        assert replay.status_code == 200
+        assert replay.headers["x-lifeos-idempotent-replay"] == "true"
+        assert replay.content == accepted.content
+
+    reuse = client.put(
+        "/calendar", headers=first_headers,
+        content=json.dumps({"schemaVersion": 1, "items": [{"id": "different"}]}),
+    )
+    assert reuse.status_code == 409
+    assert reuse.content == accepted.content
+
+
+def test_calendar_idempotency_window_rolls_forward_and_survives_restart(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "CALENDAR_PATH", tmp_path / "calendar.json")
+    monkeypatch.setattr(main, "CALENDAR_MAX_IDEMPOTENCY_RECORDS", 2)
+
+    current = client.get("/calendar", headers=AUTH)
+    accepted = []
+    for index in range(3):
+        body = {"schemaVersion": 1, "items": [{"id": f"rollover-{index}"}]}
+        headers = {
+            **AUTH,
+            "content-type": "application/json",
+            "if-match": current.headers["etag"],
+            "idempotency-key": f"rollover-write-{index}",
+        }
+        response = client.put("/calendar", headers=headers, json=body)
+        assert response.status_code == 200
+        accepted.append((headers, body, response))
+        current = response
+
+    assert current.headers["x-lifeos-revision"] == "3"
+    state_body, _document, metadata = main._load_calendar_state()
+    assert json.loads(state_body)["schemaVersion"] == 1
+    assert [record["key"] for record in metadata["idempotency"]] == [
+        "rollover-write-1",
+        "rollover-write-2",
+    ]
+    assert [record["revision"] for record in metadata["idempotency"]] == [2, 3]
+
+    # The newest retained key is still a replay after the journal rolled over;
+    # replaying it does not create revision 4.
+    replay = client.put(
+        "/calendar",
+        headers=accepted[2][0],
+        json=accepted[2][1],
+    )
+    assert replay.status_code == 200
+    assert replay.headers["x-lifeos-idempotent-replay"] == "true"
+    assert replay.headers["x-lifeos-revision"] == "3"
+
+    # The expired key is not silently accepted with its stale conditional
+    # token.  A process restart sees the same bounded, durable window.
+    expired = client.put(
+        "/calendar",
+        headers=accepted[0][0],
+        json=accepted[0][1],
+    )
+    assert expired.status_code == 412
+    assert expired.headers["x-lifeos-revision"] == "3"
+    _restarted_body, _restarted_document, restarted_metadata = main._load_calendar_state()
+    assert [record["key"] for record in restarted_metadata["idempotency"]] == [
+        "rollover-write-1",
+        "rollover-write-2",
+    ]
+
+
+def test_calendar_rejects_missing_identity_conditional_headers_and_torn_state(tmp_path, monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "CALENDAR_PATH", tmp_path / "calendar.json")
+    assert client.get("/calendar").status_code == 403
+    initial = client.get("/calendar", headers=AUTH)
+    body = json.dumps({"schemaVersion": 1, "items": []})
+    assert client.put("/calendar", headers={**AUTH, "content-type": "application/json"}, content=body).status_code == 428
+    assert client.put(
+        "/calendar",
+        headers={**AUTH, "content-type": "application/json", "if-match": initial.headers["etag"]},
+        content=body,
+    ).status_code == 400
+    assert client.put(
+        "/calendar",
+        headers={**AUTH, "content-type": "application/json", "if-match": "W/\"weak\"", "idempotency-key": "bad"},
+        content=body,
+    ).status_code == 400
+    assert client.put(
+        "/calendar",
+        headers={**AUTH, "content-type": "application/json", "if-match": '"calendar-v1-r9007199254740992-' + "a" * 64 + '"', "idempotency-key": "unsafe-revision"},
+        content=body,
+    ).status_code == 400
+
+    # A truncated committed envelope is a bounded recovery failure. The
+    # compatibility projection is deliberately not a fallback once the
+    # authoritative state file exists.
+    (tmp_path / "calendar.json.state.json").write_text("{\"schemaVersion\":1,\"bodyBase64\":")
+    assert client.get("/calendar", headers=AUTH).status_code == 503
+
+
+def test_calendar_ignores_an_interrupted_temporary_publish_and_keeps_last_commit(tmp_path, monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "CALENDAR_PATH", tmp_path / "calendar.json")
+    initial = client.get("/calendar", headers=AUTH)
+    body = {"schemaVersion": 1, "items": [{"id": "committed"}]}
+    accepted = client.put(
+        "/calendar",
+        headers={
+            **AUTH,
+            "content-type": "application/json",
+            "if-match": initial.headers["etag"],
+            "idempotency-key": "committed-write",
+        },
+        json=body,
+    )
+    assert accepted.status_code == 200
+    state_path = tmp_path / "calendar.json.state.json"
+    committed_state = state_path.read_bytes()
+    (tmp_path / ".calendar.json.state.json.interrupted.tmp").write_bytes(b"{\"schemaVersion\":1")
+
+    current = client.get("/calendar", headers=AUTH)
+    assert current.status_code == 200
+    assert current.json() == body
+    assert state_path.read_bytes() == committed_state
+
+
+def test_calendar_authoritative_commit_survives_projection_failure_and_replay_repairs_and_rebroadcasts(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "CALENDAR_PATH", tmp_path / "calendar.json")
+    events = []
+
+    async def capture(message):
+        events.append(message)
+
+    monkeypatch.setattr(main.broadcaster, "broadcast", capture)
+    original_write = main._atomic_write_bytes
+    projection_failed = False
+
+    def fail_projection_once(path, data):
+        nonlocal projection_failed
+        if path == tmp_path / "calendar.json.meta.json" and not projection_failed:
+            projection_failed = True
+            raise OSError("projection unavailable")
+        return original_write(path, data)
+
+    monkeypatch.setattr(main, "_atomic_write_bytes", fail_projection_once)
+    initial = client.get("/calendar", headers=AUTH)
+    body = {"schemaVersion": 1, "items": [{"id": "projection-recovery"}]}
+    headers = {
+        **AUTH,
+        "content-type": "application/json",
+        "if-match": initial.headers["etag"],
+        "idempotency-key": "projection-recovery-write",
+    }
+
+    accepted = client.put("/calendar", headers=headers, json=body)
+    assert accepted.status_code == 200
+    assert accepted.headers["x-lifeos-projection-repair"] == "pending"
+    assert (tmp_path / "calendar.json.state.json").is_file()
+    assert (tmp_path / "calendar.json.retry.json").is_file()
+    assert not (tmp_path / "calendar.json.meta.json").is_file()
+
+    replay = client.put("/calendar", headers=headers, json=body)
+    assert replay.status_code == 200
+    assert replay.headers["x-lifeos-idempotent-replay"] == "true"
+    assert replay.headers.get("x-lifeos-projection-repair") is None
+    assert (tmp_path / "calendar.json.meta.json").is_file()
+    assert (tmp_path / "calendar.json").read_bytes() == accepted.content
+    assert not (tmp_path / "calendar.json.retry.json").exists()
+    assert events == [
+        {"type": "calendar_changed", "revision": 1},
+        {"type": "calendar_changed", "revision": 1},
+    ]
+
+
+def test_calendar_broadcast_failure_returns_success_and_replay_rebroadcasts(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "CALENDAR_PATH", tmp_path / "calendar.json")
+    broadcast_calls = []
+
+    async def fail_broadcast(_message):
+        broadcast_calls.append("failed")
+        raise RuntimeError("websocket fan-out unavailable")
+
+    monkeypatch.setattr(main.broadcaster, "broadcast", fail_broadcast)
+    initial = client.get("/calendar", headers=AUTH)
+    body = {"schemaVersion": 1, "items": [{"id": "broadcast-recovery"}]}
+    headers = {
+        **AUTH,
+        "content-type": "application/json",
+        "if-match": initial.headers["etag"],
+        "idempotency-key": "broadcast-recovery-write",
+    }
+
+    accepted = client.put("/calendar", headers=headers, json=body)
+    assert accepted.status_code == 200
+    assert len(broadcast_calls) == 1
+
+    replayed = []
+
+    async def capture_replay(message):
+        replayed.append(message)
+
+    monkeypatch.setattr(main.broadcaster, "broadcast", capture_replay)
+    replay = client.put("/calendar", headers=headers, json=body)
+    assert replay.status_code == 200
+    assert replay.headers["x-lifeos-idempotent-replay"] == "true"
+    assert replayed == [{"type": "calendar_changed", "revision": 1}]
 
 
 def test_websocket_requires_identity():
@@ -292,9 +580,16 @@ def test_websocket_requires_identity():
     assert wrong_identity.value.code == 4403
 
 
-def test_websocket_accepts_identity_only():
+def test_websocket_accepts_trusted_serve_identity():
     with client.websocket_connect("/ws", headers=AUTH) as websocket:
         websocket.close()
+
+
+def test_websocket_rejects_canonical_identity_without_trusted_edge():
+    with pytest.raises(WebSocketDisconnect) as missing_edge:
+        with client.websocket_connect("/ws", headers=TAILSCALE_IDENTITY):
+            pass
+    assert missing_edge.value.code == 4403
 
 
 def test_usage_malformed_payload():
@@ -519,6 +814,7 @@ def test_usage_rejects_observed_window_contradictory_freshness_or_connector(fres
 
 def test_usage_accepts_observed_rate_limited_and_stale_truth():
     rate_limited = _usage_payload_with_window(usedPercent=100, connectorState="rate_limited")
+    rate_limited["connectors"]["codex"] = "rate_limited"
     with request_with(FakeResponse(json.dumps(rate_limited).encode())):
         assert client.get("/usage", headers=AUTH).status_code == 200
 
@@ -526,8 +822,16 @@ def test_usage_accepts_observed_rate_limited_and_stale_truth():
     stale = _usage_payload_with_window(
         freshness="stale", connectorState="refresh_due", observedAt=stale_at
     )
+    stale["connectors"]["codex"] = "refresh_due"
     with request_with(FakeResponse(json.dumps(stale).encode())):
         assert client.get("/usage", headers=AUTH).status_code == 200
+
+
+def test_usage_rejects_connector_state_that_contradicts_observed_window():
+    stale_at = (datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat().replace("+00:00", "Z")
+    payload = _usage_payload_with_window(freshness="stale", connectorState="refresh_due", observedAt=stale_at)
+    payload["connectors"]["codex"] = "healthy"
+    _assert_usage_unavailable(payload)
 
 
 def test_usage_rejects_future_generated_and_provenance_timestamps():
@@ -568,6 +872,7 @@ def test_usage_accepts_distinct_window_and_estimate_provider_keys():
     second_window["provider"] = "claude"
     second_window["provenance"]["source"] = "claude-statusline"
     payload["windows"].append(second_window)
+    payload["connectors"]["claude"] = "healthy"
     second_estimate = copy.deepcopy(payload["estimates"][0])
     second_estimate["provider"] = "claude"
     payload["estimates"].append(second_estimate)
@@ -737,10 +1042,10 @@ def test_claude_ingest_accepts_identity_only_and_forwards_allowlisted_json_to_ex
     assert len(calls) == 1
     url, options = calls[0]
     assert url == main.CLAUDE_INGEST_UPSTREAM == "http://127.0.0.1:8787/api/usage/claude-ingest"
-    assert options["headers"] == {
-        "Authorization": "Bearer " + "s" * 32,
-        "Content-Type": "application/json",
-    }
+    assert options["headers"]["Authorization"] == "Bearer " + "s" * 32
+    assert options["headers"]["Content-Type"] == "application/json"
+    assert re.fullmatch(r"[0-9a-f]{64}", options["headers"]["Idempotency-Key"])
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT.*Z", options["headers"]["X-Observed-At"])
     assert json.loads(options["content"]) == VALID_CLAUDE_INGEST
     assert b"source-client-secret" not in options["content"]
     assert options["content"] != json.dumps(VALID_CLAUDE_INGEST).encode()
@@ -766,6 +1071,42 @@ def test_claude_ingest_forwards_only_a_validated_capture_timestamp(tmp_path, mon
         headers=ingest_headers(**{"X-Observed-At": "not-a-timestamp"}),
         content=json.dumps(VALID_CLAUDE_INGEST).encode(),
     ).status_code == 400
+
+
+def test_claude_ingest_without_capture_time_derives_a_stable_replay_key(tmp_path, monkeypatch):
+    configure_ingest_secret(tmp_path, monkeypatch)
+    calls = []
+    with patch("main.httpx.AsyncClient", lambda **kwargs: FakeIngestClient(calls, **kwargs)):
+        first = client.post(
+            CLAUDE_INGEST,
+            headers=ingest_headers(),
+            content=json.dumps(VALID_CLAUDE_INGEST).encode(),
+        )
+        second = client.post(
+            CLAUDE_INGEST,
+            headers=ingest_headers(),
+            content=json.dumps(VALID_CLAUDE_INGEST).encode(),
+        )
+    assert first.status_code == second.status_code == 204
+    assert len(calls) == 2
+    first_key = calls[0][1]["headers"]["Idempotency-Key"]
+    second_key = calls[1][1]["headers"]["Idempotency-Key"]
+    assert first_key == second_key == hashlib.sha256(calls[0][1]["content"]).hexdigest()
+
+
+def test_claude_ingest_rejects_duplicate_transport_headers(tmp_path, monkeypatch):
+    configure_ingest_secret(tmp_path, monkeypatch)
+    response = client.post(
+        CLAUDE_INGEST,
+        headers=[
+            ("Tailscale-User-Login", "test-user@example.com"),
+            ("X-LifeOS-Trusted-Edge", "e" * 64),
+            ("content-type", "application/json"),
+            ("content-type", "application/json"),
+        ],
+        content=json.dumps(VALID_CLAUDE_INGEST).encode(),
+    )
+    assert response.status_code == 415
 
 
 def test_claude_ingest_identity_is_the_only_remote_auth_gate(tmp_path, monkeypatch):
@@ -1255,7 +1596,7 @@ def test_finance_summary_accepts_account_only_observation_and_unavailable_omissi
     payload["accounts"] = {
         "availability": "observed",
         "accounts": [{
-            "id": "account-1", "name": "Girokonto", "detail": "EUR",
+            "availability": "observed", "id": "account-1", "name": "Girokonto", "detail": "EUR",
             "balanceCents": 125_000, "source": "sparkasse_leipzig",
             "provenance": provenance,
         }],
@@ -1285,7 +1626,7 @@ def test_finance_summary_rejects_account_overflow_source_mismatch_and_bad_proven
     payload["accounts"] = {
         "availability": "observed",
         "accounts": [{
-            "id": "account-2", "name": "Personal", "detail": "EUR",
+            "availability": "observed", "id": "account-2", "name": "Personal", "detail": "EUR",
             "balanceCents": -4_200, "source": "revolut_personal", "provenance": provenance,
         }],
         "provenance": provenance,
@@ -1318,7 +1659,7 @@ def test_finance_summary_accepts_mixed_account_and_transaction_snapshot_but_reje
     payload["accounts"] = {
         "availability": "observed",
         "accounts": [{
-            "id": "account-2", "name": "Personal", "detail": "EUR",
+            "availability": "observed", "id": "account-2", "name": "Personal", "detail": "EUR",
             "balanceCents": -4_200, "source": "revolut_personal", "provenance": provenance,
         }],
         "provenance": provenance,
@@ -1366,7 +1707,7 @@ def test_finance_validator_is_total_for_missing_top_level_and_nested_values():
         "freshness": "fresh", "quality": "observed", "connectorState": "healthy",
     }
     account = {
-        "id": "account-1", "name": "Personal", "detail": "EUR",
+        "availability": "observed", "id": "account-1", "name": "Personal", "detail": "EUR",
         "balanceCents": 100, "source": "revolut_personal", "provenance": observed_provenance,
     }
     transaction = {
@@ -1403,7 +1744,7 @@ def test_finance_validator_enforces_age_order_worst_freshness_and_source_reconci
     payload["accounts"] = {
         "availability": "observed",
         "accounts": [{
-            "id": "account-1", "name": "Personal", "detail": "EUR",
+            "availability": "observed", "id": "account-1", "name": "Personal", "detail": "EUR",
             "balanceCents": 100, "source": "revolut_personal", "provenance": stale,
         }],
         "provenance": fresh,
@@ -1464,6 +1805,7 @@ def test_finance_metrics_require_age_consistent_observed_provenance():
         },
     }
     assert not main._validate_finance_payload(payload)
+    assert main._validate_persisted_finance_payload(payload)
     payload["spent"]["provenance"]["freshness"] = "stale"
     payload["spent"]["provenance"]["connectorState"] = "refresh_due"
     assert main._validate_finance_payload(payload)
@@ -1486,7 +1828,7 @@ def test_finance_validator_keeps_empty_observed_ledgers_truthful_and_rejects_sen
     sensitive["accounts"] = {
         "availability": "observed",
         "accounts": [{
-            "id": "account-1", "name": "Personal", "detail": "Bearer should-not-escape",
+            "availability": "observed", "id": "account-1", "name": "Personal", "detail": "Bearer should-not-escape",
             "balanceCents": 100, "source": "revolut_personal", "provenance": provenance,
         }],
         "provenance": provenance,

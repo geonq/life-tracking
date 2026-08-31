@@ -11,6 +11,7 @@ never persisted or returned to the client.
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import hmac
 import json
@@ -62,10 +63,21 @@ class EnableBankingService:
     # The final normalized envelope must fit the native client's bounded
     # read-only response contract. Provider pages may be larger while being
     # fetched, but the cached/returned snapshot may not be.
-    MAX_FINANCE_SUMMARY_SIZE = 1 * 1024 * 1024
+    # Finance is a telemetry/control response at the gateway boundary. Keep
+    # the provider-neutral envelope within the same 256 KiB cap as Usage,
+    # Calendar, Clipper, and Supplement responses.
+    MAX_FINANCE_SUMMARY_SIZE = 256 * 1024
     MAX_TRANSACTION_PAGES = 64
     MAX_TRANSACTIONS_PER_ACCOUNT = 5_000
     MAX_ASPSP_RESPONSE_SIZE = 4 * 1024 * 1024
+    FINANCE_METADATA_SCHEMA_VERSION = 1
+    FINANCE_STATE_SCHEMA_VERSION = 1
+    MAX_FINANCE_METADATA_SIZE = 4 * 1024 * 1024
+    MAX_FINANCE_STATE_SIZE = 6 * 1024 * 1024
+    MAX_FINANCE_JOURNAL_RECORDS = 10_000
+    MAX_FINANCE_REVISION = 9_007_199_254_740_991
+    MAX_CALLBACK_QUERY_SIZE = 4 * 1024
+    MAX_CALLBACK_FIELDS = 8
     REQUEST_TIMEOUT = httpx.Timeout(5.0, connect=2.0)
     TOTAL_TIMEOUT = 8.0
     FLOW_TTL_SECONDS = 60 * 60
@@ -109,9 +121,13 @@ class EnableBankingService:
         data_dir: Callable[[], Path],
         validate_finance_payload: Callable[[dict], bool],
         max_safe_cents: int,
+        validate_persisted_finance_payload: Callable[[dict], bool] | None = None,
     ) -> None:
         self._data_dir = data_dir
         self._validate_finance_payload = validate_finance_payload
+        self._validate_persisted_finance_payload = (
+            validate_persisted_finance_payload or validate_finance_payload
+        )
         self._max_safe_cents = max_safe_cents
         self.consent_lock = asyncio.Lock()
         self.connections_lock = asyncio.Lock()
@@ -212,13 +228,42 @@ class EnableBankingService:
         directory = self._data_dir()
         directory.mkdir(parents=True, exist_ok=True)
         temporary = directory / f".{path.name}.{secrets.token_hex(8)}.tmp"
+        descriptor: int | None = None
         try:
-            temporary.write_text(
-                json.dumps(payload, separators=(",", ":"), sort_keys=True),
-                encoding="utf-8",
+            body = json.dumps(
+                payload,
+                separators=(",", ":"),
+                sort_keys=True,
+                allow_nan=False,
+            ).encode("utf-8")
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
             )
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = None
+                handle.write(body)
+                handle.flush()
+                os.fsync(handle.fileno())
             os.replace(temporary, path)
+            if os.name != "nt" and hasattr(os, "O_DIRECTORY"):
+                directory_descriptor: int | None = None
+                try:
+                    directory_descriptor = os.open(
+                        directory,
+                        os.O_RDONLY | os.O_DIRECTORY,
+                    )
+                    os.fsync(directory_descriptor)
+                except OSError as exc:
+                    if exc.errno not in {errno.EINVAL, errno.ENOTSUP, errno.EISDIR}:
+                        raise
+                finally:
+                    if directory_descriptor is not None:
+                        os.close(directory_descriptor)
         finally:
+            if descriptor is not None:
+                os.close(descriptor)
             try:
                 temporary.unlink()
             except FileNotFoundError:
@@ -229,6 +274,144 @@ class EnableBankingService:
 
     def _summary_path(self) -> Path:
         return self._data_dir() / "finance-summary.json"
+
+    def _summary_metadata_path(self) -> Path:
+        return Path(f"{self._summary_path()}.meta.json")
+
+    def _summary_state_path(self) -> Path:
+        return Path(f"{self._summary_path()}.state.json")
+
+    @staticmethod
+    def _summary_digest(value: object) -> str:
+        encoded = json.dumps(
+            value,
+            separators=(",", ":"),
+            sort_keys=True,
+            allow_nan=False,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    @classmethod
+    def _is_safe_revision(cls, value: object) -> bool:
+        return (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and 0 <= value <= cls.MAX_FINANCE_REVISION
+        )
+
+    @classmethod
+    def _validate_summary_metadata(cls, value: object) -> dict:
+        if not isinstance(value, dict) or set(value) != {
+            "schemaVersion", "domain", "authority", "revision",
+            "bodyDigest", "idempotency", "tombstones",
+        }:
+            raise EnableBankingUnavailable("invalid finance metadata")
+        if (
+            value["schemaVersion"] != cls.FINANCE_METADATA_SCHEMA_VERSION
+            or value["domain"] != "finance"
+            or value["authority"] != "gateway"
+            or not cls._is_safe_revision(value["revision"])
+            or not isinstance(value["bodyDigest"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", value["bodyDigest"])
+            or not isinstance(value["idempotency"], list)
+            or len(value["idempotency"]) > cls.MAX_FINANCE_JOURNAL_RECORDS
+            or value["tombstones"] != []
+        ):
+            raise EnableBankingUnavailable("invalid finance metadata")
+
+        seen_keys: set[str] = set()
+        for record in value["idempotency"]:
+            if not isinstance(record, dict) or set(record) != {"key", "fingerprint", "revision"}:
+                raise EnableBankingUnavailable("invalid finance idempotency record")
+            key = record["key"]
+            if (
+                not isinstance(key, str)
+                or not re.fullmatch(r"[\x21-\x7e]{1,128}", key)
+                or key in seen_keys
+                or not isinstance(record["fingerprint"], str)
+                or not re.fullmatch(r"[0-9a-f]{64}", record["fingerprint"])
+                or not cls._is_safe_revision(record["revision"])
+                or record["revision"] > value["revision"]
+            ):
+                raise EnableBankingUnavailable("invalid finance idempotency record")
+            seen_keys.add(key)
+        return value
+
+    def _read_summary_metadata(self) -> dict | None:
+        path = self._summary_metadata_path()
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return None
+        raw = self._read_bounded_json_file(path, self.MAX_FINANCE_METADATA_SIZE)
+        if raw is None:
+            raise EnableBankingUnavailable("finance metadata unavailable")
+        return self._validate_summary_metadata(raw)
+
+    def _read_summary_state(self) -> tuple[dict, dict] | None:
+        """Read the single committed Finance summary/metadata envelope."""
+        path = self._summary_state_path()
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return None
+        raw = self._read_bounded_json_file(path, self.MAX_FINANCE_STATE_SIZE)
+        if not isinstance(raw, dict) or set(raw) != {
+            "schemaVersion", "summary", "metadata",
+        } or raw["schemaVersion"] != self.FINANCE_STATE_SCHEMA_VERSION:
+            raise EnableBankingUnavailable("finance state unavailable")
+        summary = raw["summary"]
+        if not isinstance(summary, dict):
+            raise EnableBankingUnavailable("finance state summary unavailable")
+        metadata = self._validate_summary_metadata(raw["metadata"])
+        if self._summary_digest(summary) != metadata["bodyDigest"]:
+            raise EnableBankingUnavailable("finance state digest mismatch")
+        if not self._validate_persisted_finance_payload(summary):
+            raise EnableBankingUnavailable("finance state payload invalid")
+        return summary, metadata
+
+    def summary_revision(self) -> int | None:
+        """Return the durable Finance revision, or none for legacy/no state."""
+        try:
+            state = self._read_summary_state()
+            if state is not None:
+                return int(state[1]["revision"])
+            metadata = self._read_summary_metadata()
+        except EnableBankingUnavailable:
+            return None
+        return None if metadata is None else int(metadata["revision"])
+
+    def _next_summary_metadata(self, summary: dict) -> dict:
+        digest = self._summary_digest(summary)
+        committed = self._read_summary_state()
+        previous = committed[1] if committed is not None else self._read_summary_metadata()
+        if previous is None:
+            revision = 0
+            journal: list[dict] = []
+        else:
+            revision = int(previous["revision"])
+            journal = list(previous["idempotency"])
+
+        if previous is None or previous["bodyDigest"] != digest:
+            if revision >= self.MAX_FINANCE_REVISION:
+                raise EnableBankingUnavailable("finance revision exhausted")
+            revision += 1
+            key = f"finance-refresh-{digest}"
+            journal = [
+                *journal,
+                {"key": key, "fingerprint": digest, "revision": revision},
+            ][-self.MAX_FINANCE_JOURNAL_RECORDS:]
+        return {
+            "schemaVersion": self.FINANCE_METADATA_SCHEMA_VERSION,
+            "domain": "finance",
+            "authority": "gateway",
+            "revision": revision,
+            "bodyDigest": digest,
+            "idempotency": journal,
+            # Finance has no approved delete/revocation source in this adapter;
+            # retain the explicit empty branch rather than fabricating tombstones.
+            "tombstones": [],
+        }
 
     def _load_connections(self) -> list[dict]:
         raw = self._read_bounded_json_file(self._connections_path(), 256 * 1024)
@@ -276,8 +459,18 @@ class EnableBankingService:
         self._atomic_write_json(self._connections_path(), {"connections": existing[-32:]})
 
     def load_cached_summary(self) -> dict | None:
-        value = self._read_bounded_json_file(self._summary_path(), self.MAX_FINANCE_SUMMARY_SIZE)
-        if not isinstance(value, dict):
+        try:
+            committed = self._read_summary_state()
+            if committed is not None:
+                value, _metadata = committed
+            else:
+                value = self._read_bounded_json_file(self._summary_path(), self.MAX_FINANCE_SUMMARY_SIZE)
+                if not isinstance(value, dict):
+                    return None
+                metadata = self._read_summary_metadata()
+                if metadata is not None and self._summary_digest(value) != metadata["bodyDigest"]:
+                    return None
+        except (EnableBankingUnavailable, TypeError, ValueError):
             return None
         repaired = self._repair_cached_summary_categories(value)
         if self._validate_finance_payload(repaired):
@@ -290,7 +483,7 @@ class EnableBankingService:
         # and validate the complete result again before exposing it. This
         # never turns malformed or partial disk state into a usable snapshot.
         stale = self._mark_cached_summary_stale(repaired)
-        return stale if self._validate_finance_payload(stale) else None
+        return stale if self._validate_persisted_finance_payload(stale) else None
 
     @classmethod
     def _repair_cached_summary_categories(cls, value: object) -> object:
@@ -354,6 +547,13 @@ class EnableBankingService:
         }
         provenance = result.get("provenance")
         if isinstance(provenance, dict) and provenance.get("quality") == "observed":
+            account_rows = result.get("accounts")
+            has_observed_account = not isinstance(account_rows, list) or any(
+                isinstance(account, dict) and account.get("availability") == "observed"
+                for account in account_rows
+            )
+            if not has_observed_account:
+                return result
             result["provenance"] = {
                 **provenance,
                 "freshness": "stale",
@@ -781,7 +981,17 @@ class EnableBankingService:
         return {"state": state}
 
     async def callback(self, query: str) -> CallbackResult:
-        pairs = parse_qsl(query, keep_blank_values=True)
+        if not isinstance(query, str) or len(query) > self.MAX_CALLBACK_QUERY_SIZE:
+            return CallbackResult(valid=False)
+        try:
+            pairs = parse_qsl(
+                query,
+                keep_blank_values=True,
+                strict_parsing=True,
+                max_num_fields=self.MAX_CALLBACK_FIELDS,
+            )
+        except ValueError:
+            return CallbackResult(valid=False)
         values: dict[str, str] = {}
         for key, value in pairs:
             if key not in {"code", "state", "error", "error_description"}:
@@ -1116,10 +1326,37 @@ class EnableBankingService:
                 if fetched:
                     details = fetched
             currency = details.get("currency")
-            if currency != "EUR":
-                raise EnableBankingUnavailable("provider account is not EUR")
+            if not isinstance(currency, str) or not currency.strip():
+                raise EnableBankingUnavailable("provider account has no valid currency")
+            currency_code = currency.strip().upper()
+            if not re.fullmatch(r"[A-Z]{3}", currency_code):
+                raise EnableBankingUnavailable("provider account has an invalid currency")
             account_name = self._provider_text(details.get("name"), maximum=96)
             account_label = f"{connection['institutionId']} · {account_name or f'Account {index}'}"
+            source = f"enablebanking:{connection['institutionId']}"
+            account_id = "ebacct-" + hashlib.sha256(
+                f"{connection['institutionId']}|{uid}".encode("utf-8")
+            ).hexdigest()[:40]
+            if currency_code != "EUR":
+                # Keep the account in the observed account list so a mixed-currency
+                # wallet does not disappear or black out its EUR accounts. The
+                # balance is intentionally omitted: LifeOS has no FX conversion
+                # authority, so this account must never enter an EUR aggregate.
+                account_rows.append({
+                    "availability": "unavailable",
+                    "id": account_id,
+                    "name": account_label,
+                    "detail": f"{currency_code} · Enable Banking",
+                    "source": source,
+                    "provenance": {
+                        "source": source,
+                        "observedAt": observed_at,
+                        "freshness": "unknown",
+                        "quality": "unavailable",
+                        "connectorState": "unavailable",
+                    },
+                })
+                continue
             balances = await self._get_account_json(
                 client, credentials, token, uid, "balances"
             )
@@ -1144,7 +1381,6 @@ class EnableBankingService:
                 break
             if balance_cents is None:
                 raise EnableBankingUnavailable("provider account has no valid EUR balance")
-            source = f"enablebanking:{connection['institutionId']}"
             provenance = {
                 "source": source,
                 "observedAt": observed_at,
@@ -1153,9 +1389,8 @@ class EnableBankingService:
                 "connectorState": "healthy",
             }
             account_rows.append({
-                "id": "ebacct-" + hashlib.sha256(
-                    f"{connection['institutionId']}|{uid}".encode("utf-8")
-                ).hexdigest()[:40],
+                "availability": "observed",
+                "id": account_id,
                 "name": account_label,
                 "detail": "EUR · Enable Banking",
                 "balanceCents": balance_cents,
@@ -1280,12 +1515,21 @@ class EnableBankingService:
             if len(account_sources) == 1
             else "derived-account-snapshot"
         )
+        has_observed_eur_account = any(
+            row["availability"] == "observed" for row in all_accounts
+        )
         transaction_sources = {row["source"] for row in all_transactions}
         transaction_source = (
             next(iter(transaction_sources))
             if len(transaction_sources) == 1
             else "derived-transaction-snapshot"
         )
+        if not has_observed_eur_account:
+            # A wallet containing only unsupported currencies is an observed
+            # account list, not an observed EUR ledger. Keep every aggregate
+            # unavailable instead of turning the empty transaction set into
+            # a misleading zero.
+            transaction_source = "no-authorized-finance-source"
         current_month = datetime.now(BUSINESS_TIME_ZONE).strftime("%Y-%m")
         monthly_income = 0
         fixed_costs = 0
@@ -1312,15 +1556,23 @@ class EnableBankingService:
             "generatedAt": observed_at,
             "currency": "EUR",
             "monthlyIncome": self._metric(
-                monthly_income, source=transaction_source, observed_at=observed_at
+                monthly_income if has_observed_eur_account else None,
+                source=transaction_source,
+                observed_at=observed_at,
             ),
             "fixedCosts": self._metric(
-                fixed_costs, source=transaction_source, observed_at=observed_at
+                fixed_costs if has_observed_eur_account else None,
+                source=transaction_source,
+                observed_at=observed_at,
             ),
             "discretionaryBuffer": self._metric(
                 None, source="no-authorized-finance-source", observed_at=observed_at
             ),
-            "spent": self._metric(spent, source=transaction_source, observed_at=observed_at),
+            "spent": self._metric(
+                spent if has_observed_eur_account else None,
+                source=transaction_source,
+                observed_at=observed_at,
+            ),
             "savingsGoal": self._metric(
                 None, source="no-authorized-finance-source", observed_at=observed_at
             ),
@@ -1342,6 +1594,15 @@ class EnableBankingService:
                 "availability": "observed",
                 "transactions": all_transactions,
                 "provenance": observed_provenance,
+            } if has_observed_eur_account else {
+                "availability": "unavailable",
+                "provenance": {
+                    "source": transaction_source,
+                    "observedAt": observed_at,
+                    "freshness": "unknown",
+                    "quality": "unavailable",
+                    "connectorState": "unavailable",
+                },
             },
         }
         if not self._validate_finance_payload(summary):
@@ -1349,5 +1610,19 @@ class EnableBankingService:
         serialized = json.dumps(summary, separators=(",", ":"), sort_keys=True, allow_nan=False).encode("utf-8")
         if len(serialized) > self.MAX_FINANCE_SUMMARY_SIZE:
             raise EnableBankingUnavailable("normalized finance summary exceeds response bound")
+        metadata = self._next_summary_metadata(summary)
+        state = {
+            "schemaVersion": self.FINANCE_STATE_SCHEMA_VERSION,
+            "summary": summary,
+            "metadata": metadata,
+        }
+        state_body = json.dumps(state, separators=(",", ":"), sort_keys=True, allow_nan=False).encode("utf-8")
+        if len(state_body) > self.MAX_FINANCE_STATE_SIZE:
+            raise EnableBankingUnavailable("finance state exceeds response bound")
+        # The state envelope is the single commit point. The historical body
+        # and metadata files are compatibility projections; a crash between
+        # either projection rename cannot expose a torn Finance snapshot.
+        self._atomic_write_json(self._summary_state_path(), state)
+        self._atomic_write_json(self._summary_metadata_path(), metadata)
         self._atomic_write_json(self._summary_path(), summary)
         return summary

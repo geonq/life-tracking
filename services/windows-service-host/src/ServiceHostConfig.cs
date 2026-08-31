@@ -158,6 +158,7 @@ public static class ServiceHostConfigValidator
         "LIFEOS_DATA_DIR",
         "LIFEOS_SUPPLEMENT_CATALOG_PATH",
         "LIFEOS_TAILSCALE_ALLOWED_LOGIN",
+        "LIFEOS_TAILSCALE_SERVICE_NAME",
         "CLAUDE_INGEST_ENABLED",
         "CLAUDE_STATUSLINE_ENABLED",
         "CLAUDE_INGEST_SECRET_FILE",
@@ -472,7 +473,11 @@ public static class ServiceHostConfigValidator
             {
                 throw new ConfigValidationException("environment", "NODE_ENV must be production");
             }
-            else if (pair.Key is "GOOGLE_AI_STUDIO_FOOD_MODEL" or "GOOGLE_AI_STUDIO_FOOD_MODEL_VERSION" or "ENABLE_BANKING_APP_ID" or "LIFEOS_TAILSCALE_ALLOWED_LOGIN")
+            else if (pair.Key == "LIFEOS_TAILSCALE_SERVICE_NAME" && !IsSafeServiceName(value))
+            {
+                throw new ConfigValidationException("environment", "LIFEOS_TAILSCALE_SERVICE_NAME must match the Windows service-name pattern");
+            }
+            else if (pair.Key is "GOOGLE_AI_STUDIO_FOOD_MODEL" or "GOOGLE_AI_STUDIO_FOOD_MODEL_VERSION" or "ENABLE_BANKING_APP_ID" or "LIFEOS_TAILSCALE_ALLOWED_LOGIN" or "LIFEOS_TAILSCALE_SERVICE_NAME")
             {
                 ValidateBoundedToken(value, "environment");
             }

@@ -1,8 +1,19 @@
 # LifeOS gateway
 
 This directory is the tracked gateway source of truth. The Python module is
-loopback-only and is authenticated by the exact Tailscale login header; it is
-not a deployment bundle.
+loopback-only and accepts protected routes only after the reviewed Windows
+launcher proves both the exact Tailscale login and the trusted Serve transport;
+it is not a deployment bundle.
+
+The launcher receives Serve's identity and app-capability headers on the
+loopback hop, but those headers are not trusted merely because they came from
+an HTTP client. On Windows, the launcher maps the exact established gateway
+connection to its owning PID with `GetExtendedTcpTable` and compares that PID
+with the running Tailscale SCM service from `QueryServiceStatusEx`. A direct
+local caller, an unknown service, an ambiguous connection, or a failed OS
+query cannot cause the private gateway header to be injected. `/health`
+remains available for the service host's local liveness probe; protected
+routes fail closed.
 
 If a remote Windows gateway has drifted, replace that remote source only after
 the isolated gateway test suite and Python compile check pass against this

@@ -12,17 +12,22 @@ Run:
     python -m venv venv
     venv\\\\Scripts\\\\pip install -r requirements.txt
     set LIFEOS_TAILSCALE_ALLOWED_LOGIN=<exact tailnet login>
+    set LIFEOS_TAILSCALE_EDGE_TOKEN=<random edge-only capability>
     venv\\\\Scripts\\\\python -m uvicorn main:app --host 127.0.0.1 --port 8421
 
 The Python backend binds only to loopback (127.0.0.1:8421); private Tailscale
-Serve terminates HTTPS and forwards to it. Never bind this backend to 0.0.0.0:
-calendar and tax-document data must stay unreachable without the Serve layer.
+Serve terminates HTTPS and forwards to it. The reviewed Windows launcher also
+proves that the exact loopback connection is owned by the Tailscale SCM
+service before it injects the private edge header. Never bind this backend to
+0.0.0.0: calendar and tax-document data must stay unreachable without the
+Serve layer and its OS-bound local hop.
 """
 import asyncio
 import base64
 import binascii
 import json
 import hashlib
+import hmac
 import math
 import mimetypes
 import os
@@ -85,6 +90,31 @@ def _required_tailscale_login() -> str:
         raise RuntimeError("LIFEOS_TAILSCALE_ALLOWED_LOGIN is invalid") from exc
 
 
+TAILSCALE_EDGE_CAPABILITY_HEADER = b"x-lifeos-trusted-edge"
+TAILSCALE_EDGE_TOKEN_ENV = "LIFEOS_TAILSCALE_EDGE_TOKEN"
+TAILSCALE_EDGE_TOKEN_MIN_LENGTH = 32
+TAILSCALE_EDGE_TOKEN_MAX_LENGTH = 256
+
+
+def _configured_tailscale_edge_token() -> str | None:
+    """Return a valid out-of-band edge capability, or fail closed.
+
+    Tailscale Serve's identity header is authoritative only at the Serve
+    boundary. Once Serve forwards to a loopback listener, a local process can
+    forge that header. The capability is therefore injected by the reviewed
+    launcher only after its Windows SCM/TCP owner proof succeeds and is never
+    accepted directly from the phone. Keeping an invalid or missing value as
+    ``None`` leaves ``/health`` useful for diagnostics while protected routes
+    remain unavailable.
+    """
+    value = os.environ.get(TAILSCALE_EDGE_TOKEN_ENV)
+    if value is None or not TAILSCALE_EDGE_TOKEN_MIN_LENGTH <= len(value) <= TAILSCALE_EDGE_TOKEN_MAX_LENGTH:
+        return None
+    if any(not 0x21 <= ord(char) <= 0x7E for char in value):
+        return None
+    return value
+
+
 def _tailscale_login_from_raw_headers(headers) -> str | None:
     """Read exactly one Serve identity header without ASGI duplicate collapsing."""
     values = [
@@ -98,6 +128,44 @@ def _tailscale_login_from_raw_headers(headers) -> str | None:
         return _canonicalize_tailscale_login(raw_value)
     except (UnicodeDecodeError, ValueError):
         return None
+
+
+def _tailscale_edge_capability_from_raw_headers(headers) -> str | None:
+    """Read exactly one trusted-edge capability without header collapsing."""
+    values = [
+        value for name, value in headers
+        if isinstance(name, bytes) and name.lower() == TAILSCALE_EDGE_CAPABILITY_HEADER
+    ]
+    if len(values) != 1:
+        return None
+    try:
+        value = values[0].decode("ascii")
+    except UnicodeDecodeError:
+        return None
+    if not TAILSCALE_EDGE_TOKEN_MIN_LENGTH <= len(value) <= TAILSCALE_EDGE_TOKEN_MAX_LENGTH:
+        return None
+    if any(not 0x21 <= ord(char) <= 0x7E for char in value):
+        return None
+    return value
+
+
+def _request_has_allowed_tailscale_identity(scope) -> bool:
+    """Authorize only the canonical Serve identity on the trusted edge path.
+
+    Authorization, Tailscale-User-Name, and generic forwarded-user headers are
+    intentionally not identity sources. A canonical login header by itself is
+    not sufficient because direct loopback callers can forge it; the trusted
+    edge capability must be present in a separate, exact single header too.
+    """
+    headers = scope.get("headers", [])
+    login = _tailscale_login_from_raw_headers(headers)
+    capability = _tailscale_edge_capability_from_raw_headers(headers)
+    return (
+        login == ALLOWED_TAILSCALE_LOGIN
+        and LIFEOS_TAILSCALE_EDGE_TOKEN is not None
+        and capability is not None
+        and hmac.compare_digest(capability, LIFEOS_TAILSCALE_EDGE_TOKEN)
+    )
 
 
 DATA_DIR = Path(os.environ.get("LIFEOS_DATA_DIR", Path(__file__).parent / "data"))
@@ -120,6 +188,7 @@ CLAUDE_INGEST_SECRET_MAX_LENGTH = 256
 CLAUDE_INGEST_SECRET_FILENAME = "claude-ingest.secret"
 
 ALLOWED_TAILSCALE_LOGIN = _required_tailscale_login()
+LIFEOS_TAILSCALE_EDGE_TOKEN = _configured_tailscale_edge_token()
 
 # Upstream configuration for read-only data endpoints. Finance is deliberately
 # absent: `/finance/summary` is owned by the direct Enable Banking adapter
@@ -143,23 +212,43 @@ if not _is_allowed_upstream(NUTRITION_BARCODE_UPSTREAM, "/api/nutrition/barcode"
     raise RuntimeError("LIFEOS_NUTRITION_BARCODE_UPSTREAM must be an exact loopback HTTP endpoint")
 if not _is_allowed_upstream(NUTRITION_PHOTO_UPSTREAM, "/api/nutrition/photo-proposal"):
     raise RuntimeError("LIFEOS_NUTRITION_PHOTO_UPSTREAM must be an exact loopback HTTP endpoint")
-# Maximum response size from upstream (1 MB)
-USAGE_MAX_RESPONSE_SIZE = 1 * 1024 * 1024
+# Frozen transport bounds from the acceptance registry.  A smaller shared
+# ceiling keeps every telemetry/control response within the native client
+# contract; image input has its separate, explicitly validated aggregate cap.
+CALENDAR_SCHEMA_VERSION = 1
+CALENDAR_MAX_BODY_SIZE = 256 * 1024
+CALENDAR_MAX_RESPONSE_SIZE = 256 * 1024
+CALENDAR_MAX_ITEMS = 10_000
+CALENDAR_METADATA_MAX_SIZE = 4 * 1024 * 1024
+CALENDAR_STATE_SCHEMA_VERSION = 1
+CALENDAR_STATE_MAX_SIZE = 6 * 1024 * 1024
+# The idempotency journal is intentionally a rolling replay window, not an
+# ever-growing ledger.  Recent keys remain replayable across process restarts;
+# once a key rolls out, the normal If-Match check still prevents a stale retry
+# from creating a second revision.  Keeping the window bounded is what lets a
+# long-lived Calendar continue accepting new writes.
+CALENDAR_MAX_IDEMPOTENCY_RECORDS = 10_000
+CALENDAR_MAX_REVISION = 9_007_199_254_740_991
+CALENDAR_BODY_TIMEOUT = 8.0
+CALENDAR_IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[\x21-\x7e]{1,128}$")
+CALENDAR_ETAG_PATTERN = re.compile(r'^"calendar-v1-r([0-9]+)-([0-9a-f]{64})"$')
+SYNC_FINGERPRINT_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+USAGE_MAX_RESPONSE_SIZE = 256 * 1024
 # Strict per-operation timeout plus an outer wall-clock deadline.
 USAGE_REQUEST_TIMEOUT = httpx.Timeout(5.0, connect=2.0)
 USAGE_TOTAL_TIMEOUT = 6.0
-CLIPPER_MAX_RESPONSE_SIZE = 1 * 1024 * 1024
+CLIPPER_MAX_RESPONSE_SIZE = 256 * 1024
 CLIPPER_REQUEST_TIMEOUT = httpx.Timeout(5.0, connect=2.0)
 CLIPPER_TOTAL_TIMEOUT = 6.0
 NUTRITION_PHOTO_MAX_BODY_SIZE = 30 * 1024 * 1024
-NUTRITION_PHOTO_MAX_RESPONSE_SIZE = 1 * 1024 * 1024
+NUTRITION_PHOTO_MAX_RESPONSE_SIZE = 256 * 1024
 NUTRITION_PHOTO_MAX_IMAGE_BYTES = 20 * 1024 * 1024
 NUTRITION_PHOTO_MAX_IMAGE_COUNT = 3
 NUTRITION_PHOTO_MAX_IMAGE_DIMENSION = 12_000
 NUTRITION_PHOTO_MAX_IMAGE_PIXELS = 40_000_000
-NUTRITION_PHOTO_REQUEST_TIMEOUT = httpx.Timeout(40.0, connect=2.0)
-NUTRITION_PHOTO_TOTAL_TIMEOUT = 45.0
-NUTRITION_PHOTO_BODY_TIMEOUT = 45.0
+NUTRITION_PHOTO_REQUEST_TIMEOUT = httpx.Timeout(28.0, connect=2.0)
+NUTRITION_PHOTO_TOTAL_TIMEOUT = 30.0
+NUTRITION_PHOTO_BODY_TIMEOUT = 30.0
 DOCUMENT_MAX_UPLOAD_SIZE = int(os.environ.get("LIFEOS_DOCUMENT_MAX_UPLOAD_SIZE", 64 * 1024 * 1024))
 DOCUMENT_READ_CHUNK_SIZE = 1024 * 1024
 DOCUMENT_ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".heic"}
@@ -192,8 +281,7 @@ app.router.redirect_slashes = False
 async def require_tailscale_identity(request: Request, call_next):
     path = request.scope.get("path")
     if path != "/health":
-        login = _tailscale_login_from_raw_headers(request.scope.get("headers", []))
-        if login != ALLOWED_TAILSCALE_LOGIN:
+        if not _request_has_allowed_tailscale_identity(request.scope):
             response = JSONResponse(
                 {"detail": "Invalid or missing Tailscale identity"},
                 status_code=403,
@@ -510,11 +598,27 @@ def _validate_usage_payload(data: dict) -> bool:
     if len(estimate_keys) != len(set(estimate_keys)):
         return False
     connectors = data["connectors"]
-    return (
+    if not (
         isinstance(connectors, dict)
         and set(connectors) == PROVIDERS
         and all(_is_choice(state, CONNECTOR_STATES) for state in connectors.values())
-    )
+    ):
+        return False
+    for provider in PROVIDERS:
+        observed = [
+            item for item in data["windows"]
+            if item["provider"] == provider and item["availability"] == "observed"
+        ]
+        if not observed:
+            continue
+        expected = (
+            "rate_limited" if any(item["provenance"]["connectorState"] == "rate_limited" for item in observed)
+            else "refresh_due" if any(item["provenance"]["connectorState"] == "refresh_due" for item in observed)
+            else "healthy"
+        )
+        if connectors[provider] != expected:
+            return False
+    return True
 
 
 FINANCE_MAX_SAFE_CENTS = 9_007_199_254_740_991
@@ -530,8 +634,9 @@ FINANCE_PROVENANCE_FIELDS = {
     "source", "observedAt", "freshness", "quality", "connectorState"
 }
 FINANCE_ACCOUNT_FIELDS = {
-    "id", "name", "detail", "balanceCents", "source", "provenance"
+    "availability", "id", "name", "detail", "source", "provenance"
 }
+FINANCE_ACCOUNT_OBSERVED_FIELDS = FINANCE_ACCOUNT_FIELDS | {"balanceCents"}
 FINANCE_ACCOUNT_SNAPSHOT_FIELDS = {"availability", "accounts", "provenance"}
 FINANCE_TRANSACTION_FIELDS = {
     "id", "merchant", "title", "signedAmountCents", "timestamp",
@@ -621,10 +726,13 @@ def _validate_finance_provenance(value, *, observed: bool, age_consistent: bool 
             or not _is_choice(value["connectorState"], {"healthy", "refresh_due"})
         ):
             return False
+        pair = (value["freshness"], value["connectorState"])
+        if pair not in {("fresh", "healthy"), ("stale", "refresh_due")}:
+            return False
         if not age_consistent:
             return True
         expected = _expected_finance_observed_pair(value)
-        return expected is not None and (value["freshness"], value["connectorState"]) == expected
+        return expected is not None and pair == expected
     return (
         value["quality"] == "unavailable"
         and _is_choice(value["freshness"], {"unknown"})
@@ -636,13 +744,13 @@ def _validate_finance_observed_provenance(value, *, age_consistent: bool = True)
     return _validate_finance_provenance(value, observed=True, age_consistent=age_consistent)
 
 
-def _validate_finance_metric(value) -> bool:
+def _validate_finance_metric(value, *, age_consistent: bool = True) -> bool:
     if not isinstance(value, dict) or not _is_choice(value.get("availability"), {"observed", "unavailable"}):
         return False
     observed = value["availability"] == "observed"
     expected = {"availability", "provenance", "amountCents"} if observed else {"availability", "provenance"}
     if set(value) != expected or not _validate_finance_provenance(
-        value.get("provenance"), observed=observed, age_consistent=observed
+        value.get("provenance"), observed=observed, age_consistent=observed and age_consistent
     ):
         return False
     return not observed or (
@@ -652,8 +760,12 @@ def _validate_finance_metric(value) -> bool:
     )
 
 
-def _validate_finance_account_observation(value) -> bool:
-    if not isinstance(value, dict) or set(value) != FINANCE_ACCOUNT_FIELDS:
+def _validate_finance_account_observation(value, *, age_consistent: bool = True) -> bool:
+    if not isinstance(value, dict) or not _is_choice(value.get("availability"), {"observed", "unavailable"}):
+        return False
+    observed = value["availability"] == "observed"
+    expected_fields = FINANCE_ACCOUNT_OBSERVED_FIELDS if observed else FINANCE_ACCOUNT_FIELDS
+    if set(value) != expected_fields:
         return False
     text_fields = ("id", "name", "detail", "source")
     if not all(isinstance(value[field], str) and value[field].strip() for field in text_fields):
@@ -661,16 +773,19 @@ def _validate_finance_account_observation(value) -> bool:
     provenance = value.get("provenance")
     if not isinstance(provenance, dict):
         return False
-    return (
-        isinstance(value["balanceCents"], int)
-        and not isinstance(value["balanceCents"], bool)
-        and -FINANCE_MAX_SAFE_CENTS <= value["balanceCents"] <= FINANCE_MAX_SAFE_CENTS
-        and _validate_finance_observed_provenance(provenance, age_consistent=True)
-        and value["source"] == provenance["source"]
-    )
+    if value["source"] != provenance.get("source"):
+        return False
+    if observed:
+        return (
+            isinstance(value["balanceCents"], int)
+            and not isinstance(value["balanceCents"], bool)
+            and -FINANCE_MAX_SAFE_CENTS <= value["balanceCents"] <= FINANCE_MAX_SAFE_CENTS
+            and _validate_finance_observed_provenance(provenance, age_consistent=age_consistent)
+        )
+    return _validate_finance_provenance(provenance, observed=False)
 
 
-def _validate_finance_account_snapshot(value) -> bool:
+def _validate_finance_account_snapshot(value, *, age_consistent: bool = True) -> bool:
     if not isinstance(value, dict) or not _is_choice(value.get("availability"), {"observed", "unavailable"}):
         return False
     provenance = value.get("provenance")
@@ -682,9 +797,12 @@ def _validate_finance_account_snapshot(value) -> bool:
     if set(value) != FINANCE_ACCOUNT_SNAPSHOT_FIELDS or not isinstance(value.get("accounts"), list):
         return False
     accounts = value["accounts"]
-    if not accounts or not _validate_finance_observed_provenance(provenance, age_consistent=False):
+    if not accounts or not _validate_finance_observed_provenance(provenance, age_consistent=age_consistent):
         return False
-    if not all(_validate_finance_account_observation(account) for account in accounts):
+    if not all(
+        _validate_finance_account_observation(account, age_consistent=age_consistent)
+        for account in accounts
+    ):
         return False
     snapshot_observed_at = _parse_finance_timestamp(provenance["observedAt"])
     if snapshot_observed_at is None:
@@ -702,22 +820,27 @@ def _validate_finance_account_snapshot(value) -> bool:
     ):
         return False
     has_stale_account = any(
-        account["provenance"]["freshness"] == "stale"
-        or account["provenance"]["connectorState"] == "refresh_due"
+        account["availability"] == "observed"
+        and (
+            account["provenance"]["freshness"] == "stale"
+            or account["provenance"]["connectorState"] == "refresh_due"
+        )
         for account in accounts
     )
     expected = ("stale", "refresh_due") if has_stale_account else ("fresh", "healthy")
     return (provenance["freshness"], provenance["connectorState"]) == expected
 
 
-def _validate_finance_transaction_observation(value) -> bool:
+def _validate_finance_transaction_observation(value, *, age_consistent: bool = True) -> bool:
     if not isinstance(value, dict) or set(value) != FINANCE_TRANSACTION_FIELDS:
         return False
     text_fields = ("id", "merchant", "title", "account", "source", "category")
     if not all(isinstance(value[field], str) and value[field].strip() for field in text_fields):
         return False
     provenance = value.get("provenance")
-    if not isinstance(provenance, dict) or not _validate_finance_observed_provenance(provenance, age_consistent=True):
+    if not isinstance(provenance, dict) or not _validate_finance_observed_provenance(
+        provenance, age_consistent=age_consistent
+    ):
         return False
     return (
         isinstance(value["signedAmountCents"], int)
@@ -728,7 +851,7 @@ def _validate_finance_transaction_observation(value) -> bool:
     )
 
 
-def _validate_finance_transaction_snapshot(value) -> bool:
+def _validate_finance_transaction_snapshot(value, *, age_consistent: bool = True) -> bool:
     if not isinstance(value, dict) or not _is_choice(value.get("availability"), {"observed", "unavailable"}):
         return False
     provenance = value.get("provenance")
@@ -740,9 +863,14 @@ def _validate_finance_transaction_snapshot(value) -> bool:
     if set(value) != FINANCE_TRANSACTION_SNAPSHOT_FIELDS or not isinstance(value.get("transactions"), list):
         return False
     rows = value["transactions"]
-    if not _validate_finance_observed_provenance(provenance, age_consistent=not rows):
+    if not _validate_finance_observed_provenance(
+        provenance, age_consistent=age_consistent and not rows
+    ):
         return False
-    if not all(_validate_finance_transaction_observation(row) for row in rows):
+    if not all(
+        _validate_finance_transaction_observation(row, age_consistent=age_consistent)
+        for row in rows
+    ):
         return False
     row_sources = {row["source"] for row in rows}
     if row_sources and not (
@@ -771,7 +899,7 @@ def _validate_finance_transaction_snapshot(value) -> bool:
     return True
 
 
-def _validate_finance_payload(data: dict) -> bool:
+def _validate_finance_payload(data: dict, *, age_consistent: bool = True) -> bool:
     allowed = {"generatedAt", "currency"} | FINANCE_METRICS | {"accounts", "transactions"}
     if (
         not isinstance(data, dict)
@@ -784,10 +912,15 @@ def _validate_finance_payload(data: dict) -> bool:
         not _contains_sensitive_finance(data)
         and _is_finance_observed_timestamp(data["generatedAt"])
         and data["currency"] == "EUR"
-        and all(_validate_finance_metric(data[key]) for key in FINANCE_METRICS)
-        and ("accounts" not in data or data["accounts"] is None or _validate_finance_account_snapshot(data["accounts"]))
-        and ("transactions" not in data or data["transactions"] is None or _validate_finance_transaction_snapshot(data["transactions"]))
+        and all(_validate_finance_metric(data[key], age_consistent=age_consistent) for key in FINANCE_METRICS)
+        and ("accounts" not in data or data["accounts"] is None or _validate_finance_account_snapshot(data["accounts"], age_consistent=age_consistent))
+        and ("transactions" not in data or data["transactions"] is None or _validate_finance_transaction_snapshot(data["transactions"], age_consistent=age_consistent))
     )
+
+
+def _validate_persisted_finance_payload(data: dict) -> bool:
+    """Validate durable Finance shape without treating wall-clock age as corruption."""
+    return _validate_finance_payload(data, age_consistent=False)
 
 
 _CLIPPER_SNAPSHOT_FIELDS = {
@@ -1000,28 +1133,36 @@ enable_banking = EnableBankingService(
     data_dir=lambda: DATA_DIR,
     validate_finance_payload=_validate_finance_payload,
     max_safe_cents=FINANCE_MAX_SAFE_CENTS,
+    validate_persisted_finance_payload=_validate_persisted_finance_payload,
 )
 
 
 async def _read_bounded_finance_request(request: Request) -> bytes:
     """Read the only mutating finance request without accepting an unbounded body."""
-    raw_length = request.headers.get("content-length")
-    if raw_length is not None:
-        try:
-            content_length = int(raw_length)
-        except ValueError as exc:
-            raise ValueError("invalid content length") from exc
-        if content_length < 0 or content_length > enable_banking.BODY_LIMIT:
-            raise ValueError("finance request too large")
-    body = bytearray()
-    async for chunk in request.stream():
-        if len(body) + len(chunk) > enable_banking.BODY_LIMIT:
-            raise ValueError("finance request too large")
-        body.extend(chunk)
-    return bytes(body)
+    try:
+        async with asyncio.timeout(8.0):
+            length_values = _raw_header_values(request, "content-length")
+            if len(length_values) > 1:
+                raise ValueError("duplicate content length")
+            raw_length = _calendar_header(request, "content-length")
+            if raw_length is not None:
+                try:
+                    content_length = int(raw_length)
+                except ValueError as exc:
+                    raise ValueError("invalid content length") from exc
+                if content_length < 0 or content_length > enable_banking.BODY_LIMIT:
+                    raise ValueError("finance request too large")
+            body = bytearray()
+            async for chunk in request.stream():
+                if len(body) + len(chunk) > enable_banking.BODY_LIMIT:
+                    raise ValueError("finance request too large")
+                body.extend(chunk)
+            return bytes(body)
+    except TimeoutError as exc:
+        raise TimeoutError("finance request timeout") from exc
 
 
-def _finance_consent_response(payload: dict, status_code: int) -> Response:
+def _finance_consent_response(payload: dict, status_code: int, *, revision: int | None = None) -> Response:
     """Return a compact Finance envelope within the native client's bound."""
     try:
         body = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
@@ -1031,11 +1172,15 @@ def _finance_consent_response(payload: dict, status_code: int) -> Response:
     if len(body) > EnableBankingService.MAX_FINANCE_SUMMARY_SIZE:
         body = b'{"error":"finance unavailable"}'
         status_code = 503
+    headers = {"Cache-Control": "no-store"}
+    if revision is not None:
+        headers["X-LifeOS-Revision"] = str(revision)
+        headers["X-LifeOS-Schema-Version"] = "1"
     return Response(
         content=body,
         status_code=status_code,
         media_type="application/json",
-        headers={"Cache-Control": "no-store"},
+        headers=headers,
     )
 
 
@@ -1051,6 +1196,8 @@ def _finance_callback_page(linked: bool) -> Response:
 
 @app.post("/finance/connect")
 async def post_finance_connect(request: Request) -> Response:
+    if _calendar_header(request, "content-type") != "application/json":
+        return _finance_consent_response({"error": "content_type"}, 415)
     try:
         body = await _read_bounded_finance_request(request)
         payload = json.loads(
@@ -1087,8 +1234,7 @@ async def get_finance_callback(request: Request) -> Response:
 
 @app.websocket("/ws")
 async def ws_changes(websocket: WebSocket) -> None:
-    identity = _tailscale_login_from_raw_headers(websocket.scope.get("headers", []))
-    if identity != ALLOWED_TAILSCALE_LOGIN:
+    if not _request_has_allowed_tailscale_identity(websocket.scope):
         await websocket.close(code=4403)
         return
     await websocket.accept()
@@ -1104,10 +1250,449 @@ async def ws_changes(websocket: WebSocket) -> None:
 
 
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Publish one bounded file atomically and durably where the OS permits."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
-    tmp.write_bytes(data)
-    os.replace(tmp, path)  # atomic on Windows (ReplaceFileW) and POSIX
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        descriptor = os.open(tmp, flags, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = -1
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+        finally:
+            if descriptor != -1:
+                os.close(descriptor)
+        os.replace(tmp, path)  # atomic on Windows (ReplaceFileW) and POSIX
+        if hasattr(os, "O_DIRECTORY"):
+            try:
+                directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            except OSError:
+                directory = -1
+            if directory != -1:
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+class _CalendarStateUnavailable(Exception):
+    """Durable Calendar state was missing, malformed, or torn."""
+
+
+def _calendar_metadata_path() -> Path:
+    return Path(f"{CALENDAR_PATH}.meta.json")
+
+
+def _calendar_state_path() -> Path:
+    return Path(f"{CALENDAR_PATH}.state.json")
+
+
+def _calendar_retry_path() -> Path:
+    """Durable marker for a committed revision needing projection work."""
+    return Path(f"{CALENDAR_PATH}.retry.json")
+
+
+def _read_bounded_state_file(path: Path, maximum: int) -> bytes | None:
+    """Read a regular, non-symlink state file without trusting its size race."""
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode) or before.st_size > maximum:
+        raise _CalendarStateUnavailable
+    try:
+        body = path.read_bytes()
+        after = path.lstat()
+    except (FileNotFoundError, OSError) as exc:
+        raise _CalendarStateUnavailable from exc
+    if (
+        not stat.S_ISREG(after.st_mode)
+        or stat.S_ISLNK(after.st_mode)
+        or (after.st_dev, after.st_ino, after.st_size) != (before.st_dev, before.st_ino, before.st_size)
+        or len(body) > maximum
+    ):
+        raise _CalendarStateUnavailable
+    return body
+
+
+def _parse_calendar_document(body: bytes) -> dict:
+    if len(body) > CALENDAR_MAX_BODY_SIZE:
+        raise HTTPException(status_code=413, detail="calendar body exceeds limit")
+    try:
+        decoded = json.loads(
+            body.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="invalid calendar JSON") from exc
+    if (
+        not isinstance(decoded, dict)
+        or set(decoded) != {"schemaVersion", "items"}
+        or isinstance(decoded["schemaVersion"], bool)
+        or decoded["schemaVersion"] != CALENDAR_SCHEMA_VERSION
+        or not isinstance(decoded["items"], list)
+        or len(decoded["items"]) > CALENDAR_MAX_ITEMS
+    ):
+        raise HTTPException(status_code=400, detail="invalid calendar resource")
+    return decoded
+
+
+def _calendar_digest(body: bytes) -> str:
+    return hashlib.sha256(body).hexdigest()
+
+
+def _calendar_etag(revision: int, digest: str) -> str:
+    return f'"calendar-v1-r{revision}-{digest}"'
+
+
+def _valid_calendar_etag(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    match = CALENDAR_ETAG_PATTERN.fullmatch(value)
+    if match is None:
+        return False
+    revision_text = match.group(1)
+    try:
+        revision = int(revision_text)
+    except (TypeError, ValueError):
+        return False
+    return revision <= CALENDAR_MAX_REVISION and str(revision) == revision_text
+
+
+def _calendar_default_body() -> bytes:
+    return b'{"schemaVersion":1,"items":[]}'
+
+
+def _calendar_default_metadata(body: bytes) -> dict:
+    return {
+        "schemaVersion": 1,
+        "domain": "calendar",
+        "authority": "gateway",
+        "revision": 0,
+        "bodyDigest": _calendar_digest(body),
+        "idempotency": [],
+        # Calendar deletion tombstones live in the versioned opaque item
+        # payload.  The gateway preserves them without inventing timestamps or
+        # identifiers it cannot validate as the client's source of truth.
+        "tombstones": [],
+    }
+
+
+def _calendar_idempotency_window(records: list[dict], new_record: dict) -> list[dict]:
+    """Return the newest bounded replay records in revision order.
+
+    The authority envelope stores only the latest replay window.  The current
+    Calendar body remains the source of truth; a retained record is used to
+    recognize a safe retry and avoid incrementing the authority revision a
+    second time.  Expired keys are deliberately not retained forever because
+    an unbounded idempotency ledger would eventually make Calendar read-only.
+    """
+    window_size = max(1, CALENDAR_MAX_IDEMPOTENCY_RECORDS)
+    return [*records, new_record][-window_size:]
+
+
+def _validate_calendar_metadata(value: object, body: bytes) -> dict:
+    if not isinstance(value, dict) or set(value) != {
+        "schemaVersion", "domain", "authority", "revision", "bodyDigest", "idempotency", "tombstones",
+    }:
+        raise _CalendarStateUnavailable
+    revision = value["revision"]
+    if (
+        value["schemaVersion"] != 1
+        or isinstance(revision, bool)
+        or not isinstance(revision, int)
+        or revision < 0
+        or revision > CALENDAR_MAX_REVISION
+        or value["domain"] != "calendar"
+        or value["authority"] != "gateway"
+        or not isinstance(value["bodyDigest"], str)
+        or not SYNC_FINGERPRINT_PATTERN.fullmatch(value["bodyDigest"])
+        or value["bodyDigest"] != _calendar_digest(body)
+        or not isinstance(value["idempotency"], list)
+        or len(value["idempotency"]) > CALENDAR_MAX_IDEMPOTENCY_RECORDS
+        or not isinstance(value["tombstones"], list)
+        or len(value["tombstones"]) > CALENDAR_MAX_IDEMPOTENCY_RECORDS
+    ):
+        raise _CalendarStateUnavailable
+
+    keys: set[str] = set()
+    for record in value["idempotency"]:
+        if not isinstance(record, dict) or set(record) != {"key", "fingerprint", "revision"}:
+            raise _CalendarStateUnavailable
+        key = record["key"]
+        record_revision = record["revision"]
+        if (
+            not isinstance(key, str)
+            or not CALENDAR_IDEMPOTENCY_KEY_PATTERN.fullmatch(key)
+            or key in keys
+            or not isinstance(record["fingerprint"], str)
+            or not SYNC_FINGERPRINT_PATTERN.fullmatch(record["fingerprint"])
+            or isinstance(record_revision, bool)
+            or not isinstance(record_revision, int)
+            or record_revision < 0
+            or record_revision > revision
+        ):
+            raise _CalendarStateUnavailable
+        keys.add(key)
+
+    tombstone_ids: set[str] = set()
+    for tombstone in value["tombstones"]:
+        if not isinstance(tombstone, dict) or set(tombstone) != {
+            "schemaVersion", "domain", "entityID", "revision", "idempotencyKey", "authority", "deletedAt",
+        }:
+            raise _CalendarStateUnavailable
+        entity_id = tombstone["entityID"]
+        tombstone_revision = tombstone["revision"]
+        deleted_at = tombstone["deletedAt"]
+        if (
+            tombstone["schemaVersion"] != 1
+            or tombstone["domain"] != "calendar"
+            or tombstone["authority"] != "gateway"
+            or not isinstance(entity_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,127})?", entity_id)
+            or entity_id in tombstone_ids
+            or isinstance(tombstone_revision, bool)
+            or not isinstance(tombstone_revision, int)
+            or not 0 < tombstone_revision <= revision
+            or not isinstance(tombstone["idempotencyKey"], str)
+            or not CALENDAR_IDEMPOTENCY_KEY_PATTERN.fullmatch(tombstone["idempotencyKey"])
+            or tombstone["idempotencyKey"] in keys
+            or not isinstance(deleted_at, str)
+            or not _is_usage_observed_timestamp(deleted_at)
+        ):
+            raise _CalendarStateUnavailable
+        tombstone_ids.add(entity_id)
+        keys.add(tombstone["idempotencyKey"])
+    return value
+
+
+def _decode_calendar_state(state_body: bytes) -> tuple[bytes, dict, dict]:
+    """Decode the single committed Calendar envelope.
+
+    The legacy body/metadata files remain compatibility projections for
+    operators and migration.  Once a state envelope exists, it is the only
+    authority consulted by the gateway, so a torn projection cannot become a
+    second or partially committed Calendar state.
+    """
+    try:
+        decoded = json.loads(
+            state_body.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite_constant,
+        )
+        if not isinstance(decoded, dict) or set(decoded) != {
+            "schemaVersion", "bodyBase64", "metadata",
+        } or decoded["schemaVersion"] != CALENDAR_STATE_SCHEMA_VERSION:
+            raise ValueError("invalid calendar state envelope")
+        encoded_body = decoded["bodyBase64"]
+        if not isinstance(encoded_body, str) or not encoded_body:
+            raise ValueError("invalid calendar state body")
+        body = base64.b64decode(encoded_body.encode("ascii"), validate=True)
+        if len(body) > CALENDAR_MAX_BODY_SIZE or base64.b64encode(body).decode("ascii") != encoded_body:
+            raise ValueError("invalid calendar state body")
+        document = _parse_calendar_document(body)
+        metadata = _validate_calendar_metadata(decoded["metadata"], body)
+        return body, document, metadata
+    except (UnicodeDecodeError, UnicodeEncodeError, ValueError, binascii.Error, HTTPException) as exc:
+        raise _CalendarStateUnavailable from exc
+
+
+def _load_calendar_state() -> tuple[bytes, dict, dict]:
+    """Return body, decoded document, and validated authority metadata."""
+    state_body = _read_bounded_state_file(_calendar_state_path(), CALENDAR_STATE_MAX_SIZE)
+    if state_body is not None:
+        return _decode_calendar_state(state_body)
+
+    calendar_body = _read_bounded_state_file(CALENDAR_PATH, CALENDAR_MAX_BODY_SIZE)
+    metadata_body = _read_bounded_state_file(_calendar_metadata_path(), CALENDAR_METADATA_MAX_SIZE)
+    if calendar_body is None and metadata_body is None:
+        calendar_body = _calendar_default_body()
+        return calendar_body, _parse_calendar_document(calendar_body), _calendar_default_metadata(calendar_body)
+    if calendar_body is None:
+        raise _CalendarStateUnavailable
+    document = _parse_calendar_document(calendar_body)
+    # A pre-versioning Calendar body is safe to adopt at revision zero after
+    # strict validation. Metadata without its body is instead a torn publish.
+    if metadata_body is None:
+        return calendar_body, document, _calendar_default_metadata(calendar_body)
+    try:
+        decoded_metadata = json.loads(
+            metadata_body.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise _CalendarStateUnavailable from exc
+    metadata = _validate_calendar_metadata(decoded_metadata, calendar_body)
+    return calendar_body, document, metadata
+
+
+def _calendar_metadata_bytes(metadata: dict) -> bytes:
+    body = json.dumps(metadata, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    if len(body) > CALENDAR_METADATA_MAX_SIZE:
+        raise ValueError("calendar metadata exceeds limit")
+    return body
+
+
+def _calendar_retry_intent_bytes(revision: int, body: bytes) -> bytes:
+    return json.dumps(
+        {"bodyDigest": _calendar_digest(body), "revision": revision},
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _write_calendar_retry_intent(revision: int, body: bytes) -> bool:
+    """Persist the retry source before committing a new authority revision."""
+    try:
+        _atomic_write_bytes(_calendar_retry_path(), _calendar_retry_intent_bytes(revision, body))
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _read_calendar_retry_intent() -> dict | None:
+    """Read the auxiliary retry marker without making it a source of truth."""
+    try:
+        raw = _read_bounded_state_file(_calendar_retry_path(), 512)
+        if raw is None:
+            return None
+        value = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite_constant,
+        )
+        if not isinstance(value, dict) or set(value) != {"bodyDigest", "revision"}:
+            return None
+        revision = value["revision"]
+        if (
+            isinstance(revision, bool)
+            or not isinstance(revision, int)
+            or revision < 0
+            or revision > CALENDAR_MAX_REVISION
+            or not isinstance(value["bodyDigest"], str)
+            or not SYNC_FINGERPRINT_PATTERN.fullmatch(value["bodyDigest"])
+        ):
+            return None
+        return value
+    except (_CalendarStateUnavailable, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return None
+
+
+def _clear_calendar_retry_intent() -> None:
+    try:
+        _calendar_retry_path().unlink()
+    except (FileNotFoundError, OSError):
+        # The marker is only a retry hint. Failure to remove it is safe: the
+        # next read/replay will retry the same durable authority revision.
+        pass
+
+
+def _repair_calendar_projections(body: bytes, metadata: dict) -> bool:
+    """Repair compatibility projections from the authoritative state envelope."""
+    try:
+        metadata_body = _calendar_metadata_bytes(metadata)
+        _atomic_write_bytes(_calendar_metadata_path(), metadata_body)
+        _atomic_write_bytes(CALENDAR_PATH, body)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+async def _broadcast_calendar_revision(revision: int) -> bool:
+    """Never turn a committed Calendar revision into an HTTP failure."""
+    try:
+        await broadcaster.broadcast({"type": "calendar_changed", "revision": revision})
+    except Exception:
+        # The durable retry marker remains in place. A replay or a subsequent
+        # authoritative read repeats the notification without losing state.
+        return False
+    return True
+
+
+def _calendar_response(
+    body: bytes,
+    revision: int,
+    *,
+    status_code: int = 200,
+    replay: bool = False,
+    projection_pending: bool = False,
+) -> Response:
+    headers = {
+        "Cache-Control": "no-store",
+        "ETag": _calendar_etag(revision, _calendar_digest(body)),
+        "X-LifeOS-Revision": str(revision),
+        "X-LifeOS-Schema-Version": str(CALENDAR_SCHEMA_VERSION),
+    }
+    if replay:
+        headers["X-LifeOS-Idempotent-Replay"] = "true"
+    if projection_pending:
+        headers["X-LifeOS-Projection-Repair"] = "pending"
+    return Response(content=body, status_code=status_code, media_type="application/json", headers=headers)
+
+
+def _calendar_header(request: Request, name: str) -> str | None:
+    values = _raw_header_values(request, name)
+    if len(values) != 1:
+        return None
+    try:
+        return values[0].decode("latin-1")
+    except UnicodeDecodeError:
+        return None
+
+
+def _raw_header_values(request: Request, name: str) -> list[bytes]:
+    wanted = name.lower().encode("ascii")
+    scope = getattr(request, "scope", None)
+    if isinstance(scope, dict):
+        return [
+            value for header, value in scope.get("headers", [])
+            if isinstance(header, bytes) and header.lower() == wanted and isinstance(value, bytes)
+        ]
+    # Keep the helper usable with narrow request doubles in unit tests. Real
+    # Starlette requests always take the raw-scope branch above, which retains
+    # duplicate-header visibility for the security checks.
+    headers = getattr(request, "headers", {})
+    value = headers.get(name) if hasattr(headers, "get") else None
+    if isinstance(value, str):
+        return [value.encode("latin-1")]
+    if isinstance(value, bytes):
+        return [value]
+    return []
+
+
+async def _read_calendar_body(request: Request) -> bytes:
+    try:
+        async with asyncio.timeout(CALENDAR_BODY_TIMEOUT):
+            length_values = _raw_header_values(request, "content-length")
+            if len(length_values) > 1:
+                raise HTTPException(status_code=400, detail="duplicate content length")
+            raw_length = _calendar_header(request, "content-length")
+            if raw_length is not None:
+                try:
+                    content_length = int(raw_length)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail="invalid content length") from exc
+                if content_length < 0 or content_length > CALENDAR_MAX_BODY_SIZE:
+                    raise HTTPException(status_code=413, detail="calendar body exceeds limit")
+            body = bytearray()
+            async for chunk in request.stream():
+                if len(body) + len(chunk) > CALENDAR_MAX_BODY_SIZE:
+                    raise HTTPException(status_code=413, detail="calendar body exceeds limit")
+                body.extend(chunk)
+            return bytes(body)
+    except TimeoutError as exc:
+        raise HTTPException(status_code=408, detail="calendar request timeout") from exc
 
 
 def _safe_document_id(value) -> str:
@@ -1133,45 +1718,164 @@ async def health() -> dict:
 
 @app.get("/calendar")
 async def get_calendar() -> Response:
+    revision = 0
+    should_rebroadcast = False
+    projection_pending = False
     async with calendar_lock:
-        if not CALENDAR_PATH.exists():
-            body = b"{}"
-        else:
-            body = CALENDAR_PATH.read_bytes()
-        return Response(
-            content=body,
-            media_type="application/json",
-            headers={"X-LifeOS-Revision": str(calendar_revision)},
+        try:
+            body, _document, metadata = _load_calendar_state()
+        except (HTTPException, _CalendarStateUnavailable, OSError, ValueError):
+            return JSONResponse({"error": "calendar_unavailable"}, status_code=503)
+        revision = metadata["revision"]
+        retry_intent = _read_calendar_retry_intent()
+        retry_matches = retry_intent is not None and (
+            retry_intent["revision"] == revision
+            and retry_intent["bodyDigest"] == _calendar_digest(body)
         )
+        if retry_intent is not None and not retry_matches:
+            _clear_calendar_retry_intent()
+
+        # A state envelope is the authority. Rebuilding these compatibility
+        # projections on every authoritative read makes a failed post-commit
+        # projection self-healing even when the client does not replay PUT.
+        if _calendar_state_path().is_file():
+            projection_pending = not _repair_calendar_projections(body, metadata)
+            if projection_pending:
+                _write_calendar_retry_intent(revision, body)
+            should_rebroadcast = retry_matches or projection_pending
+
+    if should_rebroadcast:
+        broadcasted = await _broadcast_calendar_revision(revision)
+        if broadcasted and not projection_pending:
+            _clear_calendar_retry_intent()
+    return _calendar_response(body, revision, projection_pending=projection_pending)
 
 
 @app.put("/calendar")
 async def put_calendar(request: Request) -> Response:
-    body = await request.body()
+    if _calendar_header(request, "content-type") != "application/json":
+        return JSONResponse({"error": "content_type"}, status_code=415)
+    if_match = _calendar_header(request, "if-match")
+    idempotency_key = _calendar_header(request, "idempotency-key")
+    if if_match is None:
+        return JSONResponse({"error": "missing_if_match"}, status_code=428)
+    if idempotency_key is None:
+        return JSONResponse({"error": "missing_idempotency_key"}, status_code=400)
+    if not _valid_calendar_etag(if_match):
+        return JSONResponse({"error": "invalid_if_match"}, status_code=400)
+    if not CALENDAR_IDEMPOTENCY_KEY_PATTERN.fullmatch(idempotency_key):
+        return JSONResponse({"error": "invalid_idempotency_key"}, status_code=400)
     try:
-        json.loads(body)
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail=f"Body is not valid JSON: {exc}") from exc
-    global calendar_revision
+        body = await _read_calendar_body(request)
+        _parse_calendar_document(body)
+    except HTTPException as exc:
+        return JSONResponse({"error": "request_timeout" if exc.status_code == 408 else "body_too_large" if exc.status_code == 413 else "invalid_request"}, status_code=exc.status_code)
+
+    fingerprint = hashlib.sha256(f"{if_match}\x00".encode("ascii") + body).hexdigest()
+    response: Response
+    response_revision: int
+    projection_pending = False
     async with calendar_lock:
-        _atomic_write_bytes(CALENDAR_PATH, body)
-        calendar_revision += 1
-        revision = calendar_revision
-    await broadcaster.broadcast({"type": "calendar_changed", "revision": revision})
-    return Response(
-        content=b'{"status":"ok"}',
-        media_type="application/json",
-        headers={"X-LifeOS-Revision": str(revision)},
-    )
+        try:
+            current_body, _current_document, metadata = _load_calendar_state()
+        except (HTTPException, _CalendarStateUnavailable, OSError, ValueError):
+            return JSONResponse({"error": "calendar_unavailable"}, status_code=503)
+
+        current_revision = metadata["revision"]
+        current_etag = _calendar_etag(current_revision, _calendar_digest(current_body))
+        previous = next((record for record in metadata["idempotency"] if record["key"] == idempotency_key), None)
+        if previous is not None:
+            if previous["fingerprint"] != fingerprint:
+                return _calendar_response(current_body, current_revision, status_code=409)
+            # Replays are also the durable recovery path for a projection or
+            # broadcast interrupted after the original authority commit.
+            response_revision = current_revision
+            projection_pending = not _repair_calendar_projections(current_body, metadata)
+            response = _calendar_response(
+                current_body,
+                current_revision,
+                replay=True,
+                projection_pending=projection_pending,
+            )
+            if projection_pending:
+                _write_calendar_retry_intent(current_revision, current_body)
+        else:
+            if if_match != current_etag:
+                return _calendar_response(current_body, current_revision, status_code=412)
+            if current_revision >= CALENDAR_MAX_REVISION:
+                return _calendar_response(current_body, current_revision, status_code=503)
+
+            revision = current_revision + 1
+            idempotency_record = {
+                "key": idempotency_key,
+                "fingerprint": fingerprint,
+                "revision": revision,
+            }
+            next_metadata = {
+                "schemaVersion": 1,
+                "domain": "calendar",
+                "authority": "gateway",
+                "revision": revision,
+                "bodyDigest": _calendar_digest(body),
+                "idempotency": _calendar_idempotency_window(
+                    metadata["idempotency"], idempotency_record
+                ),
+                # The opaque Calendar document owns item tombstones. Keeping this
+                # list empty is deliberate: the gateway cannot invent a deletion
+                # timestamp or identity it did not receive from the client.
+                "tombstones": metadata["tombstones"],
+            }
+            try:
+                metadata_body = _calendar_metadata_bytes(next_metadata)
+                state_body = json.dumps({
+                    "schemaVersion": CALENDAR_STATE_SCHEMA_VERSION,
+                    "bodyBase64": base64.b64encode(body).decode("ascii"),
+                    "metadata": next_metadata,
+                }, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+            except (TypeError, ValueError):
+                return _calendar_response(current_body, current_revision, status_code=503)
+            if len(state_body) > CALENDAR_STATE_MAX_SIZE:
+                return _calendar_response(current_body, current_revision, status_code=503)
+
+            # The retry intent is durable before the state commit. If state
+            # commit succeeds, it records exactly which authority revision
+            # must be projected and rebroadcast. If state commit fails, the
+            # request still returns failure and the marker is harmlessly
+            # ignored until a matching authority revision exists.
+            if not _write_calendar_retry_intent(revision, body):
+                return JSONResponse({"error": "calendar_unavailable"}, status_code=503)
+            try:
+                # The state envelope is the single commit point. The historical
+                # body and metadata files are projections for migration/inspection;
+                # a crash between either projection rename leaves the committed
+                # envelope available and never exposes a torn pair.
+                _atomic_write_bytes(_calendar_state_path(), state_body)
+            except (OSError, ValueError):
+                return JSONResponse({"error": "calendar_unavailable"}, status_code=503)
+
+            response_revision = revision
+            projection_pending = not _repair_calendar_projections(body, next_metadata)
+            response = _calendar_response(body, revision, projection_pending=projection_pending)
+            if projection_pending:
+                # Keep the marker even when the first repair attempt fails;
+                # the committed envelope remains the retry source.
+                _write_calendar_retry_intent(revision, body)
+
+    broadcasted = await _broadcast_calendar_revision(response_revision)
+    if broadcasted and not projection_pending:
+        _clear_calendar_retry_intent()
+    return response
 
 
 @app.get("/documents")
 async def list_documents() -> Response:
     async with documents_lock:
-        if not DOCUMENTS_INDEX_PATH.exists():
+        try:
+            body = _read_bounded_state_file(DOCUMENTS_INDEX_PATH, CALENDAR_MAX_RESPONSE_SIZE)
+        except _CalendarStateUnavailable:
+            return JSONResponse({"error": "documents_unavailable"}, status_code=503)
+        if body is None:
             body = b"[]"
-        else:
-            body = DOCUMENTS_INDEX_PATH.read_bytes()
         return Response(content=body, media_type="application/json")
 
 
@@ -1302,7 +2006,10 @@ class _ClaudeIngestRequestError(Exception):
 async def _read_claude_ingest_body(request: Request) -> bytes:
     try:
         async with asyncio.timeout(CLAUDE_INGEST_BODY_TIMEOUT):
-            raw_length = request.headers.get("content-length")
+            length_values = _raw_header_values(request, "content-length")
+            if len(length_values) > 1:
+                raise _ClaudeIngestRequestError(400)
+            raw_length = _calendar_header(request, "content-length")
             if raw_length is not None:
                 try:
                     content_length = int(raw_length)
@@ -1326,7 +2033,7 @@ def _claude_ingest_input_error(status_code: int) -> JSONResponse:
 
 
 async def _proxy_claude_ingest(request: Request) -> Response:
-    if request.headers.get("content-type", "").lower().split(";", 1)[0].strip() != "application/json":
+    if _calendar_header(request, "content-type") != "application/json":
         return JSONResponse({"error": "invalid_request"}, status_code=415)
     secret = _read_ingest_secret()
     if secret is None:
@@ -1344,8 +2051,15 @@ async def _proxy_claude_ingest(request: Request) -> Response:
     except _ClaudeIngestRequestError as exc:
         return _claude_ingest_input_error(exc.status_code)
 
-    observed_header = request.headers.get(CLAUDE_INGEST_OBSERVED_HEADER)
-    observed_at = None
+    if len(_raw_header_values(request, CLAUDE_INGEST_OBSERVED_HEADER)) > 1:
+        return _claude_ingest_input_error(400)
+    if len(_raw_header_values(request, "idempotency-key")) > 1:
+        return _claude_ingest_input_error(400)
+    observed_header = _calendar_header(request, CLAUDE_INGEST_OBSERVED_HEADER)
+    supplied_idempotency_key = _calendar_header(request, "idempotency-key")
+    if supplied_idempotency_key is not None and not CALENDAR_IDEMPOTENCY_KEY_PATTERN.fullmatch(supplied_idempotency_key):
+        return _claude_ingest_input_error(400)
+    observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     if observed_header is not None:
         if not isinstance(observed_header, str) or len(observed_header) > 64:
             return _claude_ingest_input_error(400)
@@ -1360,6 +2074,16 @@ async def _proxy_claude_ingest(request: Request) -> Response:
     if not observed:
         return JSONResponse({"error": "usage_unavailable"}, status_code=422)
     forwarded = json.dumps(sanitized, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    # A caller-supplied key is authoritative.  With an explicit capture time,
+    # the timestamp participates in the derived key so distinct observations
+    # remain distinct.  If the transport has no capture time, keep the key
+    # stable across gateway retries even though the gateway supplies a fresh
+    # receipt timestamp for the upstream schema.
+    idempotency_key = supplied_idempotency_key or (
+        hashlib.sha256(forwarded + b"\x00" + observed_at.encode("ascii")).hexdigest()
+        if observed_header is not None
+        else hashlib.sha256(forwarded).hexdigest()
+    )
     try:
         async with asyncio.timeout(CLAUDE_INGEST_TOTAL_TIMEOUT):
             async with httpx.AsyncClient(
@@ -1374,7 +2098,8 @@ async def _proxy_claude_ingest(request: Request) -> Response:
                     headers={
                         "Authorization": f"Bearer {secret}",
                         "Content-Type": "application/json",
-                        **({"X-Observed-At": observed_at} if observed_at is not None else {}),
+                        "Idempotency-Key": idempotency_key,
+                        "X-Observed-At": observed_at,
                     },
                 ) as upstream:
                     if not 200 <= upstream.status_code < 300:
@@ -1405,7 +2130,10 @@ class _NutritionPhotoRequestError(Exception):
 async def _read_nutrition_photo_body(request: Request) -> bytes:
     try:
         async with asyncio.timeout(NUTRITION_PHOTO_BODY_TIMEOUT):
-            raw_length = request.headers.get("content-length")
+            length_values = _raw_header_values(request, "content-length")
+            if len(length_values) > 1:
+                raise _NutritionPhotoRequestError(400)
+            raw_length = _calendar_header(request, "content-length")
             if raw_length is not None:
                 try:
                     content_length = int(raw_length)
@@ -1720,14 +2448,14 @@ async def get_nutrition_barcode(barcode: str) -> Response:
         lambda payload: _validate_nutrition_barcode_payload(payload, barcode),
         "nutrition",
         max_response_size=256 * 1024,
-        request_timeout=httpx.Timeout(5.0, connect=2.0),
-        total_timeout=6.0,
+        request_timeout=httpx.Timeout(4.0, connect=1.0),
+        total_timeout=5.0,
     )
 
 
 @app.post("/nutrition/photo-proposal")
 async def post_nutrition_photo_proposal(request: Request) -> Response:
-    if request.headers.get("content-type", "").lower().split(";", 1)[0].strip() != "application/json":
+    if _calendar_header(request, "content-type") != "application/json":
         return JSONResponse({"error": "invalid_request"}, status_code=415)
     try:
         body = await _read_nutrition_photo_body(request)
@@ -1802,8 +2530,14 @@ async def get_supplement_catalog(request: Request) -> Response:
         return JSONResponse({"error": "invalid_request"}, status_code=400)
     except SupplementCatalogUnavailable:
         return JSONResponse({"error": "supplement_catalog_unavailable"}, status_code=503)
+    try:
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "supplement_catalog_unavailable"}, status_code=503)
+    if len(encoded) > CALENDAR_MAX_RESPONSE_SIZE:
+        return JSONResponse({"error": "supplement_catalog_unavailable"}, status_code=503)
     return Response(
-        content=json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode(),
+        content=encoded,
         media_type="application/json",
         headers={"Cache-Control": "no-store"},
     )
@@ -1826,7 +2560,9 @@ async def get_finance_summary() -> Response:
         payload = enable_banking.load_cached_summary()
         if payload is None:
             return _finance_consent_response({"error": "finance unavailable"}, 503)
-    return _finance_consent_response(payload, 200)
+    revision_reader = getattr(enable_banking, "summary_revision", None)
+    revision = revision_reader() if callable(revision_reader) else None
+    return _finance_consent_response(payload, 200, revision=revision)
 
 
 @app.get("/clipper/summary")

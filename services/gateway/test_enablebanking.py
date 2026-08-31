@@ -1,4 +1,6 @@
 import asyncio
+import copy
+import hashlib
 import json
 import os
 import time
@@ -8,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 os.environ["LIFEOS_TAILSCALE_ALLOWED_LOGIN"] = "test-user@example.com"
+os.environ["LIFEOS_TAILSCALE_EDGE_TOKEN"] = "e" * 64
 
 import enablebanking
 import main
@@ -67,6 +70,7 @@ def service(tmp_path, monkeypatch):
         data_dir=lambda: tmp_path,
         validate_finance_payload=main._validate_finance_payload,
         max_safe_cents=main.FINANCE_MAX_SAFE_CENTS,
+        validate_persisted_finance_payload=main._validate_persisted_finance_payload,
     )
     monkeypatch.setattr(result, "_build_jwt", lambda *_: "test.jwt.signature")
     return result
@@ -117,7 +121,10 @@ def test_fastapi_connect_route_exposes_connection_id_contract(tmp_path, monkeypa
 
     response = client.post(
         "/finance/connect",
-        headers={"Tailscale-User-Login": "test-user@example.com"},
+        headers={
+            "Tailscale-User-Login": "test-user@example.com",
+            "X-LifeOS-Trusted-Edge": "e" * 64,
+        },
         json={"institutionId": "revolut_personal"},
     )
 
@@ -274,6 +281,112 @@ def test_refresh_normalizes_realistic_account_and_transaction_shapes(tmp_path, m
     assert main._validate_finance_payload(summary)
     cached = json.loads((tmp_path / "finance-summary.json").read_text())
     assert cached == summary
+    metadata = json.loads((tmp_path / "finance-summary.json.meta.json").read_text())
+    assert metadata["schemaVersion"] == 1
+    assert metadata["domain"] == "finance"
+    assert metadata["authority"] == "gateway"
+    assert metadata["revision"] == 1
+    assert metadata["bodyDigest"] == hashlib.sha256(
+        json.dumps(summary, separators=(",", ":"), sort_keys=True, allow_nan=False).encode()
+    ).hexdigest()
+    assert metadata["idempotency"] == [{
+        "key": f"finance-refresh-{metadata['bodyDigest']}",
+        "fingerprint": metadata["bodyDigest"],
+        "revision": 1,
+    }]
+    assert metadata["tombstones"] == []
+    state_path = tmp_path / "finance-summary.json.state.json"
+    committed_state = state_path.read_bytes()
+    (tmp_path / ".finance-summary.json.state.json.interrupted.tmp").write_bytes(
+        b'{"schemaVersion":1,"summary":'
+    )
+    assert adapter.summary_revision() == 1
+    assert adapter.load_cached_summary() == summary
+    assert state_path.read_bytes() == committed_state
+
+    tampered = copy.deepcopy(summary)
+    tampered["spent"]["amountCents"] += 1
+    partial_state = json.loads(committed_state)
+    partial_state["summary"] = tampered
+    state_path.write_text(json.dumps(partial_state))
+    assert adapter.load_cached_summary() is None
+
+
+def test_refresh_preserves_mixed_currency_accounts_without_converting_them(tmp_path, monkeypatch):
+    adapter = service(tmp_path, monkeypatch)
+    adapter._save_connection({
+        "connectionId": "eb-flow",
+        "institutionId": "revolut_personal",
+        "sessionId": "session-1",
+        "linkedAt": "2026-01-01T00:00:00Z",
+    })
+    eur_uid = "01234567-89ab-cdef-0123-456789abcdef"
+    usd_uid = "11234567-89ab-cdef-0123-456789abcdef"
+    today = datetime.now(timezone.utc).date().isoformat()
+    holder = QueueClient([
+        FakeResponse({
+            "status": "AUTHORIZED",
+            "accounts": [
+                {"uid": eur_uid, "name": "Main account", "currency": "EUR"},
+                {"uid": usd_uid, "name": "Dollar savings", "currency": "USD"},
+            ],
+        }),
+        FakeResponse({"balances": [{
+            "balance_type": "CLAV",
+            "balance_amount": {"amount": "1234.56", "currency": "EUR"},
+        }]}),
+        FakeResponse({"transactions": [{
+            "transaction_id": "tx-eur",
+            "transaction_amount": {"amount": "12.34", "currency": "EUR"},
+            "credit_debit_indicator": "DBIT",
+            "creditor": {"name": "REWE"},
+            "booking_date": today,
+        }]}),
+    ])
+    monkeypatch.setattr(enablebanking.httpx, "AsyncClient", lambda **_: holder)
+
+    summary = run(adapter.refresh_summary())
+
+    accounts = summary["accounts"]["accounts"]
+    assert len(accounts) == 2
+    observed = next(account for account in accounts if account["availability"] == "observed")
+    unavailable = next(account for account in accounts if account["availability"] == "unavailable")
+    assert observed["balanceCents"] == 123456
+    assert unavailable["detail"] == "USD · Enable Banking"
+    assert "balanceCents" not in unavailable
+    assert unavailable["provenance"]["quality"] == "unavailable"
+    assert main._validate_finance_payload(summary)
+    assert len(holder.responses) == 0
+
+
+def test_refresh_keeps_all_unsupported_currency_ledgers_unavailable(tmp_path, monkeypatch):
+    adapter = service(tmp_path, monkeypatch)
+    adapter._save_connection({
+        "connectionId": "eb-flow",
+        "institutionId": "revolut_personal",
+        "sessionId": "session-1",
+        "linkedAt": "2026-01-01T00:00:00Z",
+    })
+    holder = QueueClient([
+        FakeResponse({
+            "status": "AUTHORIZED",
+            "accounts": [{
+                "uid": "21234567-89ab-cdef-0123-456789abcdef",
+                "name": "Dollar savings",
+                "currency": "USD",
+            }],
+        }),
+    ])
+    monkeypatch.setattr(enablebanking.httpx, "AsyncClient", lambda **_: holder)
+
+    summary = run(adapter.refresh_summary())
+
+    assert summary["monthlyIncome"]["availability"] == "unavailable"
+    assert summary["fixedCosts"]["availability"] == "unavailable"
+    assert summary["spent"]["availability"] == "unavailable"
+    assert summary["transactions"]["availability"] == "unavailable"
+    assert main._validate_finance_payload(summary)
+    assert len(holder.responses) == 0
 
 
 def test_refresh_fails_closed_when_provider_returns_malformed_account(tmp_path, monkeypatch):
@@ -286,6 +399,30 @@ def test_refresh_fails_closed_when_provider_returns_malformed_account(tmp_path, 
     })
     holder = QueueClient([
         FakeResponse({"status": "AUTHORIZED", "accounts": [{"uid": "not-a-provider-account"}]}),
+    ])
+    monkeypatch.setattr(enablebanking.httpx, "AsyncClient", lambda **_: holder)
+
+    with pytest.raises(enablebanking.EnableBankingUnavailable):
+        run(adapter.refresh_summary())
+
+
+def test_refresh_fails_closed_when_provider_returns_an_invalid_currency_code(tmp_path, monkeypatch):
+    adapter = service(tmp_path, monkeypatch)
+    adapter._save_connection({
+        "connectionId": "eb-flow",
+        "institutionId": "revolut_personal",
+        "sessionId": "session-1",
+        "linkedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    })
+    holder = QueueClient([
+        FakeResponse({
+            "status": "AUTHORIZED",
+            "accounts": [{
+                "uid": "01234567-89ab-cdef-0123-456789abcdef",
+                "name": "Main",
+                "currency": "EURO",
+            }],
+        }),
     ])
     monkeypatch.setattr(enablebanking.httpx, "AsyncClient", lambda **_: holder)
 
@@ -363,6 +500,13 @@ def test_cached_summary_becomes_truthfully_stale_after_provider_outage(tmp_path,
     }
     cached = tmp_path / "finance-summary.json"
     cached.write_text(json.dumps(summary))
+    metadata = adapter._next_summary_metadata(summary)
+    adapter._atomic_write_json(adapter._summary_state_path(), {
+        "schemaVersion": adapter.FINANCE_STATE_SCHEMA_VERSION,
+        "summary": summary,
+        "metadata": metadata,
+    })
+    adapter._atomic_write_json(adapter._summary_metadata_path(), metadata)
 
     loaded = adapter.load_cached_summary()
 
@@ -372,6 +516,20 @@ def test_cached_summary_becomes_truthfully_stale_after_provider_outage(tmp_path,
         assert loaded[key]["provenance"]["freshness"] == "stale"
         assert loaded[key]["provenance"]["connectorState"] == "refresh_due"
     assert main._validate_finance_payload(loaded)
+
+
+def test_finance_revision_journal_rolls_forward_without_eventual_write_lockout(tmp_path, monkeypatch):
+    adapter = service(tmp_path, monkeypatch)
+    monkeypatch.setattr(adapter, "MAX_FINANCE_JOURNAL_RECORDS", 2)
+
+    metadata = None
+    for index in range(3):
+        metadata = adapter._next_summary_metadata({"revisionMarker": index})
+        adapter._atomic_write_json(adapter._summary_metadata_path(), metadata)
+
+    assert metadata is not None
+    assert metadata["revision"] == 3
+    assert [record["revision"] for record in metadata["idempotency"]] == [2, 3]
 
 
 def test_cached_summary_backfills_new_merchant_categories_without_overwriting_labels(tmp_path, monkeypatch):
@@ -514,6 +672,7 @@ def test_refresh_follows_bounded_transaction_continuation_pages(tmp_path, monkey
 def test_duplicate_accounts_are_collapsed_but_conflicts_fail_closed(tmp_path, monkeypatch):
     adapter = service(tmp_path, monkeypatch)
     row = {
+        "availability": "observed",
         "id": "ebacct-duplicate",
         "name": "revolut_personal · Main",
         "detail": "EUR · Enable Banking",
