@@ -117,6 +117,32 @@ public struct CalendarRemoteResource: Equatable, Sendable {
     }
 }
 
+#if DEBUG
+/// Debug-only evidence used by fixture-host regression tests. It counts
+/// network tasks created through the production Tailscale transport, not
+/// arbitrary Swift concurrency tasks. Release builds contain no audit state.
+public final class LifeOSNetworkTaskAudit: @unchecked Sendable {
+    public static let shared = LifeOSNetworkTaskAudit()
+
+    private let lock = NSLock()
+    private var createdTaskCountStorage = 0
+
+    private init() {}
+
+    public var createdTaskCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return createdTaskCountStorage
+    }
+
+    fileprivate func recordTaskCreated() {
+        lock.lock()
+        createdTaskCountStorage += 1
+        lock.unlock()
+    }
+}
+#endif
+
 /// `URLSessionWebSocketTask` on this toolchain never delivers its handshake or `receive()`
 /// completions -- not even a failure -- unless the owning `URLSession` has an actual
 /// `URLSessionWebSocketDelegate` attached. Verified by isolated reproduction: identical
@@ -156,6 +182,12 @@ public actor TailscaleSyncClient {
     static let maximumNutritionPhotoRequestBytes = 30 * 1024 * 1024
     static let maximumNutritionPhotoResponseBytes = 1 * 1024 * 1024
     static let calendarTimeout: TimeInterval = 8
+
+    private static func recordNetworkTaskCreated() {
+#if DEBUG
+        LifeOSNetworkTaskAudit.shared.recordTaskCreated()
+#endif
+    }
 
     public init(
         defaults: UserDefaults = .standard
@@ -439,6 +471,7 @@ public actor TailscaleSyncClient {
     }
 
     private func calendarRequest(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        Self.recordNetworkTaskCreated()
         let (bytes, response) = try await session.bytes(for: request)
         guard let http = response as? HTTPURLResponse else { throw TailscaleSyncError.invalidResponse }
         let declaredLength = http.value(forHTTPHeaderField: "Content-Length")
@@ -462,6 +495,7 @@ public actor TailscaleSyncClient {
 
     public func fetchDocuments() async throws -> Data {
         let url = try baseURL().appendingPathComponent("documents")
+        Self.recordNetworkTaskCreated()
         let (data, response) = try await session.data(for: request(url: url))
         try Self.checkHTTPStatus(response)
         return data
@@ -700,6 +734,7 @@ public actor TailscaleSyncClient {
         request: URLRequest,
         maximumBytes: Int
     ) async throws -> (Data, HTTPURLResponse) {
+        recordNetworkTaskCreated()
         let (bytes, response) = try await session.bytes(for: request)
         guard let http = response as? HTTPURLResponse else { throw TailscaleSyncError.invalidResponse }
         let declaredLength = http.value(forHTTPHeaderField: "Content-Length")
@@ -744,6 +779,7 @@ public actor TailscaleSyncClient {
         maximumBytes: Int
     ) async throws -> Data {
         guard request.httpMethod == "GET" else { throw TailscaleSyncError.invalidResponse }
+        recordNetworkTaskCreated()
         let (bytes, response) = try await session.bytes(for: request)
         guard let http = response as? HTTPURLResponse else { throw TailscaleSyncError.invalidResponse }
         try Self.checkHTTPStatus(http)
@@ -795,6 +831,7 @@ public actor TailscaleSyncClient {
         guard let wsURL = components.url else { return }
 
         let request = request(url: wsURL)
+        Self.recordNetworkTaskCreated()
         let task = session.webSocketTask(with: request)
         webSocketTask = task
         task.resume()

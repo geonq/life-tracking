@@ -6,11 +6,15 @@ public enum CalendarPeerSyncError: Error, Equatable, Sendable {
     case invalidSenderID
     case invalidRevision
     case invalidEnvelope
+    case snapshotTooLarge
 }
 
 /// The wire format is deliberately versioned so peers can reject newer formats safely.
 public struct CalendarPeerSyncEnvelope: Codable, Equatable, Sendable {
     public static let currentVersion = 1
+    /// Keep the peer frame bounded while leaving room for envelope metadata on
+    /// top of the remote calendar resource's 256 KiB body limit.
+    public static let maximumEncodedBytes = 288 * 1_024
 
     public let version: Int
     public let snapshot: CalendarSnapshot
@@ -29,13 +33,28 @@ public struct CalendarPeerSyncEnvelope: Codable, Equatable, Sendable {
     }
 
     public func encoded() throws -> Data {
+        guard snapshot.schemaVersion == CalendarSnapshot.currentSchemaVersion,
+              snapshot.items.count <= CalendarSnapshot.maximumItemCount else {
+            throw CalendarPeerSyncError.snapshotTooLarge
+        }
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.sortedKeys]
-        return try encoder.encode(self)
+        let snapshotData = try encoder.encode(snapshot)
+        guard snapshotData.count <= CalendarSnapshot.maximumEncodedBytes else {
+            throw CalendarPeerSyncError.snapshotTooLarge
+        }
+        let data = try encoder.encode(self)
+        guard data.count <= Self.maximumEncodedBytes else {
+            throw CalendarPeerSyncError.snapshotTooLarge
+        }
+        return data
     }
 
     public static func decode(_ data: Data) throws -> CalendarPeerSyncEnvelope {
+        guard data.count <= Self.maximumEncodedBytes else {
+            throw CalendarPeerSyncError.snapshotTooLarge
+        }
         do {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
@@ -43,9 +62,23 @@ public struct CalendarPeerSyncEnvelope: Codable, Equatable, Sendable {
             guard envelope.version == currentVersion else { throw CalendarPeerSyncError.unsupportedEnvelopeVersion(envelope.version) }
             guard !envelope.senderID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw CalendarPeerSyncError.invalidSenderID }
             guard envelope.revision >= 0 else { throw CalendarPeerSyncError.invalidRevision }
+            try envelope.snapshot.validatedForPersistence()
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            encoder.outputFormatting = [.sortedKeys]
+            guard try encoder.encode(envelope.snapshot).count <= CalendarSnapshot.maximumEncodedBytes else {
+                throw CalendarPeerSyncError.snapshotTooLarge
+            }
             return envelope
         } catch let error as CalendarPeerSyncError {
             throw error
+        } catch let error as CalendarSnapshotError {
+            switch error {
+            case .tooManyItems, .payloadTooLarge:
+                throw CalendarPeerSyncError.snapshotTooLarge
+            case .unsupportedSchemaVersion:
+                throw CalendarPeerSyncError.invalidEnvelope
+            }
         } catch {
             throw CalendarPeerSyncError.invalidEnvelope
         }

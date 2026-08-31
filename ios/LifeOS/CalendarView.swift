@@ -633,13 +633,14 @@ public struct CalendarView: View {
                 Button(action: toggleMonthExpansion) {
                     HStack(spacing: 5) {
                         Text(headerDate, format: .dateTime.month(.wide))
-                            .font(LifeOSFont.headerLarge(20))
+                            .font(LifeOSFont.title(22))
+                            .tracking(-0.2)
                             .lineLimit(1)
                         LifeOSIcon(.chevronRight)
                             .rotationEffect(.degrees(monthExpanded ? -90 : 90))
                             .frame(width: 12, height: 12)
                     }
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(LifeOSTokens.Module.calendar)
                     .padding(.horizontal, monthExpanded ? 10 : 0)
                     .frame(height: 38)
                     .background(
@@ -661,8 +662,8 @@ public struct CalendarView: View {
                 Button {
                     isSearchPresented = true
                 } label: {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 15, weight: .semibold))
+                    LifeOSIcon(.search)
+                        .frame(width: 15, height: 15)
                         .foregroundStyle(.secondary)
                         .frame(width: 32, height: 32)
                         .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
@@ -674,8 +675,8 @@ public struct CalendarView: View {
                 Button {
                     Task { _ = await coordinator.undo() }
                 } label: {
-                    Image(systemName: "arrow.uturn.backward")
-                        .font(.system(size: 15, weight: .semibold))
+                    LifeOSIcon(.undo)
+                        .frame(width: 15, height: 15)
                         .foregroundStyle(coordinator.canUndo ? Color.primary : Color.secondary)
                         .frame(width: 32, height: 32)
                         .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
@@ -695,7 +696,7 @@ public struct CalendarView: View {
                 } label: {
                     LifeOSIcon(.calendar)
                         .frame(width: 17, height: 17)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(LifeOSTokens.Module.calendar)
                         .frame(width: 32, height: 32)
                 }
                 // Menus re-tint their label with the system accent; pin the
@@ -716,9 +717,9 @@ public struct CalendarView: View {
                 .accessibilityIdentifier("calendar-today")
 
                 Button(action: create) {
-                    LifeOSIcon(.add)
+                    LifeOSIcon(.calendarPlus)
                         .frame(width: 17, height: 17)
-                        .foregroundStyle(.primary)
+                        .foregroundStyle(LifeOSTokens.Module.calendar)
                         .frame(width: 32, height: 32)
                 }
                 .buttonStyle(.plain)
@@ -741,7 +742,7 @@ public struct CalendarView: View {
                     Button {
                         isSearchPresented = true
                     } label: {
-                        Image(systemName: "magnifyingglass")
+                        LifeOSIcon(.search).frame(width: 15, height: 15)
                     }
                     .buttonStyle(.bordered)
                     .accessibilityLabel("Search events")
@@ -750,7 +751,7 @@ public struct CalendarView: View {
                         Task { _ = await coordinator.undo() }
                     } label: {
                         HStack(spacing: 6) {
-                            Image(systemName: "arrow.uturn.backward")
+                            LifeOSIcon(.undo).frame(width: 15, height: 15)
                             Text("Undo")
                         }
                     }
@@ -778,7 +779,7 @@ public struct CalendarView: View {
                     .keyboardShortcut("]", modifiers: .command)
                     Button { create() } label: {
                         HStack(spacing: 6) {
-                            LifeOSIcon(.add).frame(width: 15, height: 15)
+                            LifeOSIcon(.calendarPlus).frame(width: 15, height: 15)
                             Text("New")
                         }
                     }
@@ -1114,8 +1115,9 @@ public struct CalendarView: View {
     /// anchor used by sidebar and command-palette entry points.
     private func edit(_ item: CalendarItem, sourceFrame: CGRect) {
         timedCreationPreview = nil
+        let target = resolveAnchor(for: item)
         presentMacEditor(
-            CalendarEditorPresentation(item: item, date: selectedDate),
+            CalendarEditorPresentation(item: target, date: selectedDate),
             sourceFrame: sourceFrame
         )
     }
@@ -1218,8 +1220,12 @@ public struct CalendarView: View {
     }
 
     private func delete(_ item: CalendarItem, completion: @escaping CalendarEditorCompletion) {
+        // Derived occurrences share the anchor's durable ID. Resolve before
+        // tombstoning so deleting one visible occurrence removes the series
+        // without persisting that occurrence's transient wall-clock bounds.
+        let target = resolveAnchor(for: item)
         Task { @MainActor in
-            completion(await coordinator.delete(item))
+            completion(await coordinator.delete(target))
         }
     }
 
@@ -1301,7 +1307,7 @@ private struct CalendarEditorTimeZoneChip: View {
             } label: {
                 choiceLabel(deviceIdentifier, isSelected: identifier == nil)
             }
-            ForEach(Self.commonZoneIdentifiers, id: \.self) { candidate in
+            ForEach(selectableZoneIdentifiers, id: \.self) { candidate in
                 Button {
                     identifier = TimeZone(identifier: candidate)?.identifier ?? candidate
                 } label: {
@@ -1329,6 +1335,15 @@ private struct CalendarEditorTimeZoneChip: View {
 
     private var effectiveIdentifier: String {
         identifier ?? deviceIdentifier
+    }
+
+    private var selectableZoneIdentifiers: [String] {
+        var result: [String] = []
+        for candidate in Self.commonZoneIdentifiers + [identifier].compactMap({ $0 }) {
+            guard candidate != deviceIdentifier, !result.contains(candidate) else { continue }
+            result.append(candidate)
+        }
+        return result
     }
 
     private func choiceLabel(_ zoneIdentifier: String, isSelected: Bool) -> some View {
@@ -1407,6 +1422,10 @@ enum CalendarEditorStrings {
 
     static func deleteEvent(localeIdentifier: String = Locale.current.identifier) -> String {
         de("Ereignis löschen", "Delete event", localeIdentifier: localeIdentifier)
+    }
+
+    static func confirmDeleteTitle(localeIdentifier: String = Locale.current.identifier) -> String {
+        de("Ereignis löschen?", "Delete event?", localeIdentifier: localeIdentifier)
     }
 
     static func cancel(localeIdentifier: String = Locale.current.identifier) -> String {
@@ -1532,6 +1551,7 @@ struct CalendarEditor: View {
     @State private var repeatUntil: Date
     @State private var validationMessage: String?
     @State private var retryAvailable = false
+    @State private var pendingDelete: CalendarItem?
     @State private var showingIconPicker = false
     @State private var iconAsset: CalendarIconAsset?
     @State private var systemIconName: String?
@@ -1572,24 +1592,37 @@ struct CalendarEditor: View {
         _systemIconName = State(initialValue: item?.systemIconName)
         _status = State(initialValue: item?.status ?? .planned)
         let roundedStart = item?.start ?? date
+        let editorCalendar = Self.calendarAdjusted(for: item?.timeZoneIdentifier, fallback: calendar)
         _start = State(initialValue: roundedStart)
         _end = State(initialValue: item?.end ?? endDate ?? roundedStart.addingTimeInterval(3600))
-        _eventDate = State(initialValue: calendar.startOfDay(for: roundedStart))
+        _eventDate = State(initialValue: editorCalendar.startOfDay(for: roundedStart))
         _allDay = State(initialValue: Self.inferredAllDay(
             item: item,
             start: roundedStart,
             endDate: endDate,
-            calendar: calendar
+            calendar: editorCalendar
         ))
-        _showTimezone = State(initialValue: false)
+        _showTimezone = State(initialValue: item?.timeZoneIdentifier != nil)
         _timeZoneIdentifier = State(initialValue: item?.timeZoneIdentifier)
         _repeatFrequency = State(initialValue: item?.recurrence?.frequency)
         _repeatInterval = State(initialValue: item?.recurrence?.interval ?? 1)
         _repeatUntilEnabled = State(initialValue: item?.recurrence?.until != nil)
         _repeatUntil = State(
             initialValue: item?.recurrence?.until
-                ?? (calendar.date(byAdding: .day, value: 30, to: roundedStart) ?? roundedStart)
+                ?? (editorCalendar.date(byAdding: .day, value: 30, to: roundedStart) ?? roundedStart)
         )
+    }
+
+    private static func calendarAdjusted(for identifier: String?, fallback: Calendar) -> Calendar {
+        guard let identifier,
+              let timeZone = TimeZone(identifier: identifier) else { return fallback }
+        var adjusted = fallback
+        adjusted.timeZone = timeZone
+        return adjusted
+    }
+
+    private var editingCalendar: Calendar {
+        Self.calendarAdjusted(for: timeZoneIdentifier, fallback: calendar)
     }
 
     static func inferredAllDay(
@@ -1626,6 +1659,25 @@ struct CalendarEditor: View {
         } message: {
             Text(validationMessage ?? "Please check the event details.")
         }
+        .confirmationDialog(
+            CalendarEditorStrings.confirmDeleteTitle(),
+            isPresented: Binding(
+                get: { pendingDelete != nil },
+                set: { if !$0 { pendingDelete = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button(CalendarEditorStrings.deleteEvent(), role: .destructive) {
+                guard let item = pendingDelete else { return }
+                pendingDelete = nil
+                onDelete(item, handleMutationResult)
+            }
+            Button(CalendarEditorStrings.cancel(), role: .cancel) {
+                pendingDelete = nil
+            }
+        } message: {
+            Text(deleteConfirmationMessage)
+        }
         .sheet(isPresented: $showingIconPicker) {
             CalendarIconPicker(icon: $icon, systemIconName: $systemIconName, iconAsset: $iconAsset)
 #if os(iOS)
@@ -1641,12 +1693,12 @@ struct CalendarEditor: View {
             if allDay {
                 setAllDayBounds(for: date)
             } else {
-                let previousDate = calendar.startOfDay(for: start)
+                let previousDate = editingCalendar.startOfDay(for: start)
                 let result = CalendarEditorDateAdjustment.translatedBounds(
                     start: start,
                     end: end,
                     to: date,
-                    calendar: calendar
+                    calendar: editingCalendar
                 )
                 switch result {
                 case .success(let translated):
@@ -1655,7 +1707,7 @@ struct CalendarEditor: View {
                 case .failure:
                     retryAvailable = false
                     validationMessage = "That local time does not exist on the selected date. The previous date was kept."
-                    if !calendar.isDate(eventDate, inSameDayAs: previousDate) {
+                    if !editingCalendar.isDate(eventDate, inSameDayAs: previousDate) {
                         eventDate = previousDate
                     }
                 }
@@ -1664,12 +1716,19 @@ struct CalendarEditor: View {
         .onChange(of: allDay) { _, enabled in
             if enabled {
                 setAllDayBounds(for: eventDate)
-            } else if calendar.startOfDay(for: start) == start,
-                      let nextDay = calendar.date(byAdding: .day, value: 1, to: start), end == nextDay {
-                start = calendar.date(bySettingHour: 9, minute: 0, second: 0, of: eventDate) ?? start
+            } else if editingCalendar.startOfDay(for: start) == start,
+                      let nextDay = editingCalendar.date(byAdding: .day, value: 1, to: start), end == nextDay {
+                start = editingCalendar.date(bySettingHour: 9, minute: 0, second: 0, of: eventDate) ?? start
                 end = start.addingTimeInterval(3600)
             }
         }
+        .onChange(of: timeZoneIdentifier) { _, _ in
+            let day = editingCalendar.startOfDay(for: start)
+            eventDate = day
+            if allDay { setAllDayBounds(for: day) }
+        }
+        .environment(\.calendar, editingCalendar)
+        .environment(\.timeZone, editingCalendar.timeZone)
     }
 
 #if os(macOS)
@@ -1911,13 +1970,13 @@ struct CalendarEditor: View {
                     CalendarEditorTimePill(
                         label: "Start",
                         date: start,
-                        calendar: calendar,
+                        calendar: editingCalendar,
                         accessibilityIdentifier: "calendar-event-start"
                     ) {
                         CalendarEditorTimePopover(
                             title: "Start time",
                             date: $start,
-                            calendar: calendar,
+                            calendar: editingCalendar,
                             minimumDate: nil
                         )
                     }
@@ -1927,13 +1986,13 @@ struct CalendarEditor: View {
                     CalendarEditorTimePill(
                         label: "End",
                         date: end,
-                        calendar: calendar,
+                        calendar: editingCalendar,
                         accessibilityIdentifier: "calendar-event-end"
                     ) {
                         CalendarEditorTimePopover(
                             title: "End time",
                             date: $end,
-                            calendar: calendar,
+                            calendar: editingCalendar,
                             minimumDate: start,
                             quickDurations: [15, 30, 60, 120],
                             quickDurationBase: start
@@ -1967,7 +2026,7 @@ struct CalendarEditor: View {
                     .font(.system(size: 13, weight: .medium))
                 Spacer(minLength: 4)
 #if os(macOS)
-                CalendarEditorDatePill(date: $eventDate, calendar: calendar)
+                CalendarEditorDatePill(date: $eventDate, calendar: editingCalendar)
 #else
                 DatePicker("Date", selection: $eventDate, displayedComponents: .date)
                     .labelsHidden()
@@ -1982,7 +2041,7 @@ struct CalendarEditor: View {
                 CalendarEditorInlineToggle(title: CalendarEditorStrings.allDay(), isOn: $allDay, identifier: "calendar-event-all-day")
                 CalendarEditorInlineToggle(title: CalendarEditorStrings.timezone(), isOn: $showTimezone, identifier: "calendar-event-timezone")
                 if showTimezone {
-                    Text(TimeZone.current.identifier)
+                    Text(editingCalendar.timeZone.identifier)
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -2142,8 +2201,8 @@ struct CalendarEditor: View {
     }
 
     private func setAllDayBounds(for date: Date) {
-        start = calendar.startOfDay(for: date)
-        end = calendar.date(byAdding: .day, value: 1, to: start) ?? start
+        start = editingCalendar.startOfDay(for: date)
+        end = editingCalendar.date(byAdding: .day, value: 1, to: start) ?? start
     }
 
     private func commit() {
@@ -2182,7 +2241,14 @@ struct CalendarEditor: View {
     }
 
     private func requestDelete(_ item: CalendarItem) {
-        onDelete(item, handleMutationResult)
+        pendingDelete = item
+    }
+
+    private var deleteConfirmationMessage: String {
+        if pendingDelete?.recurrence != nil {
+            return "This deletes the entire repeating series. You can undo the deletion after it is saved."
+        }
+        return "This event will be removed from the calendar. You can undo the deletion after it is saved."
     }
 
     private func retryLastMutation() {

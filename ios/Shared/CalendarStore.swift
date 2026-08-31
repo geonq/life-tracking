@@ -42,13 +42,21 @@ public actor CalendarStore {
 
     public func load() throws -> CalendarSnapshot {
         guard fileManager.fileExists(atPath: url.path) else { let empty = CalendarSnapshot(); cached = empty; return empty }
-        let snapshot = try JSONDecoder.calendar.decode(CalendarSnapshot.self, from: Data(contentsOf: url))
+        let data = try Data(contentsOf: url)
+        guard data.count <= CalendarSnapshot.maximumEncodedBytes else {
+            throw CalendarSnapshotError.payloadTooLarge
+        }
+        let snapshot = try JSONDecoder.calendar.decode(CalendarSnapshot.self, from: data)
         cached = snapshot; return snapshot
     }
 
     @discardableResult
     public func save(_ snapshot: CalendarSnapshot) throws -> CalendarSnapshot {
+        try snapshot.validatedForPersistence()
         let data = try JSONEncoder.calendar.encode(snapshot)
+        guard data.count <= CalendarSnapshot.maximumEncodedBytes else {
+            throw CalendarSnapshotError.payloadTooLarge
+        }
         let directory = url.deletingLastPathComponent()
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         let temporary = directory.appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString).tmp")
@@ -74,7 +82,10 @@ public actor CalendarStore {
     }
 
     public func merge(_ remote: CalendarSnapshot) throws -> CalendarSnapshot {
-        let merged = (try load()).merged(with: remote)
+        try remote.validatedForPersistence()
+        let current = try load()
+        let merged = current.merged(with: remote)
+        guard merged != current else { return current }
         return try save(merged)
     }
 }

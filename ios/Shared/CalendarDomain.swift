@@ -157,6 +157,17 @@ public enum CalendarRecurrence {
     /// so an open-ended daily rule can never explode rendering or sync work.
     public static let maximumOccurrencesPerItem = 400
 
+    /// Recurrence math is expressed in the item's stored wall-clock zone. The
+    /// caller's calendar still supplies locale/week rules, but a travel event
+    /// must not jump from 09:00 to 08:00 merely because the device is elsewhere.
+    private static func calendar(for item: CalendarItem, fallback: Calendar) -> Calendar {
+        guard let identifier = item.timeZoneIdentifier,
+              let timeZone = TimeZone(identifier: identifier) else { return fallback }
+        var adjusted = fallback
+        adjusted.timeZone = timeZone
+        return adjusted
+    }
+
     /// Returns the calendar-derived start for an occurrence index without
     /// allowing `step * interval` to overflow. Keeping this calculation
     /// anchored to the original item preserves wall-clock and month/year
@@ -267,6 +278,8 @@ public enum CalendarRecurrence {
         guard !item.isDeleted else { return [] }
         guard let rule = item.recurrence else { return [item] }
 
+        let calendar = Self.calendar(for: item, fallback: calendar)
+
         let duration = item.end.timeIntervalSince(item.start)
         var results: [CalendarItem] = []
         guard var step = firstPotentialStep(
@@ -300,6 +313,23 @@ public enum CalendarRecurrence {
             step += 1
         }
         return results
+    }
+}
+
+public enum CalendarSnapshotError: Error, Equatable, Sendable, LocalizedError {
+    case unsupportedSchemaVersion(Int)
+    case tooManyItems
+    case payloadTooLarge
+
+    public var errorDescription: String? {
+        switch self {
+        case .unsupportedSchemaVersion(let version):
+            return "Unsupported calendar schema version \(version)."
+        case .tooManyItems:
+            return "The calendar contains too many items to load safely."
+        case .payloadTooLarge:
+            return "The calendar payload is too large to save safely."
+        }
     }
 }
 
@@ -560,9 +590,71 @@ public enum CalendarSearch {
 }
 
 public struct CalendarSnapshot: Codable, Equatable, Sendable {
-    public var schemaVersion: Int = 1
+    public static let currentSchemaVersion = 1
+    /// This is a defensive item-count ceiling in addition to the byte ceiling
+    /// enforced by the local store and remote client. It prevents a compact
+    /// malformed payload from expanding into an unbounded merge/render pass.
+    public static let maximumItemCount = 1_024
+    public static let maximumEncodedBytes = 256 * 1_024
+
+    public var schemaVersion: Int = CalendarSnapshot.currentSchemaVersion
     public var items: [CalendarItem]
-    public init(items: [CalendarItem] = []) { self.items = items.sorted { $0.start == $1.start ? $0.id.uuidString < $1.id.uuidString : $0.start < $1.start } }
+
+    public init(items: [CalendarItem] = []) {
+        schemaVersion = Self.currentSchemaVersion
+        self.items = Self.sortedItems(items)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, items
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let version = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? Self.currentSchemaVersion
+        guard version == Self.currentSchemaVersion else {
+            throw CalendarSnapshotError.unsupportedSchemaVersion(version)
+        }
+        let decodedItems = try container.decodeIfPresent([CalendarItem].self, forKey: .items) ?? []
+        guard decodedItems.count <= Self.maximumItemCount else {
+            throw CalendarSnapshotError.tooManyItems
+        }
+        schemaVersion = version
+        items = Self.sortedItems(decodedItems)
+    }
+
+    private static func sortedItems(_ items: [CalendarItem]) -> [CalendarItem] {
+        var byID: [UUID: CalendarItem] = [:]
+        for item in items {
+            guard let current = byID[item.id] else {
+                byID[item.id] = item
+                continue
+            }
+            if prefers(item, over: current) {
+                byID[item.id] = item
+            }
+        }
+        return byID.values.sorted {
+            $0.start == $1.start ? $0.id.uuidString < $1.id.uuidString : $0.start < $1.start
+        }
+    }
+
+    private static func prefers(_ candidate: CalendarItem, over current: CalendarItem) -> Bool {
+        candidate.updatedAt > current.updatedAt ||
+            (candidate.updatedAt == current.updatedAt && candidate.conflictKey > current.conflictKey)
+    }
+
+    /// Validates a snapshot immediately before it crosses a durable or sync
+    /// boundary. No item is silently truncated: callers receive a truthful
+    /// failure and can keep the last acknowledged snapshot visible.
+    public func validatedForPersistence() throws {
+        guard schemaVersion == Self.currentSchemaVersion else {
+            throw CalendarSnapshotError.unsupportedSchemaVersion(schemaVersion)
+        }
+        guard items.count <= Self.maximumItemCount else {
+            throw CalendarSnapshotError.tooManyItems
+        }
+    }
 
     public func items(on day: Date, calendar: Calendar = .current) -> [CalendarItem] {
         let dayStart = calendar.startOfDay(for: day)
@@ -572,13 +664,20 @@ public struct CalendarSnapshot: Codable, Equatable, Sendable {
     }
 
     public func merged(with other: CalendarSnapshot) -> CalendarSnapshot {
-        var byID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
-        for candidate in other.items {
-            guard let current = byID[candidate.id] else { byID[candidate.id] = candidate; continue }
-            if candidate.updatedAt > current.updatedAt ||
-                (candidate.updatedAt == current.updatedAt && candidate.conflictKey > current.conflictKey) {
-                byID[candidate.id] = candidate
+        var byID: [UUID: CalendarItem] = [:]
+        for item in items {
+            if let current = byID[item.id] {
+                if Self.prefers(item, over: current) { byID[item.id] = item }
+            } else {
+                byID[item.id] = item
             }
+        }
+        for candidate in other.items {
+            guard let current = byID[candidate.id] else {
+                byID[candidate.id] = candidate
+                continue
+            }
+            if Self.prefers(candidate, over: current) { byID[candidate.id] = candidate }
         }
         return CalendarSnapshot(items: Array(byID.values))
     }

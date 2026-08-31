@@ -1991,8 +1991,16 @@ private struct CalendarAllDayEventChip: View {
     }
 
     private func calendarISODate(_ date: Date) -> String {
-        let parts = calendar.dateComponents([.year, .month, .day], from: date)
+        let parts = itemCalendar.dateComponents([.year, .month, .day], from: date)
         return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
+    }
+
+    private var itemCalendar: Calendar {
+        guard let identifier = item.timeZoneIdentifier,
+              let timeZone = TimeZone(identifier: identifier) else { return calendar }
+        var value = calendar
+        value.timeZone = timeZone
+        return value
     }
 }
 
@@ -2808,8 +2816,15 @@ private struct CalendarInteractiveTimelineEvent: View {
     }
 
     private var accessibilityValue: String {
-        let style = Date.FormatStyle.dateTime.hour().minute().locale(.current)
+        var style = Date.FormatStyle.dateTime.hour().minute().locale(.current)
+        style.timeZone = timeZone
         return "\(calendarISODate(item.start)) \(item.start.formatted(style)) to \(calendarISODate(item.end)) \(item.end.formatted(style)); move actions available"
+    }
+
+    private var presentationCalendar: Calendar {
+        var value = calendar
+        value.timeZone = timeZone
+        return value
     }
 
     @ViewBuilder
@@ -3084,7 +3099,7 @@ private struct CalendarInteractiveTimelineEvent: View {
     }
 
     private func calendarISODate(_ date: Date) -> String {
-        let components = calendar.dateComponents([.year, .month, .day], from: date)
+        let components = presentationCalendar.dateComponents([.year, .month, .day], from: date)
         guard let year = components.year, let month = components.month, let day = components.day else { return "" }
         return String(format: "%04d-%02d-%02d", year, month, day)
     }
@@ -3739,14 +3754,14 @@ private struct CalendarMonthEventChip: View {
         .accessibilityHidden(isGhost || isSourceOwner)
         .accessibilityLabel(
             "\(item.icon ?? "No icon") \(item.title), \(item.status.label), " +
-            "\(item.start.formatted(date: .omitted, time: .shortened)) to " +
-            "\(item.end.formatted(date: .omitted, time: .shortened))"
+            "\(item.start.formatted(accessibilityTimeStyle)) to " +
+            "\(item.end.formatted(accessibilityTimeStyle))"
         )
         .accessibilityValue(
             "\(calendarISODate(item.start)), " +
-            "\(item.start.formatted(date: .omitted, time: .shortened)) to " +
+            "\(item.start.formatted(accessibilityTimeStyle)) to " +
             "\(calendarISODate(item.end)), " +
-            "\(item.end.formatted(date: .omitted, time: .shortened)); long press and drag to move"
+            "\(item.end.formatted(accessibilityTimeStyle)); long press and drag to move"
         )
         .accessibilityIdentifier("calendar-month-event-\(item.id.uuidString)")
         .accessibilityHint("Long press and drag to move this event between month days")
@@ -3769,8 +3784,22 @@ private struct CalendarMonthEventChip: View {
     }
 
     private func calendarISODate(_ date: Date) -> String {
-        let parts = calendar.dateComponents([.year, .month, .day], from: date)
+        let parts = itemCalendar.dateComponents([.year, .month, .day], from: date)
         return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
+    }
+
+    private var itemCalendar: Calendar {
+        guard let identifier = item.timeZoneIdentifier,
+              let timeZone = TimeZone(identifier: identifier) else { return calendar }
+        var value = calendar
+        value.timeZone = timeZone
+        return value
+    }
+
+    private var accessibilityTimeStyle: Date.FormatStyle {
+        var style = Date.FormatStyle.dateTime.hour().minute().locale(.current)
+        style.timeZone = itemCalendar.timeZone
+        return style
     }
 
     private var monthMoveGesture: some Gesture {

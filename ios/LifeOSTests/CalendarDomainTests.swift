@@ -49,6 +49,57 @@ private final class CalendarRevisionRecorder: @unchecked Sendable {
     }
 }
 
+private actor CalendarRemoteScript {
+    struct Observation: Sendable {
+        let fetchCount: Int
+        let pushCount: Int
+        let etags: [String]
+        let idempotencyKeys: [String]
+        let bodies: [Data]
+    }
+
+    let initial: CalendarRemoteResource
+    let conflict: CalendarRemoteResource
+    let success: CalendarRemoteResource
+    private var fetchCount = 0
+    private var pushCount = 0
+    private var etags: [String] = []
+    private var idempotencyKeys: [String] = []
+    private var bodies: [Data] = []
+
+    init(initial: CalendarRemoteResource, conflict: CalendarRemoteResource, success: CalendarRemoteResource) {
+        self.initial = initial
+        self.conflict = conflict
+        self.success = success
+    }
+
+    func fetch() -> CalendarRemoteResource {
+        fetchCount += 1
+        return initial
+    }
+
+    func push(data: Data, etag: String, idempotencyKey: String) throws -> CalendarRemoteResource {
+        pushCount += 1
+        etags.append(etag)
+        idempotencyKeys.append(idempotencyKey)
+        bodies.append(data)
+        if pushCount == 1 {
+            throw CalendarSyncError.calendarConflict(data: conflict.data, etag: conflict.etag)
+        }
+        return success
+    }
+
+    func observation() -> Observation {
+        Observation(
+            fetchCount: fetchCount,
+            pushCount: pushCount,
+            etags: etags,
+            idempotencyKeys: idempotencyKeys,
+            bodies: bodies
+        )
+    }
+}
+
 private final class AppGroupTestFileManager: FileManager {
     let groupURL: URL
 
@@ -610,6 +661,94 @@ final class CalendarDomainTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(CalendarSnapshot.self, from: data), CalendarSnapshot(items: [item]))
     }
 
+    func testSnapshotRejectsUnsupportedVersionsAndUnboundedItemLists() throws {
+        var unsupported = CalendarSnapshot()
+        unsupported.schemaVersion = CalendarSnapshot.currentSchemaVersion + 1
+        XCTAssertThrowsError(try unsupported.validatedForPersistence()) { error in
+            XCTAssertEqual(error as? CalendarSnapshotError, .unsupportedSchemaVersion(2))
+        }
+
+        let items = try (0..<CalendarSnapshot.maximumItemCount + 1).map { index in
+            try CalendarItem(
+                title: "item \(index)",
+                start: base.addingTimeInterval(Double(index) * 60),
+                end: base.addingTimeInterval(Double(index) * 60 + 30),
+                createdAt: base,
+                updatedAt: base
+            )
+        }
+        XCTAssertThrowsError(try JSONDecoder().decode(
+            CalendarSnapshot.self,
+            from: JSONEncoder().encode(CalendarSnapshot(items: items))
+        )) { error in
+            XCTAssertEqual(error as? CalendarSnapshotError, .tooManyItems)
+        }
+    }
+
+    func testSnapshotDeduplicatesRepeatedIDsWithDeterministicLWW() throws {
+        let id = UUID()
+        let older = try CalendarItem(
+            id: id,
+            title: "older",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: base
+        )
+        let newer = try CalendarItem(
+            id: id,
+            title: "newer",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: base.addingTimeInterval(1)
+        )
+
+        let normalized = CalendarSnapshot(items: [older, newer])
+        XCTAssertEqual(normalized.items.count, 1)
+        XCTAssertEqual(normalized.items.first?.title, "newer")
+
+        var malformed = CalendarSnapshot()
+        malformed.items = [newer, older]
+        let merged = malformed.merged(with: CalendarSnapshot())
+        XCTAssertEqual(merged.items.count, 1)
+        XCTAssertEqual(merged.items.first?.title, "newer")
+    }
+
+    func testRecurrenceUsesStoredTimeZoneForWallClockExpansion() throws {
+        var berlin = Calendar(identifier: .gregorian)
+        berlin.timeZone = TimeZone(identifier: "Europe/Berlin")!
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(secondsFromGMT: 0)!
+        let start = DateComponents(
+            calendar: berlin,
+            timeZone: berlin.timeZone,
+            year: 2026,
+            month: 3,
+            day: 22,
+            hour: 9,
+            minute: 0
+        ).date!
+        let rule = try CalendarRecurrenceRule(frequency: .daily)
+        let item = try CalendarItem(
+            title: "Berlin routine",
+            start: start,
+            end: start.addingTimeInterval(45 * 60),
+            createdAt: start,
+            updatedAt: start,
+            timeZoneIdentifier: "Europe/Berlin",
+            recurrence: rule
+        )
+
+        let occurrences = CalendarRecurrence.occurrences(
+            of: item,
+            overlapping: DateInterval(start: start, duration: 8 * 24 * 60 * 60),
+            calendar: utc
+        )
+        XCTAssertGreaterThanOrEqual(occurrences.count, 8)
+        XCTAssertTrue(occurrences.allSatisfy { berlin.component(.hour, from: $0.start) == 9 })
+    }
+
     func testSystemIconCodableAndLegacyPayloadCompatibility() throws {
         let item = try CalendarItem(
             title: "Native symbol",
@@ -972,6 +1111,128 @@ final class CalendarDomainTests: XCTestCase {
         XCTAssertEqual(loaded.items, [item])
         XCTAssertTrue(coordinator.syncWarning?.contains("saved locally") == true)
         XCTAssertNil(coordinator.errorMessage)
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    @MainActor
+    func testExplicitSyncFetchesMergesAndRetriesConditionalMutationWithOneKey() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let url = directory.appendingPathComponent("calendar.json")
+        let remote = try CalendarItem(
+            title: "remote",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: base
+        )
+        let remoteChange = try CalendarItem(
+            title: "remote change",
+            start: base.addingTimeInterval(120),
+            end: base.addingTimeInterval(180),
+            createdAt: base,
+            updatedAt: base.addingTimeInterval(1)
+        )
+        let local = try CalendarItem(
+            title: "local",
+            start: base.addingTimeInterval(240),
+            end: base.addingTimeInterval(300),
+            createdAt: base,
+            updatedAt: base.addingTimeInterval(2)
+        )
+        let initial = CalendarSnapshot(items: [remote])
+        let conflict = CalendarSnapshot(items: [remote, remoteChange])
+        let success = CalendarSnapshot(items: [remote, remoteChange, local])
+        let initialResource = CalendarRemoteResource(
+            data: try JSONEncoder.calendar.encode(initial),
+            etag: #""calendar-v1-r1-initial"#
+        )
+        let conflictResource = CalendarRemoteResource(
+            data: try JSONEncoder.calendar.encode(conflict),
+            etag: #""calendar-v1-r2-conflict"#
+        )
+        let successResource = CalendarRemoteResource(
+            data: try JSONEncoder.calendar.encode(success),
+            etag: #""calendar-v1-r3-success"#
+        )
+        let script = CalendarRemoteScript(initial: initialResource, conflict: conflictResource, success: successResource)
+        let coordinator = CalendarCoordinator(
+            storeURL: url,
+            calendarRemoteFetch: { await script.fetch() },
+            calendarRemotePush: { data, etag, key in try await script.push(data: data, etag: etag, idempotencyKey: key) }
+        )
+
+        let localSaveResult = await coordinator.save(local)
+        XCTAssertEqual(localSaveResult, .success)
+        let beforeSync = await script.observation()
+        XCTAssertEqual(beforeSync.pushCount, 0, "Local durability must not implicitly upload calendar contents")
+        XCTAssertTrue(coordinator.canUndo, "An explicit remote sync should not be needed for local durability")
+        let syncResult = await coordinator.syncNow()
+        XCTAssertEqual(syncResult, .success)
+
+        let observation = await script.observation()
+        XCTAssertEqual(observation.fetchCount, 1)
+        XCTAssertEqual(observation.pushCount, 2)
+        XCTAssertEqual(observation.etags, [initialResource.etag, conflictResource.etag])
+        XCTAssertEqual(Set(observation.idempotencyKeys).count, 1, "Conflict retries must replay one mutation key")
+        XCTAssertEqual(observation.bodies.count, 2)
+        let loaded = try await coordinator.store.load()
+        XCTAssertEqual(Set(loaded.items.map(\.id)), Set([remote.id, remoteChange.id, local.id]))
+        XCTAssertNil(coordinator.syncWarning)
+        XCTAssertFalse(coordinator.canUndo, "Adopting a changed authoritative resource invalidates a stale undo")
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    @MainActor
+    func testReplayedRemoteMergeDoesNotConsumeLocalUndo() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let coordinator = CalendarCoordinator(storeURL: directory.appendingPathComponent("calendar.json"))
+        let item = try CalendarItem(
+            title: "local",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: base
+        )
+
+        let saveResult = await coordinator.save(item)
+        XCTAssertEqual(saveResult, .success)
+        XCTAssertTrue(coordinator.canUndo)
+        let mergeResult = await coordinator.merge(CalendarSnapshot(items: [item]))
+        XCTAssertEqual(mergeResult, .success)
+        XCTAssertTrue(coordinator.canUndo, "An idempotent peer replay must not invalidate the local undo token")
+        XCTAssertEqual(try await coordinator.store.load(), CalendarSnapshot(items: [item]))
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    @MainActor
+    func testEventTodoAndDailyScheduleMutationsPersistAndDeleteAsUndoableTombstone() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let coordinator = CalendarCoordinator(storeURL: directory.appendingPathComponent("calendar.json"))
+        let event = try CalendarItem(title: "Event", kind: .event, start: base, end: base.addingTimeInterval(60), createdAt: base, updatedAt: base)
+        let todo = try CalendarItem(title: "To-do", kind: .todo, status: .done, start: base.addingTimeInterval(120), end: base.addingTimeInterval(180), createdAt: base, updatedAt: base.addingTimeInterval(1))
+        let schedule = try CalendarItem(title: "Daily plan", kind: .dailySchedule, status: .inProgress, start: base.addingTimeInterval(240), end: base.addingTimeInterval(300), createdAt: base, updatedAt: base.addingTimeInterval(2))
+
+        let eventSaveResult = await coordinator.save(event)
+        let todoSaveResult = await coordinator.save(todo)
+        let scheduleSaveResult = await coordinator.save(schedule)
+        let deleteResult = await coordinator.delete(todo)
+        XCTAssertEqual(eventSaveResult, .success)
+        XCTAssertEqual(todoSaveResult, .success)
+        XCTAssertEqual(scheduleSaveResult, .success)
+        XCTAssertEqual(deleteResult, .success)
+
+        let persisted = try await coordinator.store.load()
+        XCTAssertEqual(persisted.items.count, 3)
+        XCTAssertEqual(persisted.items.first(where: { $0.id == event.id })?.kind, .event)
+        XCTAssertEqual(persisted.items.first(where: { $0.id == todo.id })?.kind, .todo)
+        XCTAssertTrue(persisted.items.first(where: { $0.id == todo.id })?.isDeleted == true)
+        XCTAssertEqual(persisted.items.first(where: { $0.id == schedule.id })?.kind, .dailySchedule)
+
+        let undoResult = await coordinator.undo()
+        XCTAssertEqual(undoResult, .success)
+        let restored = try await coordinator.store.load()
+        XCTAssertEqual(Set(restored.items.map(\.id)), Set([event.id, todo.id, schedule.id]))
+        XCTAssertFalse(restored.items.contains(where: { $0.isDeleted }))
         try? FileManager.default.removeItem(at: directory)
     }
 
