@@ -6,8 +6,14 @@ import Foundation
 public struct FitnessStressEvidence: Equatable, Sendable {
     public enum State: Equatable, Sendable {
         case unavailable(reason: String)
+        case permissionRequired(reason: String)
+        case deviceUnavailable(reason: String)
+        case readIndeterminate(reason: String)
         case observed(source: String, device: String, window: String, freshness: String)
+        case partial(source: String, device: String, window: String, freshness: String)
         case stale(source: String, device: String, window: String, freshness: String)
+        case conflict(reason: String)
+        case error(reason: String)
         case demo(source: String, device: String, window: String, freshness: String)
     }
 
@@ -22,8 +28,13 @@ public struct FitnessStressEvidence: Equatable, Sendable {
     }
 
     public var isUnavailable: Bool {
-        if case .unavailable = state { return true }
-        return false
+        switch state {
+        case .unavailable, .permissionRequired, .deviceUnavailable,
+             .readIndeterminate, .conflict, .error:
+            return true
+        case .observed, .partial, .stale, .demo:
+            return false
+        }
     }
 
     public var isDemo: Bool {
@@ -36,21 +47,56 @@ public struct FitnessStressEvidence: Equatable, Sendable {
         return false
     }
 
+    public var isPartial: Bool {
+        if case .partial = state { return true }
+        return false
+    }
+
+    public var statusLabel: String {
+        switch state {
+        case .unavailable: "Unavailable"
+        case .permissionRequired: "Permission required"
+        case .deviceUnavailable: "Device unavailable"
+        case .readIndeterminate: "Read status unknown"
+        case .observed: "Observed"
+        case .partial: "Partial"
+        case .stale: "Stale"
+        case .conflict: "Conflict"
+        case .error: "Source error"
+        case .demo: "Demo fixture"
+        }
+    }
+
     public var summary: String {
         switch state {
         case .unavailable(let reason):
             return "Unavailable · \(reason)"
+        case .permissionRequired(let reason):
+            return "Permission required · \(reason)"
+        case .deviceUnavailable(let reason):
+            return "Device unavailable · \(reason)"
+        case .readIndeterminate(let reason):
+            return "Read status unknown · \(reason)"
         case .observed(let source, let device, let window, let freshness),
+             .partial(let source, let device, let window, let freshness),
              .stale(let source, let device, let window, let freshness),
              .demo(let source, let device, let window, let freshness):
             return "\(source) · \(device) · \(window) · \(freshness)"
+        case .conflict(let reason):
+            return "Conflict · \(reason)"
+        case .error(let reason):
+            return "Source error · \(reason)"
         }
     }
 
     public var source: String? {
         switch state {
         case .unavailable: return nil
-        case .observed(let source, _, _, _), .stale(let source, _, _, _), .demo(let source, _, _, _):
+        case .permissionRequired, .deviceUnavailable, .readIndeterminate,
+             .conflict, .error:
+            return nil
+        case .observed(let source, _, _, _), .partial(let source, _, _, _),
+             .stale(let source, _, _, _), .demo(let source, _, _, _):
             return source
         }
     }
@@ -64,18 +110,39 @@ public struct FitnessStressEvidence: Equatable, Sendable {
         case .unavailable(let reason):
             let reason = clean(reason)
             return .unavailable(reason: reason.isEmpty ? "No Stress source observation is available." : reason)
+        case .permissionRequired(let reason):
+            let reason = clean(reason)
+            return .permissionRequired(reason: reason.isEmpty ? "Stress source permission is required." : reason)
+        case .deviceUnavailable(let reason):
+            let reason = clean(reason)
+            return .deviceUnavailable(reason: reason.isEmpty ? "The Stress source device is unavailable." : reason)
+        case .readIndeterminate(let reason):
+            let reason = clean(reason)
+            return .readIndeterminate(reason: reason.isEmpty ? "Stress read status is indeterminate." : reason)
         case .observed(let source, let device, let window, let freshness):
             let values = [source, device, window, freshness].map(clean)
             guard values.allSatisfy({ !$0.isEmpty }) else {
                 return .unavailable(reason: "Stress source evidence is incomplete.")
             }
             return .observed(source: values[0], device: values[1], window: values[2], freshness: values[3])
+        case .partial(let source, let device, let window, let freshness):
+            let values = [source, device, window, freshness].map(clean)
+            guard values.allSatisfy({ !$0.isEmpty }) else {
+                return .unavailable(reason: "Partial Stress source evidence is incomplete.")
+            }
+            return .partial(source: values[0], device: values[1], window: values[2], freshness: values[3])
         case .stale(let source, let device, let window, let freshness):
             let values = [source, device, window, freshness].map(clean)
             guard values.allSatisfy({ !$0.isEmpty }) else {
                 return .unavailable(reason: "Stale Stress source evidence is incomplete.")
             }
             return .stale(source: values[0], device: values[1], window: values[2], freshness: values[3])
+        case .conflict(let reason):
+            let reason = clean(reason)
+            return .conflict(reason: reason.isEmpty ? "Conflicting Stress source observations were withheld." : reason)
+        case .error(let reason):
+            let reason = clean(reason)
+            return .error(reason: reason.isEmpty ? "The Stress source reported an error." : reason)
         case .demo(let source, let device, let window, let freshness):
             let values = [source, device, window, freshness].map(clean)
             guard values.allSatisfy({ !$0.isEmpty }) else {
@@ -202,13 +269,25 @@ public struct FitnessStressMetric: Equatable, Sendable {
         let cleanUnit = unit.trimmingCharacters(in: .whitespacesAndNewlines)
         let safeTitle = cleanTitle.isEmpty ? "Stress metric" : cleanTitle
         let safeEvidence = evidence
+        guard Self.stateKindsMatch(state, safeEvidence.state) else {
+            let reason = "Stress metric state and evidence disagree."
+            self.id = id ?? (cleanTitle.isEmpty ? "stress-metric" : cleanTitle)
+            self.title = safeTitle
+            self.value = nil
+            self.unit = cleanUnit
+            self.state = .conflict(reason: reason)
+            self.evidence = FitnessStressEvidence(state: .conflict(reason: reason))
+            self.scale = nil
+            return
+        }
         let compatibleValue: Double?
         let compatibleState: FitnessStressEvidence.State
         switch safeEvidence.state {
-        case .unavailable:
+        case .unavailable, .permissionRequired, .deviceUnavailable,
+             .readIndeterminate, .conflict, .error:
             compatibleValue = nil
             compatibleState = safeEvidence.state
-        case .observed, .stale, .demo:
+        case .observed, .partial, .stale, .demo:
             guard let value, value.isFinite else {
                 compatibleValue = nil
                 compatibleState = .unavailable(reason: "\(safeTitle) has no finite source value.")
@@ -229,8 +308,33 @@ public struct FitnessStressMetric: Equatable, Sendable {
         self.value = compatibleValue
         self.unit = cleanUnit
         self.state = compatibleState
-        self.evidence = safeEvidence.isUnavailable ? .unavailable(safeEvidence.summary) : safeEvidence
+        // Preserve the exact provider state. A conflict, permission block, or
+        // device failure is intentionally value-less, but collapsing its
+        // evidence to generic `.unavailable` would erase the reason the UI
+        // needs to surface and would make independent metric truth opaque.
+        self.evidence = safeEvidence
         self.scale = scale
+    }
+
+    private static func stateKindsMatch(
+        _ lhs: FitnessStressEvidence.State,
+        _ rhs: FitnessStressEvidence.State
+    ) -> Bool {
+        switch (lhs, rhs) {
+        case (.unavailable, .unavailable),
+             (.permissionRequired, .permissionRequired),
+             (.deviceUnavailable, .deviceUnavailable),
+             (.readIndeterminate, .readIndeterminate),
+             (.observed, .observed),
+             (.partial, .partial),
+             (.stale, .stale),
+             (.conflict, .conflict),
+             (.error, .error),
+             (.demo, .demo):
+            return true
+        default:
+            return false
+        }
     }
 
     public static func unavailable(_ title: String, reason: String = "No source observation is available.") -> FitnessStressMetric {
@@ -760,14 +864,5 @@ public struct FitnessStressSnapshot: Equatable, Sendable {
             coverage: coverage,
             trendWindows: [.overall: [trend], .nonActivity: [nonActivityTrend]]
         )
-    }
-}
-
-private extension FitnessStressMetric {
-    var evidenceStateMatches: Bool {
-        switch (state, evidence.state) {
-        case (.unavailable, .unavailable), (.observed, .observed), (.stale, .stale), (.demo, .demo): return true
-        default: return false
-        }
     }
 }

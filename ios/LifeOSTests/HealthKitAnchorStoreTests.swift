@@ -25,7 +25,11 @@ private final class HealthKitAnchorReadCounter: @unchecked Sendable {
 final class HealthKitAnchorStoreTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_700_000_000)
 
-    private func observation(uuid: UUID = UUID(), identity: HealthKitSampleIdentity? = nil) throws -> HealthKitObservation {
+    private func observation(
+        uuid: UUID = UUID(),
+        identity: HealthKitSampleIdentity? = nil,
+        at date: Date? = nil
+    ) throws -> HealthKitObservation {
         let source = try HealthKitSourceMetadata(bundleIdentifier: "com.example.source", name: "Source")
         let provenance = try HealthKitProvenance.from(
             source: source,
@@ -33,12 +37,13 @@ final class HealthKitAnchorStoreTests: XCTestCase {
             registry: .init(rules: [])
         )
         let value = try HealthKitQuantityValue(metric: .water, value: 250, unit: .milliliters)
+        let sampleDate = date ?? now.addingTimeInterval(-60)
         return try HealthKitObservation(
             metric: .water,
             identity: identity ?? .init(uuid: uuid, revision: .uuidFallback),
             value: .quantity(value),
-            startDate: now.addingTimeInterval(-60),
-            endDate: now.addingTimeInterval(-60),
+            startDate: sampleDate,
+            endDate: sampleDate,
             provenance: provenance,
             now: now
         )
@@ -667,5 +672,45 @@ final class HealthKitAnchorStoreTests: XCTestCase {
             _ = try await store.commit(metric: .water, observations: [sample], tombstones: [], sourceIndex: ["bad": .other], nextAnchor: nil, syncState: .synced, committedAt: now)
             XCTFail("invalid source key must fail closed")
         } catch { }
+    }
+
+    func testCommitAppliesRollingRetentionToObservationsTombstonesAndConflicts() async throws {
+        let recent = try observation(at: now.addingTimeInterval(-60))
+        let old = try observation(at: now.addingTimeInterval(-(HealthKitSafetyLimits.healthObservationRetention + 60)))
+        let oldTombstone = try HealthKitDeletionTombstone(
+            metric: .water,
+            identity: old.identity,
+            deletedAt: old.endDate
+        )
+        let recentConflict = HealthKitObservationConflict(
+            metric: .water,
+            identity: recent.identity,
+            existing: recent,
+            incoming: old
+        )
+        let oldConflict = HealthKitObservationConflict(
+            metric: .water,
+            identity: old.identity,
+            existing: old,
+            incoming: old
+        )
+        let store = HealthKitAnchorStore(persistenceURL: nil, now: now)
+
+        let state = try await store.commit(
+            metric: .water,
+            observations: [old, recent],
+            tombstones: [oldTombstone],
+            sourceIndex: [:],
+            conflicts: [recentConflict, oldConflict],
+            nextAnchor: nil,
+            syncState: .conflict,
+            committedAt: now
+        )
+
+        XCTAssertEqual(state.observations, [recent])
+        XCTAssertTrue(state.tombstones.isEmpty)
+        XCTAssertEqual(state.conflicts, [recentConflict])
+        XCTAssertEqual(state.lastObservedAt, recent.endDate)
+        XCTAssertEqual(state.syncState, .conflict)
     }
 }

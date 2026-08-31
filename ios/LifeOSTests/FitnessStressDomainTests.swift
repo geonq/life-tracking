@@ -124,4 +124,49 @@ final class FitnessStressDomainTests: XCTestCase {
         XCTAssertTrue(samples.allSatisfy { $0.id.hasPrefix("demo-overall-") })
         XCTAssertTrue(demo.days.first?.coaching.provenanceSummary?.contains("source-authored copy fixture") == true)
     }
+
+    func testStressEvidencePreservesPartialAndProviderFailureStates() {
+        let partial = FitnessStressEvidence(state: .partial(
+            source: "HealthKit",
+            device: "Helio Strap",
+            window: "Selected day",
+            freshness: "Some samples pending"
+        ))
+        XCTAssertTrue(partial.isPartial)
+        XCTAssertFalse(partial.isUnavailable)
+        XCTAssertEqual(partial.statusLabel, "Partial")
+
+        let permission = FitnessStressEvidence(state: .permissionRequired(reason: "HealthKit read permission is required."))
+        XCTAssertTrue(permission.isUnavailable)
+        XCTAssertEqual(permission.statusLabel, "Permission required")
+
+        let conflict = FitnessStressMetric(
+            title: "Stress",
+            value: 42,
+            unit: "score",
+            state: .conflict(reason: "Two source revisions disagree."),
+            evidence: FitnessStressEvidence(state: .conflict(reason: "Two source revisions disagree."))
+        )
+        XCTAssertNil(conflict.value)
+        XCTAssertTrue(conflict.isUnavailable)
+        XCTAssertEqual(conflict.evidence.statusLabel, "Conflict")
+    }
+
+    func testStressMetricRejectsMismatchedStateAndEvidence() {
+        let mismatch = FitnessStressMetric(
+            title: "Stress",
+            value: 42,
+            unit: "score",
+            state: .conflict(reason: "Caller supplied a conflict state."),
+            evidence: evidence
+        )
+
+        XCTAssertNil(mismatch.value)
+        guard case .conflict = mismatch.state else {
+            return XCTFail("A state/evidence mismatch must fail closed as a conflict")
+        }
+        guard case .conflict = mismatch.evidence.state else {
+            return XCTFail("Mismatched evidence must not remain observed")
+        }
+    }
 }

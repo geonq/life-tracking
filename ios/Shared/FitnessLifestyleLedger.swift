@@ -117,6 +117,36 @@ public enum FitnessLifestyleProvenance: String, Codable, CaseIterable, Hashable,
     }
 }
 
+/// Canonical source-revision tokens shared by a future HealthKit lifestyle
+/// importer. This portable ledger contract intentionally accepts the raw
+/// token rather than importing the HealthKit domain type, because the ledger
+/// also compiles into the macOS logic target. Legacy opaque tokens remain
+/// accepted for already-persisted fixtures, but new HealthKit revisions can
+/// retain the typed HealthKit form (`sync:<non-negative integer>` or
+/// `uuid-fallback`) without losing ordering information to a free-form string.
+public enum FitnessLifestyleSourceRevision {
+    public static let uuidFallback = "uuid-fallback"
+
+    public static func token(syncVersion: Int64?) -> String? {
+        guard let syncVersion else { return uuidFallback }
+        guard syncVersion >= 0 else { return nil }
+        return "sync:\(syncVersion)"
+    }
+
+    public static func token(rawValue: String) -> String {
+        rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    public static func isCanonical(_ value: String) -> Bool {
+        let token = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if token == uuidFallback { return true }
+        guard token.hasPrefix("sync:") else { return false }
+        let numeric = String(token.dropFirst("sync:".count))
+        guard !numeric.isEmpty, numeric.allSatisfy(\.isNumber) else { return false }
+        return Int64(numeric) != nil
+    }
+}
+
 public struct FitnessLifestyleLineage: Codable, Equatable, Hashable, Sendable {
     public let rootEventID: UUID
     public let parentEventID: UUID?
@@ -1499,6 +1529,9 @@ private enum FitnessLifestyleValidation {
     private static func isValidSourceRevision(_ value: String) -> Bool {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed.utf8.count <= maximumSourceRevisionLength else { return false }
+        if trimmed.contains(":") {
+            return FitnessLifestyleSourceRevision.isCanonical(trimmed)
+        }
         return trimmed.utf8.allSatisfy { byte in
             (byte >= 48 && byte <= 57) || (byte >= 65 && byte <= 90) ||
             (byte >= 97 && byte <= 122) || byte == 45 || byte == 46 || byte == 95

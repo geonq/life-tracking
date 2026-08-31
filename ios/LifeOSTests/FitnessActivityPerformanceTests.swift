@@ -336,4 +336,65 @@ final class FitnessActivityPerformanceTests: XCTestCase {
             return XCTFail("Invalid target bands must not render")
         }
     }
+
+    func testActivityMetricKeepsPartialAndStaleValuesDistinctFromUnavailable() {
+        let partial = FitnessActivityMetric(
+            id: "cardio-load",
+            title: "Cardio load",
+            state: .partial(
+                value: 42,
+                unit: .sourceDefined,
+                window: "Rolling 30 days",
+                provenance: "Helio Strap → Zepp → HealthKit"
+            )
+        )
+        XCTAssertEqual(partial.value, 42)
+        XCTAssertEqual(partial.statusLabel, "Partial")
+
+        let stale = FitnessActivityMetric(
+            id: "cardio-load",
+            title: "Cardio load",
+            state: .stale(
+                value: 38,
+                unit: .sourceDefined,
+                window: "Rolling 30 days",
+                provenance: "HealthKit retained observation"
+            )
+        )
+        XCTAssertEqual(stale.value, 38)
+        XCTAssertEqual(stale.statusLabel, "Stale")
+
+        let permission = FitnessActivityMetric(
+            id: "cardio-load",
+            title: "Cardio load",
+            state: .permissionRequired(reason: "HealthKit permission is required.")
+        )
+        XCTAssertNil(permission.value)
+        XCTAssertEqual(permission.statusLabel, "Permission required")
+    }
+
+    func testPerformanceTargetRetainsIndependentSourceState() {
+        let stale = FitnessPerformanceTarget(
+            state: .observed(
+                current: 24,
+                deviationPercent: -12,
+                lowerBound: 20,
+                upperBound: 40,
+                window: "Rolling 30 days",
+                provenance: "HealthKit retained target"
+            ),
+            sourceState: .stale
+        )
+        XCTAssertEqual(stale.sourceState, .stale)
+        XCTAssertEqual(stale.targetStatus, .within)
+
+        let conflict = FitnessPerformanceTarget(
+            state: .unavailable(reason: "Two target revisions disagree."),
+            series: [FitnessActivitySeriesPoint(date: Date(timeIntervalSinceReferenceDate: 1), value: 24)],
+            sourceState: .conflict
+        )
+        XCTAssertEqual(conflict.sourceState, .conflict)
+        XCTAssertNil(conflict.targetStatus)
+        XCTAssertTrue(conflict.series.isEmpty)
+    }
 }

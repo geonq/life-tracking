@@ -29,6 +29,36 @@ final class FitnessStrengthDomainTests: XCTestCase {
         XCTAssertNil(invalid.kilograms)
     }
 
+    func testStrengthSourceStateStaysIndependentFromKilogramValue() {
+        let stale = FitnessStrengthMetric(
+            group: .chest,
+            state: .observed(
+                kilograms: 80,
+                window: "Last 30 days",
+                provenance: "HealthKit source"
+            ),
+            sourceState: .stale
+        )
+        XCTAssertEqual(stale.sourceState, .stale)
+        XCTAssertEqual(stale.kilograms, 80)
+        XCTAssertTrue(stale.sourceDetail?.hasPrefix("Stale") == true)
+
+        let conflict = FitnessStrengthMetric(
+            group: .back,
+            state: .unavailable(reason: "Two source revisions disagree."),
+            sourceState: .conflict
+        )
+        XCTAssertEqual(conflict.sourceState, .conflict)
+        XCTAssertNil(conflict.kilograms)
+
+        let aggregate = FitnessStrengthAggregate(
+            state: .unavailable(reason: "HealthKit read access is indeterminate."),
+            sourceState: .readIndeterminate
+        )
+        XCTAssertEqual(aggregate.sourceState, .readIndeterminate)
+        XCTAssertNil(aggregate.kilograms)
+    }
+
     func testProgressRequiresSourceAndPreservesEmptyState() {
         let point = FitnessStrengthProgressPoint(date: Date(timeIntervalSinceReferenceDate: 10), kilograms: 120)
         XCTAssertNotNil(point)

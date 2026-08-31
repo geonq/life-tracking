@@ -63,6 +63,40 @@ final class FitnessLifestyleLedgerTests: XCTestCase {
         }
     }
 
+    func testHealthKitSourceRevisionAcceptsCanonicalTypedTokensAndRejectsMalformedOnes() throws {
+        let store = FitnessLifestyleLedgerStore(persistenceURL: nil)
+        let occurredAt = try XCTUnwrap(FitnessLifestyleTime.date(fromLocalDay: "2026-08-13", timeZoneIdentifier: timeZone))
+        let sampleID = try XCTUnwrap(UUID(uuidString: "B4BD2D1E-2DC6-4CB0-BB6A-3110C2C63210"))
+        let revision = try XCTUnwrap(FitnessLifestyleSourceRevision.token(syncVersion: 12))
+        XCTAssertEqual(revision, "sync:12")
+        XCTAssertTrue(FitnessLifestyleSourceRevision.isCanonical("sync:12"))
+        XCTAssertTrue(FitnessLifestyleSourceRevision.isCanonical("uuid-fallback"))
+        XCTAssertFalse(FitnessLifestyleSourceRevision.isCanonical("sync:-1"))
+        XCTAssertFalse(FitnessLifestyleSourceRevision.isCanonical("sync:"))
+
+        let imported = try store.insertObservedQuantity(
+            kind: .hydration,
+            amount: 500,
+            unit: .milliliters,
+            occurredAt: occurredAt,
+            timeZoneIdentifier: timeZone,
+            sourceSampleUUID: sampleID,
+            sourceSampleRevision: revision,
+            now: occurredAt
+        )
+        XCTAssertEqual(imported.sourceSampleRevision, "sync:12")
+        XCTAssertThrowsError(try store.insertObservedQuantity(
+            kind: .caffeine,
+            amount: 80,
+            unit: .milligrams,
+            occurredAt: occurredAt,
+            timeZoneIdentifier: timeZone,
+            sourceSampleUUID: UUID(),
+            sourceSampleRevision: "sync:-1",
+            now: occurredAt
+        ))
+    }
+
     func testDecodedPersistedLineageGraphFailureQuarantinesQueries() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("lifeos-lifestyle-lineage-corrupt-\(UUID().uuidString)", isDirectory: true)
         let url = root.appendingPathComponent("ledger.json")

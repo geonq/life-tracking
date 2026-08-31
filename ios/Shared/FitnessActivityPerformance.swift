@@ -7,7 +7,14 @@ import Foundation
 public struct FitnessActivityMetric: Identifiable {
     public enum State: Equatable, Sendable {
         case unavailable(reason: String)
+        case permissionRequired(reason: String)
+        case deviceUnavailable(reason: String)
+        case readIndeterminate(reason: String)
         case calibrating(reason: String)
+        case partial(value: Double, unit: Unit, window: String, provenance: String)
+        case stale(value: Double, unit: Unit, window: String, provenance: String)
+        case conflict(reason: String)
+        case error(reason: String)
         case observed(value: Double, unit: Unit, window: String, provenance: String)
         case demo(value: Double, unit: Unit, window: String, provenance: String)
     }
@@ -46,19 +53,64 @@ public struct FitnessActivityMetric: Identifiable {
         self.hue = hue
     }
 
+    public var value: Double? {
+        switch state {
+        case .partial(let value, _, _, _), .stale(let value, _, _, _),
+             .observed(let value, _, _, _), .demo(let value, _, _, _):
+            return value
+        case .unavailable, .permissionRequired, .deviceUnavailable,
+             .readIndeterminate, .calibrating, .conflict, .error:
+            return nil
+        }
+    }
+
+    public var statusLabel: String {
+        switch state {
+        case .unavailable: "Unavailable"
+        case .permissionRequired: "Permission required"
+        case .deviceUnavailable: "Device unavailable"
+        case .readIndeterminate: "Read status unknown"
+        case .calibrating: "Calibrating"
+        case .partial: "Partial"
+        case .stale: "Stale"
+        case .conflict: "Conflict"
+        case .error: "Source error"
+        case .observed: "Observed"
+        case .demo: "Demo fixture · not live"
+        }
+    }
+
     private static func validated(_ state: State) -> State {
         switch state {
         case .unavailable(let reason):
             return .unavailable(reason: reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "No source observation is available." : reason)
+        case .permissionRequired(let reason):
+            return .permissionRequired(reason: reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Source permission is required." : reason)
+        case .deviceUnavailable(let reason):
+            return .deviceUnavailable(reason: reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "The source device is unavailable." : reason)
+        case .readIndeterminate(let reason):
+            return .readIndeterminate(reason: reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "The source read result is indeterminate." : reason)
         case .calibrating(let reason):
             return .calibrating(reason: reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Source calibration is incomplete." : reason)
-        case .observed(let value, let unit, let window, let provenance):
+        case .partial(let value, let unit, let window, let provenance),
+             .stale(let value, let unit, let window, let provenance),
+             .observed(let value, let unit, let window, let provenance):
             guard value.isFinite, value >= 0,
                   !window.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   !provenance.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 return .unavailable(reason: "Source observation is invalid or missing its provenance.")
             }
-            return .observed(value: value, unit: unit, window: window, provenance: provenance)
+            let window = window.trimmingCharacters(in: .whitespacesAndNewlines)
+            let provenance = provenance.trimmingCharacters(in: .whitespacesAndNewlines)
+            switch state {
+            case .partial: return .partial(value: value, unit: unit, window: window, provenance: provenance)
+            case .stale: return .stale(value: value, unit: unit, window: window, provenance: provenance)
+            default: return .observed(value: value, unit: unit, window: window, provenance: provenance)
+            }
+        case .conflict(let reason):
+            return .conflict(reason: reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Conflicting source observations were withheld." : reason)
+        case .error(let reason):
+            return .error(reason: reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "The source reported an error." : reason)
         case .demo(let value, let unit, let window, let provenance):
             guard value.isFinite, value >= 0,
                   !window.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -183,12 +235,18 @@ public struct FitnessPerformanceTarget: Equatable, Sendable {
     }
 
     public let state: State
+    /// The target payload and its source condition are separate. A partial or
+    /// stale provider band may remain inspectable with an explicit label;
+    /// permission, device, read, conflict, and error states never imply a
+    /// current target value.
+    public let sourceState: FitnessMetric.SourceState
     public let series: [FitnessActivitySeriesPoint]
 
     /// Classifies only the source current value against the source target
     /// band. The source-provided deviation is a separate comparison and must
     /// never decide whether the current load is below, within, or above band.
     public var targetStatus: TargetStatus? {
+        guard sourceState.canDisplayValue else { return nil }
         switch state {
         case .unavailable, .calibrating:
             return nil
@@ -208,9 +266,15 @@ public struct FitnessPerformanceTarget: Equatable, Sendable {
         return .within
     }
 
-    public init(state: State, series: [FitnessActivitySeriesPoint] = []) {
-        self.state = Self.validated(state)
-        self.series = series
+    public init(
+        state: State,
+        series: [FitnessActivitySeriesPoint] = [],
+        sourceState: FitnessMetric.SourceState? = nil
+    ) {
+        let validatedState = Self.validated(state)
+        self.state = validatedState
+        self.sourceState = Self.resolvedSourceState(sourceState, for: validatedState)
+        self.series = self.sourceState.canDisplayValue ? series : []
     }
 
     private static func validated(_ state: State) -> State {
@@ -241,6 +305,40 @@ public struct FitnessPerformanceTarget: Equatable, Sendable {
     public static let unavailable = FitnessPerformanceTarget(
         state: .unavailable(reason: "A reviewed source must provide a target window and observed load.")
     )
+
+    private static func resolvedSourceState(
+        _ requested: FitnessMetric.SourceState?,
+        for state: State
+    ) -> FitnessMetric.SourceState {
+        let fallback: FitnessMetric.SourceState
+        switch state {
+        case .unavailable: fallback = .unavailable
+        case .calibrating: fallback = .calibrating
+        case .observed: fallback = .observed
+        case .demo: fallback = .demo
+        }
+
+        guard let requested else { return fallback }
+        switch state {
+        case .demo:
+            return .demo
+        case .observed:
+            switch requested {
+            case .observed, .partial, .stale:
+                return requested
+            default:
+                return .observed
+            }
+        case .unavailable, .calibrating:
+            switch requested {
+            case .permissionRequired, .deviceUnavailable, .readIndeterminate,
+                 .partial, .stale, .conflict, .error:
+                return requested
+            default:
+                return fallback
+            }
+        }
+    }
 }
 
 /// The exact data boundary for Bevel IMG_0391–0392's activity/performance

@@ -288,6 +288,12 @@ public struct HealthKitStoredMetricState: Equatable, Sendable {
 /// anchor in one atomic envelope. If writing fails, the previous anchor and
 /// projection remain the only visible state.
 public actor HealthKitAnchorStore {
+    private struct RetainedProjectionData {
+        let observations: [HealthKitObservation]
+        let tombstones: [HealthKitDeletionTombstone]
+        let conflicts: [HealthKitObservationConflict]
+    }
+
     private enum PersistencePathEntry: Equatable {
         case missing
         case directory
@@ -407,11 +413,23 @@ public actor HealthKitAnchorStore {
               conflicts.allSatisfy({ $0.metric == metric }),
               observations.count <= HealthKitSafetyLimits.maxProjectionItems,
               tombstones.count <= HealthKitSafetyLimits.maxProjectionItems,
+              sourceIndex.count <= HealthKitSafetyLimits.maxSourceIndexItems,
               conflicts.count <= HealthKitSafetyLimits.maxConflictItems,
               quarantine.isWithinSafetyBounds,
               committedAt.timeIntervalSinceReferenceDate.isFinite else {
             throw HealthKitAnchorStoreError.invalidProjection
         }
+
+        // Reconciliation keeps the provider cursor moving, but the durable
+        // Fitness projection is still bounded. Apply the same rolling
+        // retention policy on every write so a replayed anchored page cannot
+        // re-grow storage with observations outside the contract.
+        let retained = try Self.retainedProjectionData(
+            observations: observations,
+            tombstones: tombstones,
+            conflicts: conflicts,
+            committedAt: committedAt
+        )
 
         let current = envelope.projections.first(where: { $0.metric == metric })
         if expectedAnchorChecked, current?.anchorArchive != expectedAnchorArchive {
@@ -426,25 +444,25 @@ public actor HealthKitAnchorStore {
         let archive = nextAnchor.map { $0.archivedData.base64EncodedString() } ?? current?.anchorArchive
         try Self.validateForCommit(
             metric: metric,
-            observations: observations,
-            tombstones: tombstones,
-            conflicts: conflicts,
+            observations: retained.observations,
+            tombstones: retained.tombstones,
+            conflicts: retained.conflicts,
             now: committedAt
         )
-        let rebuiltSourceIndex = try Self.rebuildSourceIndex(observations: observations)
+        let rebuiltSourceIndex = try Self.rebuildSourceIndex(observations: retained.observations)
         guard sourceIndex.keys.allSatisfy(HealthKitSourceIndexKey.isValid) else {
             throw HealthKitAnchorStoreError.invalidProjection
         }
         let projection = try HealthKitMetricProjection(
             metric: metric,
-            observations: observations,
-            tombstones: tombstones,
+            observations: retained.observations,
+            tombstones: retained.tombstones,
             sourceIndex: rebuiltSourceIndex,
-            conflicts: conflicts,
+            conflicts: retained.conflicts,
             quarantine: quarantine,
             anchorArchive: archive,
             lastCommittedAt: committedAt,
-            lastObservedAt: observations.map(\.endDate).max(),
+            lastObservedAt: retained.observations.map(\.endDate).max(),
             syncState: syncState
         )
         let projections = envelope.projections.filter { $0.metric != metric } + [projection]
@@ -462,19 +480,26 @@ public actor HealthKitAnchorStore {
         loadIfNeeded()
         guard loadFailure == nil else { throw HealthKitAnchorStoreError.loadFailure }
         let current = snapshot(for: metric)
-        let projection = try HealthKitMetricProjection(
-            metric: metric,
+        let retained = try Self.retainedProjectionData(
             observations: current.observations,
             tombstones: current.tombstones,
-            sourceIndex: current.sourceIndex,
             conflicts: current.conflicts,
+            committedAt: committedAt
+        )
+        let rebuiltSourceIndex = try Self.rebuildSourceIndex(observations: retained.observations)
+        let projection = try HealthKitMetricProjection(
+            metric: metric,
+            observations: retained.observations,
+            tombstones: retained.tombstones,
+            sourceIndex: rebuiltSourceIndex,
+            conflicts: retained.conflicts,
             quarantine: current.quarantine,
             anchorArchive: nil,
             lastCommittedAt: committedAt,
-            lastObservedAt: current.lastObservedAt,
+            lastObservedAt: retained.observations.map(\.endDate).max(),
             syncState: current.syncState == .conflict ||
-                !current.conflicts.isEmpty ||
-                current.sourceIndex.values.contains(.conflict) ? .conflict : .neverSynced
+                !retained.conflicts.isEmpty ||
+                rebuiltSourceIndex.values.contains(.conflict) ? .conflict : .neverSynced
         )
         let nextEnvelope = HealthKitAnchorStoreEnvelope(
             projections: (envelope.projections.filter { $0.metric != metric } + [projection])
@@ -495,6 +520,13 @@ public actor HealthKitAnchorStore {
         loadIfNeeded()
         guard loadFailure == nil else { throw HealthKitAnchorStoreError.loadFailure }
         let current = snapshot(for: metric)
+        let retained = try Self.retainedProjectionData(
+            observations: current.observations,
+            tombstones: current.tombstones,
+            conflicts: current.conflicts,
+            committedAt: committedAt
+        )
+        let rebuiltSourceIndex = try Self.rebuildSourceIndex(observations: retained.observations)
         if current.anchorArchive != nil, let persistenceURL {
             // Preserve the archive that the iOS adapter could not unarchive;
             // it is diagnostic input, never replacement truth.
@@ -502,14 +534,14 @@ public actor HealthKitAnchorStore {
         }
         let projection = try HealthKitMetricProjection(
             metric: metric,
-            observations: current.observations,
-            tombstones: current.tombstones,
-            sourceIndex: current.sourceIndex,
-            conflicts: current.conflicts,
+            observations: retained.observations,
+            tombstones: retained.tombstones,
+            sourceIndex: rebuiltSourceIndex,
+            conflicts: retained.conflicts,
             quarantine: current.quarantine,
             anchorArchive: envelope.projections.first(where: { $0.metric == metric })?.anchorArchive,
             lastCommittedAt: committedAt,
-            lastObservedAt: current.lastObservedAt,
+            lastObservedAt: retained.observations.map(\.endDate).max(),
             syncState: .fullResyncRequired
         )
         let nextEnvelope = HealthKitAnchorStoreEnvelope(
@@ -644,6 +676,41 @@ public actor HealthKitAnchorStore {
             ))
         }
         return (HealthKitAnchorStoreEnvelope(projections: projections), malformed)
+    }
+
+    private static func retainedProjectionData(
+        observations: [HealthKitObservation],
+        tombstones: [HealthKitDeletionTombstone],
+        conflicts: [HealthKitObservationConflict],
+        committedAt: Date
+    ) throws -> RetainedProjectionData {
+        guard committedAt.timeIntervalSinceReferenceDate.isFinite else {
+            throw HealthKitAnchorStoreError.invalidProjection
+        }
+        let cutoff = committedAt.addingTimeInterval(-HealthKitSafetyLimits.healthObservationRetention)
+        guard cutoff.timeIntervalSinceReferenceDate.isFinite else {
+            throw HealthKitAnchorStoreError.invalidProjection
+        }
+
+        let retainedObservations = observations.filter { $0.endDate >= cutoff }
+        let retainedTombstones = tombstones.filter { $0.deletedAt >= cutoff }
+        // Keep a conflict while either side is still in the retained window;
+        // dropping the old side would otherwise turn a recent disagreement
+        // into an apparently clean projection. Conflicts where both sides are
+        // outside the window are historical evidence and may be compacted.
+        let retainedConflicts = conflicts.filter {
+            $0.existing.endDate >= cutoff || $0.incoming.endDate >= cutoff
+        }
+        guard retainedObservations.count <= HealthKitSafetyLimits.maxProjectionItems,
+              retainedTombstones.count <= HealthKitSafetyLimits.maxProjectionItems,
+              retainedConflicts.count <= HealthKitSafetyLimits.maxConflictItems else {
+            throw HealthKitAnchorStoreError.invalidProjection
+        }
+        return RetainedProjectionData(
+            observations: retainedObservations,
+            tombstones: retainedTombstones,
+            conflicts: retainedConflicts
+        )
     }
 
     private static func validateForCommit(

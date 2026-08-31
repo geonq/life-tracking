@@ -141,6 +141,94 @@ public struct HealthKitQuantityValue: Codable, Equatable, Sendable {
     }
 }
 
+/// The small set of user-authored quantities LifeOS may write back to
+/// HealthKit. Imported sensor metrics remain read-only so a reconciliation
+/// pass can never duplicate or impersonate a provider observation.
+public enum HealthKitWriteMetric: String, Codable, CaseIterable, Hashable, Identifiable, Sendable {
+    case water
+    case caffeine
+    case bodyMass = "body_mass"
+    case bodyFatPercentage = "body_fat_percentage"
+    case leanBodyMass = "lean_body_mass"
+
+    public var id: String { rawValue }
+
+    public var metricID: HealthKitMetricID {
+        switch self {
+        case .water: .water
+        case .caffeine: .caffeine
+        case .bodyMass: .bodyMass
+        case .bodyFatPercentage: .bodyFatPercentage
+        case .leanBodyMass: .leanBodyMass
+        }
+    }
+
+    public var canonicalUnit: HealthKitCanonicalUnit {
+        switch self {
+        case .water: .milliliters
+        case .caffeine: .milligrams
+        case .bodyMass, .leanBodyMass: .kilograms
+        case .bodyFatPercentage: .percent
+        }
+    }
+
+    public init?(metric: HealthKitMetricID) {
+        switch metric {
+        case .water: self = .water
+        case .caffeine: self = .caffeine
+        case .bodyMass: self = .bodyMass
+        case .bodyFatPercentage: self = .bodyFatPercentage
+        case .leanBodyMass: self = .leanBodyMass
+        default: return nil
+        }
+    }
+}
+
+/// A validated, typed request for one explicit user-authored HealthKit
+/// quantity. Constructing this value is the first write guard: unsupported
+/// metrics, wrong units, invalid dates, future values, and unreasonable
+/// intervals cannot reach the platform adapter.
+public struct HealthKitWriteRequest: Equatable, Sendable {
+    public let metric: HealthKitWriteMetric
+    public let value: HealthKitQuantityValue
+    public let startDate: Date
+    public let endDate: Date
+
+    public init(
+        metric: HealthKitWriteMetric,
+        value: Double,
+        startDate: Date,
+        endDate: Date,
+        now: Date = .now,
+        futureTolerance: TimeInterval = HealthKitObservation.defaultFutureTolerance
+    ) throws {
+        guard startDate.timeIntervalSinceReferenceDate.isFinite,
+              endDate.timeIntervalSinceReferenceDate.isFinite,
+              now.timeIntervalSinceReferenceDate.isFinite,
+              futureTolerance.isFinite,
+              futureTolerance >= 0,
+              endDate >= startDate,
+              endDate.timeIntervalSince(startDate) <= HealthKitSafetyLimits.maxObservationIntervalSeconds,
+              endDate.timeIntervalSince(now) <= futureTolerance else {
+            throw HealthKitDomainError.invalidDate("HealthKit write interval")
+        }
+
+        let quantity = try HealthKitQuantityValue(
+            metric: metric.metricID,
+            value: value,
+            unit: metric.canonicalUnit
+        )
+        if metric == .bodyFatPercentage, quantity.value > 100 {
+            throw HealthKitDomainError.invalidQuantity
+        }
+
+        self.metric = metric
+        self.value = quantity
+        self.startDate = startDate
+        self.endDate = endDate
+    }
+}
+
 // MARK: - Sample identity and source provenance
 
 public enum HealthKitSampleRevision: Codable, Equatable, Hashable, Sendable {
@@ -694,6 +782,9 @@ public enum HealthKitSourceIndex {
                 result[key] = .conflict
             } else {
                 result[key] = observation.provenance.helioMatch
+            }
+            guard result.count <= HealthKitSafetyLimits.maxSourceIndexItems else {
+                throw HealthKitDomainError.invalidSourceIndex
             }
         }
         return result

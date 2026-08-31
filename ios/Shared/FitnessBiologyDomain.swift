@@ -125,16 +125,28 @@ public struct FitnessBiologyMetric: Identifiable, Equatable, Sendable {
 
     public let id: FitnessBiologyMetricID
     public let state: State
+    /// The source state is independent from the value state. A partial, stale,
+    /// conflicted, or permission-blocked source must remain explicit even
+    /// though `currentValue` is intentionally withheld for some of those
+    /// conditions.
+    public let sourceState: FitnessMetric.SourceState
 
-    public init(id: FitnessBiologyMetricID, state: State) {
+    public init(
+        id: FitnessBiologyMetricID,
+        state: State,
+        sourceState: FitnessMetric.SourceState? = nil
+    ) {
         self.id = id
-        self.state = Self.validated(id: id, state: state)
+        let validatedState = Self.validated(id: id, state: state)
+        self.state = validatedState
+        self.sourceState = Self.resolvedSourceState(sourceState, for: validatedState)
     }
 
     public var title: String { id.title }
     public var unit: FitnessBiologyUnit { id.unit }
 
     public var samples: [FitnessBiologySample] {
+        guard sourceState.canDisplayValue else { return [] }
         switch state {
         case .observed(_, _, _, _, _, _, _, let samples), .demo(_, _, _, _, _, _, _, let samples):
             return samples.sorted { $0.date < $1.date }
@@ -144,6 +156,7 @@ public struct FitnessBiologyMetric: Identifiable, Equatable, Sendable {
     }
 
     public var currentValue: Double? {
+        guard sourceState.canDisplayValue else { return nil }
         switch state {
         case .observed(let value, _, _, _, _, _, _, _), .demo(let value, _, _, _, _, _, _, _):
             return value
@@ -194,25 +207,55 @@ public struct FitnessBiologyMetric: Identifiable, Equatable, Sendable {
 
     public var stateDetail: String {
         switch state {
-        case .unavailable(let reason), .calibrating(let reason): reason
-        case .observed: "Observed source value"
+        case .unavailable(let reason), .calibrating(let reason):
+            sourceState == .unavailable || sourceState == .calibrating
+                ? reason
+                : "\(sourceState.label) · \(reason)"
+        case .observed:
+            sourceState == .observed ? "Observed source value" : "\(sourceState.label) · source value"
         case .demo: "DEMO · NOT LIVE"
         }
     }
 
-    public func samples(for range: FitnessBiologyRange, endingAt date: Date) -> [FitnessBiologySample] {
-        let calendar = Calendar(identifier: .gregorian)
-        let end = calendar.startOfDay(for: date).addingTimeInterval(86_399.999)
-        let start = calendar.date(byAdding: .day, value: -(range.days - 1), to: calendar.startOfDay(for: date)) ?? date
-        return samples.filter { $0.date >= start && $0.date <= end }
+    /// Filters by half-open local calendar days. Using calendar arithmetic
+    /// keeps the range correct across daylight-saving transitions instead of
+    /// assuming every local day has exactly 86,400 seconds.
+    public func samples(
+        for range: FitnessBiologyRange,
+        endingAt date: Date,
+        calendar: Calendar = .current
+    ) -> [FitnessBiologySample] {
+        guard date.timeIntervalSinceReferenceDate.isFinite else { return [] }
+        let endDay = calendar.startOfDay(for: date)
+        guard let start = calendar.date(byAdding: .day, value: -(range.days - 1), to: endDay),
+              let end = calendar.date(byAdding: .day, value: 1, to: endDay) else {
+            return []
+        }
+        return samples.filter { $0.date >= start && $0.date < end }
     }
 
-    public static func unavailable(_ id: FitnessBiologyMetricID, reason: String? = nil) -> FitnessBiologyMetric {
-        FitnessBiologyMetric(id: id, state: .unavailable(reason: FitnessBiologyValidation.reason(reason, fallback: "No source observation is available.")))
+    public static func unavailable(
+        _ id: FitnessBiologyMetricID,
+        reason: String? = nil,
+        sourceState: FitnessMetric.SourceState? = nil
+    ) -> FitnessBiologyMetric {
+        FitnessBiologyMetric(
+            id: id,
+            state: .unavailable(reason: FitnessBiologyValidation.reason(reason, fallback: "No source observation is available.")),
+            sourceState: sourceState
+        )
     }
 
-    public static func calibrating(_ id: FitnessBiologyMetricID, reason: String? = nil) -> FitnessBiologyMetric {
-        FitnessBiologyMetric(id: id, state: .calibrating(reason: FitnessBiologyValidation.reason(reason, fallback: "Source calibration is incomplete.")))
+    public static func calibrating(
+        _ id: FitnessBiologyMetricID,
+        reason: String? = nil,
+        sourceState: FitnessMetric.SourceState? = nil
+    ) -> FitnessBiologyMetric {
+        FitnessBiologyMetric(
+            id: id,
+            state: .calibrating(reason: FitnessBiologyValidation.reason(reason, fallback: "Source calibration is incomplete.")),
+            sourceState: sourceState
+        )
     }
 
     private static func validated(id: FitnessBiologyMetricID, state: State) -> State {
@@ -236,6 +279,37 @@ public struct FitnessBiologyMetric: Identifiable, Equatable, Sendable {
 
     private static func isValid(id: FitnessBiologyMetricID, value: Double, unit: FitnessBiologyUnit, sourceDevice: String, sampleCount: Int, freshness: String, window: String, provenance: String, samples: [FitnessBiologySample]) -> Bool {
         value.isFinite && id.plausibleRange.contains(value) && unit == id.unit && sampleCount > 0 && sampleCount >= samples.count && !sourceDevice.isBlank && !freshness.isBlank && !window.isBlank && !provenance.isBlank && samples.allSatisfy { $0.value.isFinite && id.plausibleRange.contains($0.value) }
+    }
+
+    private static func resolvedSourceState(_ requested: FitnessMetric.SourceState?, for state: State) -> FitnessMetric.SourceState {
+        let fallback: FitnessMetric.SourceState
+        switch state {
+        case .unavailable: fallback = .unavailable
+        case .calibrating: fallback = .calibrating
+        case .observed: fallback = .observed
+        case .demo: fallback = .demo
+        }
+
+        guard let requested else { return fallback }
+        switch state {
+        case .demo:
+            return .demo
+        case .observed:
+            switch requested {
+            case .observed, .partial, .stale, .conflict:
+                return requested
+            default:
+                return .observed
+            }
+        case .calibrating, .unavailable:
+            switch requested {
+            case .permissionRequired, .deviceUnavailable, .readIndeterminate,
+                 .partial, .stale, .conflict, .error:
+                return requested
+            default:
+                return fallback
+            }
+        }
     }
 }
 

@@ -47,6 +47,52 @@ final class HealthKitDomainTests: XCTestCase {
         XCTAssertNotEqual(report.state, .writeDenied)
     }
 
+    func testTypedHealthKitWriteMetricsStayWithinUserAuthoredSet() {
+        XCTAssertEqual(
+            HealthKitWriteMetric.allCases,
+            [.water, .caffeine, .bodyMass, .bodyFatPercentage, .leanBodyMass]
+        )
+        XCTAssertNil(HealthKitWriteMetric(metric: .heartRate))
+        XCTAssertNil(HealthKitWriteMetric(metric: .sleep))
+        XCTAssertEqual(HealthKitWriteMetric(metric: .water)?.metricID, .water)
+        XCTAssertEqual(HealthKitWriteMetric(metric: .bodyMass)?.canonicalUnit, .kilograms)
+    }
+
+    func testHealthKitWriteRequestValidatesValueMetricAndInterval() throws {
+        let request = try HealthKitWriteRequest(
+            metric: .water,
+            value: 250,
+            startDate: now,
+            endDate: now,
+            now: now
+        )
+        XCTAssertEqual(request.metric, .water)
+        XCTAssertEqual(request.value.metric, .water)
+        XCTAssertEqual(request.value.unit, .milliliters)
+
+        XCTAssertThrowsError(try HealthKitWriteRequest(
+            metric: .bodyFatPercentage,
+            value: 100.1,
+            startDate: now,
+            endDate: now,
+            now: now
+        ))
+        XCTAssertThrowsError(try HealthKitWriteRequest(
+            metric: .water,
+            value: 250,
+            startDate: now.addingTimeInterval(1),
+            endDate: now,
+            now: now
+        ))
+        XCTAssertThrowsError(try HealthKitWriteRequest(
+            metric: .water,
+            value: 250,
+            startDate: now,
+            endDate: now.addingTimeInterval(HealthKitSafetyLimits.maxObservationIntervalSeconds + 1),
+            now: now
+        ))
+    }
+
     func testHealthKitErrorMappingPreservesUnavailableRestrictedAndReadAmbiguity() {
 #if os(iOS) && canImport(HealthKit)
         XCTAssertEqual(HealthKitAdapterError.mappedHealthKitError(domain: HKErrorDomain, code: HKError.Code.errorHealthDataUnavailable.rawValue, description: "unavailable"), .unavailable)

@@ -122,7 +122,7 @@ public struct FitnessStrengthDetailView: View {
                     Text("Total volume")
                         .font(LifeOSFont.header(17))
                     Spacer()
-                    StrengthStateBadge(state: snapshot.totalVolume.state)
+                    StrengthStateBadge(sourceState: snapshot.totalVolume.sourceState)
                 }
 
                 ViewThatFits(in: .horizontal) {
@@ -157,7 +157,7 @@ public struct FitnessStrengthDetailView: View {
             Text("All muscle groups")
                 .font(LifeOSFont.caption(11))
                 .foregroundStyle(LifeOSTokens.tertiaryText)
-            StrengthAggregateValue(state: snapshot.totalVolume.state)
+            StrengthAggregateValue(aggregate: snapshot.totalVolume)
             Text("Logged volume in the selected window")
                 .font(LifeOSFont.caption(10))
                 .foregroundStyle(LifeOSTokens.tertiaryText)
@@ -510,7 +510,9 @@ private struct StrengthMetricValue: View {
                 Text("—")
                     .font(LifeOSFont.spaceGrotesk(32, weight: .bold))
                     .foregroundStyle(LifeOSTokens.tertiaryText)
-                Text(reason)
+                Text(metric.sourceState == .unavailable || metric.sourceState == .calibrating
+                     ? reason
+                     : "\(metric.sourceState.label) · \(reason)")
                     .font(LifeOSFont.caption(10))
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                     .fixedSize(horizontal: false, vertical: true)
@@ -520,10 +522,10 @@ private struct StrengthMetricValue: View {
 }
 
 private struct StrengthAggregateValue: View {
-    let state: FitnessStrengthMetric.State
+    let aggregate: FitnessStrengthAggregate
 
     var body: some View {
-        switch state {
+        switch aggregate.state {
         case .observed(let kilograms, _, _), .demo(let kilograms, _, _):
             HStack(alignment: .lastTextBaseline, spacing: 4) {
                 Text(kilograms.formatted(.number.precision(.fractionLength(0...1))))
@@ -534,15 +536,22 @@ private struct StrengthAggregateValue: View {
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
         case .unavailable, .calibrating:
-            Text("—")
-                .font(LifeOSFont.spaceGrotesk(28, weight: .bold))
-                .foregroundStyle(LifeOSTokens.tertiaryText)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("—")
+                    .font(LifeOSFont.spaceGrotesk(28, weight: .bold))
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                if aggregate.sourceState != .unavailable && aggregate.sourceState != .calibrating {
+                    Text(aggregate.sourceState.label)
+                        .font(LifeOSFont.caption(10).weight(.semibold))
+                        .foregroundStyle(LifeOSTokens.warning)
+                }
+            }
         }
     }
 }
 
 private struct StrengthStateBadge: View {
-    let state: FitnessStrengthMetric.State
+    let sourceState: FitnessMetric.SourceState
 
     var body: some View {
         Text(label)
@@ -555,20 +564,32 @@ private struct StrengthStateBadge: View {
     }
 
     private var label: String {
-        switch state {
+        switch sourceState {
         case .observed: "OBSERVED"
         case .demo: "DEMO · NOT LIVE"
         case .calibrating: "CALIBRATING"
+        case .permissionRequired: "PERMISSION REQUIRED"
+        case .deviceUnavailable: "DEVICE UNAVAILABLE"
+        case .readIndeterminate: "READ STATUS UNKNOWN"
+        case .partial: "PARTIAL"
+        case .stale: "STALE"
+        case .conflict: "CONFLICT"
+        case .error: "SOURCE ERROR"
+        case .derived: "DERIVED"
+        case .manual: "MANUAL"
         case .unavailable: "UNAVAILABLE"
         }
     }
 
     private var color: Color {
-        switch state {
+        switch sourceState {
         case .observed: LifeOSTokens.success
         case .demo: LifeOSTokens.warning
         case .calibrating: LifeOSTokens.accent
+        case .derived, .manual: LifeOSTokens.success
         case .unavailable: LifeOSTokens.tertiaryText
+        case .permissionRequired, .deviceUnavailable, .readIndeterminate,
+             .partial, .stale, .conflict, .error: LifeOSTokens.warning
         }
     }
 }

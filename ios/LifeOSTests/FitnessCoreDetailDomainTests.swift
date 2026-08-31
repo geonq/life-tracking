@@ -462,4 +462,63 @@ final class FitnessCoreDetailDomainTests: XCTestCase {
             XCTAssertNil(card.series(for: .seven))
         }
     }
+
+    func testMetricStatePreservesPartialStaleAndPermissionSemantics() throws {
+        let provenance = try XCTUnwrap(FitnessMetric.Provenance(
+            source: "HealthKit",
+            device: "Helio Strap",
+            window: "Rolling 7 days",
+            freshness: "2 hours ago",
+            observationID: "hrv-1",
+            revision: "sync:12"
+        ))
+        let partial = FitnessMetric(
+            title: "HRV",
+            value: "52",
+            unit: "ms",
+            detail: "Some source pages are still pending",
+            quality: .observed,
+            sourceState: .partial,
+            provenance: provenance
+        )
+        XCTAssertTrue(partial.isValueAvailable)
+        XCTAssertEqual(FitnessSourceEvidence.from(metric: partial).statusLabel, "Partial")
+        XCTAssertTrue(FitnessSourceEvidence.from(metric: partial).isPartial)
+
+        let denied = FitnessMetric.unavailable(
+            "Respiration",
+            reason: "HealthKit read permission is required.",
+            sourceState: .permissionRequired
+        )
+        XCTAssertFalse(denied.isValueAvailable)
+        XCTAssertEqual(FitnessSourceEvidence.from(metric: denied).statusLabel, "Permission required")
+        XCTAssertTrue(FitnessSourceEvidence.from(metric: denied).isUnavailable)
+
+        let trend = FitnessLoadTrendCard(id: .load, metric: partial, availableRanges: [.seven])
+        XCTAssertEqual(trend.truth, .partial)
+        XCTAssertEqual(trend.availableRanges, [.seven])
+    }
+
+    func testSleepEvidencePreservesPermissionStaleAndConflictStates() {
+        let permission = FitnessSleepObservationEvidence(state: .permissionRequired(
+            reason: "HealthKit sleep read permission is required."
+        ))
+        XCTAssertTrue(permission.isUnavailable)
+        XCTAssertEqual(permission.statusLabel, "Permission required")
+        XCTAssertTrue(permission.summary.contains("HealthKit sleep read permission"))
+
+        let stale = FitnessSleepObservationEvidence(state: .stale(
+            reason: "The retained sleep interval is outside its freshness window."
+        ))
+        XCTAssertFalse(stale.isUnavailable)
+        XCTAssertTrue(stale.isStale)
+        XCTAssertEqual(stale.statusLabel, "Stale")
+
+        let conflict = FitnessSleepObservationEvidence(state: .conflict(
+            reason: "Two source sleep revisions overlap."
+        ))
+        XCTAssertTrue(conflict.isUnavailable)
+        XCTAssertEqual(conflict.statusLabel, "Conflict")
+        XCTAssertTrue(conflict.summary.contains("overlap"))
+    }
 }

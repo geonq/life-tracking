@@ -542,19 +542,15 @@ private struct StressStateBadge: View {
     let evidence: FitnessStressEvidence
 
     private var title: String {
-        switch evidence.state {
-        case .unavailable: return "Unavailable"
-        case .observed: return "Observed"
-        case .stale: return "Stale"
-        case .demo: return "Demo · not live"
-        }
+        evidence.isDemo ? "Demo · not live" : evidence.statusLabel
     }
 
     private var color: Color {
         switch evidence.state {
         case .unavailable: return LifeOSTokens.tertiaryText
+        case .permissionRequired, .deviceUnavailable, .readIndeterminate,
+             .partial, .stale, .conflict, .error: return LifeOSTokens.warning
         case .observed: return LifeOSTokens.success
-        case .stale: return LifeOSTokens.warning
         case .demo: return LifeOSTokens.accent
         }
     }
@@ -567,6 +563,8 @@ private struct StressStateBadge: View {
             .padding(.vertical, 6)
             .background(color.opacity(0.12), in: Capsule())
             .overlay(Capsule().stroke(color.opacity(0.28), lineWidth: 0.75))
+            .accessibilityLabel("Stress source state")
+            .accessibilityValue("\(title). \(evidence.summary)")
     }
 }
 

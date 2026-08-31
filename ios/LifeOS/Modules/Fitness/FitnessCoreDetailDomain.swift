@@ -4,6 +4,7 @@ extension FitnessMetric: Equatable {
     public static func == (lhs: FitnessMetric, rhs: FitnessMetric) -> Bool {
         lhs.id == rhs.id && lhs.title == rhs.title && lhs.value == rhs.value &&
         lhs.unit == rhs.unit && lhs.detail == rhs.detail && lhs.quality == rhs.quality &&
+        lhs.sourceState == rhs.sourceState && lhs.provenance == rhs.provenance &&
         lhs.progress == rhs.progress && lhs.trend == rhs.trend
     }
 }
@@ -175,6 +176,14 @@ public enum FitnessTrendRange: Int, CaseIterable, Hashable, Identifiable, Sendab
 public struct FitnessSourceEvidence: Equatable {
     public enum State: Equatable {
         case unavailable(reason: String)
+        case permissionRequired(reason: String)
+        case deviceUnavailable(reason: String)
+        case readIndeterminate(reason: String)
+        case calibrating(reason: String)
+        case partial(reason: String)
+        case stale(reason: String)
+        case conflict(reason: String)
+        case error(reason: String)
         case observed(source: String, device: String, window: String, freshness: String)
         case demo(source: String, device: String, window: String, freshness: String)
     }
@@ -190,9 +199,25 @@ public struct FitnessSourceEvidence: Equatable {
     }
 
     public static func from(metric: FitnessMetric) -> FitnessSourceEvidence {
-        switch metric.quality {
+        switch metric.sourceState {
         case .unavailable:
             return .unavailable(metric.detail)
+        case .permissionRequired:
+            return FitnessSourceEvidence(state: .permissionRequired(reason: metric.detail))
+        case .deviceUnavailable:
+            return FitnessSourceEvidence(state: .deviceUnavailable(reason: metric.detail))
+        case .readIndeterminate:
+            return FitnessSourceEvidence(state: .readIndeterminate(reason: metric.detail))
+        case .calibrating:
+            return FitnessSourceEvidence(state: .calibrating(reason: metric.detail))
+        case .partial:
+            return FitnessSourceEvidence(state: .partial(reason: metric.provenance?.summary ?? metric.detail))
+        case .stale:
+            return FitnessSourceEvidence(state: .stale(reason: metric.provenance?.summary ?? metric.detail))
+        case .conflict:
+            return FitnessSourceEvidence(state: .conflict(reason: metric.detail))
+        case .error:
+            return FitnessSourceEvidence(state: .error(reason: metric.detail))
         case .demo:
             return FitnessSourceEvidence(state: .demo(
                 source: "DEMO · NOT LIVE",
@@ -200,14 +225,29 @@ public struct FitnessSourceEvidence: Equatable {
                 window: "Explicit fixture window",
                 freshness: "Fixture timestamp"
             ))
-        case .observed, .derived, .manual:
+        case .observed:
+            guard let provenance = metric.provenance else {
+                return .unavailable("Observed metric is missing source provenance.")
+            }
+            return FitnessSourceEvidence(state: .observed(
+                source: provenance.source,
+                device: provenance.device,
+                window: provenance.window,
+                freshness: provenance.freshness
+            ))
+        case .derived, .manual:
             return .unavailable("Source provenance is not supplied for this metric.")
         }
     }
 
     public var isUnavailable: Bool {
-        if case .unavailable = state { return true }
-        return false
+        switch state {
+        case .unavailable, .permissionRequired, .deviceUnavailable,
+             .readIndeterminate, .calibrating, .conflict, .error:
+            return true
+        case .partial, .stale, .observed, .demo:
+            return false
+        }
     }
 
     public var isDemo: Bool {
@@ -215,9 +255,43 @@ public struct FitnessSourceEvidence: Equatable {
         return false
     }
 
+    public var isPartial: Bool {
+        if case .partial = state { return true }
+        return false
+    }
+
+    public var isStale: Bool {
+        if case .stale = state { return true }
+        return false
+    }
+
+    public var statusLabel: String {
+        switch state {
+        case .unavailable: "Unavailable"
+        case .permissionRequired: "Permission required"
+        case .deviceUnavailable: "Device unavailable"
+        case .readIndeterminate: "Read status unknown"
+        case .calibrating: "Calibrating"
+        case .partial: "Partial"
+        case .stale: "Stale"
+        case .conflict: "Conflict"
+        case .error: "Source error"
+        case .observed: "Observed"
+        case .demo: "Demo fixture"
+        }
+    }
+
     public var summary: String {
         switch state {
         case .unavailable(let reason): return "Unavailable · \(reason)"
+        case .permissionRequired(let reason): return "Permission required · \(reason)"
+        case .deviceUnavailable(let reason): return "Device unavailable · \(reason)"
+        case .readIndeterminate(let reason): return "Read status unknown · \(reason)"
+        case .calibrating(let reason): return "Calibrating · \(reason)"
+        case .partial(let reason): return "Partial · \(reason)"
+        case .stale(let reason): return "Stale · \(reason)"
+        case .conflict(let reason): return "Conflict · \(reason)"
+        case .error(let reason): return "Source error · \(reason)"
         case .observed(let source, let device, let window, let freshness),
              .demo(let source, let device, let window, let freshness):
             return "\(source) · \(device) · \(window) · \(freshness)"
@@ -234,6 +308,30 @@ public struct FitnessSourceEvidence: Equatable {
         case .unavailable(let reason):
             let reason = clean(reason)
             return .unavailable(reason: reason == "Not supplied" ? "Source evidence is not available." : reason)
+        case .permissionRequired(let reason):
+            let reason = clean(reason)
+            return .permissionRequired(reason: reason == "Not supplied" ? "Source permission is required." : reason)
+        case .deviceUnavailable(let reason):
+            let reason = clean(reason)
+            return .deviceUnavailable(reason: reason == "Not supplied" ? "The source device is unavailable." : reason)
+        case .readIndeterminate(let reason):
+            let reason = clean(reason)
+            return .readIndeterminate(reason: reason == "Not supplied" ? "The source read result is indeterminate." : reason)
+        case .calibrating(let reason):
+            let reason = clean(reason)
+            return .calibrating(reason: reason == "Not supplied" ? "Source calibration is incomplete." : reason)
+        case .partial(let reason):
+            let reason = clean(reason)
+            return .partial(reason: reason == "Not supplied" ? "The source supplied only part of the requested data." : reason)
+        case .stale(let reason):
+            let reason = clean(reason)
+            return .stale(reason: reason == "Not supplied" ? "The source observation is outside its freshness window." : reason)
+        case .conflict(let reason):
+            let reason = clean(reason)
+            return .conflict(reason: reason == "Not supplied" ? "Conflicting source observations were withheld." : reason)
+        case .error(let reason):
+            let reason = clean(reason)
+            return .error(reason: reason == "Not supplied" ? "The source reported an error." : reason)
         case .observed(let source, let device, let window, let freshness):
             let values = [source, device, window, freshness].map(clean)
             guard values.allSatisfy({ $0 != "Not supplied" }) else {
@@ -302,7 +400,7 @@ private enum FitnessTrendSeriesValidation {
         metric: FitnessMetric,
         evidence: FitnessSourceEvidence
     ) -> [FitnessTrendRange: [Double]] {
-        guard metric.quality != .unavailable, !evidence.isUnavailable else { return [:] }
+        guard metric.isValueAvailable, !evidence.isUnavailable else { return [:] }
         return series.reduce(into: [:]) { result, entry in
             guard let values = FitnessTrendSeries(values: entry.value)?.values else { return }
             result[entry.key] = values
@@ -327,6 +425,8 @@ public struct FitnessLoadTargetBand: Equatable {
 public enum FitnessLoadTrendTruth: Equatable {
     case unavailable(reason: String)
     case observed
+    case partial
+    case stale
     case underTarget
     case inTarget
     case overTarget
@@ -336,6 +436,8 @@ public enum FitnessLoadTrendTruth: Equatable {
         switch self {
         case .unavailable: "Unavailable"
         case .observed: "Observed"
+        case .partial: "Partial"
+        case .stale: "Stale"
         case .underTarget: "Under target"
         case .inTarget: "Within target"
         case .overTarget: "Over target"
@@ -388,7 +490,7 @@ public struct FitnessLoadTrendCard: Identifiable, Equatable {
         let resolvedEvidence = evidence ?? FitnessSourceEvidence.from(metric: metric)
         self.evidence = resolvedEvidence
         self.target = target
-        self.availableRanges = metric.quality == .unavailable || resolvedEvidence.isUnavailable ? [] : availableRanges
+        self.availableRanges = !metric.isValueAvailable || resolvedEvidence.isUnavailable ? [] : availableRanges
         self.seriesByRange = FitnessTrendSeriesValidation.validated(seriesByRange, metric: metric, evidence: resolvedEvidence)
     }
 
@@ -397,10 +499,12 @@ public struct FitnessLoadTrendCard: Identifiable, Equatable {
     public func series(for range: FitnessTrendRange) -> [Double]? { seriesByRange[range] }
 
     public var truth: FitnessLoadTrendTruth {
-        guard metric.quality != .unavailable, metric.value != nil, !evidence.isUnavailable else {
+        guard metric.isValueAvailable, !evidence.isUnavailable else {
             return .unavailable(reason: metric.detail)
         }
-        if metric.quality == .demo { return .demo }
+        if metric.sourceState == .demo { return .demo }
+        if metric.sourceState == .partial { return .partial }
+        if metric.sourceState == .stale { return .stale }
         guard let target, let numericValue = Self.number(from: metric.value ?? "") else { return .observed }
         if numericValue < target.lower { return .underTarget }
         if numericValue > target.upper { return .overTarget }
@@ -593,7 +697,7 @@ public struct FitnessRecoveryTrendCard: Identifiable {
         self.metric = metric
         let resolvedEvidence = evidence ?? FitnessSourceEvidence.from(metric: metric)
         self.evidence = resolvedEvidence
-        self.availableRanges = metric.quality == .unavailable || resolvedEvidence.isUnavailable ? [] : availableRanges
+        self.availableRanges = !metric.isValueAvailable || resolvedEvidence.isUnavailable ? [] : availableRanges
         self.seriesByRange = FitnessTrendSeriesValidation.validated(seriesByRange, metric: metric, evidence: resolvedEvidence)
     }
 
@@ -646,21 +750,28 @@ public struct FitnessRecoveryDetail {
             let metric = id == .recovery ? readiness : matching(id)
             // A range is enabled for an explicit visual fixture only. Live
             // callers must provide actual history before a range is offered.
-            let ranges: Set<FitnessTrendRange> = metric.quality == .demo ? [.seven, .fourteen, .thirty] : []
+            let ranges: Set<FitnessTrendRange> = metric.sourceState == .demo ? [.seven, .fourteen, .thirty] : []
             return FitnessRecoveryTrendCard(id: id, metric: metric, evidence: FitnessSourceEvidence.from(metric: metric), availableRanges: ranges)
         }
         let explanation: FitnessSourceCopy
         let insight: FitnessSourceCopy
-        switch readiness.quality {
-        case .unavailable:
+        switch readiness.sourceState {
+        case .unavailable, .permissionRequired, .deviceUnavailable,
+             .readIndeterminate, .calibrating, .conflict, .error:
             explanation = .unavailable("A reviewed wake-time observation is not available.")
             insight = .unavailable("Insights require observed recovery inputs; no conclusion is drawn from missing data.")
         case .demo:
             explanation = FitnessSourceCopy(state: .demo(text: "Fixture-only recovery context; LifeOS does not reproduce a proprietary score formula.", window: "Explicit fixture window", provenance: "DEMO · NOT LIVE"))
             insight = FitnessSourceCopy(state: .demo(text: "Fixture-only insight copy; live recovery inputs are not connected.", window: "Explicit fixture window", provenance: "DEMO · NOT LIVE"))
-        default:
+        case .partial, .stale:
+            explanation = .unavailable("\(readiness.sourceState.label) recovery input; the source did not provide a complete current observation.")
+            insight = .unavailable("Insights require a complete current recovery observation; no conclusion is drawn from partial or stale data.")
+        case .observed:
             explanation = FitnessSourceCopy(state: .observed(text: "Recovery context is source-defined. LifeOS exposes the contributing observations without recreating a proprietary formula.", window: "Source-defined window", provenance: "Source-backed readiness metric"))
             insight = FitnessSourceCopy(state: .observed(text: "Insights describe the observed inputs only; they do not claim causation or prescribe action.", window: "Source-defined window", provenance: "Source-backed readiness metric"))
+        case .derived, .manual:
+            explanation = .unavailable("Recovery input is not an observed source value.")
+            insight = .unavailable("Insights require an observed source value; no conclusion is drawn from derived or manual input.")
         }
         return FitnessRecoveryDetail(hrv: hrv, restingHeartRate: rhr, explanation: explanation, insights: [insight], trends: trends)
     }
@@ -793,7 +904,14 @@ public struct FitnessSleepDayBoundary: Equatable {
 public struct FitnessSleepObservationEvidence: Equatable {
     public enum State: Equatable {
         case unavailable(reason: String)
+        case permissionRequired(reason: String)
+        case deviceUnavailable(reason: String)
+        case readIndeterminate(reason: String)
         case observed(source: String, device: String, provenance: String, freshness: String)
+        case partial(reason: String)
+        case stale(reason: String)
+        case conflict(reason: String)
+        case error(reason: String)
         case demo(source: String, device: String, provenance: String, freshness: String)
     }
 
@@ -810,6 +928,13 @@ public struct FitnessSleepObservationEvidence: Equatable {
     public var summary: String {
         switch state {
         case .unavailable(let reason): return "Unavailable · \(reason)"
+        case .permissionRequired(let reason): return "Permission required · \(reason)"
+        case .deviceUnavailable(let reason): return "Device unavailable · \(reason)"
+        case .readIndeterminate(let reason): return "Read status unknown · \(reason)"
+        case .partial(let reason): return "Partial · \(reason)"
+        case .stale(let reason): return "Stale · \(reason)"
+        case .conflict(let reason): return "Conflict · \(reason)"
+        case .error(let reason): return "Source error · \(reason)"
         case .observed(let source, let device, let provenance, let freshness),
              .demo(let source, let device, let provenance, let freshness):
             return "\(source) · \(device) · \(provenance) · \(freshness)"
@@ -817,13 +942,43 @@ public struct FitnessSleepObservationEvidence: Equatable {
     }
 
     public var isUnavailable: Bool {
-        if case .unavailable = state { return true }
-        return false
+        switch state {
+        case .unavailable, .permissionRequired, .deviceUnavailable,
+             .readIndeterminate, .conflict, .error:
+            return true
+        case .observed, .partial, .stale, .demo:
+            return false
+        }
     }
 
     public var isDemo: Bool {
         if case .demo = state { return true }
         return false
+    }
+
+    public var isPartial: Bool {
+        if case .partial = state { return true }
+        return false
+    }
+
+    public var isStale: Bool {
+        if case .stale = state { return true }
+        return false
+    }
+
+    public var statusLabel: String {
+        switch state {
+        case .unavailable: "Unavailable"
+        case .permissionRequired: "Permission required"
+        case .deviceUnavailable: "Device unavailable"
+        case .readIndeterminate: "Read status unknown"
+        case .observed: "Observed"
+        case .partial: "Partial"
+        case .stale: "Stale"
+        case .conflict: "Conflict"
+        case .error: "Source error"
+        case .demo: "Demo fixture"
+        }
     }
 
     private static func validated(_ state: State) -> State {
@@ -835,12 +990,33 @@ public struct FitnessSleepObservationEvidence: Equatable {
         case .unavailable(let reason):
             let reason = clean(reason)
             return .unavailable(reason: reason.isEmpty ? "Sleep source evidence is unavailable." : reason)
+        case .permissionRequired(let reason):
+            let reason = clean(reason)
+            return .permissionRequired(reason: reason.isEmpty ? "Sleep source permission is required." : reason)
+        case .deviceUnavailable(let reason):
+            let reason = clean(reason)
+            return .deviceUnavailable(reason: reason.isEmpty ? "The sleep source device is unavailable." : reason)
+        case .readIndeterminate(let reason):
+            let reason = clean(reason)
+            return .readIndeterminate(reason: reason.isEmpty ? "Sleep read status is indeterminate." : reason)
         case .observed(let source, let device, let provenance, let freshness):
             let values = [source, device, provenance, freshness].map(clean)
             guard values.allSatisfy({ !$0.isEmpty }) else {
                 return .unavailable(reason: "Sleep source evidence is incomplete.")
             }
             return .observed(source: values[0], device: values[1], provenance: values[2], freshness: values[3])
+        case .partial(let reason):
+            let reason = clean(reason)
+            return .partial(reason: reason.isEmpty ? "The source supplied only part of the sleep night." : reason)
+        case .stale(let reason):
+            let reason = clean(reason)
+            return .stale(reason: reason.isEmpty ? "The sleep source observation is outside its freshness window." : reason)
+        case .conflict(let reason):
+            let reason = clean(reason)
+            return .conflict(reason: reason.isEmpty ? "Conflicting sleep observations were withheld." : reason)
+        case .error(let reason):
+            let reason = clean(reason)
+            return .error(reason: reason.isEmpty ? "The sleep source reported an error." : reason)
         case .demo(let source, let device, let provenance, let freshness):
             let values = [source, device, provenance, freshness].map(clean)
             guard values.allSatisfy({ !$0.isEmpty }) else {
@@ -989,7 +1165,7 @@ public struct FitnessSleepNight: Identifiable, Equatable {
                 return .unavailable(reason: "Observed sleep interval has no named sleep-day boundary.")
             }
             guard !evidence.isUnavailable else {
-                return .unavailable(reason: "Observed sleep interval has incomplete source evidence.")
+                return .unavailable(reason: evidence.summary)
             }
             if stages.isEmpty {
                 return .partial(reason: "Sleep interval is present, but no stage samples were supplied.")
@@ -1071,7 +1247,7 @@ public struct FitnessSleepTrendCard: Identifiable, Equatable {
         self.metric = metric
         let resolvedEvidence = evidence ?? FitnessSourceEvidence.from(metric: metric)
         self.evidence = resolvedEvidence
-        self.availableRanges = metric.quality == .unavailable || resolvedEvidence.isUnavailable ? [] : availableRanges
+        self.availableRanges = !metric.isValueAvailable || resolvedEvidence.isUnavailable ? [] : availableRanges
         self.seriesByRange = FitnessTrendSeriesValidation.validated(seriesByRange, metric: metric, evidence: resolvedEvidence)
     }
 
@@ -1141,7 +1317,7 @@ public struct FitnessSleepDetail {
     private static func durationMetric(from sleep: FitnessMetric) -> FitnessMetric? {
         let title = sleep.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard title == "sleep" || title == "sleep duration" else { return nil }
-        guard sleep.quality != .unavailable, let value = sleep.value else { return nil }
+        guard sleep.isValueAvailable, let value = sleep.value else { return nil }
 
         let normalized = value
             .lowercased()
@@ -1167,7 +1343,9 @@ public struct FitnessSleepDetail {
             quality: sleep.quality,
             progress: sleep.progress,
             hue: sleep.hue,
-            trend: sleep.trend
+            trend: sleep.trend,
+            sourceState: sleep.sourceState,
+            provenance: sleep.provenance
         )
     }
 }

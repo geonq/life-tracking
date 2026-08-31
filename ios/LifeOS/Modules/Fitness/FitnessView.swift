@@ -426,9 +426,17 @@ public struct FitnessSourceState {
 
         var color: Color {
             switch self {
-            case .connected, .demo: LifeOSTokens.success
+            case .connected: LifeOSTokens.success
+            case .demo: LifeOSTokens.warning
             case .stale, .permissionRequired: LifeOSTokens.warning
             case .unavailable: LifeOSTokens.tertiaryText
+            }
+        }
+
+        var needsReview: Bool {
+            switch self {
+            case .unavailable, .stale, .permissionRequired: true
+            case .connected, .demo: false
             }
         }
     }
@@ -821,10 +829,11 @@ private struct FitnessHeader: View {
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Fitness")
-                        .font(LifeOSFont.headerLarge(26))
+                        .font(LifeOSFont.display(30))
+                        .tracking(-0.5)
                     Text(source.status == .demo ? "Visual review" : "Local-first health journal")
-                        .font(LifeOSFont.caption(11))
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .font(LifeOSFont.bodyText(14))
+                        .foregroundStyle(LifeOSTokens.secondaryText)
                 }
 
                 Spacer(minLength: 8)
@@ -849,7 +858,7 @@ private struct FitnessHeader: View {
 
             HStack(spacing: 8) {
                 LifeOSIcon(.calendar)
-                    .foregroundStyle(LifeOSTokens.accent)
+                    .foregroundStyle(LifeOSTokens.Module.fitness)
                     .frame(width: 15, height: 15)
 
                 Button {
@@ -861,7 +870,7 @@ private struct FitnessHeader: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(LifeOSTokens.accent)
+                .foregroundStyle(LifeOSTokens.Module.fitness)
                 .accessibilityLabel("Previous day")
                 .accessibilityHint("Show the previous calendar day")
                 .accessibilityIdentifier("fitness-date-previous-day")
@@ -870,7 +879,7 @@ private struct FitnessHeader: View {
                     showingDatePicker = true
                 } label: {
                     Text(selectedDate.fitnessHeaderDateLabel)
-                        .font(LifeOSFont.inter(12, weight: .semiBold))
+                        .font(LifeOSFont.control())
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                         .frame(minHeight: 44, alignment: .leading)
@@ -1032,7 +1041,7 @@ private struct FitnessSectionPicker: View {
                     .frame(width: 12, height: 12)
                     .rotationEffect(.degrees(90))
             }
-            .foregroundStyle(LifeOSTokens.primaryText)
+                .foregroundStyle(LifeOSTokens.Module.fitness)
             .padding(.horizontal, 11)
             .frame(height: 36, alignment: .leading)
             .background(LifeOSTokens.raised, in: Capsule())
@@ -1052,15 +1061,17 @@ private struct FitnessSectionPicker: View {
                 select(section)
             } label: {
                 HStack(spacing: 6) {
-                    LifeOSIcon(section.icon).frame(width: 15, height: 15)
+                    LifeOSIcon(section.icon)
+                        .frame(width: 15, height: 15)
+                        .foregroundStyle(selection == section ? LifeOSTokens.Module.fitness : LifeOSTokens.secondaryText)
                     Text(section.rawValue)
                         .font(LifeOSFont.inter(12, weight: .semiBold))
                         .fixedSize(horizontal: true, vertical: false)
                 }
-                .foregroundStyle(selection == section ? LifeOSTokens.primaryText : LifeOSTokens.tertiaryText)
+                .foregroundStyle(selection == section ? LifeOSTokens.primaryText : LifeOSTokens.secondaryText)
                 .padding(.horizontal, 11)
                 .padding(.vertical, 8)
-                .background(selection == section ? LifeOSTokens.raised : LifeOSTokens.surface.opacity(0.48), in: Capsule())
+                .background(selection == section ? LifeOSTokens.Module.fitness.opacity(0.14) : LifeOSTokens.surface.opacity(0.48), in: Capsule())
             }
             .buttonStyle(.plain)
             .background(GeometryReader { geometry in
@@ -1231,7 +1242,7 @@ private struct FitnessSectionContent: View {
             )
         case .biology:
             VStack(alignment: .leading, spacing: 14) {
-                if snapshot.source.status == .unavailable {
+                if snapshot.source.status.needsReview {
                     FitnessSourceGateCard(source: snapshot.source, onSourceTap: onSourceTap)
                 }
                 FitnessBiologyDetailSurface(
@@ -1329,7 +1340,7 @@ private struct FitnessCoreTodayComposition: View {
         VStack(alignment: .leading, spacing: 18) {
             FitnessSectionHeading(title: "Today", subtitle: selectedDate.fitnessDayLabel)
 
-            if snapshot.source.status == .unavailable {
+            if snapshot.source.status.needsReview {
                 FitnessSourceGateCard(source: snapshot.source, onSourceTap: onSourceTap)
             }
 
@@ -1376,11 +1387,15 @@ private struct FitnessCoreSectionLabel: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Capsule()
+                .fill(LifeOSTokens.Module.fitness)
+                .frame(width: 3, height: 16)
+                .accessibilityHidden(true)
             Text(title)
-                .font(LifeOSFont.header(15))
+                .font(LifeOSFont.cardTitle(15))
             Text(detail)
-                .font(LifeOSFont.caption(10))
-                .foregroundStyle(LifeOSTokens.tertiaryText)
+                .font(LifeOSFont.metadata())
+                .foregroundStyle(LifeOSTokens.secondaryText)
             Spacer(minLength: 0)
         }
         .accessibilityElement(children: .combine)
@@ -1477,7 +1492,7 @@ private struct FitnessCoreReadinessHero: View {
                     FitnessCoreProvenance(metric: metric)
                 }
                 Spacer(minLength: 8)
-                if let progress = metric.progress, metric.quality != .unavailable {
+                if let progress = metric.progress, metric.isValueAvailable {
                     FitnessRing(progress: progress, hue: metric.hue, size: 78, color: FitnessRingPalette.threshold(progress))
                         .accessibilityHidden(true)
                 } else {
@@ -1493,11 +1508,14 @@ private struct FitnessCoreReadinessHero: View {
     }
 
     private var readinessContext: String {
-        switch metric.quality {
-        case .unavailable:
-            "Unavailable · no reviewed wake-time observation"
+        switch metric.sourceState {
+        case .unavailable, .permissionRequired, .deviceUnavailable,
+             .readIndeterminate, .calibrating, .conflict, .error:
+            "\(metric.sourceState.label) · \(metric.detail)"
         case .demo:
             "Live wake-time timing requires a connected source"
+        case .partial, .stale:
+            "\(metric.sourceState.label) · Open for source-backed interpretation"
         default:
             "Open for source-backed interpretation"
         }
@@ -1527,7 +1545,7 @@ private struct FitnessCoreMetricCard: View {
                     }
                 }
                 Spacer(minLength: 4)
-                if let progress = metric.progress, metric.quality != .unavailable {
+                if let progress = metric.progress, metric.isValueAvailable {
                     FitnessRing(progress: progress, hue: metric.hue, size: emphasis ? 58 : 48, color: FitnessRingPalette.color(route: route, progress: progress))
                         .accessibilityHidden(true)
                 } else {
@@ -1560,6 +1578,13 @@ private struct FitnessCoreNavigationCard<Content: View>: View {
             .padding(13)
             .frame(maxWidth: .infinity, alignment: .leading)
             .flatCard()
+            .overlay(alignment: .topLeading) {
+                Capsule()
+                    .fill(accent.base)
+                    .frame(width: 3, height: 28)
+                    .padding(.top, 14)
+                    .accessibilityHidden(true)
+            }
             .overlay(
                 LifeOSTokens.cardShape.stroke(
                     hovering ? LifeOSTokens.strongBorder : Color.clear,
@@ -1583,11 +1608,11 @@ private struct FitnessCoreProvenance: View {
     var body: some View {
         HStack(spacing: 6) {
             Circle()
-                .fill((metric.quality == .demo ? LifeOSTokens.warning : LifeOSTokens.tertiaryText))
+                .fill(fitnessMetricStateColor(metric.sourceState))
                 .frame(width: 6, height: 6)
-            Text(metric.quality == .demo ? "Fixture" : metric.quality == .unavailable ? "Unavailable" : metric.quality.label)
+            Text(metric.sourceState.label)
                 .font(LifeOSFont.inter(10, weight: .semiBold))
-                .foregroundStyle((metric.quality == .demo ? LifeOSTokens.warning : LifeOSTokens.tertiaryText))
+                .foregroundStyle(fitnessMetricStateColor(metric.sourceState))
             Text("·")
                 .foregroundStyle(Color.secondary)
             Text(compactDetail)
@@ -1599,9 +1624,21 @@ private struct FitnessCoreProvenance: View {
     }
 
     private var compactDetail: String {
-        metric.detail
+        metric.provenanceSummary
             .replacingOccurrences(of: " · demo fixture", with: "")
             .replacingOccurrences(of: "demo fixture", with: "fixture")
+    }
+}
+
+private func fitnessMetricStateColor(_ state: FitnessMetric.SourceState) -> Color {
+    switch state {
+    case .observed, .derived, .manual:
+        LifeOSTokens.success
+    case .demo, .partial, .stale, .calibrating, .permissionRequired,
+         .deviceUnavailable, .readIndeterminate, .conflict, .error:
+        LifeOSTokens.warning
+    case .unavailable:
+        LifeOSTokens.tertiaryText
     }
 }
 
@@ -1683,7 +1720,7 @@ private struct FitnessCoreMiniMetric: View {
     var body: some View {
         HStack(spacing: 8) {
             Circle()
-                .fill((metric.quality == .demo ? LifeOSTokens.warning : LifeOSTokens.tertiaryText))
+                .fill(fitnessMetricStateColor(metric.sourceState))
                 .frame(width: 7, height: 7)
             VStack(alignment: .leading, spacing: 2) {
                 Text(metric.title)
@@ -1707,7 +1744,7 @@ private struct FitnessCoreMiniMetric: View {
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(LifeOSTokens.hairlineBorder, lineWidth: 0.75))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(metric.title)
-        .accessibilityValue("\(metric.value ?? "Not available") \(metric.unit). \(metric.quality.label). \(metric.detail)")
+        .accessibilityValue("\(metric.value ?? "Not available") \(metric.unit). \(metric.sourceState.label). \(metric.provenanceSummary)")
     }
 }
 
@@ -2182,9 +2219,9 @@ private struct FitnessCoreLoadTrendCard: View {
                         .font(LifeOSFont.inter(10, weight: .semiBold))
                         .foregroundStyle(truthColor)
                 } else {
-                    Text(card.metric.quality == .unavailable
+                    Text(!card.metric.isValueAvailable
                          ? card.truth.label
-                         : "Source series unavailable · range not relabelled")
+                         : "\(card.metric.sourceState.label) · source series unavailable · range not relabelled")
                         .font(LifeOSFont.inter(10, weight: .semiBold))
                         .foregroundStyle(truthColor)
                 }
@@ -2219,6 +2256,7 @@ private struct FitnessCoreLoadTrendCard: View {
         case .underTarget, .overTarget: LifeOSTokens.warning
         case .inTarget: LifeOSTokens.success
         case .observed: LifeOSTokens.accent
+        case .partial, .stale: LifeOSTokens.warning
         case .demo: LifeOSTokens.warning
         case .unavailable: LifeOSTokens.tertiaryText
         }
@@ -2372,12 +2410,12 @@ private struct FitnessCoreRecoveryTrendButton: View {
                 }
                 if let series = card.series(for: range), !series.isEmpty {
                     FitnessCoreSparkline(values: series)
-                } else if card.metric.quality != .unavailable {
+                } else if card.metric.isValueAvailable {
                     Text("Source series unavailable · range not relabelled")
                         .font(LifeOSFont.caption(10))
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
-                Text(card.metric.quality == .unavailable ? card.metric.detail : "\(card.metric.quality.label) · \(card.evidence.summary)")
+                Text(!card.metric.isValueAvailable ? card.metric.detail : "\(card.metric.sourceState.label) · \(card.evidence.summary)")
                     .font(LifeOSFont.caption(10))
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                     .multilineTextAlignment(.leading)
@@ -2466,10 +2504,10 @@ private struct FitnessCoreSleepDetail: View {
 
     private var whyNoData: FitnessSourceCopy {
         let metrics = [detail.quality, detail.timeInBed, detail.duration]
-        if metrics.allSatisfy({ $0.quality == .unavailable }) {
+        if metrics.allSatisfy({ !$0.isValueAvailable }) {
             return .unavailable("Sleep quality, time in bed, and duration require a source sleep interval. Stages and score values are never fabricated from an empty night.")
         }
-        let isDemo = source.status == .demo || metrics.contains(where: { $0.quality == .demo })
+        let isDemo = source.status == .demo || metrics.contains(where: { $0.sourceState == .demo })
         return FitnessSourceCopy(state: isDemo
             ? .demo(
                 text: "Fixture-only sleep values are shown for visual review; no live score or stage result is implied.",
@@ -2583,7 +2621,10 @@ private struct FitnessSleepTimelineCard: View {
 
     private var statusColor: Color {
         switch night.state {
-        case .observed: return night.evidence.isDemo ? LifeOSTokens.warning : LifeOSTokens.success
+        case .observed:
+            return night.evidence.isDemo || night.evidence.isPartial || night.evidence.isStale
+                ? LifeOSTokens.warning
+                : LifeOSTokens.success
         case .partial, .conflict: return LifeOSTokens.warning
         case .unavailable: return LifeOSTokens.tertiaryText
         }
@@ -2850,7 +2891,7 @@ private struct FitnessCoreSleepTrendCard: View {
                 HStack(spacing: 8) {
                     LifeOSIcon(card.id.icon)
                         .frame(width: 16, height: 16)
-                        .foregroundStyle(card.metric.quality == .unavailable ? LifeOSTokens.tertiaryText : LifeOSTokens.accent)
+                        .foregroundStyle(card.metric.isValueAvailable ? LifeOSTokens.accent : fitnessMetricStateColor(card.metric.sourceState))
                     Text(card.id.title)
                         .font(LifeOSFont.inter(12, weight: .medium))
                     Spacer(minLength: 8)
@@ -2880,9 +2921,11 @@ private struct FitnessCoreSleepTrendCard: View {
                         .font(LifeOSFont.inter(10, weight: .medium))
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 } else {
-                    Text(card.metric.quality == .unavailable ? "No trend available" : "Observed value · trend unavailable")
+                    Text(card.metric.isValueAvailable
+                         ? "\(card.metric.sourceState.label) · trend unavailable"
+                         : "\(card.metric.sourceState.label) · no trend available")
                         .font(LifeOSFont.inter(10, weight: .semiBold))
-                        .foregroundStyle(card.metric.quality == .unavailable ? LifeOSTokens.tertiaryText : LifeOSTokens.accent)
+                        .foregroundStyle(fitnessMetricStateColor(card.metric.sourceState))
                 }
                 if isExpanded {
                     FitnessCoreSleepTrendEvidenceDetail(card: card)
@@ -2908,7 +2951,7 @@ private struct FitnessCoreSleepTrendCard: View {
 #endif
         .accessibilityElement(children: .contain)
         .accessibilityLabel(card.id.title)
-        .accessibilityValue("\(card.metric.value ?? "Not available") \(card.metric.unit). \(card.metric.quality.label). \(card.evidence.summary). \(isExpanded ? "Details shown" : "Details hidden")")
+        .accessibilityValue("\(card.metric.value ?? "Not available") \(card.metric.unit). \(card.metric.sourceState.label). \(card.evidence.summary). \(isExpanded ? "Details shown" : "Details hidden")")
         .accessibilityHint("Shows source, freshness, and available history")
     }
 
@@ -2953,7 +2996,7 @@ private struct FitnessCoreSleepTrendEvidenceDetail: View {
             Text("Trend detail")
                 .font(LifeOSFont.caption(10))
                 .foregroundStyle(LifeOSTokens.tertiaryText)
-            Text(card.metric.quality == .unavailable ? card.metric.detail : "Unit · \(card.metric.unit.isEmpty ? "not specified" : card.metric.unit)")
+            Text(card.metric.isValueAvailable ? "Unit · \(card.metric.unit.isEmpty ? "not specified" : card.metric.unit)" : "\(card.metric.sourceState.label) · \(card.metric.detail)")
                 .font(LifeOSFont.caption(10))
                 .fixedSize(horizontal: false, vertical: true)
             Text(card.availableSeriesRanges.isEmpty
@@ -2985,14 +3028,14 @@ private struct FitnessCoreTrendCard: View {
                 Spacer(minLength: 8)
                 Text(metric.value ?? "No data")
                     .font(LifeOSFont.inter(12, weight: .semiBold))
-                    .foregroundStyle(metric.quality == .unavailable ? LifeOSTokens.tertiaryText : .primary)
+                        .foregroundStyle(metric.isValueAvailable ? .primary : fitnessMetricStateColor(metric.sourceState))
             }
             if !metric.trend.isEmpty {
                 FitnessCoreSparkline(values: metric.trend)
             }
-            Text(metric.quality == .unavailable
+            Text(!metric.isValueAvailable
                  ? metric.detail
-                 : metric.trend.isEmpty ? "Observed value · trend unavailable" : "Observed trend · \(source.freshness)")
+                 : metric.trend.isEmpty ? "\(metric.sourceState.label) value · trend unavailable" : "\(metric.sourceState.label) trend · \(source.freshness)")
                 .font(LifeOSFont.caption(10))
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .fixedSize(horizontal: false, vertical: true)
@@ -3000,7 +3043,7 @@ private struct FitnessCoreTrendCard: View {
         .padding(.vertical, 4)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(title)
-        .accessibilityValue(metric.value.map { "\($0) \(metric.unit). \(metric.quality.label)" } ?? "No data. \(metric.detail)")
+        .accessibilityValue(metric.value.map { "\($0) \(metric.unit). \(metric.sourceState.label)" } ?? "No data. \(metric.sourceState.label). \(metric.detail)")
     }
 }
 
@@ -3080,7 +3123,7 @@ private struct FitnessCoreDetailHero: View {
                     FitnessCoreProvenance(metric: metric)
                 }
                 Spacer(minLength: 0)
-                if let progress = metric.progress, metric.quality != .unavailable {
+                if let progress = metric.progress, metric.isValueAvailable {
                     FitnessRing(progress: progress, hue: metric.hue, size: 112, color: FitnessRingPalette.color(route: route, progress: progress))
                         .accessibilityHidden(true)
                 } else {
@@ -3099,11 +3142,11 @@ private struct FitnessCoreAvailabilityNote: View {
     var body: some View {
         FitnessCard {
             VStack(alignment: .leading, spacing: 7) {
-                Text(metric.quality == .unavailable ? "Why this is unavailable" : "Source and freshness")
+                Text(metric.isValueAvailable ? "Source and freshness" : "Why this is unavailable")
                     .font(LifeOSFont.header(14))
-                Text(metric.quality == .unavailable
+                Text(!metric.isValueAvailable
                      ? "LifeOS does not substitute zero or a guessed score. Connect the reviewed sensor chain and grant only the HealthKit categories you want to use."
-                     : "\(metric.quality.label) · \(source.title) · \(source.freshness)")
+                     : "\(metric.sourceState.label) · \(source.title) · \(source.freshness)")
                     .font(LifeOSFont.body(12))
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                     .fixedSize(horizontal: false, vertical: true)
@@ -3403,15 +3446,15 @@ private struct FitnessCoreHealthDetail: View {
                 ForEach(metrics) { metric in
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
                         Circle()
-                            .fill((metric.quality == .demo ? LifeOSTokens.warning : LifeOSTokens.tertiaryText))
+                            .fill(fitnessMetricStateColor(metric.sourceState))
                             .frame(width: 7, height: 7)
                         Text(metric.title).font(LifeOSFont.inter(12, weight: .medium))
                         Spacer(minLength: 8)
-                        Text(metric.value.map { "\($0) \(metric.unit)" } ?? "Unavailable")
+                        Text(metric.value.map { "\($0) \(metric.unit)" } ?? metric.sourceState.label)
                             .font(LifeOSFont.inter(12, weight: .semiBold))
                             .multilineTextAlignment(.trailing)
                     }
-                    Text(metric.quality == .unavailable ? metric.detail : "\(metric.quality.label) · \(source.freshness)")
+                    Text(!metric.isValueAvailable ? "\(metric.sourceState.label) · \(metric.detail)" : "\(metric.sourceState.label) · \(source.freshness)")
                         .font(LifeOSFont.caption(10))
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .padding(.leading, 17)
@@ -3426,12 +3469,18 @@ struct FitnessSectionHeading: View {
     let subtitle: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(LifeOSFont.header(20))
-            Text(subtitle)
-                .font(LifeOSFont.caption(11))
-                .foregroundStyle(LifeOSTokens.tertiaryText)
+        HStack(alignment: .top, spacing: 9) {
+            Capsule()
+                .fill(LifeOSTokens.Module.fitness)
+                .frame(width: 3, height: 27)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(LifeOSFont.sectionTitle())
+                Text(subtitle)
+                    .font(LifeOSFont.metadata())
+                    .foregroundStyle(LifeOSTokens.secondaryText)
+            }
         }
         .padding(.bottom, 2)
     }
@@ -3440,6 +3489,31 @@ struct FitnessSectionHeading: View {
 private struct FitnessSourceGateCard: View {
     let source: FitnessSourceState
     let onSourceTap: () -> Void
+
+    private var title: String {
+        switch source.status {
+        case .unavailable: "Health source unavailable"
+        case .stale: "Health source is stale"
+        case .permissionRequired: "Health permissions needed"
+        case .connected: "Health source connected"
+        case .demo: "Demo health source"
+        }
+    }
+
+    private var summary: String {
+        switch source.status {
+        case .unavailable:
+            "No readings are substituted or estimated here."
+        case .stale:
+            "Existing values remain labelled stale until a newer source observation arrives."
+        case .permissionRequired:
+            "Grant only the HealthKit categories you want LifeOS to read."
+        case .connected:
+            "Source metadata is available for the selected snapshot."
+        case .demo:
+            "Fixture-only values are not live health data."
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -3450,14 +3524,14 @@ private struct FitnessSourceGateCard: View {
                 }
                 .frame(width: 42, height: 42)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Health source not connected")
+                    Text(title)
                         .font(LifeOSFont.header(15))
-                    Text("No readings are substituted or estimated here.")
+                    Text(summary)
                         .font(LifeOSFont.caption(11))
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
             }
-            Text("The sensor authority is the Helio Strap. Zepp and Apple Health transport its samples to HealthKit; HealthKit permission and source metadata are required before LifeOS can show a metric.")
+            Text("The sensor authority is the Helio Strap. Zepp and Apple Health transport its samples to HealthKit; HealthKit permission and source metadata are required before LifeOS can show a metric. Current source: \(source.title) · \(source.detail) · \(source.freshness).")
                 .font(LifeOSFont.body(13))
                 .foregroundStyle(.primary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -3471,6 +3545,7 @@ private struct FitnessSourceGateCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .flatCard()
         .accessibilityElement(children: .contain)
+        .accessibilityValue("\(source.status.label). \(summary) \(source.freshness)")
         .accessibilityIdentifier("fitness-health-source-gate")
     }
 }
@@ -3485,42 +3560,43 @@ private struct FitnessMetricCard: View {
                 HStack(alignment: .top, spacing: 12) {
                     VStack(alignment: .leading, spacing: 7) {
                         Text(metric.title)
-                            .font(LifeOSFont.caption(11))
-                            .foregroundStyle(LifeOSTokens.tertiaryText)
+                            .font(LifeOSFont.metadata())
+                            .foregroundStyle(LifeOSTokens.secondaryText)
                             .fixedSize(horizontal: false, vertical: true)
                         HStack(alignment: .firstTextBaseline, spacing: 4) {
                             Text(metric.value ?? "—")
                                 .font(LifeOSFont.spaceGrotesk(emphasis ? 29 : 23, weight: .bold))
                                 .monospacedDigit()
+                                .foregroundStyle(metric.isValueAvailable ? metric.hue.base : fitnessMetricStateColor(metric.sourceState))
                                 .fixedSize(horizontal: true, vertical: false)
                             if metric.value != nil, !metric.unit.isEmpty {
                                 Text(metric.unit)
-                                    .font(LifeOSFont.caption(11))
-                                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                                    .font(LifeOSFont.metadata())
+                                    .foregroundStyle(LifeOSTokens.secondaryText)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
                         }
                     }
                     .layoutPriority(1)
                     Spacer(minLength: 0)
-                    if let progress = metric.progress, metric.quality != .unavailable {
+                    if let progress = metric.progress, metric.isValueAvailable {
                         FitnessRing(progress: progress, hue: metric.hue, size: emphasis ? 52 : 42)
                     }
                 }
                 // Demo provenance is already stated once in the source chip
                 // and banner. Keep the card focused on the metric itself;
                 // unavailable/observed records still explain their status.
-                if metric.quality != .demo {
+                if metric.sourceState != .demo {
                     Text(metric.detail)
-                        .font(LifeOSFont.caption(10))
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .font(LifeOSFont.metadata())
+                        .foregroundStyle(metric.isValueAvailable ? LifeOSTokens.secondaryText : LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                     HStack(spacing: 6) {
                         // §4.2: the quality dot is a neutral marker; only a
                         // demo fixture earns the warning semantic.
-                        let dotColor = metric.quality == .demo ? LifeOSTokens.warning : LifeOSTokens.tertiaryText
+                        let dotColor = fitnessMetricStateColor(metric.sourceState)
                         Circle().fill(dotColor).frame(width: 5, height: 5)
-                        Text(metric.quality.label)
+                        Text(metric.sourceState.label)
                             .font(LifeOSFont.inter(10, weight: .semiBold))
                             .foregroundStyle(dotColor)
                         Spacer(minLength: 0)
@@ -3536,7 +3612,7 @@ private struct FitnessMetricCard: View {
     private var metricAccessibilityValue: String {
         let value = metric.value ?? "Not available"
         let unit = metric.unit.isEmpty ? "" : " \(metric.unit)"
-        return "\(value)\(unit). \(metric.quality.label). \(metric.detail)"
+        return "\(value)\(unit). \(metric.sourceState.label). \(metric.provenanceSummary)"
     }
 }
 
@@ -3662,7 +3738,7 @@ private struct FitnessJournalView: View {
                 }
             }
 
-            if snapshot.source.status == .unavailable {
+            if snapshot.source.status.needsReview {
                 FitnessSourceGateCard(source: snapshot.source, onSourceTap: onSourceTap)
             }
 
@@ -4320,7 +4396,7 @@ private struct FitnessActivityView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             FitnessSectionHeading(title: "Fitness", subtitle: "Last 30 days · activity and performance")
-            if snapshot.source.status == .unavailable {
+            if snapshot.source.status.needsReview {
                 FitnessSourceGateCard(source: snapshot.source, onSourceTap: onSourceTap)
             }
 #if os(macOS)
@@ -4511,21 +4587,23 @@ private struct FitnessActivityCalendarCard: View {
         let symbols = calendar.shortStandaloneWeekdaySymbols
         let firstWeekdayIndex = max(0, min(symbols.count - 1, calendar.firstWeekday - 1))
         let daySymbols = Array(symbols[firstWeekdayIndex...] + symbols[..<firstWeekdayIndex])
+        let leadingStart = daySymbols.count
+        let datesStart = leadingStart + leading
 
         VStack(alignment: .leading, spacing: 7) {
             Text(monthStart.activityMonthLabel).font(LifeOSFont.inter(13, weight: .semiBold))
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 4), count: 7), spacing: 5) {
-                ForEach(Array(daySymbols.enumerated()), id: \.offset) { _, symbol in
-                    Text(String(symbol.prefix(1)))
+                ForEach(daySymbols.indices, id: \.self) { index in
+                    Text(String(daySymbols[index].prefix(1)))
                         .font(LifeOSFont.caption(9))
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .frame(maxWidth: .infinity)
                 }
-                ForEach(0..<leading, id: \.self) { _ in
+                ForEach(leadingStart..<datesStart, id: \.self) { _ in
                     Color.clear.frame(height: 18)
                 }
-                ForEach(dates, id: \.self) { date in
-                    activityDayButton(date)
+                ForEach(datesStart..<(datesStart + dates.count), id: \.self) { index in
+                    activityDayButton(dates[index - datesStart])
                 }
             }
         }
@@ -5145,33 +5223,38 @@ private enum FitnessActivityMetricFormatter {
     static func value(_ metric: FitnessActivityMetric) -> String {
         switch metric.state {
         case .unavailable: "No data"
+        case .permissionRequired, .deviceUnavailable, .readIndeterminate,
+             .conflict, .error: "No data"
         case .calibrating: "Calibrating"
-        case .observed(let value, let unit, _, _), .demo(let value, let unit, _, _):
+        case .partial(let value, let unit, _, _), .stale(let value, let unit, _, _),
+             .observed(let value, let unit, _, _), .demo(let value, let unit, _, _):
             format(value: value, unit: unit)
         }
     }
 
     static func status(_ metric: FitnessActivityMetric) -> String {
-        switch metric.state {
-        case .unavailable: "Unavailable"
-        case .calibrating: "Calibrating"
-        case .observed: "Observed"
-        case .demo: "Demo fixture · not live"
-        }
+        metric.statusLabel
     }
 
     static func detail(_ metric: FitnessActivityMetric) -> String {
         switch metric.state {
-        case .unavailable(let reason), .calibrating(let reason): reason
-        case .observed(_, _, let window, let provenance), .demo(_, _, let window, let provenance): "\(window) · \(provenance)"
+        case .unavailable(let reason), .permissionRequired(let reason),
+             .deviceUnavailable(let reason), .readIndeterminate(let reason),
+             .calibrating(let reason), .conflict(let reason), .error(let reason):
+            reason
+        case .partial(_, _, let window, let provenance), .stale(_, _, let window, let provenance),
+             .observed(_, _, let window, let provenance), .demo(_, _, let window, let provenance):
+            "\(metric.statusLabel) · \(window) · \(provenance)"
         }
     }
 
     static func provenance(_ metric: FitnessActivityMetric) -> String {
         switch metric.state {
-        case .unavailable(let reason): reason
-        case .calibrating(let reason): reason
-        case .observed(_, _, let window, _): window
+        case .unavailable(let reason), .permissionRequired(let reason),
+             .deviceUnavailable(let reason), .readIndeterminate(let reason),
+             .calibrating(let reason), .conflict(let reason), .error(let reason): reason
+        case .partial(_, _, let window, _), .stale(_, _, let window, _),
+             .observed(_, _, let window, _): window
         case .demo: "DEMO · NOT LIVE"
         }
     }
@@ -5179,7 +5262,8 @@ private enum FitnessActivityMetricFormatter {
     static func statusColor(_ metric: FitnessActivityMetric) -> Color {
         switch metric.state {
         case .unavailable: LifeOSTokens.tertiaryText
-        case .calibrating: LifeOSTokens.warning
+        case .permissionRequired, .deviceUnavailable, .readIndeterminate,
+             .calibrating, .partial, .stale, .conflict, .error: LifeOSTokens.warning
         case .observed: LifeOSTokens.success
         case .demo: LifeOSTokens.warning
         }
@@ -5202,54 +5286,92 @@ private enum FitnessActivityMetricFormatter {
 
 private enum FitnessPerformanceTargetFormatter {
     static func value(_ target: FitnessPerformanceTarget) -> String {
+        guard target.sourceState.canDisplayValue else {
+            return target.sourceState.label
+        }
         switch target.state {
-        case .unavailable: "No target"
-        case .calibrating: "Calibrating"
+        case .unavailable: return target.sourceState.label
+        case .calibrating: return "Calibrating"
         case .observed(_, let deviation, _, _, _, _), .demo(_, let deviation, _, _, _, _):
-            String(format: "%+.0f%%", deviation)
+            return String(format: "%+.0f%%", deviation)
         }
     }
 
     static func status(_ target: FitnessPerformanceTarget) -> String {
+        switch target.sourceState {
+        case .permissionRequired, .deviceUnavailable, .readIndeterminate,
+             .conflict, .error:
+            return target.sourceState.label
+        case .partial, .stale:
+            guard let status = target.targetStatus else { return target.sourceState.label }
+            return "\(target.sourceState.label) · \(statusLabel(status))"
+        case .unavailable:
+            return "Unavailable"
+        case .calibrating:
+            return "Calibrating"
+        case .derived, .manual:
+            return target.sourceState.label
+        case .observed, .demo:
+            break
+        }
         switch target.state {
-        case .unavailable: "Unavailable"
-        case .calibrating: "Calibrating"
+        case .unavailable: return "Unavailable"
+        case .calibrating: return "Calibrating"
         case .observed, .demo:
             switch target.targetStatus {
-            case .below: "Below target"
-            case .within: "Within target"
-            case .above: "Above target"
-            case nil: "Unavailable"
+            case .below: return statusLabel(.below)
+            case .within: return statusLabel(.within)
+            case .above: return statusLabel(.above)
+            case nil: return "Unavailable"
             }
+        }
+    }
+
+    private static func statusLabel(_ status: FitnessPerformanceTarget.TargetStatus) -> String {
+        switch status {
+        case .below: return "Below target"
+        case .within: return "Within target"
+        case .above: return "Above target"
         }
     }
 
     static func detail(_ target: FitnessPerformanceTarget) -> String {
         switch target.state {
-        case .unavailable(let reason), .calibrating(let reason): reason
+        case .unavailable(let reason), .calibrating(let reason):
+            return target.sourceState == .unavailable || target.sourceState == .calibrating
+                ? reason
+                : "\(target.sourceState.label) · \(reason)"
         case .observed(_, _, let lower, let upper, let window, let provenance), .demo(_, _, let lower, let upper, let window, let provenance):
-            "Target band \(Int(lower.rounded()))–\(Int(upper.rounded())) · \(window) · \(provenance)"
+            let detail = "Target band \(Int(lower.rounded()))–\(Int(upper.rounded())) · \(window) · \(provenance)"
+            return target.sourceState == .observed || target.sourceState == .demo
+                ? detail
+                : "\(target.sourceState.label) · \(detail)"
         }
     }
 
     static func band(_ target: FitnessPerformanceTarget) -> (Double, Double)? {
+        guard target.sourceState.canDisplayValue else { return nil }
         switch target.state {
-        case .observed(_, _, let lower, let upper, _, _), .demo(_, _, let lower, let upper, _, _): (lower, upper)
-        case .unavailable, .calibrating: nil
+        case .observed(_, _, let lower, let upper, _, _), .demo(_, _, let lower, let upper, _, _): return (lower, upper)
+        case .unavailable, .calibrating: return nil
         }
     }
 
     static func statusColor(_ target: FitnessPerformanceTarget) -> Color {
-        switch target.state {
+        switch target.sourceState {
         case .unavailable: LifeOSTokens.tertiaryText
-        case .calibrating: LifeOSTokens.warning
-        case .observed, .demo:
+        case .permissionRequired, .deviceUnavailable, .readIndeterminate,
+             .calibrating, .partial, .stale, .conflict, .error:
+            LifeOSTokens.warning
+        case .derived, .manual: LifeOSTokens.success
+        case .observed:
             switch target.targetStatus {
             case .below: LifeOSTokens.accent
             case .within: LifeOSTokens.success
             case .above: LifeOSTokens.warning
             case nil: LifeOSTokens.tertiaryText
             }
+        case .demo: LifeOSTokens.warning
         }
     }
 }
@@ -5309,7 +5431,7 @@ private struct FitnessCompactMetric: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Circle().fill((metric.quality == .demo ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)).frame(width: 7, height: 7)
+            Circle().fill(fitnessMetricStateColor(metric.sourceState)).frame(width: 7, height: 7)
             VStack(alignment: .leading, spacing: 2) {
                 Text(metric.title).font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
                 HStack(alignment: .firstTextBaseline, spacing: 3) {
@@ -5322,6 +5444,9 @@ private struct FitnessCompactMetric: View {
         .padding(10)
         .background(LifeOSTokens.screenCanvas.opacity(0.7), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(metric.title)
+        .accessibilityValue("\(metric.value ?? "Not available") \(metric.unit). \(metric.sourceState.label). \(metric.provenanceSummary)")
     }
 }
 

@@ -58,6 +58,45 @@ public struct HealthKitAuthorizationReport: Equatable, Sendable {
     }
 }
 
+/// The result of one guarded, user-authored HealthKit write. Authorization is
+/// reported separately from the save result: a denied or unavailable write is
+/// never represented as a successful no-op.
+public struct HealthKitWriteReport: Equatable, Sendable {
+    public let metric: HealthKitWriteMetric
+    public let authorizationState: HealthKitAuthorizationState
+    public let didSave: Bool
+    public let errorDescription: String?
+
+    public init(
+        metric: HealthKitWriteMetric,
+        authorizationState: HealthKitAuthorizationState,
+        didSave: Bool,
+        errorDescription: String? = nil
+    ) {
+        self.metric = metric
+        self.authorizationState = authorizationState
+        self.didSave = didSave
+        self.errorDescription = errorDescription
+    }
+
+    public static func saved(for metric: HealthKitWriteMetric) -> Self {
+        Self(metric: metric, authorizationState: .writeAuthorized, didSave: true)
+    }
+
+    public static func rejected(
+        for metric: HealthKitWriteMetric,
+        state: HealthKitAuthorizationState,
+        errorDescription: String? = nil
+    ) -> Self {
+        Self(
+            metric: metric,
+            authorizationState: state,
+            didSave: false,
+            errorDescription: errorDescription
+        )
+    }
+}
+
 /// The cadence LifeOS asks HealthKit to use when activating the app for a
 /// supported sample type. This is a request to the system, not a delivery SLA:
 /// iOS may coalesce updates and enforces a minimum hourly cadence for types
@@ -264,9 +303,10 @@ private final class HealthKitObserverTaskState: @unchecked Sendable {
     }
 }
 
-/// iOS-only HealthKit adapter. It owns one HKHealthStore and exposes only
-/// read operations. No view or macOS target imports HealthKit through this
-/// type; the shared contract above remains platform-neutral.
+/// iOS-only HealthKit adapter. It owns one HKHealthStore and exposes bounded
+/// reads plus an explicitly typed, user-authored write path. No view or macOS
+/// target imports HealthKit through this type; the shared contract above
+/// remains platform-neutral.
 public final class LifeOSHealthKitAdapter: @unchecked Sendable, HealthKitReconciliationClient {
     /// A finite page keeps an unexpectedly large HealthKit store bounded. The
     /// returned opaque anchor is the continuation point for the next bounded
@@ -364,7 +404,7 @@ public final class LifeOSHealthKitAdapter: @unchecked Sendable, HealthKitReconci
         guard isHealthDataAvailable else { return HealthKitAuthorizationReport(state: .unavailable) }
         do {
             let types = try objectTypes(for: metrics)
-            let success = try await requestAuthorization(read: types)
+            let success = try await requestAuthorization(read: types, write: [])
             return HealthKitAuthorizationReport(
                 state: .readIndeterminate,
                 promptCompleted: success,
@@ -380,6 +420,38 @@ public final class LifeOSHealthKitAdapter: @unchecked Sendable, HealthKitReconci
             default: state = .readIndeterminate
             }
             return HealthKitAuthorizationReport(state: state, promptCompleted: false, errorDescription: error.localizedDescription)
+        }
+    }
+
+    /// Requests write authorization only for the reviewed, user-authored
+    /// quantity set. Read authorization is deliberately not inferred from
+    /// this request, and HealthKit's completion Boolean is followed by a
+    /// per-type `authorizationStatus(for:)` read before returning.
+    public func requestWriteAuthorization(for metrics: [HealthKitWriteMetric]) async -> HealthKitAuthorizationReport {
+        guard isHealthDataAvailable else { return HealthKitAuthorizationReport(state: .unavailable) }
+        guard !metrics.isEmpty, Set(metrics).count == metrics.count else {
+            return HealthKitAuthorizationReport(
+                state: .error,
+                promptCompleted: false,
+                errorDescription: "HealthKit write metric configuration was rejected"
+            )
+        }
+
+        do {
+            let types = try writableObjectTypes(for: metrics)
+            let success = try await requestAuthorization(read: [], write: types)
+            return HealthKitAuthorizationReport(
+                state: writeAuthorizationStatus(for: metrics),
+                promptCompleted: success,
+                errorDescription: nil
+            )
+        } catch {
+            let mapped = Self.map(error)
+            return HealthKitAuthorizationReport(
+                state: Self.writeAuthorizationState(for: mapped),
+                promptCompleted: false,
+                errorDescription: error.localizedDescription
+            )
         }
     }
 
@@ -426,14 +498,61 @@ public final class LifeOSHealthKitAdapter: @unchecked Sendable, HealthKitReconci
         )
     }
 
-    public func writeAuthorizationStatus(for metric: HealthKitMetricID) -> HealthKitAuthorizationState {
+    public func writeAuthorizationStatus(for metric: HealthKitWriteMetric) -> HealthKitAuthorizationState {
         guard isHealthDataAvailable else { return .unavailable }
-        guard let type = try? objectType(for: metric) else { return .error }
+        guard let type = try? objectType(for: metric.metricID) else { return .error }
         switch store.authorizationStatus(for: type) {
         case .notDetermined: return .writeNotDetermined
         case .sharingAuthorized: return .writeAuthorized
         case .sharingDenied: return .writeDenied
         @unknown default: return .error
+        }
+    }
+
+    public func writeAuthorizationStatus(for metrics: [HealthKitWriteMetric]) -> HealthKitAuthorizationState {
+        guard !metrics.isEmpty, Set(metrics).count == metrics.count else { return .error }
+        return Self.aggregateWriteAuthorizationStatus(metrics.map { writeAuthorizationStatus(for: $0) })
+    }
+
+    /// Compatibility overload for callers that already hold a LifeOS metric.
+    /// Unsupported/imported metrics cannot be written through this boundary.
+    public func writeAuthorizationStatus(for metric: HealthKitMetricID) -> HealthKitAuthorizationState {
+        guard let writableMetric = HealthKitWriteMetric(metric: metric) else { return .error }
+        return writeAuthorizationStatus(for: writableMetric)
+    }
+
+    /// Saves one validated, explicit user-authored quantity after rechecking
+    /// the current HealthKit sharing authorization. A status race or platform
+    /// error remains a failed report; it is never converted into success.
+    public func write(_ request: HealthKitWriteRequest) async -> HealthKitWriteReport {
+        guard isHealthDataAvailable else {
+            return .rejected(for: request.metric, state: .unavailable)
+        }
+
+        let authorization = writeAuthorizationStatus(for: request.metric)
+        guard authorization == .writeAuthorized else {
+            return .rejected(for: request.metric, state: authorization)
+        }
+
+        do {
+            guard let type = try objectType(for: request.metric.metricID) as? HKQuantityType else {
+                return .rejected(
+                    for: request.metric,
+                    state: .error,
+                    errorDescription: "HealthKit write type was unsupported"
+                )
+            }
+            let quantity = try healthKitQuantity(for: request)
+            let sample = HKQuantitySample(
+                type: type,
+                quantity: quantity,
+                start: request.startDate,
+                end: request.endDate
+            )
+            try await save(sample)
+            return .saved(for: request.metric)
+        } catch {
+            return Self.writeFailure(for: request.metric, error: error)
         }
     }
 
@@ -639,6 +758,10 @@ public final class LifeOSHealthKitAdapter: @unchecked Sendable, HealthKitReconci
         Set(try metrics.map { try objectType(for: $0) })
     }
 
+    private func writableObjectTypes(for metrics: [HealthKitWriteMetric]) throws -> Set<HKSampleType> {
+        Set(try metrics.map { try objectType(for: $0.metricID) })
+    }
+
     private static func map(_ error: Error) -> HealthKitAdapterError {
         if let error = error as? HealthKitAdapterError { return error }
         let nsError = error as NSError
@@ -686,12 +809,100 @@ public final class LifeOSHealthKitAdapter: @unchecked Sendable, HealthKitReconci
         }
     }
 
-    private func requestAuthorization(read types: Set<HKObjectType>) async throws -> Bool {
+    private func requestAuthorization(
+        read types: Set<HKObjectType>,
+        write typesToShare: Set<HKSampleType>
+    ) async throws -> Bool {
         try await withCheckedThrowingContinuation { continuation in
-            store.requestAuthorization(toShare: nil, read: types) { success, error in
+            store.requestAuthorization(toShare: typesToShare, read: types) { success, error in
                 if let error { continuation.resume(throwing: Self.map(error)) }
                 else { continuation.resume(returning: success) }
             }
+        }
+    }
+
+    private func healthKitQuantity(for request: HealthKitWriteRequest) throws -> HKQuantity {
+        let unit: HKUnit
+        let value: Double
+        switch request.metric {
+        case .water: unit = HKUnit(from: "mL"); value = request.value.value
+        case .caffeine: unit = HKUnit(from: "mg"); value = request.value.value
+        case .bodyMass, .leanBodyMass:
+            unit = .gramUnit(with: .kilo)
+            value = request.value.value
+        case .bodyFatPercentage:
+            unit = .percent()
+            value = request.value.value / 100
+        }
+        guard value.isFinite, value >= 0 else {
+            throw HealthKitAdapterError.invalidSample("Invalid HealthKit write quantity")
+        }
+        return HKQuantity(unit: unit, doubleValue: value)
+    }
+
+    private func save(_ sample: HKQuantitySample) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            store.save(sample) { success, error in
+                if let error {
+                    continuation.resume(throwing: Self.map(error))
+                } else if success {
+                    continuation.resume(returning: ())
+                } else {
+                    continuation.resume(throwing: HealthKitAdapterError.authorizationFailed("HealthKit write failed"))
+                }
+            }
+        }
+    }
+
+    private static func aggregateWriteAuthorizationStatus(
+        _ states: [HealthKitAuthorizationState]
+    ) -> HealthKitAuthorizationState {
+        guard !states.isEmpty else { return .error }
+        if states.contains(.unavailable) { return .unavailable }
+        if states.contains(.restricted) { return .restricted }
+        if states.contains(.protectedDataUnavailable) { return .protectedDataUnavailable }
+        if states.contains(.error) { return .error }
+        if states.contains(.writeDenied) { return .writeDenied }
+        if states.contains(.writeNotDetermined) { return .writeNotDetermined }
+        return states.allSatisfy { $0 == .writeAuthorized } ? .writeAuthorized : .error
+    }
+
+    private static func writeAuthorizationState(
+        for error: HealthKitAdapterError
+    ) -> HealthKitAuthorizationState {
+        switch error {
+        case .unavailable: .unavailable
+        case .restricted: .restricted
+        case .protectedDataUnavailable: .protectedDataUnavailable
+        case .readAccessIndeterminate, .authorizationFailed: .writeDenied
+        default: .error
+        }
+    }
+
+    private static func writeFailure(
+        for metric: HealthKitWriteMetric,
+        error: Error
+    ) -> HealthKitWriteReport {
+        let mapped = map(error)
+        switch mapped {
+        case .unavailable:
+            return .rejected(for: metric, state: .unavailable)
+        case .restricted:
+            return .rejected(for: metric, state: .restricted)
+        case .protectedDataUnavailable:
+            return .rejected(for: metric, state: .protectedDataUnavailable)
+        case .readAccessIndeterminate:
+            return .rejected(
+                for: metric,
+                state: .writeDenied,
+                errorDescription: "HealthKit write access was denied"
+            )
+        default:
+            return .rejected(
+                for: metric,
+                state: .writeAuthorized,
+                errorDescription: "HealthKit write failed"
+            )
         }
     }
 
@@ -967,8 +1178,14 @@ public final class LifeOSHealthKitAdapter: @unchecked Sendable, HealthKitReconci
     public func availabilityState() -> HealthKitAuthorizationState { .unavailable }
     public func requestStatus(for metrics: [HealthKitMetricID]) async -> HealthKitAuthorizationReport { HealthKitAuthorizationReport(state: .unavailable) }
     public func requestReadAuthorization(for metrics: [HealthKitMetricID]) async -> HealthKitAuthorizationReport { HealthKitAuthorizationReport(state: .unavailable) }
+    public func requestWriteAuthorization(for metrics: [HealthKitWriteMetric]) async -> HealthKitAuthorizationReport { HealthKitAuthorizationReport(state: .unavailable) }
     public func configureBackgroundDelivery(for metrics: [HealthKitMetricID]) async -> HealthKitBackgroundDeliveryReport { .failed(metrics) }
+    public func writeAuthorizationStatus(for metric: HealthKitWriteMetric) -> HealthKitAuthorizationState { .unavailable }
+    public func writeAuthorizationStatus(for metrics: [HealthKitWriteMetric]) -> HealthKitAuthorizationState { .unavailable }
     public func writeAuthorizationStatus(for metric: HealthKitMetricID) -> HealthKitAuthorizationState { .unavailable }
+    public func write(_ request: HealthKitWriteRequest) async -> HealthKitWriteReport {
+        .rejected(for: request.metric, state: .unavailable)
+    }
     public func changes(for metric: HealthKitMetricID, from anchor: HealthKitOpaqueAnchor?) async throws -> HealthKitMetricSyncInput { throw HealthKitAdapterError.unavailable }
 
     public func stopAllObservers() {}

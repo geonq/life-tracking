@@ -127,6 +127,40 @@ final class FitnessBiologyDomainTests: XCTestCase {
         XCTAssertEqual(metric.samples(for: .threeDays, endingAt: anchor).map(\.value), [77.5])
     }
 
+    func testRangeFilteringUsesHalfOpenCalendarDaysAcrossDST() throws {
+        var berlin = Calendar(identifier: .gregorian)
+        berlin.timeZone = try XCTUnwrap(TimeZone(identifier: "Europe/Berlin"))
+        let endingAt = try XCTUnwrap(berlin.date(from: DateComponents(
+            year: 2026,
+            month: 3,
+            day: 29,
+            hour: 12
+        )))
+        let dayStart = berlin.startOfDay(for: endingAt)
+        let nextDayStart = try XCTUnwrap(berlin.date(byAdding: .day, value: 1, to: dayStart))
+        let beforeBoundary = nextDayStart.addingTimeInterval(-0.5)
+        let atBoundary = try XCTUnwrap(FitnessBiologySample(date: nextDayStart, value: 77.4))
+        let before = try XCTUnwrap(FitnessBiologySample(date: beforeBoundary, value: 77.5))
+        let metric = FitnessBiologyMetric(
+            id: .weight,
+            state: .observed(
+                value: before.value,
+                unit: .kilograms,
+                sourceDevice: "Scale",
+                sampleCount: 2,
+                freshness: "Fresh",
+                window: "Last 3 days",
+                provenance: "HealthKit",
+                samples: [before, atBoundary]
+            )
+        )
+
+        XCTAssertEqual(
+            metric.samples(for: .threeDays, endingAt: endingAt, calendar: berlin).map(\.date),
+            [before.date]
+        )
+    }
+
     func testBiologicalAgeRequiresAdultAndExplicitReviewedMetadata() {
         let missingModel = FitnessBiologicalAge(state: .observed(value: 32, userAge: 30, reviewedModel: "", reviewedAt: anchor, window: "Last 30 days", provenance: "HealthKit"))
         if case .gated = missingModel.state {} else { XCTFail("Missing reviewed model must gate biological age") }
@@ -146,5 +180,58 @@ final class FitnessBiologyDomainTests: XCTestCase {
         XCTAssertTrue(snapshot.metrics.allSatisfy { $0.sampleCount == 7 })
         XCTAssertNil(snapshot.biologicalAge.displayValue)
         XCTAssertFalse(snapshot.biologicalAge.isReviewedAndDisplayable)
+    }
+
+    func testBiologyKeepsSourceStateSeparateFromValueAndWithholdsConflicts() throws {
+        let stale = FitnessBiologyMetric(
+            id: .weight,
+            state: .observed(
+                value: 77.5,
+                unit: .kilograms,
+                sourceDevice: "Helio Strap",
+                sampleCount: 1,
+                freshness: "Outside 15 minute window",
+                window: "Selected day",
+                provenance: "HealthKit sample",
+                samples: []
+            ),
+            sourceState: .stale
+        )
+        XCTAssertEqual(stale.sourceState, .stale)
+        XCTAssertEqual(stale.currentValue, 77.5, "A stale value may remain visible, but its state must be explicit")
+
+        let conflicted = FitnessBiologyMetric(
+            id: .weight,
+            state: stale.state,
+            sourceState: .conflict
+        )
+        XCTAssertEqual(conflicted.sourceState, .conflict)
+        XCTAssertNil(conflicted.currentValue)
+        XCTAssertTrue(conflicted.samples.isEmpty)
+        XCTAssertTrue(conflicted.stateDetail.hasPrefix("Conflict"))
+    }
+
+    func testMetricProvenanceRetainsObservationAndRevisionTokens() throws {
+        let provenance = try XCTUnwrap(FitnessMetric.Provenance(
+            source: "HealthKit",
+            device: "Helio Strap",
+            window: "Selected day",
+            freshness: "Fresh",
+            observationID: "sample-123",
+            revision: "sync:7"
+        ))
+        XCTAssertEqual(provenance.summary, "HealthKit · Helio Strap · Selected day · Fresh · observation sample-123 · revision sync:7")
+
+        let metric = FitnessMetric(
+            title: "Weight",
+            value: "77.5",
+            unit: "kg",
+            detail: "Observed",
+            quality: .observed,
+            sourceState: .observed,
+            provenance: provenance
+        )
+        XCTAssertTrue(metric.isValueAvailable)
+        XCTAssertEqual(FitnessSourceEvidence.from(metric: metric).summary, "HealthKit · Helio Strap · Selected day · Fresh")
     }
 }

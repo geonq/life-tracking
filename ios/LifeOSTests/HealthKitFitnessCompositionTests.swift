@@ -560,9 +560,9 @@ final class HealthKitFitnessCompositionTests: XCTestCase {
             selectedDate: now
         )
 
-        // The night stays partial and its evidence unavailable: the in-bed
-        // interval is never called asleep time. The exact named-stage sums
-        // stay visible with an explicit Partial label instead of vanishing.
+        // The night and its evidence stay partial: the in-bed interval is
+        // never called asleep time. The exact named-stage sums stay visible
+        // with an explicit Partial label instead of vanishing.
         XCTAssertEqual(composition.snapshot.sleepDetail.night.start, start)
         XCTAssertEqual(composition.snapshot.sleepDetail.night.end, start.addingTimeInterval(2_400))
         XCTAssertEqual(composition.snapshot.sleepDetail.night.stageSamples.map(\.stage), [.core, .awake, .rem])
@@ -585,11 +585,11 @@ final class HealthKitFitnessCompositionTests: XCTestCase {
         XCTAssertEqual(composition.snapshot.sleep.value, "26 min 40s")
         XCTAssertTrue((composition.snapshot.sleep.detail).contains("Partial"))
 
-        if case .unavailable = composition.snapshot.sleepDetail.night.evidence.state {
+        if case .partial = composition.snapshot.sleepDetail.night.evidence.state {
             // The domain validator downgraded the night, so its evidence must
             // not continue to claim an observed sleep night.
         } else {
-            XCTFail("A partial sleep night must not retain observed evidence")
+            XCTFail("A partial sleep night must retain explicit partial evidence")
         }
     }
 
@@ -854,7 +854,7 @@ final class HealthKitFitnessCompositionTests: XCTestCase {
         XCTAssertFalse(composition.snapshot.loadDetail.trendCards.contains { $0.metric.value == "0" })
     }
 
-    func testNonObservedDailyStatesKeepStepsAndEnergyEvidenceUnavailable() throws {
+    func testNonObservedDailyStatesKeepValuesUnavailableAndEvidenceExplicit() throws {
         let states: [(HealthKitSyncState, String)] = [
             (.neverSynced, "unavailable"),
             (.partial, "partial"),
@@ -871,8 +871,9 @@ final class HealthKitFitnessCompositionTests: XCTestCase {
             )
             let steps = try XCTUnwrap(composition.snapshot.loadDetail.trendCards.first(where: { $0.id == .steps }))
             let energy = try XCTUnwrap(composition.snapshot.loadDetail.trendCards.first(where: { $0.id == .totalEnergy }))
-            XCTAssertTrue(steps.evidence.isUnavailable, "Steps evidence must be unavailable for \(label)")
-            XCTAssertTrue(energy.evidence.isUnavailable, "Energy evidence must be unavailable for \(label)")
+            let evidenceIsUnavailable = syncState != .partial && syncState != .stale
+            XCTAssertEqual(steps.evidence.isUnavailable, evidenceIsUnavailable, "Steps evidence state must remain explicit for \(label)")
+            XCTAssertEqual(energy.evidence.isUnavailable, evidenceIsUnavailable, "Energy evidence state must remain explicit for \(label)")
             XCTAssertNil(steps.metric.value, "Steps must not display a value for \(label)")
             XCTAssertNil(energy.metric.value, "Energy must not display a value for \(label)")
         }

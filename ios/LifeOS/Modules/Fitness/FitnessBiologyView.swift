@@ -259,6 +259,10 @@ private struct FitnessBiologyMetricCard: View {
                             Text("DEMO")
                                 .font(LifeOSFont.caption(8).weight(.bold))
                                 .foregroundStyle(LifeOSTokens.warning)
+                        } else if metric.sourceState != .observed {
+                            Text(metric.sourceState.label.uppercased())
+                                .font(LifeOSFont.caption(8).weight(.bold))
+                                .foregroundStyle(sourceStateColor)
                         }
                     }
                     metricValue
@@ -283,6 +287,17 @@ private struct FitnessBiologyMetricCard: View {
         .accessibilityLabel("\(metric.title), \(metric.accessibilityValue)")
         .accessibilityHint("Opens the \(metric.title) trend detail")
         .accessibilityIdentifier("fitness-biology-metric-\(metric.id.rawValue)")
+    }
+
+    private var sourceStateColor: Color {
+        switch metric.sourceState {
+        case .observed, .derived, .manual: LifeOSTokens.success
+        case .demo: LifeOSTokens.warning
+        case .partial, .stale, .calibrating, .permissionRequired,
+             .deviceUnavailable, .readIndeterminate, .conflict, .error:
+            LifeOSTokens.warning
+        case .unavailable: LifeOSTokens.tertiaryText
+        }
     }
 
     @ViewBuilder private var metricValue: some View {
@@ -310,9 +325,9 @@ private struct FitnessBiologyMetricCard: View {
     private var metadataLine: String {
         switch metric.state {
         case .observed(_, _, let device, _, let freshness, let window, _, _), .demo(_, _, let device, _, let freshness, let window, _, _):
-            return "\(device) · \(freshness) · \(window)"
+            return "\(metric.sourceState.label) · \(device) · \(freshness) · \(window)"
         case .unavailable(let reason), .calibrating(let reason):
-            return reason
+            return "\(metric.sourceState.label) · \(reason)"
         }
     }
 }
@@ -321,9 +336,9 @@ private extension FitnessBiologyMetric {
     var accessibilityValue: String {
         switch state {
         case .observed(let value, let unit, _, let count, let freshness, let window, _, _), .demo(let value, let unit, _, let count, let freshness, let window, _, _):
-            return "\(value) \(unit.label), \(count) samples, \(freshness), \(window)"
+            return "\(value) \(unit.label), \(count) samples, \(sourceState.label), \(freshness), \(window)"
         case .unavailable(let reason), .calibrating(let reason):
-            return reason
+            return "\(sourceState.label): \(reason)"
         }
     }
 }
@@ -583,6 +598,7 @@ private struct FitnessBiologyProvenanceCard: View {
         VStack(alignment: .leading, spacing: 7) {
             Text("Source details")
                 .font(LifeOSFont.header(15))
+            sourceRow("State", metric.sourceState.label)
             switch metric.state {
             case .observed(_, _, let device, let count, let freshness, let window, let provenance, _), .demo(_, _, let device, let count, let freshness, let window, let provenance, _):
                 sourceRow("Device", device)

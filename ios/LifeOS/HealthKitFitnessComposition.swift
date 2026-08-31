@@ -293,21 +293,31 @@ public struct HealthKitFitnessComposition {
                   value.metric == metricID else {
                 return MetricMapping(
                     metricID: metricID,
-                    metric: unavailableMetric(title: title, unit: unit, detail: detail, hue: hue, id: metricID.rawValue),
+                    metric: unavailableMetric(
+                        title: title,
+                        unit: unit,
+                        detail: detail,
+                        hue: hue,
+                        id: metricID.rawValue,
+                        state: state,
+                        evidence: fieldEvidence
+                    ),
                     state: state,
                     evidence: fieldEvidence
                 )
             }
             return MetricMapping(
                 metricID: metricID,
-                metric: FitnessMetric(
+                metric: makeMetric(
                     id: metricID.rawValue,
                     title: title,
                     value: formatNumber(value.value),
                     unit: unit,
                     detail: detail,
                     quality: .observed,
-                    hue: hue
+                    hue: hue,
+                    state: state,
+                    evidence: fieldEvidence
                 ),
                 state: state,
                 evidence: fieldEvidence
@@ -498,15 +508,17 @@ public struct HealthKitFitnessComposition {
         // never a score or quality number. When even that exact sum is not
         // derivable, the card stays unavailable with its reason.
         let sleepSummary: FitnessMetric
-        if sleepDetail.duration.quality == .observed, let durationValue = sleepDetail.duration.value {
+        if sleepDetail.duration.isValueAvailable, let durationValue = sleepDetail.duration.value {
             sleepSummary = FitnessMetric(
                 id: "sleep",
                 title: "Sleep",
                 value: durationValue,
                 unit: "",
                 detail: sleepDetail.duration.detail,
-                quality: .observed,
-                hue: .violet
+                quality: sleepDetail.duration.quality,
+                hue: .violet,
+                sourceState: sleepDetail.duration.sourceState,
+                provenance: sleepDetail.duration.provenance
             )
         } else {
             sleepSummary = unavailableMetric(
@@ -514,7 +526,9 @@ public struct HealthKitFitnessComposition {
                 unit: "",
                 detail: "Unavailable · exact source stage sums require named HealthKit sleep stages; LifeOS does not calculate sleep quality.",
                 hue: .violet,
-                id: "sleep"
+                id: "sleep",
+                state: sleepState,
+                evidence: sleepEvidence
             )
         }
 
@@ -623,21 +637,31 @@ public struct HealthKitFitnessComposition {
               value.metric == metricID else {
             return MetricMapping(
                 metricID: metricID,
-                metric: unavailableMetric(title: title, unit: unit, detail: detail, hue: hue, id: metricID.rawValue),
+                metric: unavailableMetric(
+                    title: title,
+                    unit: unit,
+                    detail: detail,
+                    hue: hue,
+                    id: metricID.rawValue,
+                    state: state,
+                    evidence: fieldEvidence
+                ),
                 state: state,
                 evidence: fieldEvidence
             )
         }
         return MetricMapping(
             metricID: metricID,
-            metric: FitnessMetric(
+            metric: makeMetric(
                 id: metricID.rawValue,
                 title: title,
                 value: formatNumber(value.value),
                 unit: unit,
                 detail: detail,
                 quality: .observed,
-                hue: hue
+                hue: hue,
+                state: state,
+                evidence: fieldEvidence
             ),
             state: state,
             evidence: fieldEvidence
@@ -658,20 +682,17 @@ public struct HealthKitFitnessComposition {
         if let index = cards.firstIndex(where: { $0.id == .totalEnergy }) {
             cards[index] = FitnessLoadTrendCard(id: .totalEnergy, metric: dailyEnergy.metric, evidence: fitnessEvidence(dailyEnergy.evidence))
         }
-        let energyMetric: FitnessMetric
-        if dailyEnergy.metric.quality == .unavailable {
-            energyMetric = .unavailable("Energy expenditure")
-        } else {
-            energyMetric = FitnessMetric(
-                id: "active_energy",
-                title: "Energy expenditure",
-                value: dailyEnergy.metric.value,
-                unit: dailyEnergy.metric.unit,
-                detail: dailyEnergy.metric.detail,
-                quality: dailyEnergy.metric.quality,
-                hue: dailyEnergy.metric.hue
-            )
-        }
+        let energyMetric = FitnessMetric(
+            id: "active_energy",
+            title: "Energy expenditure",
+            value: dailyEnergy.metric.value,
+            unit: dailyEnergy.metric.unit,
+            detail: dailyEnergy.metric.detail,
+            quality: dailyEnergy.metric.quality,
+            hue: dailyEnergy.metric.hue,
+            sourceState: dailyEnergy.metric.sourceState,
+            provenance: dailyEnergy.metric.provenance
+        )
         return FitnessLoadDetail(
             energy: energyMetric,
             trendCards: cards
@@ -721,7 +742,11 @@ public struct HealthKitFitnessComposition {
               latest.quantity.metric == metricID else {
             return .unavailable(
                 biologyID,
-                reason: selected.reason ?? "Unavailable · \(biologyID.title) is not an observed direct HealthKit value."
+                reason: biologyUnavailableReason(
+                    selected.reason ?? "\(biologyID.title) is not an observed direct HealthKit value.",
+                    evidence: evidence
+                ),
+                sourceState: fitnessMetricSourceState(for: state)
             )
         }
 
@@ -740,7 +765,11 @@ public struct HealthKitFitnessComposition {
               !samples.isEmpty else {
             return .unavailable(
                 biologyID,
-                reason: "Unavailable · \(biologyID.title) has no valid source sample timestamp."
+                reason: biologyUnavailableReason(
+                    "\(biologyID.title) has no valid source sample timestamp.",
+                    evidence: evidence
+                ),
+                sourceState: .error
             )
         }
         return FitnessBiologyMetric(
@@ -756,6 +785,14 @@ public struct HealthKitFitnessComposition {
                 samples: samples
             )
         )
+    }
+
+    private static func biologyUnavailableReason(
+        _ reason: String,
+        evidence: HealthKitFitnessCompositionEvidence?
+    ) -> String {
+        guard let evidence else { return "Unavailable · \(reason)" }
+        return "\(evidence.summary) · \(reason)"
     }
 
     /// Select a latest metric as of the end of the selected local day. The
@@ -980,17 +1017,23 @@ public struct HealthKitFitnessComposition {
                 freshness: evidence.freshness
             )
         case .partial:
-            sleepEvidenceState = .unavailable(reason: "Sleep source is partial; evidence is retained separately from a complete night.")
+            sleepEvidenceState = .partial(
+                reason: selected.reason ?? "The source supplied only part of this sleep night."
+            )
         case .stale:
-            sleepEvidenceState = .unavailable(reason: "Sleep source is stale; evidence is retained separately from freshness.")
+            sleepEvidenceState = .stale(
+                reason: "The source sleep interval is outside its freshness window."
+            )
         case .conflict:
-            sleepEvidenceState = .unavailable(reason: "Sleep source observations conflict.")
+            sleepEvidenceState = .conflict(
+                reason: selected.reason ?? "Source sleep observations disagree for this night."
+            )
         case .readIndeterminate:
-            sleepEvidenceState = .unavailable(reason: "HealthKit read access is indeterminate for sleep.")
+            sleepEvidenceState = .readIndeterminate(reason: "HealthKit read access is indeterminate for sleep.")
         case .permissionRequired:
-            sleepEvidenceState = .unavailable(reason: "HealthKit sleep permission state is not established.")
+            sleepEvidenceState = .permissionRequired(reason: "HealthKit sleep permission state is not established.")
         case .error:
-            sleepEvidenceState = .unavailable(reason: "HealthKit sleep projection failed.")
+            sleepEvidenceState = .error(reason: selected.reason ?? "HealthKit sleep projection failed.")
         case .unavailable:
             sleepEvidenceState = .unavailable(reason: "No source sleep interval is available.")
         }
@@ -1009,20 +1052,43 @@ public struct HealthKitFitnessComposition {
             state: nightState
         )
         let finalSleepEvidence: FitnessSleepObservationEvidence
-        switch initialNight.state {
+        switch selected.state {
         case .observed:
-            finalSleepEvidence = FitnessSleepObservationEvidence(state: .observed(
-                source: evidence.source,
-                device: evidence.device,
-                provenance: evidence.provenance,
-                freshness: evidence.freshness
+            switch initialNight.state {
+            case .observed:
+                finalSleepEvidence = FitnessSleepObservationEvidence(state: .observed(
+                    source: evidence.source,
+                    device: evidence.device,
+                    provenance: evidence.provenance,
+                    freshness: evidence.freshness
+                ))
+            case .partial(let reason):
+                finalSleepEvidence = FitnessSleepObservationEvidence(state: .partial(reason: reason))
+            case .conflict(let reason):
+                finalSleepEvidence = FitnessSleepObservationEvidence(state: .conflict(reason: reason))
+            case .unavailable(let reason):
+                finalSleepEvidence = FitnessSleepObservationEvidence(state: .unavailable(reason: reason))
+            }
+        case .partial:
+            finalSleepEvidence = FitnessSleepObservationEvidence(state: .partial(
+                reason: selected.reason ?? "The source supplied only part of this sleep night."
             ))
-        case .partial(let reason):
-            finalSleepEvidence = .unavailable("Sleep night is partial · \(reason)")
-        case .conflict(let reason):
-            finalSleepEvidence = .unavailable("Sleep night is conflicted · \(reason)")
-        case .unavailable(let reason):
-            finalSleepEvidence = .unavailable("Sleep night unavailable · \(reason)")
+        case .stale:
+            finalSleepEvidence = FitnessSleepObservationEvidence(state: .stale(
+                reason: "The source sleep interval is outside its freshness window."
+            ))
+        case .conflict:
+            finalSleepEvidence = FitnessSleepObservationEvidence(state: .conflict(
+                reason: selected.reason ?? "Source sleep observations disagree for this night."
+            ))
+        case .readIndeterminate:
+            finalSleepEvidence = FitnessSleepObservationEvidence(state: .readIndeterminate(reason: "HealthKit read access is indeterminate for sleep."))
+        case .permissionRequired:
+            finalSleepEvidence = FitnessSleepObservationEvidence(state: .permissionRequired(reason: "HealthKit sleep permission state is not established."))
+        case .error:
+            finalSleepEvidence = FitnessSleepObservationEvidence(state: .error(reason: selected.reason ?? "HealthKit sleep projection failed."))
+        case .unavailable:
+            finalSleepEvidence = FitnessSleepObservationEvidence(state: .unavailable(reason: "No source sleep interval is available."))
         }
         let night = FitnessSleepNight(
             id: initialNight.id,
@@ -1050,7 +1116,9 @@ public struct HealthKitFitnessComposition {
                 reason: "Source sleep interval retained; exact derived totals require a clean, non-overlapping named-stage timeline."
             ),
             hue: .violet,
-            id: "sleep_duration"
+            id: "sleep_duration",
+            state: effectiveState,
+            evidence: evidence
         )
 
         let trendCards = makeSleepTrendCards(
@@ -1182,14 +1250,17 @@ public struct HealthKitFitnessComposition {
         } else {
             detail = "Exact HealthKit interval sum · named stages · \(evidence.source) · \(evidence.provenance) · \(evidence.freshness)"
         }
-        let duration = FitnessMetric(
+        let derivedState: SourceState = derived.isPartialCoverage ? .partial : evidence.state
+        let duration = makeMetric(
             id: "sleep_duration",
             title: "Sleep duration",
             value: formatDuration(seconds: asleepSeconds),
             unit: "",
             detail: detail,
             quality: .observed,
-            hue: .violet
+            hue: .violet,
+            state: derivedState,
+            evidence: evidence
         )
         let stageDefinitions: [(FitnessSleepStageSample.Stage, FitnessSleepTrendID, String, LifeOSTokens.Hue)] = [
             (.rem, .rem, "REM sleep", .teal),
@@ -1202,14 +1273,16 @@ public struct HealthKitFitnessComposition {
             // source-derived only when that stage has an explicit interval;
             // a complete timeline can still legitimately omit a stage.
             guard let seconds = secondsByStage[definition.0] else { return }
-            result[definition.0] = FitnessMetric(
+            result[definition.0] = makeMetric(
                 id: "sleep_\(definition.1.rawValue)",
                 title: definition.2,
                 value: formatDuration(seconds: seconds),
                 unit: "",
                 detail: detail,
                 quality: .observed,
-                hue: definition.3
+                hue: definition.3,
+                state: derivedState,
+                evidence: evidence
             )
         }
         return SourceDerivedSleepMetrics(duration: duration, stages: stages)
@@ -1354,6 +1427,62 @@ public struct HealthKitFitnessComposition {
         }
     }
 
+    /// Keep the HealthKit composition state and the generic Fitness metric
+    /// state aligned. The latter is what cards/widgets consume, so dropping
+    /// this mapping at the composition boundary would turn a partial or
+    /// conflicted source into a generic unavailable value.
+    private static func fitnessMetricSourceState(for state: SourceState) -> FitnessMetric.SourceState {
+        switch state {
+        case .unavailable: return .unavailable
+        case .permissionRequired: return .permissionRequired
+        case .observed: return .observed
+        case .partial: return .partial
+        case .stale: return .stale
+        case .conflict: return .conflict
+        case .readIndeterminate: return .readIndeterminate
+        case .error: return .error
+        }
+    }
+
+    private static func fitnessProvenance(
+        from evidence: HealthKitFitnessCompositionEvidence
+    ) -> FitnessMetric.Provenance? {
+        FitnessMetric.Provenance(
+            source: evidence.source,
+            device: evidence.device,
+            window: evidence.window,
+            freshness: evidence.freshness
+        )
+    }
+
+    private static func makeMetric(
+        id: String,
+        title: String,
+        value: String?,
+        unit: String,
+        detail: String,
+        quality: FitnessMetric.Quality,
+        hue: LifeOSTokens.Hue,
+        state: SourceState,
+        evidence: HealthKitFitnessCompositionEvidence,
+        progress: Double? = nil,
+        trend: [Double] = []
+    ) -> FitnessMetric {
+        FitnessMetric(
+            id: id,
+            title: title,
+            value: value,
+            unit: unit,
+            detail: detail,
+            quality: quality,
+            progress: progress,
+            hue: hue,
+            trend: trend,
+            sourceState: fitnessMetricSourceState(for: state),
+            provenance: fitnessProvenance(from: evidence)
+        )
+    }
+
     private static func makeEvidence(
         state: SourceState,
         provenances: [HealthKitProvenance],
@@ -1410,8 +1539,18 @@ public struct HealthKitFitnessComposition {
             ))
         case .unavailable:
             return .unavailable("Unavailable · \(evidence.provenance)")
-        case .permissionRequired, .partial, .stale, .conflict, .readIndeterminate, .error:
-            return .unavailable("\(evidence.state.label) · \(evidence.provenance)")
+        case .permissionRequired:
+            return .init(state: .permissionRequired(reason: evidence.provenance))
+        case .partial:
+            return .init(state: .partial(reason: evidence.provenance))
+        case .stale:
+            return .init(state: .stale(reason: evidence.provenance))
+        case .conflict:
+            return .init(state: .conflict(reason: evidence.provenance))
+        case .readIndeterminate:
+            return .init(state: .readIndeterminate(reason: evidence.provenance))
+        case .error:
+            return .init(state: .error(reason: evidence.provenance))
         }
     }
 
@@ -1432,7 +1571,9 @@ public struct HealthKitFitnessComposition {
         unit: String,
         detail: String,
         hue: LifeOSTokens.Hue,
-        id: String
+        id: String,
+        state: SourceState = .unavailable,
+        evidence: HealthKitFitnessCompositionEvidence? = nil
     ) -> FitnessMetric {
         FitnessMetric(
             id: id,
@@ -1441,7 +1582,9 @@ public struct HealthKitFitnessComposition {
             unit: unit,
             detail: detail,
             quality: .unavailable,
-            hue: hue
+            hue: hue,
+            sourceState: fitnessMetricSourceState(for: state),
+            provenance: evidence.flatMap(fitnessProvenance(from:))
         )
     }
 

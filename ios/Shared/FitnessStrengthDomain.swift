@@ -52,14 +52,25 @@ public struct FitnessStrengthMetric: Equatable, Identifiable, Sendable {
     public let id: String
     public let group: FitnessStrengthMuscleGroup
     public let state: State
+    /// Source availability is independent from the value payload. A stale or
+    /// partial kilogram observation may remain visible with an explicit label;
+    /// permission, device, read, conflict, and error states remain value-less.
+    public let sourceState: FitnessMetric.SourceState
 
-    public init(group: FitnessStrengthMuscleGroup, state: State) {
+    public init(
+        group: FitnessStrengthMuscleGroup,
+        state: State,
+        sourceState: FitnessMetric.SourceState? = nil
+    ) {
         self.id = group.rawValue
         self.group = group
-        self.state = Self.validated(state)
+        let validatedState = Self.validated(state)
+        self.state = validatedState
+        self.sourceState = Self.resolvedSourceState(sourceState, for: validatedState)
     }
 
     public var kilograms: Double? {
+        guard sourceState.canDisplayValue else { return nil }
         switch state {
         case .observed(let kilograms, _, _), .demo(let kilograms, _, _):
             return kilograms
@@ -76,7 +87,10 @@ public struct FitnessStrengthMetric: Equatable, Identifiable, Sendable {
     public var sourceDetail: String? {
         switch state {
         case .observed(_, let window, let provenance), .demo(_, let window, let provenance):
-            return "\(window) · \(provenance)"
+            let detail = "\(window) · \(provenance)"
+            return sourceState == .observed || sourceState == .demo
+                ? detail
+                : "\(sourceState.label) · \(detail)"
         case .unavailable, .calibrating:
             return nil
         }
@@ -116,9 +130,44 @@ public struct FitnessStrengthMetric: Equatable, Identifiable, Sendable {
 
     public static func unavailable(
         group: FitnessStrengthMuscleGroup,
-        reason: String = "No source strength observation is available."
+        reason: String = "No source strength observation is available.",
+        sourceState: FitnessMetric.SourceState? = nil
     ) -> FitnessStrengthMetric {
-        FitnessStrengthMetric(group: group, state: .unavailable(reason: reason))
+        FitnessStrengthMetric(group: group, state: .unavailable(reason: reason), sourceState: sourceState)
+    }
+
+    private static func resolvedSourceState(
+        _ requested: FitnessMetric.SourceState?,
+        for state: State
+    ) -> FitnessMetric.SourceState {
+        let fallback: FitnessMetric.SourceState
+        switch state {
+        case .unavailable: fallback = .unavailable
+        case .calibrating: fallback = .calibrating
+        case .observed: fallback = .observed
+        case .demo: fallback = .demo
+        }
+
+        guard let requested else { return fallback }
+        switch state {
+        case .demo:
+            return .demo
+        case .observed:
+            switch requested {
+            case .observed, .partial, .stale:
+                return requested
+            default:
+                return .observed
+            }
+        case .unavailable, .calibrating:
+            switch requested {
+            case .permissionRequired, .deviceUnavailable, .readIndeterminate,
+                 .partial, .stale, .conflict, .error:
+                return requested
+            default:
+                return fallback
+            }
+        }
     }
 }
 
@@ -128,22 +177,65 @@ public struct FitnessStrengthAggregate: Equatable, Identifiable, Sendable {
     public let id = "total-volume"
     public let title = "Total volume"
     public let state: FitnessStrengthMetric.State
+    public let sourceState: FitnessMetric.SourceState
 
-    public init(state: FitnessStrengthMetric.State = .unavailable(reason: "No source strength total is available.")) {
+    public init(
+        state: FitnessStrengthMetric.State = .unavailable(reason: "No source strength total is available."),
+        sourceState: FitnessMetric.SourceState? = nil
+    ) {
         // Reuse the metric boundary for finite values and source metadata; the
         // aggregate's identity remains independent of any muscle group.
         self.state = FitnessStrengthMetric.validated(state)
+        self.sourceState = Self.resolvedSourceState(sourceState, for: self.state)
     }
 
     public var kilograms: Double? {
+        guard sourceState.canDisplayValue else { return nil }
         switch state {
-        case .observed(let kilograms, _, _), .demo(let kilograms, _, _): kilograms
-        case .unavailable, .calibrating: nil
+        case .observed(let kilograms, _, _), .demo(let kilograms, _, _): return kilograms
+        case .unavailable, .calibrating: return nil
         }
     }
 
-    public static func unavailable(reason: String = "No source strength total is available.") -> FitnessStrengthAggregate {
-        FitnessStrengthAggregate(state: .unavailable(reason: reason))
+    public static func unavailable(
+        reason: String = "No source strength total is available.",
+        sourceState: FitnessMetric.SourceState? = nil
+    ) -> FitnessStrengthAggregate {
+        FitnessStrengthAggregate(state: .unavailable(reason: reason), sourceState: sourceState)
+    }
+
+    private static func resolvedSourceState(
+        _ requested: FitnessMetric.SourceState?,
+        for state: FitnessStrengthMetric.State
+    ) -> FitnessMetric.SourceState {
+        let fallback: FitnessMetric.SourceState
+        switch state {
+        case .unavailable: fallback = .unavailable
+        case .calibrating: fallback = .calibrating
+        case .observed: fallback = .observed
+        case .demo: fallback = .demo
+        }
+
+        guard let requested else { return fallback }
+        switch state {
+        case .demo:
+            return .demo
+        case .observed:
+            switch requested {
+            case .observed, .partial, .stale:
+                return requested
+            default:
+                return .observed
+            }
+        case .unavailable, .calibrating:
+            switch requested {
+            case .permissionRequired, .deviceUnavailable, .readIndeterminate,
+                 .partial, .stale, .conflict, .error:
+                return requested
+            default:
+                return fallback
+            }
+        }
     }
 }
 
