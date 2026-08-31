@@ -121,26 +121,27 @@ public enum LifeOSFont {
     }
 
     /// KPI/display value. Space Grotesk remains the display face.
-    /// Quiet Machine §3: 40 iOS / 48 macOS, Bold, −0.3 tracking at call site,
+    /// Design contract: 44 iOS / 52 macOS, Bold (the closest bundled
+    /// Space Grotesk weight to semibold), −0.3 tracking at call site,
     /// `.monospacedDigit()` mandatory.
     public static func kpi(_ size: CGFloat = {
 #if os(macOS)
-        48
+        52
 #else
-        40
+        44
 #endif
     }()) -> Font {
         roleFont(SpaceGrotesk.bold.rawValue, size: size, relativeTo: .largeTitle)
             .monospacedDigit()
     }
 
-    /// Screen titles ("Overview", "Fitness"). SG Bold 34 / 30; apply
+    /// Screen titles ("Overview", "Fitness"). SG Bold 32 / 28; apply
     /// `.tracking(-0.5)` at the call site per §3.
     public static func display(_ size: CGFloat = {
 #if os(macOS)
-        30
+        28
 #else
-        34
+        32
 #endif
     }()) -> Font {
         roleFont(SpaceGrotesk.bold.rawValue, size: size, relativeTo: .largeTitle)
@@ -210,6 +211,26 @@ public enum LifeOSFont {
     /// Control label.
     public static func control(_ size: CGFloat = 13) -> Font {
         roleFont(Inter.semiBold.rawValue, size: size, relativeTo: .subheadline)
+    }
+
+    /// Primary navigation labels. This is intentionally a little larger than
+    /// the overline role: navigation is scanned repeatedly and must remain
+    /// legible at the default size and when Dynamic Type is enlarged.
+    public static func navigationLabel(_ size: CGFloat = 12) -> Font {
+        roleFont(Inter.semiBold.rawValue, size: size, relativeTo: .footnote)
+    }
+
+    /// Short supporting copy used beneath a title or metric. Keeping this
+    /// separate from metadata prevents descriptive text from being rendered
+    /// at the same visual weight as a source/timestamp label.
+    public static func supportingText(_ size: CGFloat = 14) -> Font {
+        roleFont(Inter.regular.rawValue, size: size, relativeTo: .body)
+    }
+
+    /// Compact widget header. The role keeps the widget title distinct from
+    /// the metric below it while still participating in Dynamic Type previews.
+    public static func widgetHeader(_ size: CGFloat = 13) -> Font {
+        roleFont(SpaceGrotesk.medium.rawValue, size: size, relativeTo: .headline)
     }
 
     /// Metadata and source labels.

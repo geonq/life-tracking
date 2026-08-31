@@ -123,11 +123,13 @@ public extension Color {
     static let lifeOSTeal700 = Color(hex: 0x067878)
 
     // MARK: Module identity
-    // Calendar module color — RETIRED for app chrome and widget surfaces
-    // (today is marked by primary-text inversion per the Quiet Machine plan
-    // §5.6). Remaining consumers are inside CalendarView.swift editor/status
-    // UI, which is outside the Phase 2 header-chrome boundary.
-    static let lifeOSCalendarRed = Color(hex: 0xE5433D)
+    // Calendar identity accent. The light-mode value uses the deeper ramp so
+    // small labels and icons remain readable on a light surface; the dark
+    // value keeps the vivid red visible without turning the whole surface red.
+    static let lifeOSCalendarRed = lifeOSAdaptiveColor(
+        darkRed: 0xFC/255, darkGreen: 0x58/255, darkBlue: 0x4F/255,
+        lightRed: 0xB7/255, lightGreen: 0x01/255, lightBlue: 0x12/255
+    )
 
     // Brand canvases
     /// Neutral dark canvas #000000 (reserved for the tab-bar underlay).
@@ -184,6 +186,37 @@ public extension Color {
     static let lifeOSFocusBlue = lifeOSAdaptiveColor(
         darkRed: 0x5D/255, darkGreen: 0xA0/255, darkBlue: 0xFD/255,
         lightRed: 0x02/255, lightGreen: 0x53/255, lightBlue: 0xC4/255
+    )
+
+    // Module identity accents. These stay vivid on the dark canvas and move
+    // to the deeper sibling ramp in light mode so labels remain readable.
+    static let lifeOSFinanceGreen = lifeOSAdaptiveColor(
+        darkRed: 0x00/255, darkGreen: 0xB6/255, darkBlue: 0x5D/255,
+        lightRed: 0x09/255, lightGreen: 0x96/255, lightBlue: 0x4C/255
+    )
+    static let lifeOSFitnessViolet = lifeOSAdaptiveColor(
+        darkRed: 0x8D/255, darkGreen: 0x74/255, darkBlue: 0xFE/255,
+        lightRed: 0x5E/255, lightGreen: 0x06/255, lightBlue: 0xDC/255
+    )
+    /// Nutrition identity accent — pink keeps food surfaces distinct from
+    /// Fitness violet while retaining a readable deeper light-mode ramp.
+    static let lifeOSNutritionPink = lifeOSAdaptiveColor(
+        darkRed: 0xFE/255, darkGreen: 0x6B/255, darkBlue: 0x95/255,
+        lightRed: 0xC4/255, lightGreen: 0x08/255, lightBlue: 0x5B/255
+    )
+    static let lifeOSTasksOrange = lifeOSAdaptiveColor(
+        darkRed: 0xFF/255, darkGreen: 0xB0/255, darkBlue: 0x6E/255,
+        lightRed: 0xC8/255, lightGreen: 0x70/255, lightBlue: 0x04/255
+    )
+    static let lifeOSTealInfo = lifeOSAdaptiveColor(
+        darkRed: 0x63/255, darkGreen: 0xD2/255, darkBlue: 0xD2/255,
+        lightRed: 0x02/255, lightGreen: 0x96/255, lightBlue: 0x96/255
+    )
+    /// Tax identity uses the purple sibling ramp so it remains distinct from
+    /// the teal Business/Info accent in navigation and supporting surfaces.
+    static let lifeOSTaxPurple = lifeOSAdaptiveColor(
+        darkRed: 0xAF/255, darkGreen: 0x00/255, darkBlue: 0xCD/255,
+        lightRed: 0x89/255, lightGreen: 0x03/255, lightBlue: 0xA1/255
     )
 
     static let lifeOSNeutralCanvas = lifeOSAdaptiveColor(
@@ -365,9 +398,26 @@ public enum LifeOSTokens {
     }
 
     // MARK: Module identity
-    // RETIRED for chrome and widget surfaces — today markers invert primary
-    // text instead. Alias kept for the CalendarView.swift editor/status call
-    // sites that sit outside the Phase 2 boundary.
+    /// Small, stable identity accents for module headers and cards. These are
+    /// visual wayfinding, not status semantics.
+    public enum Module {
+        public static let usage = LifeOSTokens.accent
+        public static let finance = Color.lifeOSFinanceGreen
+        public static let calendar = Color.lifeOSCalendarRed
+        public static let fitness = Color.lifeOSFitnessViolet
+        public static let nutrition = Color.lifeOSNutritionPink
+        public static let tasks = Color.lifeOSTasksOrange
+        public static let business = Color.lifeOSTealInfo
+        public static let tax = Color.lifeOSTaxPurple
+
+        /// A restrained tint for selected navigation and module surfaces.
+        /// The accent is still paired with a label, icon shape, or selection
+        /// trait; color is never the only state channel.
+        public static func surface(_ accent: Color, opacity: CGFloat = 0.12) -> Color {
+            accent.opacity(opacity)
+        }
+    }
+
     public static let calendarRed = Color.lifeOSCalendarRed
 
     // Borders & quiescent states
