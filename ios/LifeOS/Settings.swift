@@ -1359,25 +1359,25 @@ private enum SettingsReadiness: Equatable {
     var color: Color {
         switch self {
         case .providers(.observed), .finance(.observed):
-            LifeOSTokens.success
+            LifeOSTokens.successText
         case .providers(.partial):
             LifeOSTokens.info
         case .providers(.loading), .providers(.stale),
              .providers(.unavailable),
              .finance(.loading), .finance(.stale),
              .finance(.demo), .finance(.unavailable):
-            LifeOSTokens.warning
+            LifeOSTokens.warningText
         case .clipper(.observed):
-            LifeOSTokens.success
+            LifeOSTokens.successText
         case .clipper(.demo), .clipper(.loading):
             LifeOSTokens.info
         case .clipper(.stale), .clipper(.unavailable):
-            LifeOSTokens.warning
+            LifeOSTokens.warningText
         case .healthRead(.readIndeterminate):
             LifeOSTokens.info
         case .localSafeguards, .serverGatePending, .consentRequired, .healthRead,
              .identityPending:
-            LifeOSTokens.warning
+            LifeOSTokens.warningText
         }
     }
 }
@@ -2105,7 +2105,7 @@ private struct BankConsentConnectRow: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(controller.state.lifecyclePhase.title)
                         .font(LifeOSFont.inter(11, weight: .semiBold))
-                        .foregroundStyle(statusColor)
+                        .foregroundStyle(statusTextColor)
                     Text(statusDetail)
                         .font(LifeOSFont.inter(11))
                         .foregroundStyle(LifeOSTokens.tertiaryText)
@@ -2203,6 +2203,14 @@ private struct BankConsentConnectRow: View {
         case .linked: LifeOSTokens.success
         case .error(_), .expired, .alreadyLinking(_), .gatewayNotConfigured: LifeOSTokens.warning
         default: LifeOSTokens.tertiaryText
+        }
+    }
+
+    private var statusTextColor: Color {
+        switch controller.state {
+        case .linked: LifeOSTokens.successText
+        case .error(_), .expired, .alreadyLinking(_), .gatewayNotConfigured: LifeOSTokens.warningText
+        default: LifeOSTokens.metadataText
         }
     }
 
@@ -2961,7 +2969,7 @@ private struct SyncStorageSettingsView: View {
                             .fixedSize(horizontal: false, vertical: true)
                         Text(syncStatusLabel)
                             .font(LifeOSFont.inter(12, weight: .semiBold))
-                            .foregroundStyle(localReadiness.canAttemptConnection ? LifeOSTokens.success : LifeOSTokens.warning)
+                            .foregroundStyle(localReadiness.canAttemptConnection ? LifeOSTokens.successText : LifeOSTokens.warningText)
                         Button {
                             runConnectionPreflight()
                         } label: {
@@ -2988,7 +2996,7 @@ private struct SyncStorageSettingsView: View {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(connectionPreflightTitle(connectionPreflight))
                                         .font(LifeOSFont.inter(12, weight: .semiBold))
-                                        .foregroundStyle(connectionPreflightColor(connectionPreflight))
+                                        .foregroundStyle(connectionPreflightTextColor(connectionPreflight))
                                     Text(connectionPreflightDetail(connectionPreflight))
                                         .font(LifeOSFont.inter(12))
                                         .foregroundStyle(LifeOSTokens.tertiaryText)
@@ -3164,6 +3172,10 @@ private struct SyncStorageSettingsView: View {
 
     private func connectionPreflightColor(_ state: TailscaleConnectionPreflightState) -> Color {
         state == .reachable ? LifeOSTokens.success : LifeOSTokens.warning
+    }
+
+    private func connectionPreflightTextColor(_ state: TailscaleConnectionPreflightState) -> Color {
+        state == .reachable ? LifeOSTokens.successText : LifeOSTokens.warningText
     }
 
     private var syncStatusLabel: String {
@@ -3352,7 +3364,10 @@ private struct SettingsStatusRow: View {
                 Text(status)
                     .font(LifeOSFont.axis())
                     .tracking(0.2)
-                    .foregroundStyle(statusColor)
+                    // The dot carries the semantic color; the label uses the
+                    // neutral text-safe role so status remains readable in
+                    // both appearances without relying on color alone.
+                    .foregroundStyle(LifeOSTokens.metadataText)
                     .multilineTextAlignment(.trailing)
             }
         }

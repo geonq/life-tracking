@@ -13,7 +13,7 @@ from scripts.validate_native_release import (
 
 ROOT = Path(__file__).resolve().parents[2]
 TEST_APPROVED_HOST = "ci-test." + "ts.net"
-TEST_EXPIRATION = "2030-01-02T03:04:05Z"
+TEST_EXPIRATION = "2099-01-02T03:04:05Z"
 
 
 class NativeReleaseInvariantTests(unittest.TestCase):
@@ -95,6 +95,48 @@ class NativeReleaseInvariantTests(unittest.TestCase):
                         },
                         root=ROOT,
                     )
+
+    def test_release_matches_swift_iso8601_expiration_forms(self) -> None:
+        for expiration in (
+            "2099-01-02T03:04:05Z",
+            "2099-01-02T03:04:05+00:00",
+            "2099-01-02T03:04:05-05:30",
+            "2099-01-02T03:04:05+0000",
+        ):
+            with self.subTest(expiration=expiration):
+                validate_release(
+                    {
+                        "APP_GROUP_IDENTIFIER": "group.com.hermes.lifeos.ci",
+                        "PROVISIONING_MODE": "developer_program",
+                        "PROVISIONING_EXPIRATION_DATE": expiration,
+                        "LIFEOS_SYNC_APPROVED_HOSTS": TEST_APPROVED_HOST,
+                    },
+                    root=ROOT,
+                )
+
+    def test_release_rejects_space_separated_expiration(self) -> None:
+        with self.assertRaisesRegex(InvariantError, "T separator"):
+            validate_release(
+                {
+                    "APP_GROUP_IDENTIFIER": "group.com.hermes.lifeos.ci",
+                    "PROVISIONING_MODE": "developer_program",
+                    "PROVISIONING_EXPIRATION_DATE": "2099-01-02 03:04:05+00:00",
+                    "LIFEOS_SYNC_APPROVED_HOSTS": TEST_APPROVED_HOST,
+                },
+                root=ROOT,
+            )
+
+    def test_release_rejects_expired_expiration(self) -> None:
+        with self.assertRaisesRegex(InvariantError, "must be in the future"):
+            validate_release(
+                {
+                    "APP_GROUP_IDENTIFIER": "group.com.hermes.lifeos.ci",
+                    "PROVISIONING_MODE": "developer_program",
+                    "PROVISIONING_EXPIRATION_DATE": "2000-01-02T03:04:05Z",
+                    "LIFEOS_SYNC_APPROVED_HOSTS": TEST_APPROVED_HOST,
+                },
+                root=ROOT,
+            )
 
     def test_release_rejects_empty_or_non_tailnet_allowlist(self) -> None:
         for allowlist in ("", "example.com", f"{TEST_APPROVED_HOST},{TEST_APPROVED_HOST}"):

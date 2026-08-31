@@ -1,4 +1,5 @@
 #if os(iOS)
+import Foundation
 import XCTest
 #if canImport(HealthKit)
 import HealthKit
@@ -8,12 +9,18 @@ import HealthKit
 @MainActor
 final class HealthKitProductionBridgeTests: XCTestCase {
     func testDelegatesAvailabilityStatusAndRequestWithoutChangingReadTruth() async {
-        var statusMetrics: [HealthKitMetricID] = []
-        var requestMetrics: [HealthKitMetricID] = []
+        let statusMetrics = LockedTestValue<[HealthKitMetricID]>([])
+        let requestMetrics = LockedTestValue<[HealthKitMetricID]>([])
         let client = makeClient(
             availability: { .restricted },
-            status: { statusMetrics = $0; return .init(state: .requestRequired) },
-            request: { requestMetrics = $0; return .init(state: .readIndeterminate, promptCompleted: true) }
+            status: { metrics in
+                statusMetrics.replace(metrics)
+                return .init(state: .requestRequired)
+            },
+            request: { metrics in
+                requestMetrics.replace(metrics)
+                return .init(state: .readIndeterminate, promptCompleted: true)
+            }
         )
 
         XCTAssertEqual(client.availabilityState(), .restricted)
@@ -21,25 +28,25 @@ final class HealthKitProductionBridgeTests: XCTestCase {
         let requestReport = await client.requestReadAuthorization(for: HealthKitIntegrationController.supportedMetrics)
         XCTAssertEqual(statusReport.state, .requestRequired)
         XCTAssertEqual(requestReport.state, .readIndeterminate)
-        XCTAssertEqual(statusMetrics, HealthKitIntegrationController.supportedMetrics)
-        XCTAssertEqual(requestMetrics, HealthKitIntegrationController.supportedMetrics)
+        XCTAssertEqual(statusMetrics.read(), HealthKitIntegrationController.supportedMetrics)
+        XCTAssertEqual(requestMetrics.read(), HealthKitIntegrationController.supportedMetrics)
     }
 
     func testTypedWriteAuthorizationAndSavePathUseOnlyReviewedMetrics() async throws {
-        var statusMetrics: [HealthKitWriteMetric] = []
-        var authorizationMetrics: [HealthKitWriteMetric] = []
-        var savedRequest: HealthKitWriteRequest?
+        let statusMetrics = LockedTestValue<[HealthKitWriteMetric]>([])
+        let authorizationMetrics = LockedTestValue<[HealthKitWriteMetric]>([])
+        let savedRequest = LockedTestValue<HealthKitWriteRequest?>(nil)
         let client = makeClient(
             writeStatus: { metric in
-                statusMetrics.append(metric)
+                statusMetrics.mutate { $0.append(metric) }
                 return .writeAuthorized
             },
             writeRequest: { metrics in
-                authorizationMetrics = metrics
+                authorizationMetrics.replace(metrics)
                 return .init(state: .writeAuthorized, promptCompleted: true)
             },
             write: { request in
-                savedRequest = request
+                savedRequest.replace(request)
                 return .saved(for: request.metric)
             }
         )
@@ -50,16 +57,16 @@ final class HealthKitProductionBridgeTests: XCTestCase {
         let result = await client.write(request)
 
         XCTAssertEqual(authorization.state, .writeAuthorized)
-        XCTAssertEqual(authorizationMetrics, writable)
-        XCTAssertEqual(statusMetrics, [.water])
-        XCTAssertEqual(savedRequest, request)
+        XCTAssertEqual(authorizationMetrics.read(), writable)
+        XCTAssertEqual(statusMetrics.read(), [.water])
+        XCTAssertEqual(savedRequest.read(), request)
         XCTAssertEqual(result, .saved(for: .water))
     }
 
     func testInvalidWriteMetricSetIsRejectedBeforeAuthorizationClosure() async {
-        var calls = 0
+        let calls = LockedTestValue(0)
         let client = makeClient(writeRequest: { _ in
-            calls += 1
+            calls.mutate { $0 += 1 }
             return .init(state: .writeAuthorized, promptCompleted: true)
         })
 
@@ -67,15 +74,15 @@ final class HealthKitProductionBridgeTests: XCTestCase {
 
         XCTAssertEqual(report.state, .error)
         XCTAssertEqual(report.errorDescription, "HealthKit write metric configuration was rejected")
-        XCTAssertEqual(calls, 0)
+        XCTAssertEqual(calls.read(), 0)
     }
 
     func testDeniedWriteIsBlockedBeforeInjectedSaveClosure() async throws {
-        var calls = 0
+        let calls = LockedTestValue(0)
         let client = makeClient(
             writeStatus: { _ in .writeDenied },
             write: { _ in
-                calls += 1
+                calls.mutate { $0 += 1 }
                 return .saved(for: .water)
             }
         )
@@ -84,7 +91,7 @@ final class HealthKitProductionBridgeTests: XCTestCase {
 
         XCTAssertEqual(result.authorizationState, .writeDenied)
         XCTAssertFalse(result.didSave)
-        XCTAssertEqual(calls, 0)
+        XCTAssertEqual(calls.read(), 0)
     }
 
     func testWriteFailureIsSanitizedAndNeverReportsSuccess() async throws {
@@ -128,93 +135,112 @@ final class HealthKitProductionBridgeTests: XCTestCase {
     }
 
     func testStartRegistersEverySupportedMetricAndReportsInitialReconciliation() async {
-        var registered: [HealthKitMetricID] = []
-        var reconciled: [HealthKitMetricID] = []
-        var updates: [HealthKitObserverCompletion] = []
+        let registered = LockedTestValue<[HealthKitMetricID]>([])
+        let reconciled = LockedTestValue<[HealthKitMetricID]>([])
+        let updates = LockedTestValue<[HealthKitObserverCompletion]>([])
         let client = makeClient(
-            register: { metric, _ in registered.append(metric) },
+            register: { metric, _ in registered.mutate { $0.append(metric) } },
             reconcile: { metrics in
-                reconciled = metrics
+                reconciled.replace(metrics)
                 return HealthKitReconciliationReport(results: [])
             }
         )
 
-        client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { updates.append($0) }
-        await waitUntil { updates == [.success] }
+        client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { completion in
+            updates.mutate { $0.append(completion) }
+        }
+        await waitUntil { updates.read() == [.success] }
 
-        XCTAssertEqual(registered, HealthKitIntegrationController.supportedMetrics)
-        XCTAssertEqual(reconciled, HealthKitIntegrationController.supportedMetrics)
-        XCTAssertFalse(registered.contains(.alcoholicBeverages))
+        XCTAssertEqual(registered.read(), HealthKitIntegrationController.supportedMetrics)
+        XCTAssertEqual(reconciled.read(), HealthKitIntegrationController.supportedMetrics)
+        XCTAssertFalse(registered.read().contains(.alcoholicBeverages))
     }
 
     func testPartialRegistrationFailureStopsEverythingAndRemainsRestartable() async {
-        var stopCount = 0
-        var shouldFail = true
-        var registered: [HealthKitMetricID] = []
-        var updates: [HealthKitObserverCompletion] = []
+        let stopCount = LockedTestValue(0)
+        let shouldFail = LockedTestValue(true)
+        let registered = LockedTestValue<[HealthKitMetricID]>([])
+        let updates = LockedTestValue<[HealthKitObserverCompletion]>([])
         let client = makeClient(
             register: { metric, _ in
-                registered.append(metric)
-                if shouldFail && registered.count == 3 { throw HealthKitAdapterError.unavailable }
+                let registrationCount = registered.mutate {
+                    $0.append(metric)
+                    return $0.count
+                }
+                if shouldFail.read() && registrationCount == 3 {
+                    throw HealthKitAdapterError.unavailable
+                }
             },
-            stop: { stopCount += 1 }
+            stop: { stopCount.mutate { $0 += 1 } }
         )
 
-        client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { updates.append($0) }
-        XCTAssertEqual(updates, [.failure("HealthKit is unavailable on this device")])
-        XCTAssertEqual(stopCount, 1) // partial-failure cleanup
+        client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { completion in
+            updates.mutate { $0.append(completion) }
+        }
+        XCTAssertEqual(updates.read(), [.failure("HealthKit is unavailable on this device")])
+        XCTAssertEqual(stopCount.read(), 1) // partial-failure cleanup
 
-        shouldFail = false
-        registered.removeAll()
-        client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { updates.append($0) }
-        await waitUntil { updates.last == .success }
-        XCTAssertEqual(registered, HealthKitIntegrationController.supportedMetrics)
+        shouldFail.replace(false)
+        registered.replace([])
+        client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { completion in
+            updates.mutate { $0.append(completion) }
+        }
+        await waitUntil { updates.read().last == .success }
+        XCTAssertEqual(registered.read(), HealthKitIntegrationController.supportedMetrics)
     }
 
     func testStopCancelsInitialReconcileAndSuppressesLateCompletion() async {
-        var stopCount = 0
-        var continuation: CheckedContinuation<HealthKitReconciliationReport, Never>?
-        var updates: [HealthKitObserverCompletion] = []
+        let stopCount = LockedTestValue(0)
+        let continuation = LockedTestValue<CheckedContinuation<HealthKitReconciliationReport, Never>?>(nil)
+        let updates = LockedTestValue<[HealthKitObserverCompletion]>([])
         let client = makeClient(
-            stop: { stopCount += 1 },
+            stop: { stopCount.mutate { $0 += 1 } },
             reconcile: { _ in
-                await withCheckedContinuation { continuation = $0 }
+                await withCheckedContinuation { continuation.replace($0) }
             }
         )
 
-        client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { updates.append($0) }
-        await waitUntil { continuation != nil }
+        client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { completion in
+            updates.mutate { $0.append(completion) }
+        }
+        await waitUntil { continuation.read() != nil }
         client.stopAllObservers()
-        continuation?.resume(returning: HealthKitReconciliationReport(results: []))
+        continuation.read()?.resume(returning: HealthKitReconciliationReport(results: []))
         await Task.yield()
 
-        XCTAssertTrue(updates.isEmpty)
-        XCTAssertEqual(stopCount, 1)
+        XCTAssertTrue(updates.read().isEmpty)
+        XCTAssertEqual(stopCount.read(), 1)
     }
 
     func testInvalidOrAlcoholMetricSetIsRejectedBeforeRegistration() {
-        var registered = 0
-        var update: HealthKitObserverCompletion?
-        let client = makeClient(register: { _, _ in registered += 1 })
-        client.startObservers(metrics: [.water, .alcoholicBeverages]) { update = $0 }
-        XCTAssertEqual(registered, 0)
-        XCTAssertEqual(update, .failure("HealthKit metric configuration was rejected"))
+        let registered = LockedTestValue(0)
+        let update = LockedTestValue<HealthKitObserverCompletion?>(nil)
+        let client = makeClient(register: { _, _ in registered.mutate { $0 += 1 } })
+        client.startObservers(metrics: [.water, .alcoholicBeverages]) { update.replace($0) }
+        XCTAssertEqual(registered.read(), 0)
+        XCTAssertEqual(update.read(), .failure("HealthKit metric configuration was rejected"))
     }
 
     func testInvalidMetricSetIsRejectedBeforeStatusOrAuthorization() async {
-        var statusCalls = 0
-        var requestCalls = 0
+        let statusCalls = LockedTestValue(0)
+        let requestCalls = LockedTestValue(0)
         let client = makeClient(
-            status: { _ in statusCalls += 1; return .init(state: .requestRequired) },
-            request: { _ in requestCalls += 1; return .init(state: .readIndeterminate, promptCompleted: true) }
+            status: { _ in
+                statusCalls.mutate { $0 += 1 }
+                return .init(state: .requestRequired)
+            },
+            request: { _ in
+                requestCalls.mutate { $0 += 1 }
+                return .init(state: .readIndeterminate, promptCompleted: true)
+            }
         )
 
         let invalid: [HealthKitMetricID] = [.water, .alcoholicBeverages]
         let status = await client.requestStatus(for: invalid)
         let request = await client.requestReadAuthorization(for: invalid)
 
-        XCTAssertEqual(statusCalls, 0)
-        XCTAssertEqual(requestCalls, 0)
+        XCTAssertEqual(statusCalls.read(), 0)
+        XCTAssertEqual(requestCalls.read(), 0)
         XCTAssertEqual(status.state, .error)
         XCTAssertEqual(request.state, .error)
         XCTAssertEqual(status.errorDescription, "HealthKit metric configuration was rejected")
@@ -222,25 +248,25 @@ final class HealthKitProductionBridgeTests: XCTestCase {
     }
 
     func testStoredStatesUsesInjectedReaderAndReturnsRequestedOrder() async {
-        var readerMetrics: [HealthKitMetricID] = []
+        let readerMetrics = LockedTestValue<[HealthKitMetricID]>([])
         let expected = HealthKitIntegrationController.supportedMetrics
             .map(HealthKitStoredMetricState.empty(for:))
         let client = makeClient(stateReader: { metrics in
-            readerMetrics = metrics
+            readerMetrics.replace(metrics)
             return Array(expected.reversed())
         })
 
         let states = await client.storedStates(for: expected.map(\.metric))
 
-        XCTAssertEqual(readerMetrics, expected.map(\.metric))
+        XCTAssertEqual(readerMetrics.read(), expected.map(\.metric))
         XCTAssertEqual(states.map(\.metric), expected.map(\.metric))
         XCTAssertEqual(states, expected)
     }
 
     func testStoredStatesRejectsInvalidAndAlcoholSetsWithoutReading() async {
-        var readerCalls = 0
+        let readerCalls = LockedTestValue(0)
         let client = makeClient(stateReader: { _ in
-            readerCalls += 1
+            readerCalls.mutate { $0 += 1 }
             return []
         })
 
@@ -248,7 +274,7 @@ final class HealthKitProductionBridgeTests: XCTestCase {
         let states = await client.storedStates(for: invalid)
 
         XCTAssertTrue(states.isEmpty)
-        XCTAssertEqual(readerCalls, 0)
+        XCTAssertEqual(readerCalls.read(), 0)
     }
 
     func testStoredStatesPreservesErrorAndEmptyTruth() async {
@@ -259,8 +285,9 @@ final class HealthKitProductionBridgeTests: XCTestCase {
             syncState: .error
         )
         let errorState = HealthKitStoredMetricState(projection: errorProjection)
-        var provided = metrics.map(HealthKitStoredMetricState.empty(for:))
-        provided[0] = errorState
+        let provided = metrics.enumerated().map { index, metric in
+            index == 0 ? errorState : .empty(for: metric)
+        }
         let client = makeClient(stateReader: { _ in provided })
 
         let states = await client.storedStates(for: metrics)
@@ -291,19 +318,21 @@ final class HealthKitProductionBridgeTests: XCTestCase {
     }
 
     func testImmediateStopPreventsInitialReconciliationFromStarting() async {
-        var reconciliationCalls = 0
-        var updates: [HealthKitObserverCompletion] = []
+        let reconciliationCalls = LockedTestValue(0)
+        let updates = LockedTestValue<[HealthKitObserverCompletion]>([])
         let client = makeClient(reconcile: { _ in
-            reconciliationCalls += 1
+            reconciliationCalls.mutate { $0 += 1 }
             return .init(results: [])
         })
 
-        client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { updates.append($0) }
+        client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { completion in
+            updates.mutate { $0.append(completion) }
+        }
         client.stopAllObservers()
         await Task.yield()
 
-        XCTAssertEqual(reconciliationCalls, 0)
-        XCTAssertTrue(updates.isEmpty)
+        XCTAssertEqual(reconciliationCalls.read(), 0)
+        XCTAssertTrue(updates.read().isEmpty)
     }
 
     func testAuthorizationAndReconciliationErrorsAreSanitized() async {
@@ -330,35 +359,41 @@ final class HealthKitProductionBridgeTests: XCTestCase {
         XCTAssertFalse(status.errorDescription?.contains(sentinel) ?? true)
         XCTAssertFalse(request.errorDescription?.contains(sentinel) ?? true)
 
-        var updates: [HealthKitObserverCompletion] = []
-        client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { updates.append($0) }
-        await waitUntil { !updates.isEmpty }
-        XCTAssertEqual(updates, [.failure("HealthKit reconciliation failed")])
+        let updates = LockedTestValue<[HealthKitObserverCompletion]>([])
+        client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { completion in
+            updates.mutate { $0.append(completion) }
+        }
+        await waitUntil { !updates.read().isEmpty }
+        XCTAssertEqual(updates.read(), [.failure("HealthKit reconciliation failed")])
     }
 
     func testMixedAggregateKeepsSanitizedFailureWhileReportingDurablePartialSuccess() async {
         let client = try! makeCoordinatorBackedClient(failingMetrics: [.caffeine])
 
-        var updates: [HealthKitObserverCompletion] = []
-        client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { updates.append($0) }
-        await waitUntil { !updates.isEmpty }
+        let updates = LockedTestValue<[HealthKitObserverCompletion]>([])
+        client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { completion in
+            updates.mutate { $0.append(completion) }
+        }
+        await waitUntil { !updates.read().isEmpty }
 
         XCTAssertEqual(
-            updates,
+            updates.read(),
             [.partialSuccess("HealthKit reconciliation partially failed after a durable metric commit")]
         )
-        XCTAssertFalse(updates.description.contains("SECRET_PROVIDER_PAYLOAD"))
+        XCTAssertFalse(updates.read().description.contains("SECRET_PROVIDER_PAYLOAD"))
     }
 
     func testTimedOutAggregateWithDurableCommitIsPartialAndSanitized() async {
         let client = try! makeCoordinatorBackedClient(delaysByMetric: [.caffeine: [300_000_000]])
 
-        var updates: [HealthKitObserverCompletion] = []
-        client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { updates.append($0) }
-        await waitUntil { !updates.isEmpty }
+        let updates = LockedTestValue<[HealthKitObserverCompletion]>([])
+        client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { completion in
+            updates.mutate { $0.append(completion) }
+        }
+        await waitUntil { !updates.read().isEmpty }
 
         XCTAssertEqual(
-            updates,
+            updates.read(),
             [.partialSuccess("HealthKit reconciliation timed out after a durable metric commit")]
         )
     }
@@ -369,91 +404,97 @@ final class HealthKitProductionBridgeTests: XCTestCase {
             delaysByMetric: [.water: [0, 300_000_000]]
         )
 
-        var updates: [HealthKitObserverCompletion] = []
-        client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { updates.append($0) }
-        await waitUntil { updates == [.success] }
+        let updates = LockedTestValue<[HealthKitObserverCompletion]>([])
+        client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { completion in
+            updates.mutate { $0.append(completion) }
+        }
+        await waitUntil { updates.read() == [.success] }
         try? await Task.sleep(nanoseconds: 2_100_000_000)
-        await waitUntil { updates.count == 2 }
+        await waitUntil { updates.read().count == 2 }
 
         XCTAssertEqual(
-            updates[1],
+            updates.read()[1],
             .partialSuccess("HealthKit reconciliation timed out after a durable metric commit")
         )
     }
 
     func testObserverCallbackErrorIsSanitized() async {
         let sentinel = "SECRET_PROVIDER_PAYLOAD"
-        var observerUpdate: HealthKitProductionClient.ObserverUpdate?
-        var updates: [HealthKitObserverCompletion] = []
-        let client = makeClient(register: { _, update in observerUpdate = update })
+        let observerUpdate = LockedTestValue<HealthKitProductionClient.ObserverUpdate?>(nil)
+        let updates = LockedTestValue<[HealthKitObserverCompletion]>([])
+        let client = makeClient(register: { _, update in observerUpdate.replace(update) })
 
-        client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { updates.append($0) }
-        observerUpdate?(.failure(sentinel))
-        await waitUntil { updates.contains(.failure("HealthKit reconciliation failed")) }
+        client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { completion in
+            updates.mutate { $0.append(completion) }
+        }
+        observerUpdate.read()?(.failure(sentinel))
+        await waitUntil { updates.read().contains(.failure("HealthKit reconciliation failed")) }
 
-        XCTAssertFalse(updates.contains(.failure(sentinel)))
+        XCTAssertFalse(updates.read().contains(.failure(sentinel)))
     }
 
     func testObserverCallbackCannotTurnMetricPartialOutcomeIntoDurableRefresh() async {
-        var observerUpdate: HealthKitProductionClient.ObserverUpdate?
-        var updates: [HealthKitObserverCompletion] = []
-        let client = makeClient(register: { _, update in observerUpdate = update })
+        let observerUpdate = LockedTestValue<HealthKitProductionClient.ObserverUpdate?>(nil)
+        let updates = LockedTestValue<[HealthKitObserverCompletion]>([])
+        let client = makeClient(register: { _, update in observerUpdate.replace(update) })
 
-        client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { updates.append($0) }
-        observerUpdate?(.partialSuccess("SECRET_PROVIDER_PAYLOAD"))
-        await waitUntil { updates.contains(.failure("HealthKit reconciliation failed")) }
+        client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { completion in
+            updates.mutate { $0.append(completion) }
+        }
+        observerUpdate.read()?(.partialSuccess("SECRET_PROVIDER_PAYLOAD"))
+        await waitUntil { updates.read().contains(.failure("HealthKit reconciliation failed")) }
 
-        XCTAssertFalse(updates.contains { if case .partialSuccess = $0 { return true } else { return false } })
-        XCTAssertFalse(updates.contains { if case .failure(let message) = $0 { return message.contains("SECRET_PROVIDER_PAYLOAD") } else { return false } })
+        XCTAssertFalse(updates.read().contains { if case .partialSuccess = $0 { return true } else { return false } })
+        XCTAssertFalse(updates.read().contains { if case .failure(let message) = $0 { return message.contains("SECRET_PROVIDER_PAYLOAD") } else { return false } })
     }
 
     func testRepeatedStartKeepsOneObserverSetAndRefreshesAgain() async {
-        var registrations: [HealthKitMetricID] = []
-        var reconciliationCalls = 0
+        let registrations = LockedTestValue<[HealthKitMetricID]>([])
+        let reconciliationCalls = LockedTestValue(0)
         let client = makeClient(
-            register: { metric, _ in registrations.append(metric) },
+            register: { metric, _ in registrations.mutate { $0.append(metric) } },
             reconcile: { _ in
-                reconciliationCalls += 1
+                reconciliationCalls.mutate { $0 += 1 }
                 return .init(results: [])
             }
         )
 
         client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { _ in }
-        await waitUntil { reconciliationCalls == 1 }
+        await waitUntil { reconciliationCalls.read() == 1 }
         client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { _ in }
-        await waitUntil { reconciliationCalls == 2 }
+        await waitUntil { reconciliationCalls.read() == 2 }
 
-        XCTAssertEqual(registrations, HealthKitIntegrationController.supportedMetrics)
+        XCTAssertEqual(registrations.read(), HealthKitIntegrationController.supportedMetrics)
     }
 
     func testTimedOutObserverInvalidatesPartialSetAndNextStartReinstallsAll() async {
-        var registrations: [HealthKitMetricID] = []
-        var observerCallbacks: [HealthKitProductionClient.ObserverUpdate] = []
-        var stopCount = 0
+        let registrations = LockedTestValue<[HealthKitMetricID]>([])
+        let observerCallbacks = LockedTestValue<[HealthKitProductionClient.ObserverUpdate]>([])
+        let stopCount = LockedTestValue(0)
         let client = makeClient(
             register: { metric, callback in
-                registrations.append(metric)
-                observerCallbacks.append(callback)
+                registrations.mutate { $0.append(metric) }
+                observerCallbacks.mutate { $0.append(callback) }
             },
-            stop: { stopCount += 1 }
+            stop: { stopCount.mutate { $0 += 1 } }
         )
 
         client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { _ in }
-        observerCallbacks[0](.timedOut)
-        await waitUntil { stopCount == 1 }
+        observerCallbacks.read()[0](.timedOut)
+        await waitUntil { stopCount.read() == 1 }
 
-        XCTAssertEqual(stopCount, 1)
-        registrations.removeAll()
+        XCTAssertEqual(stopCount.read(), 1)
+        registrations.replace([])
         client.startObservers(metrics: HealthKitIntegrationController.supportedMetrics) { _ in }
 
-        XCTAssertEqual(registrations, HealthKitIntegrationController.supportedMetrics)
+        XCTAssertEqual(registrations.read(), HealthKitIntegrationController.supportedMetrics)
     }
 
     func testBackgroundDeliveryConfigurationIsValidatedSanitizedAndCached() async {
-        var calls = 0
+        let calls = LockedTestValue(0)
         let metrics = HealthKitIntegrationController.supportedMetrics
         let client = makeClient(configureBackground: { requested in
-            calls += 1
+            calls.mutate { $0 += 1 }
             return .enabled(requested)
         })
 
@@ -462,14 +503,14 @@ final class HealthKitProductionBridgeTests: XCTestCase {
 
         XCTAssertEqual(first, .enabled(metrics))
         XCTAssertEqual(second, first)
-        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(calls.read(), 1)
     }
 
     func testMalformedOrUnsupportedBackgroundDeliveryReportFailsClosed() async {
         let metrics = HealthKitIntegrationController.supportedMetrics
-        var calls = 0
+        let calls = LockedTestValue(0)
         let client = makeClient(configureBackground: { _ in
-            calls += 1
+            calls.mutate { $0 += 1 }
             return HealthKitBackgroundDeliveryReport(
                 state: .enabled,
                 enabledMetrics: [.alcoholicBeverages]
@@ -481,7 +522,7 @@ final class HealthKitProductionBridgeTests: XCTestCase {
 
         XCTAssertEqual(malformed, .failed(metrics))
         XCTAssertEqual(unsupported, .failed([.alcoholicBeverages]))
-        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(calls.read(), 1)
     }
 
     private func makeClient(
@@ -603,6 +644,38 @@ final class HealthKitProductionBridgeTests: XCTestCase {
 #else
         return try HealthKitOpaqueAnchor(archivedData: Data([byte]))
 #endif
+    }
+}
+
+/// Synchronous, lock-protected state for callbacks that are allowed to run
+/// concurrently with the main-actor test method. Capturing this reference in
+/// an injected `@Sendable` callback is safe; the mutable value never escapes
+/// without holding the lock.
+private final class LockedTestValue<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Value
+
+    init(_ value: Value) {
+        self.value = value
+    }
+
+    func read() -> Value {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func replace(_ value: Value) {
+        lock.lock()
+        self.value = value
+        lock.unlock()
+    }
+
+    @discardableResult
+    func mutate<Result>(_ mutation: (inout Value) -> Result) -> Result {
+        lock.lock()
+        defer { lock.unlock() }
+        return mutation(&value)
     }
 }
 

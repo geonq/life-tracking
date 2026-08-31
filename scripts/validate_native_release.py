@@ -16,7 +16,7 @@ on a clean GitHub-hosted macOS runner before any project build starts.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 import re
 import sys
@@ -58,6 +58,10 @@ FIXTURE_TOKENS = tuple(flag.lstrip("-") for flag in FIXTURE_FLAGS)
 _BUILD_VARIABLE = re.compile(r"\$\([A-Za-z_][A-Za-z0-9_]*\)|\$\{[^}]+\}")
 _XCCONFIG_LINE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$")
 _HOST = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\.ts\.net$")
+_SWIFT_ISO8601_DATE = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+    r"(?:Z|[+-][0-9]{2}:?[0-9]{2})$"
+)
 
 
 class InvariantError(ValueError):
@@ -308,6 +312,11 @@ def validate_release(
     provisioning_expiration = settings["PROVISIONING_EXPIRATION_DATE"].strip()
     if _contains_placeholder(provisioning_expiration):
         _fail("release PROVISIONING_EXPIRATION_DATE still contains a placeholder")
+    if _SWIFT_ISO8601_DATE.fullmatch(provisioning_expiration) is None:
+        _fail(
+            "release PROVISIONING_EXPIRATION_DATE must be a whole-second "
+            "ISO-8601 date with a T separator and timezone"
+        )
     try:
         normalized_expiration = (
             provisioning_expiration[:-1] + "+00:00"
@@ -321,6 +330,8 @@ def validate_release(
         ) from error
     if parsed_expiration.tzinfo is None:
         _fail("release PROVISIONING_EXPIRATION_DATE must include a timezone")
+    if parsed_expiration <= datetime.now(timezone.utc):
+        _fail("release PROVISIONING_EXPIRATION_DATE must be in the future")
 
     allowlist = settings["LIFEOS_SYNC_APPROVED_HOSTS"].strip()
     if _contains_placeholder(allowlist):

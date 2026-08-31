@@ -155,8 +155,13 @@ public extension Color {
         lightRed: 0x52/255, lightGreen: 0x52/255, lightBlue: 0x5B/255
     )
 
-    /// One value for both appearances — the reference surfaces do this.
-    static let lifeOSMetadataText = Color(red: 0x71/255, green: 0x71/255, blue: 0x7A/255)
+    /// Adaptive metadata/tertiary text for normal-size supporting copy. These
+    /// values preserve the quiet hierarchy while clearing the 4.5:1 small-text
+    /// threshold on the dark card and light canvas surfaces.
+    static let lifeOSMetadataText = lifeOSAdaptiveColor(
+        darkRed: 0x8C/255, darkGreen: 0x8C/255, darkBlue: 0x96/255,
+        lightRed: 0x5F/255, lightGreen: 0x60/255, lightBlue: 0x68/255
+    )
 
     /// Disabled text only.
     static let lifeOSQuaternaryText = lifeOSAdaptiveColor(
@@ -257,6 +262,16 @@ public extension Color {
     static let lifeOSWarning = lifeOSAdaptiveColor(
         darkRed: 0xFF/255, darkGreen: 0xB2/255, darkBlue: 0x24/255,
         lightRed: 0xC2/255, lightGreen: 0x74/255, lightBlue: 0x03/255
+    )
+    /// Text-safe semantic green. Indicators may keep the more vivid `success`.
+    static let lifeOSSuccessText = lifeOSAdaptiveColor(
+        darkRed: 0x30/255, darkGreen: 0xD1/255, darkBlue: 0x58/255,
+        lightRed: 0x01/255, lightGreen: 0x77/255, lightBlue: 0x3B/255
+    )
+    /// Text-safe semantic amber. Indicators may keep the more vivid `warning`.
+    static let lifeOSWarningText = lifeOSAdaptiveColor(
+        darkRed: 0xFF/255, darkGreen: 0xB2/255, darkBlue: 0x24/255,
+        lightRed: 0x8A/255, lightGreen: 0x5A/255, lightBlue: 0x00/255
     )
     static let lifeOSDanger = lifeOSAdaptiveColor(
         darkRed: 0xFF/255, darkGreen: 0x45/255, darkBlue: 0x3A/255,
@@ -360,8 +375,14 @@ public enum LifeOSTokens {
 
     /// success / positive / income / target-met → Apple-dark green (calmer light green)
     public static let success = Color.lifeOSSuccess
+    /// Text-safe success for normal-size labels; `success` stays vivid for dots,
+    /// icons, and chart series.
+    public static let successText = Color.lifeOSSuccessText
     /// warning / near-limit / estimate → readable amber in both modes
     public static let warning = Color.lifeOSWarning
+    /// Text-safe warning for normal-size labels; `warning` stays vivid for dots,
+    /// icons, and chart series.
+    public static let warningText = Color.lifeOSWarningText
     /// danger / negative / over-limit / failed
     public static let danger  = Color.lifeOSDanger
     /// Retired teal — one accent only. Alias of `accent` kept for compile;
