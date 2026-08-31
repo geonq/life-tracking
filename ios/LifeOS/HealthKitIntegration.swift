@@ -12,8 +12,10 @@ public enum HealthKitIntegrationLifecycle: String, Codable, Sendable {
 /// code without making that code import HealthKit or know about HK queries.
 public struct HealthKitIntegrationSnapshot: Equatable, Sendable {
     public let authorizationState: HealthKitAuthorizationState
+    public let writeAuthorizationState: HealthKitAuthorizationState
     public let lifecycle: HealthKitIntegrationLifecycle
     public let isRequestInFlight: Bool
+    public let isWriteRequestInFlight: Bool
     public let explicitRequestCompleted: Bool
     public let lastObserverCompletion: HealthKitObserverCompletion?
     /// Monotonically identifies every accepted observer/reconciliation update
@@ -28,8 +30,10 @@ public struct HealthKitIntegrationSnapshot: Equatable, Sendable {
 
     public init(
         authorizationState: HealthKitAuthorizationState = .notRequested,
+        writeAuthorizationState: HealthKitAuthorizationState = .writeNotDetermined,
         lifecycle: HealthKitIntegrationLifecycle = .inactive,
         isRequestInFlight: Bool = false,
+        isWriteRequestInFlight: Bool = false,
         explicitRequestCompleted: Bool = false,
         lastObserverCompletion: HealthKitObserverCompletion? = nil,
         observerCompletionSequence: UInt64 = 0,
@@ -38,8 +42,10 @@ public struct HealthKitIntegrationSnapshot: Equatable, Sendable {
         errorDescription: String? = nil
     ) {
         self.authorizationState = authorizationState
+        self.writeAuthorizationState = writeAuthorizationState
         self.lifecycle = lifecycle
         self.isRequestInFlight = isRequestInFlight
+        self.isWriteRequestInFlight = isWriteRequestInFlight
         self.explicitRequestCompleted = explicitRequestCompleted
         self.lastObserverCompletion = lastObserverCompletion
         self.observerCompletionSequence = observerCompletionSequence
@@ -49,6 +55,7 @@ public struct HealthKitIntegrationSnapshot: Equatable, Sendable {
     }
 
     public var authorization: HealthKitAuthorizationState { authorizationState }
+    public var writeAuthorization: HealthKitAuthorizationState { writeAuthorizationState }
     public var isActive: Bool { lifecycle == .active }
 }
 
@@ -60,6 +67,9 @@ public protocol HealthKitIntegrationClient {
     func availabilityState() -> HealthKitAuthorizationState
     func requestStatus(for metrics: [HealthKitMetricID]) async -> HealthKitAuthorizationReport
     func requestReadAuthorization(for metrics: [HealthKitMetricID]) async -> HealthKitAuthorizationReport
+    func requestWriteAuthorization(for metrics: [HealthKitWriteMetric]) async -> HealthKitAuthorizationReport
+    func writeAuthorizationStatus(for metric: HealthKitWriteMetric) -> HealthKitAuthorizationState
+    func write(_ request: HealthKitWriteRequest) async -> HealthKitWriteReport
     func configureBackgroundDelivery(
         metrics: [HealthKitMetricID]
     ) async -> HealthKitBackgroundDeliveryReport
@@ -79,6 +89,9 @@ public struct HealthKitIntegrationClientClosures: HealthKitIntegrationClient {
     private let availability: () -> HealthKitAuthorizationState
     private let status: ([HealthKitMetricID]) async -> HealthKitAuthorizationReport
     private let request: ([HealthKitMetricID]) async -> HealthKitAuthorizationReport
+    private let writeStatus: (HealthKitWriteMetric) -> HealthKitAuthorizationState
+    private let writeRequest: ([HealthKitWriteMetric]) async -> HealthKitAuthorizationReport
+    private let writeSample: (HealthKitWriteRequest) async -> HealthKitWriteReport
     private let configureBackground: ([HealthKitMetricID]) async -> HealthKitBackgroundDeliveryReport
     private let start: ObserverStarter
     private let stop: () -> Void
@@ -87,6 +100,13 @@ public struct HealthKitIntegrationClientClosures: HealthKitIntegrationClient {
         availability: @escaping () -> HealthKitAuthorizationState,
         status: @escaping ([HealthKitMetricID]) async -> HealthKitAuthorizationReport,
         request: @escaping ([HealthKitMetricID]) async -> HealthKitAuthorizationReport,
+        writeStatus: @escaping (HealthKitWriteMetric) -> HealthKitAuthorizationState = { _ in .writeNotDetermined },
+        writeRequest: @escaping ([HealthKitWriteMetric]) async -> HealthKitAuthorizationReport = { _ in
+            HealthKitAuthorizationReport(state: .writeNotDetermined)
+        },
+        write: @escaping (HealthKitWriteRequest) async -> HealthKitWriteReport = { request in
+            .rejected(for: request.metric, state: .writeNotDetermined)
+        },
         configureBackground: @escaping ([HealthKitMetricID]) async -> HealthKitBackgroundDeliveryReport = {
             .enabled($0)
         },
@@ -96,6 +116,9 @@ public struct HealthKitIntegrationClientClosures: HealthKitIntegrationClient {
         self.availability = availability
         self.status = status
         self.request = request
+        self.writeStatus = writeStatus
+        self.writeRequest = writeRequest
+        self.writeSample = write
         self.configureBackground = configureBackground
         self.start = start
         self.stop = stop
@@ -109,6 +132,18 @@ public struct HealthKitIntegrationClientClosures: HealthKitIntegrationClient {
 
     public func requestReadAuthorization(for metrics: [HealthKitMetricID]) async -> HealthKitAuthorizationReport {
         await request(metrics)
+    }
+
+    public func requestWriteAuthorization(for metrics: [HealthKitWriteMetric]) async -> HealthKitAuthorizationReport {
+        await writeRequest(metrics)
+    }
+
+    public func writeAuthorizationStatus(for metric: HealthKitWriteMetric) -> HealthKitAuthorizationState {
+        writeStatus(metric)
+    }
+
+    public func write(_ request: HealthKitWriteRequest) async -> HealthKitWriteReport {
+        await writeSample(request)
     }
 
     public func configureBackgroundDelivery(
@@ -139,6 +174,16 @@ public final class HealthKitIntegrationController: ObservableObject {
         $0 != .alcoholicBeverages
     }
 
+    /// Only explicit user-authored quantities are writable. Sensor-derived
+    /// metrics remain read-only to preserve HealthKit/provider provenance.
+    public static let writableMetrics: [HealthKitWriteMetric] = [
+        .water,
+        .caffeine,
+        .bodyMass,
+        .bodyFatPercentage,
+        .leanBodyMass
+    ]
+
     public static var defaultPersistenceURL: URL {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
@@ -157,6 +202,7 @@ public final class HealthKitIntegrationController: ObservableObject {
     private var observerCallbackOperationID: UInt64 = 0
     private var statusOperationID: UInt64 = 0
     private var requestOperationID: UInt64 = 0
+    private var writeRequestOperationID: UInt64 = 0
     private var backgroundDeliveryOperationID: UInt64 = 0
     private var explicitRequestCompleted = false
     /// Execution readiness comes from the current HealthKit availability/
@@ -167,7 +213,8 @@ public final class HealthKitIntegrationController: ObservableObject {
     private var executionAuthorizationReady = false
     private var sessionStarted = false
     private var requestTask: Task<HealthKitAuthorizationReport, Never>?
-    private var statusTask: Task<HealthKitAuthorizationReport, Never>?
+    private var writeRequestTask: Task<HealthKitAuthorizationReport, Never>?
+    private var statusTask: Task<(HealthKitAuthorizationReport, HealthKitAuthorizationState), Never>?
     private var backgroundDeliveryTask: Task<HealthKitBackgroundDeliveryReport, Never>?
 
     public init(
@@ -185,6 +232,7 @@ public final class HealthKitIntegrationController: ObservableObject {
             authorizationState: initialExplicitRequestCompleted && !usesVisualFixtures
                 ? .readIndeterminate
                 : .notRequested,
+            writeAuthorizationState: usesVisualFixtures ? .unavailable : .writeNotDetermined,
             explicitRequestCompleted: initialExplicitRequestCompleted && !usesVisualFixtures
         )
     }
@@ -203,13 +251,17 @@ public final class HealthKitIntegrationController: ObservableObject {
             let availability = client.availabilityState()
             switch availability {
             case .unavailable, .restricted, .protectedDataUnavailable:
-                return HealthKitAuthorizationReport(state: availability)
+                return (HealthKitAuthorizationReport(state: availability), availability)
             default:
-                return await client.requestStatus(for: metrics)
+                let report = await client.requestStatus(for: metrics)
+                let writeState = Self.aggregateWriteAuthorizationStatus(
+                    Self.writableMetrics.map { client.writeAuthorizationStatus(for: $0) }
+                )
+                return (report, writeState)
             }
         }
         statusTask = task
-        let report = await task.value
+        let (report, writeAuthorizationState) = await task.value
         guard token == generation, currentOperation == statusOperationID else { return }
         statusTask = nil
         switch report.state {
@@ -218,6 +270,7 @@ public final class HealthKitIntegrationController: ObservableObject {
             stopSessionIfRunning()
             publish(
                 authorizationState: report.state,
+                writeAuthorizationState: writeAuthorizationState,
                 lastObserverCompletion: .replace(nil),
                 errorDescription: .replace(report.errorDescription)
             )
@@ -230,6 +283,7 @@ public final class HealthKitIntegrationController: ObservableObject {
             executionAuthorizationReady = true
             publish(
                 authorizationState: .readIndeterminate,
+                writeAuthorizationState: writeAuthorizationState,
                 errorDescription: .replace(report.errorDescription)
             )
             startSessionIfEligible()
@@ -242,6 +296,7 @@ public final class HealthKitIntegrationController: ObservableObject {
             stopSessionIfRunning()
             publish(
                 authorizationState: report.state,
+                writeAuthorizationState: writeAuthorizationState,
                 errorDescription: .replace(report.errorDescription)
             )
         }
@@ -303,6 +358,93 @@ public final class HealthKitIntegrationController: ObservableObject {
         return normalized
     }
 
+    /// Requests write access as a separate operation from read access. The
+    /// default is deliberately non-interactive so lifecycle/setup code cannot
+    /// open a write-permission sheet. A reviewed user-authored flow must pass
+    /// `userInitiated: true` after its own confirmation step. The returned
+    /// status is based on the typed write set and never treats the system
+    /// request completion Boolean as proof that sharing was granted.
+    @discardableResult
+    public func requestWriteAuthorization(userInitiated: Bool = false) async -> HealthKitAuthorizationReport {
+        guard !usesVisualFixtures, let client else {
+            return HealthKitAuthorizationReport(state: snapshot.writeAuthorizationState)
+        }
+
+        let availability = client.availabilityState()
+        switch availability {
+        case .unavailable, .restricted, .protectedDataUnavailable:
+            publish(writeAuthorizationState: availability, isWriteRequestInFlight: false)
+            return HealthKitAuthorizationReport(state: availability)
+        default:
+            break
+        }
+        guard userInitiated else {
+            return HealthKitAuthorizationReport(state: snapshot.writeAuthorizationState)
+        }
+        if let writeRequestTask {
+            return await writeRequestTask.value
+        }
+
+        writeRequestOperationID &+= 1
+        let currentOperation = writeRequestOperationID
+        let metrics = Self.writableMetrics
+        let task = Task { @MainActor in
+            await client.requestWriteAuthorization(for: metrics)
+        }
+        writeRequestTask = task
+        publish(isWriteRequestInFlight: true)
+
+        let report = await task.value
+        guard currentOperation == writeRequestOperationID else { return report }
+        writeRequestTask = nil
+        let observedState = Self.aggregateWriteAuthorizationStatus(
+            metrics.map { client.writeAuthorizationStatus(for: $0) }
+        )
+        let state = Self.normalizedWriteAuthorizationState(report.state, observed: observedState)
+        publish(
+            writeAuthorizationState: state,
+            isWriteRequestInFlight: false,
+            errorDescription: .replace(report.errorDescription)
+        )
+        return HealthKitAuthorizationReport(
+            state: state,
+            promptCompleted: report.promptCompleted,
+            errorDescription: report.errorDescription
+        )
+    }
+
+    /// Writes only an already-validated typed request after an explicit user
+    /// action, and rechecks the current per-type sharing authorization
+    /// immediately before dispatch. The client performs the same guard at the
+    /// platform boundary so a status race cannot turn a denied or failed save
+    /// into success.
+    @discardableResult
+    public func write(_ request: HealthKitWriteRequest, userInitiated: Bool = false) async -> HealthKitWriteReport {
+        guard !usesVisualFixtures, let client else {
+            return .rejected(for: request.metric, state: .unavailable)
+        }
+        guard userInitiated else {
+            return .rejected(
+                for: request.metric,
+                state: snapshot.writeAuthorizationState,
+                errorDescription: "HealthKit writes require an explicit user action"
+            )
+        }
+
+        let authorization = client.writeAuthorizationStatus(for: request.metric)
+        guard authorization == .writeAuthorized else {
+            publish(writeAuthorizationState: authorization)
+            return .rejected(for: request.metric, state: authorization)
+        }
+
+        let report = await client.write(request)
+        publish(
+            writeAuthorizationState: report.authorizationState,
+            errorDescription: .replace(report.errorDescription)
+        )
+        return report
+    }
+
     @discardableResult
     public func requestAuthorization() async -> HealthKitAuthorizationReport {
         await requestReadAuthorization()
@@ -356,7 +498,10 @@ public final class HealthKitIntegrationController: ObservableObject {
         requestOperationID &+= 1
         requestTask?.cancel()
         requestTask = nil
-        publish(isRequestInFlight: false)
+        writeRequestOperationID &+= 1
+        writeRequestTask?.cancel()
+        writeRequestTask = nil
+        publish(isRequestInFlight: false, isWriteRequestInFlight: false)
     }
 
     private func startSessionIfEligible(refreshExisting: Bool = false) {
@@ -473,8 +618,10 @@ public final class HealthKitIntegrationController: ObservableObject {
 
     private func publish(
         authorizationState: HealthKitAuthorizationState? = nil,
+        writeAuthorizationState: HealthKitAuthorizationState? = nil,
         lifecycle: HealthKitIntegrationLifecycle? = nil,
         isRequestInFlight: Bool? = nil,
+        isWriteRequestInFlight: Bool? = nil,
         explicitRequestCompleted: Bool? = nil,
         lastObserverCompletion: OptionalReplacement<HealthKitObserverCompletion> = .preserve,
         observerCompletionSequence: UInt64? = nil,
@@ -500,8 +647,10 @@ public final class HealthKitIntegrationController: ObservableObject {
         }
         snapshot = HealthKitIntegrationSnapshot(
             authorizationState: authorizationState ?? old.authorizationState,
+            writeAuthorizationState: writeAuthorizationState ?? old.writeAuthorizationState,
             lifecycle: lifecycle ?? old.lifecycle,
             isRequestInFlight: isRequestInFlight ?? old.isRequestInFlight,
+            isWriteRequestInFlight: isWriteRequestInFlight ?? old.isWriteRequestInFlight,
             explicitRequestCompleted: explicitRequestCompleted ?? old.explicitRequestCompleted,
             lastObserverCompletion: observerCompletion,
             observerCompletionSequence: observerCompletionSequence ?? old.observerCompletionSequence,
@@ -518,6 +667,33 @@ public final class HealthKitIntegrationController: ObservableObject {
             promptCompleted: true,
             errorDescription: report.errorDescription
         )
+    }
+
+    private static func aggregateWriteAuthorizationStatus(
+        _ states: [HealthKitAuthorizationState]
+    ) -> HealthKitAuthorizationState {
+        guard !states.isEmpty else { return .error }
+        if states.contains(.unavailable) { return .unavailable }
+        if states.contains(.restricted) { return .restricted }
+        if states.contains(.protectedDataUnavailable) { return .protectedDataUnavailable }
+        if states.contains(.error) { return .error }
+        if states.contains(.writeDenied) { return .writeDenied }
+        if states.contains(.writeNotDetermined) { return .writeNotDetermined }
+        return states.allSatisfy { $0 == .writeAuthorized } ? .writeAuthorized : .error
+    }
+
+    private static func normalizedWriteAuthorizationState(
+        _ reported: HealthKitAuthorizationState,
+        observed: HealthKitAuthorizationState
+    ) -> HealthKitAuthorizationState {
+        switch reported {
+        case .unavailable, .restricted, .protectedDataUnavailable, .error:
+            return reported
+        case .writeNotDetermined, .writeAuthorized, .writeDenied:
+            return observed == .error ? reported : observed
+        default:
+            return observed
+        }
     }
 }
 #endif

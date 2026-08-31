@@ -25,6 +25,108 @@ final class HealthKitProductionBridgeTests: XCTestCase {
         XCTAssertEqual(requestMetrics, HealthKitIntegrationController.supportedMetrics)
     }
 
+    func testTypedWriteAuthorizationAndSavePathUseOnlyReviewedMetrics() async throws {
+        var statusMetrics: [HealthKitWriteMetric] = []
+        var authorizationMetrics: [HealthKitWriteMetric] = []
+        var savedRequest: HealthKitWriteRequest?
+        let client = makeClient(
+            writeStatus: { metric in
+                statusMetrics.append(metric)
+                return .writeAuthorized
+            },
+            writeRequest: { metrics in
+                authorizationMetrics = metrics
+                return .init(state: .writeAuthorized, promptCompleted: true)
+            },
+            write: { request in
+                savedRequest = request
+                return .saved(for: request.metric)
+            }
+        )
+
+        let writable = HealthKitIntegrationController.writableMetrics
+        let request = try makeWriteRequest()
+        let authorization = await client.requestWriteAuthorization(for: writable)
+        let result = await client.write(request)
+
+        XCTAssertEqual(authorization.state, .writeAuthorized)
+        XCTAssertEqual(authorizationMetrics, writable)
+        XCTAssertEqual(statusMetrics, [.water])
+        XCTAssertEqual(savedRequest, request)
+        XCTAssertEqual(result, .saved(for: .water))
+    }
+
+    func testInvalidWriteMetricSetIsRejectedBeforeAuthorizationClosure() async {
+        var calls = 0
+        let client = makeClient(writeRequest: { _ in
+            calls += 1
+            return .init(state: .writeAuthorized, promptCompleted: true)
+        })
+
+        let report = await client.requestWriteAuthorization(for: [.water])
+
+        XCTAssertEqual(report.state, .error)
+        XCTAssertEqual(report.errorDescription, "HealthKit write metric configuration was rejected")
+        XCTAssertEqual(calls, 0)
+    }
+
+    func testDeniedWriteIsBlockedBeforeInjectedSaveClosure() async throws {
+        var calls = 0
+        let client = makeClient(
+            writeStatus: { _ in .writeDenied },
+            write: { _ in
+                calls += 1
+                return .saved(for: .water)
+            }
+        )
+
+        let result = await client.write(try makeWriteRequest())
+
+        XCTAssertEqual(result.authorizationState, .writeDenied)
+        XCTAssertFalse(result.didSave)
+        XCTAssertEqual(calls, 0)
+    }
+
+    func testWriteFailureIsSanitizedAndNeverReportsSuccess() async throws {
+        let sentinel = "SECRET_PROVIDER_PAYLOAD"
+        let client = makeClient(
+            writeStatus: { _ in .writeAuthorized },
+            write: { request in
+                .rejected(
+                    for: request.metric,
+                    state: .writeAuthorized,
+                    errorDescription: sentinel
+                )
+            }
+        )
+
+        let result = await client.write(try makeWriteRequest())
+
+        XCTAssertFalse(result.didSave)
+        XCTAssertEqual(result.errorDescription, "HealthKit write failed")
+        XCTAssertFalse(result.errorDescription?.contains(sentinel) ?? true)
+    }
+
+    func testContradictorySuccessfulWriteIsRejected() async throws {
+        let client = makeClient(
+            writeStatus: { _ in .writeAuthorized },
+            write: { request in
+                HealthKitWriteReport(
+                    metric: request.metric,
+                    didSave: true,
+                    authorizationState: .writeAuthorized,
+                    errorDescription: "provider error"
+                )
+            }
+        )
+
+        let result = await client.write(try makeWriteRequest())
+
+        XCTAssertFalse(result.didSave)
+        XCTAssertEqual(result.authorizationState, .error)
+        XCTAssertEqual(result.errorDescription, "HealthKit write failed")
+    }
+
     func testStartRegistersEverySupportedMetricAndReportsInitialReconciliation() async {
         var registered: [HealthKitMetricID] = []
         var reconciled: [HealthKitMetricID] = []
@@ -386,6 +488,9 @@ final class HealthKitProductionBridgeTests: XCTestCase {
         availability: @escaping () -> HealthKitAuthorizationState = { .readIndeterminate },
         status: @escaping ([HealthKitMetricID]) async -> HealthKitAuthorizationReport = { _ in .init(state: .requestRequired) },
         request: @escaping ([HealthKitMetricID]) async -> HealthKitAuthorizationReport = { _ in .init(state: .readIndeterminate, promptCompleted: true) },
+        writeStatus: @escaping (HealthKitWriteMetric) -> HealthKitAuthorizationState = { _ in .writeNotDetermined },
+        writeRequest: @escaping ([HealthKitWriteMetric]) async -> HealthKitAuthorizationReport = { _ in .init(state: .writeNotDetermined) },
+        write: @escaping (HealthKitWriteRequest) async -> HealthKitWriteReport = { request in .rejected(for: request.metric, state: .writeNotDetermined) },
         configureBackground: @escaping ([HealthKitMetricID]) async -> HealthKitBackgroundDeliveryReport = {
             .enabled($0)
         },
@@ -401,12 +506,26 @@ final class HealthKitProductionBridgeTests: XCTestCase {
             availability: availability,
             status: status,
             request: request,
+            writeStatus: writeStatus,
+            writeRequest: writeRequest,
+            write: write,
             configureBackground: configureBackground,
             registerObserver: register,
             stopObservers: stop,
             reconcile: reconcile,
             reconcileRemainder: reconcileRemainder,
             stateReader: stateReader
+        )
+    }
+
+    private func makeWriteRequest() throws -> HealthKitWriteRequest {
+        let now = Date(timeIntervalSinceReferenceDate: 700_000_000)
+        return try HealthKitWriteRequest(
+            metric: .water,
+            value: 250,
+            startDate: now,
+            endDate: now,
+            now: now
         )
     }
 

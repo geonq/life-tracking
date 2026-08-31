@@ -86,6 +86,121 @@ final class HealthKitIntegrationTests: XCTestCase {
         XCTAssertEqual(client.callbacks.count, 0)
     }
 
+    func testReadAndWriteAuthorizationRemainSeparate() async {
+        let client = RecordingHealthKitIntegrationClient()
+        client.statusResult = .init(state: .readIndeterminate)
+        client.writeAuthorizationResult = .writeAuthorized
+        let controller = HealthKitIntegrationController(client: client)
+
+        await controller.refreshStatus()
+
+        XCTAssertEqual(controller.snapshot.authorizationState, .readIndeterminate)
+        XCTAssertEqual(controller.snapshot.writeAuthorizationState, .writeAuthorized)
+        XCTAssertEqual(client.writeStatusCalls, HealthKitIntegrationController.writableMetrics.count)
+        XCTAssertEqual(client.authorizationCalls, 0)
+        XCTAssertEqual(client.writeAuthorizationCalls, 0)
+    }
+
+    func testWriteAuthorizationDoesNotPromptWithoutExplicitUserAction() async {
+        let client = RecordingHealthKitIntegrationClient()
+        client.writeAuthorizationResult = .writeAuthorized
+        client.writeAuthorizationReport = .init(state: .writeAuthorized, promptCompleted: true)
+        let controller = HealthKitIntegrationController(client: client)
+
+        let report = await controller.requestWriteAuthorization()
+
+        XCTAssertEqual(report.state, .writeNotDetermined)
+        XCTAssertEqual(controller.snapshot.writeAuthorizationState, .writeNotDetermined)
+        XCTAssertEqual(client.writeAuthorizationCalls, 0)
+    }
+
+    func testWriteAuthorizationRequestUsesOnlyTypedWritableMetrics() async {
+        let client = RecordingHealthKitIntegrationClient()
+        client.writeAuthorizationResult = .writeAuthorized
+        client.writeAuthorizationReport = .init(state: .writeAuthorized, promptCompleted: true)
+        let controller = HealthKitIntegrationController(client: client)
+
+        let report = await controller.requestWriteAuthorization(userInitiated: true)
+
+        XCTAssertEqual(report.state, .writeAuthorized)
+        XCTAssertEqual(report.promptCompleted, true)
+        XCTAssertEqual(controller.snapshot.authorizationState, .notRequested)
+        XCTAssertEqual(controller.snapshot.writeAuthorizationState, .writeAuthorized)
+        XCTAssertEqual(client.writeAuthorizationMetrics, HealthKitIntegrationController.writableMetrics)
+        XCTAssertEqual(client.writeAuthorizationCalls, 1)
+    }
+
+    func testWriteAuthorizationDenialRemainsDenied() async {
+        let client = RecordingHealthKitIntegrationClient()
+        client.writeAuthorizationResult = .writeDenied
+        client.writeAuthorizationReport = .init(state: .writeDenied, promptCompleted: true)
+        let controller = HealthKitIntegrationController(client: client)
+
+        let report = await controller.requestWriteAuthorization(userInitiated: true)
+
+        XCTAssertEqual(report.state, .writeDenied)
+        XCTAssertEqual(controller.snapshot.writeAuthorizationState, .writeDenied)
+    }
+
+    func testUnavailableHealthKitDoesNotRequestOrWrite() async throws {
+        let client = RecordingHealthKitIntegrationClient()
+        client.availabilityResult = .unavailable
+        client.writeAuthorizationResult = .unavailable
+        let controller = HealthKitIntegrationController(client: client)
+
+        await controller.refreshStatus()
+        let authorization = await controller.requestWriteAuthorization()
+        let result = await controller.write(try makeWriteRequest(), userInitiated: true)
+
+        XCTAssertEqual(authorization.state, .unavailable)
+        XCTAssertEqual(result.authorizationState, .unavailable)
+        XCTAssertFalse(result.didSave)
+        XCTAssertEqual(client.writeAuthorizationCalls, 0)
+        XCTAssertEqual(client.writeCalls, 0)
+    }
+
+    func testAuthorizedWriteIsReportedOnlyWhenClientSaves() async throws {
+        let client = RecordingHealthKitIntegrationClient()
+        client.writeAuthorizationResult = .writeAuthorized
+        client.writeResult = .saved(for: .water)
+        let controller = HealthKitIntegrationController(client: client)
+
+        let result = await controller.write(try makeWriteRequest(), userInitiated: true)
+
+        XCTAssertEqual(result, .saved(for: .water))
+        XCTAssertEqual(client.writeCalls, 1)
+    }
+
+    func testWriteFailureNeverFabricatesSuccess() async throws {
+        let client = RecordingHealthKitIntegrationClient()
+        client.writeAuthorizationResult = .writeAuthorized
+        client.writeResult = .rejected(
+            for: .water,
+            state: .writeAuthorized,
+            errorDescription: "HealthKit write failed"
+        )
+        let controller = HealthKitIntegrationController(client: client)
+
+        let result = await controller.write(try makeWriteRequest(), userInitiated: true)
+
+        XCTAssertFalse(result.didSave)
+        XCTAssertEqual(result.authorizationState, .writeAuthorized)
+        XCTAssertEqual(result.errorDescription, "HealthKit write failed")
+        XCTAssertEqual(client.writeCalls, 1)
+    }
+
+    func testDeniedWriteIsBlockedBeforeClientSave() async throws {
+        let client = RecordingHealthKitIntegrationClient()
+        client.writeAuthorizationResult = .writeDenied
+        let controller = HealthKitIntegrationController(client: client)
+
+        let result = await controller.write(try makeWriteRequest(), userInitiated: true)
+
+        XCTAssertFalse(result.didSave)
+        XCTAssertEqual(result.authorizationState, .writeDenied)
+        XCTAssertEqual(client.writeCalls, 0)
+    }
+
     func testPersistedPromptDoesNotHideDeviceLevelRestriction() async {
         let client = RecordingHealthKitIntegrationClient()
         client.availabilityResult = .restricted
@@ -529,6 +644,17 @@ final class HealthKitIntegrationTests: XCTestCase {
         }
         XCTFail("Timed out waiting for condition", file: file, line: line)
     }
+
+    private func makeWriteRequest() throws -> HealthKitWriteRequest {
+        let now = Date(timeIntervalSinceReferenceDate: 700_000_000)
+        return try HealthKitWriteRequest(
+            metric: .water,
+            value: 250,
+            startDate: now,
+            endDate: now,
+            now: now
+        )
+    }
 }
 
 @MainActor
@@ -541,6 +667,13 @@ private final class RecordingHealthKitIntegrationClient: HealthKitIntegrationCli
     var availabilityCalls = 0
     var statusCalls = 0
     var authorizationCalls = 0
+    var writeAuthorizationCalls = 0
+    var writeStatusCalls = 0
+    var writeCalls = 0
+    var writeAuthorizationMetrics: [HealthKitWriteMetric] = []
+    var writeAuthorizationResult: HealthKitAuthorizationState = .writeNotDetermined
+    var writeAuthorizationReport: HealthKitAuthorizationReport = .init(state: .writeNotDetermined)
+    var writeResult: HealthKitWriteReport = .rejected(for: .water, state: .writeNotDetermined)
     var backgroundConfigurationCalls = 0
     var startCalls = 0
     var stopCalls = 0
@@ -576,6 +709,24 @@ private final class RecordingHealthKitIntegrationClient: HealthKitIntegrationCli
             }
         }
         return authorizationResult
+    }
+
+    func requestWriteAuthorization(for metrics: [HealthKitWriteMetric]) async -> HealthKitAuthorizationReport {
+        XCTAssertEqual(metrics, HealthKitIntegrationController.writableMetrics)
+        writeAuthorizationCalls += 1
+        writeAuthorizationMetrics = metrics
+        return writeAuthorizationReport
+    }
+
+    func writeAuthorizationStatus(for metric: HealthKitWriteMetric) -> HealthKitAuthorizationState {
+        writeStatusCalls += 1
+        return writeAuthorizationResult
+    }
+
+    func write(_ request: HealthKitWriteRequest) async -> HealthKitWriteReport {
+        XCTAssertEqual(request.metric, .water)
+        writeCalls += 1
+        return writeResult
     }
 
     func configureBackgroundDelivery(

@@ -12,6 +12,9 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
     private let availability: () -> HealthKitAuthorizationState
     private let status: ([HealthKitMetricID]) async -> HealthKitAuthorizationReport
     private let request: ([HealthKitMetricID]) async -> HealthKitAuthorizationReport
+    private let writeStatus: (HealthKitWriteMetric) -> HealthKitAuthorizationState
+    private let writeRequest: ([HealthKitWriteMetric]) async -> HealthKitAuthorizationReport
+    private let writeSample: (HealthKitWriteRequest) async -> HealthKitWriteReport
     private let configureBackground: ([HealthKitMetricID]) async -> HealthKitBackgroundDeliveryReport
     private let registerObserver: (HealthKitMetricID, @escaping ObserverUpdate) throws -> Void
     private let stopObservers: () -> Void
@@ -43,6 +46,9 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
             availability: { adapter.availabilityState() },
             status: { metrics in await adapter.requestStatus(for: metrics) },
             request: { metrics in await adapter.requestReadAuthorization(for: metrics) },
+            writeStatus: { metric in adapter.writeAuthorizationStatus(for: metric) },
+            writeRequest: { metrics in await adapter.requestWriteAuthorization(for: metrics) },
+            write: { request in await adapter.write(request) },
             configureBackground: { metrics in
                 await adapter.configureBackgroundDelivery(for: metrics)
             },
@@ -78,6 +84,13 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
         availability: @escaping () -> HealthKitAuthorizationState,
         status: @escaping ([HealthKitMetricID]) async -> HealthKitAuthorizationReport,
         request: @escaping ([HealthKitMetricID]) async -> HealthKitAuthorizationReport,
+        writeStatus: @escaping (HealthKitWriteMetric) -> HealthKitAuthorizationState = { _ in .writeNotDetermined },
+        writeRequest: @escaping ([HealthKitWriteMetric]) async -> HealthKitAuthorizationReport = { _ in
+            HealthKitAuthorizationReport(state: .writeNotDetermined)
+        },
+        write: @escaping (HealthKitWriteRequest) async -> HealthKitWriteReport = { request in
+            .rejected(for: request.metric, state: .writeNotDetermined)
+        },
         configureBackground: @escaping ([HealthKitMetricID]) async -> HealthKitBackgroundDeliveryReport = {
             .enabled($0)
         },
@@ -90,6 +103,9 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
         self.availability = availability
         self.status = status
         self.request = request
+        self.writeStatus = writeStatus
+        self.writeRequest = writeRequest
+        self.writeSample = write
         self.configureBackground = configureBackground
         self.registerObserver = registerObserver
         self.stopObservers = stopObservers
@@ -112,6 +128,26 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
             return Self.configurationRejectedReport()
         }
         return Self.sanitizedAuthorizationReport(await request(metrics), operation: .request)
+    }
+
+    public func writeAuthorizationStatus(for metric: HealthKitWriteMetric) -> HealthKitAuthorizationState {
+        guard Self.writableMetrics.contains(metric) else { return .error }
+        return writeStatus(metric)
+    }
+
+    public func requestWriteAuthorization(for metrics: [HealthKitWriteMetric]) async -> HealthKitAuthorizationReport {
+        guard Self.isExactWritableMetricSet(metrics) else {
+            return Self.configurationRejectedWriteReport()
+        }
+        return Self.sanitizedAuthorizationReport(await writeRequest(metrics), operation: .writeRequest)
+    }
+
+    public func write(_ request: HealthKitWriteRequest) async -> HealthKitWriteReport {
+        let authorization = writeAuthorizationStatus(for: request.metric)
+        guard authorization == .writeAuthorized else {
+            return .rejected(for: request.metric, state: authorization)
+        }
+        return Self.sanitizedWriteReport(await writeSample(request), requested: request)
     }
 
     public func configureBackgroundDelivery(
@@ -281,6 +317,16 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
             !metrics.contains(.alcoholicBeverages)
     }
 
+    private static var writableMetrics: [HealthKitWriteMetric] {
+        HealthKitIntegrationController.writableMetrics
+    }
+
+    private static func isExactWritableMetricSet(_ metrics: [HealthKitWriteMetric]) -> Bool {
+        metrics.count == writableMetrics.count &&
+            metrics == writableMetrics &&
+            Set(metrics).count == metrics.count
+    }
+
     private static func orderedStoredStates(
         _ states: [HealthKitStoredMetricState],
         for metrics: [HealthKitMetricID]
@@ -372,6 +418,7 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
     private enum AuthorizationOperation {
         case status
         case request
+        case writeRequest
     }
 
     private static func configurationRejectedReport() -> HealthKitAuthorizationReport {
@@ -379,6 +426,14 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
             state: .error,
             promptCompleted: false,
             errorDescription: "HealthKit metric configuration was rejected"
+        )
+    }
+
+    private static func configurationRejectedWriteReport() -> HealthKitAuthorizationReport {
+        HealthKitAuthorizationReport(
+            state: .error,
+            promptCompleted: false,
+            errorDescription: "HealthKit write metric configuration was rejected"
         )
     }
 
@@ -397,16 +452,79 @@ public final class HealthKitProductionClient: HealthKitIntegrationClient {
             message = "Health data is unavailable while the device is locked"
         case .readIndeterminate:
             message = "HealthKit read access is indeterminate"
+        case .writeNotDetermined:
+            message = "HealthKit write access has not been requested"
+        case .writeDenied:
+            message = "HealthKit write access was denied"
+        case .writeAuthorized:
+            message = "HealthKit write authorization could not be completed"
         default:
-            message = operation == .status
-                ? "HealthKit authorization status could not be checked"
-                : "HealthKit authorization could not be completed"
+            switch operation {
+            case .status:
+                message = "HealthKit authorization status could not be checked"
+            case .request:
+                message = "HealthKit authorization could not be completed"
+            case .writeRequest:
+                message = "HealthKit write authorization could not be completed"
+            }
         }
         return HealthKitAuthorizationReport(
             state: report.state,
             promptCompleted: report.promptCompleted,
             errorDescription: message
         )
+    }
+
+    private static func sanitizedWriteReport(
+        _ report: HealthKitWriteReport,
+        requested: HealthKitWriteRequest
+    ) -> HealthKitWriteReport {
+        guard report.metric == requested.metric else {
+            return .rejected(
+                for: requested.metric,
+                state: .error,
+                errorDescription: "HealthKit write failed"
+            )
+        }
+        guard report.didSave else {
+            let message: String?
+            switch report.authorizationState {
+            case .unavailable:
+                message = "HealthKit is unavailable on this device"
+            case .restricted:
+                message = "HealthKit is restricted on this device"
+            case .protectedDataUnavailable:
+                message = "Health data is unavailable while the device is locked"
+            case .writeNotDetermined:
+                message = "HealthKit write access has not been requested"
+            case .writeDenied:
+                message = "HealthKit write access was denied"
+            case .writeAuthorized:
+                message = "HealthKit write failed"
+            default:
+                message = "HealthKit write failed"
+            }
+            return .rejected(
+                for: requested.metric,
+                state: report.authorizationState,
+                errorDescription: message
+            )
+        }
+        guard report.errorDescription == nil else {
+            return .rejected(
+                for: requested.metric,
+                state: .error,
+                errorDescription: "HealthKit write failed"
+            )
+        }
+        guard report.authorizationState == .writeAuthorized else {
+            return .rejected(
+                for: requested.metric,
+                state: report.authorizationState,
+                errorDescription: "HealthKit write failed"
+            )
+        }
+        return .saved(for: requested.metric)
     }
 
     private static func sanitizedReconciliationCompletion(
