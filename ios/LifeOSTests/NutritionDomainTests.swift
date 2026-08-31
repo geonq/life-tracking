@@ -211,6 +211,15 @@ final class NutritionDomainTests: XCTestCase {
         ))
     }
 
+    func testManifestRejectsUnknownTimeZoneIdentifier() throws {
+        let timestamp = iso(Date(timeIntervalSinceNow: -60))
+        let manifest = try baseManifest(capturedAt: timestamp)
+        var object = try jsonObject(manifest)
+        object["clientTimeZone"] = "Europe/NotARealZone"
+
+        XCTAssertThrowsError(try decode(FoodPhotoManifest.self, object: object))
+    }
+
     func testManifestAndProposalRejectCredentialOrAdviceTextAndBadRanges() throws {
         let timestamp = iso(Date(timeIntervalSinceNow: -60))
         let manifest = try baseManifest(capturedAt: timestamp)
@@ -437,6 +446,94 @@ final class NutritionDomainTests: XCTestCase {
                 now: generatedAt
             ),
             "A summary with an old metric and a future metric must fail closed"
+        )
+    }
+
+    func testPhotoLineageAndRetentionPolicyKeepDeletionExplicit() throws {
+        let now = Date(timeIntervalSinceNow: -60)
+        let hash = try FoodEstimateImageHashReference(
+            imageID: "image-a",
+            sha256: String(repeating: "a", count: 64)
+        )
+        let lineage = try NutritionMealPhotoLineage(
+            proposalID: "proposal-1",
+            requestID: "request-1",
+            requestTimestamp: iso(now.addingTimeInterval(-60)),
+            generatedAt: iso(now.addingTimeInterval(-30)),
+            provider: "gateway-food-provider",
+            modelIdentifier: "food-model",
+            modelVersion: "1",
+            policyVersion: "nutrition-v1",
+            sanitizedImageHashes: [hash]
+        )
+        let roundTrip = try JSONDecoder().decode(
+            NutritionMealPhotoLineage.self,
+            from: JSONEncoder().encode(lineage)
+        )
+        XCTAssertEqual(roundTrip, lineage)
+
+        XCTAssertEqual(
+            NutritionPhotoRetentionPolicy.storageState(totalBytes: 0),
+            .normal
+        )
+        XCTAssertEqual(
+            NutritionPhotoRetentionPolicy.storageState(totalBytes: NutritionPhotoRetentionPolicy.warningStorageBytes),
+            .warning
+        )
+        XCTAssertEqual(
+            NutritionPhotoRetentionPolicy.storageState(totalBytes: NutritionPhotoRetentionPolicy.criticalStorageBytes),
+            .critical
+        )
+        XCTAssertEqual(
+            NutritionPhotoRetentionPolicy.storageState(totalBytes: NutritionPhotoRetentionPolicy.ingestGateStorageBytes),
+            .ingestBlocked
+        )
+        XCTAssertNoThrow(try NutritionPhotoRetentionPolicy.validateAsset(
+            kind: .derivative,
+            byteCount: NutritionPhotoRetentionPolicy.maximumDerivativeBytes,
+            imageCount: 3
+        ))
+        XCTAssertThrowsError(try NutritionPhotoRetentionPolicy.validateAsset(
+            kind: .derivative,
+            byteCount: NutritionPhotoRetentionPolicy.maximumDerivativeBytes + 1,
+            imageCount: 1
+        ))
+        XCTAssertThrowsError(try NutritionPhotoRetentionPolicy.validateAsset(
+            kind: .original,
+            byteCount: 1,
+            imageCount: 1,
+            totalStorageBytes: NutritionPhotoRetentionPolicy.ingestGateStorageBytes
+        ))
+
+        XCTAssertEqual(
+            NutritionPhotoRetentionPolicy.decision(
+                for: .original,
+                capturedAt: now,
+                now: now.addingTimeInterval(NutritionPhotoRetentionPolicy.originalRetention),
+                byteCount: 1,
+                imageCount: 1
+            ),
+            .eligibleForDeletion
+        )
+        XCTAssertEqual(
+            NutritionPhotoRetentionPolicy.decision(
+                for: .detail,
+                capturedAt: now,
+                now: now.addingTimeInterval(NutritionPhotoRetentionPolicy.detailRetention - 1),
+                byteCount: 1,
+                imageCount: 1
+            ),
+            .retain
+        )
+        XCTAssertEqual(
+            NutritionPhotoRetentionPolicy.decision(
+                for: .detail,
+                capturedAt: now,
+                now: now.addingTimeInterval(NutritionPhotoRetentionPolicy.detailRetention),
+                byteCount: 1,
+                imageCount: 1
+            ),
+            .eligibleForDeletion
         )
     }
 }

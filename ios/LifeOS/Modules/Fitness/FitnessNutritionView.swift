@@ -2044,10 +2044,12 @@ private struct FitnessFoodReviewSheet: View {
     @State private var photoProposal: FoodEstimateProposal?
     @State private var photoProposalLoading = false
     @State private var photoProposalError: String?
+    @State private var photoConfirmationAcknowledged = false
     @State private var photoMealSaved = false
     @State private var photoMealID = "photo-meal-\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())"
     @State private var photoRequestID = "photo-request-\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())"
     @State private var mealName = "Meal"
+    @State private var photoGrams = ""
     @State private var calories = ""
     @State private var protein = ""
     @State private var carbohydrates = ""
@@ -2065,6 +2067,7 @@ private struct FitnessFoodReviewSheet: View {
     @State private var barcodeCarbohydrates = ""
     @State private var barcodeFat = ""
     @State private var barcodeGrams = ""
+    @State private var barcodeValuesEdited = false
     @State private var barcodeBasis: NutritionBarcodeBasis = .perServing
     @State private var barcodeLoading = false
     @State private var barcodeError: String?
@@ -2216,6 +2219,7 @@ private struct FitnessFoodReviewSheet: View {
             photoProposal = nil
             photoProposalError = nil
             photoProposalLoading = false
+            photoConfirmationAcknowledged = false
             photoPreparation.clear()
             selectedPhotoItems.removeAll()
         }
@@ -2229,6 +2233,7 @@ private struct FitnessFoodReviewSheet: View {
             barcodeProposalToken = nil
             confirmedBarcodeRecord = nil
             barcodeError = nil
+            barcodeValuesEdited = false
         }
     }
 
@@ -2379,10 +2384,17 @@ private struct FitnessFoodReviewSheet: View {
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("nutrition-barcode-grams-help")
-                FitnessEditableField(title: "Calories (kcal)", text: $barcodeCalories, numeric: true)
-                FitnessEditableField(title: "Protein (g)", text: $barcodeProtein, numeric: true)
-                FitnessEditableField(title: "Carbohydrates (g)", text: $barcodeCarbohydrates, numeric: true)
-                FitnessEditableField(title: "Fat (g)", text: $barcodeFat, numeric: true)
+                FitnessEditableField(title: "Calories (kcal)", text: barcodeCaloriesBinding, numeric: true)
+                FitnessEditableField(title: "Protein (g)", text: barcodeProteinBinding, numeric: true)
+                FitnessEditableField(title: "Carbohydrates (g)", text: barcodeCarbohydratesBinding, numeric: true)
+                FitnessEditableField(title: "Fat (g)", text: barcodeFatBinding, numeric: true)
+                Text(barcodeValuesEdited
+                    ? "Edited values will be saved exactly as entered after validation."
+                    : "Provider values are scaled from the selected basis and grams when you confirm.")
+                    .font(LifeOSFont.caption(9))
+                    .foregroundStyle(barcodeValuesEdited ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("nutrition-barcode-edit-state")
                 Text("Source: Open Food Facts · ODbL-1.0 database / DbCL-1.0 contents. Volunteer-sourced data is not guaranteed accurate, complete, or reliable.")
                     .font(LifeOSFont.caption(9))
                     .foregroundStyle(LifeOSTokens.tertiaryText)
@@ -2488,6 +2500,7 @@ private struct FitnessFoodReviewSheet: View {
                 barcodeProtein = ""
                 barcodeCarbohydrates = ""
                 barcodeFat = ""
+                barcodeValuesEdited = false
             }
         } catch {
             barcodeProposal = nil
@@ -2498,9 +2511,17 @@ private struct FitnessFoodReviewSheet: View {
 
     private func applyBarcodeValues(_ values: NutritionBarcodeMacros) {
         let displayedValues: NutritionBarcodeMacros
-        if barcodeBasis == .per100g,
+        if let proposal = barcodeProposal,
            let grams = NutritionBarcodeValueParser.parse(barcodeGrams, maximum: 5_000),
-           let scaled = try? values.scaledFromPer100g(forGrams: grams) {
+           let canonical = try? NutritionBarcodeFlow.canonicalValues(
+               for: proposal,
+               basis: barcodeBasis,
+               grams: grams
+           ) {
+            displayedValues = canonical
+        } else if barcodeBasis == .per100g,
+                  let grams = NutritionBarcodeValueParser.parse(barcodeGrams, maximum: 5_000),
+                  let scaled = try? values.scaledFromPer100g(forGrams: grams) {
             displayedValues = scaled
         } else {
             displayedValues = values
@@ -2509,6 +2530,7 @@ private struct FitnessFoodReviewSheet: View {
         barcodeProtein = displayedValues.proteinGrams.map(formatNutritionValue) ?? ""
         barcodeCarbohydrates = displayedValues.carbsGrams.map(formatNutritionValue) ?? ""
         barcodeFat = displayedValues.fatGrams.map(formatNutritionValue) ?? ""
+        barcodeValuesEdited = false
     }
 
     private func applyBarcodeBasis(_ basis: NutritionBarcodeBasis, found: NutritionBarcodeFound) {
@@ -2565,7 +2587,8 @@ private struct FitnessFoodReviewSheet: View {
             productName: barcodeProductName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : barcodeProductName,
             grams: grams, kcal: kcal, proteinGrams: proteinGrams,
             carbsGrams: carbsGrams, fatGrams: fatGrams,
-            confirmedAt: ISO8601DateFormatter().string(from: .now)
+            confirmedAt: ISO8601DateFormatter().string(from: .now),
+            valuesAreEdited: barcodeValuesEdited
         )
         do {
             let record = try NutritionBarcodeFlow.confirm(confirmation, for: barcodeProposal)
@@ -2611,6 +2634,49 @@ private struct FitnessFoodReviewSheet: View {
 
     private func formatNutritionValue(_ value: Double) -> String {
         value.formatted(.number.precision(.fractionLength(0...2)))
+    }
+
+    // These bindings distinguish a user edit from the programmatic refresh
+    // performed when basis/grams changes. That lets the domain flow apply
+    // exact per-100-g scaling without discarding an intentional correction.
+    private var barcodeCaloriesBinding: Binding<String> {
+        Binding(
+            get: { barcodeCalories },
+            set: {
+                barcodeCalories = $0
+                barcodeValuesEdited = true
+            }
+        )
+    }
+
+    private var barcodeProteinBinding: Binding<String> {
+        Binding(
+            get: { barcodeProtein },
+            set: {
+                barcodeProtein = $0
+                barcodeValuesEdited = true
+            }
+        )
+    }
+
+    private var barcodeCarbohydratesBinding: Binding<String> {
+        Binding(
+            get: { barcodeCarbohydrates },
+            set: {
+                barcodeCarbohydrates = $0
+                barcodeValuesEdited = true
+            }
+        )
+    }
+
+    private var barcodeFatBinding: Binding<String> {
+        Binding(
+            get: { barcodeFat },
+            set: {
+                barcodeFat = $0
+                barcodeValuesEdited = true
+            }
+        )
     }
 
     private func barcodeErrorMessage(_ error: TailscaleSyncError) -> String {
@@ -2835,16 +2901,29 @@ private struct FitnessFoodReviewSheet: View {
                     Divider().overlay(LifeOSTokens.hairlineBorder)
                     Text("Total · \(photoRange(photoProposal.totals.grams, suffix: "g")) · \(photoRange(photoProposal.totals.calories, suffix: "kcal"))")
                         .font(LifeOSFont.control())
-                    Text("Nothing is saved until you confirm this proposal. The selected range midpoint is used for the durable local meal record.")
+                    Text("Review the displayed totals in exact units. Nothing is saved until you explicitly confirm; provider estimates never enter totals or sync as a proposal.")
                         .font(LifeOSFont.caption(9))
                         .foregroundStyle(LifeOSTokens.warning)
                         .fixedSize(horizontal: false, vertical: true)
-                    Button(photoMealSaved ? "Saved locally" : "Confirm estimate & save locally") {
+                    FitnessEditableField(title: "Meal name", text: $mealName)
+                    FitnessEditableField(title: "Confirmed grams", text: photoGramsBinding, numeric: true)
+                    FitnessEditableField(title: "Confirmed calories (kcal)", text: photoCaloriesBinding, numeric: true)
+                    FitnessEditableField(title: "Confirmed protein (g)", text: photoProteinBinding, numeric: true)
+                    FitnessEditableField(title: "Confirmed carbohydrates (g)", text: photoCarbohydratesBinding, numeric: true)
+                    FitnessEditableField(title: "Confirmed fat (g)", text: photoFatBinding, numeric: true)
+                    Toggle("I reviewed these values and want to save this meal", isOn: $photoConfirmationAcknowledged)
+                        .font(LifeOSFont.inter(12, weight: .medium))
+                        .accessibilityIdentifier("food-photo-confirmation-acknowledgement")
+                    Text("Saving records the values above as a user-reviewed correction of this proposal. The sanitized image bytes are cleared after the save; only request/provider/hash lineage remains.")
+                        .font(LifeOSFont.caption(9))
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button(photoMealSaved ? "Saved locally" : "Review & confirm meal locally") {
                         confirmPhotoProposal()
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(LifeOSTokens.success)
-                    .disabled(photoMealSaved || nutritionMealStore == nil || photoProposalLoading)
+                    .disabled(photoMealSaved || nutritionMealStore == nil || photoProposalLoading || !photoConfirmationAcknowledged)
                     .accessibilityIdentifier("food-photo-confirm")
                 }
             }
@@ -2868,6 +2947,8 @@ private struct FitnessFoodReviewSheet: View {
 
         photoProposalTask?.cancel()
         photoProposalError = nil
+        photoProposal = nil
+        photoConfirmationAcknowledged = false
         photoProposalLoading = true
         photoProposalTask = Task { @MainActor in
             defer {
@@ -2876,8 +2957,20 @@ private struct FitnessFoodReviewSheet: View {
             }
             do {
                 let proposal = try await barcodeClient.fetchFoodPhotoProposal(manifest)
+                let validatedProposal = try validateFoodEstimateProposalAgainstManifest(
+                    proposal,
+                    manifest,
+                    now: .now
+                )
                 guard !Task.isCancelled else { return }
-                photoProposal = proposal
+                photoProposal = validatedProposal
+                mealName = "Photo meal"
+                photoGrams = formatNutritionValue(validatedProposal.totals.grams.estimate)
+                calories = formatNutritionValue(validatedProposal.totals.calories.estimate)
+                protein = formatNutritionValue(validatedProposal.totals.protein.estimate)
+                carbohydrates = formatNutritionValue(validatedProposal.totals.carbs.estimate)
+                fat = formatNutritionValue(validatedProposal.totals.fat.estimate)
+                photoConfirmationAcknowledged = false
                 stage = .needsConfirmation
             } catch let error as TailscaleSyncError {
                 guard !Task.isCancelled else { return }
@@ -2891,28 +2984,45 @@ private struct FitnessFoodReviewSheet: View {
 
     private func confirmPhotoProposal() {
         guard let proposal = photoProposal, let nutritionMealStore, !photoMealSaved else { return }
+        guard photoConfirmationAcknowledged else {
+            photoProposalError = "Review the values and explicitly acknowledge the confirmation before saving. Nothing was saved."
+            return
+        }
         do {
-            let items = try proposal.items.map { item in
-                try FoodConfirmedItem(
-                    itemID: item.itemID,
-                    label: item.estimatedLabel,
-                    quantity: item.quantity,
-                    unit: item.unit,
-                    grams: item.grams.estimate,
-                    calories: item.calories.estimate,
-                    protein: item.protein.estimate,
-                    carbs: item.carbs.estimate,
-                    fat: item.fat.estimate,
-                    fiber: item.fiber?.estimate
-                )
+            let trimmedName = mealName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedName.isEmpty else {
+                throw NutritionValidationError.invalidText("mealName")
             }
+            guard let grams = NutritionBarcodeValueParser.parse(photoGrams, maximum: 1_000_000),
+                  let calories = NutritionBarcodeValueParser.parse(self.calories, maximum: 5_000),
+                  let protein = NutritionBarcodeValueParser.parse(self.protein, maximum: 2_000),
+                  let carbs = NutritionBarcodeValueParser.parse(carbohydrates, maximum: 2_000),
+                  let fat = NutritionBarcodeValueParser.parse(self.fat, maximum: 2_000) else {
+                throw NutritionValidationError.invalidBounds("confirmed photo values")
+            }
+            // The durable meal store keeps meal-level totals. An aggregate
+            // confirmed item preserves the exact user-reviewed totals while
+            // the proposal itself remains ephemeral.
+            let fiber = proposal.totals.fiber?.estimate
+            let items = [try FoodConfirmedItem(
+                itemID: "confirmed-\(proposal.proposalID)",
+                label: trimmedName,
+                quantity: 1,
+                unit: .portion,
+                grams: grams,
+                calories: calories,
+                protein: protein,
+                carbs: carbs,
+                fat: fat,
+                fiber: fiber
+            )]
             let totals = try FoodConfirmedTotals(
-                grams: proposal.totals.grams.estimate,
-                calories: proposal.totals.calories.estimate,
-                protein: proposal.totals.protein.estimate,
-                carbs: proposal.totals.carbs.estimate,
-                fat: proposal.totals.fat.estimate,
-                fiber: proposal.totals.fiber?.estimate
+                grams: grams,
+                calories: calories,
+                protein: protein,
+                carbs: carbs,
+                fat: fat,
+                fiber: fiber
             )
             let now = Date.now
             let timestamp = ISO8601DateFormatter().string(from: now)
@@ -2920,29 +3030,36 @@ private struct FitnessFoodReviewSheet: View {
                 mealID: proposal.mealID,
                 requestID: proposal.requestID,
                 proposalID: proposal.proposalID,
-                action: .confirm,
-                mealName: "Photo meal",
+                action: .editAndConfirm,
+                mealName: trimmedName,
                 mealAt: timestamp,
                 items: items,
                 totals: totals,
-                confirmedAt: timestamp
+                confirmedAt: timestamp,
+                correctionNotes: "User reviewed and confirmed the displayed photo estimate values."
             )
             _ = try validateFoodConfirmationAgainstProposal(confirmation, proposal, now: now)
+            let lineage = try NutritionMealPhotoLineage(proposal: proposal)
             let meal = NutritionMeal(
                 loggedAt: now,
                 timeZoneIdentifier: TimeZone.current.identifier,
-                name: "Photo meal",
-                kcal: Int(proposal.totals.calories.estimate.rounded()),
-                proteinGrams: Int(proposal.totals.protein.estimate.rounded()),
-                carbGrams: Int(proposal.totals.carbs.estimate.rounded()),
-                fatGrams: Int(proposal.totals.fat.estimate.rounded()),
-                journalNote: "Confirmed from a Google AI Studio food-photo proposal; midpoint values saved.",
-                provenance: .confirmedFromPhoto
+                name: trimmedName,
+                kcal: Int(calories.rounded()),
+                proteinGrams: Int(protein.rounded()),
+                carbGrams: Int(carbs.rounded()),
+                fatGrams: Int(fat.rounded()),
+                portionGrams: grams,
+                portionUnit: .g,
+                journalNote: "User-reviewed values from a food-photo proposal; provider estimates remain attributable but are not medical guidance.",
+                provenance: .confirmedFromPhoto,
+                photoLineage: lineage
             )
             try nutritionMealStore.addConfirmed(meal)
             photoMealSaved = true
+            photoPreparation.clear()
+            selectedPhotoItems.removeAll()
             stage = .confirmed
-            savedMessage = "Photo proposal confirmed and saved locally · midpoint values used."
+            savedMessage = "Photo proposal reviewed and saved locally · lineage retained; image bytes cleared."
             onMealSaved()
         } catch {
             photoProposalError = "The proposal could not be confirmed safely. Nothing was saved."
@@ -2954,6 +3071,26 @@ private struct FitnessFoodReviewSheet: View {
         let minimum = formatNutritionValue(range.min)
         let maximum = formatNutritionValue(range.max)
         return abs(range.min - range.max) < 0.01 ? "\(estimate) \(suffix)" : "\(estimate) \(suffix) · \(minimum)–\(maximum)"
+    }
+
+    private var photoGramsBinding: Binding<String> {
+        Binding(get: { photoGrams }, set: { photoGrams = $0 })
+    }
+
+    private var photoCaloriesBinding: Binding<String> {
+        Binding(get: { calories }, set: { calories = $0 })
+    }
+
+    private var photoProteinBinding: Binding<String> {
+        Binding(get: { protein }, set: { protein = $0 })
+    }
+
+    private var photoCarbohydratesBinding: Binding<String> {
+        Binding(get: { carbohydrates }, set: { carbohydrates = $0 })
+    }
+
+    private var photoFatBinding: Binding<String> {
+        Binding(get: { fat }, set: { fat = $0 })
     }
 
     private func photoFlagLabel(_ flag: FoodEstimateFlag) -> String {
@@ -3003,14 +3140,21 @@ private struct FitnessFoodReviewSheet: View {
         photoLoadTask?.cancel()
         photoLoadTask = nil
         guard !items.isEmpty else {
+            photoProposal = nil
+            photoConfirmationAcknowledged = false
             photoPreparation.clear()
             return
         }
         guard items.count <= FoodPhotoSanitizer.maximumImageCount else {
+            photoProposal = nil
+            photoConfirmationAcknowledged = false
             photoPreparation.failPreparation()
             return
         }
 
+        photoProposal = nil
+        photoProposalError = nil
+        photoConfirmationAcknowledged = false
         photoPreparation.beginSelection()
         photoLoadTask = Task { @MainActor in
             defer {
@@ -3257,12 +3401,12 @@ private struct FitnessHydrationLifestyleCard: View {
         if isFixture {
             switch kind {
             case .hydration:
-                guard let amount = nutrition.hydrationMilliliters else { return "Fixture · —" }
+                guard let amount = nutrition.hydrationMilliliters else { return "Fixture · no observation" }
                 return "Fixture · \(amount) ml"
             case .caffeine:
-                return nutrition.caffeineMilligrams.map { "Fixture · \($0) mg" } ?? "Fixture · —"
+                return nutrition.caffeineMilligrams.map { "Fixture · \($0) mg" } ?? "Fixture · no observation"
             case .alcohol:
-                return nutrition.alcoholUnits.map { "Fixture · \($0.formatted(.number.precision(.fractionLength(1)))) standard drinks" } ?? "Fixture · —"
+                return nutrition.alcoholUnits.map { "Fixture · \($0.formatted(.number.precision(.fractionLength(1)))) standard drinks" } ?? "Fixture · no observation"
             }
         }
         switch summary(for: kind) {
@@ -3270,7 +3414,7 @@ private struct FitnessHydrationLifestyleCard: View {
         case .success(let summary):
             if summary.explicitNone { return "None" }
             if summary.alcoholFree { return "Alcohol-free" }
-            guard let total = summary.total else { return "—" }
+            guard let total = summary.total else { return "No observation" }
             return "\(total.formatted(.number.precision(.fractionLength(0...2)))) \(summary.unit?.label ?? "")"
         }
     }
@@ -3316,8 +3460,8 @@ private struct LifestyleColumn: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Circle().fill(LifeOSTokens.tertiaryText).frame(width: 6, height: 6)
-            Text(title).font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
+            Circle().fill(hue.base).frame(width: 6, height: 6)
+            Text(title).font(LifeOSFont.caption(10)).foregroundStyle(hue.base)
             Text(value)
                 .font(LifeOSFont.inter(11, weight: .semiBold))
                 .monospacedDigit()

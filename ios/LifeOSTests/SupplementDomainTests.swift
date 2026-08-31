@@ -255,6 +255,14 @@ final class SupplementDomainTests: XCTestCase {
         ]
         XCTAssertThrowsError(try decode(pathLikeTimezone, as: SupplementPlan.self))
 
+        var unknownTimezone = planObject()
+        unknownTimezone["schedule"] = [
+            "weekdays": [1, 3, 5], "localTime": "11:30", "timeZoneIdentifier": "Europe/NotARealZone",
+            "startDate": "2026-08-01", "pauseRanges": [],
+            "notificationPreference": "product_and_timing", "calendarOverlayEnabled": true,
+        ]
+        XCTAssertThrowsError(try decode(unknownTimezone, as: SupplementPlan.self))
+
         var overlappingPause = planObject()
         overlappingPause["schedule"] = [
             "weekdays": [1, 3, 5], "localTime": "11:30", "timeZoneIdentifier": "Europe/Berlin",
@@ -515,5 +523,37 @@ final class SupplementDomainTests: XCTestCase {
         XCTAssertEqual(value.inventoryEvents.count, 1)
         XCTAssertLessThanOrEqual(value.inventoryEvents[0].id.count, 128)
         XCTAssertTrue(value.inventoryEvents[0].id.hasPrefix("taken-"))
+    }
+
+    func testCatalogReferenceCanBeValidatedBeforePlanConfirmation() throws {
+        let fact = try SupplementNutrientFact(
+            nutrientID: "magnesium",
+            name: "Magnesium",
+            amountPerUnit: 200,
+            unit: "mg"
+        )
+        let entry = try SupplementCatalogEntry(
+            id: "catalog-magnesium",
+            name: "Magnesium Complex",
+            brand: "Example label",
+            productIdentifier: "batch-a",
+            form: .capsule,
+            servingUnit: "capsule",
+            source: .imported,
+            sourceDate: "2026-08-01",
+            nutrients: [fact]
+        )
+        let response = try SupplementCatalogResponse(
+            query: "magnesium",
+            entries: [entry]
+        )
+        XCTAssertEqual(response.entries, [entry])
+        XCTAssertEqual(response.query, "magnesium")
+
+        var unknown = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder.lifeOS.encode(response)) as? [String: Any]
+        )
+        unknown["recommendation"] = "take two"
+        XCTAssertThrowsError(try decode(unknown, as: SupplementCatalogResponse.self))
     }
 }

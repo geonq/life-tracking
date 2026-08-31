@@ -509,6 +509,11 @@ public struct FoodPhotoManifest: Codable, Equatable, Sendable {
         guard totalBytes <= NutritionValidation.maximumPhotoBytes else {
             throw NutritionValidationError.invalidBounds("combined photo payload")
         }
+        try NutritionPhotoRetentionPolicy.validateAsset(
+            kind: .original,
+            byteCount: totalBytes,
+            imageCount: images.count
+        )
         try userContext?.validate()
     }
 
@@ -528,7 +533,12 @@ public struct FoodPhotoManifest: Codable, Equatable, Sendable {
         let valid = value == "UTC" || (parts.count >= 2
             && isSafeSegment(parts[0], firstMustBeLetter: true)
             && parts.dropFirst().allSatisfy { isSafeSegment($0, firstMustBeLetter: false) })
-        guard valid, !parts.contains("."), value.utf16.count <= 64 else {
+        guard
+            valid,
+            !parts.contains("."),
+            value.utf16.count <= 64,
+            TimeZone(identifier: value) != nil
+        else {
             throw NutritionValidationError.invalidBounds("clientTimeZone")
         }
     }
@@ -754,6 +764,117 @@ public struct FoodEstimateImageHashReference: Codable, Equatable, Sendable {
         try NutritionValidation.validateID(imageID, field: "imageID")
         try NutritionValidation.validateSHA256(sha256, field: "sha256")
     }
+}
+
+/// The minimum proposal provenance that survives when a reviewed photo
+/// estimate becomes a durable meal.  The photo bytes are deliberately not
+/// part of this value: `FoodPhotoPreparationCoordinator` owns only sanitized
+/// descriptors, and the review flow clears them after the request finishes.
+/// Keeping the request/proposal/provider/hash lineage here means a later
+/// correction can still explain what was confirmed without retaining the
+/// user's image.
+public struct NutritionMealPhotoLineage: Codable, Equatable, Sendable {
+    public let proposalID: String
+    public let requestID: String
+    public let requestTimestamp: String
+    public let generatedAt: String
+    public let provider: String
+    public let modelIdentifier: String
+    public let modelVersion: String
+    public let policyVersion: String
+    public let sanitizedImageHashes: [FoodEstimateImageHashReference]
+
+    private enum CodingKeys: String, CodingKey {
+        case proposalID, requestID, requestTimestamp, generatedAt, provider, modelIdentifier,
+             modelVersion, policyVersion, sanitizedImageHashes
+    }
+
+    public init(proposal: FoodEstimateProposal) throws {
+        self.proposalID = proposal.proposalID
+        self.requestID = proposal.requestID
+        self.requestTimestamp = proposal.provenance.requestTimestamp
+        self.generatedAt = proposal.generatedAt
+        self.provider = proposal.provenance.provider
+        self.modelIdentifier = proposal.provenance.modelIdentifier
+        self.modelVersion = proposal.provenance.modelVersion
+        self.policyVersion = proposal.provenance.policyVersion
+        self.sanitizedImageHashes = proposal.provenance.sanitizedImageHashes
+        try validate()
+    }
+
+    public init(
+        proposalID: String,
+        requestID: String,
+        requestTimestamp: String,
+        generatedAt: String,
+        provider: String,
+        modelIdentifier: String,
+        modelVersion: String,
+        policyVersion: String,
+        sanitizedImageHashes: [FoodEstimateImageHashReference]
+    ) throws {
+        self.proposalID = proposalID
+        self.requestID = requestID
+        self.requestTimestamp = requestTimestamp
+        self.generatedAt = generatedAt
+        self.provider = provider
+        self.modelIdentifier = modelIdentifier
+        self.modelVersion = modelVersion
+        self.policyVersion = policyVersion
+        self.sanitizedImageHashes = sanitizedImageHashes
+        try validate()
+    }
+
+    public init(from decoder: Decoder) throws {
+        try rejectUnknownNutritionKeys(decoder, allowed: [
+            "proposalID", "requestID", "requestTimestamp", "generatedAt", "provider", "modelIdentifier",
+            "modelVersion", "policyVersion", "sanitizedImageHashes"
+        ])
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        proposalID = try c.decode(String.self, forKey: .proposalID)
+        requestID = try c.decode(String.self, forKey: .requestID)
+        requestTimestamp = try c.decode(String.self, forKey: .requestTimestamp)
+        generatedAt = try c.decode(String.self, forKey: .generatedAt)
+        provider = try c.decode(String.self, forKey: .provider)
+        modelIdentifier = try c.decode(String.self, forKey: .modelIdentifier)
+        modelVersion = try c.decode(String.self, forKey: .modelVersion)
+        policyVersion = try c.decode(String.self, forKey: .policyVersion)
+        sanitizedImageHashes = try c.decode([FoodEstimateImageHashReference].self, forKey: .sanitizedImageHashes)
+        try validate(now: NutritionValidation.now(from: decoder))
+    }
+
+    public func validate(now: Date = .now) throws {
+        try NutritionValidation.validateID(proposalID, field: "photoLineage.proposalID")
+        try NutritionValidation.validateID(requestID, field: "photoLineage.requestID")
+        let generated = try NutritionValidation.validateObserved(
+            generatedAt,
+            field: "photoLineage.generatedAt",
+            now: now
+        )
+        let request = try NutritionValidation.validateObserved(
+            requestTimestamp,
+            field: "photoLineage.requestTimestamp",
+            now: now
+        )
+        guard generated >= request else {
+            throw NutritionValidationError.invalidLineage("photo lineage generation predates inference request")
+        }
+        try NutritionValidation.validateSecretFreeText(provider, maximum: 120, field: "photoLineage.provider")
+        try NutritionValidation.validateSecretFreeText(modelIdentifier, maximum: 160, field: "photoLineage.modelIdentifier")
+        try NutritionValidation.validateSecretFreeText(modelVersion, maximum: 80, field: "photoLineage.modelVersion")
+        try NutritionValidation.validateSecretFreeText(policyVersion, maximum: 80, field: "photoLineage.policyVersion")
+        guard (1...NutritionValidation.maximumPhotoCount).contains(sanitizedImageHashes.count) else {
+            throw NutritionValidationError.invalidBounds("photoLineage.sanitizedImageHashes")
+        }
+        var seen = Set<String>()
+        for hash in sanitizedImageHashes {
+            try hash.validate()
+            guard seen.insert(hash.imageID).inserted else {
+                throw NutritionValidationError.duplicateIdentifier(hash.imageID)
+            }
+        }
+    }
+
 }
 
 public struct FoodEstimateProvenance: Codable, Equatable, Sendable {
@@ -1292,4 +1413,105 @@ public struct NutritionContractConstants: Sendable {
     public static let maximumItems = 40
 
     private init() {}
+}
+
+// MARK: - Photo retention and storage policy
+
+/// Storage classes are explicit because the retention clock for an original
+/// is intentionally different from the clock for a review/detail derivative.
+/// A derivative may never be larger than 500 KiB, even when the source image
+/// was within the 20 MiB request limit.
+public enum NutritionPhotoAssetKind: String, Codable, CaseIterable, Sendable {
+    case original
+    case detail
+    case derivative
+}
+
+public enum NutritionPhotoStorageState: String, Codable, Equatable, Sendable {
+    case normal
+    case warning
+    case critical
+    case ingestBlocked = "ingest_blocked"
+}
+
+/// Retention is a decision, not an implicit delete.  A caller must record an
+/// explicit deletion/export action before removing an eligible asset; this
+/// policy never silently removes a photo or its provenance.
+public enum NutritionPhotoRetentionDecision: String, Codable, Equatable, Sendable {
+    case retain
+    case eligibleForDeletion = "eligible_for_deletion"
+    case rejectIngest = "reject_ingest"
+}
+
+public enum NutritionPhotoRetentionPolicy {
+    public static let maximumImagesPerMeal = 3
+    public static let maximumInputBytes = 20 * 1_024 * 1_024
+    public static let maximumDerivativeBytes = 500 * 1_024
+    public static let originalRetention: TimeInterval = 90 * 86_400
+    public static let detailRetention: TimeInterval = 365 * 86_400
+    public static let warningStorageBytes: Int64 = 8 * 1_024 * 1_024 * 1_024
+    public static let criticalStorageBytes: Int64 = 9 * 1_024 * 1_024 * 1_024
+    public static let ingestGateStorageBytes: Int64 = 10 * 1_024 * 1_024 * 1_024
+
+    public static func storageState(totalBytes: Int64) -> NutritionPhotoStorageState {
+        guard totalBytes >= 0 else { return .ingestBlocked }
+        if totalBytes >= ingestGateStorageBytes { return .ingestBlocked }
+        if totalBytes >= criticalStorageBytes { return .critical }
+        if totalBytes >= warningStorageBytes { return .warning }
+        return .normal
+    }
+
+    public static func validateAsset(
+        kind: NutritionPhotoAssetKind,
+        byteCount: Int,
+        imageCount: Int,
+        totalStorageBytes: Int64 = 0
+    ) throws {
+        guard (1...maximumImagesPerMeal).contains(imageCount) else {
+            throw NutritionValidationError.invalidBounds("photoRetention.imageCount")
+        }
+        guard (1...maximumInputBytes).contains(byteCount) else {
+            throw NutritionValidationError.invalidBounds("photoRetention.byteCount")
+        }
+        if kind == .derivative, byteCount > maximumDerivativeBytes {
+            throw NutritionValidationError.invalidBounds("photoRetention.derivativeBytes")
+        }
+        guard totalStorageBytes >= 0, totalStorageBytes < ingestGateStorageBytes else {
+            throw NutritionValidationError.invalidBounds("photoRetention.storageGate")
+        }
+    }
+
+    public static func retentionDeadline(
+        for kind: NutritionPhotoAssetKind,
+        capturedAt: Date
+    ) -> Date? {
+        guard capturedAt.timeIntervalSinceReferenceDate.isFinite else { return nil }
+        let interval = kind == .original ? originalRetention : detailRetention
+        return capturedAt.addingTimeInterval(interval)
+    }
+
+    public static func decision(
+        for kind: NutritionPhotoAssetKind,
+        capturedAt: Date,
+        now: Date,
+        byteCount: Int,
+        imageCount: Int,
+        totalStorageBytes: Int64 = 0
+    ) -> NutritionPhotoRetentionDecision {
+        guard now.timeIntervalSinceReferenceDate.isFinite,
+              let deadline = retentionDeadline(for: kind, capturedAt: capturedAt) else {
+            return .rejectIngest
+        }
+        do {
+            try validateAsset(
+                kind: kind,
+                byteCount: byteCount,
+                imageCount: imageCount,
+                totalStorageBytes: totalStorageBytes
+            )
+        } catch {
+            return .rejectIngest
+        }
+        return now >= deadline ? .eligibleForDeletion : .retain
+    }
 }

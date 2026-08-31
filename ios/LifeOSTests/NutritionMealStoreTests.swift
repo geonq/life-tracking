@@ -54,6 +54,47 @@ final class NutritionMealStoreTests: XCTestCase {
         XCTAssertEqual(loaded.first?.kcal, 400)
     }
 
+    func testAddConfirmedRejectsDuplicateIDsAndDirectLineageInsertion() throws {
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        let store = try NutritionMealStore(url: url)
+        let original = meal()
+
+        try store.addConfirmed(original)
+
+        XCTAssertThrowsError(try store.addConfirmed(original))
+
+        var invalidCorrection = meal(name: "Invalid correction")
+        invalidCorrection.revision = 2
+        invalidCorrection.supersedesID = original.id
+        XCTAssertThrowsError(try store.addConfirmed(invalidCorrection))
+
+        XCTAssertEqual(try store.load(), [original])
+    }
+
+    func testLoadRejectsUnknownEnvelopeFieldsAndDuplicateIDs() throws {
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+
+        let store = try NutritionMealStore(url: url)
+        try Data(#"{"schemaVersion":1,"meals":[],"unexpected":true}"#.utf8).write(to: url)
+        XCTAssertThrowsError(try store.load())
+
+        let duplicate = meal()
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(
+            NutritionMealStoreEnvelope(meals: [duplicate, duplicate])
+        )
+        try data.write(to: url)
+
+        XCTAssertThrowsError(try store.load())
+    }
+
     // MARK: 2. Confirmation creates a durable meal
 
     func testAddConfirmedPersistsAndIsQueryable() throws {
@@ -69,6 +110,51 @@ final class NutritionMealStoreTests: XCTestCase {
         let dayMeals = try store.meals(on: now, calendar: bavarianCalendar)
         XCTAssertEqual(dayMeals.map(\.id), [saved.id])
         XCTAssertEqual(dayMeals.first?.provenance, .confirmedFromBarcode)
+    }
+
+    func testPhotoConfirmedMealRequiresAndPersistsSanitizedProposalLineage() throws {
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        let store = try NutritionMealStore(url: url)
+        let withoutLineage = meal(name: "Photo meal", provenance: .confirmedFromPhoto)
+        XCTAssertThrowsError(try store.addConfirmed(withoutLineage))
+
+        let hash = try FoodEstimateImageHashReference(
+            imageID: "image-a",
+            sha256: String(repeating: "a", count: 64)
+        )
+        let lineage = try NutritionMealPhotoLineage(
+            proposalID: "proposal-photo",
+            requestID: "request-photo",
+            requestTimestamp: iso(now),
+            generatedAt: iso(now),
+            provider: "gateway-food-provider",
+            modelIdentifier: "food-model",
+            modelVersion: "1",
+            policyVersion: "nutrition-v1",
+            sanitizedImageHashes: [hash]
+        )
+        let saved = NutritionMeal(
+            loggedAt: now,
+            timeZoneIdentifier: "Europe/Berlin",
+            name: "Photo meal",
+            kcal: 400,
+            proteinGrams: 30,
+            carbGrams: 40,
+            fatGrams: 10,
+            portionGrams: 250,
+            portionUnit: .g,
+            provenance: .confirmedFromPhoto,
+            createdAt: now,
+            photoLineage: lineage
+        )
+        try store.addConfirmed(saved)
+
+        let loaded = try store.load()
+        XCTAssertEqual(loaded, [saved])
+        XCTAssertEqual(loaded.first?.photoLineage, lineage)
+        XCTAssertEqual(loaded.first?.portionUnit, .g)
+        XCTAssertEqual(loaded.first?.portionGrams, 250)
     }
 
     // MARK: 3. Ephemeral proposal not persisted
@@ -187,5 +273,11 @@ final class NutritionMealStoreTests: XCTestCase {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "Europe/Berlin")!
         return calendar
+    }
+
+    private func iso(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: date)
     }
 }

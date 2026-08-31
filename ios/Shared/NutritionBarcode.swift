@@ -352,10 +352,43 @@ public struct NutritionBarcodeConfirmation: Codable, Equatable, Sendable {
     public let carbsGrams: Double?
     public let fatGrams: Double?
     public let confirmedAt: String
+    /// `false` means the caller is accepting the provider values for the
+    /// selected basis and portion. The flow then recalculates per-100-g
+    /// values from `grams` instead of trusting a stale display value. `true`
+    /// preserves intentional user edits. Legacy payloads default to `true`
+    /// because their caller's edit intent was not recorded.
+    public let valuesAreEdited: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case proposalID, barcode, basis, mealAt, productName, grams, kcal,
+             proteinGrams, carbsGrams, fatGrams, confirmedAt, valuesAreEdited
+    }
 
     public init(proposalID: String, barcode: String, basis: NutritionBarcodeBasis, mealAt: String,
-                productName: String?, grams: Double?, kcal: Double?, proteinGrams: Double?, carbsGrams: Double?, fatGrams: Double?, confirmedAt: String) {
+                productName: String?, grams: Double?, kcal: Double?, proteinGrams: Double?, carbsGrams: Double?, fatGrams: Double?, confirmedAt: String,
+                valuesAreEdited: Bool = true) {
         self.proposalID = proposalID; self.barcode = barcode; self.basis = basis; self.mealAt = mealAt; self.productName = productName; self.grams = grams; self.kcal = kcal; self.proteinGrams = proteinGrams; self.carbsGrams = carbsGrams; self.fatGrams = fatGrams; self.confirmedAt = confirmedAt
+        self.valuesAreEdited = valuesAreEdited
+    }
+
+    public init(from decoder: Decoder) throws {
+        try rejectUnknownBarcodeKeys(decoder, allowed: [
+            "proposalID", "barcode", "basis", "mealAt", "productName", "grams", "kcal",
+            "proteinGrams", "carbsGrams", "fatGrams", "confirmedAt", "valuesAreEdited"
+        ])
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        proposalID = try c.decode(String.self, forKey: .proposalID)
+        barcode = try c.decode(String.self, forKey: .barcode)
+        basis = try c.decode(NutritionBarcodeBasis.self, forKey: .basis)
+        mealAt = try c.decode(String.self, forKey: .mealAt)
+        productName = try c.decodeIfPresent(String.self, forKey: .productName)
+        grams = try c.decodeIfPresent(Double.self, forKey: .grams)
+        kcal = try c.decodeIfPresent(Double.self, forKey: .kcal)
+        proteinGrams = try c.decodeIfPresent(Double.self, forKey: .proteinGrams)
+        carbsGrams = try c.decodeIfPresent(Double.self, forKey: .carbsGrams)
+        fatGrams = try c.decodeIfPresent(Double.self, forKey: .fatGrams)
+        confirmedAt = try c.decode(String.self, forKey: .confirmedAt)
+        valuesAreEdited = try c.decodeIfPresent(Bool.self, forKey: .valuesAreEdited) ?? true
     }
 }
 
@@ -444,6 +477,28 @@ public struct NutritionRecord: Codable, Equatable, Identifiable, Sendable {
 }
 
 public enum NutritionBarcodeFlow {
+    /// Returns the values that correspond to the proposal's selected basis
+    /// and the actual amount eaten. This is the single canonical scaling path
+    /// used by both UI previews and durable confirmation.
+    public static func canonicalValues(
+        for proposal: NutritionBarcodeProposal,
+        basis: NutritionBarcodeBasis,
+        grams: Double?
+    ) throws -> NutritionBarcodeMacros {
+        switch basis {
+        case .per100g:
+            guard let grams, grams > 0, let values = proposal.per100g else {
+                throw NutritionBarcodeInputError.invalidProposal
+            }
+            return try values.scaledFromPer100g(forGrams: grams)
+        case .perServing:
+            guard let values = proposal.perServing else {
+                throw NutritionBarcodeInputError.invalidProposal
+            }
+            return values
+        }
+    }
+
     public static func confirm(_ confirmation: NutritionBarcodeConfirmation, for proposal: NutritionBarcodeProposal, now: Date = .now) throws -> NutritionRecord {
         guard confirmation.proposalID == proposal.proposalID,
               confirmation.barcode == proposal.barcode,
@@ -464,7 +519,27 @@ public enum NutritionBarcodeFlow {
         for value in [confirmation.proteinGrams, confirmation.carbsGrams, confirmation.fatGrams] {
             if let value, !value.isFinite || value < 0 || value > 2_000 { throw NutritionBarcodeInputError.invalidProposal }
         }
-        let record = NutritionRecord(confirmation: confirmation, source: proposal.provenance)
+        let canonicalized: NutritionBarcodeConfirmation
+        if confirmation.valuesAreEdited {
+            canonicalized = confirmation
+        } else {
+            let values = try canonicalValues(for: proposal, basis: confirmation.basis, grams: confirmation.grams)
+            canonicalized = NutritionBarcodeConfirmation(
+                proposalID: confirmation.proposalID,
+                barcode: confirmation.barcode,
+                basis: confirmation.basis,
+                mealAt: confirmation.mealAt,
+                productName: confirmation.productName,
+                grams: confirmation.grams,
+                kcal: values.kcal,
+                proteinGrams: values.proteinGrams,
+                carbsGrams: values.carbsGrams,
+                fatGrams: values.fatGrams,
+                confirmedAt: confirmation.confirmedAt,
+                valuesAreEdited: false
+            )
+        }
+        let record = NutritionRecord(confirmation: canonicalized, source: proposal.provenance)
         try record.validateForPersistence()
         return record
     }

@@ -174,6 +174,7 @@ enum SupplementValidation {
             pattern: #"^(?:UTC|[A-Za-z][A-Za-z0-9+_-]{0,31}(?:/[A-Za-z0-9+_-]{1,31})+)$"#,
             options: []
         ), expression.firstMatch(in: value, options: [], range: range) != nil else { return false }
+        guard TimeZone(identifier: value) != nil else { return false }
         return !value.split(separator: "/").contains { $0 == "." || $0 == ".." }
     }
 
@@ -584,6 +585,29 @@ public struct SupplementCatalogEntry: Codable, Equatable, Hashable, Identifiable
         case id, name, brand, productIdentifier, form, servingUnit, source, sourceDate, nutrients
     }
 
+    public init(
+        id: String,
+        name: String,
+        brand: String,
+        productIdentifier: String? = nil,
+        form: SupplementForm,
+        servingUnit: String,
+        source: SupplementSource,
+        sourceDate: String,
+        nutrients: [SupplementNutrientFact] = []
+    ) throws {
+        self.id = id
+        self.name = name
+        self.brand = brand
+        self.productIdentifier = productIdentifier
+        self.form = form
+        self.servingUnit = servingUnit
+        self.source = source
+        self.sourceDate = sourceDate
+        self.nutrients = nutrients
+        try validate()
+    }
+
     public init(from decoder: Decoder) throws {
         try rejectUnknownSupplementKeys(decoder, allowed: [
             "id", "name", "brand", "productIdentifier", "form", "servingUnit", "source", "sourceDate", "nutrients"
@@ -626,6 +650,17 @@ public struct SupplementCatalogResponse: Codable, Equatable, Sendable {
     public let entries: [SupplementCatalogEntry]
 
     private enum CodingKeys: String, CodingKey { case schemaVersion, query, entries }
+
+    public init(
+        schemaVersion: Int = currentSchemaVersion,
+        query: String,
+        entries: [SupplementCatalogEntry]
+    ) throws {
+        self.schemaVersion = schemaVersion
+        self.query = query
+        self.entries = entries
+        try validate()
+    }
 
     public init(from decoder: Decoder) throws {
         try rejectUnknownSupplementKeys(decoder, allowed: ["schemaVersion", "query", "entries"])

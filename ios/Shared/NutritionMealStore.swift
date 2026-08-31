@@ -1,5 +1,33 @@
 import Foundation
 
+private struct NutritionMealStoreAnyCodingKey: CodingKey {
+    let stringValue: String
+    let intValue: Int? = nil
+
+    init?(stringValue: String) {
+        self.stringValue = stringValue
+    }
+
+    init?(intValue: Int) {
+        return nil
+    }
+}
+
+private func rejectUnknownNutritionMealStoreKeys(
+    _ decoder: Decoder,
+    allowedKeys: Set<String>
+) throws {
+    let container = try decoder.container(keyedBy: NutritionMealStoreAnyCodingKey.self)
+    let unknownKeys = container.allKeys.filter { !allowedKeys.contains($0.stringValue) }
+    guard unknownKeys.isEmpty else {
+        throw DecodingError.dataCorruptedError(
+            forKey: unknownKeys[0],
+            in: container,
+            debugDescription: "Unknown nutrition meal store field"
+        )
+    }
+}
+
 // MARK: - Durable local meal storage
 
 /// Stable, user-visible failures for the local nutrition meal store. The
@@ -48,6 +76,7 @@ public struct NutritionMealStoreEnvelope: Codable, Equatable, Sendable {
     }
 
     public init(from decoder: Decoder) throws {
+        try rejectUnknownNutritionMealStoreKeys(decoder, allowedKeys: ["schemaVersion", "meals"])
         let container = try decoder.container(keyedBy: CodingKeys.self)
         schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
         // `meals` is decoded with `decodeIfPresent` so a minimal/older
@@ -108,9 +137,21 @@ public final class NutritionMealStore: @unchecked Sendable {
     public func addConfirmed(_ meal: NutritionMeal) throws {
         Self.processTransactionLock.lock()
         defer { Self.processTransactionLock.unlock() }
-        var meals = try loadUnlocked()
-        meals.append(meal)
-        try saveUnlocked(meals)
+        do {
+            try meal.validateForPersistence()
+        } catch {
+            throw NutritionMealStoreError.invalidEnvelope
+        }
+        guard meal.revision == 1, meal.supersedesID == nil, meal.deletedAt == nil else {
+            throw NutritionMealStoreError.invalidEnvelope
+        }
+        let meals = try loadUnlocked()
+        guard !meals.contains(where: { $0.id == meal.id }) else {
+            throw NutritionMealStoreError.invalidEnvelope
+        }
+        var updatedMeals = meals
+        updatedMeals.append(meal)
+        try saveUnlocked(updatedMeals)
     }
 
     /// Creates a new revision of an existing active meal. The original is
@@ -141,13 +182,22 @@ public final class NutritionMealStore: @unchecked Sendable {
             proteinGrams: draft.proteinGrams,
             carbGrams: draft.carbGrams,
             fatGrams: draft.fatGrams,
+            portionGrams: draft.portionGrams,
+            portionUnit: draft.portionUnit,
             journalNote: draft.journalNote,
             provenance: draft.provenance,
             createdAt: now,
             revision: original.revision + 1,
             supersedesID: original.id,
-            deletedAt: nil
+            deletedAt: nil,
+            photoLineage: draft.photoLineage
         )
+
+        do {
+            try corrected.validateForPersistence()
+        } catch {
+            throw NutritionMealStoreError.invalidEnvelope
+        }
 
         meals[index].deletedAt = now
         meals.append(corrected)
@@ -205,6 +255,7 @@ public final class NutritionMealStore: @unchecked Sendable {
             guard envelope.schemaVersion == NutritionMealStoreEnvelope.currentSchemaVersion else {
                 throw NutritionMealStoreError.invalidEnvelope
             }
+            try validateMealCollection(envelope.meals)
             return envelope.meals
         } catch {
             throw NutritionMealStoreError.invalidEnvelope
@@ -212,6 +263,11 @@ public final class NutritionMealStore: @unchecked Sendable {
     }
 
     private func saveUnlocked(_ meals: [NutritionMeal]) throws {
+        do {
+            try validateMealCollection(meals)
+        } catch {
+            throw NutritionMealStoreError.invalidEnvelope
+        }
         let data: Data
         do {
             data = try JSONEncoder.nutritionMeal.encode(NutritionMealStoreEnvelope(meals: meals))
@@ -222,6 +278,34 @@ public final class NutritionMealStore: @unchecked Sendable {
             try atomicReplace(data)
         } catch {
             throw NutritionMealStoreError.writeFailed
+        }
+    }
+
+    private func validateMealCollection(_ meals: [NutritionMeal]) throws {
+        var ids = Set<UUID>()
+        for meal in meals {
+            guard ids.insert(meal.id).inserted else {
+                throw NutritionMealStoreError.invalidEnvelope
+            }
+            try meal.validateForPersistence()
+        }
+
+        let mealsByID = Dictionary(uniqueKeysWithValues: meals.map { ($0.id, $0) })
+        for meal in meals {
+            if let predecessorID = meal.supersedesID {
+                guard
+                    let predecessor = mealsByID[predecessorID],
+                    predecessor.deletedAt != nil,
+                    predecessor.revision < Int.max,
+                    meal.revision == predecessor.revision + 1
+                else {
+                    throw NutritionMealStoreError.invalidEnvelope
+                }
+            } else {
+                guard meal.revision == 1 else {
+                    throw NutritionMealStoreError.invalidEnvelope
+                }
+            }
         }
     }
 

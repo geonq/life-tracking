@@ -787,8 +787,12 @@ private struct FitnessAddSupplementSheet: View {
     @State private var catalogLoading = false
     @State private var catalogError: String?
     @State private var selectedCatalogID: String?
+    @State private var selectedCatalogProductIdentifier: String?
     @State private var selectedCatalogSourceDate: String?
+    @State private var pendingCatalogEntry: SupplementCatalogEntry?
+    @State private var showingCatalogConfirmation = false
     @State private var catalogTask: Task<Void, Never>?
+    @State private var planConfirmationAcknowledged = false
     @State private var hasReminderTime = true
     @State private var reminderTime = Date.now
     @State private var timingNote = ""
@@ -797,7 +801,7 @@ private struct FitnessAddSupplementSheet: View {
     @State private var expectedLeadTimeDays = ""
     @State private var tracksExpiry = false
     @State private var expiryDate = Date.now
-    @State private var inventoryUnitsPerDose = "1"
+    @State private var inventoryUnitsPerDose = ""
     @State private var validationMessage: String?
 
     var body: some View {
@@ -858,6 +862,16 @@ private struct FitnessAddSupplementSheet: View {
                             }
                         }
                     }
+                    Toggle(
+                        "I confirm this product, label facts, dose, schedule, and inventory settings",
+                        isOn: $planConfirmationAcknowledged
+                    )
+                    .font(LifeOSFont.inter(12, weight: .medium))
+                    .accessibilityIdentifier("supplement-plan-confirmation")
+                    Text("This acknowledgement is required immediately before the plan is persisted. Catalog results are reference-only and never become a dose recommendation.")
+                        .font(LifeOSFont.caption(9))
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .fixedSize(horizontal: false, vertical: true)
                     Text("Reminders use the local timezone, and Taken/Snooze/Skip are separate from this product record.")
                         .font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
                     Text(
@@ -889,6 +903,24 @@ private struct FitnessAddSupplementSheet: View {
 #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
 #endif
+            .confirmationDialog(
+                "Use this catalog reference?",
+                isPresented: $showingCatalogConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("Use reference") {
+                    guard let pendingCatalogEntry else { return }
+                    applyCatalogEntry(pendingCatalogEntry)
+                }
+                Button("Cancel", role: .cancel) {
+                    pendingCatalogEntry = nil
+                }
+            } message: {
+                Text("This copies reference label facts into the editable form. Verify the package, choose your own dose, and confirm the complete plan before saving.")
+            }
+            .onChange(of: planDraftFingerprint) { _, _ in
+                planConfirmationAcknowledged = false
+            }
             .onChange(of: catalogQuery) { _, _ in scheduleCatalogSearch() }
             .onDisappear { catalogTask?.cancel() }
         }
@@ -918,7 +950,7 @@ private struct FitnessAddSupplementSheet: View {
                 if let response = catalogResponse, !response.entries.isEmpty {
                     ForEach(response.entries) { entry in
                         Button {
-                            applyCatalogEntry(entry)
+                            requestCatalogEntry(entry)
                         } label: {
                             VStack(alignment: .leading, spacing: 3) {
                                 HStack {
@@ -980,19 +1012,34 @@ private struct FitnessAddSupplementSheet: View {
         }
     }
 
+    private func requestCatalogEntry(_ entry: SupplementCatalogEntry) {
+        pendingCatalogEntry = entry
+        showingCatalogConfirmation = true
+    }
+
     private func applyCatalogEntry(_ entry: SupplementCatalogEntry) {
         selectedCatalogID = entry.id
+        selectedCatalogProductIdentifier = entry.productIdentifier
         selectedCatalogSourceDate = entry.sourceDate
         name = entry.name
         brand = entry.brand
         form = FitnessSupplement.Form(rawValue: entry.form.rawValue.capitalized) ?? .other
         servingUnit = entry.servingUnit
         strength = entry.nutrients.map { "\($0.name) \(supplementAmountText($0.amountPerUnit)) \($0.unit)/\(entry.servingUnit)" }.joined(separator: "; ")
-        userDose = "1 \(entry.servingUnit)"
+        // A catalog result is reference data, not permission to infer a dose
+        // or inventory conversion. Leave both choices explicit for the user.
+        userDose = ""
+        inventoryUnitsPerDose = ""
         nutrientFacts = entry.nutrients
+        planConfirmationAcknowledged = false
+        pendingCatalogEntry = nil
     }
 
     private func addLocally() {
+        guard planConfirmationAcknowledged else {
+            validationMessage = "Review the complete product plan and confirm it before saving."
+            return
+        }
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else {
             validationMessage = "Enter a product name to add a local record."
@@ -1003,22 +1050,29 @@ private struct FitnessAddSupplementSheet: View {
             validationMessage = "Enter the inventory unit used by one label dose, such as tablet or capsule."
             return
         }
-        let parsedStock = max(0, Int(stock.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0)
-        let parsedThreshold = max(0, Int(reorderThreshold.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0)
-        let parsedLeadTime = Int(expectedLeadTimeDays.trimmingCharacters(in: .whitespacesAndNewlines)).map { max(0, $0) }
-        let parsedUnits = max(1, Int(inventoryUnitsPerDose.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 1)
-        let trimmedTimingNote = timingNote.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedStrength = strength.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedStrength.isEmpty else {
+            validationMessage = "Enter the label strength, or leave this plan unsaved until it is known."
+            return
+        }
+        guard let parsedStock = parseRequiredNonNegativeInteger(stock, field: "stock units"),
+              let parsedThreshold = parseRequiredNonNegativeInteger(reorderThreshold, field: "refill threshold"),
+              let parsedLeadTime = parseOptionalNonNegativeInteger(expectedLeadTimeDays, field: "supplier lead time"),
+              let parsedUnits = parsePositiveInteger(inventoryUnitsPerDose, field: "inventory units per dose") else {
+            return
+        }
+        let trimmedTimingNote = timingNote.trimmingCharacters(in: .whitespacesAndNewlines)
         let supplement = FitnessSupplement(
             id: "local-\(UUID().uuidString)",
             name: trimmedName,
             brand: brand.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "User-entered product" : brand,
+            productIdentifier: selectedCatalogProductIdentifier,
             form: form,
-            strength: trimmedStrength.isEmpty ? "Not entered" : trimmedStrength,
+            strength: trimmedStrength,
             servingUnit: trimmedServingUnit,
             userDose: userDose.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : userDose,
             nutrientFacts: nutrientFacts,
-            source: selectedCatalogID == nil ? .manual : .packageLabel,
+            source: selectedCatalogID == nil ? .manual : .imported,
             productLabelNote: selectedCatalogSourceDate.flatMap {
                 try? SupplementProductLabelNote(text: supplementFactsText(nutrientFacts), sourceDate: $0)
             },
@@ -1036,12 +1090,73 @@ private struct FitnessAddSupplementSheet: View {
         dismiss()
     }
 
+    private func parseRequiredNonNegativeInteger(_ raw: String, field: String) -> Int? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            validationMessage = "Enter \(field), or enter 0 when the value is none."
+            return nil
+        }
+        guard let value = Int(trimmed), value >= 0, value <= 1_000_000_000 else {
+            validationMessage = "Enter a whole non-negative \(field) value."
+            return nil
+        }
+        return value
+    }
+
+    private func parseOptionalNonNegativeInteger(_ raw: String, field: String) -> Int? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        guard let value = Int(trimmed), value >= 0, value <= 365 else {
+            validationMessage = "Enter a whole non-negative \(field) value, or leave it blank."
+            return nil
+        }
+        return value
+    }
+
+    private func parsePositiveInteger(_ raw: String, field: String) -> Int? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let value = Int(trimmed), (1...1_000_000_000).contains(value) else {
+            validationMessage = "Enter a whole positive \(field) value."
+            return nil
+        }
+        return value
+    }
+
     private var formattedReminderTime: String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone.current
         formatter.dateFormat = "HH:mm"
         return formatter.string(from: reminderTime)
+    }
+
+    /// The acknowledgement is deliberately tied to the exact editable plan.
+    /// Changing a field after confirming invalidates it, so a stale checkbox
+    /// can never authorize a different dose, schedule, or inventory value.
+    private var planDraftFingerprint: String {
+        [
+            name,
+            brand,
+            form.rawValue,
+            servingUnit,
+            strength,
+            userDose,
+            nutrientFacts.map { "\($0.nutrientID)=\($0.amountPerUnit)\($0.unit)" }.joined(separator: ","),
+            selectedCatalogID,
+            selectedCatalogProductIdentifier,
+            selectedCatalogSourceDate,
+            hasReminderTime.description,
+            reminderTime.timeIntervalSinceReferenceDate.description,
+            timingNote,
+            stock,
+            reorderThreshold,
+            expectedLeadTimeDays,
+            tracksExpiry.description,
+            expiryDate.timeIntervalSinceReferenceDate.description,
+            inventoryUnitsPerDose
+        ]
+        .compactMap { $0 }
+        .joined(separator: "|")
     }
 }
 

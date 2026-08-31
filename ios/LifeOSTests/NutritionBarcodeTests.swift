@@ -59,6 +59,36 @@ final class NutritionBarcodeTests: XCTestCase {
         XCTAssertThrowsError(try per100g.scaledFromPer100g(forGrams: 5_000))
     }
 
+    func testUneditedPer100gConfirmationIsScaledInsideTheConfirmationFlow() throws {
+        let lookup = try decode(baseFound(
+            nutritionState: "complete",
+            metrics: #"{"kcal": 539, "proteinGrams": 6.3, "carbsGrams": 57.5, "fatGrams": 30.9}"#
+        ))
+        let proposal = try NutritionBarcodeProposal(proposalID: "proposal-scaled", lookup: lookup)
+        let confirmation = NutritionBarcodeConfirmation(
+            proposalID: proposal.proposalID,
+            barcode: proposal.barcode,
+            basis: .per100g,
+            mealAt: fetchedAt,
+            productName: "Reference values",
+            grams: 15,
+            // These are the untouched provider values. The explicit edit
+            // state tells the flow to derive the amount eaten from grams.
+            kcal: 539,
+            proteinGrams: 6.3,
+            carbsGrams: 57.5,
+            fatGrams: 30.9,
+            confirmedAt: fetchedAt,
+            valuesAreEdited: false
+        )
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: fetchedAt))
+        let record = try NutritionBarcodeFlow.confirm(confirmation, for: proposal, now: now)
+        XCTAssertEqual(record.kcal!, 80.85, accuracy: 0.001)
+        XCTAssertEqual(record.proteinGrams!, 0.945, accuracy: 0.001)
+        XCTAssertEqual(record.carbsGrams!, 8.625, accuracy: 0.001)
+        XCTAssertEqual(record.fatGrams!, 4.635, accuracy: 0.001)
+    }
+
 #if os(iOS)
     func testCameraCaptureNormalizesOnlySupportedChecksumBarcodes() {
         XCTAssertEqual(NutritionBarcodeScannerCoordinator.normalizedCapture("042100005264"), "0042100005264")
