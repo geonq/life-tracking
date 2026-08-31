@@ -48,6 +48,8 @@
     <string>$(APP_GROUP_IDENTIFIER)</string>
     <key>PROVISIONING_MODE</key>
     <string>$(PROVISIONING_MODE)</string>
+    <key>PROVISIONING_EXPIRATION_DATE</key>
+    <string>$(PROVISIONING_EXPIRATION_DATE)</string>
     <key>LIFEOS_SYNC_APPROVED_HOSTS</key>
     <string>$(LIFEOS_SYNC_APPROVED_HOSTS)</string>
     <key>NSLocalNetworkUsageDescription</key>

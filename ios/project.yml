@@ -17,6 +17,9 @@ settings:
     DEVELOPMENT_TEAM: 8F6VSCQ9SZ
     APP_GROUP_IDENTIFIER: group.com.hermes.lifeos.REPLACE_WITH_TEAM_CONFIGURED_ID
     PROVISIONING_MODE: unknown
+    # Development builds intentionally carry no signing expiration. Release
+    # validation injects a timezone-qualified profile expiration value.
+    PROVISIONING_EXPIRATION_DATE: ""
 targets:
   LifeOS:
     type: application

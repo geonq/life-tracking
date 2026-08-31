@@ -225,6 +225,48 @@ final class BankConsentTests: XCTestCase {
         XCTAssertFalse(BankConsentLifecyclePhase.linked.canRetry)
     }
 
+    func testBankConsentRecoveryRetainsPendingLinkForTransientFailureAndAlreadyLinking() {
+        let link = BankConsentLink(
+            consentUrl: URL(string: "https://bank.example.com/consent?session=opaque")!,
+            connectionId: "eb-opaque-123"
+        )
+
+        XCTAssertEqual(
+            BankConsentRowState.recoveredState(for: .httpError(503), preserving: link),
+            .error(link)
+        )
+        XCTAssertEqual(
+            BankConsentRowState.recoveredState(for: .connectionAlreadyLinking, preserving: link),
+            .alreadyLinking(link)
+        )
+        XCTAssertEqual(
+            BankConsentRowState.recoveredState(for: .httpError(503)),
+            .error(nil)
+        )
+    }
+
+    func testVisualFixtureSettingsNeverSchedulesFinancePreflight() {
+        XCTAssertFalse(SettingsFixturePolicy.shouldRunFinanceGatewayPreflight(usesVisualFixtures: true))
+        XCTAssertTrue(SettingsFixturePolicy.shouldRunFinanceGatewayPreflight(usesVisualFixtures: false))
+    }
+
+    func testGatewayIdentityPresentationDoesNotClaimRuntimeEnforcementWithoutPreflight() {
+        XCTAssertEqual(
+            SyncGatewayRuntimePresentation.identityStatusTitle(for: nil),
+            "Required by configuration"
+        )
+        XCTAssertEqual(
+            SyncGatewayRuntimePresentation.identityStatusTitle(for: .reachable),
+            "Verified for this session"
+        )
+        XCTAssertFalse(SyncGatewayRuntimePresentation.identityIsVerified(for: nil))
+        XCTAssertTrue(SyncGatewayRuntimePresentation.identityIsVerified(for: .reachable))
+        XCTAssertTrue(
+            SyncGatewayRuntimePresentation.identityStatusDetail(for: nil)
+                .contains("no current runtime preflight")
+        )
+    }
+
     func testProviderLifecyclePreservesAuthorizationAndFailureStates() {
         let observedProvenance = Provenance(
             source: "provider-observation",

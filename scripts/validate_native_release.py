@@ -16,6 +16,7 @@ on a clean GitHub-hosted macOS runner before any project build starts.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import os
 import re
 import sys
@@ -28,9 +29,13 @@ IOS = ROOT / "ios"
 
 EXPECTED_APP_GROUP_SOURCE = "group.com.hermes.lifeos.REPLACE_WITH_TEAM_CONFIGURED_ID"
 EXPECTED_PROVISIONING_SOURCE = "unknown"
+EXPECTED_PROVISIONING_EXPIRATION_SOURCE = ""
 EXPECTED_SYNC_ALLOWLIST_SOURCE = "geonqserver.tail5f8789.ts.net"
 EXPECTED_CODE_SIGN_STYLE_SOURCE = "Automatic"
 EXPECTED_DEVELOPMENT_TEAM_SOURCE = "8F6VSCQ9SZ"
+SUPPORTED_PROVISIONING_MODES = frozenset(
+    {"personal_team", "developer_program", "sideloaded"}
+)
 
 EXPECTED_IOS_PRIMARY = ("home", "calendar", "finance", "fitness", "more")
 EXPECTED_MAC_PRIMARY = ("home", "calendar", "finance", "fitness", "tax", "settings")
@@ -38,6 +43,7 @@ EXPECTED_MAC_PRIMARY = ("home", "calendar", "finance", "fitness", "tax", "settin
 RELEASE_ENVIRONMENT_KEYS = {
     "APP_GROUP_IDENTIFIER": "LIFEOS_RELEASE_APP_GROUP_IDENTIFIER",
     "PROVISIONING_MODE": "LIFEOS_RELEASE_PROVISIONING_MODE",
+    "PROVISIONING_EXPIRATION_DATE": "LIFEOS_RELEASE_PROVISIONING_EXPIRATION_DATE",
     "LIFEOS_SYNC_APPROVED_HOSTS": "LIFEOS_RELEASE_SYNC_APPROVED_HOSTS",
 }
 
@@ -172,6 +178,7 @@ def _project_setting(project: str, key: str) -> str | None:
 def _reject_signed_source_values(project: str) -> None:
     app_group = _project_setting(project, "APP_GROUP_IDENTIFIER")
     provisioning = _project_setting(project, "PROVISIONING_MODE")
+    provisioning_expiration = _project_setting(project, "PROVISIONING_EXPIRATION_DATE")
     allowlist = _project_setting(project, "LIFEOS_SYNC_APPROVED_HOSTS")
     signing_style = _project_setting(project, "CODE_SIGN_STYLE")
     development_team = _project_setting(project, "DEVELOPMENT_TEAM")
@@ -183,6 +190,8 @@ def _reject_signed_source_values(project: str) -> None:
         )
     if provisioning != EXPECTED_PROVISIONING_SOURCE:
         _fail("source PROVISIONING_MODE must remain unknown/fail-closed")
+    if provisioning_expiration != EXPECTED_PROVISIONING_EXPIRATION_SOURCE:
+        _fail("source PROVISIONING_EXPIRATION_DATE must remain empty/fail-closed")
     if allowlist != EXPECTED_SYNC_ALLOWLIST_SOURCE:
         _fail("source LIFEOS_SYNC_APPROVED_HOSTS must remain the exact approved private host")
     if signing_style != EXPECTED_CODE_SIGN_STYLE_SOURCE:
@@ -219,6 +228,7 @@ def validate_source(root: Path = ROOT) -> None:
         "CURRENT_PROJECT_VERSION",
         "APP_GROUP_IDENTIFIER",
         "PROVISIONING_MODE",
+        "PROVISIONING_EXPIRATION_DATE",
         "LIFEOS_SYNC_APPROVED_HOSTS",
     }
     source_paths = [
@@ -265,7 +275,12 @@ def validate_release(
 
     validate_source(root)
 
-    required = ("APP_GROUP_IDENTIFIER", "PROVISIONING_MODE", "LIFEOS_SYNC_APPROVED_HOSTS")
+    required = (
+        "APP_GROUP_IDENTIFIER",
+        "PROVISIONING_MODE",
+        "PROVISIONING_EXPIRATION_DATE",
+        "LIFEOS_SYNC_APPROVED_HOSTS",
+    )
     missing = [key for key in required if not settings.get(key, "").strip()]
     if missing:
         _fail(f"release settings missing required values: {', '.join(missing)}")
@@ -283,11 +298,29 @@ def validate_release(
     if _contains_placeholder(app_group):
         _fail("release APP_GROUP_IDENTIFIER still contains a placeholder")
 
-    provisioning = settings["PROVISIONING_MODE"].strip().lower()
-    if provisioning in {"", "unknown", "debug", "development-placeholder"}:
-        _fail("release PROVISIONING_MODE must be an explicit non-unknown mode")
+    provisioning = settings["PROVISIONING_MODE"].strip()
+    if provisioning not in SUPPORTED_PROVISIONING_MODES:
+        supported = ", ".join(sorted(SUPPORTED_PROVISIONING_MODES))
+        _fail(f"release PROVISIONING_MODE must be one of: {supported}")
     if _contains_placeholder(provisioning):
         _fail("release PROVISIONING_MODE still contains a placeholder")
+
+    provisioning_expiration = settings["PROVISIONING_EXPIRATION_DATE"].strip()
+    if _contains_placeholder(provisioning_expiration):
+        _fail("release PROVISIONING_EXPIRATION_DATE still contains a placeholder")
+    try:
+        normalized_expiration = (
+            provisioning_expiration[:-1] + "+00:00"
+            if provisioning_expiration.endswith("Z")
+            else provisioning_expiration
+        )
+        parsed_expiration = datetime.fromisoformat(normalized_expiration)
+    except ValueError as error:
+        raise InvariantError(
+            "release PROVISIONING_EXPIRATION_DATE must be an ISO-8601 date with a timezone"
+        ) from error
+    if parsed_expiration.tzinfo is None:
+        _fail("release PROVISIONING_EXPIRATION_DATE must include a timezone")
 
     allowlist = settings["LIFEOS_SYNC_APPROVED_HOSTS"].strip()
     if _contains_placeholder(allowlist):

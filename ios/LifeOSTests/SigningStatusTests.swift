@@ -4,6 +4,16 @@ import XCTest
 final class SigningStatusTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_783_000_000)
 
+    func testProvisioningModeUsesTheClosedReleaseVocabulary() {
+        XCTAssertEqual(
+            ProvisioningMode.releaseModes,
+            [.personalTeam, .developerProgram, .sideloaded]
+        )
+        XCTAssertTrue(ProvisioningMode.releaseModes.allSatisfy(\.isReleaseMode))
+        XCTAssertFalse(ProvisioningMode.unknown.isReleaseMode)
+        XCTAssertNil(ProvisioningMode(rawValue: "development"))
+    }
+
     func testFreeProvisioningWarnsBeforeExpiration() {
         let status = SigningStatus(
             mode: .personalTeam,

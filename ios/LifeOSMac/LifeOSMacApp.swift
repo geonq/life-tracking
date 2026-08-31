@@ -380,7 +380,8 @@ struct LifeOSMacRootView: View {
                 SettingsView(
                     usageCoordinator: usageCoordinator,
                     financeCoordinator: financeCoordinator,
-                    clipperCoordinator: clipperCoordinator
+                    clipperCoordinator: clipperCoordinator,
+                    usesVisualFixtures: usesVisualFixtures
                 )
             }
                 .transition(reduceMotion ? .identity : .opacity)

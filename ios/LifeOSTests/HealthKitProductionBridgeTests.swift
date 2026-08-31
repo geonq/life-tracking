@@ -113,8 +113,8 @@ final class HealthKitProductionBridgeTests: XCTestCase {
             write: { request in
                 HealthKitWriteReport(
                     metric: request.metric,
-                    didSave: true,
                     authorizationState: .writeAuthorized,
+                    didSave: true,
                     errorDescription: "provider error"
                 )
             }
@@ -123,7 +123,7 @@ final class HealthKitProductionBridgeTests: XCTestCase {
         let result = await client.write(try makeWriteRequest())
 
         XCTAssertFalse(result.didSave)
-        XCTAssertEqual(result.authorizationState, .error)
+        XCTAssertEqual(result.authorizationState, HealthKitAuthorizationState.error)
         XCTAssertEqual(result.errorDescription, "HealthKit write failed")
     }
 

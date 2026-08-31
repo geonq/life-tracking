@@ -1,10 +1,15 @@
 import Foundation
 
-public enum ProvisioningMode: String, Codable, Equatable, Sendable {
+public enum ProvisioningMode: String, Codable, CaseIterable, Equatable, Sendable {
     case personalTeam = "personal_team"
     case developerProgram = "developer_program"
     case sideloaded
     case unknown
+
+    /// `unknown` is a source/development state, not a valid release value.
+    public static let releaseModes: Set<Self> = [.personalTeam, .developerProgram, .sideloaded]
+
+    public var isReleaseMode: Bool { Self.releaseModes.contains(self) }
 }
 
 public enum SigningState: String, Codable, Equatable, Sendable {
@@ -29,13 +34,17 @@ public struct SigningStatus: Equatable, Sendable {
         // An expiration date without a recognized provisioning mode is not
         // enough to claim a usable signed build.  Keep the presentation
         // fail-closed until both pieces of bundle metadata are known.
-        guard mode != .unknown, let expirationDate else { return .unknown }
+        // The checked-in project injects neither a release mode nor an
+        // expiration date. Until a release pipeline supplies both values,
+        // Settings must remain explicitly unavailable rather than infer a
+        // signing state from Xcode's build configuration.
+        guard mode.isReleaseMode, let expirationDate else { return .unknown }
         guard expirationDate > now else { return .expired }
         return expirationDate.timeIntervalSince(now) <= 3 * 86_400 ? .expiringSoon : .valid
     }
 
     public var daysRemaining: Int? {
-        guard mode != .unknown, let expirationDate else { return nil }
+        guard mode.isReleaseMode, let expirationDate else { return nil }
         return max(0, Int(ceil(expirationDate.timeIntervalSince(now) / 86_400)))
     }
 
@@ -66,7 +75,7 @@ public struct SigningStatus: Equatable, Sendable {
     }
 
     public var metadataIsComplete: Bool {
-        mode != .unknown && expirationDate != nil
+        mode.isReleaseMode && expirationDate != nil
     }
 
     /// A Settings status row is descriptive metadata only.  It cannot prove

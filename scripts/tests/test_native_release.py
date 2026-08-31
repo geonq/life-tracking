@@ -13,6 +13,7 @@ from scripts.validate_native_release import (
 
 ROOT = Path(__file__).resolve().parents[2]
 TEST_APPROVED_HOST = "ci-test." + "ts.net"
+TEST_EXPIRATION = "2030-01-02T03:04:05Z"
 
 
 class NativeReleaseInvariantTests(unittest.TestCase):
@@ -23,7 +24,8 @@ class NativeReleaseInvariantTests(unittest.TestCase):
         validate_release(
             {
                 "APP_GROUP_IDENTIFIER": "group.com.hermes.lifeos.ci",
-                "PROVISIONING_MODE": "development",
+                "PROVISIONING_MODE": "developer_program",
+                "PROVISIONING_EXPIRATION_DATE": TEST_EXPIRATION,
                 "LIFEOS_SYNC_APPROVED_HOSTS": TEST_APPROVED_HOST,
                 "SWIFT_ACTIVE_COMPILATION_CONDITIONS": "",
                 "OTHER_SWIFT_FLAGS": "",
@@ -36,7 +38,8 @@ class NativeReleaseInvariantTests(unittest.TestCase):
             validate_release(
                 {
                     "APP_GROUP_IDENTIFIER": "group.com.hermes.lifeos.REPLACE_WITH_TEAM_CONFIGURED_ID",
-                    "PROVISIONING_MODE": "development",
+                    "PROVISIONING_MODE": "developer_program",
+                    "PROVISIONING_EXPIRATION_DATE": TEST_EXPIRATION,
                     "LIFEOS_SYNC_APPROVED_HOSTS": TEST_APPROVED_HOST,
                 },
                 root=ROOT,
@@ -48,10 +51,50 @@ class NativeReleaseInvariantTests(unittest.TestCase):
                 {
                     "APP_GROUP_IDENTIFIER": "group.com.hermes.lifeos.ci",
                     "PROVISIONING_MODE": "unknown",
+                    "PROVISIONING_EXPIRATION_DATE": TEST_EXPIRATION,
                     "LIFEOS_SYNC_APPROVED_HOSTS": TEST_APPROVED_HOST,
                 },
                 root=ROOT,
             )
+
+    def test_release_rejects_arbitrary_provisioning_mode(self) -> None:
+        with self.assertRaisesRegex(InvariantError, "PROVISIONING_MODE"):
+            validate_release(
+                {
+                    "APP_GROUP_IDENTIFIER": "group.com.hermes.lifeos.ci",
+                    "PROVISIONING_MODE": "development",
+                    "PROVISIONING_EXPIRATION_DATE": TEST_EXPIRATION,
+                    "LIFEOS_SYNC_APPROVED_HOSTS": TEST_APPROVED_HOST,
+                },
+                root=ROOT,
+            )
+
+    def test_release_accepts_only_the_app_vocabulary(self) -> None:
+        for mode in ("personal_team", "developer_program", "sideloaded"):
+            with self.subTest(mode=mode):
+                validate_release(
+                    {
+                        "APP_GROUP_IDENTIFIER": "group.com.hermes.lifeos.ci",
+                        "PROVISIONING_MODE": mode,
+                        "PROVISIONING_EXPIRATION_DATE": TEST_EXPIRATION,
+                        "LIFEOS_SYNC_APPROVED_HOSTS": TEST_APPROVED_HOST,
+                    },
+                    root=ROOT,
+                )
+
+    def test_release_requires_timezone_qualified_expiration(self) -> None:
+        for expiration in ("", "2030-01-02", "not-a-date"):
+            with self.subTest(expiration=expiration):
+                with self.assertRaisesRegex(InvariantError, "PROVISIONING_EXPIRATION_DATE"):
+                    validate_release(
+                        {
+                            "APP_GROUP_IDENTIFIER": "group.com.hermes.lifeos.ci",
+                            "PROVISIONING_MODE": "developer_program",
+                            "PROVISIONING_EXPIRATION_DATE": expiration,
+                            "LIFEOS_SYNC_APPROVED_HOSTS": TEST_APPROVED_HOST,
+                        },
+                        root=ROOT,
+                    )
 
     def test_release_rejects_empty_or_non_tailnet_allowlist(self) -> None:
         for allowlist in ("", "example.com", f"{TEST_APPROVED_HOST},{TEST_APPROVED_HOST}"):
@@ -60,7 +103,8 @@ class NativeReleaseInvariantTests(unittest.TestCase):
                     validate_release(
                         {
                             "APP_GROUP_IDENTIFIER": "group.com.hermes.lifeos.ci",
-                            "PROVISIONING_MODE": "development",
+                            "PROVISIONING_MODE": "developer_program",
+                            "PROVISIONING_EXPIRATION_DATE": TEST_EXPIRATION,
                             "LIFEOS_SYNC_APPROVED_HOSTS": allowlist,
                         },
                         root=ROOT,
@@ -76,7 +120,8 @@ class NativeReleaseInvariantTests(unittest.TestCase):
                     validate_release(
                         {
                             "APP_GROUP_IDENTIFIER": "group.com.hermes.lifeos.ci",
-                            "PROVISIONING_MODE": "development",
+                            "PROVISIONING_MODE": "developer_program",
+                            "PROVISIONING_EXPIRATION_DATE": TEST_EXPIRATION,
                             "LIFEOS_SYNC_APPROVED_HOSTS": TEST_APPROVED_HOST,
                             key: value,
                         },
@@ -92,6 +137,23 @@ class NativeReleaseInvariantTests(unittest.TestCase):
             """
         )
         self.assertEqual(settings["APP_GROUP_IDENTIFIER"], "group.com.hermes.lifeos.ci")
+
+    def test_selected_tab_text_uses_a_text_safe_neutral_role(self) -> None:
+        source = (ROOT / "ios/LifeOS/LifeOSApp.swift").read_text(encoding="utf-8")
+        self.assertIn(
+            ".foregroundStyle(isSelected ? tab.accent : LifeOSTokens.tertiaryText)",
+            source,
+        )
+        self.assertIn(
+            ".foregroundStyle(isSelected ? LifeOSTokens.primaryText : LifeOSTokens.tertiaryText)",
+            source,
+        )
+
+    def test_health_prompts_are_settings_only_and_write_is_explicit(self) -> None:
+        source = (ROOT / "ios/LifeOS/LifeOSApp.swift").read_text(encoding="utf-8")
+        self.assertNotIn("autoRequestHealthReadAccessIfNeeded", source)
+        self.assertNotIn("requestWriteAuthorization()", source)
+        self.assertIn("requestWriteAuthorization(userInitiated: true)", source)
 
 
 if __name__ == "__main__":

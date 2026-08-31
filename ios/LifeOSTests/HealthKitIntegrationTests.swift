@@ -101,6 +101,36 @@ final class HealthKitIntegrationTests: XCTestCase {
         XCTAssertEqual(client.writeAuthorizationCalls, 0)
     }
 
+    func testReadAuthorizationDoesNotRequestWritePermission() async {
+        let client = RecordingHealthKitIntegrationClient()
+        client.authorizationResult = .init(state: .requestRequired, promptCompleted: true)
+        let controller = HealthKitIntegrationController(client: client)
+
+        _ = await controller.requestReadAuthorization()
+
+        XCTAssertEqual(controller.snapshot.authorizationState, .readIndeterminate)
+        XCTAssertEqual(client.authorizationCalls, 1)
+        XCTAssertEqual(client.writeAuthorizationCalls, 0)
+    }
+
+    func testWriteSettingsProjectionKeepsSharingStateSeparate() {
+        let pending = HealthWriteAccessSettings.from(snapshot: .init(
+            writeAuthorizationState: .writeNotDetermined,
+            isWriteRequestInFlight: true
+        ))
+        let authorized = HealthWriteAccessSettings.from(snapshot: .init(
+            writeAuthorizationState: .writeAuthorized
+        ))
+        let denied = HealthWriteAccessSettings.from(snapshot: .init(
+            writeAuthorizationState: .writeDenied
+        ))
+
+        XCTAssertEqual(pending.state, .requestPending)
+        XCTAssertEqual(authorized.state, .authorized)
+        XCTAssertEqual(denied.state, .denied)
+        XCTAssertTrue(authorized.allowsRequest)
+    }
+
     func testWriteAuthorizationDoesNotPromptWithoutExplicitUserAction() async {
         let client = RecordingHealthKitIntegrationClient()
         client.writeAuthorizationResult = .writeAuthorized

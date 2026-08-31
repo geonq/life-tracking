@@ -266,7 +266,6 @@ struct LifeOSApp: App {
                     healthKitController.appActive()
                     Task { @MainActor in
                         await healthKitController.refreshStatus()
-                        await autoRequestHealthReadAccessIfNeeded()
                         await refreshNetworkBackedDataAfterForeground()
 #if os(iOS)
                         LifeOSBackgroundRefresh.schedule()
@@ -510,7 +509,9 @@ struct LifeOSApp: App {
                 clipperCoordinator: clipperCoordinator,
                 healthKitController: healthKitController,
                 healthKitFitnessRepository: healthKitFitnessRepository,
-                requestHealthReadAccess: usesVisualFixtures ? nil : requestHealthReadAccess
+                requestHealthReadAccess: usesVisualFixtures ? nil : requestHealthReadAccess,
+                requestHealthWriteAccess: usesVisualFixtures ? nil : requestHealthWriteAccess,
+                usesVisualFixtures: usesVisualFixtures
             ))
 #else
             return AnyView(SettingsView(
@@ -519,7 +520,8 @@ struct LifeOSApp: App {
                 clipperCoordinator: clipperCoordinator,
                 healthReadAccess: healthReadAccessSettings,
                 requestHealthReadAccess: usesVisualFixtures ? nil : requestHealthReadAccess,
-                retainedHealthData: retainedHealthDataSettings
+                retainedHealthData: retainedHealthDataSettings,
+                usesVisualFixtures: usesVisualFixtures
             ))
 #endif
         default:
@@ -540,31 +542,16 @@ struct LifeOSApp: App {
         let report = await healthKitController.requestReadAuthorization()
         if report.promptCompleted == true {
             UserDefaults.standard.set(true, forKey: Self.healthReadPromptCompletedKey)
-            // Read and write permissions remain separate in the controller,
-            // but the one explicit Health setup action requests both reviewed
-            // typed sets so the app cannot ship with a read-only runtime while
-            // advertising the HealthKit update capability.
-            _ = await healthKitController.requestWriteAuthorization()
         }
     }
 
-    /// Issues the Health read prompt automatically when the system reports it
-    /// is still required, so an install never dead-ends behind the Settings
-    /// navigation just to open the one-time sheet. `requestAuthorization`
-    /// completes instantly without a sheet once every determination exists
-    /// (including grants made manually in the Settings app), so this is a
-    /// no-op for an already-authorized installation and can re-show at most
-    /// until the first completed determination. Read access itself remains
-    /// indeterminate; no per-type denial is inferred from the outcome.
     @MainActor
-    private func autoRequestHealthReadAccessIfNeeded() async {
+    private func requestHealthWriteAccess() async {
         guard !usesVisualFixtures else { return }
-        let snapshot = healthKitController.snapshot
-        guard !snapshot.isRequestInFlight,
-              !snapshot.explicitRequestCompleted,
-              snapshot.authorizationState == .notRequested ||
-              snapshot.authorizationState == .requestRequired else { return }
-        await requestHealthReadAccess()
+        _ = await healthKitController.requestWriteAuthorization(userInitiated: true)
+        // Refresh status after the explicit action so the row reflects the
+        // typed per-metric sharing state observed by the controller.
+        await healthKitController.refreshStatus()
     }
 }
 
@@ -580,6 +567,8 @@ private struct HealthKitSettingsDestination: View {
     @ObservedObject private var healthKitController: HealthKitIntegrationController
     @ObservedObject private var healthKitFitnessRepository: HealthKitFitnessRepository
     private let requestHealthReadAccess: (@MainActor () async -> Void)?
+    private let requestHealthWriteAccess: (@MainActor () async -> Void)?
+    private let usesVisualFixtures: Bool
 
     init(
         usageCoordinator: UsageCoordinator,
@@ -587,7 +576,9 @@ private struct HealthKitSettingsDestination: View {
         clipperCoordinator: ClipperCoordinator,
         healthKitController: HealthKitIntegrationController,
         healthKitFitnessRepository: HealthKitFitnessRepository,
-        requestHealthReadAccess: (@MainActor () async -> Void)?
+        requestHealthReadAccess: (@MainActor () async -> Void)?,
+        requestHealthWriteAccess: (@MainActor () async -> Void)?,
+        usesVisualFixtures: Bool
     ) {
         _usageCoordinator = ObservedObject(wrappedValue: usageCoordinator)
         _financeCoordinator = ObservedObject(wrappedValue: financeCoordinator)
@@ -595,6 +586,8 @@ private struct HealthKitSettingsDestination: View {
         _healthKitController = ObservedObject(wrappedValue: healthKitController)
         _healthKitFitnessRepository = ObservedObject(wrappedValue: healthKitFitnessRepository)
         self.requestHealthReadAccess = requestHealthReadAccess
+        self.requestHealthWriteAccess = requestHealthWriteAccess
+        self.usesVisualFixtures = usesVisualFixtures
     }
 
     var body: some View {
@@ -606,7 +599,10 @@ private struct HealthKitSettingsDestination: View {
             requestHealthReadAccess: requestHealthReadAccess,
             retainedHealthData: retainedHealthData,
             healthKitController: healthKitController,
-            healthKitFitnessRepository: healthKitFitnessRepository
+            healthKitFitnessRepository: healthKitFitnessRepository,
+            requestHealthWriteAccess: requestHealthWriteAccess,
+            healthWriteAccess: HealthWriteAccessSettings.from(snapshot: healthKitController.snapshot),
+            usesVisualFixtures: usesVisualFixtures
         )
     }
 
@@ -690,13 +686,14 @@ private struct CompactTabBarItem: View {
                 Image(systemName: isSelected ? tab.filledSymbol : tab.outlineSymbol)
                     .font(.system(size: 17, weight: isSelected ? .semibold : .regular))
                     .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(isSelected ? tab.accent : LifeOSTokens.tertiaryText)
                     .modifier(CompactTabSymbolTransition(enabled: !reduceMotion))
                     .frame(width: 20, height: 19)
                 Text(title)
                     .font(LifeOSFont.navigationLabel())
+                    .foregroundStyle(isSelected ? LifeOSTokens.primaryText : LifeOSTokens.tertiaryText)
                     .lineLimit(1)
             }
-            .foregroundStyle(isSelected ? tab.accent : LifeOSTokens.tertiaryText)
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
             .frame(maxWidth: .infinity, minHeight: 44)

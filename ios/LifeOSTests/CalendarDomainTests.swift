@@ -1200,7 +1200,8 @@ final class CalendarDomainTests: XCTestCase {
         let mergeResult = await coordinator.merge(CalendarSnapshot(items: [item]))
         XCTAssertEqual(mergeResult, .success)
         XCTAssertTrue(coordinator.canUndo, "An idempotent peer replay must not invalidate the local undo token")
-        XCTAssertEqual(try await coordinator.store.load(), CalendarSnapshot(items: [item]))
+        let loaded = try await coordinator.store.load()
+        XCTAssertEqual(loaded, CalendarSnapshot(items: [item]))
         try? FileManager.default.removeItem(at: directory)
     }
 

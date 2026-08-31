@@ -158,6 +158,81 @@ struct HealthReadAccessSettings: Equatable, Sendable {
     }
 }
 
+/// HealthKit sharing is a separate privacy decision from read access. The
+/// settings surface keeps that distinction visible and only exposes the
+/// request action when the app supplies an explicit user-authored handler.
+struct HealthWriteAccessSettings: Equatable, Sendable {
+    enum State: Equatable, Sendable {
+        case unavailable
+        case notRequested
+        case requestPending
+        case authorized
+        case denied
+        case restricted
+        case protectedDataUnavailable
+        case error
+    }
+
+    let state: State
+
+    init(state: State) {
+        self.state = state
+    }
+
+    static var platformDefault: Self { Self(state: .unavailable) }
+
+    var title: String {
+        switch state {
+        case .unavailable: "Unavailable"
+        case .notRequested: "Permission required"
+        case .requestPending: "Waiting for Apple Health"
+        case .authorized: "Write access available"
+        case .denied: "Write access denied"
+        case .restricted: "Restricted"
+        case .protectedDataUnavailable: "Device locked"
+        case .error: "Could not check"
+        }
+    }
+
+    var detail: String {
+        switch state {
+        case .unavailable:
+            "HealthKit sharing is not available in this app context."
+        case .notRequested:
+            "Allow LifeOS to share only explicit manual values such as water, caffeine, and body measurements."
+        case .requestPending:
+            "Complete the Apple Health sharing sheet. No value is written by this permission request."
+        case .authorized:
+            "Apple Health sharing is available for the supported manual values; every save is still rechecked."
+        case .denied:
+            "Apple Health sharing was denied or is unavailable. Review Health access in the system settings if needed."
+        case .restricted:
+            "Health data sharing is restricted on this device."
+        case .protectedDataUnavailable:
+            "Unlock the iPhone before LifeOS retries HealthKit sharing."
+        case .error:
+            "HealthKit sharing status could not be interpreted. Retry from this screen."
+        }
+    }
+
+    var buttonTitle: String {
+        switch state {
+        case .authorized, .denied: "Review Health write access"
+        case .requestPending: "Waiting…"
+        default: "Allow Health writes"
+        }
+    }
+
+    var allowsRequest: Bool {
+        switch state {
+        case .requestPending, .unavailable, .restricted, .protectedDataUnavailable:
+            false
+        default:
+            true
+        }
+    }
+}
+
 #if os(iOS)
 extension HealthReadAccessSettings {
     /// Keeps the SwiftUI settings surface on the same privacy boundary as the
@@ -185,6 +260,33 @@ extension HealthReadAccessSettings {
         // and are not a support-safe diagnostic channel.  The Settings copy
         // uses the fixed state detail above rather than rendering a raw
         // localized error that could contain private implementation data.
+        return Self(state: state)
+    }
+}
+
+extension HealthWriteAccessSettings {
+    static func from(snapshot: HealthKitIntegrationSnapshot) -> Self {
+        if snapshot.isWriteRequestInFlight {
+            return Self(state: .requestPending)
+        }
+
+        let state: State
+        switch snapshot.writeAuthorizationState {
+        case .unavailable:
+            state = .unavailable
+        case .restricted, .revoked:
+            state = .restricted
+        case .protectedDataUnavailable:
+            state = .protectedDataUnavailable
+        case .writeNotDetermined, .notRequested, .requestRequired, .requestPending:
+            state = .notRequested
+        case .writeAuthorized:
+            state = .authorized
+        case .writeDenied:
+            state = .denied
+        case .readIndeterminate, .error:
+            state = .error
+        }
         return Self(state: state)
     }
 }
@@ -902,6 +1004,38 @@ struct SyncSettingsReadiness: Equatable, Sendable {
     }
 }
 
+/// Settings must be safe to render in screenshot/visual-fixture launches.
+/// This policy is shared by the view's task and its manual action guard so a
+/// future refactor cannot reintroduce a network call on fixture navigation.
+enum SettingsFixturePolicy {
+    static func shouldRunFinanceGatewayPreflight(usesVisualFixtures: Bool) -> Bool {
+        !usesVisualFixtures
+    }
+}
+
+/// A configured route is not the same thing as a verified runtime path. Keep
+/// the status copy tied to the latest read-only preflight, if one exists.
+enum SyncGatewayRuntimePresentation {
+    static func identityStatusTitle(for preflight: TailscaleConnectionPreflightState?) -> String {
+        guard let preflight else { return "Required by configuration" }
+        return preflight == .reachable ? "Verified for this session" : "Not verified"
+    }
+
+    static func identityStatusDetail(for preflight: TailscaleConnectionPreflightState?) -> String {
+        guard let preflight else {
+            return "Tailscale Serve identity is required by configuration; no current runtime preflight has verified enforcement."
+        }
+        guard preflight == .reachable else {
+            return "\(preflight.settingsTitle). Runtime identity enforcement is not verified for this session."
+        }
+        return "The latest read-only preflight succeeded with the approved gateway. This verifies the current session only, not deployment or provider connectivity."
+    }
+
+    static func identityIsVerified(for preflight: TailscaleConnectionPreflightState?) -> Bool {
+        preflight == .reachable
+    }
+}
+
 enum AppGroupSettingsState: String, Equatable, Sendable {
     case configured
     case placeholder
@@ -975,7 +1109,10 @@ struct SettingsView: View {
     @ObservedObject private var clipperCoordinator: ClipperCoordinator
     private let healthReadAccess: HealthReadAccessSettings
     private let requestHealthReadAccess: (@MainActor () async -> Void)?
+    private let requestHealthWriteAccess: (@MainActor () async -> Void)?
     private let retainedHealthData: RetainedHealthDataSettings
+    private let healthWriteAccess: HealthWriteAccessSettings
+    private let usesVisualFixtures: Bool
 #if os(iOS)
     private let healthKitController: HealthKitIntegrationController
     private let healthKitFitnessRepository: HealthKitFitnessRepository
@@ -1022,14 +1159,20 @@ struct SettingsView: View {
         requestHealthReadAccess: (@MainActor () async -> Void)?,
         retainedHealthData: RetainedHealthDataSettings,
         healthKitController: HealthKitIntegrationController,
-        healthKitFitnessRepository: HealthKitFitnessRepository
+        healthKitFitnessRepository: HealthKitFitnessRepository,
+        requestHealthWriteAccess: (@MainActor () async -> Void)? = nil,
+        healthWriteAccess: HealthWriteAccessSettings = .platformDefault,
+        usesVisualFixtures: Bool = false
     ) {
         _usageCoordinator = ObservedObject(wrappedValue: usageCoordinator)
         _financeCoordinator = ObservedObject(wrappedValue: financeCoordinator)
         _clipperCoordinator = ObservedObject(wrappedValue: clipperCoordinator)
         self.healthReadAccess = healthReadAccess
         self.requestHealthReadAccess = requestHealthReadAccess
+        self.requestHealthWriteAccess = requestHealthWriteAccess
         self.retainedHealthData = retainedHealthData
+        self.healthWriteAccess = healthWriteAccess
+        self.usesVisualFixtures = usesVisualFixtures
         self.healthKitController = healthKitController
         self.healthKitFitnessRepository = healthKitFitnessRepository
     }
@@ -1040,14 +1183,20 @@ struct SettingsView: View {
         clipperCoordinator: ClipperCoordinator,
         healthReadAccess: HealthReadAccessSettings = .platformDefault,
         requestHealthReadAccess: (@MainActor () async -> Void)? = nil,
-        retainedHealthData: RetainedHealthDataSettings = .unavailable
+        retainedHealthData: RetainedHealthDataSettings = .unavailable,
+        requestHealthWriteAccess: (@MainActor () async -> Void)? = nil,
+        healthWriteAccess: HealthWriteAccessSettings = .platformDefault,
+        usesVisualFixtures: Bool = false
     ) {
         _usageCoordinator = ObservedObject(wrappedValue: usageCoordinator)
         _financeCoordinator = ObservedObject(wrappedValue: financeCoordinator)
         _clipperCoordinator = ObservedObject(wrappedValue: clipperCoordinator)
         self.healthReadAccess = healthReadAccess
         self.requestHealthReadAccess = requestHealthReadAccess
+        self.requestHealthWriteAccess = requestHealthWriteAccess
         self.retainedHealthData = retainedHealthData
+        self.healthWriteAccess = healthWriteAccess
+        self.usesVisualFixtures = usesVisualFixtures
     }
     #endif
 
@@ -1068,7 +1217,7 @@ struct SettingsView: View {
                         NavigationLink {
                             ProviderConnectionsSettingsView(
                                 snapshot: usageSettings,
-                                refreshAction: { await usageCoordinator.refresh() }
+                                refreshAction: usesVisualFixtures ? nil : { await usageCoordinator.refresh() }
                             )
                         } label: {
                             SettingsHubCard(category: categories[0])
@@ -1079,7 +1228,8 @@ struct SettingsView: View {
                         NavigationLink {
                             FinanceConnectionsSettingsView(
                                 snapshot: financeSettings,
-                                refreshAction: { await financeCoordinator.refresh() }
+                                refreshAction: usesVisualFixtures ? nil : { await financeCoordinator.refresh() },
+                                usesVisualFixtures: usesVisualFixtures
                             )
                         } label: {
                             SettingsHubCard(category: categories[1])
@@ -1092,7 +1242,7 @@ struct SettingsView: View {
                                 state: clipperCoordinator.state,
                                 lastUpdated: clipperCoordinator.lastUpdated,
                                 errorMessage: clipperCoordinator.errorMessage,
-                                refreshAction: { await clipperCoordinator.refresh() }
+                                refreshAction: usesVisualFixtures ? nil : { await clipperCoordinator.refresh() }
                             )
                         } label: {
                             SettingsHubCard(category: categories[2])
@@ -1105,7 +1255,9 @@ struct SettingsView: View {
                             HealthDevicesSettingsView(
                                 healthReadAccess: healthReadAccess,
                                 requestHealthReadAccess: requestHealthReadAccess,
+                                requestHealthWriteAccess: requestHealthWriteAccess,
                                 retainedHealthData: retainedHealthData,
+                                healthWriteAccess: healthWriteAccess,
                                 healthKitController: healthKitController,
                                 healthKitFitnessRepository: healthKitFitnessRepository
                             )
@@ -1113,7 +1265,9 @@ struct SettingsView: View {
                             HealthDevicesSettingsView(
                                 healthReadAccess: healthReadAccess,
                                 requestHealthReadAccess: requestHealthReadAccess,
-                                retainedHealthData: retainedHealthData
+                                requestHealthWriteAccess: requestHealthWriteAccess,
+                                retainedHealthData: retainedHealthData,
+                                healthWriteAccess: healthWriteAccess
                             )
 #endif
                         } label: {
@@ -1707,7 +1861,7 @@ private struct BankConsentSafariView: UIViewControllerRepresentable {
 /// Honest, coarse per-row state for one catalog connector's consent attempt.
 /// Mirrors `TailscaleConnectionPreflightState`: never claims "connected"
 /// without an authoritative `linked` status from the gateway.
-private enum BankConsentRowState: Equatable {
+enum BankConsentRowState: Equatable {
     case idle
     case openingConsent
     case awaitingConsent(BankConsentLink)
@@ -1715,9 +1869,23 @@ private enum BankConsentRowState: Equatable {
     case checkingStatus(BankConsentLink)
     case linked
     case expired
-    case alreadyLinking
+    case alreadyLinking(BankConsentLink?)
     case gatewayNotConfigured
-    case error
+    case error(BankConsentLink?)
+
+    static func recoveredState(
+        for error: TailscaleSyncError,
+        preserving link: BankConsentLink? = nil
+    ) -> Self {
+        switch error {
+        case .connectionAlreadyLinking:
+            return .alreadyLinking(link)
+        case .gatewayNotConfigured:
+            return .gatewayNotConfigured
+        default:
+            return .error(link)
+        }
+    }
 
     var lifecyclePhase: BankConsentLifecyclePhase {
         switch self {
@@ -1750,7 +1918,14 @@ private final class BankConsentRowController: ObservableObject {
 
     func start(institutionId: String) {
         task?.cancel()
-        BankConsentPendingLinkStore.clear(institutionId: self.institutionId)
+        // A pending opaque handoff is recoverable state. Re-check it before
+        // asking the gateway for another link so a transient failure or a
+        // 409-already-linking response cannot strand the consent session.
+        if let pending = BankConsentPendingLinkStore.load(institutionId: self.institutionId) {
+            state = .awaitingConsent(pending)
+            refreshStatus()
+            return
+        }
         state = .openingConsent
         task = Task { [client] in
             do {
@@ -1794,10 +1969,43 @@ private final class BankConsentRowController: ObservableObject {
         refreshStatus()
     }
 
+    /// Retries the current opaque consent session when one exists. Without a
+    /// retained link, the only safe recovery is a new gateway request.
+    func retry() {
+        switch state {
+        case .awaitingConsent:
+            openConsent()
+        case .alreadyLinking(let link), .error(let link):
+            if link != nil {
+                refreshStatus()
+            } else {
+                start(institutionId: institutionId)
+            }
+        case .idle, .expired:
+            start(institutionId: institutionId)
+        default:
+            break
+        }
+    }
+
+    var hasPendingLinkForRecovery: Bool {
+        switch state {
+        case .awaitingConsent, .returningFromConsent, .checkingStatus:
+            true
+        case .alreadyLinking(let link), .error(let link):
+            link != nil
+        default:
+            false
+        }
+    }
+
     func refreshStatus() {
         let link: BankConsentLink
         switch state {
         case .awaitingConsent(let pending), .returningFromConsent(let pending):
+            link = pending
+        case .alreadyLinking(let pending), .error(let pending):
+            guard let pending else { return }
             link = pending
         default:
             return
@@ -1817,13 +2025,15 @@ private final class BankConsentRowController: ObservableObject {
                     BankConsentPendingLinkStore.clear(institutionId: self.institutionId)
                     self.state = .expired
                 case .error:
-                    BankConsentPendingLinkStore.clear(institutionId: self.institutionId)
-                    self.state = .error
+                    // The gateway may report a temporary provider failure;
+                    // keep the opaque link so the user can retry status or
+                    // reopen the hosted consent flow without starting over.
+                    self.state = .error(link)
                 case .created, .linkOpened: self.state = .awaitingConsent(link)
                 }
             } catch {
                 guard !Task.isCancelled else { return }
-                self.state = Self.rowState(for: error)
+                self.state = Self.rowState(for: error, preserving: link)
             }
         }
     }
@@ -1838,13 +2048,9 @@ private final class BankConsentRowController: ObservableObject {
         task?.cancel()
     }
 
-    private static func rowState(for error: Error) -> BankConsentRowState {
-        guard let syncError = error as? TailscaleSyncError else { return .error }
-        switch syncError {
-        case .connectionAlreadyLinking: return .alreadyLinking
-        case .gatewayNotConfigured: return .gatewayNotConfigured
-        default: return .error
-        }
+    static func rowState(for error: Error, preserving link: BankConsentLink? = nil) -> BankConsentRowState {
+        guard let syncError = error as? TailscaleSyncError else { return .error(link) }
+        return BankConsentRowState.recoveredState(for: syncError, preserving: link)
     }
 }
 
@@ -1874,11 +2080,7 @@ private struct BankConsentConnectRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Button {
-                if case .awaitingConsent = controller.state {
-                    controller.openConsent()
-                } else {
-                    controller.start(institutionId: descriptor.kind.rawValue)
-                }
+                controller.retry()
             } label: {
                 HStack(spacing: 7) {
                     if isBusy {
@@ -1913,13 +2115,14 @@ private struct BankConsentConnectRow: View {
             .accessibilityElement(children: .combine)
             .accessibilityIdentifier("settings-finance-connect-status-\(descriptor.kind.rawValue)")
 
-            if case .awaitingConsent = controller.state {
+            if controller.hasPendingLinkForRecovery {
                 Button("Re-check status") {
                     controller.refreshStatus()
                 }
                 .font(LifeOSFont.inter(11, weight: .semiBold))
                 .buttonStyle(.plain)
                 .foregroundStyle(LifeOSTokens.accent)
+                .disabled(isBusy)
                 .accessibilityIdentifier("settings-finance-connect-recheck-\(descriptor.kind.rawValue)")
             }
         }
@@ -1966,7 +2169,7 @@ private struct BankConsentConnectRow: View {
     private var canTap: Bool {
         guard gatewayReady, !isBusy else { return false }
         switch controller.state {
-        case .linked, .alreadyLinking, .gatewayNotConfigured: return false
+        case .linked, .gatewayNotConfigured: return false
         default: return true
         }
     }
@@ -1975,13 +2178,14 @@ private struct BankConsentConnectRow: View {
         guard let gatewayPreflight else { return "Check gateway first" }
         guard gatewayPreflight == .reachable else { return "Gateway unavailable" }
         switch controller.state {
-        case .idle, .error, .expired: return "Connect"
+        case .idle, .expired: return "Connect"
         case .openingConsent: return "Opening consent…"
         case .awaitingConsent: return "Continue consent"
         case .returningFromConsent: return "Verifying callback…"
         case .checkingStatus: return "Checking status…"
         case .linked: return "Linked"
-        case .alreadyLinking: return "Already linking"
+        case .alreadyLinking(let link), .error(let link):
+            return link == nil ? "Retry connection" : "Re-check status"
         case .gatewayNotConfigured: return "Gateway required"
         }
     }
@@ -1989,7 +2193,7 @@ private struct BankConsentConnectRow: View {
     private var statusIcon: LifeOSIconName {
         switch controller.state {
         case .linked: .verified
-        case .error, .expired, .alreadyLinking, .gatewayNotConfigured: .warning
+        case .error(_), .expired, .alreadyLinking(_), .gatewayNotConfigured: .warning
         default: .security
         }
     }
@@ -1997,7 +2201,7 @@ private struct BankConsentConnectRow: View {
     private var statusColor: Color {
         switch controller.state {
         case .linked: LifeOSTokens.success
-        case .error, .expired, .alreadyLinking, .gatewayNotConfigured: LifeOSTokens.warning
+        case .error(_), .expired, .alreadyLinking(_), .gatewayNotConfigured: LifeOSTokens.warning
         default: LifeOSTokens.tertiaryText
         }
     }
@@ -2024,12 +2228,18 @@ private struct BankConsentConnectRow: View {
             return "The gateway reports this connection as linked. Refresh is read-only; revoke remains gateway-owned."
         case .expired:
             return "The consent link expired before it was completed. Tap Connect to request a new one."
-        case .alreadyLinking:
-            return "A connection is already in progress for this connector. Finish or expire it before starting another."
+        case .alreadyLinking(let link):
+            if link != nil {
+                return "A connection is already in progress. The pending session is retained; re-check status or reopen consent after the gateway allows it."
+            }
+            return "A connection is already in progress for this connector. Retry once the gateway can expose its status."
         case .gatewayNotConfigured:
             return "The gateway has no Enable Banking configuration. Nothing was linked."
-        case .error:
-            return "The gateway rejected the request. Nothing was linked."
+        case .error(let link):
+            if link != nil {
+                return "The status check failed temporarily. The pending session is retained; re-check status instead of starting over."
+            }
+            return "The gateway rejected the request. Nothing was linked; retry the connection when the gateway is ready."
         }
     }
 }
@@ -2037,6 +2247,7 @@ private struct BankConsentConnectRow: View {
 private struct FinanceConnectionsSettingsView: View {
     let snapshot: FinanceSettingsSnapshot
     let refreshAction: (() async -> Void)?
+    let usesVisualFixtures: Bool
     private let catalog = FinanceConnectorCatalog.defaults
     private let syncClient = TailscaleSyncClient()
     @State private var gatewayPreflight: TailscaleConnectionPreflightState?
@@ -2045,10 +2256,12 @@ private struct FinanceConnectionsSettingsView: View {
 
     init(
         snapshot: FinanceSettingsSnapshot = .unavailable,
-        refreshAction: (() async -> Void)? = nil
+        refreshAction: (() async -> Void)? = nil,
+        usesVisualFixtures: Bool = false
     ) {
         self.snapshot = snapshot
         self.refreshAction = refreshAction
+        self.usesVisualFixtures = usesVisualFixtures
     }
 
     var body: some View {
@@ -2112,7 +2325,7 @@ private struct FinanceConnectionsSettingsView: View {
                         }
                         .buttonStyle(.bordered)
                         .tint(LifeOSTokens.accent)
-                        .disabled(isCheckingGateway)
+                        .disabled(isCheckingGateway || usesVisualFixtures)
                         .accessibilityIdentifier("settings-finance-gateway-preflight")
                     }
                 }
@@ -2206,6 +2419,7 @@ private struct FinanceConnectionsSettingsView: View {
         .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
         .navigationTitle("Bank & Finance")
         .task {
+            guard SettingsFixturePolicy.shouldRunFinanceGatewayPreflight(usesVisualFixtures: usesVisualFixtures) else { return }
             runGatewayPreflight()
         }
         .onDisappear {
@@ -2216,7 +2430,8 @@ private struct FinanceConnectionsSettingsView: View {
     }
 
     private func runGatewayPreflight() {
-        guard !isCheckingGateway else { return }
+        guard SettingsFixturePolicy.shouldRunFinanceGatewayPreflight(usesVisualFixtures: usesVisualFixtures),
+              !isCheckingGateway else { return }
         gatewayPreflightTask?.cancel()
         isCheckingGateway = true
         gatewayPreflight = nil
@@ -2229,12 +2444,16 @@ private struct FinanceConnectionsSettingsView: View {
     }
 
     private var gatewayPreflightTitle: String {
+        if usesVisualFixtures { return "Disabled in fixture mode" }
         if isCheckingGateway { return "Checking" }
         guard let gatewayPreflight else { return "Not checked" }
         return gatewayPreflight.settingsTitle
     }
 
     private var gatewayPreflightDetail: String {
+        if usesVisualFixtures {
+            return "Visual fixture mode keeps the gateway preflight offline; no network request is made on navigation or by this control."
+        }
         if isCheckingGateway {
             return "One bounded read-only request is in flight; no finance or bank connection is changed."
         }
@@ -2309,7 +2528,12 @@ private struct HealthDevicesSettingsView: View {
     private let snapshot = HelioDeviceSettingsSnapshot.current
     let healthReadAccess: HealthReadAccessSettings
     let requestHealthReadAccess: (@MainActor () async -> Void)?
+    let requestHealthWriteAccess: (@MainActor () async -> Void)?
     let retainedHealthData: RetainedHealthDataSettings
+    let healthWriteAccess: HealthWriteAccessSettings
+#if os(iOS)
+    @State private var isWriteAuthorizationConfirmationPresented = false
+#endif
 #if os(iOS)
     @ObservedObject private var healthKitController: HealthKitIntegrationController
     @ObservedObject private var healthKitFitnessRepository: HealthKitFitnessRepository
@@ -2319,13 +2543,17 @@ private struct HealthDevicesSettingsView: View {
     init(
         healthReadAccess: HealthReadAccessSettings,
         requestHealthReadAccess: (@MainActor () async -> Void)?,
+        requestHealthWriteAccess: (@MainActor () async -> Void)?,
         retainedHealthData: RetainedHealthDataSettings,
+        healthWriteAccess: HealthWriteAccessSettings,
         healthKitController: HealthKitIntegrationController,
         healthKitFitnessRepository: HealthKitFitnessRepository
     ) {
         self.healthReadAccess = healthReadAccess
         self.requestHealthReadAccess = requestHealthReadAccess
+        self.requestHealthWriteAccess = requestHealthWriteAccess
         self.retainedHealthData = retainedHealthData
+        self.healthWriteAccess = healthWriteAccess
         _healthKitController = ObservedObject(wrappedValue: healthKitController)
         _healthKitFitnessRepository = ObservedObject(wrappedValue: healthKitFitnessRepository)
     }
@@ -2333,11 +2561,15 @@ private struct HealthDevicesSettingsView: View {
     init(
         healthReadAccess: HealthReadAccessSettings,
         requestHealthReadAccess: (@MainActor () async -> Void)?,
-        retainedHealthData: RetainedHealthDataSettings
+        requestHealthWriteAccess: (@MainActor () async -> Void)?,
+        retainedHealthData: RetainedHealthDataSettings,
+        healthWriteAccess: HealthWriteAccessSettings
     ) {
         self.healthReadAccess = healthReadAccess
         self.requestHealthReadAccess = requestHealthReadAccess
+        self.requestHealthWriteAccess = requestHealthWriteAccess
         self.retainedHealthData = retainedHealthData
+        self.healthWriteAccess = healthWriteAccess
     }
 #endif
 
@@ -2346,12 +2578,17 @@ private struct HealthDevicesSettingsView: View {
         HealthReadAccessSettings.from(snapshot: healthKitController.snapshot)
     }
 
+    private var resolvedHealthWriteAccess: HealthWriteAccessSettings {
+        HealthWriteAccessSettings.from(snapshot: healthKitController.snapshot)
+    }
+
     private var resolvedRetainedHealthData: RetainedHealthDataSettings {
         guard let projection = healthKitFitnessRepository.projection else { return .unavailable }
         return .from(projection: projection)
     }
 #else
     private var resolvedHealthReadAccess: HealthReadAccessSettings { healthReadAccess }
+    private var resolvedHealthWriteAccess: HealthWriteAccessSettings { healthWriteAccess }
     private var resolvedRetainedHealthData: RetainedHealthDataSettings { retainedHealthData }
 #endif
 
@@ -2405,6 +2642,49 @@ private struct HealthDevicesSettingsView: View {
                             .accessibilityIdentifier("settings-health-request-read-access")
                             .padding(.vertical, 10)
                         }
+#if os(iOS)
+                        if let requestHealthWriteAccess {
+                            Divider().padding(.leading, 38)
+                            SettingsStatusRow(
+                                title: "Apple Health write access",
+                                detail: resolvedHealthWriteAccess.detail,
+                                status: resolvedHealthWriteAccess.title,
+                                icon: .security,
+                                statusColor: healthWriteAccessStatusColor
+                            )
+                            .accessibilityIdentifier("settings-health-write-status")
+
+                            Button {
+                                isWriteAuthorizationConfirmationPresented = true
+                            } label: {
+                                HStack(spacing: 8) {
+                                    if resolvedHealthWriteAccess.state == .requestPending {
+                                        ProgressView().controlSize(.small)
+                                    }
+                                    Text(resolvedHealthWriteAccess.buttonTitle)
+                                }
+                                .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(LifeOSTokens.accent)
+                            .disabled(!resolvedHealthWriteAccess.allowsRequest)
+                            .accessibilityIdentifier("settings-health-request-write-access")
+                            .accessibilityHint("Opens a confirmation before the Apple Health sharing permission sheet")
+                            .confirmationDialog(
+                                "Allow LifeOS to write selected Health values?",
+                                isPresented: $isWriteAuthorizationConfirmationPresented,
+                                titleVisibility: .visible
+                            ) {
+                                Button("Continue to Apple Health") {
+                                    Task { @MainActor in await requestHealthWriteAccess() }
+                                }
+                                Button("Cancel", role: .cancel) {}
+                            } message: {
+                                Text("LifeOS will request sharing access only for explicit manual values. It will not write a sample as part of this permission request.")
+                            }
+                            .padding(.vertical, 10)
+                        }
+#endif
                         Divider().padding(.leading, 38)
                         SettingsStatusRow(
                             title: "Current connection",
@@ -2512,7 +2792,7 @@ private struct HealthDevicesSettingsView: View {
                     .accessibilityIdentifier("settings-health-device-management")
                 }
 
-                TruthfulSetupNote(text: "HealthKit reads are iPhone-only and read-only. Battery, firmware, pairing, reboot, configuration, private BLE control, and a verified Zepp launch route remain unavailable or Zepp-only until a supported interface is proven. Demo fixtures remain separate from observed device data.")
+                TruthfulSetupNote(text: "HealthKit reads and separately confirmed writes are iPhone-only. Writes are limited to explicit manual values and every save is rechecked. Battery, firmware, pairing, reboot, configuration, private BLE control, and a verified Zepp launch route remain unavailable or Zepp-only until a supported interface is proven. Demo fixtures remain separate from observed device data.")
             }
             .frame(maxWidth: 760, alignment: .leading)
             .padding(LifeOSTokens.pagePadding)
@@ -2529,6 +2809,17 @@ private struct HealthDevicesSettingsView: View {
             return LifeOSTokens.warning
         case .restricted, .error:
             return LifeOSTokens.danger
+        }
+    }
+
+    private var healthWriteAccessStatusColor: Color {
+        switch resolvedHealthWriteAccess.state {
+        case .authorized:
+            LifeOSTokens.info
+        case .denied, .restricted, .error:
+            LifeOSTokens.danger
+        case .notRequested, .requestPending, .protectedDataUnavailable, .unavailable:
+            LifeOSTokens.warning
         }
     }
 
@@ -2645,7 +2936,7 @@ private struct SyncStorageSettingsView: View {
             VStack(alignment: .leading, spacing: 18) {
                 SettingsIntro(
                     title: "Sync & storage",
-                    message: "The loopback-only Windows gateway enforces Tailscale device identity through Tailscale Serve. LifeOS sends no bearer or token."
+                    message: "The loopback-only Windows gateway is configured to require Tailscale device identity through Tailscale Serve. The current session is shown below only after a read-only preflight. LifeOS sends no bearer or token."
                 )
 
                 SettingsSection(title: "Tailscale sync", icon: .security) {
@@ -2735,10 +3026,12 @@ private struct SyncStorageSettingsView: View {
                         Divider().padding(.leading, 38)
                         SettingsStatusRow(
                             title: "Tailscale device identity",
-                            detail: "The loopback-only Windows gateway enforces identity through Tailscale Serve; LifeOS does not mint or send identity headers.",
-                            status: localReadiness.canAttemptConnection ? "Gateway enforced" : "Configuration required",
+                            detail: SyncGatewayRuntimePresentation.identityStatusDetail(for: connectionPreflight),
+                            status: SyncGatewayRuntimePresentation.identityStatusTitle(for: connectionPreflight),
                             icon: .security,
-                            statusColor: localReadiness.canAttemptConnection ? LifeOSTokens.success : LifeOSTokens.warning
+                            statusColor: SyncGatewayRuntimePresentation.identityIsVerified(for: connectionPreflight)
+                                ? LifeOSTokens.success
+                                : LifeOSTokens.warning
                         )
                     }
                 }
@@ -2755,10 +3048,12 @@ private struct SyncStorageSettingsView: View {
                         Divider().padding(.leading, 38)
                         SettingsStatusRow(
                             title: "Device identity",
-                            detail: "Tailscale device identity is enforced by the loopback-only gateway; no bearer or token is stored here",
-                            status: "Gateway enforced",
+                            detail: SyncGatewayRuntimePresentation.identityStatusDetail(for: connectionPreflight),
+                            status: SyncGatewayRuntimePresentation.identityStatusTitle(for: connectionPreflight),
                             icon: .security,
-                            statusColor: LifeOSTokens.success
+                            statusColor: SyncGatewayRuntimePresentation.identityIsVerified(for: connectionPreflight)
+                                ? LifeOSTokens.success
+                                : LifeOSTokens.warning
                         )
                         Divider().padding(.leading, 38)
                         SettingsStatusRow(
