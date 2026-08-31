@@ -91,6 +91,15 @@ export const UnifiedUsage = z.object({
     if (estimates.has(key)) context.addIssue({ code: z.ZodIssueCode.custom, message: `duplicate usage estimate ${key}` });
     estimates.add(key);
   }
+  for (const provider of Provider.options) {
+    const observed = value.windows.filter(window => window.provider === provider && window.availability === 'observed');
+    if (!observed.length) continue;
+    const expected = observed.some(window => window.provenance.connectorState === 'rate_limited') ? 'rate_limited'
+      : observed.some(window => window.provenance.connectorState === 'refresh_due') ? 'refresh_due' : 'healthy';
+    if (value.connectors[provider] !== expected) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ['connectors', provider], message: 'connector state contradicts observed windows' });
+    }
+  }
 });
 export type UnifiedUsage = z.infer<typeof UnifiedUsage>;
 

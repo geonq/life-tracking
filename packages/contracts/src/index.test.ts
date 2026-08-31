@@ -4,11 +4,101 @@ import {
   ConnectorState, FinanceConnectorCatalog, FinanceConnectorDescriptor,
   FinanceAccountSnapshot, FinanceSummary, parseOverview, fixtures,
   NutritionBenchmarkFoodClass,
+  CalendarAuthorityUnavailable, SyncDomainMetadata, SyncStateMetadata, SyncTombstone, SyncTransportHeaders,
 } from './index.js';
 describe('contracts',()=>{ it('accepts truthful fixture',()=>expect(parseOverview(fixtures.overview).label).toBe('Demo data')); it('rejects invalid connector state',()=>expect(()=>ConnectorState.parse('connected')).toThrow()); it('requires provenance',()=>expect(()=>parseOverview({...fixtures.overview,codex:{...fixtures.overview.codex,usage5h:{value:1,unit:'%'}}})).toThrow()); });
 describe('contract index exports', () => {
   it('re-exports the bounded nutrition benchmark contract', () => {
     expect(NutritionBenchmarkFoodClass.parse('unknown_portion')).toBe('unknown_portion');
+  });
+
+  it('describes the disabled Node Calendar route without reopening API authority', () => {
+    expect(CalendarAuthorityUnavailable.parse({
+      error: 'calendar_authority_gateway_only', authority: 'gateway',
+    })).toEqual({ error: 'calendar_authority_gateway_only', authority: 'gateway' });
+    expect(() => CalendarAuthorityUnavailable.parse({
+      error: 'calendar_authority_gateway_only', authority: 'api',
+    })).toThrow();
+  });
+});
+
+describe('versioned synchronization metadata', () => {
+  const observedAt = new Date(Date.now() - 1_000).toISOString();
+
+  it('exports an explicit authority/revision/journal/tombstone vocabulary', () => {
+    const metadata = SyncDomainMetadata.parse({
+      schemaVersion: 1,
+      domain: 'calendar',
+      authority: 'gateway',
+      revision: 4,
+      bodyDigest: 'a'.repeat(64),
+      idempotency: [{ key: 'calendar-write-1', fingerprint: 'b'.repeat(64), revision: 4 }],
+      tombstones: [],
+    });
+    expect(metadata).toMatchObject({ domain: 'calendar', authority: 'gateway', revision: 4 });
+  });
+
+  it('rejects journal revisions, duplicate keys, and tombstones outside the authority domain', () => {
+    const base = {
+      schemaVersion: 1,
+      domain: 'usage' as const,
+      authority: 'api' as const,
+      revision: 1,
+      bodyDigest: 'a'.repeat(64),
+      idempotency: [{ key: 'one', fingerprint: 'b'.repeat(64), revision: 2 }],
+      tombstones: [],
+    };
+    expect(() => SyncDomainMetadata.parse(base)).toThrow();
+    expect(() => SyncDomainMetadata.parse({
+      ...base,
+      idempotency: [
+        { key: 'one', fingerprint: 'b'.repeat(64), revision: 1 },
+        { key: 'one', fingerprint: 'c'.repeat(64), revision: 1 },
+      ],
+    })).toThrow();
+    expect(() => SyncDomainMetadata.parse({
+      ...base,
+      idempotency: [],
+      tombstones: [{
+        schemaVersion: 1, domain: 'calendar', entityID: 'event-1', revision: 1,
+        idempotencyKey: 'delete-1', authority: 'api', deletedAt: observedAt,
+      }],
+    })).toThrow();
+  });
+
+  it('requires an honest deleted state and validates conditional transport headers', () => {
+    expect(() => SyncStateMetadata.parse({
+      schemaVersion: 1, domain: 'calendar', authority: 'gateway', revision: 1,
+      state: 'deleted', source: 'calendar-client', updatedAt: observedAt,
+    })).toThrow();
+    expect(() => SyncTransportHeaders.parse({
+      schemaVersion: 1, domain: 'calendar', revision: 1,
+      etag: 'W/"weak"', idempotencyKey: 'write-1',
+    })).toThrow();
+    expect(SyncTransportHeaders.parse({
+      schemaVersion: 1, domain: 'calendar', revision: 1,
+      etag: '"calendar-v1-r1-' + 'a'.repeat(64) + '"',
+      idempotencyKey: 'write-1', ifMatch: '"calendar-v1-r0-' + 'b'.repeat(64) + '"',
+    }).revision).toBe(1);
+  });
+
+  it('keeps tombstones bound to the same authority and revision as their state', () => {
+    const tombstone = {
+      schemaVersion: 1, domain: 'calendar' as const, entityID: 'event-1', revision: 3,
+      idempotencyKey: 'delete-1', authority: 'gateway' as const, deletedAt: observedAt,
+    };
+    expect(() => SyncDomainMetadata.parse({
+      schemaVersion: 1, domain: 'calendar', authority: 'api', revision: 3,
+      bodyDigest: 'a'.repeat(64), idempotency: [], tombstones: [tombstone],
+    })).toThrow();
+    expect(() => SyncStateMetadata.parse({
+      schemaVersion: 1, domain: 'calendar', authority: 'gateway', revision: 2,
+      state: 'deleted', source: 'calendar-client', updatedAt: observedAt, tombstone,
+    })).toThrow();
+    expect(SyncStateMetadata.parse({
+      schemaVersion: 1, domain: 'calendar', authority: 'gateway', revision: 3,
+      state: 'deleted', source: 'calendar-client', updatedAt: observedAt, tombstone,
+    }).tombstone?.revision).toBe(3);
   });
 });
 
@@ -67,6 +157,14 @@ describe('usage window truthfulness', () => {
     expect(normalizeWindow({ usedPercent: 25 }, 'codex', 'five_hour', 'codex-app-server', future).availability).toBe('unavailable');
     expect(() => UsageHistoryEntry.parse({ provider: 'codex', window: 'five_hour', durationMinutes: 300,
       usedPercent: 25, observedAt: future })).toThrow();
+  });
+
+  it('binds the provider connector state to its observed windows', () => {
+    const stale = normalizeWindow({ usedPercent: 25 }, 'codex', 'five_hour', 'codex-app-server', '2020-01-01T00:00:00Z');
+    expect(() => UnifiedUsage.parse({ generatedAt: provenance.observedAt, windows: [stale], estimates: [],
+      connectors: connectorStates })).toThrow();
+    expect(UnifiedUsage.parse({ generatedAt: provenance.observedAt, windows: [stale], estimates: [],
+      connectors: { ...connectorStates, codex: 'refresh_due' } }).connectors.codex).toBe('refresh_due');
   });
 
   it('applies the five-second clock-skew bound to observed and unavailable provenance', () => {
@@ -332,7 +430,7 @@ describe('finance summary truthfulness', () => {
   it('accepts an account-only observed snapshot with opaque account fields', () => {
     const observedAt = new Date().toISOString();
     const account = {
-      id: 'account-1', name: 'Girokonto', detail: 'EUR · Sparkasse Leipzig', balanceCents: 125_000,
+      availability: 'observed' as const, id: 'account-1', name: 'Girokonto', detail: 'EUR · Sparkasse Leipzig', balanceCents: 125_000,
       source: 'sparkasse_leipzig',
       provenance: {
         source: 'sparkasse_leipzig', observedAt, freshness: 'fresh' as const,
@@ -351,6 +449,41 @@ describe('finance summary truthfulness', () => {
     expect(parsed.accounts.accounts[0]).toMatchObject({ id: 'account-1', balanceCents: 125_000 });
   });
 
+  it('keeps non-EUR accounts visible without allowing an invented EUR balance', () => {
+    const observedAt = new Date().toISOString();
+    const observedProvenance = {
+      source: 'sparkasse_leipzig', observedAt, freshness: 'fresh' as const,
+      quality: 'observed' as const, connectorState: 'healthy' as const,
+    };
+    const unavailableProvenance = {
+      source: 'revolut_personal', observedAt, freshness: 'unknown' as const,
+      quality: 'unavailable' as const, connectorState: 'unavailable' as const,
+    };
+    const observedAccount = {
+      availability: 'observed' as const, id: 'account-eur', name: 'Girokonto', detail: 'EUR',
+      balanceCents: 125_000, source: 'sparkasse_leipzig', provenance: observedProvenance,
+    };
+    const unavailableAccount = {
+      availability: 'unavailable' as const, id: 'account-usd', name: 'Savings', detail: 'USD · Enable Banking',
+      source: 'revolut_personal', provenance: unavailableProvenance,
+    };
+    const parsed = FinanceAccountSnapshot.parse({
+      availability: 'observed',
+      accounts: [observedAccount, unavailableAccount],
+      provenance: {
+        source: 'derived-account-snapshot', observedAt, freshness: 'fresh' as const,
+        quality: 'observed' as const, connectorState: 'healthy' as const,
+      },
+    });
+    if (parsed.availability !== 'observed') throw new Error('expected observed mixed account snapshot');
+    expect(parsed.accounts[1]).toMatchObject({ availability: 'unavailable', id: 'account-usd' });
+    expect(parsed.accounts[1]).not.toHaveProperty('balanceCents');
+    expect(() => FinanceAccountSnapshot.parse({
+      ...parsed,
+      accounts: [{ ...unavailableAccount, balanceCents: 1 }],
+    })).toThrow();
+  });
+
   it('keeps unavailable account snapshots free of account rows and accepts missing consent summaries', () => {
     expect(FinanceSummary.parse(unavailableFinance).accounts).toBeUndefined();
     const unavailable = {
@@ -364,7 +497,7 @@ describe('finance summary truthfulness', () => {
   it('rejects account balance overflow and source/provenance contradictions', () => {
     const observedAt = new Date().toISOString();
     const account = {
-      id: 'account-1', name: 'Girokonto', detail: 'EUR', balanceCents: 100,
+      availability: 'observed' as const, id: 'account-1', name: 'Girokonto', detail: 'EUR', balanceCents: 100,
       source: 'sparkasse_leipzig',
       provenance: {
         source: 'sparkasse_leipzig', observedAt, freshness: 'fresh' as const,
@@ -397,7 +530,7 @@ describe('finance summary truthfulness', () => {
       quality: 'observed' as const, connectorState: 'healthy' as const,
     };
     const account = {
-      id: 'account-2', name: 'Personal account', detail: 'EUR', balanceCents: -4_200,
+      availability: 'observed' as const, id: 'account-2', name: 'Personal account', detail: 'EUR', balanceCents: -4_200,
       source: 'revolut_personal', provenance,
     };
     const transaction = {
@@ -437,7 +570,7 @@ describe('finance summary truthfulness', () => {
       generatedAt: observedAt,
       accounts: {
         availability: 'observed', accounts: [{
-          id: 'account-1', name: 'Personal', detail: 'EUR', balanceCents: 100,
+          availability: 'observed' as const, id: 'account-1', name: 'Personal', detail: 'EUR', balanceCents: 100,
           source: 'revolut_personal', provenance: null,
         }], provenance: row.provenance,
       },
@@ -462,7 +595,7 @@ describe('finance summary truthfulness', () => {
       quality: 'observed' as const, connectorState: 'refresh_due' as const,
     };
     const account = {
-      id: 'account-1', name: 'Personal', detail: 'EUR', balanceCents: 100,
+      availability: 'observed' as const, id: 'account-1', name: 'Personal', detail: 'EUR', balanceCents: 100,
       source: 'revolut_personal', provenance: staleProvenance,
     };
     const base = { ...unavailableFinance, generatedAt: nowString };
@@ -519,7 +652,7 @@ describe('finance summary truthfulness', () => {
       ...base,
       accounts: {
         availability: 'observed',
-        accounts: [{ id: 'account-1', name: 'Personal', detail: 'EUR', balanceCents: 100, source: 'revolut_personal', provenance }],
+        accounts: [{ availability: 'observed' as const, id: 'account-1', name: 'Personal', detail: 'EUR', balanceCents: 100, source: 'revolut_personal', provenance }],
         provenance: { ...provenance, source: 'sparkasse_leipzig' },
       },
     })).toThrow();
@@ -528,8 +661,8 @@ describe('finance summary truthfulness', () => {
       accounts: {
         availability: 'observed',
         accounts: [
-          { id: 'account-1', name: 'Personal', detail: 'EUR', balanceCents: 100, source: 'revolut_personal', provenance },
-          { id: 'account-2', name: 'Girokonto', detail: 'EUR', balanceCents: 200, source: 'sparkasse_leipzig',
+          { availability: 'observed' as const, id: 'account-1', name: 'Personal', detail: 'EUR', balanceCents: 100, source: 'revolut_personal', provenance },
+          { availability: 'observed' as const, id: 'account-2', name: 'Girokonto', detail: 'EUR', balanceCents: 200, source: 'sparkasse_leipzig',
             provenance: { ...provenance, source: 'sparkasse_leipzig' } },
         ],
         provenance: { ...provenance, source: 'derived-account-snapshot' },

@@ -87,10 +87,30 @@ describe('ClipperStore', () => {
     const persisted = JSON.parse(await readFile(path, 'utf8'));
     expect(persisted.schemaVersion).toBe(1);
     expect(persisted.snapshot).toEqual(snapshot);
+    expect(persisted.revision).toBe(1);
+    expect(persisted.tombstones).toEqual([]);
+    expect(persisted.idempotency).toEqual([
+      { key: 'persistent-key', fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/), revision: 1 },
+    ]);
 
     const reloaded = new ClipperStore(path);
     expect(await reloaded.get()).toEqual(snapshot);
     await expect(reloaded.ingest('persistent-key', body)).resolves.toMatchObject({ kind: 'replay' });
+  });
+
+  it('does not expose mutable authority state through reads or replay responses', async () => {
+    const store = new ClipperStore();
+    const body = JSON.stringify(snapshot);
+    await store.ingest('detached-key', body);
+
+    const exposed = await store.get();
+    if (exposed.availability !== 'observed') throw new Error('expected observed snapshot');
+    exposed.metrics.views.value = 999;
+    expect((await store.get()).metrics.views.value).toBe(100);
+
+    const replay = await store.ingest('detached-key', body);
+    if (replay.snapshot.availability !== 'observed') throw new Error('expected observed replay');
+    expect(replay.snapshot.metrics.views.value).toBe(100);
   });
 
   it('does not lose the journal when separate store instances ingest concurrently', async () => {

@@ -9,7 +9,9 @@ import {
   type FoodPhotoManifest as FoodPhotoManifestValue,
 } from '@iphone-life-os/contracts';
 import { lstatSync, readFileSync } from 'node:fs';
+import { TextDecoder } from 'node:util';
 import { z } from 'zod';
+import { parseStrictJSON } from './json-boundary.js';
 
 /**
  * Server-side Google AI Studio adapter for the optional food-photo flow.
@@ -24,8 +26,8 @@ import { z } from 'zod';
 
 const GOOGLE_AI_STUDIO_ORIGIN = 'https://generativelanguage.googleapis.com';
 const DEFAULT_MODEL = 'gemini-3.7-flash';
-const DEFAULT_TIMEOUT_MS = 35_000;
-const MAX_RESPONSE_BYTES = 1 * 1024 * 1024;
+const DEFAULT_TIMEOUT_MS = 30_000;
+const MAX_RESPONSE_BYTES = 256 * 1024;
 const MAX_REQUEST_BYTES = 30 * 1024 * 1024;
 const MAX_MODEL_NAME_LENGTH = 128;
 
@@ -184,7 +186,7 @@ function promptFor(manifest: FoodPhotoManifestValue): string {
   ].join('\n');
 }
 
-async function readBoundedBody(response: Response, maximumBytes: number): Promise<string> {
+async function readBoundedBody(response: Response, maximumBytes: number): Promise<Buffer> {
   const declared = response.headers.get('content-length');
   if (declared !== null) {
     const value = Number(declared);
@@ -193,11 +195,11 @@ async function readBoundedBody(response: Response, maximumBytes: number): Promis
     }
   }
   if (!response.body) {
-    const value = await response.text();
-    if (Buffer.byteLength(value, 'utf8') > maximumBytes) {
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (bytes.byteLength > maximumBytes) {
       throw new NutritionPhotoProposalError('response_too_large');
     }
-    return value;
+    return bytes;
   }
   const reader = response.body.getReader();
   const chunks: Buffer[] = [];
@@ -210,10 +212,13 @@ async function readBoundedBody(response: Response, maximumBytes: number): Promis
       if (total > maximumBytes) throw new NutritionPhotoProposalError('response_too_large');
       chunks.push(Buffer.from(next.value));
     }
+  } catch (error) {
+    await reader.cancel().catch(() => undefined);
+    throw error;
   } finally {
     reader.releaseLock();
   }
-  return Buffer.concat(chunks).toString('utf8');
+  return Buffer.concat(chunks);
 }
 
 function candidateText(payload: unknown): string | undefined {
@@ -232,13 +237,21 @@ function candidateText(payload: unknown): string | undefined {
   return text || undefined;
 }
 
-function parseJSONText(text: string): unknown {
+function parseJSONText(input: string | Buffer): unknown {
+  let text: string;
+  try {
+    text = Buffer.isBuffer(input)
+      ? new TextDecoder('utf-8', { fatal: true }).decode(input)
+      : input;
+  } catch {
+    throw new NutritionPhotoProposalError('provider_response_invalid');
+  }
   const trimmed = text.trim();
   const withoutFence = trimmed.startsWith('```')
     ? trimmed.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
     : trimmed;
   try {
-    return JSON.parse(withoutFence);
+    return parseStrictJSON(withoutFence);
   } catch {
     throw new NutritionPhotoProposalError('provider_response_invalid');
   }
@@ -287,8 +300,14 @@ export class GoogleFoodPhotoProposalClient implements NutritionPhotoProposalClie
     this.model = validModel(options.model);
     this.modelVersion = validMetadata(options.modelVersion ?? 'generate-content-json-v1', 160) ?? 'generate-content-json-v1';
     this.now = options.now ?? (() => Date.now());
-    this.timeoutMs = Math.max(1_000, Math.min(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, 60_000));
-    this.maxResponseBytes = Math.max(1_024, Math.min(options.maxResponseBytes ?? MAX_RESPONSE_BYTES, MAX_RESPONSE_BYTES));
+    const requestedTimeout = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.timeoutMs = Number.isFinite(requestedTimeout)
+      ? Math.max(1_000, Math.min(requestedTimeout, DEFAULT_TIMEOUT_MS))
+      : DEFAULT_TIMEOUT_MS;
+    const requestedResponseBytes = options.maxResponseBytes ?? MAX_RESPONSE_BYTES;
+    this.maxResponseBytes = Number.isFinite(requestedResponseBytes)
+      ? Math.max(1_024, Math.min(requestedResponseBytes, MAX_RESPONSE_BYTES))
+      : MAX_RESPONSE_BYTES;
   }
 
   public async generate(manifestInput: unknown): Promise<FoodEstimateProposalValue> {

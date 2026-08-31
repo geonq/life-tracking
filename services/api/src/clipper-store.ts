@@ -1,11 +1,13 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
-import { lstat, mkdir, open, rename, unlink, writeFile } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { lstat, open } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { ClipperSnapshot, parseClipperSnapshot, unavailableClipperSnapshot, type ClipperSnapshot as Snapshot } from '@iphone-life-os/contracts';
+import { atomicWriteFile } from './atomic-file.js';
+import { parseStrictJSON } from './json-boundary.js';
 
 /** Keep a malformed Hermes payload from causing an unbounded allocation. */
-export const CLIPPER_MAX_BYTES = 1 * 1024 * 1024;
+export const CLIPPER_MAX_BYTES = 256 * 1024;
 export const CLIPPER_STORE_SCHEMA_VERSION = 1;
 
 export type ClipperStoreErrorCode =
@@ -32,15 +34,24 @@ export function isClipperIdempotencyKey(value: unknown): value is string {
   return typeof value === 'string' && /^[\x21-\x7e]{1,128}$/.test(value);
 }
 
-type IdempotencyRecord = { key: string; fingerprint: string };
+type IdempotencyRecord = { key: string; fingerprint: string; revision: number };
 type StoreEnvelope = {
   schemaVersion: typeof CLIPPER_STORE_SCHEMA_VERSION;
   snapshot: Snapshot;
   idempotency: IdempotencyRecord[];
+  revision: number;
+  tombstones: [];
 };
 
 function bytesFor(input: string | Buffer): Buffer {
   return Buffer.isBuffer(input) ? Buffer.from(input) : Buffer.from(input, 'utf8');
+}
+
+function cloneSnapshot(snapshot: Snapshot): Snapshot {
+  // The store is an authority boundary. Never hand callers the object that is
+  // also used for the next durable write; a caller-side mutation must not
+  // change the advertised snapshot without a journaled ingest.
+  return ClipperSnapshot.parse(JSON.parse(JSON.stringify(snapshot)));
 }
 
 /**
@@ -96,7 +107,7 @@ function parseSnapshot(input: string | Buffer): { snapshot: Snapshot; bytes: Buf
   const source = bytes.toString('utf8');
   let parsed: unknown;
   try {
-    parsed = JSON.parse(source);
+    parsed = parseStrictJSON(bytes);
     if (hasDuplicateObjectKeys(source)) throw new Error('duplicate_json_key');
   } catch {
     throw new ClipperStoreError('invalid_json');
@@ -154,7 +165,10 @@ export class ClipperStore {
   private static readonly mutationQueues = new Map<string, Promise<void>>();
   private readonly file?: string;
   private readonly idempotency = new Map<string, string>();
+  private readonly idempotencyRevisions = new Map<string, number>();
   private snapshot: Snapshot | undefined;
+  private revision = 0;
+  private tombstones: [] = [];
   private loaded = false;
 
   constructor(file?: string) {
@@ -163,10 +177,16 @@ export class ClipperStore {
 
   async get(): Promise<Snapshot> {
     await this.load();
-    return this.snapshot ?? unavailableClipperSnapshot();
+    return this.snapshot === undefined ? unavailableClipperSnapshot() : cloneSnapshot(this.snapshot);
   }
 
-  async ingest(idempotencyKey: unknown, input: string | Buffer): Promise<{ kind: 'accepted' | 'replay' | 'stale'; snapshot: Snapshot }> {
+  /** Return the durable Clipper authority revision; missing state is revision zero. */
+  async currentRevision(): Promise<number> {
+    await this.load();
+    return this.revision;
+  }
+
+  async ingest(idempotencyKey: unknown, input: string | Buffer): Promise<{ kind: 'accepted' | 'replay' | 'stale'; snapshot: Snapshot; revision: number }> {
     if (idempotencyKey === undefined) throw new ClipperStoreError('missing_idempotency_key');
     if (!isClipperIdempotencyKey(idempotencyKey)) throw new ClipperStoreError('invalid_idempotency_key');
     const parsed = parseSnapshot(input);
@@ -178,6 +198,9 @@ export class ClipperStore {
         this.loaded = false;
         this.snapshot = undefined;
         this.idempotency.clear();
+        this.idempotencyRevisions.clear();
+        this.revision = 0;
+        this.tombstones = [];
         await this.load();
         return this.ingestLoaded(idempotencyKey, parsed);
       });
@@ -190,13 +213,17 @@ export class ClipperStore {
   private async ingestLoaded(
     idempotencyKey: string,
     parsed: { snapshot: Snapshot; bytes: Buffer },
-  ): Promise<{ kind: 'accepted' | 'replay' | 'stale'; snapshot: Snapshot }> {
+  ): Promise<{ kind: 'accepted' | 'replay' | 'stale'; snapshot: Snapshot; revision: number }> {
 
     const fingerprint = createHash('sha256').update(parsed.bytes).digest('hex');
     const previous = this.idempotency.get(idempotencyKey);
     if (previous !== undefined) {
       if (previous !== fingerprint) throw new ClipperStoreError('idempotency_key_reuse');
-      return { kind: 'replay', snapshot: this.snapshot ?? parsed.snapshot };
+      return {
+        kind: 'replay',
+        snapshot: this.snapshot === undefined ? cloneSnapshot(parsed.snapshot) : cloneSnapshot(this.snapshot),
+        revision: this.revision,
+      };
     }
     if (this.idempotency.size >= ClipperStore.maximumIdempotencyRecords) {
       throw new ClipperStoreError('idempotency_store_full');
@@ -215,24 +242,36 @@ export class ClipperStore {
     const incomingTime = observationWatermark(parsed.snapshot);
     const currentTime = previousSnapshot ? observationWatermark(previousSnapshot) : Number.NaN;
     if (previousSnapshot && Number.isFinite(incomingTime) && Number.isFinite(currentTime) && incomingTime <= currentTime) {
+      this.idempotencyRevisions.set(idempotencyKey, this.revision);
       try {
         await this.persistUnlocked();
       } catch (error) {
         this.idempotency.delete(idempotencyKey);
+        this.idempotencyRevisions.delete(idempotencyKey);
         throw error;
       }
-      return { kind: 'stale', snapshot: previousSnapshot };
+      return { kind: 'stale', snapshot: cloneSnapshot(previousSnapshot), revision: this.revision };
     }
 
-    this.snapshot = parsed.snapshot;
+    this.snapshot = cloneSnapshot(parsed.snapshot);
+    const previousRevision = this.revision;
+    if (this.revision >= Number.MAX_SAFE_INTEGER) {
+      this.idempotency.delete(idempotencyKey);
+      this.snapshot = previousSnapshot;
+      throw new ClipperStoreError('storage_unavailable');
+    }
+    this.revision += 1;
+    this.idempotencyRevisions.set(idempotencyKey, this.revision);
     try {
       await this.persistUnlocked();
     } catch (error) {
       this.idempotency.delete(idempotencyKey);
+      this.idempotencyRevisions.delete(idempotencyKey);
       this.snapshot = previousSnapshot;
+      this.revision = previousRevision;
       throw error;
     }
-    return { kind: 'accepted', snapshot: parsed.snapshot };
+    return { kind: 'accepted', snapshot: cloneSnapshot(this.snapshot), revision: this.revision };
   }
 
   private async enqueueMutation<T>(operation: () => Promise<T>): Promise<T> {
@@ -302,32 +341,49 @@ export class ClipperStore {
     }
     try {
       const source = bytes.toString('utf8');
-      const envelope = JSON.parse(source) as Partial<StoreEnvelope>;
+      const envelope = parseStrictJSON(bytes) as Partial<StoreEnvelope> & Record<string, unknown>;
       if (hasDuplicateObjectKeys(source)) throw new Error('duplicate_json_key');
-      if (Object.keys(envelope).length !== 3
-          || !Object.hasOwn(envelope, 'schemaVersion')
-          || !Object.hasOwn(envelope, 'snapshot')
-          || !Object.hasOwn(envelope, 'idempotency')
+      const keys = Object.keys(envelope);
+      const commonEnvelope = keys.includes('schemaVersion') && keys.includes('snapshot') && keys.includes('idempotency');
+      const legacyEnvelope = keys.length === 3 && commonEnvelope;
+      const versionedEnvelope = keys.length === 5
+        && commonEnvelope
+        && keys.includes('revision') && keys.includes('tombstones');
+      if ((!legacyEnvelope && !versionedEnvelope)
           || envelope.schemaVersion !== CLIPPER_STORE_SCHEMA_VERSION
           || !Array.isArray(envelope.idempotency)
           || envelope.snapshot === undefined) throw new Error('invalid_envelope');
+      const durableRevision = legacyEnvelope && !versionedEnvelope ? 0 : envelope.revision;
+      const tombstones = envelope.tombstones;
+      if (typeof durableRevision !== 'number' || !Number.isSafeInteger(durableRevision) || durableRevision < 0
+          || (versionedEnvelope && !Array.isArray(tombstones))
+          || (versionedEnvelope && Array.isArray(tombstones) && tombstones.length !== 0)) throw new Error('invalid_envelope');
       const snapshot = ClipperSnapshot.parse(envelope.snapshot);
       const parsedJournal = new Map<string, string>();
+      const parsedJournalRevisions = new Map<string, number>();
       for (const record of envelope.idempotency) {
         if (!record || typeof record !== 'object'
-            || Object.keys(record).length !== 2
+            || (Object.keys(record).length !== (legacyEnvelope && !versionedEnvelope ? 2 : 3))
             || !Object.hasOwn(record, 'key')
             || !Object.hasOwn(record, 'fingerprint')
             || !isClipperIdempotencyKey(record.key)
             || typeof record.fingerprint !== 'string'
             || !/^[0-9a-f]{64}$/.test(record.fingerprint)) throw new Error('invalid_journal');
+        const journalRevision = legacyEnvelope && !versionedEnvelope ? 0 : record.revision;
+        if (typeof journalRevision !== 'number' || !Number.isSafeInteger(journalRevision)
+            || journalRevision < 0 || journalRevision > durableRevision) throw new Error('invalid_journal');
         if (parsedJournal.has(record.key)) throw new Error('duplicate_journal_key');
         parsedJournal.set(record.key, record.fingerprint);
+        parsedJournalRevisions.set(record.key, journalRevision);
       }
       if (parsedJournal.size > ClipperStore.maximumIdempotencyRecords) throw new Error('journal_full');
       this.idempotency.clear();
+      this.idempotencyRevisions.clear();
       parsedJournal.forEach((fingerprint, key) => this.idempotency.set(key, fingerprint));
+      parsedJournalRevisions.forEach((journalRevision, key) => this.idempotencyRevisions.set(key, journalRevision));
       this.snapshot = snapshot;
+      this.revision = durableRevision;
+      this.tombstones = [];
     } catch {
       throw new ClipperStoreError('storage_unavailable');
     }
@@ -338,20 +394,18 @@ export class ClipperStore {
     const envelope: StoreEnvelope = {
       schemaVersion: CLIPPER_STORE_SCHEMA_VERSION,
       snapshot: this.snapshot,
-      idempotency: [...this.idempotency].map(([key, fingerprint]) => ({ key, fingerprint })),
+      idempotency: [...this.idempotency].map(([key, fingerprint]) => ({
+        key,
+        fingerprint,
+        revision: this.idempotencyRevisions.get(key) ?? this.revision,
+      })),
+      revision: this.revision,
+      tombstones: this.tombstones,
     };
     const body = JSON.stringify(envelope);
     if (Buffer.byteLength(body, 'utf8') > CLIPPER_MAX_BYTES) {
       throw new ClipperStoreError('storage_unavailable');
     }
-    const directory = dirname(this.file);
-    await mkdir(directory, { recursive: true });
-    const temporary = `${this.file}.tmp-${process.pid}-${randomUUID()}`;
-    try {
-      await writeFile(temporary, body, { encoding: 'utf8', mode: 0o600 });
-      await rename(temporary, this.file);
-    } finally {
-      await unlink(temporary).catch(() => undefined);
-    }
+    await atomicWriteFile(this.file, body);
   }
 }

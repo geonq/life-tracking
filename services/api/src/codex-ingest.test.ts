@@ -8,8 +8,8 @@ import { main as collectorMain, postCodexPayload, runCodexCollector } from './co
 
 type ResponseValue = { status: number; body: string };
 const post = (port: number, secret: string, payload: string, contentType = 'application/json') => new Promise<ResponseValue>(resolve => {
-  const req = request({ port, path: '/api/usage/codex-ingest', method: 'POST', headers: {
-    authorization: `Bearer ${secret}`, 'content-type': contentType, 'content-length': Buffer.byteLength(payload),
+  const req = request({ host: '127.0.0.1', port, path: '/api/usage/codex-ingest', method: 'POST', headers: {
+    authorization: `Bearer ${secret}`, 'content-type': contentType, 'idempotency-key': 'codex-ingest-test', 'content-length': Buffer.byteLength(payload),
   } }, response => {
     let value = '';
     response.on('data', chunk => value += chunk);
@@ -20,7 +20,7 @@ const post = (port: number, secret: string, payload: string, contentType = 'appl
   req.end(payload);
 });
 const getUsage = (port: number) => new Promise<{ status: number; body: any }>(resolve => {
-  const req = request({ port, path: '/api/usage', method: 'GET' }, response => {
+  const req = request({ host: '127.0.0.1', port, path: '/api/usage', method: 'GET' }, response => {
     let value = '';
     response.on('data', chunk => value += chunk);
     response.on('end', () => resolve({ status: response.statusCode!, body: JSON.parse(value) }));
@@ -61,7 +61,7 @@ async function configuredServer(readLive: Parameters<typeof createApiServer>[0] 
     delete process.env.CLAUDE_STATUSLINE_ENABLED;
     await writeFile(secretPath, secret, { mode: 0o600 });
     server = createApiServer(readLive);
-    await new Promise<void>((resolve, reject) => { server!.once('error', reject); server!.listen(0, resolve); });
+    await new Promise<void>((resolve, reject) => { server!.once('error', reject); server!.listen(0, '127.0.0.1', resolve); });
     const address = server.address();
     if (!address || typeof address === 'string') throw new Error('no address');
     return {
@@ -232,6 +232,10 @@ describe('sanitized Codex collector boundary', () => {
       expect(await validateStartupConfiguration()).toBe(true);
       await writeFile(safePath, '{not-json}\n', { mode: 0o600 });
       await chmod(safePath, 0o600);
+      expect(await validateStartupConfiguration()).toBe(false);
+      const orphanedStatePath = `${join(directory, 'orphaned-history.jsonl')}.state.json`;
+      await writeFile(orphanedStatePath, '{not-json}', { mode: 0o600 });
+      process.env.USAGE_STORE_PATH = orphanedStatePath.slice(0, -'.state.json'.length);
       expect(await validateStartupConfiguration()).toBe(false);
       if (process.platform !== 'win32') {
         const readOnlyParent = join(directory, 'read-only-parent');

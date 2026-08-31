@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { createHash } from 'node:crypto';
 import { request as httpRequest, type RequestOptions } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { isAbsolute, resolve } from 'node:path';
@@ -9,6 +10,7 @@ import { readIngestSecretFile } from './ingest-secret.js';
 const COLLECTOR_PORT = 8787;
 const COLLECTOR_TIMEOUT_MS = 8_000;
 const MAX_RESPONSE_BYTES = 16 * 1024;
+const MAX_POST_ATTEMPTS = 3;
 
 type RequestFactory = (options: RequestOptions, callback: (response: import('node:http').IncomingMessage) => void) => import('node:http').ClientRequest;
 type CollectorDependencies = {
@@ -34,6 +36,29 @@ export async function postCodexPayload(
 ): Promise<void> {
   const envelope = parseCodexIngestEnvelope(payload);
   const encoded = Buffer.from(JSON.stringify(envelope), 'utf8');
+  // The same key must survive every bounded retry so the API can turn a
+  // transport timeout after commit into a replay instead of a duplicate
+  // history mutation.
+  const idempotencyKey = createHash('sha256').update(encoded).digest('hex');
+  let lastError: Error | undefined;
+  for (let attempt = 1; attempt <= MAX_POST_ATTEMPTS; attempt += 1) {
+    try {
+      await postCodexPayloadOnce(encoded, idempotencyKey, secret, port, requestFactory);
+      return;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error('collector_unavailable');
+    }
+  }
+  throw lastError ?? new Error('collector_unavailable');
+}
+
+async function postCodexPayloadOnce(
+  encoded: Buffer,
+  idempotencyKey: string,
+  secret: string,
+  port: number,
+  requestFactory: RequestFactory,
+): Promise<void> {
   await new Promise<void>((resolveRequest, rejectRequest) => {
     let settled = false;
     const fail = () => {
@@ -47,6 +72,7 @@ export async function postCodexPayload(
       headers: {
         authorization: `Bearer ${secret}`,
         'content-type': 'application/json',
+        'idempotency-key': idempotencyKey,
         'content-length': encoded.byteLength,
       },
     };

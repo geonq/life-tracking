@@ -13,7 +13,7 @@ function fakeRuntime() {
 }
 
 const connectionIsRefused = (port: number) => new Promise<boolean>(resolve => {
-  const req = request({ port, path: '/health', method: 'GET' }, () => resolve(false));
+  const req = request({ host: '127.0.0.1', port, path: '/health', method: 'GET' }, () => resolve(false));
   req.once('error', () => resolve(true));
   req.end();
 });

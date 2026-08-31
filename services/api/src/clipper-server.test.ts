@@ -23,7 +23,7 @@ async function call(store: ClipperStore, payload: string | undefined, headers: R
   request.headers = headers;
   request.socket = { remoteAddress: '127.0.0.1' };
   const result = response();
-  await app(request, result as never, undefined, undefined, undefined, store);
+  await app(request, result as never, undefined, undefined, store);
   return { ...result, json: result.body ? JSON.parse(result.body) : undefined };
 }
 

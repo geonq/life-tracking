@@ -6,6 +6,7 @@ export * from './nutrition-barcode.js';
 export * from './nutrition-benchmark.js';
 export * from './fitness-retention.js';
 export * from './clipper.js';
+export * from './sync.js';
 
 import { ConnectorState, freshnessFromObservedAt } from './usage.js';
 
@@ -91,15 +92,26 @@ const FinanceObservedAccountProvenance = FinanceObservedProvenance;
 const FinanceUnavailableAccountProvenance = FinanceUnavailableProvenance;
 
 /** Keep this wire shape in lockstep with FinanceAccountObservation in the native client. */
-const FinanceAccountObservationBase = z.object({
+const FinanceAccountObservationCommon = z.object({
+  availability: z.enum(['observed', 'unavailable']),
   id: financeNonEmptyText,
   name: financeNonEmptyText,
   detail: financeNonEmptyText,
-  balanceCents: z.number().int().min(-Number.MAX_SAFE_INTEGER).max(Number.MAX_SAFE_INTEGER),
   source: financeNonEmptyText,
+}).strict();
+const FinanceObservedAccountObservation = FinanceAccountObservationCommon.extend({
+  availability: z.literal('observed'),
+  balanceCents: z.number().int().min(-Number.MAX_SAFE_INTEGER).max(Number.MAX_SAFE_INTEGER),
   provenance: FinanceObservedAccountProvenance,
 }).strict();
-export const FinanceAccountObservation = FinanceAccountObservationBase.superRefine((value, context) => {
+const FinanceUnavailableAccountObservation = FinanceAccountObservationCommon.extend({
+  availability: z.literal('unavailable'),
+  provenance: FinanceUnavailableAccountProvenance,
+}).strict();
+export const FinanceAccountObservation = z.discriminatedUnion('availability', [
+  FinanceObservedAccountObservation,
+  FinanceUnavailableAccountObservation,
+]).superRefine((value, context) => {
   if (value.source !== value.provenance.source) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
@@ -136,7 +148,8 @@ export const FinanceAccountSnapshot = FinanceAccountSnapshotBase.superRefine((va
     });
   }
   const hasStaleAccount = value.accounts.some(account =>
-    account.provenance.freshness === 'stale' || account.provenance.connectorState === 'refresh_due');
+    account.availability === 'observed'
+      && (account.provenance.freshness === 'stale' || account.provenance.connectorState === 'refresh_due'));
   const expectedFreshness = hasStaleAccount ? 'stale' : 'fresh';
   const expectedConnector = hasStaleAccount ? 'refresh_due' : 'healthy';
   if (value.provenance.freshness !== expectedFreshness || value.provenance.connectorState !== expectedConnector) {

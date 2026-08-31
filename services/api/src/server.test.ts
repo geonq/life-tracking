@@ -1,40 +1,43 @@
 import { describe, expect, it } from 'vitest';
 import { request } from 'node:http';
+import { Readable } from 'node:stream';
 import { chmod, mkdtemp, mkdir, readFile, rmdir, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createApiServer } from './server.js';
+import { app, createApiServer } from './server.js';
+
+const LOOPBACK_HOST = '127.0.0.1';
 
 const postClaudeIngest = (port: number, secret: string) => new Promise<{ status: number; body: string }>(resolve => {
-  const req = request({ port, path: '/api/usage/claude-ingest', method: 'POST', headers: {
-    authorization: `Bearer ${secret}`, 'content-type': 'application/json',
+  const req = request({ host: LOOPBACK_HOST, port, path: '/api/usage/claude-ingest', method: 'POST', headers: {
+    authorization: `Bearer ${secret}`, 'content-type': 'application/json', 'idempotency-key': 'claude-empty-test',
   } }, response => { let value = ''; response.on('data', chunk => value += chunk);
     response.on('end', () => resolve({ status: response.statusCode!, body: value })); });
   req.end('{}');
 });
 const postClaudePayload = (port: number, secret: string, payload: unknown, extraHeaders: Record<string, string> = {}) => new Promise<{ status: number; body: string }>(resolve => {
-  const req = request({ port, path: '/api/usage/claude-ingest', method: 'POST', headers: {
-    authorization: `Bearer ${secret}`, 'content-type': 'application/json', ...extraHeaders,
+  const req = request({ host: LOOPBACK_HOST, port, path: '/api/usage/claude-ingest', method: 'POST', headers: {
+    authorization: `Bearer ${secret}`, 'content-type': 'application/json', 'idempotency-key': 'claude-test-capture', ...extraHeaders,
   } }, response => { let value = ''; response.on('data', chunk => value += chunk);
     response.on('end', () => resolve({ status: response.statusCode!, body: value })); });
   req.end(JSON.stringify(payload));
 });
 const postCodexPayload = (port: number, secret: string, payload: unknown) => new Promise<{ status: number; body: string }>(resolve => {
-  const req = request({ port, path: '/api/usage/codex-ingest', method: 'POST', headers: {
-    authorization: `Bearer ${secret}`, 'content-type': 'application/json',
+  const req = request({ host: LOOPBACK_HOST, port, path: '/api/usage/codex-ingest', method: 'POST', headers: {
+    authorization: `Bearer ${secret}`, 'content-type': 'application/json', 'idempotency-key': 'codex-test-capture',
   } }, response => { let value = ''; response.on('data', chunk => value += chunk);
     response.on('end', () => resolve({ status: response.statusCode!, body: value })); });
   req.end(JSON.stringify(payload));
 });
 const getUsage = (port: number) => new Promise<{ status: number; body: any }>(resolve => {
-  const req = request({ port, path: '/api/usage', method: 'GET' }, response => { let value = ''; response.on('data', chunk => value += chunk);
+  const req = request({ host: LOOPBACK_HOST, port, path: '/api/usage', method: 'GET' }, response => { let value = ''; response.on('data', chunk => value += chunk);
     response.on('end', () => resolve({ status: response.statusCode!, body: JSON.parse(value) })); });
   req.end();
 });
 const listenApiServer = (server: ReturnType<typeof createApiServer>) => new Promise<void>((resolve, reject) => {
   const onError = (error: Error) => { server.removeListener('error', onError); reject(error); };
   server.once('error', onError);
-  server.listen(0, () => { server.removeListener('error', onError); resolve(); });
+  server.listen(0, LOOPBACK_HOST, () => { server.removeListener('error', onError); resolve(); });
 });
 const closeApiServer = (server: ReturnType<typeof createApiServer>) => new Promise<void>(resolve => {
   if (!server.listening) { resolve(); return; }
@@ -42,6 +45,32 @@ const closeApiServer = (server: ReturnType<typeof createApiServer>) => new Promi
 });
 
 describe('HTTP API', () => {
+  it('rejects malformed and mismatched Content-Length before parsing JSON', async () => {
+    const callWithLength = async (contentLength: string) => {
+      const req = Readable.from([Buffer.from('{}')]) as Readable & {
+        method: string;
+        url: string;
+        headers: Record<string, string>;
+        socket: { remoteAddress: string };
+      };
+      req.method = 'POST';
+      req.url = '/api/nutrition/photo-proposal';
+      req.headers = { 'content-type': 'application/json', 'content-length': contentLength };
+      req.socket = { remoteAddress: LOOPBACK_HOST };
+      let body = '';
+      const response = {
+        statusCode: 200,
+        setHeader: () => undefined,
+        end: (value?: string | Buffer) => { body = value === undefined ? '' : Buffer.isBuffer(value) ? value.toString('utf8') : value; },
+      };
+      await app(req, response as never, undefined, undefined, undefined, { generate: async () => { throw new Error('must not parse'); } });
+      return { status: response.statusCode, body };
+    };
+
+    expect(await callWithLength('1')).toEqual({ status: 400, body: '{"error":"invalid_request"}' });
+    expect(await callWithLength('2e0')).toEqual({ status: 400, body: '{"error":"invalid_request"}' });
+  });
+
   it('preserves direct Codex capture time through the usage response', async () => {
     const previousEnabled = process.env.CODEX_LIVE_ENABLED;
     const previousStore = process.env.USAGE_STORE_PATH;
@@ -54,11 +83,11 @@ describe('HTTP API', () => {
       observedAt: captured,
       windows: [{ minutes: 300, usedPercent: 12 }],
     }));
-    await new Promise<void>(resolve => server.listen(0, resolve));
+    await listenApiServer(server);
     const address = server.address();
     if (!address || typeof address === 'string') throw Error('no address');
     const result = await new Promise<{ status: number; body: any }>(resolve => {
-      const req = request({ port: address.port, path: '/api/usage', method: 'GET' }, response => {
+      const req = request({ host: LOOPBACK_HOST, port: address.port, path: '/api/usage', method: 'GET' }, response => {
         let value = '';
         response.on('data', chunk => value += chunk);
         response.on('end', () => resolve({ status: response.statusCode!, body: JSON.parse(value) }));
@@ -76,6 +105,7 @@ describe('HTTP API', () => {
       usedPercent: 12,
       provenance: { observedAt: captured, freshness: 'stale', connectorState: 'refresh_due' },
     });
+    expect(result.body.connectors.codex).toBe('refresh_due');
   });
 
   it('ignores inline Claude secrets when no secret file is configured', async () => {
@@ -87,10 +117,10 @@ describe('HTTP API', () => {
     process.env.CLAUDE_INGEST_SECRET = 'a'.repeat(32);
     process.env.CLAUDE_STATUSLINE_TOKEN = 'b'.repeat(32);
     delete process.env.CLAUDE_INGEST_SECRET_FILE;
-    const server = createApiServer(); await new Promise<void>(resolve => server.listen(0, resolve));
+    const server = createApiServer(); await listenApiServer(server);
     const address = server.address(); if (!address || typeof address === 'string') throw Error('no address');
     const result = await new Promise<{ status: number; body: { error?: string } }>(resolve => {
-      const req = request({ port: address.port, path: '/api/usage/claude-ingest', method: 'POST', headers: {
+      const req = request({ host: LOOPBACK_HOST, port: address.port, path: '/api/usage/claude-ingest', method: 'POST', headers: {
         authorization: `Bearer ${'a'.repeat(32)}`, 'content-type': 'application/json',
       } }, response => { let value = ''; response.on('data', chunk => value += chunk);
         response.on('end', () => resolve({ status: response.statusCode!, body: JSON.parse(value) })); });
@@ -115,7 +145,7 @@ describe('HTTP API', () => {
     process.env.CLAUDE_INGEST_SECRET_FILE = secretPath;
     await writeFile(secretPath, fileSecret, { mode: 0o600 });
     await chmod(secretPath, 0o600);
-    const server = createApiServer(); await new Promise<void>(resolve => server.listen(0, resolve));
+    const server = createApiServer(); await listenApiServer(server);
     const address = server.address(); if (!address || typeof address === 'string') throw Error('no address');
     const accepted = await postClaudeIngest(address.port, fileSecret);
     const inlineRejected = await postClaudeIngest(address.port, 'i'.repeat(32));
@@ -135,7 +165,7 @@ describe('HTTP API', () => {
     process.env.CLAUDE_INGEST_ENABLED = 'true';
     process.env.CLAUDE_INGEST_SECRET = 'i'.repeat(32);
     process.env.CLAUDE_INGEST_SECRET_FILE = secretPath;
-    const server = createApiServer(); await new Promise<void>(resolve => server.listen(0, resolve));
+    const server = createApiServer(); await listenApiServer(server);
     const address = server.address(); if (!address || typeof address === 'string') throw Error('no address');
     for (const value of [undefined, 'short', 'v'.repeat(31), `${'v'.repeat(32)}\n`, 'x'.repeat(4097)]) {
       if (value === undefined) {
@@ -162,7 +192,7 @@ describe('HTTP API', () => {
     await chmod(targetPath, 0o600);
     await writeFile(secretPath, 's'.repeat(32), { mode: 0o600 });
     await chmod(secretPath, 0o600);
-    const server = createApiServer(); await new Promise<void>(resolve => server.listen(0, resolve));
+    const server = createApiServer(); await listenApiServer(server);
     const address = server.address(); if (!address || typeof address === 'string') throw Error('no address');
 
     if (process.platform !== 'win32') {
@@ -190,7 +220,7 @@ describe('HTTP API', () => {
       process.env.LIFEOS_API_MODE = 'test';
       server = createApiServer(); await listenApiServer(server);
       const address = server.address(); if (!address || typeof address === 'string') throw Error('no address');
-      const call = (path:string, method='GET') => new Promise<{status:number; body:any}>(resolve => { const req=request({port:address.port,path,method}, res=>{let b='';res.on('data',x=>b+=x);res.on('end',()=>resolve({status:res.statusCode!,body:JSON.parse(b)}))});req.end(); });
+      const call = (path:string, method='GET') => new Promise<{status:number; body:any}>(resolve => { const req=request({host:LOOPBACK_HOST,port:address.port,path,method}, res=>{let b='';res.on('data',x=>b+=x);res.on('end',()=>resolve({status:res.statusCode!,body:JSON.parse(b)}))});req.end(); });
       const health = await call('/health');
       expect(health.body).toMatchObject({ status: 'ok', mode: 'test', readiness: 'ready' });
       expect(health.body).not.toHaveProperty('demo');
@@ -278,7 +308,7 @@ describe('HTTP API', () => {
       server = createApiServer(); await listenApiServer(server);
       const address = server.address(); if (!address || typeof address === 'string') throw Error('no address');
       const call = (path: string) => new Promise<{ status: number; body: any }>(resolve => {
-        const req = request({ port: address.port, path }, response => {
+        const req = request({ host: LOOPBACK_HOST, port: address.port, path }, response => {
           let value = ''; response.on('data', chunk => value += chunk);
           response.on('end', () => resolve({ status: response.statusCode!, body: JSON.parse(value) }));
         });
@@ -332,10 +362,10 @@ describe('HTTP API', () => {
   it('fails closed when Claude ingestion is enabled but no observation exists', async () => {
     const previous = process.env.CLAUDE_INGEST_ENABLED;
     process.env.CLAUDE_INGEST_ENABLED = 'true';
-    const server = createApiServer(); await new Promise<void>(r => server.listen(0, r));
+    const server = createApiServer(); await listenApiServer(server);
     const address = server.address(); if (!address || typeof address === 'string') throw Error('no address');
     const result = await new Promise<{ status: number; body: { connectors: { claude: string }; windows: unknown[] } }>(resolve => {
-      const req = request({ port: address.port, path: '/api/usage' }, res => {
+      const req = request({ host: LOOPBACK_HOST, port: address.port, path: '/api/usage' }, res => {
         let body = ''; res.on('data', chunk => body += chunk); res.on('end', () => resolve({ status: res.statusCode!, body: JSON.parse(body) }));
       }); req.end();
     });
@@ -357,10 +387,10 @@ describe('HTTP API', () => {
     await writeFile(storePath, JSON.stringify({ provider: 'claude', window: 'five_hour',
       durationMinutes: 300, usedPercent: 25, observedAt: staleObservedAt }) + '\n');
     const server = createApiServer(async () => ({ connectorState: 'unavailable', windows: [] }));
-    await new Promise<void>(resolve => server.listen(0, resolve));
+    await listenApiServer(server);
     const address = server.address(); if (!address || typeof address === 'string') throw Error('no address');
     const body = await new Promise<{ connectors: { claude: string }; windows: Array<{ provider: string; provenance: { connectorState: string } }> }>(resolve => {
-      const req = request({ port: address.port, path: '/api/usage' }, response => {
+      const req = request({ host: LOOPBACK_HOST, port: address.port, path: '/api/usage' }, response => {
         let value = ''; response.on('data', chunk => value += chunk); response.on('end', () => resolve(JSON.parse(value)));
       }); req.end();
     });
@@ -377,10 +407,10 @@ describe('HTTP API', () => {
     const storePath = join(directory, 'history.jsonl');
     process.env.USAGE_STORE_PATH = storePath;
     const server = createApiServer(async () => ({ connectorState: 'healthy', windows: [{ minutes: 300, usedPercent: 25 }] }));
-    await new Promise<void>(resolve => server.listen(0, resolve));
+    await listenApiServer(server);
     const address = server.address(); if (!address || typeof address === 'string') throw Error('no address');
     await new Promise<void>(resolve => {
-      const req = request({ port: address.port, path: '/api/usage' }, response => { response.resume(); response.on('end', resolve); });
+      const req = request({ host: LOOPBACK_HOST, port: address.port, path: '/api/usage' }, response => { response.resume(); response.on('end', resolve); });
       req.end();
     });
     await new Promise(resolve => server.close(resolve));
@@ -400,10 +430,10 @@ describe('HTTP API', () => {
       usedPercent: 10, observedAt: '2020-01-01T00:00:00Z',
     }) + '\n');
     const server = createApiServer(async () => ({ connectorState: 'healthy', windows: [{ minutes: 300, usedPercent: 25 }] }));
-    await new Promise<void>(resolve => server.listen(0, resolve));
+    await listenApiServer(server);
     const address = server.address(); if (!address || typeof address === 'string') throw Error('no address');
     const body = await new Promise<{ windows: Array<{ provider: string; window: string; usedPercent?: number }> }>(resolve => {
-      const req = request({ port: address.port, path: '/api/usage' }, response => {
+      const req = request({ host: LOOPBACK_HOST, port: address.port, path: '/api/usage' }, response => {
         let value = ''; response.on('data', chunk => value += chunk); response.on('end', () => resolve(JSON.parse(value)));
       }); req.end();
     });
@@ -420,10 +450,10 @@ describe('HTTP API', () => {
     const directory = await mkdtemp(join(tmpdir(), 'usage-duration-'));
     process.env.USAGE_STORE_PATH = join(directory, 'history.jsonl');
     const server = createApiServer(async () => ({ connectorState: 'healthy', windows: [{ minutes: 60, usedPercent: 25 }] }));
-    await new Promise<void>(resolve => server.listen(0, resolve));
+    await listenApiServer(server);
     const address = server.address(); if (!address || typeof address === 'string') throw Error('no address');
     const body = await new Promise<{ windows: unknown[] }>(resolve => {
-      const req = request({ port: address.port, path: '/api/usage' }, response => {
+      const req = request({ host: LOOPBACK_HOST, port: address.port, path: '/api/usage' }, response => {
         let value = ''; response.on('data', chunk => value += chunk); response.on('end', () => resolve(JSON.parse(value)));
       }); req.end();
     });
@@ -446,7 +476,7 @@ describe('HTTP API', () => {
     process.env.CLAUDE_INGEST_SECRET = 'wrong'.repeat(8);
     process.env.CLAUDE_INGEST_SECRET_FILE = secretPath;
     await writeFile(secretPath, secret, { mode: 0o600 });
-    const server = createApiServer(); await new Promise<void>(resolve => server.listen(0, resolve));
+    const server = createApiServer(); await listenApiServer(server);
     const address = server.address(); if (!address || typeof address === 'string') throw Error('no address');
     const result = await postClaudePayload(address.port, secret, { rate_limits: {
       five_hour: { used_percentage: 12, resets_at: '2026-08-10T05:00:00Z' },
@@ -477,7 +507,7 @@ describe('HTTP API', () => {
     process.env.CLAUDE_INGEST_SECRET_FILE = secretPath;
     delete process.env.CLAUDE_INGEST_SECRET;
     await writeFile(secretPath, secret, { mode: 0o600 });
-    const server = createApiServer(); await new Promise<void>(resolve => server.listen(0, resolve));
+    const server = createApiServer(); await listenApiServer(server);
     const address = server.address(); if (!address || typeof address === 'string') throw Error('no address');
     const result = await postClaudePayload(address.port, secret, { rate_limits: {
       five_hour: { used_percentage: 12, resets_at: '2026-08-10T05:00:00Z' },
@@ -575,7 +605,7 @@ describe('HTTP API', () => {
     delete process.env.CLAUDE_INGEST_SECRET;
     await writeFile(secretPath, secret, { mode: 0o600 });
     await writeFile(storePath, corrupt, { mode: 0o600 });
-    const server = createApiServer(); await new Promise<void>(resolve => server.listen(0, resolve));
+    const server = createApiServer(); await listenApiServer(server);
     const address = server.address(); if (!address || typeof address === 'string') throw Error('no address');
     const result = await postClaudePayload(address.port, secret, { rate_limits: {
       five_hour: { used_percentage: 12, resets_at: '2026-08-10T05:00:00Z' },

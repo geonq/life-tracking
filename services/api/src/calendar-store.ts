@@ -1,8 +1,18 @@
+/**
+ * TEST-ONLY protocol fixture.
+ *
+ * The production Node server deliberately does not import this module: the
+ * gateway owns durable Calendar state, ETags, and idempotency. Keep this
+ * injectable in-memory model only for isolated protocol tests that do not
+ * claim production authority.
+ */
 import { createHash } from 'node:crypto';
+import { parseStrictJSON } from './json-boundary.js';
 
 /** Calendar control/resource payloads are bounded to the frozen gateway limit. */
 export const CALENDAR_MAX_BYTES = 256 * 1024;
 export const CALENDAR_SCHEMA_VERSION = 1;
+export const CALENDAR_MAX_ITEMS = 10_000;
 
 type JSONRecord = Record<string, unknown>;
 
@@ -30,6 +40,7 @@ export type CalendarStoreErrorCode =
   | 'missing_if_match'
   | 'invalid_if_match'
   | 'stale_revision'
+  | 'revision_exhausted'
   | 'missing_idempotency_key'
   | 'invalid_idempotency_key'
   | 'idempotency_key_reuse'
@@ -55,14 +66,15 @@ function parseDocument(input: string | Buffer): { document: CalendarDocument; bo
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(bytes.toString('utf8'));
+    parsed = parseStrictJSON(bytes);
   } catch {
     throw new CalendarStoreError('invalid_json');
   }
-  if (!isRecord(parsed) || parsed.schemaVersion !== CALENDAR_SCHEMA_VERSION || !Array.isArray(parsed.items)) {
+  if (!isRecord(parsed) || Object.keys(parsed).length !== 2
+    || parsed.schemaVersion !== CALENDAR_SCHEMA_VERSION || !Array.isArray(parsed.items)
+    || parsed.items.length > CALENDAR_MAX_ITEMS) {
     throw new CalendarStoreError('invalid_resource');
   }
-
   // Preserve the exact validated JSON bytes. The API is a dumb blob boundary;
   // changing object order/whitespace here could alter a client snapshot even
   // though it remains semantically equivalent JSON.
@@ -77,9 +89,15 @@ function resourceFor(document: CalendarDocument, body: Buffer, revision: number)
   return { document, body: Buffer.from(body), etag, revision };
 }
 
+function cloneDocument(document: CalendarDocument): CalendarDocument {
+  // The resource is an authority boundary. Return a detached JSON value so a
+  // caller cannot mutate the document without a conditional journaled write.
+  return JSON.parse(JSON.stringify(document)) as CalendarDocument;
+}
+
 function cloneResource(resource: CalendarResource): CalendarResource {
   return {
-    document: resource.document,
+    document: cloneDocument(resource.document),
     body: Buffer.from(resource.body),
     etag: resource.etag,
     revision: resource.revision,
@@ -88,8 +106,11 @@ function cloneResource(resource: CalendarResource): CalendarResource {
 
 /** Validates only strong quoted tags emitted by this local Calendar store. */
 export function isCalendarETag(value: unknown): value is string {
-  return typeof value === 'string'
-    && /^"calendar-v1-r\d+-[0-9a-f]{64}"$/.test(value);
+  if (typeof value !== 'string') return false;
+  const match = /^"calendar-v1-r(\d+)-[0-9a-f]{64}"$/.exec(value);
+  if (!match) return false;
+  const revision = Number(match[1]);
+  return Number.isSafeInteger(revision) && revision >= 0 && String(revision) === match[1];
 }
 
 /** Idempotency keys are opaque visible ASCII and never contain delimiters/control. */
@@ -97,7 +118,7 @@ export function isCalendarIdempotencyKey(value: unknown): value is string {
   return typeof value === 'string' && /^[\x21-\x7e]{1,128}$/.test(value);
 }
 
-type IdempotencyRecord = { fingerprint: string };
+type IdempotencyRecord = { fingerprint: string; revision: number };
 
 /**
  * Local, injectable Calendar authority foundation.
@@ -106,6 +127,7 @@ type IdempotencyRecord = { fingerprint: string };
  * replay behavior without pretending that the external Windows gateway or its
  * durable storage/identity boundary has been accepted.
  */
+/** @internal Test-only in-memory conditional-write fixture. */
 export class CalendarStore {
   static readonly maximumIdempotencyRecords = 10_000;
 
@@ -129,11 +151,11 @@ export class CalendarStore {
   }
 
   put(ifMatch: unknown, idempotencyKey: unknown, input: string | Buffer): CalendarWriteResult {
-    const parsed = parseDocument(input);
     if (ifMatch === undefined) throw new CalendarStoreError('missing_if_match');
     if (!isCalendarETag(ifMatch)) throw new CalendarStoreError('invalid_if_match');
     if (idempotencyKey === undefined) throw new CalendarStoreError('missing_idempotency_key');
     if (!isCalendarIdempotencyKey(idempotencyKey)) throw new CalendarStoreError('invalid_idempotency_key');
+    const parsed = parseDocument(input);
 
     const fingerprint = `${ifMatch}:${createHash('sha256').update(parsed.body).digest('hex')}`;
     const previous = this.idempotency.get(idempotencyKey);
@@ -149,8 +171,10 @@ export class CalendarStore {
       throw new CalendarStoreError('idempotency_store_full');
     }
 
-    this.idempotency.set(idempotencyKey, { fingerprint });
-    this.resource = resourceFor(parsed.document, parsed.body, this.resource.revision + 1);
+    if (this.resource.revision >= Number.MAX_SAFE_INTEGER) throw new CalendarStoreError('revision_exhausted');
+    const revision = this.resource.revision + 1;
+    this.idempotency.set(idempotencyKey, { fingerprint, revision });
+    this.resource = resourceFor(parsed.document, parsed.body, revision);
     return { kind: 'accepted', resource: this.get() };
   }
 }

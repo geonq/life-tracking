@@ -6,6 +6,7 @@ import {
   type NutritionMacros,
   type NutritionPer100gMacros,
 } from '@iphone-life-os/contracts';
+import { parseStrictJSON } from './json-boundary.js';
 
 const OPEN_FOOD_FACTS_ORIGIN = 'https://world.openfoodfacts.org';
 const OPEN_FOOD_FACTS_API_VERSION = 'v3.6';
@@ -145,16 +146,16 @@ function unavailable(barcode: string, reason: NutritionBarcodeReason, fetchedAt:
   });
 }
 
-async function readBoundedBody(response: Response, maximumBytes: number): Promise<string> {
+async function readBoundedBody(response: Response, maximumBytes: number): Promise<Buffer> {
   const contentLength = response.headers.get('content-length');
   if (contentLength !== null) {
     const declared = Number(contentLength);
     if (!Number.isSafeInteger(declared) || declared < 0 || declared > maximumBytes) throw new Error('response_too_large');
   }
   if (!response.body) {
-    const text = await response.text();
-    if (Buffer.byteLength(text, 'utf8') > maximumBytes) throw new Error('response_too_large');
-    return text;
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (bytes.byteLength > maximumBytes) throw new Error('response_too_large');
+    return bytes;
   }
   const reader = response.body.getReader();
   const chunks: Buffer[] = [];
@@ -167,10 +168,13 @@ async function readBoundedBody(response: Response, maximumBytes: number): Promis
       if (total > maximumBytes) throw new Error('response_too_large');
       chunks.push(Buffer.from(next.value));
     }
+  } catch (error) {
+    await reader.cancel().catch(() => undefined);
+    throw error;
   } finally {
     reader.releaseLock();
   }
-  return Buffer.concat(chunks).toString('utf8');
+  return Buffer.concat(chunks);
 }
 
 function mapProduct(barcode: string, raw: unknown, fetchedAt: string): NutritionBarcodeLookupResponse {
@@ -181,6 +185,10 @@ function mapProduct(barcode: string, raw: unknown, fetchedAt: string): Nutrition
   }
   if (!isRecord(raw.product)) return unavailable(barcode, 'invalid_response', fetchedAt);
   const product = raw.product;
+  if (product.code !== undefined
+    && (typeof product.code !== 'string' || normalizeNutritionBarcode(product.code) !== barcode)) {
+    return unavailable(barcode, 'invalid_response', fetchedAt);
+  }
   const nutriments = product.nutriments;
   const per100g = macrosFromNutriments(nutriments, '100g');
   const perServing = macrosFromNutriments(nutriments, 'serving');
@@ -233,8 +241,14 @@ export class OpenFoodFactsClient {
   constructor(options: OpenFoodFactsClientOptions = {}) {
     this.fetcher = options.fetch ?? fetch;
     this.now = options.now ?? (() => Date.now());
-    this.timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
-    this.maxResponseBytes = options.maxResponseBytes ?? MAX_RESPONSE_BYTES;
+    const requestedTimeout = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
+    this.timeoutMs = Number.isFinite(requestedTimeout)
+      ? Math.max(1, Math.min(requestedTimeout, REQUEST_TIMEOUT_MS))
+      : REQUEST_TIMEOUT_MS;
+    const requestedResponseBytes = options.maxResponseBytes ?? MAX_RESPONSE_BYTES;
+    this.maxResponseBytes = Number.isFinite(requestedResponseBytes)
+      ? Math.max(1_024, Math.min(requestedResponseBytes, MAX_RESPONSE_BYTES))
+      : MAX_RESPONSE_BYTES;
     this.contactEmail = validateOpenFoodFactsContactEmail(options.contactEmail);
   }
 
@@ -307,7 +321,7 @@ export class OpenFoodFactsClient {
         } else if (!response.ok) {
           result = unavailable(barcode, 'upstream_unavailable', new Date(this.now()).toISOString());
         } else {
-          const payload = JSON.parse(await readBoundedBody(response, this.maxResponseBytes)) as unknown;
+          const payload = parseStrictJSON(await readBoundedBody(response, this.maxResponseBytes));
           result = mapProduct(barcode, payload, new Date(this.now()).toISOString());
           this.backoffLevel = 0;
           this.backoffUntil = 0;

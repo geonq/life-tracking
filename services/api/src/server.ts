@@ -2,11 +2,11 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { constants as fsConstants } from 'node:fs';
 import { access, lstat, open } from 'node:fs/promises';
 import { dirname, isAbsolute, resolve } from 'node:path';
-import { FinanceConnectorCatalog, FinanceSummary as FinanceSummarySchema, UnifiedUsage, parseCodexFixture, parseOverview, fixtures, normalizeWindow, type UsageWindow } from '@iphone-life-os/contracts';
+import { CalendarAuthorityUnavailable, FinanceConnectorCatalog, FinanceSummary as FinanceSummarySchema, UnifiedUsage, parseCodexFixture, parseOverview, fixtures, normalizeWindow, type UsageWindow } from '@iphone-life-os/contracts';
 import { parseCodexIngestEnvelope, readCodexLive } from './codex-adapter.js';
-import { UsageHistory } from './history.js';
+import { isUsageIdempotencyKey, UsageHistory, UsageHistoryError } from './history.js';
 import { projectUsage } from './projection.js';
-import { constantTimeEqual, ingestClaudeStatusline, validClaudeContentType, MAX_BODY_BYTES } from './claude-ingest.js';
+import { constantTimeEqual, ingestClaudeStatusline, MAX_BODY_BYTES } from './claude-ingest.js';
 import { financeConnectors } from './finance-connectors.js';
 import { readIngestSecretFile } from './ingest-secret.js';
 import { createConfiguredOpenFoodFactsClient, type OpenFoodFactsClient } from './open-food-facts.js';
@@ -16,8 +16,8 @@ import {
   NutritionPhotoProposalError,
   type NutritionPhotoProposalClient,
 } from './nutrition-photo.js';
-import { CALENDAR_MAX_BYTES, CalendarStore, CalendarStoreError, type CalendarResource, type CalendarStoreErrorCode } from './calendar-store.js';
 import { CLIPPER_MAX_BYTES, ClipperStore, ClipperStoreError } from './clipper-store.js';
+import { parseStrictJSON } from './json-boundary.js';
 
 function usageStorePath(): string | undefined {
   const configured = process.env.USAGE_STORE_PATH;
@@ -30,7 +30,6 @@ function clipperStorePath(): string | undefined {
   return resolve(configured ?? 'clipper-snapshot.json');
 }
 const history = () => new UsageHistory(usageStorePath() ?? resolve('usage-history.jsonl'));
-const defaultCalendarStore = new CalendarStore();
 const defaultClipperStore = new ClipperStore(clipperStorePath());
 const json = (res: ServerResponse, status: number, value: unknown) => { res.statusCode = status; res.end(JSON.stringify(value)); };
 
@@ -54,12 +53,10 @@ const fixtureRouteUnavailable = (res: ServerResponse) => json(res, 503, {
   code: 'fixture_route_unavailable',
   reason: 'explicit_fixture_or_test_mode_required',
 });
-const calendarResource = (res: ServerResponse, status: number, resource: CalendarResource, replay = false) => {
-  res.statusCode = status;
-  res.setHeader('etag', resource.etag);
-  if (replay) res.setHeader('x-lifeos-idempotent-replay', 'true');
-  res.end(resource.body);
-};
+const calendarAuthorityUnavailable = (res: ServerResponse) => json(res, 503, CalendarAuthorityUnavailable.parse({
+  error: 'calendar_authority_gateway_only',
+  authority: 'gateway',
+}));
 async function readClaudeSecretFile(pathValue: string): Promise<string | undefined> {
   return readIngestSecretFile(pathValue);
 }
@@ -103,9 +100,22 @@ async function validateUsageStore(): Promise<boolean> {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false;
     }
-    // A missing file is valid when its safe parent is writable; an existing
-    // file must also parse as bounded UsageHistory before readiness is true.
-    return fileExists ? history().ready() : true;
+    // A missing file is valid when its safe parent is writable. Once any
+    // authoritative artifact exists, validate the complete state envelope and
+    // projections; otherwise a corrupt state sidecar could pass readiness just
+    // because the legacy JSONL projection is absent.
+    let companionExists = false;
+    for (const companionPath of [`${filePath}.meta.json`, `${filePath}.state.json`]) {
+      try {
+        const companion = await lstat(companionPath);
+        companionExists = true;
+        if (!companion.isFile() || companion.isSymbolicLink()
+          || (process.platform !== 'win32' && (companion.mode & 0o077) !== 0)) return false;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false;
+      }
+    }
+    return fileExists || companionExists ? history().ready() : true;
   } catch {
     return false;
   }
@@ -134,12 +144,18 @@ const unavailableFinanceSummary = () => {
     discretionaryBuffer: metric(), spent: metric(), savingsGoal: metric(), saved: metric(),
   });
 };
-const loopback = (req: IncomingMessage) => req.socket.remoteAddress === '127.0.0.1' || req.socket.remoteAddress === '::1';
-async function body(req: IncomingMessage, maximumBytes = MAX_BODY_BYTES): Promise<string> {
-  const declared = req.headers['content-length'];
+const loopback = (req: IncomingMessage) => ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress ?? '');
+async function body(req: IncomingMessage, maximumBytes = MAX_BODY_BYTES): Promise<Buffer> {
+  const declared = singleHeader(req, 'content-length');
+  if (headerValues(req, 'content-length').length > 0 && declared === undefined) {
+    throw new Error('invalid_content_length');
+  }
+  let declaredLength: number | undefined;
   if (declared !== undefined) {
-    const value = typeof declared === 'string' ? Number(declared) : Number.NaN;
+    if (!/^\d+$/.test(declared)) throw new Error('invalid_content_length');
+    const value = Number(declared);
     if (!Number.isSafeInteger(value) || value < 0 || value > maximumBytes) throw new Error('body_too_large');
+    declaredLength = value;
   }
   const chunks: Buffer[] = [];
   let total = 0;
@@ -149,21 +165,28 @@ async function body(req: IncomingMessage, maximumBytes = MAX_BODY_BYTES): Promis
     if (total > maximumBytes) throw new Error('body_too_large');
     chunks.push(bytes);
   }
-  return Buffer.concat(chunks).toString('utf8');
+  if (declaredLength !== undefined && total !== declaredLength) {
+    throw new Error('invalid_content_length');
+  }
+  return Buffer.concat(chunks);
 }
 async function ingest(req: IncomingMessage, res: ServerResponse) {
   if (!loopback(req)) return json(res, 403, { error: 'loopback_only' });
   const expected = await claudeIngestSecret();
-  const auth = req.headers.authorization || '';
+  const auth = singleHeader(req, 'authorization') || '';
   if (!expected || !auth.startsWith('Bearer ') || !constantTimeEqual(auth.slice(7), expected)) return json(res, 401, { error: 'unauthorized' });
-  if (!validClaudeContentType(req.headers['content-type'])) return json(res, 415, { error: 'content_type' });
+  if (singleHeader(req, 'content-type') !== 'application/json') return json(res, 415, { error: 'content_type' });
+  const idempotencyKey = singleHeader(req, 'idempotency-key');
+  if (idempotencyKey === undefined) return json(res, 400, { error: 'missing_idempotency_key' });
+  if (!isUsageIdempotencyKey(idempotencyKey)) {
+    return json(res, 400, { error: 'invalid_idempotency_key' });
+  }
   let parsed: unknown;
-  try { parsed = JSON.parse(await body(req)); } catch (error) { return json(res, error instanceof Error && error.message === 'body_too_large' ? 413 : 400, { error: error instanceof Error ? error.message : 'invalid_json' }); }
-  const observedHeader = req.headers['x-observed-at'];
+  try { parsed = parseStrictJSON(await body(req)); } catch (error) { return json(res, error instanceof Error && error.message === 'body_too_large' ? 413 : 400, { error: error instanceof Error ? error.message : 'invalid_json' }); }
+  const observedHeader = singleHeader(req, 'x-observed-at');
   let observedAt = new Date().toISOString();
-  if (Array.isArray(observedHeader) || (observedHeader !== undefined && typeof observedHeader !== 'string')
-    || (typeof observedHeader === 'string' && (observedHeader.length > 64 || !Number.isFinite(Date.parse(observedHeader))
-      || Date.parse(observedHeader) > Date.now() + 5_000))) {
+  if (typeof observedHeader === 'string' && (observedHeader.length > 64 || !Number.isFinite(Date.parse(observedHeader))
+      || Date.parse(observedHeader) > Date.now() + 5_000)) {
     return json(res, 400, { error: 'invalid_request' });
   }
   if (typeof observedHeader === 'string') observedAt = new Date(observedHeader).toISOString();
@@ -176,11 +199,18 @@ async function ingest(req: IncomingMessage, res: ServerResponse) {
     connectors: {
       codex: 'unavailable', claude: connector,
       glm: 'unavailable', deepseek: 'unavailable', google_ai_studio: 'unavailable',
-    } });
+  } });
   try {
-    await history().addMany(validated.windows.map(window => ({ provider: 'claude', window: window.window,
-      durationMinutes: window.durationMinutes, usedPercent: window.usedPercent!, resetAt: window.resetAt, observedAt })));
-  } catch {
+    const outcome = await history().addMany(validated.windows.map(window => ({ provider: 'claude', window: window.window,
+      durationMinutes: window.durationMinutes, usedPercent: window.usedPercent!, resetAt: window.resetAt, observedAt })), idempotencyKey);
+    res.setHeader('x-lifeos-revision', String(outcome.revision));
+    res.setHeader('x-lifeos-schema-version', '1');
+    if (outcome.kind === 'replay') res.setHeader('x-lifeos-idempotent-replay', 'true');
+    if (outcome.kind === 'stale') res.setHeader('x-lifeos-stale-ingest', 'true');
+  } catch (error) {
+    if (error instanceof UsageHistoryError && error.code === 'idempotency_key_reuse') {
+      return json(res, 409, { error: error.code });
+    }
     return json(res, 503, { error: 'usage_store_unavailable' });
   }
   return json(res, 200, { windows: validated.windows, connector: validated.connectors.claude });
@@ -189,14 +219,19 @@ async function ingest(req: IncomingMessage, res: ServerResponse) {
 async function ingestCodex(req: IncomingMessage, res: ServerResponse) {
   if (!loopback(req)) return json(res, 403, { error: 'forbidden' });
   const expected = await codexIngestSecret();
-  const auth = req.headers.authorization || '';
+  const auth = singleHeader(req, 'authorization') || '';
   if (!expected || !auth.startsWith('Bearer ') || !constantTimeEqual(auth.slice(7), expected)) {
     return json(res, 401, { error: 'unauthorized' });
   }
-  if (req.headers['content-type'] !== 'application/json') return json(res, 415, { error: 'invalid_request' });
+  if (singleHeader(req, 'content-type') !== 'application/json') return json(res, 415, { error: 'invalid_request' });
+  const idempotencyKey = singleHeader(req, 'idempotency-key');
+  if (idempotencyKey === undefined) return json(res, 400, { error: 'missing_idempotency_key' });
+  if (!isUsageIdempotencyKey(idempotencyKey)) {
+    return json(res, 400, { error: 'invalid_idempotency_key' });
+  }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(await body(req));
+    parsed = parseStrictJSON(await body(req));
   } catch (error) {
     return json(res, error instanceof Error && error.message === 'body_too_large' ? 413 : 400, { error: 'invalid_request' });
   }
@@ -227,15 +262,22 @@ async function ingestCodex(req: IncomingMessage, res: ServerResponse) {
     return json(res, 400, { error: 'invalid_request' });
   }
   try {
-    await history().addMany(windows.map(window => ({
+    const outcome = await history().addMany(windows.map(window => ({
       provider: 'codex' as const,
       window: window.minutes === 300 ? 'five_hour' as const : 'seven_day' as const,
       durationMinutes: window.minutes,
       usedPercent: window.usedPercent,
       ...(window.resetAt ? { resetAt: window.resetAt } : {}),
       observedAt,
-    })));
-  } catch {
+    })), idempotencyKey);
+    res.setHeader('x-lifeos-revision', String(outcome.revision));
+    res.setHeader('x-lifeos-schema-version', '1');
+    if (outcome.kind === 'replay') res.setHeader('x-lifeos-idempotent-replay', 'true');
+    if (outcome.kind === 'stale') res.setHeader('x-lifeos-stale-ingest', 'true');
+  } catch (error) {
+    if (error instanceof UsageHistoryError && error.code === 'idempotency_key_reuse') {
+      return json(res, 409, { error: error.code });
+    }
     return json(res, 503, { error: 'unavailable' });
   }
   return json(res, 200, { ok: true });
@@ -244,14 +286,13 @@ async function ingestCodex(req: IncomingMessage, res: ServerResponse) {
 async function ingestClipper(req: IncomingMessage, res: ServerResponse, store: ClipperStore) {
   if (!loopback(req)) return json(res, 403, { error: 'loopback_only' });
   const expected = await clipperIngestSecret();
-  const auth = req.headers.authorization || '';
+  const auth = singleHeader(req, 'authorization') || '';
   if (!expected || !auth.startsWith('Bearer ') || !constantTimeEqual(auth.slice(7), expected)) {
     return json(res, 401, { error: 'unauthorized' });
   }
-  if (req.headers['content-type'] !== 'application/json') return json(res, 415, { error: 'content_type' });
-  const key = req.headers['idempotency-key'];
-  if (Array.isArray(key)) return json(res, 400, { error: 'invalid_idempotency_key' });
-  let payload: string;
+  if (singleHeader(req, 'content-type') !== 'application/json') return json(res, 415, { error: 'content_type' });
+  const key = singleHeader(req, 'idempotency-key');
+  let payload: Buffer;
   try {
     payload = await body(req, CLIPPER_MAX_BYTES);
   } catch (error) {
@@ -259,6 +300,8 @@ async function ingestClipper(req: IncomingMessage, res: ServerResponse, store: C
   }
   try {
     const outcome = await store.ingest(key, payload);
+    res.setHeader('x-lifeos-revision', String(outcome.revision));
+    res.setHeader('x-lifeos-schema-version', '1');
     if (outcome.kind === 'replay') res.setHeader('x-lifeos-idempotent-replay', 'true');
     if (outcome.kind === 'stale') res.setHeader('x-lifeos-stale-ingest', 'true');
     return json(res, 200, outcome.snapshot);
@@ -306,10 +349,10 @@ async function nutritionPhotoProposal(
   client: NutritionPhotoProposalClient,
 ) {
   if (!loopback(req)) return json(res, 403, { error: 'loopback_only' });
-  if (req.headers['content-type'] !== 'application/json') return json(res, 415, { error: 'content_type' });
+  if (singleHeader(req, 'content-type') !== 'application/json') return json(res, 415, { error: 'content_type' });
   let parsed: unknown;
   try {
-    parsed = JSON.parse(await body(req, NUTRITION_PHOTO_MAX_BODY_BYTES));
+    parsed = parseStrictJSON(await body(req, NUTRITION_PHOTO_MAX_BODY_BYTES));
   } catch (error) {
     return json(res, error instanceof Error && error.message === 'body_too_large' ? 413 : 400, { error: 'invalid_request' });
   }
@@ -330,56 +373,23 @@ async function nutritionPhotoProposal(
   }
 }
 
+function headerValues(req: IncomingMessage, name: string): string[] {
+  const wanted = name.toLowerCase();
+  if (Array.isArray(req.rawHeaders) && req.rawHeaders.length > 0) {
+    const values: string[] = [];
+    for (let index = 0; index + 1 < req.rawHeaders.length; index += 2) {
+      if (req.rawHeaders[index]!.toLowerCase() === wanted) values.push(req.rawHeaders[index + 1]!);
+    }
+    return values;
+  }
+  const value = req.headers[wanted];
+  if (Array.isArray(value)) return value;
+  return value === undefined ? [] : [value];
+}
+
 function singleHeader(req: IncomingMessage, name: string): string | undefined {
-  const value = req.headers[name.toLowerCase()];
-  return typeof value === 'string' ? value : undefined;
-}
-
-function calendarError(res: ServerResponse, store: CalendarStore, error: unknown) {
-  const code: CalendarStoreErrorCode = error instanceof CalendarStoreError
-    ? error.code
-    : error instanceof Error && error.message === 'body_too_large' ? 'body_too_large' : 'invalid_resource';
-  const status: Record<string, number> = {
-    body_too_large: 413,
-    invalid_json: 400,
-    invalid_resource: 400,
-    missing_if_match: 428,
-    invalid_if_match: 400,
-    stale_revision: 412,
-    missing_idempotency_key: 400,
-    invalid_idempotency_key: 400,
-    idempotency_key_reuse: 409,
-    idempotency_store_full: 503,
-  };
-  // Revision/identity failures return the authoritative bytes and ETag. This
-  // lets the client merge truth without ever treating an error as permission
-  // to blindly overwrite the current resource.
-  if (code === 'missing_if_match' || code === 'invalid_if_match' || code === 'stale_revision'
-      || code === 'missing_idempotency_key' || code === 'invalid_idempotency_key'
-      || code === 'idempotency_key_reuse' || code === 'idempotency_store_full') {
-    return calendarResource(res, status[code] ?? 400, store.get());
-  }
-  return json(res, status[code] ?? 400, { error: code });
-}
-
-async function calendar(req: IncomingMessage, res: ServerResponse, store: CalendarStore) {
-  if (!loopback(req)) return json(res, 403, { error: 'loopback_only' });
-  if (req.method === 'GET') return calendarResource(res, 200, store.get());
-  if (req.method !== 'PUT') return json(res, 405, { error: 'calendar_method_not_allowed' });
-  if (singleHeader(req, 'content-type') !== 'application/json') return json(res, 415, { error: 'content_type' });
-
-  let payload: string;
-  try {
-    payload = await body(req, CALENDAR_MAX_BYTES);
-  } catch (error) {
-    return calendarError(res, store, error);
-  }
-  try {
-    const outcome = store.put(singleHeader(req, 'if-match'), singleHeader(req, 'idempotency-key'), payload);
-    return calendarResource(res, 200, outcome.resource, outcome.kind === 'replay');
-  } catch (error) {
-    return calendarError(res, store, error);
-  }
+  const values = headerValues(req, name);
+  return values.length === 1 ? values[0] : undefined;
 }
 
 export async function app(
@@ -387,15 +397,14 @@ export async function app(
   res: ServerResponse,
   readLive: typeof readCodexLive = readCodexLive,
   barcodeClient?: OpenFoodFactsClient,
-  calendarStore?: CalendarStore,
   clipperStore?: ClipperStore,
   nutritionPhotoClient?: NutritionPhotoProposalClient,
 ) {
   const configuredBarcodeClient = barcodeClient ?? createConfiguredOpenFoodFactsClient();
-  const configuredCalendarStore = calendarStore ?? defaultCalendarStore;
   const configuredClipperStore = clipperStore ?? defaultClipperStore;
   const configuredNutritionPhotoClient = nutritionPhotoClient ?? createConfiguredNutritionPhotoProposalClient();
   res.setHeader('content-type', 'application/json'); res.setHeader('cache-control', 'no-store');
+  if (req.url !== '/health' && !loopback(req)) return json(res, 403, { error: 'loopback_only' });
   if (req.method === 'POST' && (req.url === '/api/usage/claude-ingest' || req.url === '/api/claude/statusline')) {
     if (process.env.CLAUDE_INGEST_ENABLED !== 'true' && process.env.CLAUDE_STATUSLINE_ENABLED !== 'true') return json(res, 404, { error: 'disabled' });
     return ingest(req, res);
@@ -412,7 +421,7 @@ export async function app(
     return nutritionPhotoProposal(req, res, configuredNutritionPhotoClient);
   }
   if (req.url === '/api/calendar' || req.url === '/calendar') {
-    return calendar(req, res, configuredCalendarStore);
+    return calendarAuthorityUnavailable(res);
   }
   if (req.method !== 'GET') return json(res, 405, { error: 'read_only_api' });
   if (req.url?.startsWith('/api/nutrition/barcode/') || req.url?.startsWith('/nutrition/barcode/')) {
@@ -437,7 +446,10 @@ export async function app(
   if (req.url === '/api/finance/summary') return json(res, 200, unavailableFinanceSummary());
   if (req.url === '/api/clipper/summary') {
     try {
-      return json(res, 200, await configuredClipperStore.get());
+      const snapshot = await configuredClipperStore.get();
+      res.setHeader('x-lifeos-revision', String(await configuredClipperStore.currentRevision()));
+      res.setHeader('x-lifeos-schema-version', '1');
+      return json(res, 200, snapshot);
     } catch {
       return json(res, 503, { error: 'clipper_unavailable' });
     }
@@ -488,13 +500,17 @@ export async function app(
     const codexStates = windows
       .filter(window => window.provider === 'codex' && window.availability === 'observed')
       .map(window => window.provenance.connectorState);
-    // When the direct app-server connector is intentionally disabled, the
-    // collector's history remains an honest source. Its freshness determines
-    // healthy vs refresh_due; an unavailable connector must not mask it.
-    const codexState = codexEnabled ? codex.connectorState
-      : codexStates.includes('rate_limited') ? 'rate_limited'
-        : codexStates.includes('refresh_due') ? 'refresh_due'
-          : codexStates.includes('healthy') ? 'healthy' : 'unavailable';
+    // The normalized window is the source of truth for an observed Codex
+    // value. A connector can report healthy while the captured observation is
+    // already stale, so do not let the connector's transport status relabel a
+    // stale window as healthy. If there is no usable window, preserve only an
+    // explicit rate-limit signal; a nominally healthy read without a value
+    // remains unavailable.
+    const codexState = codexStates.includes('rate_limited') ? 'rate_limited'
+      : codexStates.includes('refresh_due') ? 'refresh_due'
+        : codexStates.includes('healthy') ? 'healthy'
+          : codexEnabled && codex.connectorState === 'rate_limited'
+            ? codex.connectorState : 'unavailable';
     return json(res, 200, UnifiedUsage.parse({
       generatedAt: now, windows, estimates,
       connectors: {
@@ -514,7 +530,6 @@ export async function app(
 export function createApiServer(
   readLive: typeof readCodexLive = readCodexLive,
   barcodeClient?: OpenFoodFactsClient,
-  calendarStore: CalendarStore = new CalendarStore(),
   clipperStore: ClipperStore = defaultClipperStore,
   nutritionPhotoClient?: NutritionPhotoProposalClient,
 ) {
@@ -524,7 +539,6 @@ export function createApiServer(
     res,
     readLive,
     configuredBarcodeClient,
-    calendarStore,
     clipperStore,
     nutritionPhotoClient,
   ));
@@ -549,7 +563,6 @@ export type StartApiServerOptions = {
   port?: number;
   readLive?: typeof readCodexLive;
   runtime?: ApiRuntime;
-  calendarStore?: CalendarStore;
   clipperStore?: ClipperStore;
   nutritionPhotoClient?: NutritionPhotoProposalClient;
 };
@@ -560,7 +573,6 @@ export async function startApiServer(options: StartApiServerOptions = {}): Promi
   const server = createApiServer(
     options.readLive ?? readCodexLive,
     undefined,
-    options.calendarStore,
     options.clipperStore,
     options.nutritionPhotoClient,
   );
