@@ -76,6 +76,15 @@ artifacts/
 !ios/LifeOS/Modules/Finance/
 !ios/LifeOS/Modules/Finance/FinanceView.swift
 
-# Windows service-host deploy tree stays UNTRACKED until reviewed/approved (LIFEOS_95_EXECUTION_PLAN section 3/7)
-services/windows-service-host/deploy/
+# The Windows service-host deployment toolkit is reviewed, reproducible source.
+# Runtime staging, backups, and machine-local state remain ignored by the rules above.
 lifeos-derived-*/
+!services/windows-service-host/deploy/Deployment.Common.ps1
+!services/windows-service-host/deploy/README.md
+!services/windows-service-host/deploy/gateway_launcher.py
+!services/windows-service-host/deploy/install.ps1
+!services/windows-service-host/deploy/preflight.ps1
+!services/windows-service-host/deploy/rollback.ps1
+!services/windows-service-host/deploy/verify.ps1
+!services/windows-service-host/deploy/tests/Deployment.Behavior.Tests.ps1
+!services/windows-service-host/deploy/tests/Deployment.Static.Tests.ps1
