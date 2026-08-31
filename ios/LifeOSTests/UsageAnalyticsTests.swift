@@ -150,6 +150,21 @@ final class UsageAnalyticsTests: XCTestCase {
         XCTAssertEqual(selected.usedPercent, 0.4, accuracy: 0.0001)
     }
 
+    func testSelectionKeepsTheLatestPointWhenAFeedRepeatsATimestamp() throws {
+        let date = Date(timeIntervalSince1970: 1_783_000_000)
+        let selected = try XCTUnwrap(UsageSelection.closestPoint(
+            to: date,
+            observed: [
+                UsageProjectionPoint(date: date, usedPercent: 0.2),
+                UsageProjectionPoint(date: date, usedPercent: 0.4)
+            ],
+            projected: []
+        ))
+
+        XCTAssertEqual(selected.id, "observed|\(date.timeIntervalSinceReferenceDate)")
+        XCTAssertEqual(selected.usedPercent, 0.4, accuracy: 0.0001)
+    }
+
     func testRadarSelectionMapsTopAndRightGesturesToAdjacentCategories() {
         let center = CGPoint(x: 100, y: 100)
         XCTAssertEqual(UsageSelection.radarCategoryIndex(at: CGPoint(x: 100, y: 20), center: center, count: 5), 0)
@@ -245,4 +260,220 @@ final class UsageAnalyticsTests: XCTestCase {
         XCTAssertTrue(DemoUsageAnalytics.snapshots.allSatisfy { !$0.activity.isEmpty })
         XCTAssertTrue(DemoUsageAnalytics.snapshots.allSatisfy { !$0.modelBreakdowns.isEmpty })
     }
+}
+final class UsageHistoryTests: XCTestCase {
+    private let now = Date(timeIntervalSince1970: 1_785_283_200)
+
+    func testAppendIsIdempotentAndRejectsDelayedObservation() throws {
+        var ledger = UsageHistoryLedger()
+        let first = entry(at: now, usedPercent: 20)
+        let key = UsageHistoryDigest.idempotencyKey(for: [first])
+
+        XCTAssertEqual(try ledger.append([first], idempotencyKey: key, now: now), .accepted(revision: 1))
+        XCTAssertEqual(try ledger.append([first], idempotencyKey: key, now: now), .replay(revision: 1))
+        XCTAssertEqual(try ledger.append([first], idempotencyKey: "usage-retry-2", now: now), .stale(revision: 1))
+
+        let delayedChange = entry(at: now.addingTimeInterval(-1), usedPercent: 90)
+        XCTAssertEqual(
+            try ledger.append([delayedChange], idempotencyKey: "usage-delayed", now: now),
+            .stale(revision: 1)
+        )
+        XCTAssertEqual(ledger.entries.count, 1)
+        XCTAssertEqual(ledger.entries.first?.usedPercent, 20)
+    }
+
+    func testChangedNewerObservationAdvancesRevisionAndRetainsSource() throws {
+        var ledger = UsageHistoryLedger()
+        let first = entry(at: now, usedPercent: 20)
+        let second = entry(at: now.addingTimeInterval(60), usedPercent: 35)
+
+        _ = try ledger.append([first], idempotencyKey: "usage-first", now: now)
+        XCTAssertEqual(
+            try ledger.append([second], idempotencyKey: "usage-second", now: now.addingTimeInterval(60)),
+            .accepted(revision: 2)
+        )
+        XCTAssertEqual(ledger.entries.map(\.usedPercent), [20, 35])
+        XCTAssertEqual(ledger.entries.last?.source, "reviewed-source")
+    }
+
+    func testKeyReuseWithDifferentContentFailsClosed() throws {
+        var ledger = UsageHistoryLedger()
+        let first = entry(at: now, usedPercent: 20)
+        _ = try ledger.append([first], idempotencyKey: "same-key", now: now)
+
+        XCTAssertThrowsError(
+            try ledger.append([entry(at: now.addingTimeInterval(60), usedPercent: 21)],
+                              idempotencyKey: "same-key", now: now)
+        ) { error in
+            XCTAssertEqual(error as? UsageHistoryError, .idempotencyKeyReuse)
+        }
+    }
+
+    func testArchiveRoundTripAndLocalDeletionExposeVersionAuthorityAndTombstone() throws {
+        var ledger = UsageHistoryLedger()
+        _ = try ledger.append([entry(at: now, usedPercent: 20)], idempotencyKey: "usage-one", now: now)
+        try ledger.delete(provider: .codex, window: "five_hour", now: now)
+
+        XCTAssertTrue(ledger.entries.isEmpty)
+        XCTAssertEqual(ledger.tombstones.first?.scope, "codex:five_hour")
+        let data = try JSONEncoder.lifeOS.encode(ledger.archive())
+        let archive = try JSONDecoder.lifeOS.decode(UsageHistoryArchive.self, from: data)
+        let restored = try UsageHistoryLedger(archive: archive, now: now)
+        XCTAssertTrue(restored.entries.isEmpty)
+        XCTAssertEqual(restored.revision, ledger.revision)
+    }
+
+    func testPersistenceRoundTripIsBoundedAndDoesNotNeedCredentials() throws {
+        let persistence = InMemoryUsageHistoryPersistence()
+        var ledger = UsageHistoryLedger()
+        _ = try ledger.append([entry(at: now, usedPercent: 20)], idempotencyKey: "usage-one", now: now)
+        try persistence.save(JSONEncoder.lifeOS.encode(ledger.archive()))
+
+        let decoded = try JSONDecoder.lifeOS.decode(
+            UsageHistoryArchive.self, from: try XCTUnwrap(persistence.data)
+        )
+        XCTAssertEqual(decoded.authority, "local-observation-cache")
+        XCTAssertEqual(decoded.entries.first?.source, "reviewed-source")
+        XCTAssertFalse(String(data: try XCTUnwrap(persistence.data), encoding: .utf8)?.contains("secret") == true)
+    }
+
+    func testArchiveRejectsNonDigestIdempotencyFingerprints() {
+        let archive = UsageHistoryArchive(
+            idempotency: [UsageHistoryIdempotencyRecord(key: "retry", fingerprint: "1", revision: 0)]
+        )
+
+        XCTAssertThrowsError(try UsageHistoryLedger(archive: archive, now: now)) { error in
+            XCTAssertEqual(error as? UsageHistoryError, .archiveInvalid)
+        }
+    }
+
+    func testCompleteDayAggregationIsTheOnlyPeakDailyFact() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let points = (0..<24).map { hour in
+            UsageActivityPoint(
+                date: now.addingTimeInterval(Double(hour) * 3_600),
+                tokens: hour + 1,
+                usedPercent: Double(hour) / 100
+            )
+        }
+        let complete = UsageActivityAggregation.completeDays(from: points, calendar: calendar)
+        XCTAssertEqual(complete.count, 1)
+        XCTAssertTrue(complete[0].isComplete)
+
+        let analytics = UsageAnalyticsSnapshot(
+            provider: .codex,
+            activity: points,
+            projection: [],
+            modelBreakdowns: [],
+            heatmap: [],
+            provenance: Provenance(source: "test", observedAt: now, quality: .observed, connector: .healthy)
+        )
+        XCTAssertEqual(
+            UsageFacts.compute(from: analytics, calendar: calendar, now: now).peakDailyActivity?.tokens,
+            300
+        )
+    }
+
+    func testHistoryBuilderKeepsQuotaHistorySeparateFromTokenActivity() throws {
+        var ledger = UsageHistoryLedger()
+        _ = try ledger.append([entry(at: now, usedPercent: 20)], idempotencyKey: "usage-one", now: now)
+        let provider = ProviderSnapshot(
+            provider: .codex,
+            accountLabel: "Codex",
+            windows: [
+                UsageWindow(
+                    id: "five_hour", label: "5-hour", limit: 1, used: 0.2,
+                    resetAt: now.addingTimeInterval(3_600),
+                    durationMinutes: 300,
+                    provenance: Provenance(source: "reviewed-source", observedAt: now,
+                                           quality: .observed, connector: .healthy)
+                )
+            ],
+            provenance: Provenance(source: "reviewed-source", observedAt: now,
+                                   quality: .observed, connector: .healthy)
+        )
+
+        let snapshot = try XCTUnwrap(
+            UsageAnalyticsHistoryBuilder.snapshots(from: ledger, providers: [provider], now: now).first
+        )
+        XCTAssertEqual(snapshot.history.count, 1)
+        XCTAssertTrue(snapshot.activity.isEmpty)
+        XCTAssertEqual(snapshot.windowID, "five_hour")
+    }
+
+    @available(iOS 17.0, macOS 14.0, *)
+    func testCoordinatorPersistsOnlyObservedUsageAndReloadsHistory() async throws {
+        let persistence = InMemoryUsageHistoryPersistence()
+        let observedAt = Date.now
+        let provenance = APIUsageProvenance(
+            source: "reviewed-usage-source",
+            observedAt: observedAt,
+            freshness: "fresh",
+            official: true,
+            quality: "observed",
+            connectorState: .healthy
+        )
+        let payload = APIUsagePayload(
+            generatedAt: observedAt,
+            windows: [
+                APIUsageWindow(
+                    provider: .codex,
+                    window: "five_hour",
+                    durationMinutes: 300,
+                    usedPercent: 42,
+                    resetAt: observedAt.addingTimeInterval(3_600),
+                    availability: "observed",
+                    provenance: provenance
+                )
+            ],
+            estimates: [],
+            connectors: [
+                "codex": .healthy,
+                "claude": .unavailable,
+                "glm": .unavailable,
+                "deepseek": .unavailable,
+                "google_ai_studio": .unavailable
+            ]
+        )
+        let coordinator = await MainActor.run {
+            UsageCoordinator(fetch: { payload }, historyPersistence: persistence)
+        }
+        await coordinator.refresh()
+        let first = await MainActor.run {
+            (coordinator.historyStatus, coordinator.analytics.first?.history.count, coordinator.failure)
+        }
+        XCTAssertEqual(first.0, .available)
+        XCTAssertEqual(first.1, 1)
+        XCTAssertEqual(first.2, .none)
+
+        let reloaded = await MainActor.run {
+            UsageCoordinator(fetch: { payload }, historyPersistence: persistence)
+        }
+        let second = await MainActor.run {
+            (reloaded.historyStatus, reloaded.analytics.first?.history.count)
+        }
+        XCTAssertEqual(second.0, .available)
+        XCTAssertEqual(second.1, 1)
+    }
+
+    private func entry(at date: Date, usedPercent: Double) -> UsageHistoryEntry {
+        UsageHistoryEntry(
+            provider: .codex,
+            window: "five_hour",
+            durationMinutes: 300,
+            usedPercent: usedPercent,
+            resetAt: date.addingTimeInterval(3_600),
+            observedAt: date,
+            source: "reviewed-source",
+            connectorState: .healthy
+        )
+    }
+}
+
+private final class InMemoryUsageHistoryPersistence: UsageHistoryPersistence {
+    var data: Data?
+
+    func load() throws -> Data? { data }
+    func save(_ data: Data) throws { self.data = data }
 }

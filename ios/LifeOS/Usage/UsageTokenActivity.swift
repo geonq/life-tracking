@@ -18,7 +18,11 @@ struct UsageTokenActivityView: View {
     }
 
     private var orderedActivity: [UsageActivityPoint] {
-        activity.sorted { $0.date < $1.date }
+        var latestByDate: [Date: UsageActivityPoint] = [:]
+        for point in activity where point.date.timeIntervalSinceReferenceDate.isFinite {
+            latestByDate[point.date] = point
+        }
+        return latestByDate.values.sorted { $0.date < $1.date }
     }
 
     private var activityRevealID: String {
@@ -29,148 +33,223 @@ struct UsageTokenActivityView: View {
 
     private var totalTokens: Int { orderedActivity.reduce(0) { $0 + $1.tokens } }
 
+    private var dailySummaries: [UsageDailyActivitySummary] {
+        UsageActivityAggregation.daily(from: orderedActivity)
+    }
+
+    private var completeDays: [UsageDailyActivitySummary] {
+        dailySummaries.filter(\.isComplete)
+    }
+
     private var maxTokens: Double {
         Double(max(orderedActivity.map(\.tokens).max() ?? 0, 1))
     }
 
+    private var spansMultipleDays: Bool {
+        guard let first = orderedActivity.first?.date, let last = orderedActivity.last?.date else { return false }
+        return !Calendar.current.isDate(first, inSameDayAs: last)
+    }
+
+    private var xAxisDesiredCount: Int {
+        spansMultipleDays ? 4 : 5
+    }
+
+    private var chartHeight: CGFloat {
+#if os(macOS)
+        230
+#else
+        215
+#endif
+    }
+
+    private var xAxisMarks: some AxisContent {
+        AxisMarks(values: .automatic(desiredCount: xAxisDesiredCount)) { value in
+            AxisValueLabel {
+                if let date = value.as(Date.self) {
+                    activityTimeAxisLabel(for: date)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func activityTimeAxisLabel(for date: Date) -> some View {
+        if spansMultipleDays {
+            Text(date, format: .dateTime.month(.abbreviated).day())
+                .font(LifeOSFont.axis(13))
+                .foregroundStyle(LifeOSTokens.metadataText)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+                .allowsTightening(true)
+                .multilineTextAlignment(.center)
+                .frame(minWidth: 42)
+        } else {
+            Text(date, format: .dateTime.hour().minute())
+                .font(LifeOSFont.axis(13))
+                .foregroundStyle(LifeOSTokens.metadataText)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .fixedSize(horizontal: true, vertical: false)
+        }
+    }
+
+    private var yAxisMarks: some AxisContent {
+        AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { _ in
+            AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5)).foregroundStyle(LifeOSTokens.chartGrid)
+            AxisValueLabel()
+                .font(LifeOSFont.axis(12))
+                .foregroundStyle(LifeOSTokens.metadataText)
+        }
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Token activity").font(.subheadline.weight(.semibold))
+                Text("Token activity").font(LifeOSFont.cardTitle())
                 Text("Hourly token totals from your \(provider.displayName) account.")
-                    .font(.caption)
+                    .font(LifeOSFont.supportingText(13))
                     .foregroundStyle(LifeOSTokens.secondaryText)
             }
 
-            summaryCard
+            if orderedActivity.isEmpty {
+                emptyActivityState
+            } else {
+                summaryCard
 
-            Chart(orderedActivity) { point in
-                BarMark(
-                    x: .value("Time", point.date),
-                    y: .value("Tokens", revealedTokens[point.date] ?? 0)
-                )
-                .cornerRadius(4)
-                .foregroundStyle(barColor(for: point))
-            }
-            .chartXAxis {
-                AxisMarks(values: .automatic(desiredCount: 4)) { value in
-                    AxisValueLabel {
-                        if let date = value.as(Date.self) {
-                            let label = Text(date, format: .dateTime.weekday(.abbreviated).hour())
-                            label
-                                .font(LifeOSFont.axis())
-                                .foregroundStyle(LifeOSTokens.metadataText)
-                        }
-                    }
+                Chart(orderedActivity) { point in
+                    BarMark(
+                        x: .value("Time", point.date),
+                        y: .value("Tokens", revealedTokens[point.date] ?? 0)
+                    )
+                    .cornerRadius(4)
+                    .foregroundStyle(barColor(for: point))
                 }
-            }
-            .chartYAxis {
-                AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { _ in
-                    AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5)).foregroundStyle(LifeOSTokens.chartGrid)
-                    AxisValueLabel()
-                        .font(LifeOSFont.axis())
-                        .foregroundStyle(LifeOSTokens.metadataText)
-                }
-            }
-            .chartYScale(domain: 0...maxTokens)
-            .chartXScale(domain: chartXDomain)
-            .chartOverlay { proxy in
-                GeometryReader { geometry in
-                    if let plotFrame = proxy.plotFrame {
-                        let frame = geometry[plotFrame]
+                .chartXAxis { xAxisMarks }
+                .chartYAxis { yAxisMarks }
+                .chartYScale(domain: 0...maxTokens)
+                .chartXScale(domain: chartXDomain)
+                .chartOverlay { proxy in
+                    GeometryReader { geometry in
+                        if let plotFrame = proxy.plotFrame {
+                            let frame = geometry[plotFrame]
 
-                        Rectangle().fill(.clear).contentShape(Rectangle())
+                            Rectangle().fill(.clear).contentShape(Rectangle())
 #if os(iOS)
-                            .simultaneousGesture(DragGesture(minimumDistance: LifeOSDirectionalClassifier.minimumDistance).onChanged { value in
-                                guard LifeOSDirectionalClassifier.classify(value.translation) == .horizontal,
-                                      let date = LifeOSChartKit.timestamp(
-                                          forPlotX: value.location.x,
-                                          in: frame,
-                                          domain: chartXDomain
-                                      ) else { return }
-                                selectClosest(to: date)
-                            })
-                            .onTapGesture { location in
-                                guard let date = LifeOSChartKit.timestamp(
-                                    forPlotX: location.x,
-                                    in: frame,
-                                    domain: chartXDomain
-                                ) else { return }
-                                selectClosest(to: date)
-                            }
-#elseif os(macOS)
-                            .onContinuousHover(coordinateSpace: .local) { phase in
-                                switch phase {
-                                case .active(let location):
+                                .simultaneousGesture(DragGesture(minimumDistance: LifeOSDirectionalClassifier.minimumDistance).onChanged { value in
+                                    guard LifeOSDirectionalClassifier.classify(value.translation) == .horizontal,
+                                          let date = LifeOSChartKit.timestamp(
+                                              forPlotX: value.location.x,
+                                              in: frame,
+                                              domain: chartXDomain
+                                          ) else { return }
+                                    selectClosest(to: date)
+                                })
+                                .onTapGesture { location in
                                     guard let date = LifeOSChartKit.timestamp(
                                         forPlotX: location.x,
                                         in: frame,
                                         domain: chartXDomain
                                     ) else { return }
                                     selectClosest(to: date)
-                                case .ended:
-                                    break
                                 }
-                            }
+#elseif os(macOS)
+                                .onContinuousHover(coordinateSpace: .local) { phase in
+                                    switch phase {
+                                    case .active(let location):
+                                        guard let date = LifeOSChartKit.timestamp(
+                                            forPlotX: location.x,
+                                            in: frame,
+                                            domain: chartXDomain
+                                        ) else { return }
+                                        selectClosest(to: date)
+                                    case .ended:
+                                        break
+                                    }
+                                }
 #endif
-                        if let selectedPoint,
-                           let x = proxy.position(forX: selectedPoint.date) {
-                            let y = proxy.position(forY: Double(selectedPoint.tokens)) ?? frame.origin.y
-                            ScrubBubble(
-                                x: frame.origin.x + x,
-                                y: frame.origin.y + y,
-                                bounds: frame
-                            ) {
-                                VStack(alignment: .leading, spacing: 1) {
-                                    Text(selectedPoint.tokens.formatted(.number.notation(.compactName)) + " tokens")
-                                    Text(selectedPoint.date, format: .dateTime.weekday(.abbreviated).hour().minute())
-                                        .font(.caption2)
-                                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                            if let selectedPoint,
+                               let x = proxy.position(forX: selectedPoint.date) {
+                                let y = proxy.position(forY: Double(selectedPoint.tokens)) ?? frame.origin.y
+                                ScrubBubble(
+                                    x: frame.origin.x + x,
+                                    y: frame.origin.y + y,
+                                    bounds: frame
+                                ) {
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(selectedPoint.tokens.formatted(.number.notation(.compactName)) + " tokens")
+                                        Text(selectedPoint.date, format: .dateTime.weekday(.abbreviated).hour().minute())
+                                            .font(.caption2)
+                                            .foregroundStyle(LifeOSTokens.tertiaryText)
+                                    }
                                 }
+                                .allowsHitTesting(false)
                             }
-                            .allowsHitTesting(false)
                         }
                     }
                 }
-            }
-            .frame(height: 170)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("\(provider.displayName) hourly token activity chart")
-            .accessibilityValue(activityAccessibilitySummary)
-            .task(id: activityRevealID) { await revealBars() }
+                .frame(height: chartHeight)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("\(provider.displayName) hourly token activity chart")
+                .accessibilityValue(activityAccessibilitySummary)
+                .task(id: activityRevealID) {
+                    if let selectedID, !orderedActivity.contains(where: { $0.date == selectedID }) {
+                        self.selectedID = nil
+                    }
+                    await revealBars()
+                }
 
-            footer
+                keyboardStepper
+                footer
+            }
         }
         .flatCard()
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(provider.displayName) token activity")
     }
 
+    private var emptyActivityState: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            LifeOSIcon(.usage)
+                .frame(width: 20, height: 20)
+                .foregroundStyle(LifeOSTokens.tertiaryText)
+            Text("No token activity")
+                .font(LifeOSFont.cardTitle(16))
+            Text("The gateway has not supplied token activity for this account, so no chart range is shown.")
+                .font(LifeOSFont.supportingText(13))
+                .foregroundStyle(LifeOSTokens.secondaryText)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .background(LifeOSTokens.primaryText.opacity(0.045), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .accessibilityElement(children: .combine)
+    }
+
     private var summaryCard: some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 6) {
-                    LifeOSIcon(.assistant).frame(width: 12, height: 12).foregroundStyle(LifeOSTokens.Series.actual)
-                    Text(provider.displayName).font(.caption.weight(.semibold))
+                    LifeOSIcon(.assistant).frame(width: 14, height: 14).foregroundStyle(LifeOSTokens.Series.actual)
+            Text(provider.displayName).font(LifeOSFont.cardTitle(16))
                 }
                 Text("Hourly token totals")
-                    .font(.caption2)
+                    .font(LifeOSFont.bodyText(13))
                     .foregroundStyle(LifeOSTokens.secondaryText)
                 Text(totalTokens.formatted(.number.notation(.compactName)))
                     .font(LifeOSFont.kpi(30))
                     .tracking(-0.3)
                     .monospacedDigit()
                 Text(activity.isEmpty ? "No hourly observations" : "\(activity.count) hourly observations")
-                    .font(.caption2)
+                    .font(LifeOSFont.metadata(12))
                     .foregroundStyle(LifeOSTokens.secondaryText)
             }
             Spacer(minLength: 12)
             VStack(alignment: .trailing, spacing: 6) {
-                statLine(label: "Coverage", value: "No daily aggregation")
+                statLine(label: "Daily coverage", value: dailyCoverageText)
+                statLine(label: "Peak complete day", value: peakDayText)
                 statLine(label: "Updated", value: updatedText)
             }
         }
-        .padding(14)
+        .padding(16)
         .background(LifeOSTokens.primaryText.opacity(0.045), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
@@ -181,15 +260,65 @@ struct UsageTokenActivityView: View {
 
     private func statLine(label: String, value: String) -> some View {
         VStack(alignment: .trailing, spacing: 1) {
-            Text(label).font(.caption2).foregroundStyle(LifeOSTokens.secondaryText)
-            Text(value).font(.caption2.weight(.semibold))
+            Text(label).font(LifeOSFont.metadata(12)).foregroundStyle(LifeOSTokens.secondaryText)
+            Text(value).font(LifeOSFont.control(13))
         }
+    }
+
+    private var dailyCoverageText: String {
+        guard !dailySummaries.isEmpty else { return "Not available" }
+        return "\(completeDays.count)/\(dailySummaries.count) complete"
+    }
+
+    private var peakDayText: String {
+        guard let peak = completeDays.max(by: { $0.tokens < $1.tokens }) else { return "Not available" }
+        return "\(peak.tokens.formatted(.number.notation(.compactName))) tokens"
+    }
+
+    private var keyboardStepper: some View {
+        HStack(spacing: 8) {
+            Button { stepSelection(by: -1) } label: {
+                LifeOSIcon(.chevronLeft).frame(width: 11, height: 11)
+            }
+            .buttonStyle(.plain)
+            .disabled(orderedActivity.isEmpty)
+#if os(macOS)
+            .keyboardShortcut(.leftArrow, modifiers: [])
+#endif
+            .accessibilityLabel("Previous token activity point")
+
+            Text(selectedPoint.map { $0.date.formatted(.dateTime.month(.abbreviated).day().hour().minute()) } ?? "Select a point")
+                .font(LifeOSFont.control(13).monospacedDigit())
+                .foregroundStyle(LifeOSTokens.secondaryText)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+                .frame(minWidth: 180)
+                .accessibilityLabel(selectedPoint.map {
+                    "Selected token activity point \($0.date.formatted(.dateTime.month(.abbreviated).day().hour().minute()))"
+                } ?? "No token activity point selected")
+
+            Button { stepSelection(by: 1) } label: {
+                LifeOSIcon(.chevronRight).frame(width: 11, height: 11)
+            }
+            .buttonStyle(.plain)
+            .disabled(orderedActivity.isEmpty)
+#if os(macOS)
+            .keyboardShortcut(.rightArrow, modifiers: [])
+#endif
+            .accessibilityLabel("Next token activity point")
+        }
+        .foregroundStyle(LifeOSTokens.secondaryText)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(LifeOSTokens.primaryText.opacity(0.045), in: Capsule())
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Token activity point stepper")
     }
 
     private var footer: some View {
         HStack {
             Text(footerHintText)
-                .font(.caption)
+                .font(LifeOSFont.metadata(12))
                 .foregroundStyle(LifeOSTokens.secondaryText)
             Spacer()
         }
@@ -206,7 +335,7 @@ struct UsageTokenActivityView: View {
     private var activityAccessibilitySummary: String {
         guard let latest = orderedActivity.last else { return "No hourly observations are available." }
         let total = totalTokens.formatted(.number.notation(.compactName))
-        return "\(activity.count) hourly observations, totaling \(total) tokens. Latest point: \(latest.tokens.formatted(.number.notation(.compactName))) tokens at \(latest.date.formatted(.dateTime.month(.abbreviated).day().hour().minute()))."
+        return "\(orderedActivity.count) hourly observations, totaling \(total) tokens. Latest point: \(latest.tokens.formatted(.number.notation(.compactName))) tokens at \(latest.date.formatted(.dateTime.month(.abbreviated).day().hour().minute()))."
     }
 
     private func barColor(for point: UsageActivityPoint) -> Color {
@@ -269,10 +398,21 @@ struct UsageTokenActivityView: View {
         let points = orderedActivity.map {
             LifeOSChartPoint(timestamp: $0.date, value: Double($0.tokens))
         }
-        guard let closest = LifeOSChartKit.nearestPoint(in: points, to: date) else { return }
+        guard let closest = LifeOSChartKit.nearestPoint(in: points, to: date, expectedCadence: 3_600) else { return }
         if closest.timestamp != selectedID {
             ScrubBubble<EmptyView>.snapHaptic()
         }
         selectedID = closest.timestamp
+    }
+
+    private func stepSelection(by offset: Int) {
+        guard !orderedActivity.isEmpty else { return }
+        let currentIndex = selectedID.flatMap { selected in
+            orderedActivity.firstIndex { $0.date == selected }
+        } ?? (offset < 0 ? orderedActivity.count : -1)
+        let nextIndex = min(max(currentIndex + offset, 0), orderedActivity.count - 1)
+        let next = orderedActivity[nextIndex].date
+        if next != selectedID { ScrubBubble<EmptyView>.snapHaptic() }
+        selectedID = next
     }
 }

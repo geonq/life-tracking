@@ -32,6 +32,17 @@ public enum UsageLoadState: Equatable, Sendable {
     case unavailable
 }
 
+/// A typed failure channel kept separate from `UsageLoadState` for source
+/// compatibility with existing Settings switches. UI surfaces can therefore
+/// distinguish a bad payload, transport failure, and history-storage failure
+/// without turning an error into a fabricated numeric state.
+public enum UsageRefreshFailure: String, Codable, Equatable, Sendable {
+    case none
+    case transport
+    case invalidPayload
+    case historyStorage
+}
+
 public protocol UsagePayloadFetching: Sendable {
     func fetchUsage() async throws -> Data
 }
@@ -47,22 +58,37 @@ public final class UsageCoordinator: ObservableObject {
     @Published public private(set) var connectorStates: [Provider: ConnectorState] = [:]
     @Published public private(set) var errorMessage: String?
     @Published public private(set) var lastUpdated: Date?
+    @Published public private(set) var failure: UsageRefreshFailure = .none
+    @Published public private(set) var historyStatus: UsageHistoryStatus = .empty
+    @Published public private(set) var historyErrorMessage: String?
 
     private let fetchPayload: @Sendable () async throws -> APIUsagePayload
     private var refreshTask: Task<Void, Never>?
     private var refreshGeneration = 0
     private let staleAfter: TimeInterval
+    private let historyPersistence: UsageHistoryPersistence
+    private var historyLedger: UsageHistoryLedger
 
     public init(client: UsagePayloadFetching = TailscaleSyncClient(),
                 staleAfter: TimeInterval = 15 * 60,
                 initialProviders: [ProviderSnapshot] = [],
-                initialUpdatedAt: Date? = nil) {
+                initialUpdatedAt: Date? = nil,
+                historyPersistence: UsageHistoryPersistence = UserDefaultsUsageHistoryPersistence()) {
         self.fetchPayload = {
             let data = try await client.fetchUsage()
             return try JSONDecoder.lifeOS.decode(APIUsagePayload.self, from: data)
         }
         self.staleAfter = staleAfter
+        self.historyPersistence = historyPersistence
+        let loadedHistory = Self.loadHistory(from: historyPersistence)
+        self.historyLedger = loadedHistory.ledger
+        self.historyStatus = loadedHistory.ledger.isEmpty ? .empty : .available
+        self.historyErrorMessage = loadedHistory.errorMessage
+        self.failure = loadedHistory.errorMessage == nil ? .none : .historyStorage
         self.providers = initialProviders
+        self.analytics = UsageAnalyticsHistoryBuilder.snapshots(
+            from: loadedHistory.ledger, providers: initialProviders
+        )
         self.lastUpdated = initialUpdatedAt
         if initialProviders.contains(where: { $0.provenance.quality == .observed }) {
             let timestampIsStale = initialUpdatedAt.map { Date.now.timeIntervalSince($0) >= staleAfter } ?? true
@@ -76,10 +102,20 @@ public final class UsageCoordinator: ObservableObject {
     public init(fetch: @escaping @Sendable () async throws -> APIUsagePayload,
                 staleAfter: TimeInterval = 15 * 60,
                 initialProviders: [ProviderSnapshot] = [],
-                initialUpdatedAt: Date? = nil) {
+                initialUpdatedAt: Date? = nil,
+                historyPersistence: UsageHistoryPersistence = UserDefaultsUsageHistoryPersistence()) {
         self.fetchPayload = fetch
         self.staleAfter = staleAfter
+        self.historyPersistence = historyPersistence
+        let loadedHistory = Self.loadHistory(from: historyPersistence)
+        self.historyLedger = loadedHistory.ledger
+        self.historyStatus = loadedHistory.ledger.isEmpty ? .empty : .available
+        self.historyErrorMessage = loadedHistory.errorMessage
+        self.failure = loadedHistory.errorMessage == nil ? .none : .historyStorage
         self.providers = initialProviders
+        self.analytics = UsageAnalyticsHistoryBuilder.snapshots(
+            from: loadedHistory.ledger, providers: initialProviders
+        )
         self.lastUpdated = initialUpdatedAt
         if initialProviders.contains(where: { $0.provenance.quality == .observed }) {
             let timestampIsStale = initialUpdatedAt.map { Date.now.timeIntervalSince($0) >= staleAfter } ?? true
@@ -101,12 +137,16 @@ public final class UsageCoordinator: ObservableObject {
 
         let operation = Task { [weak self] in
             guard let self else { return }
-            await MainActor.run { self.state = .loading; self.errorMessage = nil }
+            await MainActor.run {
+                self.state = .loading
+                self.failure = self.historyErrorMessage == nil ? .none : .historyStorage
+                self.errorMessage = self.historyErrorMessage
+            }
             do {
                 try Task.checkCancellation()
                 let payload = try await self.fetchPayload()
                 try Task.checkCancellation()
-                let mapped = try UsageIngestion.map(payload)
+                let mapped = try UsageIngestion.map(payload, now: .now)
                 await MainActor.run { self.apply(mapped, generatedAt: payload.generatedAt) }
             } catch is CancellationError {
                 // A newer refresh or lifecycle cancellation owns the next truthful state.
@@ -127,24 +167,121 @@ public final class UsageCoordinator: ObservableObject {
 
     private func apply(_ mapped: UsageMappingResult, generatedAt: Date) {
         providers = mapped.providers
-        analytics = mapped.analytics
         connectorStates = mapped.connectorStates
         lastUpdated = generatedAt
+
+        let incoming = mapped.providers.flatMap { provider in
+            provider.windows.compactMap { window -> UsageHistoryEntry? in
+                guard let usedPercent = window.usedPercent,
+                      let provenance = window.provenance,
+                      provenance.quality == .observed,
+                      let durationMinutes = window.durationMinutes else { return nil }
+                return UsageHistoryEntry(
+                    provider: provider.provider,
+                    window: window.id,
+                    durationMinutes: durationMinutes,
+                    usedPercent: usedPercent * 100,
+                    resetAt: window.resetAt,
+                    observedAt: provenance.observedAt,
+                    source: provenance.source,
+                    connectorState: provenance.connector
+                )
+            }
+        }
+
+        if !incoming.isEmpty {
+            do {
+                let key = UsageHistoryDigest.idempotencyKey(for: incoming)
+                _ = try historyLedger.append(incoming, idempotencyKey: key, now: .now)
+                try persistHistory()
+                historyStatus = historyLedger.isEmpty ? .empty : .available
+                historyErrorMessage = nil
+                failure = .none
+            } catch {
+                // Current gateway values remain usable; only the durable
+                // history capability is unavailable. Do not turn that into a
+                // zero-length or synthetic history series.
+                historyStatus = .storageError
+                historyErrorMessage = "Usage history unavailable"
+                failure = .historyStorage
+            }
+        }
+
+        analytics = mergedAnalytics(
+            mapped.analytics,
+            history: UsageAnalyticsHistoryBuilder.snapshots(from: historyLedger, providers: mapped.providers)
+        )
         let observed = mapped.providers.filter { $0.provenance.quality == .observed }
         let hasStale = !observed.isEmpty && (Date.now.timeIntervalSince(generatedAt) >= staleAfter || observed.contains {
             let freshness = $0.provenance.freshness(now: .now, staleAfter: staleAfter)
             return freshness == .stale || freshness == .unavailable
         })
         state = observed.isEmpty ? .unavailable : (hasStale ? .stale : .observed)
-        errorMessage = observed.isEmpty ? "Usage data unavailable" : nil
+        errorMessage = historyErrorMessage ?? (observed.isEmpty ? "Usage data unavailable" : nil)
         publishSnapshot(mapped.providers, generatedAt: generatedAt)
     }
 
     private func fail(_ error: Error) {
-        errorMessage = "Usage data unavailable"
+        if error is UsageIngestionError || error is DecodingError {
+            failure = .invalidPayload
+            errorMessage = "Usage payload unavailable"
+        } else {
+            failure = .transport
+            errorMessage = "Usage source unavailable"
+        }
         state = providers.contains(where: { $0.provenance.quality == .observed }) ? .stale : .unavailable
         if !providers.isEmpty { publishSnapshot(providers, generatedAt: lastUpdated ?? .now) }
-        _ = error
+    }
+
+    private func persistHistory() throws {
+        let archive = try historyLedger.archive().validated(now: .now)
+        let encoded = try JSONEncoder.lifeOS.encode(archive)
+        guard encoded.count <= UsageHistoryLedger.maximumArchiveBytes else {
+            throw UsageHistoryError.archiveTooLarge
+        }
+        try historyPersistence.save(encoded)
+    }
+
+    private func mergedAnalytics(_ supplied: [UsageAnalyticsSnapshot],
+                                 history: [UsageAnalyticsSnapshot]) -> [UsageAnalyticsSnapshot] {
+        var result = supplied
+        for record in history {
+            if let index = result.firstIndex(where: {
+                $0.provider == record.provider && $0.windowID == record.windowID
+            }) {
+                // A durable observation record is the stronger local source
+                // for the history field; retain supplied model/heatmap data if
+                // a future wire revision provides it.
+                let existing = result[index]
+                result[index] = UsageAnalyticsSnapshot(
+                    provider: record.provider,
+                    windowID: record.windowID,
+                    activity: existing.activity,
+                    projection: existing.projection.isEmpty ? record.projection : existing.projection,
+                    modelBreakdowns: existing.modelBreakdowns,
+                    heatmap: existing.heatmap,
+                    provenance: existing.provenance,
+                    history: record.history
+                )
+            } else {
+                result.append(record)
+            }
+        }
+        return result
+    }
+
+    private static func loadHistory(from persistence: UsageHistoryPersistence) ->
+        (ledger: UsageHistoryLedger, errorMessage: String?) {
+        do {
+            guard let data = try persistence.load() else { return (UsageHistoryLedger(), nil) }
+            guard data.count <= UsageHistoryLedger.maximumArchiveBytes else {
+                throw UsageHistoryError.archiveTooLarge
+            }
+            let archive = try JSONDecoder.lifeOS.decode(UsageHistoryArchive.self, from: data)
+            return (try UsageHistoryLedger(archive: archive), nil)
+        } catch {
+            return (UsageHistoryLedger(), "Usage history unavailable")
+        }
     }
 
     private func publishSnapshot(_ providers: [ProviderSnapshot], generatedAt: Date) {
@@ -172,7 +309,9 @@ public final class UsageCoordinator: ObservableObject {
             financeSignal: prior?.financeSignal ?? "Unavailable",
             updatedAt: generatedAt,
             freshness: freshness,
-            warning: state == .observed ? nil : "Usage data \(state.label)",
+            warning: failure == .historyStorage
+                ? "Usage history unavailable"
+                : (state == .observed ? nil : "Usage data \(state.label)"),
             provenance: aggregateProvenance
         )
         do {

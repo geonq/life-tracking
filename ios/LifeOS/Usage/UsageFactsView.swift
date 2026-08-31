@@ -12,7 +12,9 @@ struct UsageFactsView: View {
     let snapshot: ProviderSnapshot
     let analytics: UsageAnalyticsSnapshot?
 
-    private var facts: UsageFacts { UsageFacts.compute(from: analytics) }
+    private var facts: UsageFacts {
+        UsageFacts.compute(from: analytics, fallbackProvenance: snapshot.provenance)
+    }
 
     private var timestamp: String {
         snapshot.provenance.observedAt.formatted(.dateTime.month(.abbreviated).day().year().hour().minute())
@@ -41,20 +43,23 @@ struct UsageFactsView: View {
 
     private var factsCard: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("Account facts")
-                .font(.subheadline.weight(.semibold))
-                .padding(.bottom, 10)
+            UsageCardHeader(
+                title: "Account facts",
+                subtitle: "Sourced observations for \(snapshot.provider.displayName)",
+                icon: .usage
+            )
+            .padding(.bottom, 12)
 
             // Lifetime tokens — GAP. No cumulative-tokens-ever field in UsageAnalytics.swift;
             // `activity` only covers the current short window.
             factRow(label: "Lifetime tokens", value: "Not available")
             divider
 
-            // Peak hour tokens — computed from the loaded activity series. Labeled "hour" (not
-            // "day") because today's activity points are hourly, not daily — see UsageFacts.swift.
+            // Peak daily tokens is only promoted when the activity feed contains
+            // every hour for a complete calendar day. Partial feeds stay unavailable.
             factRow(
-                label: "Peak hour tokens",
-                value: facts.peakActivity.map { "\(formatTokens($0.tokens)) tok" } ?? "Not available"
+                label: "Peak daily tokens",
+                value: facts.peakDailyActivity.map { "\(formatTokens($0.tokens)) tok" } ?? "Not available"
             )
             divider
 
@@ -103,8 +108,8 @@ struct UsageFactsView: View {
     private var bankedResetsCard: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("Banked resets")
-                .font(.subheadline.weight(.semibold))
-                .padding(.bottom, 10)
+                .font(LifeOSFont.cardTitle(16))
+                .padding(.bottom, 6)
 
             // Banked resets — GAP across all four sub-fields. Only a static demo string exists
             // today (OverviewDomain.swift), not a real modeled field. 02 §0 data-gaps item 1.
@@ -126,13 +131,20 @@ struct UsageFactsView: View {
     private func factRow(label: String, value: String) -> some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(label).font(.subheadline)
-                Text(subLabel).font(.caption2).foregroundStyle(LifeOSTokens.tertiaryText)
+                Text(label)
+                    .font(LifeOSFont.bodyText(14))
+                    .foregroundStyle(LifeOSTokens.primaryText)
+                Text(subLabel)
+                    .font(LifeOSFont.metadata(11))
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
             }
             Spacer(minLength: 12)
             Text(value)
-                .font(.subheadline.weight(value == "Not available" ? .regular : .semibold))
+                .font(LifeOSFont.control(14))
                 .foregroundStyle(value == "Not available" ? LifeOSTokens.tertiaryText : .primary)
+                .multilineTextAlignment(.trailing)
+                .lineLimit(2)
+                .minimumScaleFactor(0.8)
         }
         .accessibilityElement(children: .combine)
     }

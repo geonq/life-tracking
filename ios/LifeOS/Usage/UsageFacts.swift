@@ -56,20 +56,31 @@ public struct UsageFreshnessFact: Equatable, Sendable {
 /// derived from a model that doesn't exist yet.
 public struct UsageFacts: Equatable, Sendable {
     public let peakActivity: UsagePeakActivityFact?
+    public let peakDailyActivity: UsagePeakActivityFact?
     public let observedTotals: UsageObservedTotalsFact?
     public let freshness: UsageFreshnessFact?
 
-    public init(peakActivity: UsagePeakActivityFact?, observedTotals: UsageObservedTotalsFact?, freshness: UsageFreshnessFact?) {
+    public init(peakActivity: UsagePeakActivityFact?, observedTotals: UsageObservedTotalsFact?, freshness: UsageFreshnessFact?,
+                peakDailyActivity: UsagePeakActivityFact? = nil) {
         self.peakActivity = peakActivity
+        self.peakDailyActivity = peakDailyActivity
         self.observedTotals = observedTotals
         self.freshness = freshness
     }
 
     /// Computes facts from an analytics snapshot. Returns a struct of `nil`s (not fabricated
     /// zeros) when `analytics` is `nil` or its `activity` series is empty.
-    public static func compute(from analytics: UsageAnalyticsSnapshot?, now: Date = .now) -> UsageFacts {
+    public static func compute(from analytics: UsageAnalyticsSnapshot?, fallbackProvenance: Provenance? = nil,
+                               calendar: Calendar = .current, now: Date = .now) -> UsageFacts {
         guard let analytics else {
-            return UsageFacts(peakActivity: nil, observedTotals: nil, freshness: nil)
+            let freshness = fallbackProvenance.map {
+                UsageFreshnessFact(
+                    observedAt: $0.observedAt,
+                    freshness: $0.freshness(now: now),
+                    source: $0.source
+                )
+            }
+            return UsageFacts(peakActivity: nil, observedTotals: nil, freshness: freshness)
         }
 
         let peak: UsagePeakActivityFact? = analytics.activity
@@ -85,12 +96,23 @@ public struct UsageFacts: Equatable, Sendable {
                 observationCount: analytics.activity.count
             )
 
+        let peakDay = UsageActivityAggregation.completeDays(from: analytics.activity, calendar: calendar)
+            .max { $0.tokens < $1.tokens }
+            .map { day in
+                UsagePeakActivityFact(tokens: day.tokens, date: day.date, granularityLabel: "day")
+            }
+
         let freshness = UsageFreshnessFact(
             observedAt: analytics.provenance.observedAt,
             freshness: analytics.provenance.freshness(now: now),
             source: analytics.provenance.source
         )
 
-        return UsageFacts(peakActivity: peak, observedTotals: totals, freshness: freshness)
+        return UsageFacts(
+            peakActivity: peak,
+            observedTotals: totals,
+            freshness: freshness,
+            peakDailyActivity: peakDay
+        )
     }
 }
