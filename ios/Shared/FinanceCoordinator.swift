@@ -19,6 +19,9 @@ extension TailscaleSyncClient: FinanceSummaryFetching {}
 @MainActor
 public final class FinanceCoordinator: ObservableObject {
     @Published public private(set) var state: FinanceLoadState
+    /// Finance-only detail state. The app-wide `state` intentionally keeps its
+    /// existing cases so unrelated views do not need to change.
+    @Published public private(set) var observationState: FinanceObservationState
     @Published public private(set) var summary: FinanceSummary?
     @Published public private(set) var errorMessage: String?
     @Published public private(set) var lastUpdated: Date?
@@ -43,6 +46,11 @@ public final class FinanceCoordinator: ObservableObject {
             requested: initialState,
             staleAfter: staleAfter
         )
+        self.observationState = Self.initialObservationState(
+            for: initialSummary,
+            requested: initialState,
+            staleAfter: staleAfter
+        )
     }
 
     public init(
@@ -56,6 +64,11 @@ public final class FinanceCoordinator: ObservableObject {
         self.summary = initialSummary
         self.lastUpdated = initialSummary?.generatedAt
         self.state = Self.initialState(
+            for: initialSummary,
+            requested: initialState,
+            staleAfter: staleAfter
+        )
+        self.observationState = Self.initialObservationState(
             for: initialSummary,
             requested: initialState,
             staleAfter: staleAfter
@@ -77,6 +90,7 @@ public final class FinanceCoordinator: ObservableObject {
             await MainActor.run {
                 guard generation == self.refreshGeneration else { return }
                 self.state = .loading
+                self.observationState = .loading
                 self.errorMessage = nil
             }
             do {
@@ -113,6 +127,7 @@ public final class FinanceCoordinator: ObservableObject {
             return
         }
         state = hasObservedSummary ? .stale : .unavailable
+        observationState = summary?.financeAssessment(staleAfter: staleAfter).state ?? .unavailable
     }
 
     public func retry() async {
@@ -123,11 +138,13 @@ public final class FinanceCoordinator: ObservableObject {
         summary = fetched
         lastUpdated = fetched.generatedAt
         state = Self.observationState(for: fetched, now: .now, staleAfter: staleAfter)
+        observationState = fetched.financeAssessment(staleAfter: staleAfter).state
         errorMessage = state == .unavailable ? "Finance data unavailable" : nil
     }
 
     private func fail() {
         errorMessage = "Finance data unavailable"
+        observationState = .error
         state = hasObservedSummary ? .stale : .unavailable
     }
 
@@ -144,6 +161,16 @@ public final class FinanceCoordinator: ObservableObject {
         if requested == .demo { return .demo }
         guard let summary else { return requested == .loading ? .loading : .unavailable }
         return observationState(for: summary, now: .now, staleAfter: staleAfter)
+    }
+
+    private static func initialObservationState(
+        for summary: FinanceSummary?,
+        requested: FinanceLoadState?,
+        staleAfter: TimeInterval
+    ) -> FinanceObservationState {
+        if requested == .demo { return .demo }
+        guard let summary else { return requested == .loading ? .loading : .unavailable }
+        return summary.financeAssessment(staleAfter: staleAfter).state
     }
 
     private static func observationState(
@@ -176,7 +203,16 @@ public final class FinanceCoordinator: ObservableObject {
                 guard hasObservedAccounts(in: summary) else { return false }
                 return provenanceIsStale($0.provenance, now: now, staleAfter: staleAfter)
                     || ($0.accounts ?? []).contains {
-                        provenanceIsStale($0.provenance, now: now, staleAfter: staleAfter)
+                        $0.availability == .observed
+                            && provenanceIsStale($0.provenance, now: now, staleAfter: staleAfter)
+                    }
+            } ?? false)
+            || (summary.wealth.map {
+                guard $0.availability == .observed, $0.observedValueCents != nil else { return false }
+                return provenanceIsStale($0.provenance, now: now, staleAfter: staleAfter)
+                    || ($0.holdings ?? []).contains {
+                        $0.availability == .observed
+                            && provenanceIsStale($0.provenance, now: now, staleAfter: staleAfter)
                     }
             } ?? false)
         return stale ? .stale : .observed
@@ -195,6 +231,9 @@ public final class FinanceCoordinator: ObservableObject {
                 $0.availability == .observed && $0.transactions != nil
             } ?? false)
             || hasObservedAccounts(in: summary)
+            || (summary.wealth.map {
+                $0.availability == .observed && $0.observedValueCents != nil
+            } ?? false)
     }
 
     /// Accounts are a first-class observation source. A summary containing no
@@ -208,7 +247,11 @@ public final class FinanceCoordinator: ObservableObject {
               !accounts.isEmpty else {
             return false
         }
-        return accounts.allSatisfy { isUsableObservedProvenance($0.provenance) }
+        return accounts.contains {
+            $0.availability == .observed
+                && $0.balanceCents != nil
+                && isUsableObservedProvenance($0.provenance)
+        }
     }
 
     private static func isUsableObservedProvenance(_ provenance: FinancePayloadProvenance) -> Bool {

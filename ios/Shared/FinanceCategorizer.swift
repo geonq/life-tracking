@@ -43,6 +43,25 @@ public struct FinanceSpendTotals: Equatable, Hashable, Sendable {
     public var netCents: Int { inflowCents - outflowCents }
 }
 
+public enum FinanceCategoryResolutionSource: String, Codable, Equatable, Sendable {
+    case userOverride
+    case provider
+    case providerCode
+    case heuristic
+    case investmentSource
+    case uncategorized
+}
+
+public struct FinanceCategoryResolution: Equatable, Sendable {
+    public let category: FinanceTransactionCategory
+    public let source: FinanceCategoryResolutionSource
+
+    public init(category: FinanceTransactionCategory, source: FinanceCategoryResolutionSource) {
+        self.category = category
+        self.source = source
+    }
+}
+
 // MARK: - Keyword-based categorizer
 
 /// A pure categorizer for `FinanceImportedTransaction` rows. When a saved
@@ -171,10 +190,9 @@ public enum FinanceCategorizer {
     public static func category(
         for description: String,
         amountCents: Int,
-        sourceCategory: String? = nil
+        sourceCategory: String? = nil,
+        providerCode: String? = nil
     ) -> FinanceTransactionCategory {
-        let normalized = normalized(description)
-        guard !normalized.isEmpty else { return .uncategorized }
         let isInflow = amountCents > 0
 
         // A recognized category explicitly supplied by the bank/CSV wins over
@@ -184,6 +202,11 @@ public enum FinanceCategorizer {
            supplied != .income || isInflow {
             return supplied
         }
+        if let coded = FinanceTransactionCategory.from(providerCode: providerCode) {
+            return coded
+        }
+        let normalized = normalized(description)
+        guard !normalized.isEmpty else { return .uncategorized }
 
         for rule in rules {
             if let requiresInflow = rule.requiresInflow, requiresInflow != isInflow {
@@ -194,6 +217,37 @@ public enum FinanceCategorizer {
             }
         }
         return .uncategorized
+    }
+
+    /// Resolves a persisted import row with an explicit precedence contract.
+    /// Category precedence is explicit: user override, trusted provider
+    /// category, provider code, structural investment marker, deterministic
+    /// merchant heuristic, then honest unknown. Investment orders remain
+    /// excluded from budget actuals even when a user labels the row for a
+    /// different display category.
+    public static func resolve(transaction: FinanceImportedTransaction) -> FinanceCategoryResolution {
+        if let override = FinanceTransactionCategory.from(sourceCategory: transaction.category) {
+            return FinanceCategoryResolution(category: override, source: .userOverride)
+        }
+        if let provider = FinanceTransactionCategory.from(sourceCategory: transaction.sourceCategory),
+           provider != .income || transaction.amountCents > 0 {
+            return FinanceCategoryResolution(category: provider, source: .provider)
+        }
+        if let providerCode = FinanceTransactionCategory.from(providerCode: transaction.providerCode) {
+            return FinanceCategoryResolution(category: providerCode, source: .providerCode)
+        }
+        if transaction.isInvestmentOrder {
+            return FinanceCategoryResolution(category: .investments, source: .investmentSource)
+        }
+        let heuristic = category(for: transaction.description, amountCents: transaction.amountCents)
+        return FinanceCategoryResolution(
+            category: heuristic,
+            source: heuristic == .uncategorized ? .uncategorized : .heuristic
+        )
+    }
+
+    public static func category(for transaction: FinanceImportedTransaction) -> FinanceTransactionCategory {
+        resolve(transaction: transaction).category
     }
 
     /// Builds a per-category spend/income summary over the given
@@ -208,11 +262,7 @@ public enum FinanceCategorizer {
         var countByCategory: [FinanceTransactionCategory: Int] = [:]
 
         for transaction in transactions {
-            let category = category(
-                for: transaction.description,
-                amountCents: transaction.amountCents,
-                sourceCategory: transaction.category
-            )
+            let category = category(for: transaction)
             countByCategory[category, default: 0] += 1
             if transaction.amountCents < 0 {
                 outflowByCategory[category, default: 0] += -transaction.amountCents
@@ -252,5 +302,17 @@ public enum FinanceCategorizer {
             }
         }
         return FinanceSpendTotals(outflowCents: outflow, inflowCents: inflow, transactionCount: transactions.count)
+    }
+
+    /// Budget actuals are derived only from locally imported rows and only
+    /// from ordinary spend categories. Investment orders, transfers, income,
+    /// and other non-budgetable categories are excluded; no live bank summary
+    /// is used to manufacture a budget actual.
+    public static func isBudgetEligible(_ transaction: FinanceImportedTransaction) -> Bool {
+        !transaction.isInvestmentOrder && category(for: transaction).isBudgetable
+    }
+
+    public static func budgetSummary(for transactions: [FinanceImportedTransaction]) -> [FinanceCategorySpend] {
+        summary(for: transactions.filter(isBudgetEligible))
     }
 }

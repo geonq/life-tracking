@@ -54,9 +54,49 @@ final class FinanceImportedTransactionStoreTests: XCTestCase {
         let id = UUID()
         let first = FinanceImportedTransaction(id: id, bookedAt: now, amountCents: -100, description: "Rewe", source: .genericCSV, importedAt: now)
         let retry = FinanceImportedTransaction(id: id, bookedAt: now, amountCents: -100, description: "Rewe", source: .genericCSV, importedAt: now.addingTimeInterval(60))
-        try store.add([first, first])
-        try store.add([retry])
+        let firstResult = try store.add([first, first])
+        let retryResult = try store.add([retry])
+        XCTAssertEqual(firstResult, FinanceImportSaveResult(requestedCount: 2, insertedCount: 1, duplicateCount: 1, storedCount: 1))
+        XCTAssertEqual(retryResult, FinanceImportSaveResult(requestedCount: 1, insertedCount: 0, duplicateCount: 1, storedCount: 1))
         XCTAssertEqual(try store.all(), [first])
+    }
+
+    func testReimportReconcilesSourceCorrectionAndPreservesUserOverride() throws {
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        let store = try FinanceImportedTransactionStore(url: url)
+        let id = UUID()
+        let original = FinanceImportedTransaction(
+            id: id,
+            bookedAt: now,
+            amountCents: -100,
+            description: "Unknown merchant",
+            source: .genericCSV,
+            importedAt: now,
+            sourceCategory: "Shopping"
+        )
+        try store.add([original])
+        try store.setCategory(.groceries, for: id)
+
+        let corrected = FinanceImportedTransaction(
+            id: id,
+            bookedAt: now,
+            amountCents: -1_250,
+            description: "Corrected merchant",
+            source: .genericCSV,
+            importedAt: now.addingTimeInterval(60),
+            sourceCategory: "Food"
+        )
+        let result = try store.add([corrected])
+        XCTAssertEqual(result.insertedCount, 0)
+        XCTAssertEqual(result.updatedCount, 1)
+        XCTAssertEqual(result.duplicateCount, 0)
+
+        let restored = try XCTUnwrap(try store.all().first)
+        XCTAssertEqual(restored.amountCents, -1_250)
+        XCTAssertEqual(restored.description, "Corrected merchant")
+        XCTAssertEqual(restored.category, FinanceTransactionCategory.groceries.rawValue)
+        XCTAssertEqual(try store.add([corrected]).duplicateCount, 1)
     }
 
     // MARK: 2. Honest empty when absent
@@ -133,6 +173,58 @@ final class FinanceImportedTransactionStoreTests: XCTestCase {
 
         try store.setCategory(nil, for: imported.id)
         XCTAssertNil(try store.all().first?.category)
+    }
+
+    func testClearingOverrideRestoresProviderCategory() throws {
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        let store = try FinanceImportedTransactionStore(url: url)
+        let imported = FinanceImportedTransaction(
+            bookedAt: now,
+            amountCents: -2_000,
+            description: "Unknown merchant",
+            source: .tradeRepublicCSV,
+            importedAt: now,
+            sourceCategory: "Food"
+        )
+        try store.add([imported])
+
+        try store.setCategory(.dining, for: imported.id)
+        let overridden = try XCTUnwrap(store.all().first)
+        XCTAssertEqual(FinanceCategorizer.category(for: overridden), .dining)
+
+        try store.clearCategoryOverride(for: imported.id)
+        let restored = try XCTUnwrap(store.all().first)
+        XCTAssertNil(restored.category)
+        XCTAssertEqual(restored.sourceCategory, "Food")
+        XCTAssertEqual(FinanceCategorizer.category(for: restored), .groceries)
+    }
+
+    func testInvestmentDetailsSurvivePersistenceWithoutBecomingAValuation() throws {
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        let store = try FinanceImportedTransactionStore(url: url)
+        let order = FinanceImportedTransaction(
+            bookedAt: now,
+            amountCents: -10_050,
+            description: "Vanguard",
+            source: .tradeRepublicCSV,
+            importedAt: now,
+            kind: .investmentOrder,
+            investment: FinanceImportedInvestmentDetails(
+                symbol: "VWCE",
+                assetClass: "ETF",
+                quantity: "1.25",
+                unitPriceCents: 10_050,
+                tradeType: "buy"
+            )
+        )
+        try store.add([order])
+
+        let restored = try XCTUnwrap(try FinanceImportedTransactionStore(url: url).all().first)
+        XCTAssertEqual(restored.kind, .investmentOrder)
+        XCTAssertEqual(restored.investment?.symbol, "VWCE")
+        XCTAssertEqual(FinanceCategorizer.category(for: restored), .investments)
     }
 
     func testClearAllRemovesEveryTransaction() throws {

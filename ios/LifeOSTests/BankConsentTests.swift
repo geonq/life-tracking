@@ -210,4 +210,104 @@ final class BankConsentTests: XCTestCase {
             XCTAssertEqual(TailscaleSyncClient.connectionPreflightState(for: error), .invalidResponse)
         }
     }
+
+    // MARK: - Settings lifecycle and diagnostics projections
+
+    func testBankConsentLifecycleKeepsCallbackReturnSeparateFromLinked() {
+        XCTAssertEqual(BankConsentLifecyclePhase.awaitingConsent.title, "Consent pending")
+        XCTAssertEqual(BankConsentLifecyclePhase.returningFromConsent.title, "Returning from consent")
+        XCTAssertNotEqual(
+            BankConsentLifecyclePhase.returningFromConsent,
+            BankConsentLifecyclePhase.linked
+        )
+        XCTAssertTrue(BankConsentLifecyclePhase.returningFromConsent.canRetry)
+        XCTAssertFalse(BankConsentLifecyclePhase.checking.canRetry)
+        XCTAssertFalse(BankConsentLifecyclePhase.linked.canRetry)
+    }
+
+    func testProviderLifecyclePreservesAuthorizationAndFailureStates() {
+        let observedProvenance = Provenance(
+            source: "provider-observation",
+            observedAt: Date.now,
+            quality: .observed,
+            connector: .healthy
+        )
+        let observed = ProviderSnapshot(
+            provider: .codex,
+            accountLabel: "Codex",
+            windows: [],
+            provenance: observedProvenance
+        )
+
+        XCTAssertEqual(
+            SettingsProviderLifecycle.resolve(snapshot: observed, connector: .healthy),
+            .authorized
+        )
+        XCTAssertEqual(
+            SettingsProviderLifecycle.resolve(snapshot: observed, connector: .refreshDue),
+            .refreshDue
+        )
+        XCTAssertEqual(
+            SettingsProviderLifecycle.resolve(snapshot: observed, connector: .reauthRequired),
+            .reauthRequired
+        )
+        XCTAssertEqual(
+            SettingsProviderLifecycle.resolve(snapshot: observed, connector: .revoked),
+            .revoked
+        )
+        XCTAssertEqual(
+            SettingsProviderLifecycle.resolve(snapshot: observed, connector: .rateLimited),
+            .rateLimited
+        )
+        XCTAssertEqual(
+            SettingsProviderLifecycle.resolve(snapshot: observed, connector: .error),
+            .failed
+        )
+        XCTAssertEqual(
+            SettingsProviderLifecycle.resolve(snapshot: nil, connector: nil),
+            .unavailable
+        )
+    }
+
+    func testPreflightPresentationIsExplicitAndNeverContainsRawEndpointData() {
+        XCTAssertEqual(
+            TailscaleConnectionPreflightState.authenticationRejected.settingsTitle,
+            "Tailscale device identity rejected"
+        )
+        XCTAssertTrue(
+            TailscaleConnectionPreflightState.authenticationRejected.settingsDetail.contains("No credential")
+        )
+        XCTAssertFalse(
+            TailscaleConnectionPreflightState.authenticationRejected.settingsDetail.contains("https://")
+        )
+
+        let report = SettingsRedactedDiagnostics(
+            gateway: .authenticationRejected,
+            providers: [.reauthRequired, .revoked, .rateLimited],
+            finance: .stale,
+            health: .requestRequired,
+            appGroup: .placeholder,
+            signing: SigningStatus(mode: .unknown, expirationDate: nil),
+            failure: .authentication
+        )
+        XCTAssertTrue(report.text.contains("gateway=authentication_rejected"))
+        XCTAssertTrue(report.text.contains("failure=authentication"))
+        XCTAssertTrue(report.text.contains("No endpoints"))
+        for untrustedValue in [
+            "https://untrusted.invalid",
+            "credential=REDACTED",
+            "account-label-from-response",
+            "observed-value-from-response"
+        ] {
+            XCTAssertFalse(report.text.contains(untrustedValue), untrustedValue)
+        }
+    }
+
+    func testUntrustedFailureTextCollapsesToSafeClassOnly() {
+        let raw = "HTTP 401 https://untrusted.invalid/path?credential=REDACTED"
+        let failure = SettingsFailureClass.classify(untrustedMessage: raw)
+        XCTAssertEqual(failure, .authentication)
+        XCTAssertFalse(failure.detail.contains("untrusted.invalid"))
+        XCTAssertFalse(failure.detail.contains("REDACTED"))
+    }
 }

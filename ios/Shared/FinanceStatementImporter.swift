@@ -6,7 +6,25 @@ import Foundation
 /// The outcome of parsing a CSV bank statement. `transactions` never contains
 /// fabricated rows: every entry was derived from a source row that yielded a
 /// valid date and amount. Rows that could not be parsed are counted in
-/// `skippedRowCount`, never silently dropped without a trace.
+/// `skippedRowCount`, never silently dropped without a trace. Diagnostics carry
+/// record numbers and stable reason codes, but never raw statement contents.
+public enum FinanceImportSkipReason: String, Equatable, Sendable {
+    case malformedRow
+    case unsupportedCurrency
+    case invalidDateOrAmount
+    case unrecognizedHeader
+}
+
+public struct FinanceImportDiagnostic: Equatable, Sendable {
+    public let rowNumber: Int
+    public let reason: FinanceImportSkipReason
+
+    public init(rowNumber: Int, reason: FinanceImportSkipReason) {
+        self.rowNumber = max(rowNumber, 1)
+        self.reason = reason
+    }
+}
+
 public struct FinanceImportResult: Equatable, Sendable {
     public let transactions: [FinanceImportedTransaction]
     /// Rows present in the file (excluding the header and blank lines) that
@@ -15,14 +33,42 @@ public struct FinanceImportResult: Equatable, Sendable {
     /// The detected source layout, used to label imported rows. `.genericCSV`
     /// when no specific known layout was recognized.
     public let detectedSource: FinanceImportSource
+    /// Number of non-blank records after the selected header. This lets the
+    /// import UI distinguish an empty statement from a statement whose rows
+    /// were all malformed or unsupported.
+    public let dataRowCount: Int
+    /// Whether a date + amount header was recognized. `false` is a hard
+    /// diagnostic: column order is unknown and no rows were guessed.
+    public let headerRecognized: Bool
+    /// Row-numbered, content-free diagnostics for skipped records.
+    public let diagnostics: [FinanceImportDiagnostic]
 
-    public init(transactions: [FinanceImportedTransaction], skippedRowCount: Int, detectedSource: FinanceImportSource) {
+    public init(
+        transactions: [FinanceImportedTransaction],
+        skippedRowCount: Int,
+        detectedSource: FinanceImportSource,
+        dataRowCount: Int? = nil,
+        headerRecognized: Bool = true,
+        diagnostics: [FinanceImportDiagnostic] = []
+    ) {
         self.transactions = transactions
         self.skippedRowCount = skippedRowCount
         self.detectedSource = detectedSource
+        self.dataRowCount = max(dataRowCount ?? transactions.count + skippedRowCount, 0)
+        self.headerRecognized = headerRecognized
+        self.diagnostics = diagnostics
     }
 
-    public static let empty = FinanceImportResult(transactions: [], skippedRowCount: 0, detectedSource: .genericCSV)
+    public static let empty = FinanceImportResult(
+        transactions: [],
+        skippedRowCount: 0,
+        detectedSource: .genericCSV,
+        dataRowCount: 0,
+        headerRecognized: false
+    )
+
+    public var validRowCount: Int { transactions.count }
+    public var investmentTransactionCount: Int { transactions.filter(\.isInvestmentOrder).count }
 }
 
 /// Pure, offline CSV parser for bank statements. No network access, no
@@ -75,9 +121,26 @@ public enum FinanceStatementImporter {
     /// makes card-purchase rows categorizable by `FinanceCategorizer`.
     private static let merchantHeaders: Set<String> = ["name", "counterparty_name", "counterparty", "payee", "merchant"]
     private static let categoryHeaders: Set<String> = ["category", "kategorie", "typ", "type"]
+    private static let typeHeaders: Set<String> = [
+        "type", "transaction_type", "transaction type", "order_type", "order type",
+        "transaktionstyp", "transaktionstyp", "buchungstyp"
+    ]
+    private static let assetClassHeaders: Set<String> = [
+        "asset_class", "asset class", "assetklasse", "asset", "security_type", "security type",
+        "wertpapierart", "instrument_type"
+    ]
+    private static let symbolHeaders: Set<String> = ["symbol", "ticker", "isin", "wkn"]
+    private static let quantityHeaders: Set<String> = ["shares", "share", "quantity", "units", "anzahl", "stück", "stueck"]
+    private static let priceHeaders: Set<String> = [
+        "price", "unit_price", "unit price", "execution_price", "execution price", "kurs"
+    ]
     private static let providerIDHeaders: Set<String> = [
         "transaction_id", "transaction id", "transactionid", "entry_reference", "entry reference",
         "reference", "referenz", "transaktions-id", "transaktionsid"
+    ]
+    private static let providerCodeHeaders: Set<String> = [
+        "mcc", "mcc_code", "mcc code", "merchant_category_code", "merchant category code",
+        "category_code", "category code"
     ]
     private static let accountHeaders: Set<String> = ["account", "account_id", "konto", "kontonummer", "iban"]
     private static let currencyHeaders: Set<String> = ["currency", "waehrung", "währung", "curr"]
@@ -97,14 +160,32 @@ public enum FinanceStatementImporter {
         guard let headerIndex = rows.firstIndex(where: { isHeaderRow($0) }) else {
             // No recognizable header: cannot map columns, so every row is
             // reported as skipped rather than guessing column order.
-            return FinanceImportResult(transactions: [], skippedRowCount: rows.count, detectedSource: .genericCSV)
+            return FinanceImportResult(
+                transactions: [],
+                skippedRowCount: rows.count,
+                detectedSource: .genericCSV,
+                dataRowCount: rows.count,
+                headerRecognized: false,
+                diagnostics: rows.indices.map {
+                    FinanceImportDiagnostic(rowNumber: $0 + 1, reason: .unrecognizedHeader)
+                }
+            )
         }
 
         let header = rows[headerIndex].map { normalizedField($0).lowercased() }
         guard let dateColumn = firstIndex(of: dateHeaders, in: header),
               let amountColumn = firstIndex(of: amountHeaders, in: header) else {
             let dataRowCount = rows.count - headerIndex - 1
-            return FinanceImportResult(transactions: [], skippedRowCount: max(dataRowCount, 0), detectedSource: .genericCSV)
+            let safeDataRowCount = max(dataRowCount, 0)
+            return FinanceImportResult(
+                transactions: [],
+                skippedRowCount: safeDataRowCount,
+                detectedSource: .genericCSV,
+                dataRowCount: safeDataRowCount,
+                diagnostics: (0..<safeDataRowCount).map {
+                    FinanceImportDiagnostic(rowNumber: headerIndex + 2 + $0, reason: .unrecognizedHeader)
+                }
+            )
         }
         let descriptionColumn = firstIndex(of: descriptionHeaders, in: header)
         let merchantColumn = firstIndex(of: merchantHeaders, in: header)
@@ -112,6 +193,12 @@ public enum FinanceStatementImporter {
         let providerIDColumn = firstIndex(of: providerIDHeaders, in: header)
         let accountColumn = firstIndex(of: accountHeaders, in: header)
         let currencyColumn = firstIndex(of: currencyHeaders, in: header)
+        let providerCodeColumn = firstIndex(of: providerCodeHeaders, in: header)
+        let typeColumn = firstIndex(of: typeHeaders, in: header)
+        let assetClassColumn = firstIndex(of: assetClassHeaders, in: header)
+        let symbolColumn = firstIndex(of: symbolHeaders, in: header)
+        let quantityColumn = firstIndex(of: quantityHeaders, in: header)
+        let priceColumn = firstIndex(of: priceHeaders, in: header)
         // Detect Trade Republic CSV by either German headers (Betrag/Datum) or
         // the characteristic English header layout (name, counterparty_name,
         // original_amount, original_currency, fx_rate, mcc_code, etc.)
@@ -121,12 +208,17 @@ public enum FinanceStatementImporter {
 
         var transactions: [FinanceImportedTransaction] = []
         var skipped = 0
+        var diagnostics: [FinanceImportDiagnostic] = []
         var fallbackIdentityOrdinals: [String: Int] = [:]
         let dataRows = rows[(headerIndex + 1)...]
 
-        for row in dataRows {
+        for (offset, row) in dataRows.enumerated() {
+            let rowNumber = headerIndex + 2 + offset
             guard row.count > dateColumn, row.count > amountColumn else {
-                if !row.isEmpty { skipped += 1 }
+                if !row.isEmpty {
+                    skipped += 1
+                    diagnostics.append(FinanceImportDiagnostic(rowNumber: rowNumber, reason: .malformedRow))
+                }
                 continue
             }
             let rawDate = normalizedField(row[dateColumn])
@@ -134,10 +226,12 @@ public enum FinanceStatementImporter {
             let currency = currencyColumn.flatMap { row.count > $0 ? normalizedField(row[$0]) : nil } ?? "EUR"
             guard currency.isEmpty || currency.caseInsensitiveCompare("EUR") == .orderedSame else {
                 skipped += 1
+                diagnostics.append(FinanceImportDiagnostic(rowNumber: rowNumber, reason: .unsupportedCurrency))
                 continue
             }
             guard let bookedAt = parseDate(rawDate), let amountCents = parseAmountCents(rawAmount) else {
                 skipped += 1
+                diagnostics.append(FinanceImportDiagnostic(rowNumber: rowNumber, reason: .invalidDateOrAmount))
                 continue
             }
             let merchant = merchantColumn.flatMap { row.count > $0 ? normalizedField(row[$0]) : nil }
@@ -145,6 +239,12 @@ public enum FinanceStatementImporter {
             let category = categoryColumn.flatMap { row.count > $0 ? normalizedField(row[$0]) : nil }
             let providerID = providerIDColumn.flatMap { row.count > $0 ? normalizedField(row[$0]) : nil }
             let account = accountColumn.flatMap { row.count > $0 ? normalizedField(row[$0]) : nil } ?? ""
+            let providerCode = providerCodeColumn.flatMap { row.count > $0 ? normalizedField(row[$0]) : nil }
+            let rawType = typeColumn.flatMap { row.count > $0 ? normalizedField(row[$0]) : nil }
+            let rawAssetClass = assetClassColumn.flatMap { row.count > $0 ? normalizedField(row[$0]) : nil }
+            let rawSymbol = symbolColumn.flatMap { row.count > $0 ? normalizedField(row[$0]) : nil }
+            let rawQuantity = quantityColumn.flatMap { row.count > $0 ? normalizedField(row[$0]) : nil }
+            let rawPrice = priceColumn.flatMap { row.count > $0 ? normalizedField(row[$0]) : nil }
             // Prefer the merchant column (e.g. TR's `name`) over the generic
             // description column, since the latter is often a non-specific
             // label like "TR Card Transaction". Falls back to description
@@ -158,12 +258,28 @@ public enum FinanceStatementImporter {
             } else {
                 resolvedDescription = "Imported transaction"
             }
+            let isInvestmentOrder = detectedSource == .tradeRepublicCSV && isInvestmentRow(
+                type: rawType,
+                assetClass: rawAssetClass,
+                symbol: rawSymbol,
+                quantity: rawQuantity,
+                price: rawPrice
+            )
+            let investment: FinanceImportedInvestmentDetails? = isInvestmentOrder
+                ? FinanceImportedInvestmentDetails(
+                    symbol: rawSymbol,
+                    assetClass: rawAssetClass,
+                    quantity: normalizedQuantity(rawQuantity),
+                    unitPriceCents: rawPrice.flatMap { parseAmountCents($0) },
+                    tradeType: rawType,
+                    currency: "EUR"
+                )
+                : nil
             let identity = fallbackIdentity(
                 source: detectedSource,
                 bookedAt: bookedAt,
                 amountCents: amountCents,
                 description: resolvedDescription,
-                category: category,
                 currency: currency,
                 account: account
             )
@@ -180,13 +296,24 @@ public enum FinanceStatementImporter {
                     bookedAt: bookedAt,
                     amountCents: amountCents,
                     description: resolvedDescription,
-                    category: (category?.isEmpty == false) ? category : nil,
-                    source: detectedSource
+                    category: nil,
+                    source: detectedSource,
+                    sourceCategory: (category?.isEmpty == false) ? category : nil,
+                    providerCode: providerCode,
+                    kind: isInvestmentOrder ? .investmentOrder : .cash,
+                    investment: investment
                 )
             )
         }
 
-        return FinanceImportResult(transactions: transactions, skippedRowCount: skipped, detectedSource: detectedSource)
+        return FinanceImportResult(
+            transactions: transactions,
+            skippedRowCount: skipped,
+            detectedSource: detectedSource,
+            dataRowCount: dataRows.count,
+            headerRecognized: true,
+            diagnostics: diagnostics
+        )
     }
 
     // MARK: - Line/row splitting
@@ -413,22 +540,71 @@ public enum FinanceStatementImporter {
         return groups[0].count <= 3 && groups.dropFirst().allSatisfy { $0.count == 3 }
     }
 
+    private static func normalizedQuantity(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let cleaned = normalizedField(raw)
+            .replacingOccurrences(of: "\u{00A0}", with: "")
+            .replacingOccurrences(of: "\u{202F}", with: "")
+            .replacingOccurrences(of: " ", with: "")
+        guard !cleaned.isEmpty else { return nil }
+
+        let normalized: String
+        if cleaned.contains(",") && cleaned.contains(".") {
+            if let comma = cleaned.lastIndex(of: ","), let dot = cleaned.lastIndex(of: "."), comma > dot {
+                normalized = cleaned.replacingOccurrences(of: ".", with: "").replacingOccurrences(of: ",", with: ".")
+            } else {
+                normalized = cleaned.replacingOccurrences(of: ",", with: "")
+            }
+        } else {
+            normalized = cleaned.replacingOccurrences(of: ",", with: ".")
+        }
+        guard let decimal = Decimal(string: normalized, locale: Locale(identifier: "en_US_POSIX")), decimal >= 0 else {
+            return nil
+        }
+        return normalizedField((decimal as NSDecimalNumber).stringValue)
+    }
+
+    private static func isInvestmentRow(
+        type: String?,
+        assetClass: String?,
+        symbol: String?,
+        quantity: String?,
+        price: String?
+    ) -> Bool {
+        let typeKey = type.map { normalizedField($0).lowercased() } ?? ""
+        let cashIncomeTokens = [
+            "dividend", "distribution", "interest", "dividende", "ausschüttung",
+            "ausschuettung", "zins", "zinse"
+        ]
+        if cashIncomeTokens.contains(where: { typeKey.contains($0) }) {
+            return false
+        }
+        let hasStructuredFields = [assetClass, symbol, quantity, price].contains {
+            guard let value = $0 else { return false }
+            return !normalizedField(value).isEmpty
+        }
+        let investmentTypeTokens = [
+            "buy", "sell", "order", "etf", "stock", "share",
+            "security", "securities", "wertpapier", "aktie", "aktien", "sparplan",
+            "kauf", "verkauf", "dividende", "ausschüttung", "ausschuettung", "ausführung", "ausfuehrung"
+        ]
+        return hasStructuredFields || investmentTypeTokens.contains { typeKey.contains($0) }
+    }
+
     private static func fallbackIdentity(
         source: FinanceImportSource,
         bookedAt: Date,
         amountCents: Int,
         description: String,
-        category: String?,
         currency: String,
         account: String
     ) -> String {
-        [
+        return [
             "lifeos-finance-csv-v2",
             source.rawValue,
             String(format: "%.0f", bookedAt.timeIntervalSinceReferenceDate),
             String(amountCents),
             identityComponent(description),
-            identityComponent(category ?? ""),
             identityComponent(currency),
             identityComponent(account)
         ].joined(separator: "\u{1F}")

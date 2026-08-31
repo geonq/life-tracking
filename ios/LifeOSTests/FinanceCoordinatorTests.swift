@@ -11,10 +11,11 @@ final class FinanceCoordinatorTests: XCTestCase {
 
         await coordinator.refresh()
 
-        let result = await MainActor.run { (coordinator.state, coordinator.summary, coordinator.errorMessage) }
+        let result = await MainActor.run { (coordinator.state, coordinator.observationState, coordinator.summary, coordinator.errorMessage) }
         XCTAssertEqual(result.0, .observed)
-        XCTAssertEqual(result.1, expected)
-        XCTAssertNil(result.2)
+        XCTAssertEqual(result.1, .observed)
+        XCTAssertEqual(result.2, expected)
+        XCTAssertNil(result.3)
     }
 
     func testFailurePreservesLastValidSummaryAsStale() async throws {
@@ -26,11 +27,12 @@ final class FinanceCoordinatorTests: XCTestCase {
 
         await coordinator.refresh()
 
-        let result = await MainActor.run { (coordinator.state, coordinator.summary, coordinator.errorMessage) }
+        let result = await MainActor.run { (coordinator.state, coordinator.observationState, coordinator.summary, coordinator.errorMessage) }
         XCTAssertEqual(result.0, .stale)
+        XCTAssertEqual(result.1, .error)
         XCTAssertEqual(before, expected)
-        XCTAssertEqual(result.1, expected)
-        XCTAssertEqual(result.2, "Finance data unavailable")
+        XCTAssertEqual(result.2, expected)
+        XCTAssertEqual(result.3, "Finance data unavailable")
     }
 
     func testCancellationWithoutObservationRemainsUnavailable() async throws {
@@ -95,9 +97,10 @@ final class FinanceCoordinatorTests: XCTestCase {
 
         await coordinator.refresh()
 
-        let result = await MainActor.run { (coordinator.state, coordinator.summary?.transactions?.availability) }
+        let result = await MainActor.run { (coordinator.state, coordinator.observationState, coordinator.summary?.transactions?.availability) }
         XCTAssertEqual(result.0, .observed)
-        XCTAssertEqual(result.1, .observed)
+        XCTAssertEqual(result.1, .partial)
+        XCTAssertEqual(result.2, .observed)
     }
 
     @MainActor
@@ -106,6 +109,7 @@ final class FinanceCoordinatorTests: XCTestCase {
         let coordinator = FinanceCoordinator(initialSummary: summary)
 
         XCTAssertEqual(coordinator.state, .stale)
+        XCTAssertEqual(coordinator.observationState, .stale)
     }
 
     func testFreshAccountOnlySummaryPublishesObservedState() async throws {
@@ -122,9 +126,10 @@ final class FinanceCoordinatorTests: XCTestCase {
 
         await coordinator.refresh()
 
-        let result = await MainActor.run { (coordinator.state, coordinator.summary?.accounts?.availability) }
+        let result = await MainActor.run { (coordinator.state, coordinator.observationState, coordinator.summary?.accounts?.availability) }
         XCTAssertEqual(result.0, .observed)
-        XCTAssertEqual(result.1, .observed)
+        XCTAssertEqual(result.1, .partial)
+        XCTAssertEqual(result.2, .observed)
     }
 
     @MainActor
@@ -139,6 +144,7 @@ final class FinanceCoordinatorTests: XCTestCase {
         let coordinator = FinanceCoordinator(initialSummary: summary)
 
         XCTAssertEqual(coordinator.state, .stale)
+        XCTAssertEqual(coordinator.observationState, .stale)
     }
 
     func testFinanceViewAccountOnlyDataIsObservedAndDisclosesSource() throws {
@@ -153,7 +159,8 @@ final class FinanceCoordinatorTests: XCTestCase {
         let truth = FinanceView.displayTruth(summary: summary)
 
         XCTAssertTrue(truth.hasObservedValue)
-        XCTAssertEqual(truth.statusLabel, "Observed")
+        XCTAssertEqual(truth.statusLabel, "Partial data")
+        XCTAssertEqual(truth.observationState, .partial)
         XCTAssertEqual(truth.accountsCount, 1)
         XCTAssertEqual(truth.netWorthCents, 123_456)
         XCTAssertTrue(truth.sourceDisclosure.contains("Sparkasse Leipzig"))
@@ -204,7 +211,8 @@ final class FinanceCoordinatorTests: XCTestCase {
         let truth = FinanceView.displayTruth(summary: summary)
 
         XCTAssertTrue(truth.hasObservedValue)
-        XCTAssertEqual(truth.statusLabel, "Observed")
+        XCTAssertEqual(truth.statusLabel, "Partial data")
+        XCTAssertEqual(truth.observationState, .partial)
         XCTAssertFalse(truth.transactionTotalsAvailable)
         XCTAssertTrue(truth.sourceDisclosure.contains("Revolut Personal"))
     }
@@ -263,6 +271,7 @@ final class FinanceCoordinatorTests: XCTestCase {
             "freshness": freshness, "quality": "observed", "connectorState": connector
         ]
         let account: [String: Any] = [
+            "availability": "observed",
             "id": "sparkasse-checking", "name": "Sparkasse Leipzig", "detail": "Checking",
             "balanceCents": 123_456, "source": "sparkasse_leipzig", "provenance": accountProvenance
         ]

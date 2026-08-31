@@ -25,6 +25,8 @@ final class FinanceStatementImporterTests: XCTestCase {
 
         XCTAssertEqual(result.transactions.count, 2)
         XCTAssertEqual(result.skippedRowCount, 0)
+        XCTAssertEqual(result.dataRowCount, 2)
+        XCTAssertTrue(result.headerRecognized)
 
         let spending = result.transactions.first { $0.description == "Supermarkt Rewe" }
         XCTAssertEqual(spending?.amountCents, -4590)
@@ -112,6 +114,37 @@ final class FinanceStatementImporterTests: XCTestCase {
         XCTAssertEqual(result.transactions.last?.amountCents, 53)
     }
 
+    func testTradeRepublicDividendAndInterestRemainCashIncomeEvenWithSecurityFields() {
+        let result = FinanceStatementImporter.parseCSV("""
+        Datum;Typ;Beschreibung;Betrag;Symbol;Anzahl;Kurs
+        10.08.2026;Dividende;ETF dividend;5,00;VWCE;0,10;50,00
+        11.08.2026;Zinsen;Cash interest;0,53;VWCE;1,00;0,53
+        """)
+
+        XCTAssertEqual(result.transactions.count, 2)
+        XCTAssertTrue(result.transactions.allSatisfy { !$0.isInvestmentOrder })
+        XCTAssertEqual(result.investmentTransactionCount, 0)
+        XCTAssertEqual(FinanceCategorizer.category(for: result.transactions[0]), .income)
+    }
+
+    func testTradeRepublicInvestmentFieldsRemainOrdersAndDoNotBecomeHoldings() {
+        let csv = """
+        datetime,date,account_type,category,type,asset_class,name,symbol,shares,price,amount,fee,tax,currency,original_amount,original_currency,fx_rate,description,transaction_id,counterparty_name,counterparty_iban,payment_reference,mcc_code
+        "2026-08-10T10:00:00","2026-08-10","checking","investment","buy","ETF","Vanguard","VWCE","1.25","100.50","-125.62","0.00","0.00","EUR","","","","Buy order","investment-1","","","","5411"
+        """
+        let result = FinanceStatementImporter.parseCSV(csv)
+
+        XCTAssertEqual(result.transactions.count, 1)
+        let order = try! XCTUnwrap(result.transactions.first)
+        XCTAssertEqual(order.kind, .investmentOrder)
+        XCTAssertEqual(order.investment?.symbol, "VWCE")
+        XCTAssertEqual(order.investment?.assetClass, "ETF")
+        XCTAssertEqual(order.investment?.quantity, "1.25")
+        XCTAssertEqual(order.investment?.unitPriceCents, 10_050)
+        XCTAssertEqual(order.providerCode, "5411")
+        XCTAssertEqual(result.investmentTransactionCount, 1)
+    }
+
     // MARK: 4. Malformed/short rows are skipped and counted, not fabricated
 
     func testMalformedAndShortRowsAreSkippedAndCounted() {
@@ -128,6 +161,8 @@ final class FinanceStatementImporterTests: XCTestCase {
         XCTAssertEqual(result.transactions.first?.description, "Valid row")
         // Two malformed rows (bad date, bad amount) plus one short row.
         XCTAssertEqual(result.skippedRowCount, 3)
+        XCTAssertEqual(result.diagnostics.map(\.rowNumber), [3, 4, 5])
+        XCTAssertEqual(result.diagnostics.map(\.reason), [.invalidDateOrAmount, .invalidDateOrAmount, .malformedRow])
     }
 
     func testMalformedGroupingAndNonEURRowsAreSkipped() {
@@ -142,6 +177,8 @@ final class FinanceStatementImporterTests: XCTestCase {
         XCTAssertEqual(result.transactions.count, 1)
         XCTAssertEqual(result.transactions.first?.amountCents, 123_456)
         XCTAssertEqual(result.skippedRowCount, 2)
+        XCTAssertEqual(result.diagnostics.map(\.rowNumber), [3, 4])
+        XCTAssertEqual(result.diagnostics.map(\.reason), [.invalidDateOrAmount, .unsupportedCurrency])
     }
 
     // MARK: 5. Empty input yields an empty result, not a crash
@@ -151,6 +188,7 @@ final class FinanceStatementImporterTests: XCTestCase {
         XCTAssertEqual(result, FinanceImportResult.empty)
         XCTAssertTrue(result.transactions.isEmpty)
         XCTAssertEqual(result.skippedRowCount, 0)
+        XCTAssertFalse(result.headerRecognized)
     }
 
     func testWhitespaceOnlyInputYieldsEmptyResult() {
@@ -170,6 +208,10 @@ final class FinanceStatementImporterTests: XCTestCase {
         let result = FinanceStatementImporter.parseCSV(csv)
         XCTAssertTrue(result.transactions.isEmpty)
         XCTAssertEqual(result.skippedRowCount, 3)
+        XCTAssertEqual(result.dataRowCount, 3)
+        XCTAssertFalse(result.headerRecognized)
+        XCTAssertEqual(result.diagnostics.map(\.rowNumber), [1, 2, 3])
+        XCTAssertTrue(result.diagnostics.allSatisfy { $0.reason == .unrecognizedHeader })
     }
 
     // MARK: 7. Missing description falls back to an honest placeholder, not fabricated merchant data
@@ -191,7 +233,8 @@ final class FinanceStatementImporterTests: XCTestCase {
         date,description,amount,category
         2026-08-01,Groceries,-20.00,Food
         """)
-        XCTAssertEqual(withCategory.transactions.first?.category, "Food")
+        XCTAssertNil(withCategory.transactions.first?.category)
+        XCTAssertEqual(withCategory.transactions.first?.sourceCategory, "Food")
 
         let withoutCategory = FinanceStatementImporter.parseCSV("""
         date,description,amount

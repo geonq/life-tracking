@@ -1,6 +1,17 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+private extension FinanceImportSkipReason {
+    var displayName: String {
+        switch self {
+        case .malformedRow: "malformed row"
+        case .unsupportedCurrency: "unsupported currency"
+        case .invalidDateOrAmount: "invalid date or amount"
+        case .unrecognizedHeader: "unrecognized date/amount header"
+        }
+    }
+}
+
 // MARK: - Manual bank-statement CSV import
 
 /// Drives the CSV file picker, parse preview, and persistence for manually
@@ -14,24 +25,49 @@ final class FinanceImportViewModel: ObservableObject {
     @Published var isImporterPresented = false
     @Published var pendingResult: FinanceImportResult?
     @Published var errorMessage: String?
+    @Published var statusMessage: String?
     @Published private(set) var savedTransactions: [FinanceImportedTransaction] = []
 
     private let store: FinanceImportedTransactionStore?
 
     init() {
-        let resolvedStore = try? FinanceImportedTransactionStore()
+        let resolvedStore: FinanceImportedTransactionStore?
+        let initialTransactions: [FinanceImportedTransaction]
+        let initialError: String?
+        do {
+            let candidate = try FinanceImportedTransactionStore()
+            resolvedStore = candidate
+            do {
+                initialTransactions = try candidate.all()
+                initialError = nil
+            } catch {
+                initialTransactions = []
+                initialError = error.localizedDescription
+            }
+        } catch {
+            resolvedStore = nil
+            initialTransactions = []
+            initialError = error.localizedDescription
+        }
         self.store = resolvedStore
-        self.savedTransactions = (try? resolvedStore?.all()) ?? []
+        self.savedTransactions = initialTransactions
+        self.errorMessage = initialError
     }
 
     var hasStore: Bool { store != nil }
 
     func handlePickedFile(_ result: Result<[URL], Error>) {
+        errorMessage = nil
+        statusMessage = nil
+        pendingResult = nil
         switch result {
         case .failure(let error):
             errorMessage = error.localizedDescription
         case .success(let urls):
-            guard let url = urls.first else { return }
+            guard urls.count == 1, let url = urls.first else {
+                errorMessage = "Choose one CSV statement at a time."
+                return
+            }
             let secured = url.startAccessingSecurityScopedResource()
             defer { if secured { url.stopAccessingSecurityScopedResource() } }
             do {
@@ -43,6 +79,15 @@ final class FinanceImportViewModel: ObservableObject {
                 }
                 let data = try Data(contentsOf: url)
                 pendingResult = try FinanceStatementImporter.parseCSV(data: data)
+                if pendingResult?.headerRecognized == false {
+                    statusMessage = "No date and amount header was recognized; no columns were guessed."
+                } else if pendingResult?.transactions.isEmpty == true {
+                    statusMessage = "The statement was read, but no valid EUR transactions were found."
+                }
+            } catch FinanceStatementImporter.Error.inputTooLarge {
+                errorMessage = "The CSV is larger than the 5 MB import limit."
+            } catch FinanceStatementImporter.Error.unsupportedEncoding {
+                errorMessage = "The CSV encoding is not supported. Export it as UTF-8 or UTF-16 text."
             } catch {
                 errorMessage = "The file could not be read as text: \(error.localizedDescription)"
             }
@@ -50,11 +95,23 @@ final class FinanceImportViewModel: ObservableObject {
     }
 
     func confirmImport(_ transactions: [FinanceImportedTransaction]) {
-        guard let store, !transactions.isEmpty else { return }
+        guard let store else {
+            errorMessage = FinanceImportedTransactionStoreError.applicationSupportUnavailable.localizedDescription
+            return
+        }
+        guard !transactions.isEmpty else {
+            errorMessage = "There are no valid transactions to import."
+            return
+        }
         do {
-            try store.add(transactions)
+            let result = try store.add(transactions)
             savedTransactions = try store.all()
             self.pendingResult = nil
+            var parts: [String] = []
+            if result.insertedCount > 0 { parts.append("imported \(result.insertedCount) new rows") }
+            if result.updatedCount > 0 { parts.append("updated \(result.updatedCount) corrected rows") }
+            if result.duplicateCount > 0 { parts.append("skipped \(result.duplicateCount) unchanged duplicates") }
+            statusMessage = parts.isEmpty ? "No source changes were found." : parts.joined(separator: "; ") + "."
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -62,6 +119,7 @@ final class FinanceImportViewModel: ObservableObject {
 
     func discardPending() {
         pendingResult = nil
+        statusMessage = nil
     }
 
     func delete(id: UUID) {
@@ -77,7 +135,11 @@ final class FinanceImportViewModel: ObservableObject {
     func setCategory(_ category: FinanceTransactionCategory?, for id: UUID) {
         guard let store else { return }
         do {
-            try store.setCategory(category, for: id)
+            if category == nil {
+                try store.clearCategoryOverride(for: id)
+            } else {
+                try store.setCategory(category, for: id)
+            }
             savedTransactions = try store.all()
         } catch {
             errorMessage = error.localizedDescription
@@ -89,6 +151,7 @@ final class FinanceImportViewModel: ObservableObject {
         do {
             try store.clearAll()
             savedTransactions = try store.all()
+            statusMessage = "Imported transactions cleared from this device."
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -144,6 +207,14 @@ struct FinanceImportCard: View {
                 Spacer(minLength: 0)
             }
 
+            if let statusMessage = model.statusMessage {
+                Label(statusMessage, systemImage: "info.circle")
+                    .font(LifeOSFont.axis())
+                    .foregroundStyle(LifeOSTokens.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("finance-import-status")
+            }
+
             Text("A CSV file you pick stays on this device. Imported rows are never sent anywhere and are kept separate from connected-account data.")
                 .font(LifeOSFont.axis())
                 .foregroundStyle(LifeOSTokens.tertiaryText)
@@ -158,6 +229,12 @@ struct FinanceImportCard: View {
                 .overlay(LifeOSTokens.hairlineBorder)
 
             FinanceBudgetsSection(transactions: model.savedTransactions)
+
+            if model.savedTransactions.contains(where: { $0.isInvestmentOrder }) {
+                Divider()
+                    .overlay(LifeOSTokens.hairlineBorder)
+                FinanceImportedInvestmentsSection(transactions: model.savedTransactions)
+            }
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -251,11 +328,52 @@ private struct FinanceImportPreviewView: View {
                         Text(result.detectedSource == .tradeRepublicCSV ? "Trade Republic" : "Generic CSV")
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                     }
+                    HStack {
+                        Text("Rows in file")
+                        Spacer()
+                        Text("\(result.dataRowCount)")
+                            .foregroundStyle(LifeOSTokens.tertiaryText)
+                    }
+                    if result.investmentTransactionCount > 0 {
+                        HStack {
+                            Text("Investment orders")
+                            Spacer()
+                            Text("\(result.investmentTransactionCount)")
+                                .foregroundStyle(LifeOSTokens.secondaryText)
+                        }
+                    }
+                    if !result.diagnostics.isEmpty {
+                        Text("Diagnostics identify only affected rows and never include statement contents.")
+                            .font(LifeOSFont.axis())
+                            .foregroundStyle(LifeOSTokens.tertiaryText)
+                    }
+                }
+
+                if !result.diagnostics.isEmpty {
+                    Section("Import diagnostics") {
+                        ForEach(Array(result.diagnostics.prefix(8).enumerated()), id: \.offset) { _, diagnostic in
+                            HStack(spacing: 8) {
+                                LifeOSIcon(.warning)
+                                    .foregroundStyle(LifeOSTokens.warning)
+                                    .frame(width: 14, height: 14)
+                                Text("Row \(diagnostic.rowNumber): \(diagnostic.reason.displayName)")
+                                    .font(LifeOSFont.axis())
+                                    .foregroundStyle(LifeOSTokens.secondaryText)
+                            }
+                        }
+                        if result.diagnostics.count > 8 {
+                            Text("Showing the first 8 of \(result.diagnostics.count) skipped rows.")
+                                .font(LifeOSFont.axis())
+                                .foregroundStyle(LifeOSTokens.tertiaryText)
+                        }
+                    }
                 }
 
                 if result.transactions.isEmpty {
                     Section {
-                        Text("No valid transactions were found in this file. Check that it has a date and amount column.")
+                        Text(result.headerRecognized
+                             ? "No valid EUR transactions were found in this file. Rows with unsupported currencies or malformed dates/amounts are not imported."
+                             : "No date and amount header was recognized. No column order was guessed, so nothing was imported.")
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                     }
                 } else {
@@ -300,11 +418,17 @@ private struct FinanceImportPreviewRow: View {
     var onCategoryChange: ((FinanceTransactionCategory?) -> Void)? = nil
 
     private var effectiveCategory: FinanceTransactionCategory {
-        FinanceCategorizer.category(
-            for: transaction.description,
-            amountCents: transaction.amountCents,
-            sourceCategory: transaction.category
-        )
+        FinanceCategorizer.category(for: transaction)
+    }
+
+    private var categoryOrigin: String {
+        switch FinanceCategorizer.resolve(transaction: transaction).source {
+        case .userOverride: "Override"
+        case .provider: "From statement"
+        case .providerCode: "From provider code"
+        case .investmentSource: "Investment source"
+        case .heuristic, .uncategorized: "Automatic"
+        }
     }
 
     var body: some View {
@@ -312,7 +436,12 @@ private struct FinanceImportPreviewRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(transaction.description)
                     .font(LifeOSFont.metadata())
-                Text(FinanceImportDateFormatter.point(transaction.bookedAt))
+                if transaction.isInvestmentOrder {
+                    Text(investmentSubtitle)
+                        .font(LifeOSFont.axis())
+                        .foregroundStyle(LifeOSTokens.secondaryText)
+                }
+                Text(FinanceImportDateFormatter.timestamp(transaction.bookedAt))
                     .font(LifeOSFont.axis())
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
@@ -323,7 +452,9 @@ private struct FinanceImportPreviewRow: View {
                 .monospacedDigit()
             if let onCategoryChange {
                 Menu {
-                    Button("Automatic") { onCategoryChange(nil) }
+                    Button(transaction.category == nil ? "Automatic" : "Automatic (clear override)") {
+                        onCategoryChange(nil)
+                    }
                     Divider()
                     ForEach(FinanceTransactionCategory.allCases, id: \.self) { category in
                         Button(category.displayName) { onCategoryChange(category) }
@@ -339,10 +470,27 @@ private struct FinanceImportPreviewRow: View {
                     .foregroundStyle(effectiveCategory.hue.base)
                 }
                 .accessibilityLabel("Category")
-                .accessibilityValue(effectiveCategory.displayName)
+                .accessibilityValue("\(effectiveCategory.displayName), \(categoryOrigin)")
                 .accessibilityIdentifier("finance-import-category-\(transaction.id.uuidString)")
             }
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilitySummary)
+    }
+
+    private var investmentSubtitle: String {
+        let details = transaction.investment
+        let symbol = details?.symbol ?? "Investment order"
+        let quantity = details?.quantity.map { " · \($0) units" } ?? ""
+        let price = details?.unitPriceCents.map {
+            " · \(FinanceImportCurrencyFormatter.magnitudeEuro(cents: $0)) unit price"
+        } ?? ""
+        return "\(symbol)\(quantity)\(price); holdings value unavailable"
+    }
+
+    private var accessibilitySummary: String {
+        let investment = transaction.isInvestmentOrder ? ", investment order; holdings value unavailable" : ""
+        return "\(transaction.description), \(FinanceImportDateFormatter.point(transaction.bookedAt)), \(FinanceImportCurrencyFormatter.signedEuro(cents: transaction.amountCents)), \(effectiveCategory.displayName), \(categoryOrigin)\(investment)"
     }
 }
 
@@ -654,6 +802,47 @@ private struct FinanceSpendingByCategoryEmptyState: View {
     }
 }
 
+// MARK: - Investment boundary
+
+/// Shows Trade Republic order rows without pretending that a transaction
+/// statement is a holdings feed. Current wealth, allocation, and performance
+/// remain unavailable until an explicit holdings observation is supplied.
+private struct FinanceImportedInvestmentsSection: View {
+    let transactions: [FinanceImportedTransaction]
+
+    private var investmentRows: [FinanceImportedTransaction] {
+        transactions
+            .filter(\.isInvestmentOrder)
+            .sorted { $0.bookedAt > $1.bookedAt }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label {
+                Text("Trade Republic investments")
+            } icon: {
+                LifeOSIcon(.investments)
+            }
+                .font(LifeOSFont.cardTitle())
+                .foregroundStyle(LifeOSTokens.secondaryText)
+            Text("\(investmentRows.count) investment order\(investmentRows.count == 1 ? "" : "s") imported as cash movements. Holdings value, allocation, and wealth performance are unavailable from this statement.")
+                .font(LifeOSFont.axis())
+                .foregroundStyle(LifeOSTokens.tertiaryText)
+                .fixedSize(horizontal: false, vertical: true)
+            ForEach(Array(investmentRows.prefix(5))) { transaction in
+                FinanceImportPreviewRow(transaction: transaction)
+            }
+            if investmentRows.count > 5 {
+                Text("Showing the latest 5 orders")
+                    .font(LifeOSFont.axis())
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("finance-imported-investments-section")
+    }
+}
+
 // MARK: - Budgets
 
 /// Drives budget persistence for the "Budgets" section: reads/writes its own
@@ -689,7 +878,19 @@ final class FinanceBudgetViewModel: ObservableObject {
     /// `.income` up front rather than round-tripping an invalid value
     /// through the store.
     func setLimit(cents: Int, for category: FinanceTransactionCategory, effectiveFrom date: Date) {
-        guard let store, category.isBudgetable, cents > 0 else { return }
+        errorMessage = nil
+        guard let store else {
+            errorMessage = FinanceBudgetStoreError.applicationSupportUnavailable.localizedDescription
+            return
+        }
+        guard category.isBudgetable else {
+            errorMessage = FinanceBudgetStoreError.notBudgetable.localizedDescription
+            return
+        }
+        guard cents > 0, cents <= FinanceBudgetAmountParser.maximumCents else {
+            errorMessage = FinanceBudgetStoreError.invalidLimit.localizedDescription
+            return
+        }
         do {
             try store.setBudget(FinanceCategoryBudget(category: category, monthlyLimitCents: cents, effectiveFrom: date))
             reload(on: date)
@@ -733,7 +934,7 @@ private struct FinanceBudgetsSection: View {
     }
 
     private var spendByCategory: [FinanceTransactionCategory: FinanceCategorySpend] {
-        Dictionary(uniqueKeysWithValues: FinanceCategorizer.summary(for: transactionsForMonth).map { ($0.category, $0) })
+        Dictionary(uniqueKeysWithValues: FinanceCategorizer.budgetSummary(for: transactionsForMonth).map { ($0.category, $0) })
     }
 
     var body: some View {
@@ -747,26 +948,20 @@ private struct FinanceBudgetsSection: View {
                 }
             }
 
-            if transactions.isEmpty {
-                Text("Import a CSV to set budgets against your spending.")
-                    .font(LifeOSFont.callout())
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
-                    .accessibilityIdentifier("finance-budgets-empty-state")
-            } else {
-                VStack(spacing: 10) {
-                    ForEach(FinanceTransactionCategory.budgetableCategories, id: \.self) { category in
-                        FinanceCategoryBudgetRow(
-                            category: category,
-                            budget: model.currentBudgets[category],
-                            spend: spendByCategory[category],
-                            onSetLimit: { cents in
-                                model.setLimit(cents: cents, for: category, effectiveFrom: currentMonth)
-                            },
-                            onRemove: {
-                                model.removeBudget(for: category, viewingDate: currentMonth)
-                            }
-                        )
-                    }
+            VStack(spacing: 10) {
+                ForEach(FinanceTransactionCategory.budgetableCategories, id: \.self) { category in
+                    FinanceCategoryBudgetRow(
+                        category: category,
+                        budget: model.currentBudgets[category],
+                        spend: spendByCategory[category],
+                        actualsAvailable: !transactionsForMonth.isEmpty,
+                        onSetLimit: { cents in
+                            model.setLimit(cents: cents, for: category, effectiveFrom: currentMonth)
+                        },
+                        onRemove: {
+                            model.removeBudget(for: category, viewingDate: currentMonth)
+                        }
+                    )
                 }
             }
         }
@@ -816,6 +1011,7 @@ private struct FinanceCategoryBudgetRow: View {
     let category: FinanceTransactionCategory
     let budget: FinanceCategoryBudget?
     let spend: FinanceCategorySpend?
+    let actualsAvailable: Bool
     let onSetLimit: (Int) -> Void
     let onRemove: () -> Void
 
@@ -823,14 +1019,17 @@ private struct FinanceCategoryBudgetRow: View {
     @FocusState private var isFieldFocused: Bool
     @State private var hasAppeared = false
 
-    private var spentCents: Int { spend?.outflowCents ?? 0 }
+    private var spentCents: Int? {
+        guard actualsAvailable else { return nil }
+        return spend?.outflowCents ?? 0
+    }
     private var limitCents: Int? { budget?.monthlyLimitCents }
     private var isOverBudget: Bool {
-        guard let limitCents else { return false }
+        guard let limitCents, let spentCents else { return false }
         return spentCents > limitCents
     }
-    private var progressFraction: CGFloat {
-        guard let limitCents, limitCents > 0 else { return 0 }
+    private var progressFraction: CGFloat? {
+        guard let limitCents, limitCents > 0, let spentCents else { return nil }
         return min(CGFloat(spentCents) / CGFloat(limitCents), 1)
     }
     private var progressColor: Color {
@@ -852,7 +1051,7 @@ private struct FinanceCategoryBudgetRow: View {
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                     TextField("Limit", text: $limitText)
                         #if os(iOS)
-                        .keyboardType(.numberPad)
+                        .keyboardType(.decimalPad)
                         #endif
                         .multilineTextAlignment(.trailing)
                         .font(LifeOSFont.control())
@@ -864,48 +1063,74 @@ private struct FinanceCategoryBudgetRow: View {
             }
 
             if let limitCents {
-                HStack(spacing: 6) {
-                    GeometryReader { proxy in
-                        ZStack(alignment: .leading) {
-                            Capsule()
-                                .fill(LifeOSTokens.Ring.track)
-                            Capsule()
-                                .fill(progressColor)
-                                .frame(width: proxy.size.width * (hasAppeared ? progressFraction : 0))
+                if let progressFraction {
+                    HStack(spacing: 6) {
+                        GeometryReader { proxy in
+                            ZStack(alignment: .leading) {
+                                Capsule()
+                                    .fill(LifeOSTokens.Ring.track)
+                                Capsule()
+                                    .fill(progressColor)
+                                    .frame(width: proxy.size.width * (hasAppeared ? progressFraction : 0))
+                            }
+                        }
+                        .frame(height: 5)
+                        .accessibilityHidden(true)
+                    }
+                    .onAppear {
+                        if LifeOSMotion.reduceMotion {
+                            hasAppeared = true
+                        } else {
+                            withAnimation(LifeOSMotion.chartDraw) { hasAppeared = true }
                         }
                     }
-                    .frame(height: 5)
-                    .accessibilityHidden(true)
-                }
-                .onAppear {
-                    if LifeOSMotion.reduceMotion {
-                        hasAppeared = true
-                    } else {
-                        withAnimation(LifeOSMotion.chartDraw) { hasAppeared = true }
+
+                    HStack(spacing: 6) {
+                        if let spentCents {
+                            Text(FinanceImportCurrencyFormatter.magnitudeEuro(cents: spentCents) + " of " + FinanceImportCurrencyFormatter.magnitudeEuro(cents: limitCents))
+                                .font(LifeOSFont.axis())
+                                .foregroundStyle(LifeOSTokens.tertiaryText)
+                            Spacer(minLength: 8)
+                            Text(isOverBudget
+                                 ? "Over by \(FinanceImportCurrencyFormatter.magnitudeEuro(cents: spentCents - limitCents))"
+                                 : "\(FinanceImportCurrencyFormatter.magnitudeEuro(cents: limitCents - spentCents)) remaining")
+                                .font(LifeOSFont.axis().weight(.semibold))
+                                .foregroundStyle(isOverBudget ? LifeOSTokens.danger : LifeOSTokens.success)
+                        }
+                        Button("Remove", role: .destructive, action: onRemove)
+                            .font(LifeOSFont.axis())
+                            .buttonStyle(.plain)
+                            .foregroundStyle(LifeOSTokens.tertiaryText)
+                            .accessibilityIdentifier("finance-budget-remove-\(category.rawValue)")
+                    }
+                } else {
+                    HStack(spacing: 8) {
+                        LifeOSIcon(.warning)
+                            .foregroundStyle(LifeOSTokens.warning)
+                            .frame(width: 13, height: 13)
+                        Text("Actual spend unavailable until a statement is imported")
+                            .font(LifeOSFont.axis())
+                            .foregroundStyle(LifeOSTokens.warning)
+                        Spacer(minLength: 8)
+                        Button("Remove", role: .destructive, action: onRemove)
+                            .font(LifeOSFont.axis())
+                            .buttonStyle(.plain)
+                            .foregroundStyle(LifeOSTokens.tertiaryText)
+                            .accessibilityIdentifier("finance-budget-remove-\(category.rawValue)")
                     }
                 }
-
-                HStack(spacing: 6) {
-                    Text(FinanceImportCurrencyFormatter.magnitudeEuro(cents: spentCents) + " of " + FinanceImportCurrencyFormatter.magnitudeEuro(cents: limitCents))
-                        .font(LifeOSFont.axis())
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
-                    Spacer(minLength: 8)
-                    Text(isOverBudget
-                         ? "Over by \(FinanceImportCurrencyFormatter.magnitudeEuro(cents: spentCents - limitCents))"
-                         : "\(FinanceImportCurrencyFormatter.magnitudeEuro(cents: limitCents - spentCents)) remaining")
-                        .font(LifeOSFont.axis().weight(.semibold))
-                        .foregroundStyle(isOverBudget ? LifeOSTokens.danger : LifeOSTokens.success)
-                    Button("Remove", role: .destructive, action: onRemove)
-                        .font(LifeOSFont.axis())
-                        .buttonStyle(.plain)
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
-                        .accessibilityIdentifier("finance-budget-remove-\(category.rawValue)")
-                }
             } else {
-                Text("No budget set")
-                    .font(LifeOSFont.axis())
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
-                    .accessibilityIdentifier("finance-budget-unset-\(category.rawValue)")
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("No budget set")
+                        .font(LifeOSFont.axis())
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .accessibilityIdentifier("finance-budget-unset-\(category.rawValue)")
+                    Text(actualsAvailable
+                         ? (spend.map { "Actual spend \(FinanceImportCurrencyFormatter.magnitudeEuro(cents: $0.outflowCents))" } ?? "No spend recorded")
+                         : "Actual spend unavailable until a statement is imported")
+                        .font(LifeOSFont.axis())
+                        .foregroundStyle(actualsAvailable ? LifeOSTokens.secondaryText : LifeOSTokens.warning)
+                }
             }
         }
         .accessibilityElement(children: .contain)
@@ -916,24 +1141,23 @@ private struct FinanceCategoryBudgetRow: View {
             }
         }
         .onAppear {
-            limitText = limitCents.map { String($0 / 100) } ?? ""
+            limitText = limitCents.map(FinanceBudgetAmountParser.inputText(for:)) ?? ""
         }
         .onChange(of: limitCents) { _, newValue in
             if !isFieldFocused {
-                limitText = newValue.map { String($0 / 100) } ?? ""
+                limitText = newValue.map(FinanceBudgetAmountParser.inputText(for:)) ?? ""
             }
         }
     }
 
     private func commitLimit() {
-        let trimmed = limitText.trimmingCharacters(in: .whitespaces)
-        guard let euros = Int(trimmed), euros > 0 else {
+        guard let cents = FinanceBudgetAmountParser.cents(from: limitText) else {
             // Invalid or empty entry: revert the field rather than silently
             // writing a fabricated limit.
-            limitText = limitCents.map { String($0 / 100) } ?? ""
+            limitText = limitCents.map(FinanceBudgetAmountParser.inputText(for:)) ?? ""
             return
         }
-        onSetLimit(euros * 100)
+        onSetLimit(cents)
     }
 }
 
@@ -963,6 +1187,12 @@ private enum FinanceImportDateFormatter {
     static func point(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.dateFormat = "EEE, MMM d"
+        return formatter.string(from: date)
+    }
+
+    static func timestamp(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d, yyyy · HH:mm"
         return formatter.string(from: date)
     }
 

@@ -160,11 +160,111 @@ final class FinanceCategorizerTests: XCTestCase {
             bookedAt: now,
             amountCents: -2_000,
             description: "Unknown merchant",
-            category: "Health",
             source: .genericCSV,
-            importedAt: now
+            importedAt: now,
+            sourceCategory: "Health"
         )
         XCTAssertEqual(FinanceCategorizer.summary(for: [imported]).first?.category, .health)
+    }
+
+    func testCategoryPrecedenceIsOverrideThenProviderThenHeuristic() {
+        let imported = FinanceImportedTransaction(
+            bookedAt: now,
+            amountCents: -2_000,
+            description: "Amazon Marketplace",
+            category: FinanceTransactionCategory.dining.rawValue,
+            source: .genericCSV,
+            importedAt: now,
+            sourceCategory: "Health"
+        )
+        let resolution = FinanceCategorizer.resolve(transaction: imported)
+        XCTAssertEqual(resolution.category, .dining)
+        XCTAssertEqual(resolution.source, .userOverride)
+
+        let providerOnly = FinanceImportedTransaction(
+            bookedAt: now,
+            amountCents: -2_000,
+            description: "Amazon Marketplace",
+            source: .genericCSV,
+            importedAt: now,
+            sourceCategory: "Health"
+        )
+        let providerResolution = FinanceCategorizer.resolve(transaction: providerOnly)
+        XCTAssertEqual(providerResolution.category, .health)
+        XCTAssertEqual(providerResolution.source, .provider)
+
+        let heuristicOnly = transaction(description: "Amazon Marketplace", amountCents: -2_000)
+        let heuristicResolution = FinanceCategorizer.resolve(transaction: heuristicOnly)
+        XCTAssertEqual(heuristicResolution.category, .shopping)
+        XCTAssertEqual(heuristicResolution.source, .heuristic)
+    }
+
+    func testProviderMCCWinsOverMerchantHeuristicAfterSourceCategory() {
+        let coded = FinanceImportedTransaction(
+            bookedAt: now,
+            amountCents: -2_000,
+            description: "Amazon Marketplace",
+            source: .genericCSV,
+            importedAt: now,
+            providerCode: "5411"
+        )
+        let resolution = FinanceCategorizer.resolve(transaction: coded)
+        XCTAssertEqual(resolution.category, .groceries)
+        XCTAssertEqual(resolution.source, .providerCode)
+
+        let sourceWins = FinanceImportedTransaction(
+            bookedAt: now,
+            amountCents: -2_000,
+            description: "Amazon Marketplace",
+            source: .genericCSV,
+            importedAt: now,
+            sourceCategory: "Health",
+            providerCode: "5411"
+        )
+        XCTAssertEqual(FinanceCategorizer.resolve(transaction: sourceWins).category, .health)
+    }
+
+    func testInvestmentOrderAlwaysStaysOutsideOrdinaryBudgetCategories() {
+        let order = FinanceImportedTransaction(
+            bookedAt: now,
+            amountCents: -10_000,
+            description: "Amazon Marketplace",
+            source: .tradeRepublicCSV,
+            importedAt: now,
+            kind: .investmentOrder,
+            investment: FinanceImportedInvestmentDetails(symbol: "VWCE", assetClass: "ETF", quantity: "1")
+        )
+        let transfer = FinanceImportedTransaction(
+            bookedAt: now,
+            amountCents: -5_000,
+            description: "Bank transfer",
+            source: .genericCSV,
+            importedAt: now,
+            sourceCategory: "Transfer"
+        )
+
+        XCTAssertEqual(FinanceCategorizer.category(for: order), .investments)
+        XCTAssertFalse(FinanceCategorizer.isBudgetEligible(order))
+        XCTAssertFalse(FinanceCategorizer.isBudgetEligible(transfer))
+        XCTAssertTrue(FinanceCategorizer.budgetSummary(for: [order, transfer]).isEmpty)
+    }
+
+    func testUserOverrideWinsForInvestmentDisplayButOrderRemainsExcludedFromBudgets() {
+        let order = FinanceImportedTransaction(
+            bookedAt: now,
+            amountCents: -10_000,
+            description: "Vanguard order",
+            category: FinanceTransactionCategory.shopping.rawValue,
+            source: .tradeRepublicCSV,
+            importedAt: now,
+            kind: .investmentOrder,
+            investment: FinanceImportedInvestmentDetails(symbol: "VWCE", assetClass: "ETF", quantity: "1")
+        )
+
+        let resolution = FinanceCategorizer.resolve(transaction: order)
+        XCTAssertEqual(resolution.category, .shopping)
+        XCTAssertEqual(resolution.source, .userOverride)
+        XCTAssertFalse(FinanceCategorizer.isBudgetEligible(order))
     }
 
     func testSummarySortedByAbsoluteSpendDescending() {

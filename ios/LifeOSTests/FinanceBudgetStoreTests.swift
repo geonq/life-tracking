@@ -138,8 +138,56 @@ final class FinanceBudgetStoreTests: XCTestCase {
 
     func testBudgetableCategoriesExcludesIncome() {
         XCTAssertFalse(FinanceTransactionCategory.budgetableCategories.contains(.income))
+        XCTAssertFalse(FinanceTransactionCategory.budgetableCategories.contains(.transfers))
+        XCTAssertFalse(FinanceTransactionCategory.budgetableCategories.contains(.investments))
         XCTAssertFalse(FinanceTransactionCategory.income.isBudgetable)
+        XCTAssertFalse(FinanceTransactionCategory.transfers.isBudgetable)
+        XCTAssertFalse(FinanceTransactionCategory.investments.isBudgetable)
         XCTAssertTrue(FinanceTransactionCategory.groceries.isBudgetable)
+    }
+
+    func testSetBudgetRejectsTransfersAndInvestments() throws {
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        let store = try FinanceBudgetStore(url: url)
+
+        for category in [FinanceTransactionCategory.transfers, .investments] {
+            XCTAssertThrowsError(try store.setBudget(budget(category: category))) { error in
+                XCTAssertEqual(error as? FinanceBudgetStoreError, .notBudgetable)
+            }
+        }
+        XCTAssertTrue(try store.load().isEmpty)
+    }
+
+    func testNegativeBudgetLimitIsRejected() throws {
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        let store = try FinanceBudgetStore(url: url)
+
+        XCTAssertThrowsError(try store.setBudget(budget(limitCents: -1))) { error in
+            XCTAssertEqual(error as? FinanceBudgetStoreError, .invalidLimit)
+        }
+        XCTAssertTrue(try store.load().isEmpty)
+    }
+
+    func testZeroBudgetLimitIsRejected() throws {
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        let store = try FinanceBudgetStore(url: url)
+
+        XCTAssertThrowsError(try store.setBudget(budget(limitCents: 0))) { error in
+            XCTAssertEqual(error as? FinanceBudgetStoreError, .invalidLimit)
+        }
+        XCTAssertTrue(try store.load().isEmpty)
+    }
+
+    func testBudgetAmountParserAcceptsLocalizedCentsAndRejectsFractionalCents() {
+        XCTAssertEqual(FinanceBudgetAmountParser.cents(from: "1.234,56"), 123_456)
+        XCTAssertEqual(FinanceBudgetAmountParser.cents(from: "1,234.56"), 123_456)
+        XCTAssertEqual(FinanceBudgetAmountParser.cents(from: "1234,5"), 123_450)
+        XCTAssertEqual(FinanceBudgetAmountParser.cents(from: "12.345"), nil)
+        XCTAssertEqual(FinanceBudgetAmountParser.cents(from: "0"), nil)
+        XCTAssertEqual(FinanceBudgetAmountParser.inputText(for: 12_345), "123.45")
     }
 
     // MARK: 6. Remove

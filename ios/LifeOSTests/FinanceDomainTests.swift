@@ -294,6 +294,7 @@ final class FinanceDomainTests: XCTestCase {
             rowSource: String = "sparkasse_leipzig"
         ) throws -> FinanceSummary {
             let account: [String: Any] = [
+                "availability": "observed",
                 "id": "sparkasse-checking",
                 "name": "Sparkasse Leipzig",
                 "detail": "EUR",
@@ -341,6 +342,76 @@ final class FinanceDomainTests: XCTestCase {
 
         let stale = try accountSummary(rowProvenance: staleRow, envelopeProvenance: staleEnvelope)
         XCTAssertEqual(stale.accounts?.provenance.freshness, .stale)
+
+        let unavailableAccountProvenance: [String: Any] = [
+            "source": "revolut_personal",
+            "observedAt": formatter.string(from: now.addingTimeInterval(-60)),
+            "freshness": "unknown",
+            "quality": "unavailable",
+            "connectorState": "unavailable"
+        ]
+        let unavailableAccount: [String: Any] = [
+            "availability": "unavailable",
+            "id": "revolut-dollar-savings",
+            "name": "Dollar savings",
+            "detail": "USD · Enable Banking",
+            "source": "revolut_personal",
+            "provenance": unavailableAccountProvenance
+        ]
+        let observedAccount: [String: Any] = [
+            "availability": "observed",
+            "id": "sparkasse-checking",
+            "name": "Sparkasse Leipzig",
+            "detail": "EUR",
+            "balanceCents": 123_456,
+            "source": "sparkasse_leipzig",
+            "provenance": freshRow
+        ]
+        let mixedPayload: [String: Any] = [
+            "generatedAt": formatter.string(from: now),
+            "currency": "EUR",
+            "monthlyIncome": unavailableMetric,
+            "fixedCosts": unavailableMetric,
+            "discretionaryBuffer": unavailableMetric,
+            "spent": unavailableMetric,
+            "savingsGoal": unavailableMetric,
+            "saved": unavailableMetric,
+            "accounts": [
+                "availability": "observed",
+                "accounts": [observedAccount, unavailableAccount],
+                "provenance": [
+                    "source": "derived-account-snapshot",
+                    "observedAt": formatter.string(from: now),
+                    "freshness": "fresh",
+                    "quality": "observed",
+                    "connectorState": "healthy"
+                ]
+            ]
+        ]
+        let mixed = try FinanceSummary.decode(
+            JSONSerialization.data(withJSONObject: mixedPayload), now: now
+        )
+        XCTAssertEqual(mixed.accounts?.accounts?.count, 2)
+        XCTAssertEqual(mixed.accounts?.accounts?.last?.availability, .unavailable)
+        XCTAssertNil(mixed.accounts?.accounts?.last?.balanceCents)
+
+        var invalidUnavailableAccount = unavailableAccount
+        invalidUnavailableAccount["balanceCents"] = 1
+        var invalidMixedPayload = mixedPayload
+        invalidMixedPayload["accounts"] = [
+            "availability": "observed",
+            "accounts": [observedAccount, invalidUnavailableAccount],
+            "provenance": [
+                "source": "derived-account-snapshot",
+                "observedAt": formatter.string(from: now),
+                "freshness": "fresh",
+                "quality": "observed",
+                "connectorState": "healthy"
+            ]
+        ]
+        XCTAssertThrowsError(try FinanceSummary.decode(
+            JSONSerialization.data(withJSONObject: invalidMixedPayload), now: now
+        ))
 
         let sourceMismatchEnvelope = provenance(
             source: "revolut_personal",
@@ -547,6 +618,16 @@ final class FinanceDomainTests: XCTestCase {
 
         XCTAssertEqual(filtered.map(\.id), ["food-1"])
         XCTAssertTrue(filtered.allSatisfy { $0.category == "Food" && $0.isSpending })
+    }
+
+    func testTransactionFilterCanDrillIntoIncomeCategories() {
+        let transactions = fixtureTransactions()
+        let filter = FinanceTransactionFilter(category: "Food", incomeOnly: true)
+
+        let filtered = filter.applying(to: transactions)
+
+        XCTAssertEqual(filtered.map(\.id), ["refund-1"])
+        XCTAssertTrue(filtered.allSatisfy(\.isIncome))
     }
 
     func testSummaryWithoutTransactionSourceDoesNotInventLedgerTotals() throws {
@@ -784,6 +865,119 @@ final class FinanceDomainTests: XCTestCase {
             FinanceTransactionSnapshot.self,
             from: JSONSerialization.data(withJSONObject: payload)
         ))
+    }
+
+    func testFinancePaginationCoversAllTransactionRowsWithoutDroppingOrDuplicating() throws {
+        let rows = fixtureTransactions()
+        let snapshot = FinanceTransactionSnapshot(
+            availability: .observed,
+            transactions: rows,
+            provenance: rows[0].provenance
+        )
+
+        let first = snapshot.page(offset: 0, limit: 2)
+        let second = snapshot.page(offset: first.descriptor.nextOffset ?? rows.count, limit: 2)
+        let final = snapshot.page(offset: second.descriptor.nextOffset ?? rows.count, limit: 2)
+
+        XCTAssertEqual(first.items.map(\.id), ["salary-1", "food-1"])
+        XCTAssertEqual(second.items.map(\.id), ["transport-1", "refund-1"])
+        XCTAssertTrue(final.items.isEmpty)
+        XCTAssertEqual(first.descriptor.totalCount, rows.count)
+        XCTAssertTrue(first.descriptor.hasNextPage)
+        XCTAssertFalse(second.descriptor.hasNextPage)
+        XCTAssertEqual(first.items + second.items, rows)
+    }
+
+    func testFinancePaginationClampsUnsafeOffsetsAndPageSizes() {
+        let page = FinancePagination.page([1, 2, 3], offset: -20, limit: 10_000)
+        XCTAssertEqual(page.items, [1, 2, 3])
+        XCTAssertEqual(page.descriptor.offset, 0)
+        XCTAssertEqual(page.descriptor.limit, FinancePagination.maximumPageSize)
+        XCTAssertFalse(page.descriptor.hasNextPage)
+
+        let end = FinancePagination.page([1, 2, 3], offset: 99, limit: 2)
+        XCTAssertTrue(end.items.isEmpty)
+        XCTAssertEqual(end.descriptor.offset, 3)
+        XCTAssertNil(end.descriptor.nextOffset)
+    }
+
+    func testFinanceAssessmentDistinguishesObservedPartialAndStale() throws {
+        let full = try decodeSummary(
+            monthlyIncome: 300_000,
+            fixedCosts: 170_000,
+            discretionaryBuffer: 30_000,
+            spent: 45_000,
+            savingsGoal: 100_000,
+            saved: 25_000
+        )
+        let referenceNow = ISO8601DateFormatter().date(from: "2026-08-08T12:05:00Z")!
+        XCTAssertEqual(full.financeAssessment(now: referenceNow).state, .observed)
+
+        let partial = try decodeSummary(
+            monthlyIncome: 300_000,
+            fixedCosts: nil,
+            discretionaryBuffer: nil,
+            spent: 45_000,
+            savingsGoal: nil,
+            saved: nil
+        )
+        XCTAssertEqual(partial.financeAssessment(now: referenceNow).state, .partial)
+        XCTAssertGreaterThan(partial.financeAssessment(now: referenceNow).unavailableComponentCount, 0)
+
+        XCTAssertEqual(full.financeAssessment(now: referenceNow.addingTimeInterval(3_600)).state, .stale)
+        XCTAssertEqual(full.financeAssessment(now: referenceNow, errorMessage: "provider failed").state, .error)
+    }
+
+    func testObservedWealthValueUsesEURRowsAndRetainsUnavailableNonEURRows() throws {
+        let observedAt = Date(timeIntervalSince1970: 1_786_449_600)
+        let provenance = FinancePayloadProvenance(
+            source: "trade-republic-holdings",
+            observedAt: observedAt,
+            freshness: .fresh,
+            quality: .observed,
+            connectorState: .healthy
+        )
+        let holding = FinanceHoldingObservation(
+            id: "vwce",
+            name: "Vanguard FTSE All-World",
+            symbol: "VWCE",
+            assetClass: "ETF",
+            quantity: "1.25",
+            valueCents: 12_500,
+            source: "trade-republic-holdings",
+            provenance: provenance
+        )
+        let wealth = FinanceWealthSnapshot(
+            availability: .observed,
+            holdings: [holding],
+            provenance: provenance
+        )
+        XCTAssertEqual(wealth.observedValueCents, 12_500)
+
+        let nonEUR = FinanceHoldingObservation(
+            id: "usd",
+            name: "USD holding",
+            currency: "USD",
+            source: "trade-republic-holdings",
+            provenance: FinancePayloadProvenance(
+                source: "trade-republic-holdings",
+                observedAt: observedAt,
+                freshness: .unknown,
+                quality: .unavailable,
+                connectorState: .unavailable
+            )
+        )
+        let mixed = FinanceWealthSnapshot(
+            availability: .observed,
+            holdings: [holding, nonEUR],
+            provenance: provenance
+        )
+        XCTAssertEqual(mixed.observedValueCents, 12_500)
+        let decoder = JSONDecoder.lifeOS
+        decoder.userInfo[.lifeOSNow] = observedAt.addingTimeInterval(60)
+        let decoded = try decoder.decode(FinanceWealthSnapshot.self, from: JSONEncoder.lifeOS.encode(mixed))
+        XCTAssertEqual(decoded.holdings?.last?.availability, .unavailable)
+        XCTAssertNil(decoded.holdings?.last?.valueCents)
     }
 
     private func fixtureTransactions() -> [FinanceTransactionObservation] {

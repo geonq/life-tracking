@@ -73,6 +73,29 @@ public enum FinanceTransactionCategory: String, Codable, CaseIterable, Hashable,
         }
     }
 
+    /// Maps only known four-digit merchant category codes to the canonical
+    /// vocabulary. Unknown or malformed codes stay unresolved so a merchant
+    /// heuristic can be considered next rather than being presented as fact.
+    public static func from(providerCode: String?) -> Self? {
+        guard let providerCode else { return nil }
+        let code = providerCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard code.count == 4, code.allSatisfy(\.isNumber), let mcc = Int(code) else { return nil }
+        switch mcc {
+        case 5411, 5422, 5441, 5451, 5462, 5499:
+            return .groceries
+        case 5541, 5542, 4111, 4121, 4131, 4789, 7512:
+            return .transport
+        case 5812, 5813, 5814:
+            return .dining
+        case 5912, 8011, 8021...8099:
+            return .health
+        case 7011, 4722, 4511, 3000...3999:
+            return .travel
+        default:
+            return nil
+        }
+    }
+
     /// User-facing label.
     public var displayName: String {
         switch self {
@@ -122,7 +145,7 @@ public enum FinanceTransactionCategory: String, Codable, CaseIterable, Hashable,
         switch self {
         case .groceries: .grocery
         case .dining: .shopping
-        case .transport: .investments
+        case .transport: .cashFlow
         case .shopping: .shopping
         case .bills: .budget
         case .subscriptions: .refresh

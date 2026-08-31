@@ -13,6 +13,31 @@ public enum FinanceImportedTransactionStoreError: Error, Equatable, Sendable {
     case transactionNotFound
 }
 
+/// Result of an import write. A replay is successful but reports duplicate
+/// rows explicitly; a source correction with the same stable identity is
+/// reported as an update rather than silently discarded.
+public struct FinanceImportSaveResult: Equatable, Sendable {
+    public let requestedCount: Int
+    public let insertedCount: Int
+    public let updatedCount: Int
+    public let duplicateCount: Int
+    public let storedCount: Int
+
+    public init(
+        requestedCount: Int,
+        insertedCount: Int,
+        updatedCount: Int = 0,
+        duplicateCount: Int,
+        storedCount: Int
+    ) {
+        self.requestedCount = max(requestedCount, 0)
+        self.insertedCount = max(insertedCount, 0)
+        self.updatedCount = max(updatedCount, 0)
+        self.duplicateCount = max(duplicateCount, 0)
+        self.storedCount = max(storedCount, 0)
+    }
+}
+
 extension FinanceImportedTransactionStoreError: LocalizedError {
     public var errorDescription: String? {
         switch self {
@@ -101,17 +126,67 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
 
     /// Adds the given transactions (already parsed and confirmed by the user
     /// via the import preview) to the durable store. Stable importer IDs make
-    /// retrying the same CSV idempotent; existing rows are retained exactly.
-    public func add(_ transactions: [FinanceImportedTransaction]) throws {
-        guard !transactions.isEmpty else { return }
+    /// retrying the same CSV idempotent while allowing source corrections to
+    /// replace the old observation. Existing user category overrides survive
+    /// an incoming row that has no explicit category.
+    @discardableResult
+    public func add(_ transactions: [FinanceImportedTransaction]) throws -> FinanceImportSaveResult {
+        guard !transactions.isEmpty else {
+            return FinanceImportSaveResult(
+                requestedCount: 0,
+                insertedCount: 0,
+                duplicateCount: 0,
+                storedCount: try all().count
+            )
+        }
         Self.processTransactionLock.lock()
         defer { Self.processTransactionLock.unlock() }
         var existing = try loadUnlocked()
-        var knownIDs = Set(existing.map(\.id))
-        let additions = transactions.filter { knownIDs.insert($0.id).inserted }
-        guard !additions.isEmpty else { return }
+        var indexByID: [UUID: Int] = [:]
+        for (index, transaction) in existing.enumerated() {
+            indexByID[transaction.id] = index
+        }
+        var seenIncomingIDs = Set<UUID>()
+        var additions: [FinanceImportedTransaction] = []
+        var updatedCount = 0
+        var duplicateCount = 0
+        var changed = false
+
+        for incoming in transactions {
+            guard seenIncomingIDs.insert(incoming.id).inserted else {
+                duplicateCount += 1
+                continue
+            }
+            if let index = indexByID[incoming.id] {
+                var candidate = incoming
+                if candidate.category == nil {
+                    candidate.category = existing[index].category
+                }
+                if existing[index].hasSameSourceObservation(as: candidate),
+                   existing[index].category == candidate.category {
+                    duplicateCount += 1
+                } else {
+                    existing[index] = candidate
+                    updatedCount += 1
+                    changed = true
+                }
+            } else {
+                indexByID[incoming.id] = existing.count + additions.count
+                additions.append(incoming)
+                changed = true
+            }
+        }
+        let result = FinanceImportSaveResult(
+            requestedCount: transactions.count,
+            insertedCount: additions.count,
+            updatedCount: updatedCount,
+            duplicateCount: duplicateCount,
+            storedCount: existing.count + additions.count
+        )
+        guard changed else { return result }
         existing.append(contentsOf: additions)
         try saveUnlocked(existing)
+        return result
     }
 
     /// Removes a single imported transaction by id.
@@ -127,9 +202,10 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
     }
 
     /// Persists a canonical category override for one imported transaction.
-    /// Passing `nil` clears the override and restores automatic categorizing
-    /// from the transaction description. The enum boundary prevents an
-    /// arbitrary provider label from becoming a saved LifeOS category.
+    /// Passing `nil` clears the override and restores the parsed provider
+    /// category (then the normal heuristic fallback). The enum boundary
+    /// prevents an arbitrary provider label from becoming a saved LifeOS
+    /// category.
     public func setCategory(_ category: FinanceTransactionCategory?, for id: UUID) throws {
         Self.processTransactionLock.lock()
         defer { Self.processTransactionLock.unlock() }
@@ -139,6 +215,13 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
         }
         existing[index].category = category?.rawValue
         try saveUnlocked(existing)
+    }
+
+    /// Explicit spelling for the destructive part of category editing. It
+    /// clears only the user override; a parsed provider category remains
+    /// available to the precedence resolver.
+    public func clearCategoryOverride(for id: UUID) throws {
+        try setCategory(nil, for: id)
     }
 
     /// Removes every imported transaction, leaving an honest empty store.

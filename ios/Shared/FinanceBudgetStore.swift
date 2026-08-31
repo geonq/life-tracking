@@ -11,6 +11,7 @@ public enum FinanceBudgetStoreError: Error, Equatable, Sendable {
     case invalidEnvelope
     case writeFailed
     case notBudgetable
+    case invalidLimit
 }
 
 extension FinanceBudgetStoreError: LocalizedError {
@@ -25,7 +26,9 @@ extension FinanceBudgetStoreError: LocalizedError {
         case .writeFailed:
             return "Budget changes could not be saved."
         case .notBudgetable:
-            return "Income is not a spending category and cannot carry a budget."
+            return "Income, transfers, and investments are not ordinary spending categories and cannot carry a budget."
+        case .invalidLimit:
+            return "A budget limit must be a positive EUR amount with at most two decimal places."
         }
     }
 }
@@ -118,6 +121,10 @@ public final class FinanceBudgetStore: @unchecked Sendable {
         guard budget.category.isBudgetable else {
             throw FinanceBudgetStoreError.notBudgetable
         }
+        guard budget.monthlyLimitCents > 0,
+              budget.monthlyLimitCents <= FinanceBudgetAmountParser.maximumCents else {
+            throw FinanceBudgetStoreError.invalidLimit
+        }
         Self.processTransactionLock.lock()
         defer { Self.processTransactionLock.unlock() }
         var budgets = try loadUnlocked()
@@ -157,8 +164,8 @@ public final class FinanceBudgetStore: @unchecked Sendable {
 
     /// Removes every historical entry for `category`, leaving it with an
     /// honest "no budget set" state. This is a full removal, not a dated
-    /// append of a zero-limit entry — a zero limit is a real value distinct
-    /// from "unset."
+    /// append of a zero-limit entry. Zero is not a valid monthly budget; an
+    /// absent entry is the only honest "not set" state.
     public func remove(category: FinanceTransactionCategory) throws {
         Self.processTransactionLock.lock()
         defer { Self.processTransactionLock.unlock() }
@@ -178,6 +185,15 @@ public final class FinanceBudgetStore: @unchecked Sendable {
         do {
             let envelope = try JSONDecoder.financeBudget.decode(FinanceBudgetStoreEnvelope.self, from: data)
             guard envelope.schemaVersion == FinanceBudgetStoreEnvelope.currentSchemaVersion else {
+                throw FinanceBudgetStoreError.invalidEnvelope
+            }
+            guard envelope.budgets.allSatisfy({
+                $0.category.isBudgetable
+                    && $0.monthlyLimitCents > 0
+                    && $0.monthlyLimitCents <= FinanceBudgetAmountParser.maximumCents
+                    && $0.effectiveFrom.timeIntervalSinceReferenceDate.isFinite
+                    && $0.createdAt.timeIntervalSinceReferenceDate.isFinite
+            }) else {
                 throw FinanceBudgetStoreError.invalidEnvelope
             }
             return envelope.budgets

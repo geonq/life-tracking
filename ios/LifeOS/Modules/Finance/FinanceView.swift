@@ -24,6 +24,8 @@ public struct FinanceView: View {
     private let initialDetail: FinanceDetailRoute?
     private let onOpenConnections: (() -> Void)?
     private let onRefresh: (() async -> Void)?
+    private let requestedObservationState: FinanceObservationState?
+    private let financeErrorMessage: String?
 
     @State private var selectedDetail: FinanceDetail = .spend
     @State private var selectedRange: FinanceRange = .month
@@ -33,6 +35,7 @@ public struct FinanceView: View {
     @State private var selectedNetWorthPoint: String?
     @State private var selectedCategoryID: String?
     @State private var selectedCategorySource: String?
+    @State private var selectedIncomeCategoryID: String?
     @State private var isRefreshing = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -44,7 +47,9 @@ public struct FinanceView: View {
         usesVisualFixtures: Bool = false,
         initialDetail: FinanceDetailRoute? = nil,
         onOpenConnections: (() -> Void)? = nil,
-        onRefresh: (() async -> Void)? = nil
+        onRefresh: (() async -> Void)? = nil,
+        observationState: FinanceObservationState? = nil,
+        errorMessage: String? = nil
     ) {
         self.summary = summary
         self.transactions = transactions
@@ -52,6 +57,8 @@ public struct FinanceView: View {
         self.initialDetail = initialDetail
         self.onOpenConnections = onOpenConnections
         self.onRefresh = onRefresh
+        self.requestedObservationState = observationState
+        self.financeErrorMessage = errorMessage
         switch initialDetail {
         case .income: _selectedDetail = State(initialValue: .income)
         case .cashFlow: _selectedDetail = State(initialValue: .cashFlow)
@@ -64,22 +71,27 @@ public struct FinanceView: View {
         let snapshot = FinanceDisplaySnapshot(
             summary: summary,
             transactions: transactions,
-            usesVisualFixtures: usesVisualFixtures
+            usesVisualFixtures: usesVisualFixtures,
+            observationState: requestedObservationState ?? (summary == nil && onRefresh != nil ? .loading : nil),
+            errorMessage: financeErrorMessage
         )
 
         ScrollView {
             LifeOSResponsiveContentContainer(topPadding: 16, bottomPadding: 16) {
                 VStack(alignment: .leading, spacing: 16) {
                     financeHeader(snapshot: snapshot)
+                    FinanceStateNotice(snapshot: snapshot, onRefresh: onRefresh)
                     FinanceHeroCard(snapshot: snapshot)
 
                     financeDetailAndCategories(snapshot: snapshot)
 
                     financeMetricGrid(snapshot: snapshot)
+                    FinanceWealthCard(snapshot: snapshot)
                     FinanceAccountsCard(snapshot: snapshot, onOpenConnections: onOpenConnections)
                     FinanceImportCard()
                 }
             }
+
         }
         .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
         .scrollIndicators(.hidden)
@@ -110,9 +122,8 @@ public struct FinanceView: View {
 
     private func financeHeader(snapshot: FinanceDisplaySnapshot) -> some View {
         HStack(alignment: .center, spacing: 12) {
-            // §5.1: bare icon, no tile — chrome stays gray, color is data.
             LifeOSIcon(.finance)
-                .foregroundStyle(LifeOSTokens.tertiaryText)
+                .foregroundStyle(LifeOSTokens.Module.finance)
                 .frame(width: 21, height: 21)
 
             VStack(alignment: .leading, spacing: 1) {
@@ -121,7 +132,7 @@ public struct FinanceView: View {
                     .tracking(-0.5)
                 Text("Private overview")
                     .font(LifeOSFont.metadata())
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .foregroundStyle(LifeOSTokens.secondaryText)
             }
 
             Spacer(minLength: 6)
@@ -172,6 +183,7 @@ public struct FinanceView: View {
                     snapshot: snapshot,
                     selectedCategoryID: $selectedCategoryID,
                     selectedSourceID: $selectedCategorySource,
+                    selectedIncomeCategoryID: $selectedIncomeCategoryID,
                     selectedRange: selectedRange
                 )
                 .frame(minWidth: 300, maxWidth: 390, alignment: .topLeading)
@@ -183,6 +195,7 @@ public struct FinanceView: View {
                     snapshot: snapshot,
                     selectedCategoryID: $selectedCategoryID,
                     selectedSourceID: $selectedCategorySource,
+                    selectedIncomeCategoryID: $selectedIncomeCategoryID,
                     selectedRange: selectedRange
                 )
             }
@@ -192,7 +205,7 @@ public struct FinanceView: View {
 
     private func financeDetailPanel(snapshot: FinanceDisplaySnapshot) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            FinanceSectionHeader(title: "Details", subtitle: "Trend context for this period")
+            FinanceSectionHeader(title: "Details", subtitle: "Trend context for this period", icon: .views, accent: LifeOSTokens.Module.finance)
             SpringPillSelector(
                 options: FinanceDetail.allCases,
                 selection: $selectedDetail
@@ -232,7 +245,8 @@ public struct FinanceView: View {
                 title: "Spent",
                 value: snapshot.spent.valueText,
                 detail: snapshot.spent.detail,
-                icon: .budget,
+                icon: .spending,
+                accent: LifeOSTokens.danger,
                 progress: snapshot.spendProgress,
                 isUnavailable: snapshot.spent.isUnavailable
             )
@@ -240,7 +254,8 @@ public struct FinanceView: View {
                 title: "Cash flow",
                 value: snapshot.cashFlow.valueText,
                 detail: snapshot.cashFlow.detail,
-                icon: .revenue,
+                icon: .cashFlow,
+                accent: LifeOSTokens.Module.business,
                 progress: snapshot.cashFlow.progress,
                 isUnavailable: snapshot.cashFlow.isUnavailable
             )
@@ -248,7 +263,8 @@ public struct FinanceView: View {
                 title: "Income",
                 value: snapshot.income.valueText,
                 detail: snapshot.income.detail,
-                icon: .revenue,
+                icon: .income,
+                accent: LifeOSTokens.success,
                 progress: nil,
                 isUnavailable: snapshot.income.isUnavailable
             )
@@ -257,6 +273,7 @@ public struct FinanceView: View {
                 value: snapshot.saved.valueText,
                 detail: snapshot.saved.detail,
                 icon: .savings,
+                accent: LifeOSTokens.success,
                 progress: snapshot.savingsProgress,
                 isUnavailable: snapshot.saved.isUnavailable
             )
@@ -341,6 +358,7 @@ public struct FinanceView: View {
         )
         return FinanceDisplayTruth(
             statusLabel: snapshot.statusLabel,
+            observationState: snapshot.observationState,
             sourceDisclosure: snapshot.sourceDisclosure,
             netWorthCents: snapshot.netWorth.cents,
             accountsCount: snapshot.accounts.count,
@@ -352,6 +370,7 @@ public struct FinanceView: View {
 
 internal struct FinanceDisplayTruth: Equatable {
     let statusLabel: String
+    let observationState: FinanceObservationState
     let sourceDisclosure: String
     let netWorthCents: Int?
     let accountsCount: Int
@@ -365,21 +384,103 @@ private struct FinanceStatusBadge: View {
     let snapshot: FinanceDisplaySnapshot
 
     var body: some View {
-        // §4.2 dot + overline — no tinted capsule. Color is a signal.
+        // Status uses both an icon and text; color is only a supporting signal.
         HStack(spacing: 6) {
-            Circle()
-                .fill(snapshot.statusColor)
-                .frame(width: 6, height: 6)
+            LifeOSIcon(snapshot.statusIcon)
+                .frame(width: 14, height: 14)
             Text(snapshot.statusLabel)
-                .font(LifeOSFont.overline())
-                .tracking(0.8)
-                .textCase(.uppercase)
+                .font(LifeOSFont.axis().weight(.semibold))
                 .lineLimit(1)
         }
         .foregroundStyle(snapshot.statusColor)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Finance data status")
         .accessibilityValue(snapshot.statusLabel)
+    }
+}
+
+private struct FinanceStateNotice: View {
+    let snapshot: FinanceDisplaySnapshot
+    let onRefresh: (() async -> Void)?
+
+    private var isVisible: Bool {
+        snapshot.observationState != .observed && snapshot.observationState != .demo
+    }
+
+    private var accent: Color {
+        switch snapshot.observationState {
+        case .error: LifeOSTokens.danger
+        case .partial, .stale, .loading: LifeOSTokens.warning
+        case .unavailable: LifeOSTokens.tertiaryText
+        case .observed, .demo: LifeOSTokens.success
+        }
+    }
+
+    private var title: String {
+        switch snapshot.observationState {
+        case .loading: "Loading Finance data"
+        case .partial: "Some Finance data is unavailable"
+        case .stale: "Finance data may be out of date"
+        case .error: "Finance refresh failed"
+        case .unavailable: "Finance data unavailable"
+        case .observed, .demo: ""
+        }
+    }
+
+    private var detail: String {
+        if let errorMessage = snapshot.errorMessage,
+           !errorMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return errorMessage
+        }
+        switch snapshot.observationState {
+        case .loading: return "Waiting for an authorized source response."
+        case .partial: return "Only explicitly observed values are shown; missing values are not treated as zero."
+        case .stale: return "The displayed values remain source-backed, but the source needs a refresh."
+        case .error: return "The last source-backed values remain visible where available."
+        case .unavailable: return "Connect an authorized source to show account and transaction values."
+        case .observed, .demo: return ""
+        }
+    }
+
+    @ViewBuilder
+    var body: some View {
+        if isVisible {
+            HStack(alignment: .top, spacing: 10) {
+                LifeOSIcon(snapshot.statusIcon)
+                    .foregroundStyle(accent)
+                    .frame(width: 17, height: 17)
+                    .padding(.top, 2)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(LifeOSFont.control().weight(.semibold))
+                        .foregroundStyle(LifeOSTokens.primaryText)
+                    Text(detail)
+                        .font(LifeOSFont.axis())
+                        .foregroundStyle(LifeOSTokens.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 4)
+                if let onRefresh {
+                    Button("Retry") {
+                        Task { await onRefresh() }
+                    }
+                    .font(LifeOSFont.axis().weight(.semibold))
+                    .buttonStyle(.bordered)
+                    .tint(accent)
+                    .accessibilityLabel("Retry Finance refresh")
+                }
+            }
+            .padding(12)
+            .background(accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(accent.opacity(0.24), lineWidth: 1)
+            )
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(title)
+            .accessibilityValue(detail)
+            .accessibilityIdentifier("finance-state-notice")
+        }
     }
 }
 
@@ -476,6 +577,120 @@ private struct UnavailableMetricMark: View {
     }
 }
 
+private struct FinanceWealthCard: View {
+    let snapshot: FinanceDisplaySnapshot
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            FinanceSectionHeader(
+                title: "Wealth & investments",
+                subtitle: "Explicit holdings source only",
+                icon: .investments,
+                accent: LifeOSTokens.Module.finance
+            )
+            if let wealth = snapshot.wealth, wealth.availability == .observed {
+                if let valueCents = wealth.observedValueCents {
+                    HStack(alignment: .firstTextBaseline) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(FinanceCurrencyFormatter.euro(cents: valueCents))
+                                .font(LifeOSFont.kpi(28).monospacedDigit())
+                            Text("Observed EUR holdings value · \(wealth.holdings?.count ?? 0) rows")
+                                .font(LifeOSFont.axis())
+                                .foregroundStyle(LifeOSTokens.secondaryText)
+                        }
+                        Spacer(minLength: 12)
+                        LifeOSIcon(.investments)
+                            .foregroundStyle(LifeOSTokens.Module.finance)
+                            .frame(width: 22, height: 22)
+                    }
+                } else {
+                    FinanceEmptyModuleRow(
+                        icon: .investments,
+                        title: "Holdings value unavailable",
+                        detail: "No observed EUR holding values were supplied. Non-EUR rows remain visible without conversion."
+                    )
+                }
+                if let holdings = wealth.holdings, !holdings.isEmpty {
+                    Divider()
+                        .overlay(LifeOSTokens.hairlineBorder)
+                    VStack(spacing: 0) {
+                        ForEach(holdings, id: \.id) { holding in
+                            FinanceHoldingRow(holding: holding)
+                            if holding.id != holdings.last?.id {
+                                Divider().padding(.leading, 42)
+                            }
+                        }
+                    }
+                }
+                Text("Separate from bank-account net worth. Investment orders and bank transactions never infer a holding value.")
+                    .font(LifeOSFont.axis())
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("\(FinanceSourceLabel.display(wealth.provenance.source)) · \(FinanceFreshnessLabel.text(wealth.provenance.freshness))")
+                    .font(LifeOSFont.axis())
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+            } else {
+                FinanceEmptyModuleRow(
+                    icon: .investments,
+                    title: "Wealth unavailable",
+                    detail: "No EUR holdings observation was supplied. Bank transactions and account balances are not used to estimate investments."
+                )
+            }
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .flatCard()
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("finance-wealth")
+    }
+}
+
+private struct FinanceHoldingRow: View {
+    let holding: FinanceHoldingObservation
+
+    private var subtitle: String {
+        let descriptors = [holding.symbol, holding.assetClass, holding.currency]
+            .compactMap { $0 }
+        return descriptors.isEmpty ? FinanceSourceLabel.display(holding.source) : descriptors.joined(separator: " · ")
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            LifeOSIcon(.investments)
+                .foregroundStyle(holding.availability == .observed ? LifeOSTokens.Module.finance : LifeOSTokens.warning)
+                .frame(width: 16, height: 16)
+                .frame(width: 30, height: 30)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(holding.name)
+                    .font(LifeOSFont.callout().weight(.semibold))
+                Text(subtitle)
+                    .font(LifeOSFont.axis())
+                    .foregroundStyle(holding.availability == .observed ? LifeOSTokens.tertiaryText : LifeOSTokens.warning)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            if holding.availability == .observed,
+               holding.currency == "EUR",
+               let valueCents = holding.valueCents {
+                Text(FinanceCurrencyFormatter.euro(cents: valueCents))
+                    .font(LifeOSFont.control().monospacedDigit())
+                    .foregroundStyle(LifeOSTokens.primaryText)
+            } else {
+                Text("Value unavailable")
+                    .font(LifeOSFont.axis())
+                    .foregroundStyle(LifeOSTokens.warning)
+                    .multilineTextAlignment(.trailing)
+            }
+        }
+        .padding(.vertical, 7)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(holding.name)
+        .accessibilityValue(holding.availability == .observed && holding.currency == "EUR" && holding.valueCents != nil
+                            ? "\(FinanceCurrencyFormatter.euro(cents: holding.valueCents ?? 0)), \(subtitle)"
+                            : "Value unavailable, \(subtitle)")
+    }
+}
+
 // MARK: - Metric cards
 
 private struct FinanceMetricCard: View {
@@ -483,6 +698,7 @@ private struct FinanceMetricCard: View {
     let value: String
     let detail: String
     let icon: LifeOSIconName
+    let accent: Color
     let progress: Double?
     let isUnavailable: Bool
 
@@ -492,16 +708,15 @@ private struct FinanceMetricCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                // §5.1: bare neutral icon — no tinted tile, no per-card hue.
                 LifeOSIcon(icon)
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .foregroundStyle(accent)
                     .frame(width: 17, height: 17)
                     .frame(width: 34, height: 34)
                 Spacer()
                 if let progress {
                     Circle()
                         .trim(from: 0, to: animatedProgress)
-                        .stroke(LifeOSTokens.Ring.progressArc, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                        .stroke(accent, style: StrokeStyle(lineWidth: 3, lineCap: .round))
                         .frame(width: 23, height: 23)
                         .rotationEffect(.degrees(-90))
                         .accessibilityHidden(true)
@@ -521,6 +736,7 @@ private struct FinanceMetricCard: View {
                     .foregroundStyle(LifeOSTokens.secondaryText)
                 Text(value)
                     .font(LifeOSFont.inter(17, weight: .semiBold).monospacedDigit())
+                    .foregroundStyle(isUnavailable ? LifeOSTokens.tertiaryText : LifeOSTokens.primaryText)
                     .numericTransition()
                     .lineLimit(1)
                     .minimumScaleFactor(0.72)
@@ -532,6 +748,14 @@ private struct FinanceMetricCard: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, minHeight: 124, alignment: .leading)
+        .overlay(alignment: .topLeading) {
+            Capsule()
+                .fill(accent)
+                .frame(width: 34, height: 3)
+                .padding(.leading, 14)
+                .padding(.top, 1)
+                .accessibilityHidden(true)
+        }
         .flatCard()
         .accessibilityElement(children: .combine)
         .accessibilityLabel(title)
@@ -1123,10 +1347,19 @@ private struct FinanceChartSelectionDetail: View {
 private struct FinanceAccountsCard: View {
     let snapshot: FinanceDisplaySnapshot
     let onOpenConnections: (() -> Void)?
+    @State private var visibleAccountCount = FinancePagination.defaultPageSize
+
+    private var accountPage: FinancePageDescriptor {
+        FinancePageDescriptor(
+            totalCount: snapshot.accounts.count,
+            offset: 0,
+            limit: visibleAccountCount
+        )
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 13) {
-            FinanceSectionHeader(title: "Accounts", subtitle: "Where your money is held")
+            FinanceSectionHeader(title: "Accounts", subtitle: "Where your money is held", icon: .bankConnections, accent: LifeOSTokens.Module.finance)
             if snapshot.accounts.isEmpty {
                 FinanceEmptyModuleRow(
                     icon: .bankConnections,
@@ -1137,12 +1370,32 @@ private struct FinanceAccountsCard: View {
                 )
             } else {
                 VStack(spacing: 0) {
-                    ForEach(snapshot.accounts) { account in
+                    ForEach(snapshot.accounts.prefix(accountPage.endOffset)) { account in
                         FinanceAccountRow(account: account)
-                        if account.id != snapshot.accounts.last?.id {
+                        if account.id != snapshot.accounts.prefix(accountPage.endOffset).last?.id {
                             Divider().padding(.leading, 52)
                         }
                     }
+                }
+                if accountPage.totalCount > FinancePagination.defaultPageSize {
+                    HStack {
+                        Text("Showing \(accountPage.endOffset) of \(accountPage.totalCount)")
+                            .font(LifeOSFont.axis())
+                            .foregroundStyle(LifeOSTokens.tertiaryText)
+                        Spacer(minLength: 8)
+                        if accountPage.hasNextPage {
+                            Button("Show next \(min(FinancePagination.defaultPageSize, accountPage.totalCount - accountPage.endOffset))") {
+                                visibleAccountCount = accountPage.endOffset + FinancePagination.defaultPageSize
+                            }
+                            .font(LifeOSFont.control())
+                            .buttonStyle(.bordered)
+                            .tint(LifeOSTokens.accent)
+                        }
+                    }
+                    .padding(.top, 8)
+                    .accessibilityElement(children: .contain)
+                    .accessibilityLabel("Account pagination")
+                    .accessibilityValue("Showing \(accountPage.endOffset) of \(accountPage.totalCount)")
                 }
             }
         }
@@ -1151,6 +1404,9 @@ private struct FinanceAccountsCard: View {
         .flatCard()
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("finance-accounts")
+        .task(id: snapshot.accounts.map(\.id).joined(separator: "|")) {
+            visibleAccountCount = FinancePagination.defaultPageSize
+        }
     }
 }
 
@@ -1159,9 +1415,8 @@ private struct FinanceAccountRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            // §5.1: bare neutral icon — account identity lives in the name.
             LifeOSIcon(account.icon)
-                .foregroundStyle(LifeOSTokens.tertiaryText)
+                .foregroundStyle(account.isUnavailable ? LifeOSTokens.warning : LifeOSTokens.Module.finance)
                 .frame(width: 18, height: 18)
                 .frame(width: 36, height: 36)
             VStack(alignment: .leading, spacing: 3) {
@@ -1169,16 +1424,24 @@ private struct FinanceAccountRow: View {
                     .font(LifeOSFont.control())
                 Text(account.detail)
                     .font(LifeOSFont.axis())
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .foregroundStyle(account.isUnavailable ? LifeOSTokens.warning : LifeOSTokens.secondaryText)
             }
             Spacer(minLength: 8)
-            Text(account.balanceText)
-                .font(LifeOSFont.cardTitle().monospacedDigit())
+            if let balanceText = account.balanceText {
+                Text(balanceText)
+                    .font(LifeOSFont.cardTitle().monospacedDigit())
+                    .foregroundStyle(LifeOSTokens.primaryText)
+            } else {
+                Text("Balance unavailable")
+                    .font(LifeOSFont.metadata())
+                    .foregroundStyle(LifeOSTokens.warning)
+                    .multilineTextAlignment(.trailing)
+            }
         }
         .padding(.vertical, 8)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(account.name)
-        .accessibilityValue("\(account.balanceText). \(account.detail)")
+        .accessibilityValue("\(account.balanceText ?? "Balance unavailable"). \(account.detail)")
     }
 }
 
@@ -1186,12 +1449,15 @@ private struct FinanceCategoriesCard: View {
     let snapshot: FinanceDisplaySnapshot
     @Binding var selectedCategoryID: String?
     @Binding var selectedSourceID: String?
+    @Binding var selectedIncomeCategoryID: String?
     let selectedRange: FinanceRange
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var visibleTransactionCount = FinancePagination.defaultPageSize
+    @State private var visibleIncomeTransactionCount = FinancePagination.defaultPageSize
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            FinanceSectionHeader(title: "By category", subtitle: "How spending is distributed")
+            FinanceSectionHeader(title: "By category", subtitle: "How spending is distributed", icon: .budget, accent: LifeOSTokens.danger)
             if snapshot.categories.isEmpty {
                 FinanceEmptyModuleRow(
                     icon: .budget,
@@ -1267,12 +1533,78 @@ private struct FinanceCategoriesCard: View {
                                 detail: "Try another source or date range."
                             )
                         } else {
-                            ForEach(filteredTransactions) { transaction in
+                            let transactionPage = FinancePageDescriptor(
+                                totalCount: filteredTransactions.count,
+                                offset: 0,
+                                limit: visibleTransactionCount
+                            )
+                            ForEach(filteredTransactions.prefix(transactionPage.endOffset)) { transaction in
                                 FinanceTransactionRow(transaction: transaction)
+                            }
+                            if transactionPage.totalCount > FinancePagination.defaultPageSize {
+                                HStack {
+                                    Text("Showing \(transactionPage.endOffset) of \(transactionPage.totalCount)")
+                                        .font(LifeOSFont.axis())
+                                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                                    Spacer(minLength: 8)
+                                    if transactionPage.hasNextPage {
+                                        Button("Show next \(min(FinancePagination.defaultPageSize, transactionPage.totalCount - transactionPage.endOffset))") {
+                                            visibleTransactionCount = transactionPage.endOffset + FinancePagination.defaultPageSize
+                                        }
+                                        .font(LifeOSFont.control())
+                                        .buttonStyle(.bordered)
+                                        .tint(LifeOSTokens.accent)
+                                    }
+                                }
+                                .padding(.top, 4)
+                                .accessibilityElement(children: .contain)
+                                .accessibilityLabel("Transaction pagination")
+                                .accessibilityValue("Showing \(transactionPage.endOffset) of \(transactionPage.totalCount)")
                             }
                         }
                     }
                     .transition(.opacity)
+                }
+            }
+
+            if !snapshot.incomeCategories.isEmpty {
+                Divider()
+                    .overlay(LifeOSTokens.hairlineBorder)
+                VStack(alignment: .leading, spacing: 9) {
+                    Text("Income by category")
+                        .font(LifeOSFont.control())
+                    Text("Source-backed deposits in this transaction history")
+                        .font(LifeOSFont.axis())
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                    ViewThatFits(in: .horizontal) {
+                        HStack(alignment: .center, spacing: 16) {
+                            FinanceCategoryRing(categories: snapshot.incomeCategories, centerTitle: "Income")
+                                .frame(width: 112, height: 112)
+                            VStack(alignment: .leading, spacing: 8) {
+                                ForEach(snapshot.incomeCategories) { category in
+                                    FinanceIncomeCategoryRow(
+                                        category: category,
+                                        isSelected: selectedIncomeCategoryID == category.id,
+                                        action: { selectIncomeCategory(category.id) }
+                                    )
+                                }
+                            }
+                        }
+                        VStack(alignment: .center, spacing: 12) {
+                            FinanceCategoryRing(categories: snapshot.incomeCategories, centerTitle: "Income")
+                                .frame(width: 112, height: 112)
+                            VStack(alignment: .leading, spacing: 8) {
+                                ForEach(snapshot.incomeCategories) { category in
+                                    FinanceIncomeCategoryRow(
+                                        category: category,
+                                        isSelected: selectedIncomeCategoryID == category.id,
+                                        action: { selectIncomeCategory(category.id) }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    incomeDrilldown
                 }
             }
         }
@@ -1281,6 +1613,10 @@ private struct FinanceCategoriesCard: View {
         .flatCard()
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("finance-categories")
+        .task(id: "\(selectedCategoryID ?? "none")|\(selectedSourceID ?? "all")|\(selectedIncomeCategoryID ?? "none")|\(selectedRange.rawValue)|\(snapshot.transactions.map(\.id).joined(separator: "|"))") {
+            visibleTransactionCount = FinancePagination.defaultPageSize
+            visibleIncomeTransactionCount = FinancePagination.defaultPageSize
+        }
     }
 
     @ViewBuilder
@@ -1334,10 +1670,94 @@ private struct FinanceCategoriesCard: View {
             if selectedCategoryID == categoryID {
                 selectedCategoryID = nil
                 selectedSourceID = nil
+                visibleTransactionCount = FinancePagination.defaultPageSize
             } else {
                 selectedCategoryID = categoryID
                 selectedSourceID = nil
+                visibleTransactionCount = FinancePagination.defaultPageSize
             }
+        }
+        if reduceMotion {
+            update()
+        } else {
+            withAnimation(LifeOSMotion.snappy) { update() }
+        }
+    }
+
+    @ViewBuilder
+    private var incomeDrilldown: some View {
+        if let selectedIncomeCategoryID,
+           let selectedCategory = snapshot.incomeCategories.first(where: { $0.id == selectedIncomeCategoryID }) {
+            Divider()
+                .overlay(LifeOSTokens.hairlineBorder)
+            let filteredTransactions = snapshot.filteredTransactions(
+                category: selectedCategory.name,
+                source: nil,
+                range: selectedRange,
+                incomeOnly: true
+            )
+            VStack(alignment: .leading, spacing: 9) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("\(selectedCategory.name) income")
+                            .font(LifeOSFont.control())
+                        let total = (try? FinanceTransactionTotals(transactions: filteredTransactions))?.incomeCents
+                        Text("\(filteredTransactions.count) deposit\(filteredTransactions.count == 1 ? "" : "s") · \(total.map { FinanceCurrencyFormatter.euro(cents: $0) } ?? "Unavailable")")
+                            .font(LifeOSFont.axis())
+                            .foregroundStyle(LifeOSTokens.tertiaryText)
+                            .monospacedDigit()
+                    }
+                    Spacer(minLength: 8)
+                    Button("Clear") { selectIncomeCategory(selectedIncomeCategoryID) }
+                        .font(LifeOSFont.axis())
+                        .buttonStyle(.bordered)
+                        .tint(LifeOSTokens.accent)
+                }
+                if filteredTransactions.isEmpty {
+                    FinanceEmptyModuleRow(
+                        icon: .income,
+                        title: "No matching deposits",
+                        detail: "This category has no transactions in the selected range."
+                    )
+                } else {
+                    let transactionPage = FinancePageDescriptor(
+                        totalCount: filteredTransactions.count,
+                        offset: 0,
+                        limit: visibleIncomeTransactionCount
+                    )
+                    ForEach(filteredTransactions.prefix(transactionPage.endOffset)) { transaction in
+                        FinanceTransactionRow(transaction: transaction)
+                    }
+                    if transactionPage.totalCount > FinancePagination.defaultPageSize {
+                        HStack {
+                            Text("Showing \(transactionPage.endOffset) of \(transactionPage.totalCount)")
+                                .font(LifeOSFont.axis())
+                                .foregroundStyle(LifeOSTokens.tertiaryText)
+                            Spacer(minLength: 8)
+                            if transactionPage.hasNextPage {
+                                Button("Show next \(min(FinancePagination.defaultPageSize, transactionPage.totalCount - transactionPage.endOffset))") {
+                                    visibleIncomeTransactionCount = transactionPage.endOffset + FinancePagination.defaultPageSize
+                                }
+                                .font(LifeOSFont.control())
+                                .buttonStyle(.bordered)
+                                .tint(LifeOSTokens.accent)
+                            }
+                        }
+                        .padding(.top, 4)
+                        .accessibilityElement(children: .contain)
+                        .accessibilityLabel("Income transaction pagination")
+                        .accessibilityValue("Showing \(transactionPage.endOffset) of \(transactionPage.totalCount)")
+                    }
+                }
+            }
+            .transition(.opacity)
+        }
+    }
+
+    private func selectIncomeCategory(_ categoryID: String) {
+        let update = {
+            selectedIncomeCategoryID = selectedIncomeCategoryID == categoryID ? nil : categoryID
+            visibleIncomeTransactionCount = FinancePagination.defaultPageSize
         }
         if reduceMotion {
             update()
@@ -1349,6 +1769,12 @@ private struct FinanceCategoriesCard: View {
 
 private struct FinanceCategoryRing: View {
     let categories: [FinanceCategory]
+    let centerTitle: String
+
+    init(categories: [FinanceCategory], centerTitle: String = "Spend") {
+        self.categories = categories
+        self.centerTitle = centerTitle
+    }
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var revealProgress: Double = 0
@@ -1365,7 +1791,7 @@ private struct FinanceCategoryRing: View {
             categoryArcs
 
             VStack(spacing: 1) {
-                Text("Spend")
+                Text(centerTitle)
                     .font(LifeOSFont.metadata())
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                 Text("100%")
@@ -1373,7 +1799,7 @@ private struct FinanceCategoryRing: View {
             }
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Spending category ring")
+        .accessibilityLabel("\(centerTitle) category ring")
         .accessibilityValue(categories.map { "\($0.name) \(Int($0.fraction * 100)) percent" }.joined(separator: ", "))
         .task(id: "\(categoryID)-\(reduceMotion)") {
             if reduceMotion {
@@ -1413,14 +1839,53 @@ private struct FinanceCategoryRing: View {
     }
 }
 
+private struct FinanceIncomeCategoryRow: View {
+    let category: FinanceCategory
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                LifeOSIcon(.income)
+                    .foregroundStyle(LifeOSTokens.success)
+                    .frame(width: 15, height: 15)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(category.name)
+                        .font(LifeOSFont.axis().weight(.semibold))
+                    Text("\(category.transactionCount) deposit\(category.transactionCount == 1 ? "" : "s") · \(category.sourceDisclosure)")
+                        .font(LifeOSFont.axis())
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                }
+                Spacer(minLength: 6)
+                Text(category.amountText)
+                    .font(LifeOSFont.axis().weight(.semibold).monospacedDigit())
+                    .foregroundStyle(LifeOSTokens.success)
+                LifeOSIcon(.chevronRight)
+                    .rotationEffect(.degrees(isSelected ? 90 : 0))
+                    .frame(width: 12, height: 12)
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+            }
+            .padding(.vertical, 5)
+            .padding(.horizontal, 7)
+            .background(isSelected ? LifeOSTokens.success.opacity(0.10) : Color.clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(category.name)
+        .accessibilityValue("\(category.amountText), \(category.transactionCount) deposits, \(category.sourceDisclosure), \(isSelected ? "Selected" : "Select to inspect")")
+    }
+}
+
 private struct FinanceTransactionRow: View {
     let transaction: FinanceTransactionObservation
 
     var body: some View {
         HStack(spacing: 10) {
-            // §5.1: bare neutral icon — no tinted tile.
-            LifeOSIcon(.finance)
-                .foregroundStyle(LifeOSTokens.tertiaryText)
+            LifeOSIcon(transaction.isIncome ? .income : .spending)
+                .foregroundStyle(transaction.isIncome ? LifeOSTokens.success : LifeOSTokens.danger)
                 .frame(width: 16, height: 16)
                 .frame(width: 30, height: 30)
             VStack(alignment: .leading, spacing: 2) {
@@ -1437,7 +1902,8 @@ private struct FinanceTransactionRow: View {
                 Text(FinanceCurrencyFormatter.signedEuro(cents: transaction.signedAmountCents))
                     .font(LifeOSFont.axis().weight(.semibold))
                     .monospacedDigit()
-                Text(FinanceDateFormatter.point(transaction.timestamp))
+                    .foregroundStyle(transaction.isIncome ? LifeOSTokens.success : LifeOSTokens.danger)
+                Text(FinanceDateFormatter.timestamp(transaction.timestamp))
                     .font(LifeOSFont.axis())
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
@@ -1551,14 +2017,31 @@ private struct FinanceRangePills: View {
 private struct FinanceSectionHeader: View {
     let title: String
     let subtitle: String
+    let icon: LifeOSIconName?
+    let accent: Color
+
+    init(title: String, subtitle: String, icon: LifeOSIconName? = nil, accent: Color = LifeOSTokens.Module.finance) {
+        self.title = title
+        self.subtitle = subtitle
+        self.icon = icon
+        self.accent = accent
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(title)
-                .font(LifeOSFont.cardTitle())
-            Text(subtitle)
-                .font(LifeOSFont.axis())
-                .foregroundStyle(LifeOSTokens.tertiaryText)
+        HStack(alignment: .top, spacing: 9) {
+            if let icon {
+                LifeOSIcon(icon)
+                    .foregroundStyle(accent)
+                    .frame(width: 16, height: 16)
+                    .padding(.top, 2)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(LifeOSFont.cardTitle())
+                Text(subtitle)
+                    .font(LifeOSFont.metadata())
+                    .foregroundStyle(LifeOSTokens.secondaryText)
+            }
         }
     }
 }
@@ -1596,6 +2079,8 @@ private struct FinanceDisplaySnapshot {
     let savingsGoal: FinanceDisplayMetric
     let accounts: [FinanceAccount]
     let categories: [FinanceCategory]
+    let incomeCategories: [FinanceCategory]
+    let wealth: FinanceWealthSnapshot?
     let netWorthPoints: [FinanceChartPoint]
     let spendPoints: [FinanceChartPoint]
     let incomePoints: [FinanceChartPoint]
@@ -1603,24 +2088,29 @@ private struct FinanceDisplaySnapshot {
     let updatedLabel: String
     let sourceDisclosure: String
     let overallFreshness: FinancePayloadFreshness
+    let observationState: FinanceObservationState
+    let errorMessage: String?
 
     init(
         summary: FinanceSummary?,
         transactions suppliedTransactions: [FinanceTransactionObservation]?,
-        usesVisualFixtures: Bool
+        usesVisualFixtures: Bool,
+        observationState requestedObservationState: FinanceObservationState? = nil,
+        errorMessage: String? = nil
     ) {
         if usesVisualFixtures {
             self = .demo
             return
         }
 
-        let transactionSourceAvailable = suppliedTransactions.map { !$0.isEmpty }
-            ?? (summary?.transactions?.availability == .observed
-                && !(summary?.transactions?.transactions ?? []).isEmpty)
+        let transactionSourceAvailable = suppliedTransactions != nil
+            || (summary?.transactions?.availability == .observed
+                && summary?.transactions?.transactions != nil)
         let transactionRows = suppliedTransactions ?? summary?.transactions?.transactions ?? []
         let transactionTotals = transactionSourceAvailable
             ? try? FinanceTransactionTotals(transactions: transactionRows)
             : nil
+        let accountRows = Self.accountRows(from: summary)
         let accountObservations = Self.usableObservedAccounts(from: summary)
         let observed = summary != nil && [
             summary?.monthlyIncomeCents,
@@ -1628,7 +2118,8 @@ private struct FinanceDisplaySnapshot {
             summary?.spentCents,
             summary?.savedCents
         ].contains(where: { $0 != nil }) || transactionSourceAvailable
-            || !accountObservations.isEmpty
+            || !accountRows.isEmpty
+            || summary?.wealth?.observedValueCents != nil
 
         isDemo = false
         transactions = transactionRows
@@ -1653,12 +2144,13 @@ private struct FinanceDisplaySnapshot {
         fixedCosts = FinanceDisplayMetric(cents: summary?.fixedCostsCents, detail: summary == nil ? "Not connected" : "Observed total")
         saved = FinanceDisplayMetric(cents: summary?.savedCents, detail: summary == nil ? "Not connected" : "Observed total")
         savingsGoal = FinanceDisplayMetric(cents: summary?.savingsGoalCents, detail: summary == nil ? "Not connected" : "Savings goal")
-        accounts = accountObservations.map { observation in
+        accounts = accountRows.map { observation in
             FinanceAccount(
                 id: observation.id,
                 name: observation.name,
                 detail: observation.detail,
                 balanceCents: observation.balanceCents,
+                availability: observation.availability,
                 icon: .bankConnections
             )
         }
@@ -1666,6 +2158,8 @@ private struct FinanceDisplaySnapshot {
             FinanceDisplayMetric(cents: $0, detail: "Observed account balances")
         } ?? .unavailable("Not available")
         categories = transactionTotals?.categoryObservations.map(FinanceCategory.init) ?? []
+        incomeCategories = transactionTotals?.incomeCategoryObservations.map(FinanceCategory.init) ?? []
+        wealth = summary?.wealth
         netWorthPoints = []
         spendPoints = transactionTotals.flatMap { _ in
             Self.transactionPoints(transactionRows, title: "Spend", series: .spending)
@@ -1682,8 +2176,18 @@ private struct FinanceDisplaySnapshot {
             transactionRows: transactionRows,
             accountObservations: accountObservations
         )
+        observationState = requestedObservationState
+            ?? summary?.financeAssessment(errorMessage: errorMessage).state
+            ?? (suppliedTransactions == nil ? .unavailable : .observed)
+        self.errorMessage = errorMessage
         updatedLabel = observed ? summary.map { FinanceDateFormatter.short($0.generatedAt) } ?? "Not available" : "Not available"
-        let sourceIDs = Array(Set(transactionRows.map(\.source) + accountObservations.map(\.source))).sorted()
+        let wealthSource: [String]
+        if let wealth = summary?.wealth {
+            wealthSource = [wealth.provenance.source]
+        } else {
+            wealthSource = []
+        }
+        let sourceIDs = Array(Set(transactionRows.map(\.source) + accountRows.map(\.source) + wealthSource)).sorted()
         if !sourceIDs.isEmpty {
             sourceDisclosure = "\(FinanceSourceLabel.join(sourceIDs)) · \(FinanceFreshnessLabel.text(overallFreshness)) · Updated \(updatedLabel)"
         } else if let metric = summary?.spent {
@@ -1697,6 +2201,14 @@ private struct FinanceDisplaySnapshot {
     private static let financeStaleAfter: TimeInterval = 15 * 60
 
     private static func usableObservedAccounts(from summary: FinanceSummary?) -> [FinanceAccountObservation] {
+        accountRows(from: summary).filter {
+            $0.availability == .observed
+                && $0.balanceCents != nil
+                && isUsableObservedProvenance($0.provenance)
+        }
+    }
+
+    private static func accountRows(from summary: FinanceSummary?) -> [FinanceAccountObservation] {
         guard let snapshot = summary?.accounts,
               snapshot.availability == .observed,
               isUsableObservedProvenance(snapshot.provenance),
@@ -1704,14 +2216,15 @@ private struct FinanceDisplaySnapshot {
               !accounts.isEmpty else {
             return []
         }
-        return accounts.filter { isUsableObservedProvenance($0.provenance) }
+        return accounts
     }
 
     private static func overflowCheckedAccountTotal(_ accounts: [FinanceAccountObservation]) -> Int? {
         guard !accounts.isEmpty else { return nil }
         var total = 0
         for account in accounts {
-            let (next, overflowed) = total.addingReportingOverflow(account.balanceCents)
+            guard let balanceCents = account.balanceCents else { return nil }
+            let (next, overflowed) = total.addingReportingOverflow(balanceCents)
             guard !overflowed,
                   next >= -maximumFinanceCents,
                   next <= maximumFinanceCents else {
@@ -1751,6 +2264,10 @@ private struct FinanceDisplaySnapshot {
             }
             provenances.append(contentsOf: accountObservations.map(\.provenance))
         }
+        if let wealth = summary?.wealth, wealth.availability == .observed {
+            provenances.append(wealth.provenance)
+            provenances.append(contentsOf: (wealth.holdings ?? []).map(\.provenance))
+        }
         if let summary {
             let metrics = [
                 summary.monthlyIncome,
@@ -1785,13 +2302,17 @@ private struct FinanceDisplaySnapshot {
         savingsGoal: FinanceDisplayMetric,
         accounts: [FinanceAccount],
         categories: [FinanceCategory],
+        incomeCategories: [FinanceCategory] = [],
+        wealth: FinanceWealthSnapshot? = nil,
         netWorthPoints: [FinanceChartPoint],
         spendPoints: [FinanceChartPoint],
         incomePoints: [FinanceChartPoint],
         cashFlowPoints: [FinanceChartPoint],
         updatedLabel: String,
         sourceDisclosure: String,
-        overallFreshness: FinancePayloadFreshness
+        overallFreshness: FinancePayloadFreshness,
+        observationState: FinanceObservationState = .observed,
+        errorMessage: String? = nil
     ) {
         self.isDemo = isDemo
         self.transactions = transactions
@@ -1807,6 +2328,8 @@ private struct FinanceDisplaySnapshot {
         self.savingsGoal = savingsGoal
         self.accounts = accounts
         self.categories = categories
+        self.incomeCategories = incomeCategories
+        self.wealth = wealth
         self.netWorthPoints = netWorthPoints
         self.spendPoints = spendPoints
         self.incomePoints = incomePoints
@@ -1814,6 +2337,8 @@ private struct FinanceDisplaySnapshot {
         self.updatedLabel = updatedLabel
         self.sourceDisclosure = sourceDisclosure
         self.overallFreshness = overallFreshness
+        self.observationState = observationState
+        self.errorMessage = errorMessage
     }
 
     static let demo: FinanceDisplaySnapshot = {
@@ -1857,7 +2382,7 @@ private struct FinanceDisplaySnapshot {
             FinanceAccount(name: "Revolut Savings", detail: "Vault · synced today", balanceCents: 244_000, icon: .savings),
             FinanceAccount(name: "Sparkasse", detail: "Checking · synced today", balanceCents: 50_000, icon: .bankConnections)
         ]
-        let accountBalanceCents = accounts.reduce(0) { $0 + $1.balanceCents }
+        let accountBalanceCents = accounts.reduce(0) { $0 + ($1.balanceCents ?? 0) }
         return FinanceDisplaySnapshot(
             isDemo: true,
             transactions: transactions,
@@ -1976,7 +2501,8 @@ private struct FinanceDisplaySnapshot {
     func filteredTransactions(
         category: String,
         source: String?,
-        range: FinanceRange
+        range: FinanceRange,
+        incomeOnly: Bool = false
     ) -> [FinanceTransactionObservation] {
         guard let latest = transactions.map(\.timestamp).max() else { return [] }
         let start = calendarWindowStart(for: range, latest: latest)
@@ -1985,7 +2511,8 @@ private struct FinanceDisplaySnapshot {
             source: source,
             startDate: start,
             endDate: latest,
-            spendingOnly: true
+            spendingOnly: !incomeOnly,
+            incomeOnly: incomeOnly
         ).applying(to: transactions)
     }
 
@@ -2001,17 +2528,44 @@ private struct FinanceDisplaySnapshot {
 
     var statusLabel: String {
         if isDemo { return "Demo · not live" }
-        guard hasObservedValue else { return "Not connected" }
-        return overallFreshness == .stale ? "Stale" : "Observed"
+        switch observationState {
+        case .demo: return "Demo · not live"
+        case .loading: return "Loading"
+        case .observed: return "Observed"
+        case .partial: return "Partial data"
+        case .stale: return "Stale"
+        case .error: return "Refresh error"
+        case .unavailable: return "Not connected"
+        }
     }
     var statusColor: Color {
         if isDemo { return LifeOSTokens.warning }
-        guard hasObservedValue else { return LifeOSTokens.tertiaryText }
-        return overallFreshness == .stale ? LifeOSTokens.warning : LifeOSTokens.success
+        switch observationState {
+        case .observed: return LifeOSTokens.success
+        case .partial, .stale, .loading: return LifeOSTokens.warning
+        case .error: return LifeOSTokens.danger
+        case .demo: return LifeOSTokens.warning
+        case .unavailable: return LifeOSTokens.tertiaryText
+        }
     }
-    var accessibilityStatus: String { statusLabel }
+    var statusIcon: LifeOSIconName {
+        switch observationState {
+        case .observed: .verified
+        case .partial, .stale, .loading, .error: .warning
+        case .demo: .views
+        case .unavailable: .security
+        }
+    }
+    var accessibilityStatus: String {
+        if let errorMessage, !errorMessage.isEmpty {
+            return statusLabel + ". " + errorMessage
+        }
+        return statusLabel
+    }
     var hasObservedValue: Bool {
-        hasTransactionSource || [netWorth, spent, income, fixedCosts, saved].contains(where: { !$0.isUnavailable })
+        hasTransactionSource
+            || [netWorth, spent, income, fixedCosts, saved].contains(where: { !$0.isUnavailable })
+            || wealth?.observedValueCents != nil
     }
 
     func points(for detail: FinanceDetail, range: FinanceRange) -> [FinanceChartPoint] {
@@ -2129,24 +2683,28 @@ private struct FinanceAccount: Identifiable {
     let id: String
     let name: String
     let detail: String
-    let balanceCents: Int
+    let balanceCents: Int?
+    let availability: FinanceMetricAvailability
     let icon: LifeOSIconName
 
     init(
         id: String = UUID().uuidString,
         name: String,
         detail: String,
-        balanceCents: Int,
+        balanceCents: Int?,
+        availability: FinanceMetricAvailability = .observed,
         icon: LifeOSIconName
     ) {
         self.id = id
         self.name = name
         self.detail = detail
         self.balanceCents = balanceCents
+        self.availability = availability
         self.icon = icon
     }
 
-    var balanceText: String { FinanceCurrencyFormatter.euro(cents: balanceCents) }
+    var balanceText: String? { balanceCents.map { FinanceCurrencyFormatter.euro(cents: $0) } }
+    var isUnavailable: Bool { availability == .unavailable || balanceCents == nil }
 }
 
 private struct FinanceCategory: Identifiable {
@@ -2167,12 +2725,16 @@ private struct FinanceCategory: Identifiable {
         fraction = observation.fraction
         contributingSources = observation.contributingSources
         provenanceFreshness = observation.provenance.freshness
-        switch observation.name.lowercased() {
-        case "home", "rent": hue = .violet
-        case "food", "groceries": hue = .orange
-        case "transport": hue = .blue
-        case "lifestyle", "entertainment": hue = .pink
-        default: hue = .teal
+        if let canonical = FinanceTransactionCategory.from(sourceCategory: observation.name) {
+            hue = canonical.hue
+        } else {
+            switch observation.name.lowercased() {
+            case "home", "rent": hue = .violet
+            case "food", "groceries": hue = .orange
+            case "transport": hue = .blue
+            case "lifestyle", "entertainment": hue = .pink
+            default: hue = .teal
+            }
         }
     }
 
@@ -2324,6 +2886,12 @@ private enum FinanceDateFormatter {
     static func point(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.dateFormat = "EEE, MMM d"
+        return formatter.string(from: date)
+    }
+
+    static func timestamp(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d, yyyy · HH:mm"
         return formatter.string(from: date)
     }
 }

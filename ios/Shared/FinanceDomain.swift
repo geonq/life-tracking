@@ -241,18 +241,20 @@ public struct FinancePayloadProvenance: Codable, Equatable, Sendable {
 
 }
 
-/// A connected account balance. The gateway deliberately sends an opaque
-/// stable id and display label, never an IBAN or provider account identifier.
+/// A connected account observation. Non-EUR accounts remain visible in the
+/// account list, but deliberately carry no EUR balance because the gateway
+/// has no FX conversion authority.
 public struct FinanceAccountObservation: Codable, Equatable, Identifiable, Sendable {
+    public let availability: FinanceMetricAvailability
     public let id: String
     public let name: String
     public let detail: String
-    public let balanceCents: Int
+    public let balanceCents: Int?
     public let source: String
     public let provenance: FinancePayloadProvenance
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, detail, balanceCents, source, provenance
+        case availability, id, name, detail, balanceCents, source, provenance
     }
 
     public init(
@@ -263,6 +265,7 @@ public struct FinanceAccountObservation: Codable, Equatable, Identifiable, Senda
         source: String,
         provenance: FinancePayloadProvenance
     ) {
+        self.availability = .observed
         self.id = id
         self.name = name
         self.detail = detail
@@ -271,25 +274,70 @@ public struct FinanceAccountObservation: Codable, Equatable, Identifiable, Senda
         self.provenance = provenance
     }
 
+    public init(
+        id: String,
+        name: String,
+        detail: String,
+        source: String,
+        provenance: FinancePayloadProvenance
+    ) {
+        self.availability = .unavailable
+        self.id = id
+        self.name = name
+        self.detail = detail
+        self.balanceCents = nil
+        self.source = source
+        self.provenance = provenance
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(availability, forKey: .availability)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(detail, forKey: .detail)
+        if let balanceCents {
+            try container.encode(balanceCents, forKey: .balanceCents)
+        }
+        try container.encode(source, forKey: .source)
+        try container.encode(provenance, forKey: .provenance)
+    }
+
     public init(from decoder: Decoder) throws {
         try rejectUnknownFinanceKeys(decoder, allowed: [
-            "id", "name", "detail", "balanceCents", "source", "provenance"
+            "availability", "id", "name", "detail", "balanceCents", "source", "provenance"
         ])
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        availability = try container.decode(FinanceMetricAvailability.self, forKey: .availability)
         id = try container.decode(String.self, forKey: .id)
         name = try container.decode(String.self, forKey: .name)
         detail = try container.decode(String.self, forKey: .detail)
-        balanceCents = try container.decode(Int.self, forKey: .balanceCents)
+        balanceCents = try container.decodeIfPresent(Int.self, forKey: .balanceCents)
         source = try container.decode(String.self, forKey: .source)
         provenance = try container.decode(FinancePayloadProvenance.self, forKey: .provenance)
         let now = decoder.userInfo[.lifeOSNow] as? Date ?? .now
         let fields = [id, name, detail, source]
-        let validAmount = balanceCents >= -9_007_199_254_740_991
-            && balanceCents <= 9_007_199_254_740_991
+        let validAmount = balanceCents.map {
+            $0 >= -9_007_199_254_740_991 && $0 <= 9_007_199_254_740_991
+        } ?? true
+        let isUnavailableConnector = provenance.connectorState != .healthy
+            && provenance.connectorState != .refreshDue
+        let validObservation: Bool
+        switch availability {
+        case .observed:
+            validObservation = balanceCents != nil
+                && provenance.quality == .observed
+                && financeObservedProvenanceIsAgeConsistent(provenance, now: now)
+        case .unavailable:
+            validObservation = balanceCents == nil
+                && provenance.quality == .unavailable
+                && provenance.freshness == .unknown
+                && isUnavailableConnector
+        }
         guard fields.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }),
               validAmount,
               source == provenance.source,
-              financeObservedProvenanceIsAgeConsistent(provenance, now: now) else {
+              validObservation else {
             throw DecodingError.dataCorruptedError(
                 forKey: .id,
                 in: container,
@@ -334,7 +382,8 @@ public struct FinanceAccountSnapshot: Codable, Equatable, Sendable {
             let sourceReconciles = (rowSources.count == 1 && rowSources.contains(provenance.source))
                 || provenance.source == financeDerivedAccountSnapshotSource
             let hasStaleAccount = rows.contains {
-                $0.provenance.freshness == .stale || $0.provenance.connectorState == .refreshDue
+                $0.availability == .observed
+                    && ($0.provenance.freshness == .stale || $0.provenance.connectorState == .refreshDue)
             }
             let expectedFreshness: FinancePayloadFreshness = hasStaleAccount ? .stale : .fresh
             let expectedConnector: ConnectorState = hasStaleAccount ? .refreshDue : .healthy
@@ -545,19 +594,22 @@ public struct FinanceTransactionFilter: Equatable, Sendable {
     public let startDate: Date?
     public let endDate: Date?
     public let spendingOnly: Bool
+    public let incomeOnly: Bool
 
     public init(
         category: String? = nil,
         source: String? = nil,
         startDate: Date? = nil,
         endDate: Date? = nil,
-        spendingOnly: Bool = false
+        spendingOnly: Bool = false,
+        incomeOnly: Bool = false
     ) {
         self.category = category
         self.source = source
         self.startDate = startDate
         self.endDate = endDate
         self.spendingOnly = spendingOnly
+        self.incomeOnly = incomeOnly
     }
 
     public func matches(_ transaction: FinanceTransactionObservation) -> Bool {
@@ -565,7 +617,8 @@ public struct FinanceTransactionFilter: Equatable, Sendable {
               source == nil || source == transaction.source,
               startDate == nil || transaction.timestamp >= startDate!,
               endDate == nil || transaction.timestamp <= endDate!,
-              !spendingOnly || transaction.isSpending else {
+              !spendingOnly || transaction.isSpending,
+              !incomeOnly || transaction.isIncome else {
             return false
         }
         return true
@@ -671,6 +724,10 @@ public struct FinanceTransactionTotals: Equatable, Sendable {
     public let netCashFlowCents: Int
     public let transactionCount: Int
     public let categoryObservations: [FinanceCategoryObservation]
+    /// Positive-flow category rollups kept separate from spending categories.
+    /// A deposit is never shown as spending merely because its provider label
+    /// happens to match a spending taxonomy.
+    public let incomeCategoryObservations: [FinanceCategoryObservation]
 
     public init(transactions: [FinanceTransactionObservation]) throws {
         var income = 0
@@ -722,11 +779,37 @@ public struct FinanceTransactionTotals: Equatable, Sendable {
             ))
         }
 
+        let groupedIncome = Dictionary(grouping: transactions.filter { $0.signedAmountCents > 0 }, by: \.category)
+        var incomeCategories: [FinanceCategoryObservation] = []
+        incomeCategories.reserveCapacity(groupedIncome.count)
+        for category in groupedIncome.keys.sorted() {
+            let rows = groupedIncome[category, default: []]
+            var amount = 0
+            for row in rows {
+                let (nextAmount, overflowed) = amount.addingReportingOverflow(row.signedAmountCents)
+                guard !overflowed, Self.isWithinAggregateBounds(nextAmount) else {
+                    throw FinanceTransactionTotalsError.aggregateOverflow
+                }
+                amount = nextAmount
+            }
+            incomeCategories.append(FinanceCategoryObservation(
+                id: category,
+                name: category,
+                amountCents: amount,
+                transactionCount: rows.count,
+                fraction: income > 0 ? Double(amount) / Double(income) : 0,
+                source: "derived-transaction-rollup",
+                provenance: Self.derivedCategoryProvenance(from: rows),
+                contributingSources: rows.map(\.source)
+            ))
+        }
+
         incomeCents = income
         spendingCents = spending
         netCashFlowCents = netCashFlow
         transactionCount = transactions.count
         categoryObservations = categories
+        incomeCategoryObservations = incomeCategories
     }
 
     private static let maximumAggregateCents = 9_007_199_254_740_991
@@ -837,6 +920,212 @@ public struct FinanceAmountMetric: Decodable, Equatable, Sendable {
 
 }
 
+/// One explicit holding observation. A bank transaction is not a holding:
+/// this model is intentionally separate so wealth surfaces can only render a
+/// value when a provider supplies one. Non-EUR holdings remain visible as
+/// unavailable rows and never enter EUR totals.
+public struct FinanceHoldingObservation: Codable, Equatable, Identifiable, Sendable {
+    public let availability: FinanceMetricAvailability
+    public let id: String
+    public let name: String
+    public let symbol: String?
+    public let assetClass: String?
+    public let quantity: String?
+    public let valueCents: Int?
+    public let currency: String
+    public let source: String
+    public let provenance: FinancePayloadProvenance
+
+    private enum CodingKeys: String, CodingKey {
+        case availability, id, name, symbol, assetClass, quantity, valueCents, currency, source, provenance
+    }
+
+    public init(
+        id: String,
+        name: String,
+        symbol: String? = nil,
+        assetClass: String? = nil,
+        quantity: String? = nil,
+        valueCents: Int,
+        currency: String = "EUR",
+        source: String,
+        provenance: FinancePayloadProvenance
+    ) {
+        self.availability = .observed
+        self.id = id
+        self.name = name
+        self.symbol = symbol
+        self.assetClass = assetClass
+        self.quantity = quantity
+        self.valueCents = valueCents
+        self.currency = currency.uppercased()
+        self.source = source
+        self.provenance = provenance
+    }
+
+    public init(
+        id: String,
+        name: String,
+        symbol: String? = nil,
+        assetClass: String? = nil,
+        quantity: String? = nil,
+        currency: String,
+        source: String,
+        provenance: FinancePayloadProvenance
+    ) {
+        self.availability = .unavailable
+        self.id = id
+        self.name = name
+        self.symbol = symbol
+        self.assetClass = assetClass
+        self.quantity = quantity
+        self.valueCents = nil
+        self.currency = currency.uppercased()
+        self.source = source
+        self.provenance = provenance
+    }
+
+    public init(from decoder: Decoder) throws {
+        try rejectUnknownFinanceKeys(decoder, allowed: [
+            "availability", "id", "name", "symbol", "assetClass", "quantity", "valueCents", "currency", "source", "provenance"
+        ])
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        availability = try container.decode(FinanceMetricAvailability.self, forKey: .availability)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        symbol = try container.decodeIfPresent(String.self, forKey: .symbol)
+        assetClass = try container.decodeIfPresent(String.self, forKey: .assetClass)
+        quantity = try container.decodeIfPresent(String.self, forKey: .quantity)
+        valueCents = try container.decodeIfPresent(Int.self, forKey: .valueCents)
+        currency = try container.decode(String.self, forKey: .currency).uppercased()
+        source = try container.decode(String.self, forKey: .source)
+        provenance = try container.decode(FinancePayloadProvenance.self, forKey: .provenance)
+
+        let now = decoder.userInfo[.lifeOSNow] as? Date ?? .now
+        let healthy = provenance.connectorState == .healthy || provenance.connectorState == .refreshDue
+        let ageConsistent = financeObservedProvenanceIsAgeConsistent(provenance, now: now)
+        let validText = !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !currency.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let validValue = valueCents.map {
+            $0 >= -9_007_199_254_740_991 && $0 <= 9_007_199_254_740_991
+        } ?? true
+        let valid: Bool
+        switch availability {
+        case .observed:
+            valid = currency == "EUR" && valueCents != nil && validValue
+                && provenance.quality == .observed && healthy && ageConsistent
+        case .unavailable:
+            valid = valueCents == nil && provenance.quality == .unavailable
+                && provenance.freshness == .unknown && !healthy
+        }
+        guard validText && valid else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .availability,
+                in: container,
+                debugDescription: "Finance holding value/currency/provenance is invalid"
+            )
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(availability, forKey: .availability)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encodeIfPresent(symbol, forKey: .symbol)
+        try container.encodeIfPresent(assetClass, forKey: .assetClass)
+        try container.encodeIfPresent(quantity, forKey: .quantity)
+        try container.encodeIfPresent(valueCents, forKey: .valueCents)
+        try container.encode(currency, forKey: .currency)
+        try container.encode(source, forKey: .source)
+        try container.encode(provenance, forKey: .provenance)
+    }
+}
+
+public struct FinanceWealthSnapshot: Codable, Equatable, Sendable {
+    public let availability: FinanceMetricAvailability
+    public let holdings: [FinanceHoldingObservation]?
+    public let provenance: FinancePayloadProvenance
+
+    private enum CodingKeys: String, CodingKey { case availability, holdings, provenance }
+
+    public init(
+        availability: FinanceMetricAvailability,
+        holdings: [FinanceHoldingObservation]?,
+        provenance: FinancePayloadProvenance
+    ) {
+        self.availability = availability
+        self.holdings = holdings
+        self.provenance = provenance
+    }
+
+    public init(from decoder: Decoder) throws {
+        try rejectUnknownFinanceKeys(decoder, allowed: ["availability", "holdings", "provenance"])
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        availability = try container.decode(FinanceMetricAvailability.self, forKey: .availability)
+        let hasHoldings = container.contains(.holdings)
+        holdings = try container.decodeIfPresent([FinanceHoldingObservation].self, forKey: .holdings)
+        provenance = try container.decode(FinancePayloadProvenance.self, forKey: .provenance)
+
+        let healthy = provenance.connectorState == .healthy || provenance.connectorState == .refreshDue
+        let valid: Bool
+        switch availability {
+        case .observed:
+            let rows = holdings ?? []
+            let rowSources = Set(rows.map(\.source))
+            let sourceReconciles = rows.isEmpty
+                || (rowSources.count == 1 && rowSources.contains(provenance.source))
+            let observedRows = rows.filter { $0.availability == .observed }
+            let unavailableRows = rows.filter { $0.availability == .unavailable }
+            let observedRowsAreEUR = observedRows.allSatisfy { $0.currency == "EUR" }
+            let rowsCovered = rows.allSatisfy { $0.provenance.observedAt <= provenance.observedAt }
+            valid = hasHoldings && holdings != nil && provenance.quality == .observed
+                && healthy && provenance.freshness != .unknown && sourceReconciles
+                && observedRowsAreEUR && rowsCovered
+                && unavailableRows.allSatisfy {
+                    $0.valueCents == nil && $0.provenance.quality == .unavailable
+                }
+        case .unavailable:
+            valid = !hasHoldings && holdings == nil && provenance.quality == .unavailable
+                && provenance.freshness == .unknown && !healthy
+        }
+        guard valid else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .availability,
+                in: container,
+                debugDescription: "Finance wealth availability, holdings, and provenance are inconsistent"
+            )
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(availability, forKey: .availability)
+        try container.encodeIfPresent(holdings, forKey: .holdings)
+        try container.encode(provenance, forKey: .provenance)
+    }
+
+    public var observedValueCents: Int? {
+        guard availability == .observed, let holdings else { return nil }
+        if holdings.isEmpty { return 0 }
+        var total = 0
+        var observedCount = 0
+        for holding in holdings {
+            guard holding.availability == .observed else { continue }
+            guard holding.currency == "EUR", let value = holding.valueCents else {
+                return nil
+            }
+            observedCount += 1
+            let addition = total.addingReportingOverflow(value)
+            guard !addition.overflow else { return nil }
+            total = addition.partialValue
+        }
+        return observedCount > 0 ? total : nil
+    }
+}
+
 public struct FinanceSummary: Decodable, Equatable, Sendable {
     public let generatedAt: Date
     public let currency: String
@@ -851,16 +1140,20 @@ public struct FinanceSummary: Decodable, Equatable, Sendable {
     /// remain unavailable until an observed source supplies it.
     public let transactions: FinanceTransactionSnapshot?
     public let accounts: FinanceAccountSnapshot?
+    /// Optional by design: current bank connectors do not provide holdings.
+    /// A missing wealth snapshot is unavailable, never derived from cash
+    /// transactions or account balances.
+    public let wealth: FinanceWealthSnapshot?
 
     private enum CodingKeys: String, CodingKey {
         case generatedAt, currency, monthlyIncome, fixedCosts, discretionaryBuffer, spent, savingsGoal, saved
-        case transactions, accounts
+        case transactions, accounts, wealth
     }
 
     public init(from decoder: Decoder) throws {
         try rejectUnknownFinanceKeys(decoder, allowed: [
             "generatedAt", "currency", "monthlyIncome", "fixedCosts",
-            "discretionaryBuffer", "spent", "savingsGoal", "saved", "transactions", "accounts"
+            "discretionaryBuffer", "spent", "savingsGoal", "saved", "transactions", "accounts", "wealth"
         ])
         let container = try decoder.container(keyedBy: CodingKeys.self)
         generatedAt = try container.decode(Date.self, forKey: .generatedAt)
@@ -873,6 +1166,7 @@ public struct FinanceSummary: Decodable, Equatable, Sendable {
         saved = try container.decode(FinanceAmountMetric.self, forKey: .saved)
         transactions = try container.decodeIfPresent(FinanceTransactionSnapshot.self, forKey: .transactions)
         accounts = try container.decodeIfPresent(FinanceAccountSnapshot.self, forKey: .accounts)
+        wealth = try container.decodeIfPresent(FinanceWealthSnapshot.self, forKey: .wealth)
         let now = decoder.userInfo[.lifeOSNow] as? Date ?? .now
         guard generatedAt <= now.addingTimeInterval(financeMaximumClockSkew), currency == "EUR" else {
             throw DecodingError.dataCorruptedError(
@@ -912,5 +1206,225 @@ public struct FinanceSummary: Decodable, Equatable, Sendable {
         let decoder = JSONDecoder.lifeOS
         decoder.userInfo[.lifeOSNow] = now
         return try decoder.decode(FinanceSummary.self, from: data)
+    }
+}
+
+// MARK: - Native observation assessment
+
+/// The detailed Finance-facing state. `FinanceLoadState` remains deliberately
+/// coarse because it is also consumed by app-wide views; this state captures
+/// the distinctions needed by Finance without forcing unrelated call sites to
+/// add new switch cases.
+public enum FinanceObservationState: String, Codable, Equatable, Sendable {
+    case demo
+    case loading
+    case observed
+    case partial
+    case stale
+    case error
+    case unavailable
+
+    public var label: String {
+        switch self {
+        case .demo: "Demo data"
+        case .loading: "Loading"
+        case .observed: "Observed"
+        case .partial: "Partial data"
+        case .stale: "Stale data"
+        case .error: "Refresh error"
+        case .unavailable: "Unavailable"
+        }
+    }
+}
+
+public struct FinanceObservationAssessment: Equatable, Sendable {
+    public let state: FinanceObservationState
+    public let observedComponentCount: Int
+    public let unavailableComponentCount: Int
+    public let staleComponentCount: Int
+    public let message: String?
+
+    public init(
+        state: FinanceObservationState,
+        observedComponentCount: Int,
+        unavailableComponentCount: Int,
+        staleComponentCount: Int,
+        message: String? = nil
+    ) {
+        self.state = state
+        self.observedComponentCount = max(observedComponentCount, 0)
+        self.unavailableComponentCount = max(unavailableComponentCount, 0)
+        self.staleComponentCount = max(staleComponentCount, 0)
+        self.message = message
+    }
+}
+
+public extension FinanceSummary {
+    /// Assesses only values that have explicit source provenance. Missing,
+    /// unavailable, and stale components are counted separately so the UI can
+    /// communicate a partial observation without filling gaps with zeroes.
+    func financeAssessment(
+        now: Date = Date(),
+        staleAfter: TimeInterval = 15 * 60,
+        errorMessage: String? = nil
+    ) -> FinanceObservationAssessment {
+        let metrics = [
+            monthlyIncome,
+            fixedCosts,
+            discretionaryBuffer,
+            spent,
+            savingsGoal,
+            saved
+        ]
+
+        var observedCount = metrics.filter { $0.availability == .observed && $0.amountCents != nil }.count
+        var unavailableCount = metrics.filter { $0.availability == .unavailable }.count
+        var staleCount = metrics.filter {
+            $0.provenance.freshness == .stale || $0.provenance.connectorState == .refreshDue
+        }.count
+        var hasPartialBoundary = false
+
+        func add(_ snapshot: FinanceAccountSnapshot) {
+            if snapshot.availability == .observed {
+                observedCount += 1
+                let rows = snapshot.accounts ?? []
+                let unavailableRows = rows.filter { $0.availability == .unavailable }
+                let staleRows = rows.filter {
+                    $0.provenance.freshness == .stale || $0.provenance.connectorState == .refreshDue
+                }
+                observedCount += rows.filter { $0.availability == .observed && $0.balanceCents != nil }.count
+                unavailableCount += unavailableRows.count
+                staleCount += staleRows.count
+                hasPartialBoundary = hasPartialBoundary || (!rows.isEmpty && !unavailableRows.isEmpty)
+                hasPartialBoundary = hasPartialBoundary || snapshot.provenance.freshness == .stale
+            } else {
+                unavailableCount += 1
+            }
+        }
+
+        func add(_ snapshot: FinanceTransactionSnapshot) {
+            if snapshot.availability == .observed {
+                observedCount += 1
+                let rows = snapshot.transactions ?? []
+                staleCount += rows.filter {
+                    $0.provenance.freshness == .stale || $0.provenance.connectorState == .refreshDue
+                }.count
+                hasPartialBoundary = hasPartialBoundary || snapshot.provenance.freshness == .stale
+            } else {
+                unavailableCount += 1
+            }
+        }
+
+        if let accounts {
+            add(accounts)
+        }
+        if let transactions {
+            add(transactions)
+        }
+
+        if let wealth {
+            if wealth.availability == .observed {
+                if wealth.observedValueCents != nil {
+                    observedCount += 1
+                }
+                let rows = wealth.holdings ?? []
+                let unavailableRows = rows.filter { $0.availability == .unavailable }
+                let staleRows = rows.filter {
+                    $0.provenance.freshness == .stale || $0.provenance.connectorState == .refreshDue
+                }
+                unavailableCount += unavailableRows.count
+                staleCount += staleRows.count
+                hasPartialBoundary = hasPartialBoundary
+                    || (!rows.isEmpty && !unavailableRows.isEmpty)
+                    || wealth.provenance.freshness == .stale
+            } else {
+                unavailableCount += 1
+            }
+        }
+
+        if now.timeIntervalSince(generatedAt) >= staleAfter {
+            staleCount += 1
+        }
+
+        let hasObserved = observedCount > 0
+        let state: FinanceObservationState
+        if let errorMessage, !errorMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            state = .error
+        } else if !hasObserved {
+            state = .unavailable
+        } else if staleCount > 0 {
+            state = .stale
+        } else if hasPartialBoundary || unavailableCount > 0 {
+            state = .partial
+        } else {
+            state = .observed
+        }
+
+        return FinanceObservationAssessment(
+            state: state,
+            observedComponentCount: observedCount,
+            unavailableComponentCount: unavailableCount,
+            staleComponentCount: staleCount,
+            message: errorMessage
+        )
+    }
+}
+
+// MARK: - Native pagination
+
+public struct FinancePageDescriptor: Equatable, Sendable {
+    public let offset: Int
+    public let limit: Int
+    public let totalCount: Int
+    public let endOffset: Int
+
+    public var hasNextPage: Bool { endOffset < totalCount }
+    public var nextOffset: Int? { hasNextPage ? endOffset : nil }
+
+    public init(totalCount: Int, offset: Int, limit: Int) {
+        let safeTotal = max(totalCount, 0)
+        let safeLimit = min(max(limit, 1), FinancePagination.maximumPageSize)
+        let safeOffset = min(max(offset, 0), safeTotal)
+        self.offset = safeOffset
+        self.limit = safeLimit
+        self.totalCount = safeTotal
+        self.endOffset = min(safeOffset + safeLimit, safeTotal)
+    }
+}
+
+public struct FinancePage<Item: Equatable & Sendable>: Equatable, Sendable {
+    public let items: [Item]
+    public let descriptor: FinancePageDescriptor
+
+    public init(items: [Item], descriptor: FinancePageDescriptor) {
+        self.items = items
+        self.descriptor = descriptor
+    }
+}
+
+public enum FinancePagination {
+    public static let defaultPageSize = 12
+    public static let maximumPageSize = 100
+
+    public static func page<Item: Equatable & Sendable>(
+        _ items: [Item],
+        offset: Int = 0,
+        limit: Int = defaultPageSize
+    ) -> FinancePage<Item> {
+        let descriptor = FinancePageDescriptor(totalCount: items.count, offset: offset, limit: limit)
+        let pageItems = Array(items[descriptor.offset..<descriptor.endOffset])
+        return FinancePage(items: pageItems, descriptor: descriptor)
+    }
+}
+
+public extension FinanceAccountSnapshot {
+    func page(offset: Int = 0, limit: Int = FinancePagination.defaultPageSize) -> FinancePage<FinanceAccountObservation> {
+        FinancePagination.page(accounts ?? [], offset: offset, limit: limit)
+    }
+}
+
+public extension FinanceTransactionSnapshot {
+    func page(offset: Int = 0, limit: Int = FinancePagination.defaultPageSize) -> FinancePage<FinanceTransactionObservation> {
+        FinancePagination.page(transactions ?? [], offset: offset, limit: limit)
     }
 }
