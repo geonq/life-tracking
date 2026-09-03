@@ -1193,7 +1193,12 @@ function Set-AclSnapshotContext {
 
 function Register-AclSnapshot {
     param([Parameter(Mandatory)][string]$Path)
-    $context = $script:LifeOSAclSnapshotContext
+    # New backup roots are ACL-locked before the install manifest exists. In
+    # strict mode, reading an as-yet-uninitialized script variable throws, so
+    # discover the optional context without making first-use ACL hardening
+    # depend on manifest initialization order.
+    $contextVariable = Get-Variable -Name LifeOSAclSnapshotContext -Scope Script -ErrorAction SilentlyContinue
+    $context = if ($null -eq $contextVariable) { $null } else { $contextVariable.Value }
     if ($null -eq $context) { return }
     $full = Get-FullPath $Path
     Assert-NoReparsePath $full
