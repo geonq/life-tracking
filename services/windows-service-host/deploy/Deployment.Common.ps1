@@ -1231,7 +1231,11 @@ function Restore-AclSnapshots {
         if (-not (Test-Path -LiteralPath $destination)) { continue }
         Assert-NoReparsePath $destination
         if ([string]$snapshot.mode -eq 'tree') {
-            Invoke-NativeChecked 'icacls.exe' ([string[]]@($destination, '/restore', $backup, '/C')) -Quiet | Out-Null
+            # `icacls /save` records the root leaf relative to its parent. A
+            # restore target of the saved root would therefore duplicate the
+            # leaf (for example, lifeos-secrets\lifeos-secrets).
+            $restoreParent = Split-Path -Parent $destination
+            Invoke-NativeChecked 'icacls.exe' ([string[]]@($restoreParent, '/restore', $backup, '/C')) -Quiet | Out-Null
         } else {
             $acl = Get-Acl -LiteralPath $destination -ErrorAction Stop
             $acl.SetSecurityDescriptorSddlForm((Get-Content -LiteralPath $backup -Raw -ErrorAction Stop))

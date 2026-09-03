@@ -301,8 +301,10 @@ function Get-ChildRuntimeStage {
         $cfg = Get-Content -LiteralPath $pyvenv -Raw -ErrorAction Stop
         $homeMatch = [regex]::Match($cfg, '(?m)^\s*home\s*=\s*(?<home>[^\r\n]+)\s*$')
         if (-not $homeMatch.Success) { throw "Python venv has no absolute home entry: $pyvenv" }
-        $home = $homeMatch.Groups['home'].Value.Trim()
-        $homeRuntime = Resolve-PythonRuntimeSource -Requested $home -GatewaySource $home
+        # `$HOME` is a read-only automatic variable in Windows PowerShell;
+        # use a task-specific name for the venv's base-runtime path.
+        $pythonHomePath = $homeMatch.Groups['home'].Value.Trim()
+        $homeRuntime = Resolve-PythonRuntimeSource -Requested $pythonHomePath -GatewaySource $pythonHomePath
         $homeRoot = $homeRuntime.Root
         $baseTarget = Join-Path $RuntimeRoot 'python312'
         $venvTarget = Join-Path $RuntimeRoot 'python-venv'
