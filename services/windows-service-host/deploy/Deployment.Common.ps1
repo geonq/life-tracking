@@ -494,7 +494,7 @@ function Ensure-Directory {
 function Invoke-NativeChecked {
     param(
         [Parameter(Mandatory)][string]$FilePath,
-        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$ArgumentList,
+        [Parameter(Mandatory)][AllowEmptyCollection()][AllowEmptyString()][string[]]$ArgumentList,
         [switch]$AllowNonZero,
         [switch]$Quiet
     )
