@@ -494,12 +494,18 @@ function Ensure-Directory {
 function Invoke-NativeChecked {
     param(
         [Parameter(Mandatory)][string]$FilePath,
-        [Parameter(Mandatory)][string[]]$ArgumentList,
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$ArgumentList,
         [switch]$AllowNonZero,
         [switch]$Quiet
     )
     $output = & $FilePath @ArgumentList 2>&1
-    $exitCode = $LASTEXITCODE
+    # PowerShell scripts do not necessarily initialize LASTEXITCODE.  Read
+    # the automatic variable through the provider so StrictMode does not turn
+    # a successful script invocation into an unbound-variable failure.  A
+    # present value still goes through the normal integer conversion and
+    # non-zero failure path below.
+    $lastExitCodeVariable = Get-Variable -Name LASTEXITCODE -ErrorAction SilentlyContinue
+    $exitCode = if ($null -eq $lastExitCodeVariable) { 0 } else { [int]$lastExitCodeVariable.Value }
     if (-not $AllowNonZero -and $exitCode -ne 0) {
         throw "Native command failed ($FilePath, exit code $exitCode)."
     }
@@ -2274,6 +2280,16 @@ function Test-TailscaleEndpointUsesPort {
     return $range.Start -le $Port -and $range.End -ge $Port
 }
 
+function Test-TailscaleHttpsEndpointExact {
+    param([Parameter(Mandatory)][string]$EndpointKey, [int]$Port = 8420)
+    try { $uri = [Uri]$EndpointKey } catch { return $false }
+    if ($null -eq $uri -or -not $uri.IsAbsoluteUri) { return $false }
+    return ($uri.Scheme -ieq 'https' -and $uri.Port -eq $Port -and
+        $uri.AbsolutePath -eq '/' -and [string]::IsNullOrEmpty($uri.Query) -and
+        [string]::IsNullOrEmpty($uri.Fragment) -and [string]::IsNullOrEmpty($uri.UserInfo) -and
+        -not [string]::IsNullOrWhiteSpace($uri.Host))
+}
+
 function Test-TailscaleTrustedEdgeAppCapability {
     param([object]$Value)
     if ($Value -is [string]) {
@@ -2304,6 +2320,36 @@ function Test-TailscaleWebEndpointExact {
     }
     return ([string](Get-TailscalePropertyValue -Object $handler -Name 'Proxy') -eq 'http://127.0.0.1:8421' -and
         (Test-TailscaleTrustedEdgeAppCapability (Get-TailscalePropertyValue -Object $handler -Name 'AcceptAppCaps')))
+}
+
+function Test-TailscaleWebEndpointLegacyMapping {
+    param(
+        [Parameter(Mandatory)][string]$EndpointKey,
+        [object]$Endpoint
+    )
+    if (-not (Test-TailscaleHttpsEndpointExact -EndpointKey $EndpointKey -Port 8420)) { return $false }
+    if ($null -eq $Endpoint -or $Endpoint -isnot [System.Management.Automation.PSCustomObject]) { return $false }
+    $endpointProperties = @($Endpoint.PSObject.Properties)
+    if ($endpointProperties.Count -ne 1 -or $endpointProperties[0].Name -cne 'Handlers') { return $false }
+    $handlers = Get-TailscalePropertyValue -Object $Endpoint -Name 'Handlers'
+    if ($handlers -isnot [System.Management.Automation.PSCustomObject]) { return $false }
+    $handlerProperties = @($handlers.PSObject.Properties)
+    if ($handlerProperties.Count -ne 1 -or $handlerProperties[0].Name -cne '/') { return $false }
+    $handler = Get-TailscalePropertyValue -Object $handlers -Name '/'
+    if ($handler -isnot [System.Management.Automation.PSCustomObject]) { return $false }
+    $handlerFields = @($handler.PSObject.Properties)
+    if ($handlerFields.Count -ne 1 -or $handlerFields[0].Name -cne 'Proxy') { return $false }
+    return ([string](Get-TailscalePropertyValue -Object $handler -Name 'Proxy') -ceq 'http://127.0.0.1:8421')
+}
+
+function Test-TailscaleServeTcpHttpsMirror {
+    param([Parameter(Mandatory)][psobject]$Record)
+    if ([string]$Record.Section -cne 'TCP' -or [string]$Record.Key -cne '8420') { return $false }
+    $value = $Record.Value
+    if ($null -eq $value -or $value -isnot [System.Management.Automation.PSCustomObject]) { return $false }
+    $fields = @($value.PSObject.Properties)
+    if ($fields.Count -ne 1 -or $fields[0].Name -cne 'HTTPS') { return $false }
+    return ($fields[0].Value -is [bool] -and [bool]$fields[0].Value)
 }
 
 function Get-TailscaleServiceEndpointRecords {
@@ -2391,32 +2437,44 @@ function Get-TailscaleServeDecision {
     }
     $records = @(Get-TailscaleServeEndpointRecords -State $state)
     $targetRecords = @($records | Where-Object { $_.Section -eq 'Web' -and (Test-TailscaleEndpointUsesPort -EndpointKey ([string]$_.Key) -Port 8420) })
+    $tcpRecords = @($records | Where-Object { $_.Section -eq 'TCP' })
+    $serviceRecords = @($records | Where-Object { $_.Section -eq 'Services' })
     # Get-TailscaleServeEndpointRecords already filters Web/TCP/Services to
     # port 8420. Non-8420 Web routes are deliberately absent here and must be
     # allowed to coexist unchanged.
-    $otherRecords = @($records | Where-Object { $_.Section -ne 'Web' })
     if ($targetRecords.Count -gt 1) {
         throw 'Tailscale Serve has multiple Web endpoints on port 8420; refusing an ambiguous route.'
-    }
-    if ($otherRecords.Count -gt 0) {
-        throw 'Tailscale Serve port 8420 is already occupied by a non-LifeOS endpoint; refusing a port collision.'
     }
     if ($targetRecords.Count -eq 1) {
         $targetRange = Get-TailscaleEndpointPortRange ([string]$targetRecords[0].Key)
         if ($null -eq $targetRange -or $targetRange.Start -ne 8420 -or $targetRange.End -ne 8420) {
             throw 'Tailscale Serve route/port range covers 8420; refusing an ambiguous ownership decision.'
         }
-        if (-not (Test-TailscaleWebEndpointExact $targetRecords[0].Value)) {
+        if (-not (Test-TailscaleHttpsEndpointExact -EndpointKey ([string]$targetRecords[0].Key) -Port 8420)) {
+            throw 'Tailscale Serve route/port 8420 is not an exact HTTPS endpoint; refusing an ambiguous ownership decision.'
+        }
+        $nonMirrorTcp = @($tcpRecords | Where-Object { -not (Test-TailscaleServeTcpHttpsMirror $_) })
+        if ($nonMirrorTcp.Count -gt 0 -or $serviceRecords.Count -gt 0) {
+            throw 'Tailscale Serve port 8420 is already occupied by a non-LifeOS endpoint; refusing a port collision.'
+        }
+        $isConfigured = Test-TailscaleWebEndpointExact $targetRecords[0].Value
+        $isLegacy = Test-TailscaleWebEndpointLegacyMapping -EndpointKey ([string]$targetRecords[0].Key) -Endpoint $targetRecords[0].Value
+        if (-not $isConfigured -and -not $isLegacy) {
             throw 'Tailscale Serve route/port 8420 is occupied by a non-LifeOS mapping; refusing to overwrite it.'
         }
+        $action = if ($isConfigured) { 'AlreadyConfigured' } else { 'UpgradeLegacyMapping' }
         return [pscustomobject]@{
-            Action = 'AlreadyConfigured'
+            Action = $action
             State = $state
             TargetEndpoint = [string]$targetRecords[0].Key
             TargetPort = 8420
             TargetPath = '/'
             TargetProxy = 'http://127.0.0.1:8421'
+            TcpMirrorCount = @($tcpRecords | Where-Object { Test-TailscaleServeTcpHttpsMirror $_ }).Count
         }
+    }
+    if ($tcpRecords.Count -gt 0 -or $serviceRecords.Count -gt 0) {
+        throw 'Tailscale Serve port 8420 is already occupied by a non-LifeOS endpoint; refusing a port collision.'
     }
     return [pscustomobject]@{
         Action = 'Add'
@@ -2467,15 +2525,29 @@ function Get-TailscaleServeFingerprint {
     param([Parameter(Mandatory)][string]$Json, [switch]$ExcludeLifeOSRoute)
     $state = ConvertFrom-TailscaleServeJson $Json
     if ($ExcludeLifeOSRoute) {
+        $removedLifeOSWebRoute = $false
         $webProperty = $state.PSObject.Properties['Web']
         if ($null -ne $webProperty -and $webProperty.Value -is [System.Management.Automation.PSCustomObject]) {
             foreach ($endpoint in @($webProperty.Value.PSObject.Properties)) {
                 if (Test-TailscaleEndpointUsesPort -EndpointKey ([string]$endpoint.Name) -Port 8420) {
                     $webProperty.Value.PSObject.Properties.Remove($endpoint.Name)
+                    $removedLifeOSWebRoute = $true
                 }
             }
             if (@($webProperty.Value.PSObject.Properties).Count -eq 0) {
                 $state.PSObject.Properties.Remove('Web')
+            }
+        }
+        # Tailscale emits TCP 8420 as a mirror for an HTTPS Web endpoint. It
+        # is part of the targeted LifeOS route, not an unrelated listener, but
+        # only the exact {HTTPS:true} mirror is eligible for this exclusion.
+        if ($removedLifeOSWebRoute) {
+            $tcpProperty = $state.PSObject.Properties['TCP']
+            if ($null -ne $tcpProperty -and $tcpProperty.Value -is [System.Management.Automation.PSCustomObject]) {
+                $mirrorNames = @($tcpProperty.Value.PSObject.Properties | Where-Object {
+                    Test-TailscaleServeTcpHttpsMirror ([pscustomobject]@{ Section = 'TCP'; Key = [string]$_.Name; Value = $_.Value })
+                } | ForEach-Object { [string]$_.Name })
+                foreach ($mirrorName in $mirrorNames) { $tcpProperty.Value.PSObject.Properties.Remove($mirrorName) }
             }
         }
     }
@@ -2507,19 +2579,23 @@ function Test-TailscaleServeExact {
 function Configure-TailscaleServe {
     param([Parameter(Mandatory)][string]$TailscaleExecutable)
     Assert-ExistingFile $TailscaleExecutable 'Tailscale executable'
-    $status = Get-TailscaleStatusJson $TailscaleExecutable
-    $decision = Get-TailscaleServeDecision $status
-    if ($decision.Action -eq 'AlreadyConfigured') { return $status }
-    $unrelatedBefore = Get-TailscaleServeFingerprint $status -ExcludeLifeOSRoute
+    $beforeStatus = Get-TailscaleStatusJson $TailscaleExecutable
+    $decision = Get-TailscaleServeDecision $beforeStatus
+    if ($decision.Action -eq 'AlreadyConfigured') { return $beforeStatus }
+    $unrelatedBefore = Get-TailscaleServeFingerprint $beforeStatus -ExcludeLifeOSRoute
     try {
         # Tailscale Serve supports multiple mount points. This command adds
-        # only the free HTTPS 8420 root route and never resets other routes.
-        # The app capability is public policy metadata, not the private token.
+        # or upgrades only the reviewed HTTPS 8420 root route and never resets
+        # other routes. The app capability is public policy metadata, not the
+        # private token.
         $trustedCapabilityArgument = '--accept-app-caps=' + (Get-LifeOSTrustedEdgeCapability)
         Invoke-NativeChecked $TailscaleExecutable @('serve', '--yes', '--bg', $trustedCapabilityArgument, '--https=8420', '--set-path=/', 'http://127.0.0.1:8421') -Quiet | Out-Null
         $status = Get-TailscaleStatusJson $TailscaleExecutable
         $afterDecision = Get-TailscaleServeDecision $status
         if ($afterDecision.Action -ne 'AlreadyConfigured') { throw 'Tailscale Serve did not expose the requested LifeOS route after configuration.' }
+        if ($decision.Action -eq 'UpgradeLegacyMapping' -and [string]$afterDecision.TargetEndpoint -cne [string]$decision.TargetEndpoint) {
+            throw 'Tailscale Serve legacy upgrade changed the endpoint identity; refusing to accept the mutation.'
+        }
         if ((Get-TailscaleServeFingerprint $status -ExcludeLifeOSRoute) -ne $unrelatedBefore) {
             throw 'Tailscale Serve configuration changed an unrelated entry; refusing to accept the mutation.'
         }
@@ -2529,14 +2605,68 @@ function Configure-TailscaleServe {
         try {
             $current = Get-TailscaleStatusJson $TailscaleExecutable
             $currentDecision = Get-TailscaleServeDecision $current
-            if ($currentDecision.Action -eq 'AlreadyConfigured' -and
-                (Get-TailscaleServeFingerprint $current -ExcludeLifeOSRoute) -eq $unrelatedBefore) {
-                $null = Remove-LifeOSTailscaleServeRoute $TailscaleExecutable
+            if ((Get-TailscaleServeFingerprint $current -ExcludeLifeOSRoute) -eq $unrelatedBefore) {
+                if ($decision.Action -eq 'UpgradeLegacyMapping' -and $currentDecision.Action -eq 'AlreadyConfigured') {
+                    $null = Restore-TailscaleServeLegacyMapping -TailscaleExecutable $TailscaleExecutable -BeforeJson $beforeStatus -ExpectedAfterJson $current
+                } elseif ($decision.Action -eq 'Add' -and $currentDecision.Action -eq 'AlreadyConfigured') {
+                    $null = Remove-LifeOSTailscaleServeRoute $TailscaleExecutable
+                } elseif ($currentDecision.Action -eq $decision.Action) {
+                    # The command failed before changing the targeted state.
+                    # No cleanup is needed; the original state is still exact.
+                } else {
+                    throw 'Automatic Tailscale Serve cleanup was refused because the targeted state is ambiguous.'
+                }
             }
         } catch {
             throw "Tailscale Serve configuration failed and automatic cleanup was refused: $($_.Exception.Message). Original failure: $($failure.Exception.Message)"
         }
         throw $failure
+    }
+}
+
+function Restore-TailscaleServeLegacyMapping {
+    param(
+        [Parameter(Mandatory)][string]$TailscaleExecutable,
+        [Parameter(Mandatory)][string]$BeforeJson,
+        [Parameter(Mandatory)][string]$ExpectedAfterJson
+    )
+    $beforeDecision = Get-TailscaleServeDecision $BeforeJson
+    if ($beforeDecision.Action -ne 'UpgradeLegacyMapping') {
+        throw 'Legacy Serve rollback requires an authenticated proxy-only legacy mapping snapshot.'
+    }
+    $expectedAfterDecision = Get-TailscaleServeDecision $ExpectedAfterJson
+    if ($expectedAfterDecision.Action -ne 'AlreadyConfigured') {
+        throw 'Legacy Serve rollback has an invalid post-install snapshot.'
+    }
+    $unrelatedBefore = Get-TailscaleServeFingerprint $BeforeJson -ExcludeLifeOSRoute
+    $current = Get-TailscaleStatusJson $TailscaleExecutable
+    if ((Get-TailscaleServeFingerprint $current) -ne (Get-TailscaleServeFingerprint $ExpectedAfterJson) -or
+        (Get-TailscaleServeFingerprint $current -ExcludeLifeOSRoute) -ne $unrelatedBefore) {
+        throw 'Automatic Serve rollback is refused because the authenticated post-install state changed.'
+    }
+
+    # Remove only the reviewed 8420 root route, then recreate its original
+    # proxy-only shape. This is intentionally not `tailscale serve reset`.
+    $trustedCapabilityArgument = '--accept-app-caps=' + (Get-LifeOSTrustedEdgeCapability)
+    Invoke-NativeChecked $TailscaleExecutable @('serve', '--yes', $trustedCapabilityArgument, '--https=8420', '--set-path=/', 'off') -Quiet | Out-Null
+    $afterOff = Get-TailscaleStatusJson $TailscaleExecutable
+    $afterOffDecision = Get-TailscaleServeDecision $afterOff
+    if ($afterOffDecision.Action -ne 'Add' -or
+        (Get-TailscaleServeFingerprint $afterOff -ExcludeLifeOSRoute) -ne $unrelatedBefore) {
+        throw 'Legacy Serve rollback changed the route set while removing the LifeOS mapping; refusing to continue.'
+    }
+
+    # Omitting AcceptAppCaps is deliberate: the pre-install handler was
+    # exactly proxy-only. The final authenticated snapshot comparison below
+    # proves that Tailscale restored the same Web/TCP representation.
+    Invoke-NativeChecked $TailscaleExecutable @('serve', '--yes', '--bg', '--https=8420', '--set-path=/', 'http://127.0.0.1:8421') -Quiet | Out-Null
+    $restored = Get-TailscaleStatusJson $TailscaleExecutable
+    $restoredDecision = Get-TailscaleServeDecision $restored
+    if ($restoredDecision.Action -ne 'UpgradeLegacyMapping' -or
+        [string]$restoredDecision.TargetEndpoint -cne [string]$beforeDecision.TargetEndpoint -or
+        (Get-TailscaleServeFingerprint $restored) -ne (Get-TailscaleServeFingerprint $BeforeJson) -or
+        (Get-TailscaleServeFingerprint $restored -ExcludeLifeOSRoute) -ne $unrelatedBefore) {
+        throw 'Legacy Serve rollback did not restore the exact pre-install proxy-only mapping.'
     }
 }
 
@@ -2556,7 +2686,7 @@ function Restore-TailscaleServeSnapshot {
     }
     $unrelatedBefore = Get-TailscaleServeFingerprint $Json -ExcludeLifeOSRoute
     $currentDecision = Get-TailscaleServeDecision $current
-    if ($currentDecision.Action -eq 'Add') {
+    if ($beforeDecision.Action -eq 'Add' -and $currentDecision.Action -eq 'Add') {
         if ((Get-TailscaleServeFingerprint $current -ExcludeLifeOSRoute) -ne $unrelatedBefore) {
             throw 'Automatic Serve rollback is refused because unrelated Serve entries changed after the snapshot.'
         }
@@ -2571,7 +2701,17 @@ function Restore-TailscaleServeSnapshot {
     if ((Get-TailscaleServeFingerprint $current -ExcludeLifeOSRoute) -ne $unrelatedBefore) {
         throw 'Automatic Serve rollback is refused because unrelated Serve entries changed after cutover.'
     }
+    if ($beforeDecision.Action -eq 'UpgradeLegacyMapping') {
+        $null = Restore-TailscaleServeLegacyMapping -TailscaleExecutable $TailscaleExecutable -BeforeJson $Json -ExpectedAfterJson $ExpectedAfterJson
+        return
+    }
+    if ($beforeDecision.Action -ne 'Add' -or $currentDecision.Action -ne 'AlreadyConfigured') {
+        throw 'Automatic Serve rollback encountered an unsupported targeted state.'
+    }
     $after = Remove-LifeOSTailscaleServeRoute $TailscaleExecutable
+    if ((Get-TailscaleServeFingerprint $after) -ne (Get-TailscaleServeFingerprint $Json)) {
+        throw 'Serve rollback did not restore the exact pre-install route state.'
+    }
     if ((Get-TailscaleServeFingerprint $after -ExcludeLifeOSRoute) -ne $unrelatedBefore) {
         throw 'Serve rollback changed an unrelated entry; refusing to report success.'
     }

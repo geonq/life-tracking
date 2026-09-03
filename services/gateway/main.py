@@ -1138,7 +1138,7 @@ enable_banking = EnableBankingService(
 
 
 async def _read_bounded_finance_request(request: Request) -> bytes:
-    """Read the only mutating finance request without accepting an unbounded body."""
+    """Read the mutating Finance JSON request without accepting an unbounded body."""
     try:
         async with asyncio.timeout(8.0):
             length_values = _raw_header_values(request, "content-length")
@@ -1215,6 +1215,12 @@ async def post_finance_connect(request: Request) -> Response:
     ):
         return _finance_consent_response({"error": "invalid_request"}, 400)
     status_code, result = await enable_banking.start(institution_id)
+    return _finance_consent_response(result, status_code)
+
+
+@app.delete("/finance/connect/{institution_id}")
+async def delete_finance_connect(institution_id: str) -> Response:
+    status_code, result = await enable_banking.revoke(institution_id)
     return _finance_consent_response(result, status_code)
 
 

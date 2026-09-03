@@ -92,28 +92,29 @@ New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
 $fakeTailscale = Join-Path $tempRoot 'fake-tailscale.ps1'
 $statePath = Join-Path $tempRoot 'serve-state.json'
 $fakeScript = @'
-param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
+param()
+$Arguments = @($args | ForEach-Object { [string]$_ })
 $statePath = $env:LIFEOS_BEHAVIOR_STATE_PATH
-$state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+[void]($state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json)
 if ($Arguments.Count -ge 3 -and $Arguments[0] -eq 'serve' -and $Arguments[1] -eq 'status') {
-    [Console]::Out.Write((Get-Content -LiteralPath $statePath -Raw))
-    exit 0
+    Write-Output (Get-Content -LiteralPath $statePath -Raw)
+    return
 }
 if ($Arguments -contains '--https=8420' -and $Arguments -contains 'off') {
     if ($Arguments -notcontains '--accept-app-caps=lifeos.example/trusted-edge') { throw 'targeted rollback omitted the LifeOS app capability.' }
     if ($null -ne $state.PSObject.Properties['Web'] -and $state.Web -is [System.Management.Automation.PSCustomObject]) {
-        $state.Web.PSObject.Properties.Remove('https://node.example.ts.net:8420')
-        if (@($state.Web.PSObject.Properties).Count -eq 0) { $state.PSObject.Properties.Remove('Web') }
+        [void]$state.Web.PSObject.Properties.Remove('https://node.example.ts.net:8420')
+        if (@($state.Web.PSObject.Properties).Count -eq 0) { [void]$state.PSObject.Properties.Remove('Web') }
     }
     [IO.File]::WriteAllText($statePath, ($state | ConvertTo-Json -Depth 20 -Compress))
-    exit 0
+    return
 }
 if ($Arguments -contains '--https=8420') {
     if ($Arguments -notcontains '--accept-app-caps=lifeos.example/trusted-edge') { throw 'additive Serve configuration omitted the LifeOS app capability.' }
-    if ($null -eq $state.PSObject.Properties['Web']) { $state | Add-Member -NotePropertyName Web -NotePropertyValue ([pscustomobject]@{}) }
-    $state.Web | Add-Member -NotePropertyName 'https://node.example.ts.net:8420' -NotePropertyValue ([pscustomobject]@{ Handlers = [pscustomobject]@{ '/' = [pscustomobject]@{ Proxy = 'http://127.0.0.1:8421'; AcceptAppCaps = @('lifeos.example/trusted-edge') } } })
+    if ($null -eq $state.PSObject.Properties['Web']) { [void]($state | Add-Member -NotePropertyName Web -NotePropertyValue ([pscustomobject]@{})) }
+    [void]($state.Web | Add-Member -NotePropertyName 'https://node.example.ts.net:8420' -NotePropertyValue ([pscustomobject]@{ Handlers = [pscustomobject]@{ '/' = [pscustomobject]@{ Proxy = 'http://127.0.0.1:8421'; AcceptAppCaps = @('lifeos.example/trusted-edge') } } }))
     [IO.File]::WriteAllText($statePath, ($state | ConvertTo-Json -Depth 20 -Compress))
-    exit 0
+    return
 }
 throw 'unexpected fake Tailscale invocation'
 '@
@@ -125,7 +126,8 @@ try {
     $configured = Configure-TailscaleServe $fakeTailscale
     Assert-Behavior ((Get-TailscaleServeDecision $configured).Action -eq 'AlreadyConfigured') 'fixture Configure adds the LifeOS route.'
     Assert-Behavior ((Get-TailscaleServeFingerprint $configured -ExcludeLifeOSRoute) -eq (Get-TailscaleServeFingerprint $unrelated -ExcludeLifeOSRoute)) 'fixture Configure preserves unrelated routes.'
-    $restored = Restore-TailscaleServeSnapshot -TailscaleExecutable $fakeTailscale -Json $unrelated -ExpectedAfterJson $configured
+    Restore-TailscaleServeSnapshot -TailscaleExecutable $fakeTailscale -Json $unrelated -ExpectedAfterJson $configured | Out-Null
+    $restored = Get-TailscaleStatusJson $fakeTailscale
     Assert-Behavior ((Get-TailscaleServeDecision $restored).Action -eq 'Add') 'fixture rollback removes only the LifeOS route.'
     Assert-Behavior ((Get-TailscaleServeFingerprint $restored -ExcludeLifeOSRoute) -eq (Get-TailscaleServeFingerprint $unrelated -ExcludeLifeOSRoute)) 'fixture rollback preserves unrelated routes.'
 

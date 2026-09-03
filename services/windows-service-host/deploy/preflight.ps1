@@ -63,6 +63,8 @@ $staticDeploymentTest = Join-Path $PSScriptRoot 'tests\Deployment.Static.Tests.p
 Assert-ExistingFile $staticDeploymentTest 'Deployment static test'
 $behaviorDeploymentTest = Join-Path $PSScriptRoot 'tests\Deployment.Behavior.Tests.ps1'
 Assert-ExistingFile $behaviorDeploymentTest 'Deployment behavioral test'
+$legacyServeDeploymentTest = Join-Path $PSScriptRoot 'tests\Deployment.LegacyServe.Tests.ps1'
+Assert-ExistingFile $legacyServeDeploymentTest 'Legacy Serve deployment test'
 $hostSource = Resolve-ServiceHostBinary $ServiceHostBinarySource $paths.ServiceHostPath
 $tailscale = Resolve-TailscaleExecutable $TailscaleExecutable
 $tailscaleStatus = Get-TailscaleStatusJson $tailscale
@@ -79,6 +81,7 @@ Assert-TrustedSourcePath $hostSource $operatorSid
 # it never contacts or changes the machine's real Tailscale state.
 & $staticDeploymentTest | Out-Host
 & $behaviorDeploymentTest | Out-Host
+& $legacyServeDeploymentTest | Out-Host
 
 # Validate the complete source-side Python import closure before any service
 # is stopped. The installer later stages these exact files, so an import

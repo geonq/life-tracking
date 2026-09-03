@@ -10,8 +10,12 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parent
 LAUNCHER_PATH = ROOT / "windows-service-host" / "deploy" / "gateway_launcher.py"
+if not LAUNCHER_PATH.is_file():
+    # The source tree nests this test under services/gateway, while the
+    # source-bound Windows candidate keeps the production gateway flat.
+    LAUNCHER_PATH = ROOT.parent / "windows-service-host" / "deploy" / "gateway_launcher.py"
 SPEC = importlib.util.spec_from_file_location("lifeos_gateway_launcher", LAUNCHER_PATH)
 assert SPEC is not None and SPEC.loader is not None
 launcher = importlib.util.module_from_spec(SPEC)

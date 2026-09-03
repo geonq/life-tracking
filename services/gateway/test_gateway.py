@@ -1532,6 +1532,42 @@ def test_finance_response_bound_matches_native_read_limit():
 def test_finance_summary_requires_identity_and_is_read_only():
     assert client.get("/finance/summary").status_code == 403
     assert client.post("/finance/summary", headers=AUTH).status_code == 405
+    assert client.delete("/finance/connect/revolut_personal").status_code == 403
+
+
+def test_finance_revoke_route_returns_only_provider_neutral_state(monkeypatch):
+    class FakeFinance:
+        def __init__(self):
+            self.institution_id = None
+
+        async def revoke(self, institution_id):
+            self.institution_id = institution_id
+            return 200, {"state": "revoked"}
+
+    fake = FakeFinance()
+    monkeypatch.setattr(main, "enable_banking", fake)
+
+    response = client.delete("/finance/connect/revolut_personal", headers=AUTH)
+
+    assert response.status_code == 200
+    assert response.json() == {"state": "revoked"}
+    assert fake.institution_id == "revolut_personal"
+    assert response.headers["cache-control"] == "no-store"
+    assert "session" not in response.text.lower()
+    assert "provider" not in response.text.lower()
+
+
+def test_finance_revoke_route_keeps_temporary_error_typed_and_sanitized(monkeypatch):
+    class FakeFinance:
+        async def revoke(self, _institution_id):
+            return 503, {"error": "temporary_error"}
+
+    monkeypatch.setattr(main, "enable_banking", FakeFinance())
+
+    response = client.delete("/finance/connect/revolut_personal", headers=AUTH)
+
+    assert response.status_code == 503
+    assert response.json() == {"error": "temporary_error"}
 
 
 @pytest.mark.parametrize("url, expected_path, valid", [
@@ -1750,7 +1786,7 @@ def test_finance_validator_enforces_age_order_worst_freshness_and_source_reconci
         "provenance": fresh,
     }
     assert not main._validate_finance_payload(payload)
-    payload["accounts"]["provenance"] = {**stale, "observedAt": now_string}
+    payload["accounts"]["provenance"] = stale
     assert main._validate_finance_payload(payload)
 
     account_source_mismatch = copy.deepcopy(payload)
@@ -1766,7 +1802,7 @@ def test_finance_validator_enforces_age_order_worst_freshness_and_source_reconci
         "availability": "observed", "transactions": [transaction], "provenance": fresh,
     }
     assert not main._validate_finance_payload(payload)
-    payload["transactions"]["provenance"] = {**stale, "observedAt": now_string}
+    payload["transactions"]["provenance"] = stale
     assert main._validate_finance_payload(payload)
 
     transaction_source_mismatch = copy.deepcopy(payload)

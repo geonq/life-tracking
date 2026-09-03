@@ -47,11 +47,70 @@ profile, `Users`, `Everyone`, or shared-service account grant is created.
 The v17 source bundle is reproducible and intentionally includes every
 trackable deployment file: `Deployment.Common.ps1`, `README.md`,
 `gateway_launcher.py`, `install.ps1`, `preflight.ps1`, `rollback.ps1`,
-`verify.ps1`, `tests/Deployment.Behavior.Tests.ps1`, and
-`tests/Deployment.Static.Tests.ps1`. The staged gateway release carries
+`verify.ps1`, `verify-candidate.ps1`,
+`tests/Deployment.Behavior.Tests.ps1`, `tests/Deployment.LegacyServe.Tests.ps1`,
+and `tests/Deployment.Static.Tests.ps1`. The staged gateway release carries
 `bundleVersion: v17` plus a SHA-256/length record for every staged file.
 Runtime data and secret contents remain ignored; the bundle contains only the
 reviewed source and path references.
+
+## Reproducible Windows candidate
+
+Build a source-bound candidate from a clean checkout whose `HEAD` exactly
+matches its configured `origin/*` upstream. Run this on the build host from
+the repository; provide only a standalone Windows `node.exe`, never the
+Hermes user runtime tree:
+
+```bash
+bash scripts/build_windows_release.sh \
+  --node-source '/path/to/standalone/node.exe' \
+  --output-dir '/private/tmp/lifeos-candidates'
+```
+
+The builder runs the reviewed contracts/API builds and self-contained
+`win-x64` service-host publish, then stages only the explicit API/contracts/
+`zod`, gateway, deployment, test, `node.exe`, and service-host allowlist. It
+does not copy `node_modules`, a Python environment, runtime data, or secrets.
+The output is `lifeos-release-<full-source-sha>/`, a flat-content
+`lifeos-release-<full-source-sha>.zip`, and its `.sha256` sidecar. Existing
+same-SHA outputs are never overwritten. If PowerShell is unavailable on the
+build host, the builder still writes the deterministic manifest but prints an
+explicit instruction to verify the candidate on Windows before transfer.
+
+After extracting the flat archive into a new directory, verify it before
+preflight. `SOURCE_SHA.txt` must match the full source SHA and the candidate
+verifier rejects unexpected files, symlinks/reparse points, missing allowlist
+entries, unsafe or non-deterministic manifests, invalid PE files, and unsafe
+API package metadata:
+
+```powershell
+$release = 'D:\staging\lifeos-release-<full-source-sha>'
+$sha = (Get-Content -LiteralPath (Join-Path $release 'SOURCE_SHA.txt') -Raw).Trim()
+& (Join-Path $release 'deploy\verify-candidate.ps1') `
+  -Root $release `
+  -ExpectedSourceSha $sha
+```
+
+Use the candidate paths explicitly for deployment. Keep the existing legacy
+gateway root as `-LegacyGatewaySource` so its data and Claude secret are
+read from the machine-owned source rather than from the staged code tree:
+
+```powershell
+$deploy = Join-Path $release 'deploy'
+& (Join-Path $deploy 'preflight.ps1') `
+  -ApiSource (Join-Path $release 'api') `
+  -GatewaySource (Join-Path $release 'gateway') `
+  -LegacyGatewaySource 'D:\Hermes\lifeos-server' `
+  -ServiceHostBinarySource (Join-Path $release 'service-host\LifeOS.ServiceHost.exe') `
+  -NodeRuntimeSource (Join-Path $release 'node-runtime') `
+  -PythonRuntimeSource 'D:\Hermes\lifeos-server\.venv' `
+  -GatewayEntryPoint (Join-Path $release 'gateway\main.py') `
+  -TailscaleEdgeTokenSource 'D:\Hermes\lifeos-secrets\tailscale-edge.token'
+```
+
+The same source arguments are required for `install.ps1`. The candidate
+contains the static, behavioral, and legacy Serve tests under `deploy\tests`;
+preflight executes all three before any deployment mutation.
 
 ## Optional live-provider inputs
 
@@ -119,12 +178,34 @@ Preflight is read-only. It requires an elevated PowerShell, confirms the
 Tailscale SCM service and legacy task, rejects reparse/user-profile inputs,
 refuses an unattributed listener on legacy port `8421`, and refuses to proceed
 without the existing Claude secret in the legacy gateway location. It also
-executes both transferred deployment coverage files before any deployment
+executes all three transferred deployment coverage files before any deployment
 mutation. Serve inspection allows unrelated routes on other ports, but fails
 closed on unsupported state, public-tunnel flags, ambiguity, or a route/port
 collision on `8420`. A staged gateway source does not change the legacy data
 source; pass `-LegacyGatewaySource` explicitly when that root differs from the
 default.
+
+### Serve decision and legacy upgrade
+
+The Serve decision is fail-closed and classifies only these target states:
+
+- `Add`: no Web, TCP, service, or port-range entry covers `8420`.
+- `UpgradeLegacyMapping`: exactly one HTTPS Web endpoint on port `8420` has
+  only the root `/` handler and only `Proxy: http://127.0.0.1:8421`, with no
+  app capability or other fields. The sole allowed TCP companion is the exact
+  `8420: { HTTPS: true }` mirror emitted by that Web route; it may be absent
+  from a status response.
+- `AlreadyConfigured`: the same exact Web route has exactly the trusted-edge
+  `AcceptAppCaps` selection and is idempotent.
+
+Wrong schemes or proxies, extra handlers/fields, range endpoints, any other
+TCP shape, service endpoints, ambiguous target routes, foreground state, or
+public/Funnel state are rejected. Other ports and their routes remain
+untouched. During `UpgradeLegacyMapping`, configuration adds only
+`--accept-app-caps=lifeos.example/trusted-edge` to the existing target and
+verifies that the endpoint identity and unrelated Serve fingerprint are
+unchanged. The authenticated raw post-state is what the installer records;
+the pre-state is captured before configuration for rollback.
 
 ## Install and verify
 
@@ -153,11 +234,13 @@ The generated listeners are loopback-only: API `127.0.0.1:8787`, Gateway
 Serve mapping, derives the local Tailscale login at runtime, sets the
 machine-owned data root and external Claude secret path, and runs the reviewed
 FastAPI app through uvicorn. After both health checks pass, the installer
-adds only the free Tailscale Serve route `:8420/ ->
-http://127.0.0.1:8421`; existing routes on other ports remain in place. A
-route or port collision, ambiguous status, unsupported field, or truthy
-public-tunnel flag fails verification before mutation. It never invokes the
-public tunnel mode. The old
+either adds the free Tailscale Serve route `:8420/ ->
+http://127.0.0.1:8421` or upgrades the exact proxy-only legacy mapping by
+adding the trusted-edge capability. An already-capable exact route is
+idempotent. Existing routes on other ports remain in place. A route or port
+collision, ambiguous status, unsupported field, or truthy public-tunnel flag
+fails verification before mutation. It never invokes the public tunnel mode.
+The old
 `LifeOSSyncServer` task is exported into the locked install backup and is
 disabled only after both services and Serve pass cutover. If its detached
 listener was present while the task reported `Ready`, the installer verifies
@@ -226,10 +309,14 @@ prior backup are moved to rollback backup names rather than deleted;
 the failed-install Codex task is the intentional exception because restoring
 the exact pre-install task state requires removing a task that did not exist
 before. Tailscale Serve rollback compares the authenticated pre-install and
-post-install snapshots, removes only the LifeOS `:8420/` route, and verifies
-that unrelated Serve entries and their capability selections are unchanged.
-It never resets the whole Serve configuration. If a post-install snapshot is
-missing or the current state changed concurrently, rollback fails closed for
+post-install snapshots and refuses concurrent changes. For an `Add` snapshot,
+it removes only the LifeOS `:8420/` route. For an
+`UpgradeLegacyMapping` snapshot, it removes only the capability-bearing
+target and recreates the exact pre-install proxy-only Web route, including the
+paired TCP mirror when Tailscale emits it; the canonical full fingerprint and
+the unrelated fingerprint must both match the pre-install state. It never resets the whole Serve
+configuration. If a post-install snapshot is missing
+or the current state changed concurrently, rollback fails closed for
 operator-led recovery. Older manifests without a Serve snapshot or the
 optional v17 token-path field remain accepted by the canonical rollback
 validator and require operator-led restoration of any missing token setup.
@@ -240,13 +327,16 @@ The static test can run before the scripts are copied to Windows and proves the
 source contains the required service identities, recovery policy, ACL
 boundaries, atomic migration hooks, task-preservation rules, loopback
 endpoints, and no Funnel/delete/embedded-secret patterns. The behavioral test
-executes the Serve decision, additive configuration, collision, concurrent
-change, and targeted rollback paths against a local fake Tailscale executable;
-it never contacts the real daemon. Keep both nested test files when
-transferring this toolkit; preflight verifies and executes them before any
-deployment state can be changed.
+executes the existing additive configuration and rollback paths against a
+local fake Tailscale executable; the separate legacy Serve test covers the
+proxy-only upgrade, exact rollback, LASTEXITCODE compatibility, wrong proxy,
+extra fields/paths, TCP/service/range collisions, and concurrent-change
+refusal. These fakes never contact the real daemon. Keep all three nested test
+files when transferring this toolkit; preflight verifies and executes them
+before any deployment state can be changed.
 
 ```powershell
 & "$deploy\tests\Deployment.Static.Tests.ps1"
 & "$deploy\tests\Deployment.Behavior.Tests.ps1"
+& "$deploy\tests\Deployment.LegacyServe.Tests.ps1"
 ```

@@ -6,6 +6,7 @@ import os
 import time
 from datetime import datetime, timedelta, timezone
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -78,6 +79,107 @@ def service(tmp_path, monkeypatch):
 
 def run(coro):
     return asyncio.run(coro)
+
+
+def fixture_finance_summary(institutions):
+    observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    accounts = []
+    transactions = []
+    for index, institution_id in enumerate(institutions, start=1):
+        source = f"enablebanking:{institution_id}"
+        provenance = {
+            "source": source,
+            "observedAt": observed_at,
+            "freshness": "fresh",
+            "quality": "observed",
+            "connectorState": "healthy",
+        }
+        accounts.append({
+            "availability": "observed",
+            "id": f"ebacct-fixture-{index}",
+            "name": f"{institution_id} · Main",
+            "detail": "EUR · Enable Banking",
+            "balanceCents": index * 100_000,
+            "source": source,
+            "provenance": provenance,
+        })
+        transactions.append({
+            "id": f"ebtx-fixture-{index}",
+            "merchant": "REWE",
+            "title": "REWE",
+            "signedAmountCents": -100 * index,
+            "timestamp": observed_at,
+            "account": f"{institution_id} · Main",
+            "source": source,
+            "category": "Groceries",
+            "provenance": provenance,
+        })
+    transaction_provenance = {
+        "source": "derived-transaction-snapshot",
+        "observedAt": observed_at,
+        "freshness": "fresh",
+        "quality": "observed",
+        "connectorState": "healthy",
+    }
+    unavailable = {
+        "availability": "unavailable",
+        "provenance": {
+            "source": "no-authorized-finance-source",
+            "observedAt": observed_at,
+            "freshness": "unknown",
+            "quality": "unavailable",
+            "connectorState": "unavailable",
+        },
+    }
+    return {
+        "generatedAt": observed_at,
+        "currency": "EUR",
+        "monthlyIncome": {
+            "availability": "observed",
+            "amountCents": 0,
+            "provenance": transaction_provenance,
+        },
+        "fixedCosts": {
+            "availability": "observed",
+            "amountCents": 0,
+            "provenance": transaction_provenance,
+        },
+        "discretionaryBuffer": copy.deepcopy(unavailable),
+        "spent": {
+            "availability": "observed",
+            "amountCents": sum(100 * index for index, _ in enumerate(institutions, start=1)),
+            "provenance": transaction_provenance,
+        },
+        "savingsGoal": copy.deepcopy(unavailable),
+        "saved": copy.deepcopy(unavailable),
+        "accounts": {
+            "availability": "observed",
+            "accounts": accounts,
+            "provenance": {
+                "source": "derived-account-snapshot",
+                "observedAt": observed_at,
+                "freshness": "fresh",
+                "quality": "observed",
+                "connectorState": "healthy",
+            },
+        },
+        "transactions": {
+            "availability": "observed",
+            "transactions": transactions,
+            "provenance": transaction_provenance,
+        },
+    }
+
+
+def write_cached_summary(adapter, summary):
+    metadata = adapter._next_summary_metadata(summary)
+    adapter._atomic_write_json(adapter._summary_state_path(), {
+        "schemaVersion": adapter.FINANCE_STATE_SCHEMA_VERSION,
+        "summary": summary,
+        "metadata": metadata,
+    })
+    adapter._atomic_write_json(adapter._summary_metadata_path(), metadata)
+    adapter._atomic_write_json(adapter._summary_path(), summary)
 
 
 def test_start_resolves_sparkasse_and_returns_opaque_handoff(tmp_path, monkeypatch):
@@ -197,6 +299,267 @@ def test_unknown_provider_session_state_fails_closed(tmp_path, monkeypatch):
     adapter = service(tmp_path, monkeypatch)
     assert adapter._session_state("A_NEW_PROVIDER_STATE") == "error"
     assert adapter._session_state(None) == "error"
+
+
+def test_closed_and_revoked_provider_states_remain_revoked(tmp_path, monkeypatch):
+    adapter = service(tmp_path, monkeypatch)
+    assert adapter._session_state("CLOSED") == "revoked"
+    assert adapter._session_state("REVOKED") == "revoked"
+
+    adapter.consent_flows["eb-revoked"] = {
+        "state": "revoked",
+        "institutionId": "revolut_personal",
+        "started": time.monotonic(),
+        "csrf_state": None,
+        "authorization_id": "authorization-1",
+        "session_id": None,
+    }
+    monkeypatch.setattr(
+        enablebanking.httpx,
+        "AsyncClient",
+        lambda **_: (_ for _ in ()).throw(AssertionError("revoked status must not refresh")),
+    )
+    assert run(adapter.status("eb-revoked")) == {"state": "revoked"}
+
+
+def test_expired_status_does_not_silently_refresh_persisted_connection(tmp_path, monkeypatch):
+    adapter = service(tmp_path, monkeypatch)
+    adapter._save_connection({
+        "connectionId": "eb-expired",
+        "institutionId": "revolut_personal",
+        "sessionId": "session-expired",
+        "linkedAt": "2026-08-01T00:00:00Z",
+    })
+    adapter.consent_flows["eb-expired"] = {
+        "state": "expired",
+        "institutionId": "revolut_personal",
+        "started": time.monotonic(),
+        "csrf_state": None,
+        "authorization_id": "authorization-1",
+        "session_id": "session-expired",
+    }
+    monkeypatch.setattr(
+        enablebanking.httpx,
+        "AsyncClient",
+        lambda **_: (_ for _ in ()).throw(AssertionError("expired status must not refresh")),
+    )
+
+    assert run(adapter.status("eb-expired")) == {"state": "expired"}
+
+
+def test_callback_does_not_link_closed_provider_session(tmp_path, monkeypatch):
+    adapter = service(tmp_path, monkeypatch)
+    adapter.consent_flows["eb-flow"] = {
+        "state": "created",
+        "institutionId": "sparkasse_leipzig",
+        "started": time.monotonic(),
+        "csrf_state": "csrf-token",
+        "authorization_id": "authorization-1",
+        "session_id": None,
+    }
+    holder = QueueClient([
+        FakeResponse({"session_id": "session-closed", "status": "CLOSED"}),
+    ])
+    monkeypatch.setattr(enablebanking.httpx, "AsyncClient", lambda **_: holder)
+
+    result = run(adapter.callback("code=authorization-code&state=csrf-token"))
+
+    assert result == enablebanking.CallbackResult(valid=True, linked=False)
+    assert run(adapter.status("eb-flow")) == {"state": "revoked"}
+    assert not (tmp_path / "enablebanking-connections.json").exists()
+
+
+def test_revoke_sends_authenticated_delete_and_filters_only_revoked_cache_rows(tmp_path, monkeypatch):
+    adapter = service(tmp_path, monkeypatch)
+    adapter._save_connection({
+        "connectionId": "eb-revolut",
+        "institutionId": "revolut_personal",
+        "sessionId": "session-revolut",
+        "linkedAt": "2026-08-01T00:00:00Z",
+    })
+    adapter._save_connection({
+        "connectionId": "eb-sparkasse",
+        "institutionId": "sparkasse_leipzig",
+        "sessionId": "session-sparkasse",
+        "linkedAt": "2026-08-01T00:00:00Z",
+    })
+    summary = fixture_finance_summary(["revolut_personal", "sparkasse_leipzig"])
+    assert main._validate_finance_payload(summary)
+    write_cached_summary(adapter, summary)
+    holder = QueueClient([FakeResponse(b"", status_code=204)])
+    monkeypatch.setattr(enablebanking.httpx, "AsyncClient", lambda **_: holder)
+
+    status, body = run(adapter.revoke("revolut_personal"))
+
+    assert (status, body) == (200, {"state": "revoked"})
+    assert holder.calls[0][0:2] == (
+        "DELETE",
+        "https://api.enablebanking.com/sessions/session-revolut",
+    )
+    assert holder.calls[0][2]["headers"] == {
+        "Authorization": "Bearer test.jwt.signature",
+    }
+    assert json.loads((tmp_path / "enablebanking-connections.json").read_text()) == {
+        "connections": [{
+            "connectionId": "eb-sparkasse",
+            "institutionId": "sparkasse_leipzig",
+            "sessionId": "session-sparkasse",
+            "linkedAt": "2026-08-01T00:00:00Z",
+        }]
+    }
+    cached = json.loads((tmp_path / "finance-summary.json").read_text())
+    assert main._validate_persisted_finance_payload(cached)
+    assert all(
+        row["source"] == "enablebanking:sparkasse_leipzig"
+        for row in cached["accounts"]["accounts"] + cached["transactions"]["transactions"]
+    )
+    assert cached["spent"]["amountCents"] == 200
+    assert "session-revolut" not in json.dumps(cached)
+    assert "test.jwt.signature" not in json.dumps(cached)
+    assert not (tmp_path / "enablebanking-revocation.json").exists()
+    assert run(adapter.status("eb-revolut")) == {"state": "revoked"}
+
+
+def test_revoke_allows_a_new_consent_flow_for_the_same_institution(tmp_path, monkeypatch):
+    adapter = service(tmp_path, monkeypatch)
+    adapter._save_connection({
+        "connectionId": "eb-original",
+        "institutionId": "revolut_personal",
+        "sessionId": "session-original",
+        "linkedAt": "2026-08-01T00:00:00Z",
+    })
+    revoke_client = QueueClient([FakeResponse(b"", status_code=204)])
+    monkeypatch.setattr(enablebanking.httpx, "AsyncClient", lambda **_: revoke_client)
+    assert run(adapter.revoke("revolut_personal")) == (200, {"state": "revoked"})
+
+    relink_client = QueueClient([
+        FakeResponse({"aspsps": [{"name": "Revolut", "country": "LT"}]}),
+        FakeResponse({
+            "url": "https://auth.enablebanking.com/ais/start?sessionid=new-session",
+            "authorization_id": "authorization-new",
+        }),
+    ])
+    monkeypatch.setattr(enablebanking.httpx, "AsyncClient", lambda **_: relink_client)
+
+    status, body = run(adapter.start("revolut_personal"))
+
+    assert status == 200
+    assert body["connectionId"] != "eb-original"
+    assert len(relink_client.calls) == 2
+
+
+def test_interrupted_revocation_intent_recovers_all_local_projections(tmp_path, monkeypatch):
+    adapter = service(tmp_path, monkeypatch)
+    adapter._save_connection({
+        "connectionId": "eb-revolut",
+        "institutionId": "revolut_personal",
+        "sessionId": "session-revolut",
+        "linkedAt": "2026-08-01T00:00:00Z",
+    })
+    adapter._save_connection({
+        "connectionId": "eb-sparkasse",
+        "institutionId": "sparkasse_leipzig",
+        "sessionId": "session-sparkasse",
+        "linkedAt": "2026-08-01T00:00:00Z",
+    })
+    write_cached_summary(
+        adapter,
+        fixture_finance_summary(["revolut_personal", "sparkasse_leipzig"]),
+    )
+    pending = adapter._prepare_revocation_state(
+        "revolut_personal",
+        adapter._load_connections(),
+    )
+    adapter._atomic_write_json(adapter._revocation_state_path(), pending)
+
+    restarted = service(tmp_path, monkeypatch)
+    connections = restarted._load_connections()
+    cached = restarted.load_cached_summary()
+
+    assert [connection["institutionId"] for connection in connections] == [
+        "sparkasse_leipzig"
+    ]
+    assert cached is not None
+    assert "enablebanking:revolut_personal" not in json.dumps(cached)
+    assert "enablebanking:sparkasse_leipzig" in json.dumps(cached)
+    assert not restarted._revocation_state_path().exists()
+
+
+@pytest.mark.parametrize(
+    "provider_response",
+    [
+        FakeResponse(b"", status_code=404),
+        FakeResponse({"status": "CLOSED"}, status_code=409),
+        FakeResponse({"status": "REVOKED"}, status_code=400),
+    ],
+)
+def test_revoke_treats_missing_or_closed_provider_session_as_idempotent(
+    provider_response, tmp_path, monkeypatch
+):
+    adapter = service(tmp_path, monkeypatch)
+    adapter._save_connection({
+        "connectionId": "eb-revoke",
+        "institutionId": "revolut_personal",
+        "sessionId": "session-revoke",
+        "linkedAt": "2026-08-01T00:00:00Z",
+    })
+    holder = QueueClient([provider_response])
+    monkeypatch.setattr(enablebanking.httpx, "AsyncClient", lambda **_: holder)
+
+    status, body = run(adapter.revoke("revolut_personal"))
+
+    assert (status, body) == (200, {"state": "revoked"})
+    assert json.loads((tmp_path / "enablebanking-connections.json").read_text()) == {
+        "connections": []
+    }
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        FakeResponse({"detail": "provider token must not escape"}, status_code=503),
+        httpx.ConnectError("fixture network failure"),
+    ],
+)
+def test_revoke_transient_failure_preserves_connection_and_cache(
+    failure, tmp_path, monkeypatch
+):
+    adapter = service(tmp_path, monkeypatch)
+    adapter._save_connection({
+        "connectionId": "eb-revoke",
+        "institutionId": "revolut_personal",
+        "sessionId": "session-revoke",
+        "linkedAt": "2026-08-01T00:00:00Z",
+    })
+    write_cached_summary(adapter, fixture_finance_summary(["revolut_personal"]))
+    paths = [
+        tmp_path / "enablebanking-connections.json",
+        tmp_path / "finance-summary.json",
+        tmp_path / "finance-summary.json.meta.json",
+        tmp_path / "finance-summary.json.state.json",
+    ]
+    before = {path: path.read_bytes() for path in paths}
+    holder = QueueClient([failure])
+    monkeypatch.setattr(enablebanking.httpx, "AsyncClient", lambda **_: holder)
+
+    status, body = run(adapter.revoke("revolut_personal"))
+
+    assert (status, body) == (503, {"error": "temporary_error"})
+    assert {path: path.read_bytes() for path in paths} == before
+    assert not (tmp_path / "enablebanking-revocation.json").exists()
+    assert "provider token must not escape" not in json.dumps(body)
+
+
+def test_revoke_rejects_malformed_or_unknown_institution_without_network(tmp_path, monkeypatch):
+    adapter = service(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        enablebanking.httpx,
+        "AsyncClient",
+        lambda **_: (_ for _ in ()).throw(AssertionError("invalid institution must not call provider")),
+    )
+
+    assert run(adapter.revoke("../revolut_personal")) == (400, {"error": "invalid_request"})
+    assert run(adapter.revoke("unknown_institution")) == (400, {"error": "unknown_institution"})
 
 
 def test_callback_exchanges_code_and_persists_only_opaque_connection(tmp_path, monkeypatch):

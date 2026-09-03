@@ -43,6 +43,10 @@ class UnknownInstitution(Exception):
     """The requested catalog institution was not found in provider discovery."""
 
 
+class ProviderSessionNotFound(EnableBankingUnavailable):
+    """The provider no longer has the opaque session."""
+
+
 @dataclass(frozen=True)
 class CallbackResult:
     """Sanitized callback outcome consumed by the FastAPI route."""
@@ -72,8 +76,10 @@ class EnableBankingService:
     MAX_ASPSP_RESPONSE_SIZE = 4 * 1024 * 1024
     FINANCE_METADATA_SCHEMA_VERSION = 1
     FINANCE_STATE_SCHEMA_VERSION = 1
+    REVOCATION_STATE_SCHEMA_VERSION = 1
     MAX_FINANCE_METADATA_SIZE = 4 * 1024 * 1024
     MAX_FINANCE_STATE_SIZE = 6 * 1024 * 1024
+    MAX_REVOCATION_STATE_SIZE = 8 * 1024 * 1024
     MAX_FINANCE_JOURNAL_RECORDS = 10_000
     MAX_FINANCE_REVISION = 9_007_199_254_740_991
     MAX_CALLBACK_QUERY_SIZE = 4 * 1024
@@ -94,9 +100,9 @@ class EnableBankingService:
         "AUTHORIZED": "linked",
         "EXPIRED": "expired",
         "CANCELLED": "error",
-        "CLOSED": "error",
+        "CLOSED": "revoked",
         "INVALID": "error",
-        "REVOKED": "error",
+        "REVOKED": "revoked",
         "PENDING_AUTHORIZATION": "link_opened",
         "RETURNED_FROM_BANK": "link_opened",
     }
@@ -281,6 +287,26 @@ class EnableBankingService:
     def _summary_state_path(self) -> Path:
         return Path(f"{self._summary_path()}.state.json")
 
+    def _revocation_state_path(self) -> Path:
+        return self._data_dir() / "enablebanking-revocation.json"
+
+    def _remove_file_durably(self, path: Path) -> None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return
+        if os.name != "nt" and hasattr(os, "O_DIRECTORY"):
+            directory_descriptor: int | None = None
+            try:
+                directory_descriptor = os.open(self._data_dir(), os.O_RDONLY | os.O_DIRECTORY)
+                os.fsync(directory_descriptor)
+            except OSError as exc:
+                if exc.errno not in {errno.EINVAL, errno.ENOTSUP, errno.EISDIR}:
+                    raise
+            finally:
+                if directory_descriptor is not None:
+                    os.close(directory_descriptor)
+
     @staticmethod
     def _summary_digest(value: object) -> str:
         encoded = json.dumps(
@@ -338,6 +364,7 @@ class EnableBankingService:
         return value
 
     def _read_summary_metadata(self) -> dict | None:
+        self._recover_pending_revocation()
         path = self._summary_metadata_path()
         try:
             path.lstat()
@@ -350,6 +377,7 @@ class EnableBankingService:
 
     def _read_summary_state(self) -> tuple[dict, dict] | None:
         """Read the single committed Finance summary/metadata envelope."""
+        self._recover_pending_revocation()
         path = self._summary_state_path()
         try:
             path.lstat()
@@ -408,19 +436,18 @@ class EnableBankingService:
             "revision": revision,
             "bodyDigest": digest,
             "idempotency": journal,
-            # Finance has no approved delete/revocation source in this adapter;
-            # retain the explicit empty branch rather than fabricating tombstones.
+            # Revocation removes the provider-owned rows from the cached
+            # projection; no tombstone observation is fabricated for Finance.
             "tombstones": [],
         }
 
-    def _load_connections(self) -> list[dict]:
-        raw = self._read_bounded_json_file(self._connections_path(), 256 * 1024)
-        if not isinstance(raw, dict) or set(raw) != {"connections"} or not isinstance(raw["connections"], list):
-            return []
+    def _validate_connection_records(self, records: object) -> list[dict]:
+        if not isinstance(records, list):
+            raise EnableBankingUnavailable("connection store contains a malformed record")
         result: list[dict] = []
         seen_connection_ids: set[str] = set()
         seen_institution_ids: set[str] = set()
-        for value in raw["connections"]:
+        for value in records:
             if not isinstance(value, dict):
                 raise EnableBankingUnavailable("connection store contains a malformed record")
             # Explicitly retired sandbox records are safe to skip. Every other
@@ -448,6 +475,92 @@ class EnableBankingService:
             seen_institution_ids.add(value["institutionId"])
             result.append(value)
         return result
+
+    def _read_pending_revocation(self) -> dict | None:
+        path = self._revocation_state_path()
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return None
+        raw = self._read_bounded_json_file(path, self.MAX_REVOCATION_STATE_SIZE)
+        if not isinstance(raw, dict) or set(raw) != {
+            "schemaVersion", "institutionId", "connections", "summary", "summaryMetadata",
+        }:
+            raise EnableBankingUnavailable("finance revocation state unavailable")
+        institution_id = raw["institutionId"]
+        if (
+            raw["schemaVersion"] != self.REVOCATION_STATE_SCHEMA_VERSION
+            or not isinstance(institution_id, str)
+            or not self.INSTITUTION_ID_PATTERN.fullmatch(institution_id)
+            or institution_id not in self.KNOWN_INSTITUTION_IDS
+        ):
+            raise EnableBankingUnavailable("finance revocation state unavailable")
+        connections = self._validate_connection_records(raw["connections"])
+        summary = raw["summary"]
+        metadata = raw["summaryMetadata"]
+        if summary is None:
+            if metadata is not None:
+                raise EnableBankingUnavailable("finance revocation state unavailable")
+        else:
+            if (
+                not isinstance(summary, dict)
+                or not self._validate_persisted_finance_payload(summary)
+                or not isinstance(metadata, dict)
+            ):
+                raise EnableBankingUnavailable("finance revocation state unavailable")
+            metadata = self._validate_summary_metadata(metadata)
+            if self._summary_digest(summary) != metadata["bodyDigest"]:
+                raise EnableBankingUnavailable("finance revocation state digest mismatch")
+        return {
+            "schemaVersion": raw["schemaVersion"],
+            "institutionId": institution_id,
+            "connections": connections,
+            "summary": summary,
+            "summaryMetadata": metadata,
+        }
+
+    def _apply_revocation_state(self, state: dict) -> None:
+        """Apply a durable revoke intent and clear it only after every projection is safe."""
+        self._atomic_write_json(self._connections_path(), {"connections": state["connections"]})
+        summary = state["summary"]
+        if summary is None:
+            for path in (
+                self._summary_state_path(),
+                self._summary_metadata_path(),
+                self._summary_path(),
+            ):
+                self._remove_file_durably(path)
+        else:
+            metadata = state["summaryMetadata"]
+            committed = {
+                "schemaVersion": self.FINANCE_STATE_SCHEMA_VERSION,
+                "summary": summary,
+                "metadata": metadata,
+            }
+            state_body = json.dumps(
+                committed,
+                separators=(",", ":"),
+                sort_keys=True,
+                allow_nan=False,
+            ).encode("utf-8")
+            if len(state_body) > self.MAX_FINANCE_STATE_SIZE:
+                raise EnableBankingUnavailable("finance state exceeds response bound")
+            self._atomic_write_json(self._summary_state_path(), committed)
+            self._atomic_write_json(self._summary_metadata_path(), metadata)
+            self._atomic_write_json(self._summary_path(), summary)
+        self._remove_file_durably(self._revocation_state_path())
+
+    def _recover_pending_revocation(self) -> None:
+        state = self._read_pending_revocation()
+        if state is not None:
+            self._apply_revocation_state(state)
+
+    def _load_connections(self) -> list[dict]:
+        self._recover_pending_revocation()
+        raw = self._read_bounded_json_file(self._connections_path(), 256 * 1024)
+        if not isinstance(raw, dict) or set(raw) != {"connections"} or not isinstance(raw["connections"], list):
+            return []
+        return self._validate_connection_records(raw["connections"])
 
     def _save_connection(self, connection: dict) -> None:
         existing = [
@@ -559,6 +672,195 @@ class EnableBankingService:
                 "freshness": "stale",
                 "connectorState": "refresh_due",
             }
+        return result
+
+    @staticmethod
+    def _unavailable_provenance(observed_at: str) -> dict:
+        return {
+            "source": "no-authorized-finance-source",
+            "observedAt": observed_at,
+            "freshness": "unknown",
+            "quality": "unavailable",
+            "connectorState": "unavailable",
+        }
+
+    @classmethod
+    def _filtered_observed_provenance(
+        cls,
+        original: dict,
+        *,
+        source: str,
+        rows: list[dict],
+    ) -> dict:
+        has_stale = any(
+            row.get("provenance", {}).get("freshness") == "stale"
+            or row.get("provenance", {}).get("connectorState") == "refresh_due"
+            for row in rows
+        )
+        return {
+            "source": source,
+            "observedAt": original["observedAt"],
+            "freshness": "stale" if has_stale else "fresh",
+            "quality": "observed",
+            "connectorState": "refresh_due" if has_stale else "healthy",
+        }
+
+    @staticmethod
+    def _source_for_rows(rows: list[dict], derived_source: str) -> str:
+        sources = {row["source"] for row in rows}
+        return next(iter(sources)) if len(sources) == 1 else derived_source
+
+    def _remove_institution_from_summary(self, summary: dict, institution_id: str) -> dict:
+        """Remove one connector's observations without inventing replacement data."""
+        if not self._validate_persisted_finance_payload(summary):
+            raise EnableBankingUnavailable("cached finance summary unavailable")
+        source = f"enablebanking:{institution_id}"
+        result = dict(summary)
+        generated_at = summary["generatedAt"]
+
+        accounts_snapshot = summary.get("accounts")
+        remaining_accounts: list[dict] = []
+        if isinstance(accounts_snapshot, dict) and accounts_snapshot.get("availability") == "observed":
+            rows = accounts_snapshot.get("accounts")
+            if not isinstance(rows, list):
+                raise EnableBankingUnavailable("cached finance accounts unavailable")
+            remaining_accounts = [
+                row for row in rows
+                if isinstance(row, dict) and row.get("source") != source
+            ]
+            if remaining_accounts:
+                account_source = self._source_for_rows(
+                    remaining_accounts,
+                    "derived-account-snapshot",
+                )
+                result["accounts"] = {
+                    "availability": "observed",
+                    "accounts": remaining_accounts,
+                    "provenance": self._filtered_observed_provenance(
+                        accounts_snapshot["provenance"],
+                        source=account_source,
+                        rows=[
+                            row for row in remaining_accounts
+                            if row.get("availability") == "observed"
+                        ],
+                    ),
+                }
+            else:
+                result["accounts"] = {
+                    "availability": "unavailable",
+                    "provenance": self._unavailable_provenance(generated_at),
+                }
+        elif isinstance(accounts_snapshot, dict):
+            result["accounts"] = {
+                "availability": "unavailable",
+                "provenance": self._unavailable_provenance(generated_at),
+            }
+
+        has_observed_account = any(
+            row.get("availability") == "observed" for row in remaining_accounts
+        )
+        transactions_snapshot = summary.get("transactions")
+        remaining_transactions: list[dict] = []
+        has_transaction_observation = False
+        if isinstance(transactions_snapshot, dict) and transactions_snapshot.get("availability") == "observed":
+            rows = transactions_snapshot.get("transactions")
+            if not isinstance(rows, list):
+                raise EnableBankingUnavailable("cached finance transactions unavailable")
+            remaining_transactions = [
+                row for row in rows
+                if isinstance(row, dict) and row.get("source") != source
+            ]
+            has_transaction_observation = has_observed_account
+            if remaining_transactions:
+                transaction_source = self._source_for_rows(
+                    remaining_transactions,
+                    "derived-transaction-snapshot",
+                )
+                result["transactions"] = {
+                    "availability": "observed",
+                    "transactions": remaining_transactions,
+                    "provenance": self._filtered_observed_provenance(
+                        transactions_snapshot["provenance"],
+                        source=transaction_source,
+                        rows=remaining_transactions,
+                    ),
+                }
+            elif has_observed_account:
+                result["transactions"] = {
+                    "availability": "observed",
+                    "transactions": [],
+                    "provenance": {
+                        **transactions_snapshot["provenance"],
+                        "source": "derived-transaction-snapshot",
+                    },
+                }
+            else:
+                result["transactions"] = {
+                    "availability": "unavailable",
+                    "provenance": self._unavailable_provenance(generated_at),
+                }
+        elif isinstance(transactions_snapshot, dict):
+            result["transactions"] = {
+                "availability": "unavailable",
+                "provenance": self._unavailable_provenance(generated_at),
+            }
+
+        if not has_observed_account or not has_transaction_observation:
+            for key in (
+                "monthlyIncome", "fixedCosts", "discretionaryBuffer",
+                "spent", "savingsGoal", "saved",
+            ):
+                result[key] = {
+                    "availability": "unavailable",
+                    "provenance": self._unavailable_provenance(generated_at),
+                }
+        else:
+            transaction_provenance = result["transactions"]["provenance"]
+            observed_at = transaction_provenance["observedAt"]
+            freshness = transaction_provenance["freshness"]
+            connector_state = transaction_provenance["connectorState"]
+            monthly_income = 0
+            fixed_costs = 0
+            spent = 0
+            current_month = datetime.now(BUSINESS_TIME_ZONE).strftime("%Y-%m")
+            for transaction in remaining_transactions:
+                if not transaction["timestamp"].startswith(current_month):
+                    continue
+                amount = transaction["signedAmountCents"]
+                if amount > 0:
+                    monthly_income = self._checked_add(monthly_income, amount)
+                elif amount < 0:
+                    outflow = -amount
+                    spent = self._checked_add(spent, outflow)
+                    if transaction["category"] in {"Bills", "Subscriptions"}:
+                        fixed_costs = self._checked_add(fixed_costs, outflow)
+            metric_provenance = {
+                "source": transaction_provenance["source"],
+                "observedAt": observed_at,
+                "freshness": freshness,
+                "quality": "observed",
+                "connectorState": connector_state,
+            }
+            for key, amount in (
+                ("monthlyIncome", monthly_income),
+                ("fixedCosts", fixed_costs),
+                ("spent", spent),
+            ):
+                result[key] = {
+                    "availability": "observed",
+                    "amountCents": amount,
+                    "provenance": metric_provenance,
+                }
+            for key in ("discretionaryBuffer", "savingsGoal", "saved"):
+                value = summary.get(key)
+                if not isinstance(value, dict) or value.get("availability") != "unavailable":
+                    result[key] = {
+                        "availability": "unavailable",
+                        "provenance": self._unavailable_provenance(generated_at),
+                    }
+
+        if not self._validate_persisted_finance_payload(result):
+            raise EnableBankingUnavailable("filtered finance summary failed validation")
         return result
 
     def _http_client(self) -> httpx.AsyncClient:
@@ -791,7 +1093,7 @@ class EnableBankingService:
                 headers={"Authorization": f"Bearer {token}"},
             ) as upstream:
                 if upstream.status_code == 404:
-                    raise EnableBankingUnavailable("provider session not found")
+                    raise ProviderSessionNotFound("provider session not found")
                 data = await self._read_upstream_json(
                     upstream,
                     expected_statuses={200},
@@ -800,6 +1102,47 @@ class EnableBankingService:
         if not isinstance(data, dict):
             raise EnableBankingUnavailable("invalid provider session")
         return data
+
+    async def _delete_session(
+        self,
+        client: httpx.AsyncClient,
+        credentials: dict,
+        token: str,
+        session_id: str,
+    ) -> None:
+        """Revoke one provider session without allowing provider text across the boundary."""
+        if not self.PROVIDER_ID_PATTERN.fullmatch(session_id):
+            raise EnableBankingUnavailable("invalid provider session id")
+        async with asyncio.timeout(self.TOTAL_TIMEOUT):
+            async with client.stream(
+                "DELETE",
+                f"{credentials['api_base_url']}/sessions/{session_id}",
+                headers={"Authorization": f"Bearer {token}"},
+            ) as upstream:
+                # A missing session is already revoked from this adapter's
+                # perspective.  410 is the equivalent durable "gone" result.
+                if upstream.status_code in {404, 410}:
+                    return
+                if upstream.status_code in {200, 202, 204}:
+                    return
+                if upstream.status_code not in {400, 409}:
+                    raise EnableBankingUnavailable("provider revoke unavailable")
+                try:
+                    data = await self._read_upstream_json(
+                        upstream,
+                        expected_statuses={400, 409},
+                        maximum_bytes=self.MAX_RESPONSE_SIZE,
+                    )
+                except EnableBankingUnavailable as exc:
+                    raise EnableBankingUnavailable("provider revoke unavailable") from exc
+                provider_state = (
+                    data.get("status", data.get("state"))
+                    if isinstance(data, dict)
+                    else None
+                )
+                if str(provider_state or "").strip().upper() in {"CLOSED", "REVOKED"}:
+                    return
+                raise EnableBankingUnavailable("provider revoke unavailable")
 
     async def _get_account_json(
         self,
@@ -873,6 +1216,112 @@ class EnableBankingService:
                 return connection_id, flow
         return None
 
+    def _validate_catalog_institution(self, institution_id: object) -> str | None:
+        if not isinstance(institution_id, str) or not self.INSTITUTION_ID_PATTERN.fullmatch(institution_id):
+            return "invalid_request"
+        recognized = self._recognized_institutions()
+        if (
+            institution_id not in self.KNOWN_INSTITUTION_IDS
+            or (recognized is not None and institution_id not in recognized)
+        ):
+            return "unknown_institution"
+        return None
+
+    def _prepare_revocation_state(self, institution_id: str, connections: list[dict]) -> dict:
+        cached = self.load_cached_summary()
+        summary = (
+            None
+            if cached is None
+            else self._remove_institution_from_summary(cached, institution_id)
+        )
+        metadata = None if summary is None else self._next_summary_metadata(summary)
+        state = {
+            "schemaVersion": self.REVOCATION_STATE_SCHEMA_VERSION,
+            "institutionId": institution_id,
+            "connections": [
+                connection for connection in connections
+                if connection["institutionId"] != institution_id
+            ],
+            "summary": summary,
+            "summaryMetadata": metadata,
+        }
+        encoded = json.dumps(
+            state,
+            separators=(",", ":"),
+            sort_keys=True,
+            allow_nan=False,
+        ).encode("utf-8")
+        if len(encoded) > self.MAX_REVOCATION_STATE_SIZE:
+            raise EnableBankingUnavailable("finance revocation state exceeds response bound")
+        return state
+
+    async def revoke(self, institution_id: str) -> tuple[int, dict]:
+        """Revoke a catalog institution and commit its local cleanup safely."""
+        validation_error = self._validate_catalog_institution(institution_id)
+        if validation_error is not None:
+            return 400, {"error": validation_error}
+
+        async with self.connections_lock:
+            try:
+                self._recover_pending_revocation()
+                connections = self._load_connections()
+            except Exception:
+                return 503, {"error": "temporary_error"}
+            connection = next(
+                (
+                    value for value in connections
+                    if value["institutionId"] == institution_id
+                ),
+                None,
+            )
+            if connection is None:
+                return 404, {"error": "not_connected"}
+            try:
+                state = self._prepare_revocation_state(institution_id, connections)
+            except Exception:
+                return 503, {"error": "temporary_error"}
+            credentials = self._credentials()
+            if credentials is None:
+                return 503, {"error": "temporary_error"}
+            try:
+                async with self._http_client() as client:
+                    token = await self._bearer(credentials)
+                    await self._delete_session(
+                        client,
+                        credentials,
+                        token,
+                        connection["sessionId"],
+                    )
+            except Exception:
+                # The provider must be confirmed before the local connection or
+                # its cached observations are touched.
+                return 503, {"error": "temporary_error"}
+            try:
+                # The intent is durable before either projection is changed.
+                # Any interrupted application is completed by the next read.
+                self._atomic_write_json(self._revocation_state_path(), state)
+                self._apply_revocation_state(state)
+            except Exception:
+                return 503, {"error": "temporary_error"}
+
+        async with self.consent_lock:
+            existing_flow = self.consent_flows.get(connection["connectionId"])
+            if existing_flow is None:
+                self.consent_flows[connection["connectionId"]] = {
+                    "state": "revoked",
+                    "institutionId": institution_id,
+                    "started": time.monotonic(),
+                    "csrf_state": None,
+                    "authorization_id": connection["connectionId"],
+                    "session_id": None,
+                }
+            for flow in self.consent_flows.values():
+                if flow.get("institutionId") == institution_id:
+                    flow["state"] = "revoked"
+                    flow["session_id"] = None
+            self._prune_flows()
+        return 200, {"state": "revoked"}
+
     async def start(self, institution_id: str) -> tuple[int, dict]:
         credentials = self._credentials()
         if credentials is None:
@@ -942,7 +1391,9 @@ class EnableBankingService:
         if flow is None and persisted is not None:
             flow = {"state": "linked", "session_id": persisted["sessionId"]}
             cached_state = "linked"
-        if cached_state in {"linked", "expired", "error"} and persisted is None:
+        if cached_state in {"expired", "revoked"}:
+            return {"state": cached_state}
+        if cached_state in {"linked", "error"} and persisted is None:
             return {"state": cached_state}
         credentials = self._credentials()
         if credentials is None:
@@ -962,6 +1413,8 @@ class EnableBankingService:
                         )
                     ).get("status")
                 )
+        except ProviderSessionNotFound:
+            state = "revoked"
         except Exception:
             state = cached_state if cached_state is not None else "error"
         async with self.consent_lock:
@@ -1014,6 +1467,7 @@ class EnableBankingService:
                 ),
                 None,
             )
+            matched_flow = dict(self.consent_flows[match]) if match is not None else None
         if match is None:
             return CallbackResult(valid=False)
         credentials = self._credentials()
@@ -1029,9 +1483,19 @@ class EnableBankingService:
                     client, credentials, await self._bearer(credentials), code
                 )
             session_id = session_response["session_id"]
+            if "status" in session_response:
+                session_state = self._session_state(session_response.get("status"))
+                if session_state != "linked":
+                    async with self.consent_lock:
+                        flow = self.consent_flows.get(match)
+                        if flow is not None and flow["state"] in self.ACTIVE_STATES:
+                            flow["state"] = session_state
+                            flow["session_id"] = None
+                            self._prune_flows()
+                    return CallbackResult(valid=True, linked=False)
             connection = {
                 "connectionId": match,
-                "institutionId": self.consent_flows[match]["institutionId"],
+                "institutionId": matched_flow["institutionId"],
                 "sessionId": session_id,
                 "linkedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             }
@@ -1485,7 +1949,8 @@ class EnableBankingService:
         credentials = self._credentials()
         if credentials is None:
             raise EnableBankingUnavailable("missing Enable Banking configuration")
-        connections = self._load_connections()
+        async with self.connections_lock:
+            connections = self._load_connections()
         if not connections:
             raise EnableBankingUnavailable("no linked connections")
         observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -1610,19 +2075,24 @@ class EnableBankingService:
         serialized = json.dumps(summary, separators=(",", ":"), sort_keys=True, allow_nan=False).encode("utf-8")
         if len(serialized) > self.MAX_FINANCE_SUMMARY_SIZE:
             raise EnableBankingUnavailable("normalized finance summary exceeds response bound")
-        metadata = self._next_summary_metadata(summary)
-        state = {
-            "schemaVersion": self.FINANCE_STATE_SCHEMA_VERSION,
-            "summary": summary,
-            "metadata": metadata,
-        }
-        state_body = json.dumps(state, separators=(",", ":"), sort_keys=True, allow_nan=False).encode("utf-8")
-        if len(state_body) > self.MAX_FINANCE_STATE_SIZE:
-            raise EnableBankingUnavailable("finance state exceeds response bound")
-        # The state envelope is the single commit point. The historical body
-        # and metadata files are compatibility projections; a crash between
-        # either projection rename cannot expose a torn Finance snapshot.
-        self._atomic_write_json(self._summary_state_path(), state)
-        self._atomic_write_json(self._summary_metadata_path(), metadata)
-        self._atomic_write_json(self._summary_path(), summary)
+        async with self.connections_lock:
+            # Do not publish a provider response fetched for a connection set
+            # that was concurrently relinked or revoked.
+            if self._load_connections() != connections:
+                raise EnableBankingUnavailable("connections changed during refresh")
+            metadata = self._next_summary_metadata(summary)
+            state = {
+                "schemaVersion": self.FINANCE_STATE_SCHEMA_VERSION,
+                "summary": summary,
+                "metadata": metadata,
+            }
+            state_body = json.dumps(state, separators=(",", ":"), sort_keys=True, allow_nan=False).encode("utf-8")
+            if len(state_body) > self.MAX_FINANCE_STATE_SIZE:
+                raise EnableBankingUnavailable("finance state exceeds response bound")
+            # The state envelope is the single commit point. The historical body
+            # and metadata files are compatibility projections; a crash between
+            # either projection rename cannot expose a torn Finance snapshot.
+            self._atomic_write_json(self._summary_state_path(), state)
+            self._atomic_write_json(self._summary_metadata_path(), metadata)
+            self._atomic_write_json(self._summary_path(), summary)
         return summary
