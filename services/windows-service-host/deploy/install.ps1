@@ -714,7 +714,9 @@ try {
     $env:LIFEOS_TAILSCALE_ALLOWED_LOGIN = 'staged-import@lifeos.invalid'
     $env:LIFEOS_DEPLOY_STAGED_GATEWAY_SOURCE = $gatewayTarget
     $env:LIFEOS_DEPLOY_STAGED_IMPORT_CHECK = $gatewayImportCheck
-    $gatewayImportRunner = "import os;exec(os.environ['LIFEOS_DEPLOY_STAGED_IMPORT_CHECK'])"
+    # Keep the native `-c` payload quote-free for Windows PowerShell 5.1,
+    # which strips nested quote characters while binding native arguments.
+    $gatewayImportRunner = 'import os;exec(next(v for v in os.environ.values() if v.startswith(chr(105)+chr(109)+chr(112)+chr(111)+chr(114)+chr(116)+chr(32))))'
     Invoke-NativeChecked $pythonStage.PythonPath @('-I', '-c', $gatewayImportRunner) -Quiet | Out-Null
 } finally {
     if ($null -eq $previousAllowedLogin) { Remove-Item Env:LIFEOS_TAILSCALE_ALLOWED_LOGIN -ErrorAction SilentlyContinue }
