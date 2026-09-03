@@ -105,7 +105,7 @@ try {
     $env:LIFEOS_DEPLOY_PREFLIGHT_IMPORT_CHECK = $gatewayImportCheck
     # Keep the native `-c` payload quote-free for Windows PowerShell 5.1,
     # which strips nested quote characters while binding native arguments.
-    $gatewayImportRunner = 'import os;exec(next(v for v in os.environ.values() if v.startswith(chr(105)+chr(109)+chr(112)+chr(111)+chr(114)+chr(116)+chr(32))))'
+    $gatewayImportRunner = 'import os;exec(os.environ.get(chr(76)+chr(73)+chr(70)+chr(69)+chr(79)+chr(83)+chr(95)+chr(68)+chr(69)+chr(80)+chr(76)+chr(79)+chr(89)+chr(95)+chr(80)+chr(82)+chr(69)+chr(70)+chr(76)+chr(73)+chr(71)+chr(72)+chr(84)+chr(95)+chr(73)+chr(77)+chr(80)+chr(79)+chr(82)+chr(84)+chr(95)+chr(67)+chr(72)+chr(69)+chr(67)+chr(75)))'
     Invoke-NativeChecked $pythonExecutable @('-I', '-c', $gatewayImportRunner) -Quiet | Out-Null
 } finally {
     if ($null -eq $previousAllowedLogin) { Remove-Item Env:LIFEOS_TAILSCALE_ALLOWED_LOGIN -ErrorAction SilentlyContinue }
