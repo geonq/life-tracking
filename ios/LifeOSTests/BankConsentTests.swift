@@ -176,12 +176,37 @@ final class BankConsentTests: XCTestCase {
             ("link_opened", BankConsentState.linkOpened),
             ("linked", BankConsentState.linked),
             ("expired", BankConsentState.expired),
+            ("revoked", BankConsentState.revoked),
             ("error", BankConsentState.error),
         ] {
             let body = Data(#"{"state":"\#(raw)"}"#.utf8)
             let state = try TailscaleSyncClient.parseBankConsentStatusResponse(data: body)
             XCTAssertEqual(state, expected, raw)
         }
+    }
+
+    func testRevokedGatewayStateRemainsDistinctInSettingsLifecycle() throws {
+        let link = BankConsentLink(
+            consentUrl: URL(string: "https://bank.example.com/consent?session=opaque")!,
+            connectionId: "eb-opaque-123"
+        )
+
+        let revoked = BankConsentRowState.fromGatewayState(.revoked, preserving: link)
+        XCTAssertEqual(revoked, .revoked)
+        XCTAssertEqual(revoked.lifecyclePhase, .revoked)
+        XCTAssertEqual(revoked.lifecyclePhase.title, "Connection revoked")
+        XCTAssertTrue(revoked.lifecyclePhase.canRetry)
+        XCTAssertNotEqual(revoked.lifecyclePhase, .expired)
+        XCTAssertNotEqual(revoked.lifecyclePhase, .failed)
+
+        XCTAssertEqual(
+            BankConsentRowState.fromGatewayState(.expired, preserving: link),
+            .expired
+        )
+        XCTAssertEqual(
+            BankConsentRowState.fromGatewayState(.error, preserving: link),
+            .error(link)
+        )
     }
 
     func testParseBankConsentStatusResponseRejectsUnknownStateOrMalformedBody() {

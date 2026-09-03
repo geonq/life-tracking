@@ -420,6 +420,38 @@ def test_revoke_sends_authenticated_delete_and_filters_only_revoked_cache_rows(t
     assert run(adapter.status("eb-revolut")) == {"state": "revoked"}
 
 
+def test_revoke_persists_sanitized_tombstone_across_restart(tmp_path, monkeypatch):
+    adapter = service(tmp_path, monkeypatch)
+    adapter._save_connection({
+        "connectionId": "eb-restart",
+        "institutionId": "revolut_personal",
+        "sessionId": "session-never-in-tombstone",
+        "linkedAt": "2026-08-01T00:00:00Z",
+    })
+    holder = QueueClient([FakeResponse(b"", status_code=204)])
+    monkeypatch.setattr(enablebanking.httpx, "AsyncClient", lambda **_: holder)
+
+    assert run(adapter.revoke("revolut_personal")) == (200, {"state": "revoked"})
+
+    tombstone_path = tmp_path / "enablebanking-revoked.json"
+    tombstones = json.loads(tombstone_path.read_text())
+    assert set(tombstones) == {"schemaVersion", "tombstones"}
+    assert tombstones["schemaVersion"] == 1
+    assert tombstones["tombstones"] and set(tombstones["tombstones"][0]) == {
+        "connectionId", "institutionId", "revokedAt",
+    }
+    assert tombstones["tombstones"][0]["connectionId"] == "eb-restart"
+    assert "session-never-in-tombstone" not in tombstone_path.read_text()
+
+    restarted = service(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        restarted,
+        "_get_session",
+        lambda *_: (_ for _ in ()).throw(AssertionError("revoked tombstone must not refresh")),
+    )
+    assert run(restarted.status("eb-restart")) == {"state": "revoked"}
+
+
 def test_revoke_allows_a_new_consent_flow_for_the_same_institution(tmp_path, monkeypatch):
     adapter = service(tmp_path, monkeypatch)
     adapter._save_connection({
@@ -550,6 +582,71 @@ def test_revoke_transient_failure_preserves_connection_and_cache(
     assert "provider token must not escape" not in json.dumps(body)
 
 
+def test_revoke_202_is_temporary_and_preserves_connection_and_cache(tmp_path, monkeypatch):
+    adapter = service(tmp_path, monkeypatch)
+    adapter._save_connection({
+        "connectionId": "eb-pending-revoke",
+        "institutionId": "revolut_personal",
+        "sessionId": "session-pending-revoke",
+        "linkedAt": "2026-08-01T00:00:00Z",
+    })
+    write_cached_summary(adapter, fixture_finance_summary(["revolut_personal"]))
+    paths = [
+        tmp_path / "enablebanking-connections.json",
+        tmp_path / "finance-summary.json",
+        tmp_path / "finance-summary.json.meta.json",
+        tmp_path / "finance-summary.json.state.json",
+    ]
+    before = {path: path.read_bytes() for path in paths}
+    holder = QueueClient([FakeResponse({"status": "PENDING"}, status_code=202)])
+    monkeypatch.setattr(enablebanking.httpx, "AsyncClient", lambda **_: holder)
+
+    assert run(adapter.revoke("revolut_personal")) == (
+        503,
+        {"error": "temporary_error"},
+    )
+    assert {path: path.read_bytes() for path in paths} == before
+    assert not (tmp_path / "enablebanking-revocation.json").exists()
+    assert not (tmp_path / "enablebanking-revoked.json").exists()
+
+
+@pytest.mark.parametrize(
+    "provider_response, expected_status",
+    [
+        (FakeResponse({"status": "CLOSED"}, status_code=200), 200),
+        (FakeResponse({"status": "PENDING"}, status_code=200), 503),
+    ],
+)
+def test_revoke_200_requires_explicit_final_provider_state(
+    provider_response, expected_status, tmp_path, monkeypatch
+):
+    adapter = service(tmp_path, monkeypatch)
+    adapter._save_connection({
+        "connectionId": "eb-200-revoke",
+        "institutionId": "revolut_personal",
+        "sessionId": "session-200-revoke",
+        "linkedAt": "2026-08-01T00:00:00Z",
+    })
+    holder = QueueClient([provider_response])
+    monkeypatch.setattr(enablebanking.httpx, "AsyncClient", lambda **_: holder)
+
+    status, body = run(adapter.revoke("revolut_personal"))
+
+    assert status == expected_status
+    if expected_status == 200:
+        assert body == {"state": "revoked"}
+        assert json.loads((tmp_path / "enablebanking-connections.json").read_text()) == {
+            "connections": []
+        }
+    else:
+        assert body == {"error": "temporary_error"}
+        persisted = json.loads(
+            (tmp_path / "enablebanking-connections.json").read_text()
+        )
+        assert persisted["connections"][0]["connectionId"] == "eb-200-revoke"
+        assert not (tmp_path / "enablebanking-revoked.json").exists()
+
+
 def test_revoke_rejects_malformed_or_unknown_institution_without_network(tmp_path, monkeypatch):
     adapter = service(tmp_path, monkeypatch)
     monkeypatch.setattr(
@@ -588,6 +685,60 @@ def test_callback_exchanges_code_and_persists_only_opaque_connection(tmp_path, m
         }]
     }
     assert "authorization-code" not in (tmp_path / "enablebanking-connections.json").read_text()
+
+
+def test_revoke_wins_deterministic_callback_persistence_race(tmp_path, monkeypatch):
+    adapter = service(tmp_path, monkeypatch)
+    adapter._save_connection({
+        "connectionId": "eb-existing",
+        "institutionId": "revolut_personal",
+        "sessionId": "session-existing",
+        "linkedAt": "2026-08-01T00:00:00Z",
+    })
+    adapter.consent_flows["eb-callback"] = {
+        "state": "created",
+        "institutionId": "revolut_personal",
+        "started": time.monotonic(),
+        "csrf_state": "csrf-race",
+        "authorization_id": "authorization-race",
+        "session_id": None,
+    }
+    exchanged = asyncio.Event()
+    release_exchange = asyncio.Event()
+
+    async def exchange(_client, _credentials, _token, _code):
+        exchanged.set()
+        await release_exchange.wait()
+        return {"session_id": "session-after-revoke", "accounts": []}
+
+    async def delete(_client, _credentials, _token, _session_id):
+        return None
+
+    monkeypatch.setattr(adapter, "_exchange_code", exchange)
+    monkeypatch.setattr(adapter, "_delete_session", delete)
+    monkeypatch.setattr(enablebanking.httpx, "AsyncClient", lambda **_: QueueClient([]))
+
+    async def scenario():
+        callback_task = asyncio.create_task(
+            adapter.callback("code=authorization-code&state=csrf-race")
+        )
+        await exchanged.wait()
+        revoke_task = asyncio.create_task(adapter.revoke("revolut_personal"))
+        revoke_result = await revoke_task
+        release_exchange.set()
+        callback_result = await callback_task
+        return revoke_result, callback_result
+
+    revoke_result, callback_result = run(scenario())
+
+    assert revoke_result == (200, {"state": "revoked"})
+    assert callback_result == enablebanking.CallbackResult(valid=True, linked=False)
+    assert json.loads((tmp_path / "enablebanking-connections.json").read_text()) == {
+        "connections": []
+    }
+    assert "session-after-revoke" not in "".join(
+        path.read_text() for path in tmp_path.glob("*.json")
+    )
 
 
 def test_refresh_normalizes_realistic_account_and_transaction_shapes(tmp_path, monkeypatch):

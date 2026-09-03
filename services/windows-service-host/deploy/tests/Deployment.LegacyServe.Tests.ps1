@@ -26,36 +26,47 @@ New-Item -ItemType Directory -Path $nativeFixtureRoot -Force | Out-Null
 try {
     $successfulScript = Join-Path $nativeFixtureRoot 'successful.ps1'
     [IO.File]::WriteAllText($successfulScript, "Write-Output 'ok'`r`n", [Text.UTF8Encoding]::new($false))
+    $LASTEXITCODE = 23
+    $staleResult = Invoke-NativeChecked $successfulScript @()
+    Assert-LegacyServe ([int]$staleResult.ExitCode -eq 0) 'a successful PowerShell script clears a stale nonzero LASTEXITCODE.'
+    Assert-LegacyServe ([string]$staleResult.Output[0] -eq 'ok') 'successful script output is preserved with a stale LASTEXITCODE.'
+    Assert-LegacyServe ([int]$LASTEXITCODE -eq 23) 'the caller LASTEXITCODE is restored after script invocation.'
+
     Remove-Variable -Name LASTEXITCODE -ErrorAction SilentlyContinue
     $successResult = Invoke-NativeChecked $successfulScript @()
     Assert-LegacyServe ([int]$successResult.ExitCode -eq 0) 'a successful PowerShell script without LASTEXITCODE is treated as exit code zero.'
-    Assert-LegacyServe ([string]$successResult.Output[0] -eq 'ok') 'successful script output is preserved.'
+    Assert-LegacyServe ([string]$successResult.Output[0] -eq 'ok') 'successful script output is preserved without LASTEXITCODE.'
 
     $failingScript = Join-Path $nativeFixtureRoot 'failing.ps1'
     [IO.File]::WriteAllText($failingScript, "Write-Output 'failure'`r`nexit 17`r`n", [Text.UTF8Encoding]::new($false))
+    $LASTEXITCODE = 31
     Assert-LegacyServeThrows { Invoke-NativeChecked $failingScript @() } 'a nonzero script exit remains a hard failure.'
+    Assert-LegacyServe ([int]$LASTEXITCODE -eq 31) 'the caller LASTEXITCODE is restored after a failing script invocation.'
 } finally {
     Remove-Item -LiteralPath $nativeFixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-$legacy = '{"Web":{"https://node.example.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:3000"}}},"https://node.example.ts.net:8420":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8421"}}}},"TCP":{"8420":{"HTTPS":true}},"Services":{},"AllowFunnel":false,"Foreground":false}'
+$legacy = '{"Web":{"https://node.example.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:3000"}}},"geonqserver.tail5f8789.ts.net:8420":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8421"}}}},"TCP":{"8420":{"HTTPS":true}},"Services":{},"AllowFunnel":false,"Foreground":false}'
 $unrelated = '{"Web":{"https://node.example.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:3000"}}}},"TCP":{},"Services":{},"AllowFunnel":false,"Foreground":false}'
-$configured = '{"Web":{"https://node.example.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:3000"}}},"https://node.example.ts.net:8420":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8421","AcceptAppCaps":["lifeos.example/trusted-edge"]}}}},"TCP":{"8420":{"HTTPS":true}},"Services":{},"AllowFunnel":false,"Foreground":false}'
+$configured = '{"Web":{"https://node.example.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:3000"}}},"geonqserver.tail5f8789.ts.net:8420":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8421","AcceptAppCaps":["lifeos.example/trusted-edge"]}}}},"TCP":{"8420":{"HTTPS":true}},"Services":{},"AllowFunnel":false,"Foreground":false}'
 
 $legacyDecision = Get-TailscaleServeDecision $legacy
 Assert-LegacyServe ($legacyDecision.Action -eq 'UpgradeLegacyMapping') 'the exact proxy-only HTTPS route is classified as UpgradeLegacyMapping.'
+Assert-LegacyServe ([string]$legacyDecision.TargetEndpoint -ceq 'geonqserver.tail5f8789.ts.net:8420') 'the live bare hostname:port Web key is retained as the target identity.'
 Assert-LegacyServe ([int]$legacyDecision.TcpMirrorCount -eq 1) 'the exact TCP HTTPS mirror is recorded as paired route state.'
 Assert-LegacyServe ((Get-TailscaleServeFingerprint $legacy -ExcludeLifeOSRoute) -eq (Get-TailscaleServeFingerprint $unrelated -ExcludeLifeOSRoute)) 'the paired TCP mirror is excluded only with its Web route.'
 Assert-LegacyServe ((Get-TailscaleServeDecision $configured).Action -eq 'AlreadyConfigured') 'the capability-bearing route remains idempotent.'
+$absoluteHttpsCompatibility = $legacy.Replace('geonqserver.tail5f8789.ts.net:8420', 'https://geonqserver.tail5f8789.ts.net:8420')
+Assert-LegacyServe ((Get-TailscaleServeDecision $absoluteHttpsCompatibility).Action -eq 'UpgradeLegacyMapping') 'the historical absolute HTTPS Web key remains compatible.'
 
 $wrongProxy = $legacy.Replace('http://127.0.0.1:8421', 'http://127.0.0.1:9000')
 $extraHandlerField = $legacy.Replace('"Proxy":"http://127.0.0.1:8421"', '"Proxy":"http://127.0.0.1:8421","Text":"unexpected"')
 $extraPath = $legacy.Replace('"/":{"Proxy":"http://127.0.0.1:8421"}', '"/":{"Proxy":"http://127.0.0.1:8421"},"/other":{"Proxy":"http://127.0.0.1:8421"}')
-$wrongScheme = $legacy.Replace('https://node.example.ts.net:8420', 'http://node.example.ts.net:8420')
+$wrongScheme = $legacy.Replace('geonqserver.tail5f8789.ts.net:8420', 'http://geonqserver.tail5f8789.ts.net:8420')
 $tcpCollision = $legacy.Replace('"8420":{"HTTPS":true}', '"8420":{"HTTPS":true,"TCPForward":"127.0.0.1:9000"}')
 $serviceCollision = $legacy.Replace('"Services":{}', '"Services":{"svc:other":{"endpoints":{"tcp:8420":"http://127.0.0.1:9000"}}}')
-$rangeCollision = $legacy.Replace('https://node.example.ts.net:8420', 'https://node.example.ts.net:8419-8421')
-$ambiguous = $legacy.Replace('"https://node.example.ts.net:8420":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8421"}}}', '"https://node.example.ts.net:8420":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8421"}}},"https://other.example.ts.net:8420":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8421"}}}')
+$rangeCollision = $legacy.Replace('geonqserver.tail5f8789.ts.net:8420', 'geonqserver.tail5f8789.ts.net:8419-8421')
+$ambiguous = $legacy.Replace('"geonqserver.tail5f8789.ts.net:8420":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8421"}}}', '"geonqserver.tail5f8789.ts.net:8420":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8421"}}},"other.example.ts.net:8420":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8421"}}}')
 foreach ($fixture in @(
     [pscustomobject]@{ Json = $wrongProxy; Name = 'wrong proxy' }
     [pscustomobject]@{ Json = $extraHandlerField; Name = 'extra handler field' }
@@ -92,7 +103,7 @@ $isOff = $Arguments -contains 'off'
 if ($Arguments -contains '--https=8420' -and $isOff) {
     if (-not $hasCapability) { throw 'targeted removal omitted the public capability selector.' }
     if ($null -ne $state.PSObject.Properties['Web'] -and $state.Web -is [System.Management.Automation.PSCustomObject]) {
-        $webKey = @($state.Web.PSObject.Properties | Where-Object { $_.Name -match '(?i)^https://[^/]+:8420$' } | Select-Object -First 1)
+        $webKey = @($state.Web.PSObject.Properties | Where-Object { $_.Name -match '(?i)^(?:https://)?[a-z0-9.-]+:8420$' } | Select-Object -First 1)
         if ($webKey.Count -eq 1) { [void]$state.Web.PSObject.Properties.Remove($webKey[0].Name) }
         if (@($state.Web.PSObject.Properties).Count -eq 0) { [void]$state.PSObject.Properties.Remove('Web') }
     }
@@ -105,8 +116,8 @@ if ($Arguments -contains '--https=8420' -and $isOff) {
 
 if ($Arguments -contains '--https=8420' -and $Arguments -contains 'http://127.0.0.1:8421') {
     if ($null -eq $state.PSObject.Properties['Web']) { [void]($state | Add-Member -NotePropertyName Web -NotePropertyValue ([pscustomobject]@{})) }
-    $webKey = @($state.Web.PSObject.Properties | Where-Object { $_.Name -match '(?i)^https://[^/]+:8420$' } | Select-Object -First 1)
-    $targetKey = if ($webKey.Count -eq 1) { [string]$webKey[0].Name } else { 'https://node.example.ts.net:8420' }
+    $webKey = @($state.Web.PSObject.Properties | Where-Object { $_.Name -match '(?i)^(?:https://)?[a-z0-9.-]+:8420$' } | Select-Object -First 1)
+    $targetKey = if ($webKey.Count -eq 1) { [string]$webKey[0].Name } else { 'geonqserver.tail5f8789.ts.net:8420' }
     $handler = [ordered]@{ Proxy = 'http://127.0.0.1:8421' }
     if ($hasCapability) { $handler.AcceptAppCaps = @('lifeos.example/trusted-edge') }
     $endpoint = [pscustomobject]@{ Handlers = [pscustomobject]@{ '/' = [pscustomobject]$handler } }

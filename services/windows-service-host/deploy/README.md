@@ -44,7 +44,7 @@ calendar/documents/log directories. Both services can read the Claude secret.
 The current interactive operator is resolved to a SID at install time. No
 profile, `Users`, `Everyone`, or shared-service account grant is created.
 
-The v17 source bundle is reproducible and intentionally includes every
+The v17 source bundle uses deterministic packaging and intentionally includes every
 trackable deployment file: `Deployment.Common.ps1`, `README.md`,
 `gateway_launcher.py`, `install.ps1`, `preflight.ps1`, `rollback.ps1`,
 `verify.ps1`, `verify-candidate.ps1`,
@@ -54,12 +54,12 @@ and `tests/Deployment.Static.Tests.ps1`. The staged gateway release carries
 Runtime data and secret contents remain ignored; the bundle contains only the
 reviewed source and path references.
 
-## Reproducible Windows candidate
+## Deterministic Windows candidate packaging
 
 Build a source-bound candidate from a clean checkout whose `HEAD` exactly
-matches its configured `origin/*` upstream. Run this on the build host from
-the repository; provide only a standalone Windows `node.exe`, never the
-Hermes user runtime tree:
+matches its configured `origin/*` upstream. Run this deterministic packaging
+step on the build host from the repository; provide only a standalone Windows
+`node.exe`, never the Hermes user runtime tree:
 
 ```bash
 bash scripts/build_windows_release.sh \

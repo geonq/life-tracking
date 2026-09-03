@@ -118,6 +118,27 @@ class WindowsReleaseBuilderTests(unittest.TestCase):
         self.assertIn("[A-Za-z0-9@]", verifier)
         self.assertIn("(?:\\.{1,2})", verifier)
 
+    def test_verifier_enforces_exact_api_package_and_dependency_property_sets(self) -> None:
+        verifier = VERIFIER.read_text(encoding="utf-8")
+        self.assertIn("Assert-ExactJsonPropertySet", verifier)
+        self.assertIn("'name', 'version', 'private', 'type', 'dependencies'", verifier)
+        self.assertIn("'@iphone-life-os/contracts', 'zod'", verifier)
+        self.assertIn("-isnot [bool]", verifier)
+
+    def test_legacy_suite_covers_live_bare_serve_keys_and_stale_exit_code(self) -> None:
+        legacy_test = LEGACY_TEST.read_text(encoding="utf-8")
+        self.assertIn("geonqserver.tail5f8789.ts.net:8420", legacy_test)
+        self.assertIn("absoluteHttpsCompatibility", legacy_test)
+        self.assertIn("$LASTEXITCODE = 23", legacy_test)
+        self.assertIn("caller LASTEXITCODE is restored", legacy_test)
+
+    def test_packaging_docs_do_not_claim_bit_for_bit_reproducibility(self) -> None:
+        builder = BUILDER.read_text(encoding="utf-8")
+        readme = (ROOT / "services" / "windows-service-host" / "deploy" / "README.md").read_text(encoding="utf-8")
+        self.assertIn("deterministic packaging", builder)
+        self.assertIn("Deterministic Windows candidate packaging", readme)
+        self.assertNotIn("source bundle is reproducible", readme)
+
     def test_legacy_fake_is_windows_powershell_5_1_compatible(self) -> None:
         legacy_test = LEGACY_TEST.read_text(encoding="utf-8")
         self.assertIn("param()\n$Arguments = @($args)", legacy_test)

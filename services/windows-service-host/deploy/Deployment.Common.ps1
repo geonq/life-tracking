@@ -498,14 +498,60 @@ function Invoke-NativeChecked {
         [switch]$AllowNonZero,
         [switch]$Quiet
     )
-    $output = & $FilePath @ArgumentList 2>&1
-    # PowerShell scripts do not necessarily initialize LASTEXITCODE.  Read
-    # the automatic variable through the provider so StrictMode does not turn
-    # a successful script invocation into an unbound-variable failure.  A
-    # present value still goes through the normal integer conversion and
-    # non-zero failure path below.
-    $lastExitCodeVariable = Get-Variable -Name LASTEXITCODE -ErrorAction SilentlyContinue
-    $exitCode = if ($null -eq $lastExitCodeVariable) { 0 } else { [int]$lastExitCodeVariable.Value }
+    # The deployment suites use a PowerShell fake for native tools. A script
+    # that returns normally does not overwrite LASTEXITCODE, so a non-zero
+    # value left by an earlier native command must not turn that script into a
+    # false failure. Clear the value only for .ps1 invocation, then restore
+    # the caller's value after observing the script result.
+    $isPowerShellScript = [IO.Path]::GetExtension($FilePath) -ieq '.ps1'
+    $previousLocalLastExitCode = Get-Variable -Name LASTEXITCODE -Scope 0 -ErrorAction SilentlyContinue
+    $previousCallerLastExitCode = Get-Variable -Name LASTEXITCODE -Scope 1 -ErrorAction SilentlyContinue
+    $previousGlobalLastExitCode = Get-Variable -Name LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue
+    $hadLocalLastExitCode = $null -ne $previousLocalLastExitCode
+    $hadCallerLastExitCode = $null -ne $previousCallerLastExitCode
+    $hadGlobalLastExitCode = $null -ne $previousGlobalLastExitCode
+    $localLastExitCodeValue = if ($hadLocalLastExitCode) { [int]$previousLocalLastExitCode.Value } else { 0 }
+    $callerLastExitCodeValue = if ($hadCallerLastExitCode) { [int]$previousCallerLastExitCode.Value } else { 0 }
+    $globalLastExitCodeValue = if ($hadGlobalLastExitCode) { [int]$previousGlobalLastExitCode.Value } else { 0 }
+    if ($isPowerShellScript) {
+        if ($hadLocalLastExitCode) { Set-Variable -Name LASTEXITCODE -Value 0 -Scope 0 }
+        if ($hadCallerLastExitCode) { Set-Variable -Name LASTEXITCODE -Value 0 -Scope 1 }
+        $global:LASTEXITCODE = 0
+    }
+    try {
+        $output = & $FilePath @ArgumentList 2>&1
+        # PowerShell scripts do not necessarily initialize LASTEXITCODE. Read
+        # the automatic variable through the provider so StrictMode does not
+        # turn a successful script invocation into an unbound-variable
+        # failure. A present value still goes through the normal integer
+        # conversion and non-zero failure path below.
+        if ($isPowerShellScript) {
+            $observedExitCodes = @(
+                (Get-Variable -Name LASTEXITCODE -Scope 0 -ErrorAction SilentlyContinue)
+                (Get-Variable -Name LASTEXITCODE -Scope 1 -ErrorAction SilentlyContinue)
+                (Get-Variable -Name LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue)
+            )
+            $exitCode = 0
+            foreach ($observedExitCode in $observedExitCodes) {
+                if ($null -ne $observedExitCode -and [int]$observedExitCode.Value -ne 0) {
+                    $exitCode = [int]$observedExitCode.Value
+                    break
+                }
+            }
+        } else {
+            $lastExitCodeVariable = Get-Variable -Name LASTEXITCODE -ErrorAction SilentlyContinue
+            $exitCode = if ($null -eq $lastExitCodeVariable) { 0 } else { [int]$lastExitCodeVariable.Value }
+        }
+    } finally {
+        if ($isPowerShellScript) {
+            if ($hadLocalLastExitCode) { Set-Variable -Name LASTEXITCODE -Value $localLastExitCodeValue -Scope 0 }
+            else { Remove-Variable -Name LASTEXITCODE -Scope 0 -ErrorAction SilentlyContinue }
+            if ($hadCallerLastExitCode) { Set-Variable -Name LASTEXITCODE -Value $callerLastExitCodeValue -Scope 1 }
+            else { Remove-Variable -Name LASTEXITCODE -Scope 1 -ErrorAction SilentlyContinue }
+            if ($hadGlobalLastExitCode) { Set-Variable -Name LASTEXITCODE -Value $globalLastExitCodeValue -Scope Global }
+            else { Remove-Variable -Name LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue }
+        }
+    }
     if (-not $AllowNonZero -and $exitCode -ne 0) {
         throw "Native command failed ($FilePath, exit code $exitCode)."
     }
@@ -2290,6 +2336,23 @@ function Test-TailscaleHttpsEndpointExact {
         -not [string]::IsNullOrWhiteSpace($uri.Host))
 }
 
+function Test-TailscaleBareHostnameEndpointExact {
+    param([Parameter(Mandatory)][string]$EndpointKey, [int]$Port = 8420)
+    # `tailscale serve status --json` emits Web keys as bare DNS names, for
+    # example geonqserver.tail5f8789.ts.net:8420. Keep this deliberately
+    # narrower than the port-range parser: only a hostname and the exact
+    # target port are accepted, never an IP, path, range, or extra field.
+    $label = '[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?'
+    $pattern = '^(?i:' + $label + '(?:\.' + $label + ')*):' + [regex]::Escape([string]$Port) + '$'
+    return $EndpointKey -match $pattern
+}
+
+function Test-TailscaleEndpointExact {
+    param([Parameter(Mandatory)][string]$EndpointKey, [int]$Port = 8420)
+    return (Test-TailscaleHttpsEndpointExact -EndpointKey $EndpointKey -Port $Port) -or
+        (Test-TailscaleBareHostnameEndpointExact -EndpointKey $EndpointKey -Port $Port)
+}
+
 function Test-TailscaleTrustedEdgeAppCapability {
     param([object]$Value)
     if ($Value -is [string]) {
@@ -2327,7 +2390,7 @@ function Test-TailscaleWebEndpointLegacyMapping {
         [Parameter(Mandatory)][string]$EndpointKey,
         [object]$Endpoint
     )
-    if (-not (Test-TailscaleHttpsEndpointExact -EndpointKey $EndpointKey -Port 8420)) { return $false }
+    if (-not (Test-TailscaleEndpointExact -EndpointKey $EndpointKey -Port 8420)) { return $false }
     if ($null -eq $Endpoint -or $Endpoint -isnot [System.Management.Automation.PSCustomObject]) { return $false }
     $endpointProperties = @($Endpoint.PSObject.Properties)
     if ($endpointProperties.Count -ne 1 -or $endpointProperties[0].Name -cne 'Handlers') { return $false }
@@ -2450,7 +2513,7 @@ function Get-TailscaleServeDecision {
         if ($null -eq $targetRange -or $targetRange.Start -ne 8420 -or $targetRange.End -ne 8420) {
             throw 'Tailscale Serve route/port range covers 8420; refusing an ambiguous ownership decision.'
         }
-        if (-not (Test-TailscaleHttpsEndpointExact -EndpointKey ([string]$targetRecords[0].Key) -Port 8420)) {
+        if (-not (Test-TailscaleEndpointExact -EndpointKey ([string]$targetRecords[0].Key) -Port 8420)) {
             throw 'Tailscale Serve route/port 8420 is not an exact HTTPS endpoint; refusing an ambiguous ownership decision.'
         }
         $nonMirrorTcp = @($tcpRecords | Where-Object { -not (Test-TailscaleServeTcpHttpsMirror $_) })

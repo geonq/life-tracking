@@ -22,6 +22,7 @@ public enum BankConsentState: String, Equatable, Sendable {
     case linkOpened = "link_opened"
     case linked
     case expired
+    case revoked
     case error
 }
 

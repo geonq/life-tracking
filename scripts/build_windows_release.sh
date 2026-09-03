@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build the source-bound Windows handoff. This script intentionally stages
-# explicit production files instead of copying a workspace, runtime tree, or
-# any machine-local data. The resulting archive contains no secrets.
+# Build the source-bound Windows handoff. This is deterministic packaging of
+# the selected source checkout and supplied runtime inputs; it does not claim
+# bit-for-bit identity across compiler/runtime toolchains. The script intentionally
+# stages explicit production files instead of copying a workspace, runtime
+# tree, or any machine-local data. The resulting archive contains no secrets.
 
 usage() {
     cat >&2 <<'EOF'

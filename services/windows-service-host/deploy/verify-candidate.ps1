@@ -45,6 +45,22 @@ function Sort-CandidatePaths {
     $sorted
 }
 
+function Assert-ExactJsonPropertySet {
+    param(
+        [Parameter(Mandatory)][object]$Object,
+        [Parameter(Mandatory)][string[]]$ExpectedNames,
+        [Parameter(Mandatory)][string]$Label
+    )
+    if ($Object -isnot [System.Management.Automation.PSCustomObject]) {
+        throw "$Label must be a JSON object."
+    }
+    $actualNames = @($Object.PSObject.Properties | ForEach-Object { [string]$_.Name } | Sort-Object)
+    $expectedSorted = @($ExpectedNames | Sort-Object)
+    if (($actualNames -join "`n") -cne ($expectedSorted -join "`n")) {
+        throw "$Label has an unexpected property set. Expected: $($expectedSorted -join ', '). Actual: $($actualNames -join ', ')."
+    }
+}
+
 $expectedSha = $ExpectedSourceSha.ToLowerInvariant()
 $rootFull = [IO.Path]::GetFullPath($Root)
 Assert-ExistingDirectory $rootFull 'Candidate root'
@@ -230,13 +246,18 @@ Assert-CandidatePeFile -Path (Join-Path $rootFull 'node-runtime\node.exe') -Name
 Assert-CandidatePeFile -Path (Join-Path $rootFull 'service-host\LifeOS.ServiceHost.exe') -Name 'Service host'
 
 $apiPackage = Get-Content -LiteralPath (Join-Path $rootFull 'api\package.json') -Raw | ConvertFrom-Json -ErrorAction Stop
-if ([string]$apiPackage.name -ne '@iphone-life-os/api' -or [string]$apiPackage.version -ne '0.1.0' -or
-    -not [bool]$apiPackage.private -or [string]$apiPackage.type -ne 'module') {
+Assert-ExactJsonPropertySet -Object $apiPackage -ExpectedNames @('name', 'version', 'private', 'type', 'dependencies') -Label 'Candidate API package metadata'
+if ($apiPackage.name -isnot [string] -or [string]$apiPackage.name -cne '@iphone-life-os/api' -or
+    $apiPackage.version -isnot [string] -or [string]$apiPackage.version -cne '0.1.0' -or
+    $apiPackage.private -isnot [bool] -or -not [bool]$apiPackage.private -or
+    $apiPackage.type -isnot [string] -or [string]$apiPackage.type -cne 'module') {
     throw 'Candidate API package metadata is not the reviewed production shape.'
 }
-if ([string]$apiPackage.dependencies.'@iphone-life-os/contracts' -ne '0.1.0' -or
-    [string]$apiPackage.dependencies.zod -ne '^3.25.76' -or
-    $null -ne $apiPackage.PSObject.Properties['devDependencies'] -or
+Assert-ExactJsonPropertySet -Object $apiPackage.dependencies -ExpectedNames @('@iphone-life-os/contracts', 'zod') -Label 'Candidate API dependencies'
+if ($apiPackage.dependencies.'@iphone-life-os/contracts' -isnot [string] -or
+    [string]$apiPackage.dependencies.'@iphone-life-os/contracts' -cne '0.1.0' -or
+    $apiPackage.dependencies.zod -isnot [string] -or
+    [string]$apiPackage.dependencies.zod -cne '^3.25.76' -or
     [string]$apiPackage.dependencies.'@iphone-life-os/contracts' -match '(?i)^file:') {
     throw 'Candidate API package contains an unsafe or non-installer-shaped dependency declaration.'
 }

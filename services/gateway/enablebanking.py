@@ -76,10 +76,19 @@ class EnableBankingService:
     MAX_ASPSP_RESPONSE_SIZE = 4 * 1024 * 1024
     FINANCE_METADATA_SCHEMA_VERSION = 1
     FINANCE_STATE_SCHEMA_VERSION = 1
-    REVOCATION_STATE_SCHEMA_VERSION = 1
+    # Version 1 revocation intents predate durable connection tombstones. Keep
+    # their recovery path below, but all new intents carry the sanitized
+    # tombstone required to make a revoked connection truthful after restart.
+    REVOCATION_STATE_SCHEMA_VERSION = 2
+    LEGACY_REVOCATION_STATE_SCHEMA_VERSION = 1
+    REVOCATION_TOMBSTONE_SCHEMA_VERSION = 1
     MAX_FINANCE_METADATA_SIZE = 4 * 1024 * 1024
     MAX_FINANCE_STATE_SIZE = 6 * 1024 * 1024
     MAX_REVOCATION_STATE_SIZE = 8 * 1024 * 1024
+    # 128 worst-case opaque records remain comfortably below the byte bound,
+    # including JSON framing and maximum-length validated identifiers.
+    MAX_REVOCATION_TOMBSTONES = 128
+    MAX_REVOCATION_TOMBSTONE_SIZE = 64 * 1024
     MAX_FINANCE_JOURNAL_RECORDS = 10_000
     MAX_FINANCE_REVISION = 9_007_199_254_740_991
     MAX_CALLBACK_QUERY_SIZE = 4 * 1024
@@ -290,6 +299,9 @@ class EnableBankingService:
     def _revocation_state_path(self) -> Path:
         return self._data_dir() / "enablebanking-revocation.json"
 
+    def _revoked_tombstones_path(self) -> Path:
+        return self._data_dir() / "enablebanking-revoked.json"
+
     def _remove_file_durably(self, path: Path) -> None:
         try:
             path.unlink()
@@ -476,6 +488,120 @@ class EnableBankingService:
             result.append(value)
         return result
 
+    @classmethod
+    def _validate_revoked_at(cls, value: object) -> str:
+        if (
+            not isinstance(value, str)
+            or not re.fullmatch(
+                r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z",
+                value,
+            )
+        ):
+            raise EnableBankingUnavailable("invalid finance revocation timestamp")
+        try:
+            parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+        except ValueError as exc:
+            raise EnableBankingUnavailable("invalid finance revocation timestamp") from exc
+        if parsed.utcoffset() != timedelta(0):
+            raise EnableBankingUnavailable("invalid finance revocation timestamp")
+        return value
+
+    @classmethod
+    def _validate_revocation_tombstone(cls, value: object) -> dict:
+        if not isinstance(value, dict) or set(value) != {
+            "connectionId", "institutionId", "revokedAt",
+        }:
+            raise EnableBankingUnavailable("invalid finance revocation tombstone")
+        connection_id = value["connectionId"]
+        institution_id = value["institutionId"]
+        if (
+            not isinstance(connection_id, str)
+            or not cls.CONNECTION_ID_PATTERN.fullmatch(connection_id)
+            or not isinstance(institution_id, str)
+            or not cls.INSTITUTION_ID_PATTERN.fullmatch(institution_id)
+            or institution_id not in cls.KNOWN_INSTITUTION_IDS
+        ):
+            raise EnableBankingUnavailable("invalid finance revocation tombstone")
+        return {
+            "connectionId": connection_id,
+            "institutionId": institution_id,
+            "revokedAt": cls._validate_revoked_at(value["revokedAt"]),
+        }
+
+    @classmethod
+    def _validate_revoked_tombstone_store(cls, value: object) -> list[dict]:
+        if not isinstance(value, dict) or set(value) != {
+            "schemaVersion", "tombstones",
+        }:
+            raise EnableBankingUnavailable("finance revocation tombstone store unavailable")
+        tombstones = value["tombstones"]
+        if (
+            not isinstance(value["schemaVersion"], int)
+            or isinstance(value["schemaVersion"], bool)
+            or value["schemaVersion"] != cls.REVOCATION_TOMBSTONE_SCHEMA_VERSION
+            or not isinstance(tombstones, list)
+            or len(tombstones) > cls.MAX_REVOCATION_TOMBSTONES
+        ):
+            raise EnableBankingUnavailable("finance revocation tombstone store unavailable")
+        result: list[dict] = []
+        seen_connection_ids: set[str] = set()
+        for raw in tombstones:
+            tombstone = cls._validate_revocation_tombstone(raw)
+            if tombstone["connectionId"] in seen_connection_ids:
+                raise EnableBankingUnavailable("duplicate finance revocation tombstone")
+            seen_connection_ids.add(tombstone["connectionId"])
+            result.append(tombstone)
+        return result
+
+    def _read_revoked_tombstones(self) -> list[dict]:
+        path = self._revoked_tombstones_path()
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return []
+        raw = self._read_bounded_json_file(path, self.MAX_REVOCATION_TOMBSTONE_SIZE)
+        if raw is None:
+            raise EnableBankingUnavailable("finance revocation tombstone store unavailable")
+        return self._validate_revoked_tombstone_store(raw)
+
+    def _write_revoked_tombstone(self, tombstone: dict) -> None:
+        validated = self._validate_revocation_tombstone(tombstone)
+        existing = self._read_revoked_tombstones()
+        by_connection_id = {
+            item["connectionId"]: item for item in existing
+        }
+        by_connection_id[validated["connectionId"]] = validated
+        merged = sorted(
+            by_connection_id.values(),
+            key=lambda item: (item["revokedAt"], item["connectionId"]),
+        )[-self.MAX_REVOCATION_TOMBSTONES:]
+        if not any(
+            item["connectionId"] == validated["connectionId"]
+            for item in merged
+        ):
+            # Keep the just-committed revoke even if the wall clock moved
+            # backwards relative to an older tombstone.
+            merged = [validated, *merged[:-1]]
+        payload = {
+            "schemaVersion": self.REVOCATION_TOMBSTONE_SCHEMA_VERSION,
+            "tombstones": merged,
+        }
+        encoded = json.dumps(
+            payload,
+            separators=(",", ":"),
+            sort_keys=True,
+            allow_nan=False,
+        ).encode("utf-8")
+        if len(encoded) > self.MAX_REVOCATION_TOMBSTONE_SIZE:
+            raise EnableBankingUnavailable("finance revocation tombstone store exceeds response bound")
+        self._atomic_write_json(self._revoked_tombstones_path(), payload)
+
+    def _is_revoked_connection(self, connection_id: str) -> bool:
+        return any(
+            item["connectionId"] == connection_id
+            for item in self._read_revoked_tombstones()
+        )
+
     def _read_pending_revocation(self) -> dict | None:
         path = self._revocation_state_path()
         try:
@@ -483,18 +609,33 @@ class EnableBankingService:
         except FileNotFoundError:
             return None
         raw = self._read_bounded_json_file(path, self.MAX_REVOCATION_STATE_SIZE)
-        if not isinstance(raw, dict) or set(raw) != {
+        legacy_keys = {
             "schemaVersion", "institutionId", "connections", "summary", "summaryMetadata",
-        }:
+        }
+        current_keys = {*legacy_keys, "tombstone"}
+        if not isinstance(raw, dict) or set(raw) not in (legacy_keys, current_keys):
             raise EnableBankingUnavailable("finance revocation state unavailable")
         institution_id = raw["institutionId"]
+        schema_version = raw["schemaVersion"]
         if (
-            raw["schemaVersion"] != self.REVOCATION_STATE_SCHEMA_VERSION
+            not isinstance(schema_version, int)
+            or isinstance(schema_version, bool)
+            or schema_version not in {
+                self.LEGACY_REVOCATION_STATE_SCHEMA_VERSION,
+                self.REVOCATION_STATE_SCHEMA_VERSION,
+            }
             or not isinstance(institution_id, str)
             or not self.INSTITUTION_ID_PATTERN.fullmatch(institution_id)
             or institution_id not in self.KNOWN_INSTITUTION_IDS
+            or (schema_version == self.REVOCATION_STATE_SCHEMA_VERSION and set(raw) != current_keys)
+            or (schema_version == self.LEGACY_REVOCATION_STATE_SCHEMA_VERSION and set(raw) != legacy_keys)
         ):
             raise EnableBankingUnavailable("finance revocation state unavailable")
+        tombstone = None
+        if schema_version == self.REVOCATION_STATE_SCHEMA_VERSION:
+            tombstone = self._validate_revocation_tombstone(raw["tombstone"])
+            if tombstone["institutionId"] != institution_id:
+                raise EnableBankingUnavailable("finance revocation state unavailable")
         connections = self._validate_connection_records(raw["connections"])
         summary = raw["summary"]
         metadata = raw["summaryMetadata"]
@@ -512,15 +653,21 @@ class EnableBankingService:
             if self._summary_digest(summary) != metadata["bodyDigest"]:
                 raise EnableBankingUnavailable("finance revocation state digest mismatch")
         return {
-            "schemaVersion": raw["schemaVersion"],
+            "schemaVersion": schema_version,
             "institutionId": institution_id,
             "connections": connections,
             "summary": summary,
             "summaryMetadata": metadata,
+            "tombstone": tombstone,
         }
 
     def _apply_revocation_state(self, state: dict) -> None:
         """Apply a durable revoke intent and clear it only after every projection is safe."""
+        if state.get("tombstone") is not None:
+            # Persist the sanitized lifecycle fact before changing any local
+            # projection. Recovery can therefore never lose the revoked state
+            # between the intent and its projection writes.
+            self._write_revoked_tombstone(state["tombstone"])
         self._atomic_write_json(self._connections_path(), {"connections": state["connections"]})
         summary = state["summary"]
         if summary is None:
@@ -563,8 +710,15 @@ class EnableBankingService:
         return self._validate_connection_records(raw["connections"])
 
     def _save_connection(self, connection: dict) -> None:
+        if self._is_revoked_connection(connection["connectionId"]):
+            raise EnableBankingUnavailable("connection has been revoked")
+        existing_connections = self._load_connections()
+        # `_load_connections` may have recovered an interrupted revocation and
+        # written its tombstone, so check again immediately before persisting.
+        if self._is_revoked_connection(connection["connectionId"]):
+            raise EnableBankingUnavailable("connection has been revoked")
         existing = [
-            value for value in self._load_connections()
+            value for value in existing_connections
             if value["connectionId"] != connection["connectionId"]
             and value["institutionId"] != connection["institutionId"]
         ]
@@ -1123,8 +1277,33 @@ class EnableBankingService:
                 # perspective.  410 is the equivalent durable "gone" result.
                 if upstream.status_code in {404, 410}:
                     return
-                if upstream.status_code in {200, 202, 204}:
+                if upstream.status_code == 204:
                     return
+                if upstream.status_code == 200:
+                    # A 200 is only final when the provider explicitly says
+                    # that the session is closed/revoked. An empty or
+                    # in-progress response must not cause local data loss.
+                    try:
+                        data = await self._read_upstream_json(
+                            upstream,
+                            expected_statuses={200},
+                            maximum_bytes=self.MAX_RESPONSE_SIZE,
+                        )
+                    except EnableBankingUnavailable as exc:
+                        raise EnableBankingUnavailable("provider revoke unavailable") from exc
+                    provider_state = (
+                        data.get("status", data.get("state"))
+                        if isinstance(data, dict)
+                        else None
+                    )
+                    if str(provider_state or "").strip().upper() in {"CLOSED", "REVOKED"}:
+                        return
+                    raise EnableBankingUnavailable("provider revoke unavailable")
+                if upstream.status_code == 202:
+                    # Accepted means the provider has queued the operation,
+                    # not that the session is durably closed. Preserve the
+                    # local connection and cache until a later final outcome.
+                    raise EnableBankingUnavailable("provider revoke pending")
                 if upstream.status_code not in {400, 409}:
                     raise EnableBankingUnavailable("provider revoke unavailable")
                 try:
@@ -1235,6 +1414,20 @@ class EnableBankingService:
             else self._remove_institution_from_summary(cached, institution_id)
         )
         metadata = None if summary is None else self._next_summary_metadata(summary)
+        connection = next(
+            (
+                value for value in connections
+                if value["institutionId"] == institution_id
+            ),
+            None,
+        )
+        if connection is None:
+            raise EnableBankingUnavailable("connection missing from revocation state")
+        tombstone = {
+            "connectionId": connection["connectionId"],
+            "institutionId": institution_id,
+            "revokedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
         state = {
             "schemaVersion": self.REVOCATION_STATE_SCHEMA_VERSION,
             "institutionId": institution_id,
@@ -1244,6 +1437,7 @@ class EnableBankingService:
             ],
             "summary": summary,
             "summaryMetadata": metadata,
+            "tombstone": tombstone,
         }
         encoded = json.dumps(
             state,
@@ -1261,65 +1455,70 @@ class EnableBankingService:
         if validation_error is not None:
             return 400, {"error": validation_error}
 
-        async with self.connections_lock:
-            try:
-                self._recover_pending_revocation()
-                connections = self._load_connections()
-            except Exception:
-                return 503, {"error": "temporary_error"}
-            connection = next(
-                (
-                    value for value in connections
-                    if value["institutionId"] == institution_id
-                ),
-                None,
-            )
-            if connection is None:
-                return 404, {"error": "not_connected"}
-            try:
-                state = self._prepare_revocation_state(institution_id, connections)
-            except Exception:
-                return 503, {"error": "temporary_error"}
-            credentials = self._credentials()
-            if credentials is None:
-                return 503, {"error": "temporary_error"}
-            try:
-                async with self._http_client() as client:
-                    token = await self._bearer(credentials)
-                    await self._delete_session(
-                        client,
-                        credentials,
-                        token,
-                        connection["sessionId"],
-                    )
-            except Exception:
-                # The provider must be confirmed before the local connection or
-                # its cached observations are touched.
-                return 503, {"error": "temporary_error"}
-            try:
-                # The intent is durable before either projection is changed.
-                # Any interrupted application is completed by the next read.
-                self._atomic_write_json(self._revocation_state_path(), state)
-                self._apply_revocation_state(state)
-            except Exception:
-                return 503, {"error": "temporary_error"}
-
+        # Consent is the outer lock everywhere a flow and connection
+        # transaction meet. Holding it through provider confirmation makes the
+        # callback's final persistence check linearize cleanly with revoke.
         async with self.consent_lock:
-            existing_flow = self.consent_flows.get(connection["connectionId"])
-            if existing_flow is None:
-                self.consent_flows[connection["connectionId"]] = {
-                    "state": "revoked",
-                    "institutionId": institution_id,
-                    "started": time.monotonic(),
-                    "csrf_state": None,
-                    "authorization_id": connection["connectionId"],
-                    "session_id": None,
-                }
-            for flow in self.consent_flows.values():
-                if flow.get("institutionId") == institution_id:
-                    flow["state"] = "revoked"
-                    flow["session_id"] = None
-            self._prune_flows()
+            self._expire_flows()
+            async with self.connections_lock:
+                try:
+                    self._recover_pending_revocation()
+                    connections = self._load_connections()
+                except Exception:
+                    return 503, {"error": "temporary_error"}
+                connection = next(
+                    (
+                        value for value in connections
+                        if value["institutionId"] == institution_id
+                    ),
+                    None,
+                )
+                if connection is None:
+                    return 404, {"error": "not_connected"}
+                try:
+                    state = self._prepare_revocation_state(institution_id, connections)
+                except Exception:
+                    return 503, {"error": "temporary_error"}
+                credentials = self._credentials()
+                if credentials is None:
+                    return 503, {"error": "temporary_error"}
+                try:
+                    async with self._http_client() as client:
+                        token = await self._bearer(credentials)
+                        await self._delete_session(
+                            client,
+                            credentials,
+                            token,
+                            connection["sessionId"],
+                        )
+                except Exception:
+                    # The provider must be confirmed before the local
+                    # connection or its cached observations are touched.
+                    return 503, {"error": "temporary_error"}
+                try:
+                    # The intent is durable before either projection is
+                    # changed. Any interrupted application is completed by the
+                    # next read, including its sanitized tombstone.
+                    self._atomic_write_json(self._revocation_state_path(), state)
+                    self._apply_revocation_state(state)
+                except Exception:
+                    return 503, {"error": "temporary_error"}
+
+                existing_flow = self.consent_flows.get(connection["connectionId"])
+                if existing_flow is None:
+                    self.consent_flows[connection["connectionId"]] = {
+                        "state": "revoked",
+                        "institutionId": institution_id,
+                        "started": time.monotonic(),
+                        "csrf_state": None,
+                        "authorization_id": connection["connectionId"],
+                        "session_id": None,
+                    }
+                for flow in self.consent_flows.values():
+                    if flow.get("institutionId") == institution_id:
+                        flow["state"] = "revoked"
+                        flow["session_id"] = None
+                self._prune_flows()
         return 200, {"state": "revoked"}
 
     async def start(self, institution_id: str) -> tuple[int, dict]:
@@ -1381,18 +1580,28 @@ class EnableBankingService:
             self._expire_flows()
             flow = self.consent_flows.get(connection_id)
             cached_state = flow["state"] if flow is not None else None
+        if cached_state in {"expired", "revoked"}:
+            return {"state": cached_state}
+        try:
+            connections = self._load_connections()
+            revoked = self._is_revoked_connection(connection_id)
+        except Exception:
+            return {"state": cached_state if cached_state is not None else "error"}
+        if revoked:
+            async with self.consent_lock:
+                existing = self.consent_flows.get(connection_id)
+                if existing is not None:
+                    existing["state"] = "revoked"
+                    existing["session_id"] = None
+                    self._prune_flows()
+            return {"state": "revoked"}
         persisted = next(
-            (
-                item for item in self._load_connections()
-                if item["connectionId"] == connection_id
-            ),
+            (item for item in connections if item["connectionId"] == connection_id),
             None,
         )
         if flow is None and persisted is not None:
             flow = {"state": "linked", "session_id": persisted["sessionId"]}
             cached_state = "linked"
-        if cached_state in {"expired", "revoked"}:
-            return {"state": cached_state}
         if cached_state in {"linked", "error"} and persisted is None:
             return {"state": cached_state}
         credentials = self._credentials()
@@ -1419,8 +1628,18 @@ class EnableBankingService:
             state = cached_state if cached_state is not None else "error"
         async with self.consent_lock:
             existing = self.consent_flows.get(connection_id)
+            # A provider response fetched before revoke must not overwrite the
+            # durable revoked decision when it completes afterward.
+            try:
+                revoked = self._is_revoked_connection(connection_id)
+            except Exception:
+                return {"state": cached_state if cached_state is not None else "error"}
+            if revoked:
+                state = "revoked"
             if existing is not None:
                 existing["state"] = state
+                if state == "revoked":
+                    existing["session_id"] = None
                 self._prune_flows()
             elif state != "error":
                 self.consent_flows[connection_id] = {
@@ -1499,20 +1718,30 @@ class EnableBankingService:
                 "sessionId": session_id,
                 "linkedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             }
-            async with self.connections_lock:
-                self._save_connection(connection)
+            # Revoke uses the same consent -> connections lock order. The
+            # live flow check and tombstone check immediately before the save
+            # prevent a callback that exchanged a code during revoke from
+            # resurrecting an opaque provider session locally.
+            async with self.consent_lock:
+                flow = self.consent_flows.get(match)
+                if flow is None or flow["state"] not in self.ACTIVE_STATES:
+                    return CallbackResult(valid=True, linked=False)
+                async with self.connections_lock:
+                    if self._is_revoked_connection(match):
+                        flow["state"] = "revoked"
+                        flow["session_id"] = None
+                        self._prune_flows()
+                        return CallbackResult(valid=True, linked=False)
+                    self._save_connection(connection)
+                    flow["session_id"] = session_id
+                    flow["state"] = "linked"
+                    self._prune_flows()
         except Exception:
             async with self.consent_lock:
                 if self.consent_flows.get(match, {}).get("state") in self.ACTIVE_STATES:
                     self.consent_flows[match]["state"] = "error"
                     self._prune_flows()
             return CallbackResult(valid=True, linked=False)
-        async with self.consent_lock:
-            flow = self.consent_flows.get(match)
-            if flow is not None and flow["state"] in self.ACTIVE_STATES:
-                flow["session_id"] = session_id
-                flow["state"] = "linked"
-                self._prune_flows()
         return CallbackResult(valid=True, linked=True)
 
     @staticmethod

@@ -562,6 +562,7 @@ enum BankConsentLifecyclePhase: String, Equatable, Sendable {
     case checking
     case linked
     case expired
+    case revoked
     case alreadyLinking
     case gatewayNotConfigured
     case failed
@@ -575,6 +576,7 @@ enum BankConsentLifecyclePhase: String, Equatable, Sendable {
         case .checking: "Checking status"
         case .linked: "Linked"
         case .expired: "Consent expired"
+        case .revoked: "Connection revoked"
         case .alreadyLinking: "Already linking"
         case .gatewayNotConfigured: "Gateway not configured"
         case .failed: "Connection error"
@@ -585,7 +587,7 @@ enum BankConsentLifecyclePhase: String, Equatable, Sendable {
         switch self {
         case .opening, .checking, .linked: false
         case .idle, .awaitingConsent, .returningFromConsent, .expired,
-             .alreadyLinking, .gatewayNotConfigured, .failed: true
+             .revoked, .alreadyLinking, .gatewayNotConfigured, .failed: true
         }
     }
 }
@@ -1869,6 +1871,7 @@ enum BankConsentRowState: Equatable {
     case checkingStatus(BankConsentLink)
     case linked
     case expired
+    case revoked
     case alreadyLinking(BankConsentLink?)
     case gatewayNotConfigured
     case error(BankConsentLink?)
@@ -1887,6 +1890,28 @@ enum BankConsentRowState: Equatable {
         }
     }
 
+    /// Projects the gateway's authoritative status into the Settings row
+    /// without collapsing revoked, expired, or temporary error states.
+    /// The opaque link remains persisted for revoked status so the durable
+    /// gateway tombstone can be re-checked after a Settings relaunch.
+    static func fromGatewayState(
+        _ gatewayState: BankConsentState,
+        preserving link: BankConsentLink
+    ) -> Self {
+        switch gatewayState {
+        case .created, .linkOpened:
+            return .awaitingConsent(link)
+        case .linked:
+            return .linked
+        case .expired:
+            return .expired
+        case .revoked:
+            return .revoked
+        case .error:
+            return .error(link)
+        }
+    }
+
     var lifecyclePhase: BankConsentLifecyclePhase {
         switch self {
         case .idle: .idle
@@ -1896,6 +1921,7 @@ enum BankConsentRowState: Equatable {
         case .checkingStatus: .checking
         case .linked: .linked
         case .expired: .expired
+        case .revoked: .revoked
         case .alreadyLinking: .alreadyLinking
         case .gatewayNotConfigured: .gatewayNotConfigured
         case .error: .failed
@@ -1983,6 +2009,11 @@ private final class BankConsentRowController: ObservableObject {
             }
         case .idle, .expired:
             start(institutionId: institutionId)
+        case .revoked:
+            // A reconnect creates a new provider consent flow. Remove only
+            // the old opaque handoff after the user explicitly requests it.
+            BankConsentPendingLinkStore.clear(institutionId: institutionId)
+            start(institutionId: institutionId)
         default:
             break
         }
@@ -2016,21 +2047,13 @@ private final class BankConsentRowController: ObservableObject {
             do {
                 let result = try await client.bankConsentStatus(connectionId: link.connectionId)
                 guard !Task.isCancelled else { return }
-                switch result {
-                case .linked:
-                    // Retain only the opaque handoff so a later Settings
-                    // visit can re-check the gateway and render Linked again.
-                    self.state = .linked
-                case .expired:
+                if case .expired = result {
                     BankConsentPendingLinkStore.clear(institutionId: self.institutionId)
-                    self.state = .expired
-                case .error:
-                    // The gateway may report a temporary provider failure;
-                    // keep the opaque link so the user can retry status or
-                    // reopen the hosted consent flow without starting over.
-                    self.state = .error(link)
-                case .created, .linkOpened: self.state = .awaitingConsent(link)
                 }
+                // Retain the opaque handoff for linked, revoked, and
+                // temporary error states so Settings can re-check them after
+                // relaunch without storing provider credentials.
+                self.state = BankConsentRowState.fromGatewayState(result, preserving: link)
             } catch {
                 guard !Task.isCancelled else { return }
                 self.state = Self.rowState(for: error, preserving: link)
@@ -2179,6 +2202,7 @@ private struct BankConsentConnectRow: View {
         guard gatewayPreflight == .reachable else { return "Gateway unavailable" }
         switch controller.state {
         case .idle, .expired: return "Connect"
+        case .revoked: return "Reconnect"
         case .openingConsent: return "Opening consent…"
         case .awaitingConsent: return "Continue consent"
         case .returningFromConsent: return "Verifying callback…"
@@ -2193,7 +2217,7 @@ private struct BankConsentConnectRow: View {
     private var statusIcon: LifeOSIconName {
         switch controller.state {
         case .linked: .verified
-        case .error(_), .expired, .alreadyLinking(_), .gatewayNotConfigured: .warning
+        case .error(_), .expired, .revoked, .alreadyLinking(_), .gatewayNotConfigured: .warning
         default: .security
         }
     }
@@ -2201,7 +2225,7 @@ private struct BankConsentConnectRow: View {
     private var statusColor: Color {
         switch controller.state {
         case .linked: LifeOSTokens.success
-        case .error(_), .expired, .alreadyLinking(_), .gatewayNotConfigured: LifeOSTokens.warning
+        case .error(_), .expired, .revoked, .alreadyLinking(_), .gatewayNotConfigured: LifeOSTokens.warning
         default: LifeOSTokens.tertiaryText
         }
     }
@@ -2209,7 +2233,7 @@ private struct BankConsentConnectRow: View {
     private var statusTextColor: Color {
         switch controller.state {
         case .linked: LifeOSTokens.successText
-        case .error(_), .expired, .alreadyLinking(_), .gatewayNotConfigured: LifeOSTokens.warningText
+        case .error(_), .expired, .revoked, .alreadyLinking(_), .gatewayNotConfigured: LifeOSTokens.warningText
         default: LifeOSTokens.metadataText
         }
     }
@@ -2236,6 +2260,8 @@ private struct BankConsentConnectRow: View {
             return "The gateway reports this connection as linked. Refresh is read-only; revoke remains gateway-owned."
         case .expired:
             return "The consent link expired before it was completed. Tap Connect to request a new one."
+        case .revoked:
+            return "The gateway reports this connection was revoked. Tap Reconnect to start a new consent flow."
         case .alreadyLinking(let link):
             if link != nil {
                 return "A connection is already in progress. The pending session is retained; re-check status or reopen consent after the gateway allows it."
