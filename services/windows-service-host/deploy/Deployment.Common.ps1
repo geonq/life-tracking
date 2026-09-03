@@ -2186,7 +2186,9 @@ function New-ServiceOrConfigure {
     Invoke-NativeChecked 'sc.exe' @('sidtype', $Name, 'unrestricted') -Quiet | Out-Null
     $dependencyValue = ($Dependencies -join '/')
     if ($Dependencies.Count -eq 0) {
-        Invoke-NativeChecked 'sc.exe' @('config', $Name, 'depend=', '') -Quiet | Out-Null
+        # `sc.exe` uses `/` as the documented sentinel for clearing all
+        # dependencies; an empty value is rejected by the native parser.
+        Invoke-NativeChecked 'sc.exe' @('config', $Name, 'depend=', '/') -Quiet | Out-Null
     } else {
         Invoke-NativeChecked 'sc.exe' @('config', $Name, 'depend=', $dependencyValue) -Quiet | Out-Null
     }
