@@ -2175,10 +2175,13 @@ function New-ServiceOrConfigure {
     $quoted = '"{0}" --service-name {1} --config "{2}"' -f $BinaryPath, $Name, (Join-Path (Split-Path -Parent $BinaryPath) ('config\' + $Name + '.json'))
     $existing = Get-ServiceRecord $Name
     if ($null -eq $existing) {
-        Invoke-NativeChecked 'sc.exe' @('create', $Name, 'binPath=', $quoted, 'obj=', $Account, 'password=', '', 'start=', $StartMode) -Quiet | Out-Null
+        # Virtual service accounts do not need a password.  Omitting the
+        # password pair also avoids passing an empty positional argument to
+        # PowerShell 5.1's native-command wrapper.
+        Invoke-NativeChecked 'sc.exe' @('create', $Name, 'binPath=', $quoted, 'obj=', $Account, 'start=', $StartMode) -Quiet | Out-Null
     } else {
         Assert-ServiceIdentity -Name $Name -ExpectedAccount $Account -ExpectedBinary $BinaryPath
-        Invoke-NativeChecked 'sc.exe' @('config', $Name, 'binPath=', $quoted, 'obj=', $Account, 'password=', '', 'start=', $StartMode) -Quiet | Out-Null
+        Invoke-NativeChecked 'sc.exe' @('config', $Name, 'binPath=', $quoted, 'obj=', $Account, 'start=', $StartMode) -Quiet | Out-Null
     }
     Invoke-NativeChecked 'sc.exe' @('sidtype', $Name, 'unrestricted') -Quiet | Out-Null
     $dependencyValue = ($Dependencies -join '/')
