@@ -340,6 +340,18 @@ function Get-ChildRuntimeStage {
             } finally {
                 if (Test-Path -LiteralPath $tempCfg) { Remove-Item -LiteralPath $tempCfg -Force -ErrorAction SilentlyContinue }
             }
+            # Activation helpers are operator-shell conveniences, not part of
+            # the service runtime. Standard venv activation scripts retain
+            # the creator's user-profile path and would otherwise make a
+            # deployed runtime depend on that profile.
+            $activationScriptNames = @('Activate.ps1', 'activate.bat', 'activate')
+            foreach ($activationScriptName in $activationScriptNames) {
+                $activationScript = Join-Path $venvTarget ('Scripts\' + $activationScriptName)
+                if (Test-Path -LiteralPath $activationScript -PathType Leaf) {
+                    Assert-NoReparsePath $activationScript
+                    Remove-Item -LiteralPath $activationScript -Force
+                }
+            }
             foreach ($metadata in (Get-ChildItem -LiteralPath $venvTarget -Recurse -Force -File | Where-Object { $_.Extension -in @('.cfg', '.ini', '.txt', '.cmd', '.bat', '.ps1') })) {
                 $content = [IO.File]::ReadAllText($metadata.FullName)
                 $content = $content.Replace($sourceRoot, $venvTarget).Replace($homeRoot, $baseTarget)
