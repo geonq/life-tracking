@@ -1086,17 +1086,19 @@ function Set-RestrictedAcl {
     Assert-ExplicitAclAllowTree -Path $Path -OperatorSid $OperatorSid -ReadSids $ReadSids -ModifySids $ModifySids
     Register-AclSnapshot $Path
     # Use well-known SIDs instead of localized account names.
-    $grant = @("${OperatorSid}:(F)", 'S-1-5-18:(F)', 'S-1-5-32-544:(F)')
-    if (-not $File) { $grant += "${OperatorSid}:(OI)(CI)(F)" }
+    # icacls requires a leading `*` when an identity is supplied as a SID;
+    # without it, virtual service SIDs fail name translation with 1332.
+    $grant = @("*${OperatorSid}:(F)", '*S-1-5-18:(F)', '*S-1-5-32-544:(F)')
+    if (-not $File) { $grant += "*${OperatorSid}:(OI)(CI)(F)" }
     foreach ($sid in $ReadSids) {
-        if ($File) { $grant += "${sid}:(R)" }
-        else { $grant += "${sid}:(OI)(CI)(RX)"; $grant += "${sid}:(RX)" }
+        if ($File) { $grant += "*${sid}:(R)" }
+        else { $grant += "*${sid}:(OI)(CI)(RX)"; $grant += "*${sid}:(RX)" }
     }
     foreach ($sid in $ModifySids) {
-        if ($File) { $grant += "${sid}:(M)" }
-        else { $grant += "${sid}:(OI)(CI)(M)"; $grant += "${sid}:(M)" }
+        if ($File) { $grant += "*${sid}:(M)" }
+        else { $grant += "*${sid}:(OI)(CI)(M)"; $grant += "*${sid}:(M)" }
     }
-    $broadSids = @('S-1-1-0', 'S-1-5-11', 'S-1-5-32-545', 'S-1-5-4', 'S-1-5-7', 'S-1-5-2', 'S-1-5-19', 'S-1-5-20')
+    $broadSids = @('*S-1-1-0', '*S-1-5-11', '*S-1-5-32-545', '*S-1-5-4', '*S-1-5-7', '*S-1-5-2', '*S-1-5-19', '*S-1-5-20')
     $args = @($Path, '/inheritance:r', '/remove:g') + $broadSids + @('/grant:r') + $grant
     if (-not $File) { $args += @('/T', '/C') }
     Invoke-NativeChecked 'icacls.exe' ([string[]]$args) -Quiet | Out-Null
@@ -1141,9 +1143,9 @@ function Set-DirectoryTraversalAcl {
     Ensure-Directory $Path
     Assert-ExplicitAclAllowTree -Path $Path -OperatorSid $OperatorSid -ReadSids $ReadSids -ModifySids @()
     Register-AclSnapshot $Path
-    $grant = @("${OperatorSid}:(F)", 'S-1-5-18:(F)', 'S-1-5-32-544:(F)')
-    foreach ($sid in $ReadSids) { $grant += "${sid}:(RX)" }
-    $broadSids = @('S-1-1-0', 'S-1-5-11', 'S-1-5-32-545', 'S-1-5-4', 'S-1-5-7', 'S-1-5-2', 'S-1-5-19', 'S-1-5-20')
+    $grant = @("*${OperatorSid}:(F)", '*S-1-5-18:(F)', '*S-1-5-32-544:(F)')
+    foreach ($sid in $ReadSids) { $grant += "*${sid}:(RX)" }
+    $broadSids = @('*S-1-1-0', '*S-1-5-11', '*S-1-5-32-545', '*S-1-5-4', '*S-1-5-7', '*S-1-5-2', '*S-1-5-19', '*S-1-5-20')
     Invoke-NativeChecked 'icacls.exe' ([string[]](@($Path, '/inheritance:r', '/remove:g') + $broadSids + @('/grant:r') + $grant)) -Quiet | Out-Null
     Assert-RestrictedAcl -Path $Path -OperatorSid $OperatorSid -ReadSids $ReadSids -ModifySids @()
 }

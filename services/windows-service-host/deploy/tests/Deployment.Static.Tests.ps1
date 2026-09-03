@@ -114,6 +114,7 @@ Assert-Text 'Deployment.Behavior.Tests.ps1' 'Behavioral deployment coverage is t
 Assert-Text 'Restore-TailscaleServeSnapshot' 'Tailscale Serve state is restored on rollback.'
 Assert-Text 'Set-SecretAcl \$tailscaleEdgeTokenPath' 'Gateway service can read only the token file.'
 Assert-Text 'Assert-NoBroadAcl \$tailscaleEdgeTokenPath' 'Trusted edge token ACL is checked for broad grants.'
+Assert-Text '\*\$\{OperatorSid\}' 'ACL grants use SID-qualified icacls identities.'
 Assert-Text 'Get-LegacyGatewayListenerSnapshot' 'Legacy 8421 ownership is snapshotted before cutover.'
 Assert-Text 'Get-LoopbackPortOwner' 'Legacy listener inspection is limited to the loopback port.'
 Assert-Text 'Get-LegacyGatewayApproval' 'Legacy listener attribution is tied to the scheduled-task definition.'
