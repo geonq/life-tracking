@@ -1087,6 +1087,7 @@ function Set-RestrictedAcl {
         [switch]$File
     )
     if ($File) { Assert-ExistingFile $Path 'ACL file' } else { Ensure-Directory $Path }
+    if (-not $File) { Remove-TransientLogonAclRules $Path }
     Assert-ExplicitAclAllowTree -Path $Path -OperatorSid $OperatorSid -ReadSids $ReadSids -ModifySids $ModifySids
     Register-AclSnapshot $Path
     # Use well-known SIDs instead of localized account names.
@@ -1106,6 +1107,7 @@ function Set-RestrictedAcl {
     $args = @($Path, '/inheritance:r', '/remove:g') + $broadSids + @('/grant:r') + $grant
     if (-not $File) { $args += @('/T', '/C') }
     Invoke-NativeChecked 'icacls.exe' ([string[]]$args) -Quiet | Out-Null
+    if (-not $File) { Remove-TransientLogonAclRules $Path }
     Assert-RestrictedAcl -Path $Path -OperatorSid $OperatorSid -ReadSids $ReadSids -ModifySids $ModifySids
 }
 
@@ -1143,11 +1145,11 @@ function Assert-AuthenticatedBackup {
 }
 
 function Remove-TransientLogonAclRules {
-    param([Parameter(Mandatory)][string]$Path)
+    param([Parameter(Mandatory)][string]$Path, [switch]$Recurse)
     Assert-NoReparsePath $Path
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
     $targets = @($item)
-    if ($item.PSIsContainer) { $targets += @(Get-ChildItem -LiteralPath $Path -Force -Recurse -ErrorAction Stop) }
+    if ($Recurse -and $item.PSIsContainer) { $targets += @(Get-ChildItem -LiteralPath $Path -Force -Recurse -ErrorAction Stop) }
     foreach ($target in $targets) {
         $acl = Get-Acl -LiteralPath $target.FullName -ErrorAction Stop
         $rules = @($acl.Access | Where-Object {
@@ -1166,14 +1168,14 @@ function Set-DirectoryTraversalAcl {
     # are not stable service identities and must not survive hardening.  Run
     # both before and after /inheritance:r because Windows can materialize an
     # inherited transient ACE as explicit on descendants during that call.
-    Remove-TransientLogonAclRules $Path
+    Remove-TransientLogonAclRules $Path -Recurse
     Assert-ExplicitAclAllowTree -Path $Path -OperatorSid $OperatorSid -ReadSids $ReadSids -ModifySids @()
     Register-AclSnapshot $Path
     $grant = @("*${OperatorSid}:(F)", '*S-1-5-18:(F)', '*S-1-5-32-544:(F)')
     foreach ($sid in $ReadSids) { $grant += "*${sid}:(RX)" }
     $broadSids = @('*S-1-1-0', '*S-1-5-11', '*S-1-5-32-545', '*S-1-5-4', '*S-1-5-7', '*S-1-5-2', '*S-1-5-19', '*S-1-5-20')
     Invoke-NativeChecked 'icacls.exe' ([string[]](@($Path, '/inheritance:r', '/remove:g') + $broadSids + @('/grant:r') + $grant)) -Quiet | Out-Null
-    Remove-TransientLogonAclRules $Path
+    Remove-TransientLogonAclRules $Path -Recurse
     Assert-RestrictedAcl -Path $Path -OperatorSid $OperatorSid -ReadSids $ReadSids -ModifySids @()
 }
 
