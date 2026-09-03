@@ -835,7 +835,11 @@ function Get-TreeManifest {
     $items = @()
     foreach ($item in (Get-ChildItem -LiteralPath $rootFull -Recurse -Force -File -ErrorAction Stop)) {
         $linkType = if ($null -ne $item.PSObject.Properties['LinkType']) { $item.LinkType } else { $null }
-        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $null -ne $linkType) {
+        # uv-backed Python installs may use hardlinks for ordinary package
+        # files. Copy-Item materializes those as regular files; only links
+        # that redirect path resolution remain unsafe here.
+        $unsafeLink = $null -ne $linkType -and [string]$linkType -ne 'HardLink'
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $unsafeLink) {
             throw "Reparse point found below code/runtime root: $($item.FullName)"
         }
         $relative = $item.FullName.Substring($rootFull.Length).TrimStart('\')
