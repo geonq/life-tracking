@@ -1162,20 +1162,31 @@ function Remove-TransientLogonAclRules {
 }
 
 function Set-DirectoryTraversalAcl {
-    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$OperatorSid, [Parameter(Mandatory)][string[]]$ReadSids)
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$OperatorSid,
+        [Parameter(Mandatory)][string[]]$ReadSids,
+        [switch]$RootOnly
+    )
     Ensure-Directory $Path
     # Some existing Hermes roots carry transient LogonSessionId ACEs.  They
     # are not stable service identities and must not survive hardening.  Run
     # both before and after /inheritance:r because Windows can materialize an
     # inherited transient ACE as explicit on descendants during that call.
-    Remove-TransientLogonAclRules $Path -Recurse
-    Assert-ExplicitAclAllowTree -Path $Path -OperatorSid $OperatorSid -ReadSids $ReadSids -ModifySids @()
+    Remove-TransientLogonAclRules $Path -Recurse:(!$RootOnly)
+    if ($RootOnly) {
+        Assert-ExplicitAclAllowSet -Path $Path -OperatorSid $OperatorSid -ReadSids $ReadSids -ModifySids @()
+    } else {
+        Assert-ExplicitAclAllowTree -Path $Path -OperatorSid $OperatorSid -ReadSids $ReadSids -ModifySids @()
+    }
     Register-AclSnapshot $Path
     $grant = @("*${OperatorSid}:(F)", '*S-1-5-18:(F)', '*S-1-5-32-544:(F)')
     foreach ($sid in $ReadSids) { $grant += "*${sid}:(RX)" }
     $broadSids = @('*S-1-1-0', '*S-1-5-11', '*S-1-5-32-545', '*S-1-5-4', '*S-1-5-7', '*S-1-5-2', '*S-1-5-19', '*S-1-5-20')
-    Invoke-NativeChecked 'icacls.exe' ([string[]](@($Path, '/inheritance:r', '/remove:g') + $broadSids + @('/grant:r') + $grant)) -Quiet | Out-Null
-    Remove-TransientLogonAclRules $Path -Recurse
+    $args = @($Path, '/inheritance:r', '/remove:g') + $broadSids + @('/grant:r') + $grant
+    if (-not $RootOnly) { $args += @('/T', '/C') }
+    Invoke-NativeChecked 'icacls.exe' ([string[]]$args) -Quiet | Out-Null
+    Remove-TransientLogonAclRules $Path -Recurse:(!$RootOnly)
     Assert-RestrictedAcl -Path $Path -OperatorSid $OperatorSid -ReadSids $ReadSids -ModifySids @()
 }
 

@@ -885,7 +885,7 @@ Save-InstallManifest $manifest $manifestPath
 # host binary is shared read-only; config files and secrets are per-service.
 # No profile, Users, Everyone, or shared-service grant is created.
 $hostDirectory = Split-Path -Parent $hostTarget
-Set-DirectoryTraversalAcl $paths.InstallRoot $operatorSid @($apiSid, $gatewaySid)
+Set-DirectoryTraversalAcl $paths.InstallRoot $operatorSid @($apiSid, $gatewaySid) -RootOnly
 Set-RestrictedAcl $hostDirectory $operatorSid @($apiSid, $gatewaySid) @()
 Set-RestrictedAcl $apiTarget $operatorSid @($apiSid) @()
 Set-RestrictedAcl $gatewayTarget $operatorSid @($gatewaySid) @()
