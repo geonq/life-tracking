@@ -279,7 +279,7 @@ public sealed class ServiceHostTests
     }
 
     [Fact]
-    public async Task SupervisorStartsOneChildOnlyAfterHealthAndStopsGracefully()
+    public async Task SupervisorStartsOneChildWithoutBlockingOnHealthAndStopsGracefully()
     {
         using var fixture = TestFixture.Create();
         var child = new FakeChildProcess(exitOnGraceful: true);
@@ -298,14 +298,34 @@ public sealed class ServiceHostTests
     }
 
     [Fact]
-    public async Task SupervisorFailsWhenChildExitsBeforeHealth()
+    public async Task SupervisorStartReturnsWhileHealthGateIsStillPending()
+    {
+        using var fixture = TestFixture.Create();
+        var child = new FakeChildProcess(exitOnGraceful: true);
+        var lifetime = new FakeHostLifetime();
+        var health = new BlockingHealthProbe();
+        var supervisor = fixture.Supervisor(new FakeChildFactory(child), health, lifetime);
+
+        var startTask = supervisor.StartAsync(CancellationToken.None);
+        var completed = await Task.WhenAny(startTask, Task.Delay(TimeSpan.FromSeconds(1)));
+
+        Assert.Same(startTask, completed);
+        await startTask;
+        Assert.False(lifetime.StopCalled);
+
+        await supervisor.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task SupervisorSignalsFailureWhenChildExitsBeforeHealth()
     {
         using var fixture = TestFixture.Create();
         var child = new FakeChildProcess(exitImmediately: true);
         var lifetime = new FakeHostLifetime();
         var supervisor = fixture.Supervisor(new FakeChildFactory(child), new FakeHealthProbe(false), lifetime);
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() => supervisor.StartAsync(CancellationToken.None));
+        await supervisor.StartAsync(CancellationToken.None);
+        await WaitForAsync(() => lifetime.StopCalled);
         Assert.Equal(0, child.GracefulRequests);
     }
 
@@ -458,6 +478,14 @@ public sealed class ServiceHostTests
     private sealed class FakeHealthProbe(bool healthy) : IHealthProbe
     {
         public Task<bool> WaitUntilHealthyAsync(Uri healthUrl, TimeSpan timeout, CancellationToken cancellationToken) => Task.FromResult(healthy);
+    }
+
+    private sealed class BlockingHealthProbe : IHealthProbe
+    {
+        private readonly TaskCompletionSource<bool> result = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task<bool> WaitUntilHealthyAsync(Uri healthUrl, TimeSpan timeout, CancellationToken cancellationToken)
+            => result.Task.WaitAsync(cancellationToken);
     }
 
     private sealed class FakeLogSinkFactory : IRotatingLogSinkFactory

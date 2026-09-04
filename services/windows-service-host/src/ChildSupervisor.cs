@@ -25,6 +25,7 @@ public sealed class ChildSupervisor : IHostedService, IAsyncDisposable
     private IChildProcess? child;
     private IRotatingLogSink? logs;
     private Task? monitorTask;
+    private Task? startupTask;
     private Task[] pumps = Array.Empty<Task>();
     private bool stopRequested;
     private bool started;
@@ -67,23 +68,12 @@ public sealed class ChildSupervisor : IHostedService, IAsyncDisposable
                 PumpAsync(child.StandardError, "stderr", stopping.Token)
             ];
 
-            using var startupCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, stopping.Token);
-            startupCancellation.CancelAfter(options.StartupTimeout);
-            var healthTask = healthProbe.WaitUntilHealthyAsync(options.HealthUrl, options.StartupTimeout, startupCancellation.Token);
-            var exitTask = child.WaitForExitAsync(startupCancellation.Token);
-            var first = await Task.WhenAny(healthTask, exitTask).ConfigureAwait(false);
-
-            if (first == exitTask)
-            {
-                await exitTask.ConfigureAwait(false);
-                throw new InvalidOperationException("The configured child exited before health became ready.");
-            }
-
-            if (!await healthTask.ConfigureAwait(false) || child.HasExited)
-            {
-                throw new InvalidOperationException("The configured child did not become healthy.");
-            }
-
+            // Windows Service Control Manager has a default 30-second start
+            // deadline.  Do not hold IHostedService.StartAsync open while a
+            // cold Node/Python child warms up: the deployment performs its
+            // own health gate, while this background gate keeps the service
+            // self-healing if the child never becomes ready.
+            startupTask = MonitorStartupAsync(child, stopping.Token);
             monitorTask = MonitorChildAsync(child, stopping.Token);
         }
         catch
@@ -105,6 +95,18 @@ public sealed class ChildSupervisor : IHostedService, IAsyncDisposable
             try
             {
                 await monitorTask.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // Expected when the service is stopping.
+            }
+        }
+
+        if (startupTask is not null)
+        {
+            try
+            {
+                await startupTask.ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -138,6 +140,40 @@ public sealed class ChildSupervisor : IHostedService, IAsyncDisposable
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             // Expected during service shutdown.
+        }
+    }
+
+    private async Task MonitorStartupAsync(IChildProcess process, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var healthy = await healthProbe
+                .WaitUntilHealthyAsync(options.HealthUrl, options.StartupTimeout, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (!healthy || process.HasExited)
+            {
+                if (!stopRequested && !cancellationToken.IsCancellationRequested)
+                {
+                    failureSignal.FailService();
+                    applicationLifetime.StopApplication();
+                }
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Expected during service shutdown.
+        }
+        catch
+        {
+            // A failed health probe is a failed service start.  Keep the
+            // material exception out of SCM/event output and let the host
+            // shutdown path terminate the child tree.
+            if (!stopRequested && !cancellationToken.IsCancellationRequested)
+            {
+                failureSignal.FailService();
+                applicationLifetime.StopApplication();
+            }
         }
     }
 
