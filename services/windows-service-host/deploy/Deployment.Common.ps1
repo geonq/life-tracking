@@ -1154,7 +1154,8 @@ function Remove-TransientLogonAclRules {
         $acl = Get-Acl -LiteralPath $target.FullName -ErrorAction Stop
         $rules = @($acl.Access | Where-Object {
             $_.AccessControlType -eq 'Allow' -and
-            $_.IdentityReference.Value.StartsWith('S-1-5-5-')
+            ($_.IdentityReference.Value.StartsWith('S-1-5-5-') -or
+             $_.IdentityReference.Value.StartsWith('S-1-5-80-'))
         })
         foreach ($rule in $rules) { [void]$acl.RemoveAccessRule($rule) }
         if ($rules.Count -gt 0) { Set-Acl -LiteralPath $target.FullName -AclObject $acl -ErrorAction Stop }
@@ -1169,10 +1170,11 @@ function Set-DirectoryTraversalAcl {
         [switch]$RootOnly
     )
     Ensure-Directory $Path
-    # Some existing Hermes roots carry transient LogonSessionId ACEs.  They
-    # are not stable service identities and must not survive hardening.  Run
-    # both before and after /inheritance:r because Windows can materialize an
-    # inherited transient ACE as explicit on descendants during that call.
+    # Some existing Hermes roots carry transient LogonSessionId ACEs or stale
+    # virtual-service SID ACEs from a prior service registration. Neither is
+    # stable across this transaction and must not survive hardening. Run both
+    # before and after /inheritance:r because Windows can materialize inherited
+    # ACEs as explicit on descendants during that call.
     Remove-TransientLogonAclRules $Path -Recurse:(!$RootOnly)
     if ($RootOnly) {
         Assert-ExplicitAclAllowSet -Path $Path -OperatorSid $OperatorSid -ReadSids $ReadSids -ModifySids @()
