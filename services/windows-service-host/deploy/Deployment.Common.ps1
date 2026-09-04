@@ -2231,12 +2231,25 @@ function New-ServiceOrConfigure {
     )
     $quoted = '"{0}" --service-name {1} --config "{2}"' -f $BinaryPath, $Name, (Join-Path (Split-Path -Parent $BinaryPath) ('config\' + $Name + '.json'))
     $existing = Get-ServiceRecord $Name
+    $created = $false
     if ($null -eq $existing) {
         # Virtual service accounts do not need a password.  Omitting the
         # password pair also avoids passing an empty positional argument to
         # PowerShell 5.1's native-command wrapper.
-        Invoke-NativeChecked 'sc.exe' @('create', $Name, 'binPath=', $quoted, 'obj=', $Account, 'start=', $StartMode) -Quiet | Out-Null
-    } else {
+        # A previous `sc delete` can leave a service marked for deletion for a
+        # short interval. Treat only ERROR_SERVICE_EXISTS as retryable, then
+        # re-read the service before configuring it.
+        for ($attempt = 1; $attempt -le 20; $attempt++) {
+            $createExit = Invoke-NativeChecked 'sc.exe' @('create', $Name, 'binPath=', $quoted, 'obj=', $Account, 'start=', $StartMode) -AllowNonZero -Quiet
+            if ($createExit -eq 0) { $created = $true; break }
+            if ($createExit -ne 1073) { throw "Service creation failed for ${Name} (exit code $createExit)." }
+            $existing = Get-ServiceRecord $Name
+            if ($null -ne $existing) { break }
+            if ($attempt -lt 20) { Start-Sleep -Seconds 1 }
+        }
+        if (-not $created -and $null -eq $existing) { throw "Service $Name remained unavailable after a bounded service-manager retry." }
+    }
+    if (-not $created) {
         Assert-ServiceIdentity -Name $Name -ExpectedAccount $Account -ExpectedBinary $BinaryPath
         Invoke-NativeChecked 'sc.exe' @('config', $Name, 'binPath=', $quoted, 'obj=', $Account, 'start=', $StartMode) -Quiet | Out-Null
     }
