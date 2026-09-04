@@ -886,7 +886,13 @@ Save-InstallManifest $manifest $manifestPath
 # No profile, Users, Everyone, or shared-service grant is created.
 $hostDirectory = Split-Path -Parent $hostTarget
 Set-DirectoryTraversalAcl $paths.InstallRoot $operatorSid @($apiSid, $gatewaySid) -RootOnly
-Set-RestrictedAcl $hostDirectory $operatorSid @($apiSid, $gatewaySid) @()
+# Keep the shared host directory mutation root-only.  The service manager and
+# Defender can hold the freshly staged executable open; recursively applying
+# icacls to the directory therefore races on the binary itself.  Harden the
+# directory boundary first, then apply the exact read ACL to the one shared
+# executable as a file.
+Set-DirectoryTraversalAcl $hostDirectory $operatorSid @($apiSid, $gatewaySid) -RootOnly
+Set-RestrictedAcl $hostTarget $operatorSid @($apiSid, $gatewaySid) @() -File
 Set-RestrictedAcl $apiTarget $operatorSid @($apiSid) @()
 Set-RestrictedAcl $gatewayTarget $operatorSid @($gatewaySid) @()
 Set-DirectoryTraversalAcl $paths.RuntimeRoot $operatorSid @($apiSid, $gatewaySid) -RootOnly
