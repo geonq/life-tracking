@@ -746,8 +746,14 @@ Complete-ManifestIntent $nodeIntent $manifest $manifestPath $nodeStage
 
 # Register the stopped SCM objects before creating any service-readable
 # directory, so the service SIDs can be resolved before ACLs are applied.
-New-ServiceOrConfigure 'LifeOSAPI' $hostTarget 'auto' $apiAccount @()
-New-ServiceOrConfigure 'LifeOSGateway' $hostTarget 'delayed-auto' $gatewayAccount @('LifeOSAPI', $TailscaleServiceName)
+# SCM can keep an image handle open even while a service is stopped. Use a
+# trusted system image only during ACL provisioning, then point the services at
+# the LifeOS host after the shared executable is fully protected. Existing
+# services are validated against the canonical LifeOS image before this
+# temporary transition.
+$serviceRegistrationTarget = Join-Path ([Environment]::GetFolderPath('Windows')) 'System32\svchost.exe'
+New-ServiceOrConfigure 'LifeOSAPI' $serviceRegistrationTarget 'auto' $apiAccount @() -ExpectedExistingBinary $hostTarget
+New-ServiceOrConfigure 'LifeOSGateway' $serviceRegistrationTarget 'delayed-auto' $gatewayAccount @('LifeOSAPI', $TailscaleServiceName) -ExpectedExistingBinary $hostTarget
 $apiSid = Get-ServiceSid 'LifeOSAPI'
 $gatewaySid = Get-ServiceSid 'LifeOSGateway'
 $manifest.apiServiceSid = $apiSid
@@ -893,6 +899,8 @@ Set-DirectoryTraversalAcl $paths.InstallRoot $operatorSid @($apiSid, $gatewaySid
 # executable as a file.
 Set-DirectoryTraversalAcl $hostDirectory $operatorSid @($apiSid, $gatewaySid) -RootOnly
 Set-RestrictedAcl $hostTarget $operatorSid @($apiSid, $gatewaySid) @() -File
+New-ServiceOrConfigure 'LifeOSAPI' $hostTarget 'auto' $apiAccount @() -ExpectedExistingBinary $serviceRegistrationTarget
+New-ServiceOrConfigure 'LifeOSGateway' $hostTarget 'delayed-auto' $gatewayAccount @('LifeOSAPI', $TailscaleServiceName) -ExpectedExistingBinary $serviceRegistrationTarget
 Set-RestrictedAcl $apiTarget $operatorSid @($apiSid) @()
 Set-RestrictedAcl $gatewayTarget $operatorSid @($gatewaySid) @()
 Set-DirectoryTraversalAcl $paths.RuntimeRoot $operatorSid @($apiSid, $gatewaySid) -RootOnly

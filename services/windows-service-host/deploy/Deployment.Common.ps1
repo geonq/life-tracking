@@ -2227,8 +2227,10 @@ function New-ServiceOrConfigure {
         [Parameter(Mandatory)][string]$BinaryPath,
         [Parameter(Mandatory)][ValidateSet('auto','delayed-auto')][string]$StartMode,
         [Parameter(Mandatory)][string]$Account,
-        [string[]]$Dependencies = @()
+        [string[]]$Dependencies = @(),
+        [string]$ExpectedExistingBinary = ''
     )
+    if ([string]::IsNullOrWhiteSpace($ExpectedExistingBinary)) { $ExpectedExistingBinary = $BinaryPath }
     $quoted = '"{0}" --service-name {1} --config "{2}"' -f $BinaryPath, $Name, (Join-Path (Split-Path -Parent $BinaryPath) ('config\' + $Name + '.json'))
     $existing = Get-ServiceRecord $Name
     $created = $false
@@ -2250,7 +2252,7 @@ function New-ServiceOrConfigure {
         if (-not $created -and $null -eq $existing) { throw "Service $Name remained unavailable after a bounded service-manager retry." }
     }
     if (-not $created) {
-        Assert-ServiceIdentity -Name $Name -ExpectedAccount $Account -ExpectedBinary $BinaryPath
+        Assert-ServiceIdentity -Name $Name -ExpectedAccount $Account -ExpectedBinary $ExpectedExistingBinary
         Invoke-NativeChecked 'sc.exe' @('config', $Name, 'binPath=', $quoted, 'obj=', $Account, 'start=', $StartMode) -Quiet | Out-Null
     }
     Invoke-NativeChecked 'sc.exe' @('sidtype', $Name, 'unrestricted') -Quiet | Out-Null
