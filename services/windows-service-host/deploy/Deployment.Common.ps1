@@ -1087,7 +1087,7 @@ function Set-RestrictedAcl {
         [switch]$File
     )
     if ($File) { Assert-ExistingFile $Path 'ACL file' } else { Ensure-Directory $Path }
-    Remove-TransientLogonAclRules $Path -KeepServiceSids @($ReadSids + $ModifySids)
+    Remove-TransientLogonAclRules $Path -Recurse -KeepServiceSids @($ReadSids + $ModifySids)
     Assert-ExplicitAclAllowTree -Path $Path -OperatorSid $OperatorSid -ReadSids $ReadSids -ModifySids $ModifySids
     Register-AclSnapshot $Path
     # Use well-known SIDs instead of localized account names.
@@ -1107,7 +1107,7 @@ function Set-RestrictedAcl {
     $args = @($Path, '/inheritance:r', '/remove:g') + $broadSids + @('/grant:r') + $grant
     if (-not $File) { $args += @('/T', '/C') }
     Invoke-NativeChecked 'icacls.exe' ([string[]]$args) -Quiet | Out-Null
-    Remove-TransientLogonAclRules $Path -KeepServiceSids @($ReadSids + $ModifySids)
+    Remove-TransientLogonAclRules $Path -Recurse -KeepServiceSids @($ReadSids + $ModifySids)
     Assert-RestrictedAcl -Path $Path -OperatorSid $OperatorSid -ReadSids $ReadSids -ModifySids $ModifySids
 }
 
