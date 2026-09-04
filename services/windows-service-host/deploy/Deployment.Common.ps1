@@ -952,7 +952,8 @@ function Copy-FileVerifiedAtomic {
         [Parameter(Mandatory)][string]$Destination,
         [Parameter(Mandatory)][string]$BackupDirectory,
         [string]$BackupName,
-        [long]$MaxBytes = 0
+        [long]$MaxBytes = 0,
+        [switch]$DeferMove
     )
     $sourceItem = Get-Item -LiteralPath $Source -Force -ErrorAction SilentlyContinue
     if ($null -ne $sourceItem -and $sourceItem.PSIsContainer) { throw 'Copy source must be a file.' }
@@ -970,7 +971,7 @@ function Copy-FileVerifiedAtomic {
     if (Test-Path -LiteralPath $Destination -PathType Leaf) {
         Assert-NoReparsePath $Destination
         if ((Get-FileSha256 $Destination) -eq $sourceHash) {
-            return [pscustomobject]@{ Destination = $Destination; SourceHash = $sourceHash; SourceLength = $sourceInfo.Length; Backup = $null; Changed = $false }
+            return [pscustomobject]@{ Destination = $Destination; SourceHash = $sourceHash; SourceLength = $sourceInfo.Length; Backup = $null; Changed = $false; StagedPath = $null }
         }
     }
     $backup = $null
@@ -986,8 +987,10 @@ function Copy-FileVerifiedAtomic {
             throw 'Atomic copy source exceeded its bounded migration size.'
         }
         if ((Get-FileSha256 $temp) -ne $sourceHash) { throw "Atomic copy hash verification failed for $Source." }
-        Move-Item -LiteralPath $temp -Destination $Destination -Force
-        if ((Get-FileSha256 $Destination) -ne $sourceHash) { throw "Destination hash verification failed for $Destination." }
+        if (-not $DeferMove) {
+            Move-Item -LiteralPath $temp -Destination $Destination -Force
+            if ((Get-FileSha256 $Destination) -ne $sourceHash) { throw "Destination hash verification failed for $Destination." }
+        }
     } catch {
         if ($null -ne $backup -and (Test-Path -LiteralPath $backup)) {
             Move-CurrentOutOfTheWay $Destination $BackupDirectory
@@ -997,9 +1000,9 @@ function Copy-FileVerifiedAtomic {
         }
         throw
     } finally {
-        if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }
+        if (-not $DeferMove -and (Test-Path -LiteralPath $temp)) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }
     }
-    return [pscustomobject]@{ Destination = $Destination; SourceHash = $sourceHash; SourceLength = $sourceInfo.Length; Backup = $backup; Changed = $true }
+    return [pscustomobject]@{ Destination = $Destination; SourceHash = $sourceHash; SourceLength = $sourceInfo.Length; Backup = $backup; Changed = $true; StagedPath = if ($DeferMove) { $temp } else { $null } }
 }
 
 function Copy-TreeVerifiedAtomic {
@@ -1085,13 +1088,14 @@ function Set-RestrictedAcl {
         [string[]]$ReadSids = @(),
         [string[]]$ModifySids = @(),
         [switch]$File,
+        [switch]$SkipSnapshot,
         [int]$MaxAttempts = 5,
         [int]$RetryDelayMilliseconds = 500
     )
     if ($File) { Assert-ExistingFile $Path 'ACL file' } else { Ensure-Directory $Path }
     Remove-TransientLogonAclRules $Path -Recurse -KeepServiceSids @($ReadSids + $ModifySids)
     Assert-ExplicitAclAllowTree -Path $Path -OperatorSid $OperatorSid -ReadSids $ReadSids -ModifySids $ModifySids
-    Register-AclSnapshot $Path
+    if (-not $SkipSnapshot) { Register-AclSnapshot $Path }
     # Use well-known SIDs instead of localized account names.
     # icacls requires a leading `*` when an identity is supplied as a SID;
     # without it, virtual service SIDs fail name translation with 1332.

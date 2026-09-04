@@ -701,6 +701,7 @@ foreach ($aclTarget in @($hostTarget, $apiTarget, $gatewayTarget, $nodeTarget, $
 }
 
 $legacyTaskMutated = $false
+$hostStage = $null
 try {
     foreach ($serviceName in @('LifeOSAPI', 'LifeOSGateway')) { Stop-LifeOSService $serviceName }
 
@@ -713,8 +714,7 @@ Complete-ManifestIntent $gatewayIntent $manifest $manifestPath $gatewayStage
 $hostPriorExists = Test-Path -LiteralPath $hostTarget -PathType Leaf
 $hostChanged = -not ($hostPriorExists -and (Get-FileSha256 $hostSource) -eq (Get-FileSha256 $hostTarget))
 $hostIntent = New-ManifestIntent -List $manifest.backups -Manifest $manifest -ManifestPath $manifestPath -Kind 'host-binary' -Source $hostSource -Destination $hostTarget -Backup (Join-Path $backupDirectory ('previous-' + [IO.Path]::GetFileName($hostTarget))) -PriorExists $hostPriorExists -Changed $hostChanged
-$hostStage = Copy-FileVerifiedAtomic $hostSource $hostTarget $backupDirectory
-Complete-ManifestIntent $hostIntent $manifest $manifestPath $hostStage
+$hostStage = Copy-FileVerifiedAtomic $hostSource $hostTarget $backupDirectory -DeferMove
 $pythonStage = Get-ChildRuntimeStage $pythonSource $paths.RuntimeRoot $backupDirectory $manifest $manifestPath
 Invoke-NativeChecked $pythonStage.PythonPath @('-I', '-c', 'import fastapi,httpx,uvicorn,multipart') -Quiet | Out-Null
 $gatewayImportCheck = 'import importlib,os,pathlib,sys; assert sys.version_info[:2] == (3,12),sys.version; from zoneinfo import ZoneInfo; ZoneInfo("Europe/Berlin"); roots=[pathlib.Path(os.environ["LIFEOS_DEPLOY_STAGED_GATEWAY_SOURCE"]).resolve()]; sys.path[:0]=[str(root) for root in roots]; names=("main","enablebanking","supplement_catalog","gateway_launcher"); modules=[importlib.import_module(name) for name in names]; assert all(pathlib.Path(module.__file__).resolve().parent == roots[0] for module in modules), [(name,module.__file__) for name,module in zip(names,modules)]'
@@ -898,7 +898,19 @@ Set-DirectoryTraversalAcl $paths.InstallRoot $operatorSid @($apiSid, $gatewaySid
 # directory boundary first, then apply the exact read ACL to the one shared
 # executable as a file.
 Set-DirectoryTraversalAcl $hostDirectory $operatorSid @($apiSid, $gatewaySid) -RootOnly
-Set-RestrictedAcl $hostTarget $operatorSid @($apiSid, $gatewaySid) @() -File -MaxAttempts 30 -RetryDelayMilliseconds 1000
+if ($null -ne $hostStage.StagedPath) {
+    # Apply the ACL while the verified executable still has a randomized
+    # staging name. Defender is much less likely to hold that path open; the
+    # final rename then preserves the already-hardened DACL.
+    Set-RestrictedAcl $hostStage.StagedPath $operatorSid @($apiSid, $gatewaySid) @() -File -SkipSnapshot -MaxAttempts 30 -RetryDelayMilliseconds 1000
+    Move-Item -LiteralPath $hostStage.StagedPath -Destination $hostTarget -Force
+    Assert-ExistingFile $hostTarget 'Hardened service host'
+    if ((Get-FileSha256 $hostTarget) -ne [string]$hostStage.SourceHash) { throw 'Hardened service host hash verification failed.' }
+    $hostStage.StagedPath = $null
+} else {
+    Set-RestrictedAcl $hostTarget $operatorSid @($apiSid, $gatewaySid) @() -File -MaxAttempts 30 -RetryDelayMilliseconds 1000
+}
+Complete-ManifestIntent $hostIntent $manifest $manifestPath $hostStage
 New-ServiceOrConfigure 'LifeOSAPI' $hostTarget 'auto' $apiAccount @() -ExpectedExistingBinary $serviceRegistrationTarget
 New-ServiceOrConfigure 'LifeOSGateway' $hostTarget 'delayed-auto' $gatewayAccount @('LifeOSAPI', $TailscaleServiceName) -ExpectedExistingBinary $serviceRegistrationTarget
 Set-RestrictedAcl $apiTarget $operatorSid @($apiSid) @()
@@ -963,6 +975,11 @@ Save-InstallManifest $manifest $manifestPath
     Save-InstallManifest $manifest $manifestPath
     Write-Host 'LifeOS cutover completed; the legacy task was disabled but preserved.'
 } catch {
+    if ($null -ne $hostStage -and $null -ne $hostStage.PSObject.Properties['StagedPath'] -and
+        -not [string]::IsNullOrWhiteSpace([string]$hostStage.StagedPath) -and
+        (Test-Path -LiteralPath ([string]$hostStage.StagedPath))) {
+        Remove-Item -LiteralPath ([string]$hostStage.StagedPath) -Force -ErrorAction SilentlyContinue
+    }
     foreach ($serviceName in @('LifeOSGateway', 'LifeOSAPI')) {
         try { Stop-LifeOSService $serviceName } catch { Write-Warning ("Could not stop {0} during rollback: {1}" -f $serviceName, $_.Exception.Message) }
     }
