@@ -1768,7 +1768,16 @@ function Get-LegacyGatewayListenerSnapshot {
         if ([string]::IsNullOrWhiteSpace($grandparentExecutablePath)) {
             throw 'The legacy listener process chain has no verifiable grandparent executable.'
         }
-        Assert-ExistingFile $grandparentExecutablePath 'Legacy listener grandparent executable'
+        # The grandparent is used only as a process-chain guard against a
+        # deeper Python/uvicorn parent.  Task Scheduler commonly launches the
+        # approved PowerShell wrapper through a Windows system executable that
+        # is reported as a reparse path; the exact task fingerprint and
+        # immediate approved venv-parent checks above already provide the
+        # identity proof needed for cutover.  Require an existing file here,
+        # but do not reject that legitimate system-wrapper representation.
+        if (-not (Test-Path -LiteralPath $grandparentExecutablePath -PathType Leaf)) {
+            throw 'The legacy listener grandparent executable does not exist.'
+        }
         $grandparentExecutablePath = Normalize-WindowsAbsolutePath $grandparentExecutablePath
         if ($grandparentExecutablePath -ieq [string]$relationshipProof.BaseExecutable -or
             $grandparentExecutablePath -ieq $approvedRuntimePath -or
