@@ -832,7 +832,7 @@ function Get-TreeManifest {
     param([Parameter(Mandatory)][string]$Root)
     Assert-ExistingDirectory $Root 'Manifest root'
     $rootFull = (Get-FullPath $Root).TrimEnd('\')
-    $items = @()
+    $items = New-Object 'System.Collections.Generic.List[object]'
     foreach ($item in (Get-ChildItem -LiteralPath $rootFull -Recurse -Force -File -ErrorAction Stop)) {
         $linkType = if ($null -ne $item.PSObject.Properties['LinkType']) { $item.LinkType } else { $null }
         # uv-backed Python installs may use hardlinks for ordinary package
@@ -843,7 +843,7 @@ function Get-TreeManifest {
             throw "Reparse point found below code/runtime root: $($item.FullName)"
         }
         $relative = $item.FullName.Substring($rootFull.Length).TrimStart('\')
-        $items += [ordered]@{ path = $relative; sha256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant(); length = $item.Length }
+        [void]$items.Add([ordered]@{ path = $relative; sha256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant(); length = $item.Length })
     }
     return @($items | Sort-Object -Property path)
 }
