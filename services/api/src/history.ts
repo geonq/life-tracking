@@ -162,10 +162,15 @@ export class UsageHistory {
           .filter(item => item.provider === incoming.provider && item.window === incoming.window)
           .reduce<Entry | undefined>((current, item) => !current || Date.parse(item.observedAt) > Date.parse(current.observedAt) ? item : current, undefined);
         const sameValues = latest?.usedPercent === incoming.usedPercent && latest?.resetAt === incoming.resetAt;
-        // Replaying the same provider/window observation is always idempotent. A
-        // statusline may be retried well after the previous request, so elapsed
-        // time must not turn an identical observation into a duplicate sample.
-        if (latest !== undefined && sameValues) continue;
+        // A keyed replay returns above before reaching this loop. For a new,
+        // newer capture, retain equal-value observations as freshness
+        // heartbeats: the source was checked again even though its counter did
+        // not move. This keeps the current window fresh without confusing a
+        // transport retry with a new sample.
+        if (latest !== undefined && sameValues) {
+          if (Date.parse(incoming.observedAt) > Date.parse(latest.observedAt)) nextEntries.push(incoming);
+          continue;
+        }
         // A delayed collector retry must never become the apparent current
         // observation. This is deliberately per provider/window: a reset or a
         // changed value is useful only when it was captured after the latest
