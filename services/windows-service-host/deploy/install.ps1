@@ -898,7 +898,7 @@ Set-DirectoryTraversalAcl $paths.InstallRoot $operatorSid @($apiSid, $gatewaySid
 # directory boundary first, then apply the exact read ACL to the one shared
 # executable as a file.
 Set-DirectoryTraversalAcl $hostDirectory $operatorSid @($apiSid, $gatewaySid) -RootOnly
-Set-RestrictedAcl $hostTarget $operatorSid @($apiSid, $gatewaySid) @() -File
+Set-RestrictedAcl $hostTarget $operatorSid @($apiSid, $gatewaySid) @() -File -MaxAttempts 30 -RetryDelayMilliseconds 1000
 New-ServiceOrConfigure 'LifeOSAPI' $hostTarget 'auto' $apiAccount @() -ExpectedExistingBinary $serviceRegistrationTarget
 New-ServiceOrConfigure 'LifeOSGateway' $hostTarget 'delayed-auto' $gatewayAccount @('LifeOSAPI', $TailscaleServiceName) -ExpectedExistingBinary $serviceRegistrationTarget
 Set-RestrictedAcl $apiTarget $operatorSid @($apiSid) @()

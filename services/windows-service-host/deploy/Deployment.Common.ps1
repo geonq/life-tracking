@@ -1084,7 +1084,9 @@ function Set-RestrictedAcl {
         [Parameter(Mandatory)][string]$OperatorSid,
         [string[]]$ReadSids = @(),
         [string[]]$ModifySids = @(),
-        [switch]$File
+        [switch]$File,
+        [int]$MaxAttempts = 5,
+        [int]$RetryDelayMilliseconds = 500
     )
     if ($File) { Assert-ExistingFile $Path 'ACL file' } else { Ensure-Directory $Path }
     Remove-TransientLogonAclRules $Path -Recurse -KeepServiceSids @($ReadSids + $ModifySids)
@@ -1116,8 +1118,8 @@ function Set-RestrictedAcl {
             break
         } catch {
             $aclAttempt++
-            if ($aclAttempt -ge 5) { throw }
-            Start-Sleep -Milliseconds (500 * $aclAttempt)
+            if ($aclAttempt -ge $MaxAttempts) { throw }
+            Start-Sleep -Milliseconds $RetryDelayMilliseconds
         }
     }
     Remove-TransientLogonAclRules $Path -Recurse -KeepServiceSids @($ReadSids + $ModifySids)
