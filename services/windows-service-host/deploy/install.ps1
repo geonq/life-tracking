@@ -256,8 +256,9 @@ function Initialize-SupplementCatalog {
     # Windows PowerShell 5.1 drops empty strings at the native argv boundary.
     # Use a bounded sentinel when there is no existing catalog, then decode it
     # inside Python so the four-argument contract remains stable.
-    $existingCatalog = if (Test-Path -LiteralPath $CatalogPath -PathType Leaf) { $CatalogPath } else { '-' }
-    if ($existingCatalog) { Assert-NoReparsePath $existingCatalog }
+    $catalogPriorExists = Test-Path -LiteralPath $CatalogPath -PathType Leaf
+    $existingCatalog = if ($catalogPriorExists) { $CatalogPath } else { '-' }
+    if ($catalogPriorExists) { Assert-NoReparsePath $existingCatalog }
     $pythonCode = 'import sqlite3,sys; database,existing_path,schema_path,seed_path=sys.argv[1:]; con=sqlite3.connect(database); con.execute("PRAGMA foreign_keys=ON"); source=None if existing_path in ("","-") else sqlite3.connect(existing_path); source.backup(con) if source is not None else None; source.close() if source is not None else None; con.executescript(open(schema_path,encoding="utf-8").read()); con.executescript(open(seed_path,encoding="utf-8").read()); assert con.execute("PRAGMA integrity_check").fetchone()[0] == "ok"; assert not con.execute("PRAGMA foreign_key_check").fetchone(); con.commit(); con.close()'
     $previousCatalogCheck = $env:LIFEOS_DEPLOY_SUPPLEMENT_CATALOG_CHECK
     try {
@@ -270,7 +271,6 @@ function Initialize-SupplementCatalog {
         Assert-ExistingFile $temporaryCatalog 'Staged supplement catalog database'
         Assert-NoReparsePath $temporaryCatalog
         $backup = $null
-        $catalogPriorExists = Test-Path -LiteralPath $CatalogPath -PathType Leaf
         if ($catalogPriorExists) {
             $backup = Backup-File $CatalogPath $BackupDirectory 'previous-supplements.sqlite3'
             Assert-NoReparsePath $CatalogPath
