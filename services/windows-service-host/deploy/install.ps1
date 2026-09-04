@@ -761,6 +761,17 @@ $manifest.gatewayServiceSid = $gatewaySid
 Save-InstallManifest $manifest $manifestPath
 Set-AclSnapshotContext -Manifest $manifest -ManifestPath $manifestPath -BackupDirectory $backupDirectory
 
+# Code and runtime trees are created from verified release sources.  Harden
+# each tree's root with a service-specific inheritable boundary after the
+# service SIDs exist; Windows propagates that DACL to the newly-created child
+# files without racing Defender on individual source files.
+Set-DirectoryTraversalAcl $apiTarget $operatorSid @($apiSid) -RootOnly -InheritToChildren
+Set-DirectoryTraversalAcl $gatewayTarget $operatorSid @($gatewaySid) -RootOnly -InheritToChildren
+Set-DirectoryTraversalAcl $paths.RuntimeRoot $operatorSid @($apiSid, $gatewaySid) -RootOnly -InheritToChildren
+Set-DirectoryTraversalAcl $nodeTarget $operatorSid @($apiSid) -RootOnly -InheritToChildren
+Set-DirectoryTraversalAcl (Join-Path $paths.RuntimeRoot 'python312') $operatorSid @($gatewaySid) -RootOnly -InheritToChildren
+if ($null -ne $pythonStage.VenvTarget) { Set-DirectoryTraversalAcl $pythonStage.VenvTarget $operatorSid @($gatewaySid) -RootOnly -InheritToChildren }
+
 # Lock parent roots before sensitive children are created.  Every child then
 # gets its own service-specific ACL before migration writes any bytes.
 Set-DirectoryTraversalAcl $paths.DataRoot $operatorSid @($apiSid, $gatewaySid)
@@ -916,12 +927,11 @@ if ($null -ne $hostStage.StagedPath) {
 Complete-ManifestIntent $hostIntent $manifest $manifestPath $hostStage
 New-ServiceOrConfigure 'LifeOSAPI' $hostTarget 'auto' $apiAccount @() -ExpectedExistingBinary $serviceRegistrationTarget
 New-ServiceOrConfigure 'LifeOSGateway' $hostTarget 'delayed-auto' $gatewayAccount @('LifeOSAPI', $TailscaleServiceName) -ExpectedExistingBinary $serviceRegistrationTarget
-Set-RestrictedAcl $apiTarget $operatorSid @($apiSid) @()
-Set-RestrictedAcl $gatewayTarget $operatorSid @($gatewaySid) @()
-Set-DirectoryTraversalAcl $paths.RuntimeRoot $operatorSid @($apiSid, $gatewaySid) -RootOnly
-Set-RestrictedAcl $nodeTarget $operatorSid @($apiSid) @()
-Set-RestrictedAcl (Join-Path $paths.RuntimeRoot 'python312') $operatorSid @($gatewaySid) @()
-if ($null -ne $pythonStage.VenvTarget) { Set-RestrictedAcl $pythonStage.VenvTarget $operatorSid @($gatewaySid) @() }
+Assert-RestrictedAcl $apiTarget $operatorSid @($apiSid) @() -AllowInherited
+Assert-RestrictedAcl $gatewayTarget $operatorSid @($gatewaySid) @() -AllowInherited
+Assert-RestrictedAcl $nodeTarget $operatorSid @($apiSid) @() -AllowInherited
+Assert-RestrictedAcl (Join-Path $paths.RuntimeRoot 'python312') $operatorSid @($gatewaySid) @() -AllowInherited
+if ($null -ne $pythonStage.VenvTarget) { Assert-RestrictedAcl $pythonStage.VenvTarget $operatorSid @($gatewaySid) @() -AllowInherited }
 Set-RestrictedAcl $apiConfig $operatorSid @($apiSid) @() -File
 Set-RestrictedAcl $gatewayServiceConfig $operatorSid @($gatewaySid) @() -File
 Set-RestrictedAcl $gatewayConfig $operatorSid @($gatewaySid) @() -File
