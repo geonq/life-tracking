@@ -256,8 +256,14 @@ function Initialize-SupplementCatalog {
     $existingCatalog = if (Test-Path -LiteralPath $CatalogPath -PathType Leaf) { $CatalogPath } else { '' }
     if ($existingCatalog) { Assert-NoReparsePath $existingCatalog }
     $pythonCode = 'import sqlite3,sys; database,existing_path,schema_path,seed_path=sys.argv[1:]; con=sqlite3.connect(database); con.execute("PRAGMA foreign_keys=ON"); source=None if not existing_path else sqlite3.connect(existing_path); source.backup(con) if source is not None else None; source.close() if source is not None else None; con.executescript(open(schema_path,encoding="utf-8").read()); con.executescript(open(seed_path,encoding="utf-8").read()); assert con.execute("PRAGMA integrity_check").fetchone()[0] == "ok"; assert not con.execute("PRAGMA foreign_key_check").fetchone(); con.commit(); con.close()'
+    $previousCatalogCheck = $env:LIFEOS_DEPLOY_SUPPLEMENT_CATALOG_CHECK
     try {
-        Invoke-NativeChecked $PythonExecutable @('-c', $pythonCode, $temporaryCatalog, $existingCatalog, $schema, $seed) -Quiet | Out-Null
+        # Keep the Python source out of the native argv boundary.  Windows
+        # PowerShell 5.1 strips nested quote characters from `-c` arguments;
+        # argv still carries only the four explicit filesystem paths.
+        $env:LIFEOS_DEPLOY_SUPPLEMENT_CATALOG_CHECK = $pythonCode
+        $pythonRunner = 'import os;exec(os.environ.get(chr(76)+chr(73)+chr(70)+chr(69)+chr(79)+chr(83)+chr(95)+chr(68)+chr(69)+chr(80)+chr(76)+chr(79)+chr(89)+chr(95)+chr(83)+chr(85)+chr(80)+chr(80)+chr(76)+chr(69)+chr(77)+chr(69)+chr(78)+chr(84)+chr(95)+chr(67)+chr(65)+chr(84)+chr(65)+chr(76)+chr(79)+chr(71)+chr(95)+chr(67)+chr(72)+chr(69)+chr(67)+chr(75)))'
+        Invoke-NativeChecked $PythonExecutable @('-I', '-c', $pythonRunner, $temporaryCatalog, $existingCatalog, $schema, $seed) -Quiet | Out-Null
         Assert-ExistingFile $temporaryCatalog 'Staged supplement catalog database'
         Assert-NoReparsePath $temporaryCatalog
         $backup = $null
@@ -285,6 +291,8 @@ function Initialize-SupplementCatalog {
         Save-InstallManifest $Manifest $ManifestPath
         return $true
     } finally {
+        if ($null -eq $previousCatalogCheck) { Remove-Item Env:LIFEOS_DEPLOY_SUPPLEMENT_CATALOG_CHECK -ErrorAction SilentlyContinue }
+        else { $env:LIFEOS_DEPLOY_SUPPLEMENT_CATALOG_CHECK = $previousCatalogCheck }
         if (Test-Path -LiteralPath $temporaryCatalog) {
             Remove-Item -LiteralPath $temporaryCatalog -Force -ErrorAction SilentlyContinue
         }
