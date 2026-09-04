@@ -1159,7 +1159,11 @@ function Remove-TransientLogonAclRules {
             $identitySid.StartsWith('S-1-5-5-') -or
             ($identitySid.StartsWith('S-1-5-80-') -and $identitySid -notin $KeepServiceSids)
         })
-        foreach ($rule in $rules) { [void]$acl.RemoveAccessRule($rule) }
+        # Remove every ACE for the transient identity, not only one exact
+        # rights/inheritance tuple.  A parent traversal grant can be
+        # materialized on a descendant with a different tuple, and
+        # RemoveAccessRule() may leave that sibling ACE behind.
+        foreach ($rule in $rules) { $acl.RemoveAccessRuleAll($rule) }
         if ($rules.Count -gt 0) { Set-Acl -LiteralPath $target.FullName -AclObject $acl -ErrorAction Stop }
     }
 }
