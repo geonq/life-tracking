@@ -889,7 +889,7 @@ Set-DirectoryTraversalAcl $paths.InstallRoot $operatorSid @($apiSid, $gatewaySid
 Set-RestrictedAcl $hostDirectory $operatorSid @($apiSid, $gatewaySid) @()
 Set-RestrictedAcl $apiTarget $operatorSid @($apiSid) @()
 Set-RestrictedAcl $gatewayTarget $operatorSid @($gatewaySid) @()
-Set-DirectoryTraversalAcl $paths.RuntimeRoot $operatorSid @($apiSid, $gatewaySid)
+Set-DirectoryTraversalAcl $paths.RuntimeRoot $operatorSid @($apiSid, $gatewaySid) -RootOnly
 Set-RestrictedAcl $nodeTarget $operatorSid @($apiSid) @()
 Set-RestrictedAcl (Join-Path $paths.RuntimeRoot 'python312') $operatorSid @($gatewaySid) @()
 if ($null -ne $pythonStage.VenvTarget) { Set-RestrictedAcl $pythonStage.VenvTarget $operatorSid @($gatewaySid) @() }
