@@ -2316,7 +2316,11 @@ function Wait-PortFree {
     param([Parameter(Mandatory)][int]$Port, [int]$TimeoutSeconds = 30)
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     do {
-        $listeners = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop)
+        # Get-NetTCPConnection throws when the CIM query has no matching
+        # rows.  An empty listener set is the successful condition here, so
+        # treat that expected result as an empty collection rather than
+        # turning a completed legacy cutover into a rollback.
+        $listeners = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
         if ($listeners.Count -eq 0) { return $true }
         Start-Sleep -Milliseconds 250
     } while ((Get-Date) -lt $deadline)

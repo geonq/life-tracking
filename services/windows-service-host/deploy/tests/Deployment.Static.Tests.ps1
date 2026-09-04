@@ -61,6 +61,7 @@ Assert-Text 'Copy-FileVerifiedAtomic' 'Atomic hash-verified file migration is pr
 Assert-Text 'Disable-LegacyTaskAfterCutover' 'Legacy task is disabled only through the cutover helper.'
 Assert-Text 'Restore-LegacyTask' 'Rollback restores the legacy task.'
 Assert-Text 'Restore-CodexCollectorTask' 'Rollback restores the Codex collector task.'
+Assert-Text 'Get-NetTCPConnection -LocalPort \$Port -State Listen -ErrorAction SilentlyContinue' 'A free-port probe treats no matching connection as the expected result.'
 Assert-Text 'RandomNumberGenerator' 'Codex secret is generated from the OS CSPRNG.'
 Assert-Text 'gateway_launcher\.py' 'Gateway uses the reviewed Python launcher.'
 Assert-Text 'uvicorn' 'Gateway launcher runs the FastAPI app under uvicorn.'
