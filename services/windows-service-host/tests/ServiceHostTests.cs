@@ -20,6 +20,11 @@ public sealed class ServiceHostTests
         var nodeOptions = ServiceHostConfigLoader.ParseAndValidate(Encoding.UTF8.GetBytes(nodeEnvironment));
         Assert.Equal("8787", nodeOptions.Environment["PORT"]);
 
+        var managed = valid.Replace("\"maxLogFiles\":3", "\"maxLogFiles\":3,\"managementSid\":\"S-1-5-21-100-200-300-400\"", StringComparison.Ordinal);
+        Assert.Equal("S-1-5-21-100-200-300-400", ServiceHostConfigLoader.ParseAndValidate(Encoding.UTF8.GetBytes(managed)).ManagementSid);
+        var invalidManagementSid = valid.Replace("\"maxLogFiles\":3", "\"maxLogFiles\":3,\"managementSid\":\"operator\"", StringComparison.Ordinal);
+        Assert.Throws<ConfigValidationException>(() => ServiceHostConfigLoader.ParseAndValidate(Encoding.UTF8.GetBytes(invalidManagementSid)));
+
         var unknown = valid.Replace("\"maxLogFiles\":3", "\"maxLogFiles\":3,\"unknown\":true", StringComparison.Ordinal);
         Assert.Throws<ConfigValidationException>(() => ServiceHostConfigLoader.ParseAndValidate(Encoding.UTF8.GetBytes(unknown)));
 
@@ -183,6 +188,7 @@ public sealed class ServiceHostTests
     {
         Assert.Equal(expected, WindowsAclProtector.IsAllowedPrivatePrincipal(sid));
         Assert.True(WindowsAclProtector.IsAllowedPrivatePrincipal("S-1-5-21-100-200-300-400", "S-1-5-21-100-200-300-400"));
+        Assert.True(WindowsAclProtector.IsAllowedPrivatePrincipal("S-1-5-21-100-200-300-401", managementSid: "S-1-5-21-100-200-300-401"));
         Assert.False(WindowsAclProtector.IsAllowedPrivatePrincipal("S-1-5-32-545", "S-1-5-32-545"));
     }
 

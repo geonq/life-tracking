@@ -18,7 +18,8 @@ public sealed record ServiceHostOptions(
     string LogDirectory,
     string LogFileName,
     long MaxLogBytes,
-    int MaxLogFiles);
+    int MaxLogFiles,
+    string? ManagementSid = null);
 
 internal sealed class ServiceHostConfigDocument
 {
@@ -54,6 +55,9 @@ internal sealed class ServiceHostConfigDocument
 
     [JsonPropertyName("maxLogFiles")]
     public int? MaxLogFiles { get; set; }
+
+    [JsonPropertyName("managementSid")]
+    public string? ManagementSid { get; set; }
 }
 
 public sealed class ConfigValidationException : Exception
@@ -231,6 +235,12 @@ public static class ServiceHostConfigValidator
             throw new ConfigValidationException("maxLogFiles", "it must be between 2 and 20");
         }
 
+        if (model.ManagementSid is not null
+            && !Regex.IsMatch(model.ManagementSid, "^S-1-[0-9]+(?:-[0-9]+)+$", RegexOptions.CultureInvariant))
+        {
+            throw new ConfigValidationException("managementSid", "it must be a well-formed SID");
+        }
+
         var logFilePath = Path.GetFullPath(Path.Combine(model.LogDirectory, model.LogFileName));
         var logDirectoryWithSeparator = EnsureTrailingSeparator(Path.GetFullPath(model.LogDirectory));
         if (!logFilePath.StartsWith(logDirectoryWithSeparator, StringComparison.OrdinalIgnoreCase))
@@ -249,7 +259,8 @@ public static class ServiceHostConfigValidator
             model.LogDirectory,
             model.LogFileName,
             model.MaxLogBytes.Value,
-            model.MaxLogFiles.Value);
+            model.MaxLogFiles.Value,
+            model.ManagementSid);
     }
 
     internal static void RejectDuplicateProperties(JsonElement element)

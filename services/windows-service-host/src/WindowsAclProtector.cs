@@ -19,7 +19,7 @@ public static class WindowsAclProtector
         "^S-[0-9]+(?:-[0-9]+)+$",
         System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
-    public static void VerifyPrivate(string path)
+    public static void VerifyPrivate(string path, string? managementSid = null)
     {
         // RotatingLogSink is exercised by the cross-platform test suite. ACL
         // inspection is meaningful only on Windows; do not make macOS/Linux
@@ -29,11 +29,11 @@ public static class WindowsAclProtector
             return;
         }
 
-        VerifyWindows(path);
+        VerifyWindows(path, managementSid);
     }
 
     [SupportedOSPlatform("windows")]
-    private static void VerifyWindows(string path)
+    private static void VerifyWindows(string path, string? managementSid)
     {
         if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path)
             || path.IndexOf('\0') >= 0 || path.Contains('\r') || path.Contains('\n'))
@@ -129,8 +129,8 @@ public static class WindowsAclProtector
             {
                 if (rule.AccessControlType == AccessControlType.Allow
                     && (rule.IdentityReference is not SecurityIdentifier identity
-                        || (!IsAllowedPrivatePrincipal(identity.Value, ownerSid.Value, currentSid)
-                            && !IsAllowedPrivatePrincipal(identity.Value, directoryOwnerSid, currentSid))))
+                        || (!IsAllowedPrivatePrincipal(identity.Value, ownerSid.Value, currentSid, managementSid)
+                            && !IsAllowedPrivatePrincipal(identity.Value, directoryOwnerSid, currentSid, managementSid))))
                 {
                     throw new UnauthorizedAccessException("An unapproved principal can access the private log path.");
                 }
@@ -146,7 +146,7 @@ public static class WindowsAclProtector
         }
     }
 
-    public static bool IsAllowedPrivatePrincipal(string sid, string? ownerSid = null, string? currentSid = null)
+    public static bool IsAllowedPrivatePrincipal(string sid, string? ownerSid = null, string? currentSid = null, string? managementSid = null)
     {
         var canonicalSid = CanonicalSid(sid);
         if (canonicalSid is null || IsBroadPrincipal(canonicalSid))
@@ -156,7 +156,8 @@ public static class WindowsAclProtector
 
         return canonicalSid == CanonicalSid(ownerSid)
             || canonicalSid == CanonicalSid(currentSid)
-            || canonicalSid is "S-1-5-18" or "S-1-5-32-544";
+            || canonicalSid is "S-1-5-18" or "S-1-5-32-544"
+            || canonicalSid == CanonicalSid(managementSid);
     }
 
     private static bool IsBroadPrincipal(string sid) => BroadPrincipals.Contains(CanonicalSid(sid) ?? sid);

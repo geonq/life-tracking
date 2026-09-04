@@ -424,7 +424,8 @@ function Get-ApiHostConfig {
         [string]$GoogleAIStudioFoodModel,
         [string]$GoogleAIStudioFoodModelVersion,
         [switch]$OpenFoodFactsEnabled,
-        [string]$OpenFoodFactsContactEmail
+        [string]$OpenFoodFactsContactEmail,
+        [Parameter(Mandatory)][string]$ManagementSid
     )
     $systemRoot = if ([string]::IsNullOrWhiteSpace($env:SystemRoot)) { 'C:\Windows' } else { $env:SystemRoot }
     $environment = [ordered]@{
@@ -478,6 +479,7 @@ function Get-ApiHostConfig {
         logFileName = 'child.log'
         maxLogBytes = 10485760
         maxLogFiles = 5
+        managementSid = $ManagementSid
     }
 }
 
@@ -496,7 +498,8 @@ function Get-GatewayHostConfig {
         [string]$EnableBankingCertificatePath,
         [string]$EnableBankingApiBaseUrl,
         [string]$EnableBankingRedirectUri,
-        [string]$TailscaleServiceName = 'Tailscale'
+        [string]$TailscaleServiceName = 'Tailscale',
+        [Parameter(Mandatory)][string]$ManagementSid
     )
     $systemRoot = if ([string]::IsNullOrWhiteSpace($env:SystemRoot)) { 'C:\Windows' } else { $env:SystemRoot }
     $pythonDirectory = Split-Path -Parent $PythonExecutable
@@ -538,6 +541,7 @@ function Get-GatewayHostConfig {
         logFileName = 'child.log'
         maxLogBytes = 10485760
         maxLogFiles = 5
+        managementSid = $ManagementSid
     }
 }
 
@@ -888,13 +892,13 @@ Assert-PathOnlyJson $gatewayConfig
 $configIntents[$gatewayConfig]['backup'] = if ([bool]$configIntents[$gatewayConfig]['priorExists']) { Join-Path $backupDirectory ('previous-' + [IO.Path]::GetFileName($gatewayConfig)) } else { $null }
 $configIntents[$gatewayConfig]['phase'] = 'complete'
 Save-InstallManifest $manifest $manifestPath
-$apiHost = Get-ApiHostConfig -NodeExecutable (Join-Path $nodeTarget 'node.exe') -ApiDirectory $apiTarget -UsageHistory $usageHistory -ClaudeSecret $claudeSecret -CodexSecret $codexSecret -ClipperStorePath (Join-Path $apiData 'clipper-snapshot.json') -ClipperSecret $(if ([string]::IsNullOrWhiteSpace($ClipperIngestSecretSource)) { '' } else { $clipperSecret }) -GoogleAIStudioApiKey $(if ([string]::IsNullOrWhiteSpace($GoogleAIStudioApiKeySource)) { '' } else { $googleAIStudioApiKey }) -GoogleAIStudioFoodModel $GoogleAIStudioFoodModel -GoogleAIStudioFoodModelVersion $GoogleAIStudioFoodModelVersion -OpenFoodFactsEnabled:$EnableOpenFoodFacts -OpenFoodFactsContactEmail $OpenFoodFactsContactEmail -TempDirectory $apiTemp -LogDirectory $apiLogs
+$apiHost = Get-ApiHostConfig -NodeExecutable (Join-Path $nodeTarget 'node.exe') -ApiDirectory $apiTarget -UsageHistory $usageHistory -ClaudeSecret $claudeSecret -CodexSecret $codexSecret -ClipperStorePath (Join-Path $apiData 'clipper-snapshot.json') -ClipperSecret $(if ([string]::IsNullOrWhiteSpace($ClipperIngestSecretSource)) { '' } else { $clipperSecret }) -GoogleAIStudioApiKey $(if ([string]::IsNullOrWhiteSpace($GoogleAIStudioApiKeySource)) { '' } else { $googleAIStudioApiKey }) -GoogleAIStudioFoodModel $GoogleAIStudioFoodModel -GoogleAIStudioFoodModelVersion $GoogleAIStudioFoodModelVersion -OpenFoodFactsEnabled:$EnableOpenFoodFacts -OpenFoodFactsContactEmail $OpenFoodFactsContactEmail -TempDirectory $apiTemp -LogDirectory $apiLogs -ManagementSid $operatorSid
 Write-JsonAtomic $apiConfig $apiHost
 $configIntents[$apiConfig]['backup'] = if ([bool]$configIntents[$apiConfig]['priorExists']) { Join-Path $backupDirectory ('previous-' + [IO.Path]::GetFileName($apiConfig)) } else { $null }
 $configIntents[$apiConfig]['phase'] = 'complete'
 Save-InstallManifest $manifest $manifestPath
 $launcherTarget = Join-Path $gatewayTarget 'gateway_launcher.py'
-$gatewayHost = Get-GatewayHostConfig -PythonExecutable $pythonStage.PythonPath -GatewayDirectory $gatewayTarget -GatewayEntryPoint $gatewayEntryTarget -GatewayConfig $gatewayConfig -ClaudeSecret $claudeSecret -SupplementCatalogPath $supplementCatalog -TempDirectory $gatewayTemp -LogDirectory $gatewayLogs -EnableBankingAppId $EnableBankingAppId -EnableBankingPrivateKeyPath $(if ($hasAllBankingValues) { $enableBankingPrivateKey } else { '' }) -EnableBankingCertificatePath $(if ($hasAllBankingValues) { $enableBankingCertificate } else { '' }) -EnableBankingApiBaseUrl $EnableBankingApiBaseUrl -EnableBankingRedirectUri $EnableBankingRedirectUri -TailscaleServiceName $TailscaleServiceName
+$gatewayHost = Get-GatewayHostConfig -PythonExecutable $pythonStage.PythonPath -GatewayDirectory $gatewayTarget -GatewayEntryPoint $gatewayEntryTarget -GatewayConfig $gatewayConfig -ClaudeSecret $claudeSecret -SupplementCatalogPath $supplementCatalog -TempDirectory $gatewayTemp -LogDirectory $gatewayLogs -EnableBankingAppId $EnableBankingAppId -EnableBankingPrivateKeyPath $(if ($hasAllBankingValues) { $enableBankingPrivateKey } else { '' }) -EnableBankingCertificatePath $(if ($hasAllBankingValues) { $enableBankingCertificate } else { '' }) -EnableBankingApiBaseUrl $EnableBankingApiBaseUrl -EnableBankingRedirectUri $EnableBankingRedirectUri -TailscaleServiceName $TailscaleServiceName -ManagementSid $operatorSid
 $gatewayHost.arguments = @($launcherTarget, '--config', $gatewayConfig, '--entry-point', $gatewayEntryTarget, '--tailscale', $tailscale)
 Write-JsonAtomic $gatewayServiceConfig $gatewayHost
 Assert-PathOnlyJson $apiConfig

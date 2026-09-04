@@ -24,6 +24,7 @@ public sealed class RotatingLogSink : IRotatingLogSink
     private readonly string basePath;
     private readonly long maxBytes;
     private readonly int maxFiles;
+    private readonly string? managementSid;
     private readonly SemaphoreSlim gate = new(1, 1);
     private FileStream? stream;
     private long bytesWritten;
@@ -34,6 +35,7 @@ public sealed class RotatingLogSink : IRotatingLogSink
         basePath = Path.Combine(directory, options.LogFileName);
         maxBytes = options.MaxLogBytes;
         maxFiles = options.MaxLogFiles;
+        managementSid = options.ManagementSid;
         if (OperatingSystem.IsWindows())
         {
             // The installer owns ACL provisioning. Creating a missing Windows
@@ -47,7 +49,7 @@ public sealed class RotatingLogSink : IRotatingLogSink
         {
             Directory.CreateDirectory(directory);
         }
-        WindowsAclProtector.VerifyPrivate(directory);
+        WindowsAclProtector.VerifyPrivate(directory, options.ManagementSid);
     }
 
     public async Task WriteAsync(string streamName, ReadOnlyMemory<char> text, CancellationToken cancellationToken)
@@ -130,7 +132,7 @@ public sealed class RotatingLogSink : IRotatingLogSink
         var candidate = new FileStream(basePath, fileMode, FileAccess.Write, FileShare.Read, 8192, useAsync: true);
         try
         {
-            WindowsAclProtector.VerifyPrivate(basePath);
+            WindowsAclProtector.VerifyPrivate(basePath, managementSid);
             bytesWritten = candidate.Length;
             stream = candidate;
         }
@@ -172,7 +174,7 @@ public sealed class RotatingLogSink : IRotatingLogSink
             if (File.Exists(source))
             {
                 File.Move(source, target);
-                WindowsAclProtector.VerifyPrivate(target);
+                WindowsAclProtector.VerifyPrivate(target, managementSid);
             }
         }
 
