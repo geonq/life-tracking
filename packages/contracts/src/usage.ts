@@ -1,6 +1,9 @@
 import { z } from 'zod';
 
-export const Provider = z.enum(['codex', 'claude']);
+// Stable wire identities. Adding a provider here is intentionally a contract
+// change: the server and native ingestion boundary must account for it before
+// any usage value can be accepted.
+export const Provider = z.enum(['codex', 'claude', 'glm', 'deepseek', 'google_ai_studio']);
 export type Provider = z.infer<typeof Provider>;
 export const UsageWindowKind = z.enum(['five_hour', 'seven_day']);
 export type UsageWindowKind = z.infer<typeof UsageWindowKind>;
@@ -66,7 +69,13 @@ export const Estimate = z.object({
   explanation: z.string(), official: z.literal(false),
 }).strict();
 export type Estimate = z.infer<typeof Estimate>;
-const UsageConnectors = z.object({ codex: ConnectorState, claude: ConnectorState }).strict();
+const UsageConnectors = z.object({
+  codex: ConnectorState,
+  claude: ConnectorState,
+  glm: ConnectorState,
+  deepseek: ConnectorState,
+  google_ai_studio: ConnectorState,
+}).strict();
 export const UnifiedUsage = z.object({
   generatedAt: observedTimestamp, windows: z.array(UsageWindow), estimates: z.array(Estimate), connectors: UsageConnectors,
 }).strict().superRefine((value, context) => {
@@ -81,6 +90,15 @@ export const UnifiedUsage = z.object({
     const key = `${estimate.provider}:${estimate.window}`;
     if (estimates.has(key)) context.addIssue({ code: z.ZodIssueCode.custom, message: `duplicate usage estimate ${key}` });
     estimates.add(key);
+  }
+  for (const provider of Provider.options) {
+    const observed = value.windows.filter(window => window.provider === provider && window.availability === 'observed');
+    if (!observed.length) continue;
+    const expected = observed.some(window => window.provenance.connectorState === 'rate_limited') ? 'rate_limited'
+      : observed.some(window => window.provenance.connectorState === 'refresh_due') ? 'refresh_due' : 'healthy';
+    if (value.connectors[provider] !== expected) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ['connectors', provider], message: 'connector state contradicts observed windows' });
+    }
   }
 });
 export type UnifiedUsage = z.infer<typeof UnifiedUsage>;

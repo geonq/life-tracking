@@ -1,0 +1,1884 @@
+#if os(iOS)
+import Foundation
+
+/// The source state exposed by the HealthKit-to-Fitness composition boundary.
+///
+/// `FitnessSourceState.Status` predates the HealthKit reconciliation contract
+/// and cannot distinguish partial, conflict, indeterminate, and error states.
+/// This app-only state is therefore kept beside the composed snapshot instead
+/// of collapsing those states into a generic "connected" label.
+public enum HealthKitFitnessCompositionSourceState: String, CaseIterable, Equatable, Sendable {
+    case unavailable
+    case permissionRequired = "permission_required"
+    case observed
+    case partial
+    case stale
+    case conflict
+    case readIndeterminate = "read_indeterminate"
+    case error
+
+    public var label: String {
+        switch self {
+        case .unavailable: "Unavailable"
+        case .permissionRequired: "Permission state required"
+        case .observed: "Observed"
+        case .partial: "Partial"
+        case .stale: "Stale"
+        case .conflict: "Conflict"
+        case .readIndeterminate: "Read access indeterminate"
+        case .error: "Error"
+        }
+    }
+
+    fileprivate init(_ state: HealthKitMetricState) {
+        switch state {
+        case .unavailable: self = .unavailable
+        case .permissionRequired: self = .permissionRequired
+        case .readIndeterminate: self = .readIndeterminate
+        case .observed: self = .observed
+        case .partial: self = .partial
+        case .stale: self = .stale
+        case .conflict: self = .conflict
+        case .error: self = .error
+        }
+    }
+}
+
+/// Short alias for callers that want to keep the source state name local to a
+/// HealthKit composition call site.
+public typealias HealthKitFitnessSourceState = HealthKitFitnessCompositionSourceState
+
+/// Evidence carried alongside one composed source field.  The strings are
+/// deliberately presentation-ready because `FitnessMetric` has no separate
+/// provenance storage.  `sourceMatches` preserves the reviewed Helio match
+/// result without turning a source name into a device claim.
+public struct HealthKitFitnessCompositionEvidence: Equatable, Sendable {
+    public let state: HealthKitFitnessCompositionSourceState
+    public let source: String
+    public let device: String
+    public let provenance: String
+    public let window: String
+    public let freshness: String
+    public let sourceMatches: [HealthKitSourceMatch]
+
+    public init(
+        state: HealthKitFitnessCompositionSourceState,
+        source: String,
+        device: String,
+        provenance: String,
+        window: String,
+        freshness: String,
+        sourceMatches: [HealthKitSourceMatch] = []
+    ) {
+        self.state = state
+        self.source = source
+        self.device = device
+        self.provenance = provenance
+        self.window = window
+        self.freshness = freshness
+        self.sourceMatches = sourceMatches
+    }
+
+    public var summary: String {
+        "\(state.label) · \(source) · \(device) · \(window) · \(freshness) · \(provenance)"
+    }
+}
+
+/// Pure app-only composition of a bounded HealthKit projection into the
+/// existing Fitness snapshot contract.
+///
+/// This type performs no HealthKit query, store access, write, network call,
+/// score calculation, baseline calculation, target calculation, or Helio
+/// inference.  The caller owns the retained `HealthKitAnchorStore` snapshot
+/// and supplies an already accepted `HealthKitFitnessProjection`.
+public struct HealthKitFitnessComposition {
+    public typealias SourceState = HealthKitFitnessCompositionSourceState
+
+    public let snapshot: FitnessSnapshot
+    public let sourceState: SourceState
+    public let metricStates: [HealthKitMetricID: SourceState]
+    public let sleepState: SourceState
+    public let workoutState: SourceState
+    public let evidence: [HealthKitMetricID: HealthKitFitnessCompositionEvidence]
+    public let selectedDate: Date
+    public let projectionWindow: DateInterval
+    public let calendarIdentifier: Calendar.Identifier
+    public let timeZoneIdentifier: String
+    /// Exact HealthKit-derived asleep duration in whole seconds, gated by the
+    /// same `FitnessSleepNight` validator that produces `snapshot.sleepDetail`
+    /// (observed source, no unsupported stage, exact sample reconciliation).
+    /// `nil` whenever that validator does not clear the night as `.observed`
+    /// with a complete named-stage timeline — never a derived/estimated
+    /// fallback. This is a raw-value seam for non-UI consumers (e.g. the
+    /// future-widget publisher) that cannot re-parse the formatted
+    /// `sleepDetail.duration.value` string.
+    public let sourceDerivedSleepDurationSeconds: Int?
+    /// The latest sample end-date contributing to
+    /// `sourceDerivedSleepDurationSeconds`, i.e. when that duration was last
+    /// observed. `nil` exactly when the duration itself is `nil`.
+    public let sourceDerivedSleepObservedAt: Date?
+
+    public init(
+        projection: HealthKitFitnessProjection,
+        selectedDate: Date
+    ) {
+        let built = Self.build(projection: projection, selectedDate: selectedDate)
+        self.snapshot = built.snapshot
+        self.sourceState = built.sourceState
+        self.metricStates = built.metricStates
+        self.sleepState = built.sleepState
+        self.workoutState = built.workoutState
+        self.evidence = built.evidence
+        self.selectedDate = selectedDate
+        self.projectionWindow = built.projectionWindow
+        self.calendarIdentifier = projection.bucketCalendarIdentifier
+        self.timeZoneIdentifier = projection.bucketTimeZoneIdentifier
+        self.sourceDerivedSleepDurationSeconds = built.sourceDerivedSleepDurationSeconds
+        self.sourceDerivedSleepObservedAt = built.sourceDerivedSleepObservedAt
+    }
+
+    /// Pure extraction seam for non-UI consumers that need the raw,
+    /// already-gated asleep duration instead of `FitnessSnapshot`'s formatted
+    /// string. Internally this runs the exact same validated pipeline as
+    /// `compose(projection:selectedDate:)` — it does not re-implement or
+    /// approximate the sleep-night gates, it just also returns the seconds
+    /// that `sourceDerivedSleepMetrics` already computed before formatting.
+    public static func sourceDerivedSleepDurationHours(
+        from projection: HealthKitFitnessProjection,
+        selectedDate: Date
+    ) -> (hours: Double, observedAt: Date)? {
+        let composed = Self(projection: projection, selectedDate: selectedDate)
+        guard let seconds = composed.sourceDerivedSleepDurationSeconds,
+              let observedAt = composed.sourceDerivedSleepObservedAt else { return nil }
+        return (Double(seconds) / 3_600, observedAt)
+    }
+
+    /// Named constructor for call sites that prefer a verb over an init.
+    public static func compose(
+        projection: HealthKitFitnessProjection,
+        selectedDate: Date
+    ) -> Self {
+        Self(projection: projection, selectedDate: selectedDate)
+    }
+
+    /// Convenience for the eventual view/root seam.  It intentionally does
+    /// not retain or query a store and returns only the existing snapshot.
+    public static func snapshot(
+        from projection: HealthKitFitnessProjection,
+        selectedDate: Date
+    ) -> FitnessSnapshot {
+        Self(projection: projection, selectedDate: selectedDate).snapshot
+    }
+
+    /// Equivalent spelling kept explicit for callers that want to avoid a
+    /// method/property name collision at the call site.
+    public static func makeSnapshot(
+        projection: HealthKitFitnessProjection,
+        selectedDate: Date
+    ) -> FitnessSnapshot {
+        Self(projection: projection, selectedDate: selectedDate).snapshot
+    }
+
+    private struct BuildResult {
+        let snapshot: FitnessSnapshot
+        let sourceState: SourceState
+        let metricStates: [HealthKitMetricID: SourceState]
+        let sleepState: SourceState
+        let workoutState: SourceState
+        let evidence: [HealthKitMetricID: HealthKitFitnessCompositionEvidence]
+        let projectionWindow: DateInterval
+        let sourceDerivedSleepDurationSeconds: Int?
+        let sourceDerivedSleepObservedAt: Date?
+    }
+
+    private struct MetricMapping {
+        let metricID: HealthKitMetricID
+        let metric: FitnessMetric
+        let state: SourceState
+        let evidence: HealthKitFitnessCompositionEvidence
+    }
+
+    /// The projection's `latest` is latest in the retained rolling window,
+    /// not latest at the date the user is viewing. Keep the selected cutoff,
+    /// observations, freshness, and state together so every latest consumer
+    /// uses the same half-open local-day boundary.
+    private struct SelectedLatestMetric {
+        let state: SourceState
+        let reason: String?
+        let observations: [HealthKitFitnessQuantitySample]
+        let latest: HealthKitFitnessQuantitySample?
+        let committedAt: Date?
+    }
+
+    /// Sleep is retained for the bounded projection window, but Fitness shows
+    /// one local calendar day at a time.  Keep the selected result together so
+    /// every downstream field (state, evidence, detail, and aggregate
+    /// provenance/freshness) uses the same end-date bucket.
+    private struct SelectedSleep {
+        let samples: [HealthKitFitnessSleepSample]
+        let conflicts: [HealthKitObservationConflict]
+        let state: SourceState
+        let reason: String?
+        let start: Date?
+        let end: Date?
+        let provenance: [HealthKitProvenance]
+    }
+
+    private static let latestMetricIDs: [HealthKitMetricID] = [
+        .restingHeartRate,
+        .heartRate,
+        .heartRateVariabilitySDNN,
+        .respiratoryRate,
+        .oxygenSaturation,
+        .bodyMass,
+        .bodyFatPercentage,
+        .leanBodyMass,
+        .vo2Max
+    ]
+
+    private static let dailyMetricIDs: [HealthKitMetricID] = [.steps, .activeEnergy]
+
+    private static func build(
+        projection: HealthKitFitnessProjection,
+        selectedDate: Date
+    ) -> BuildResult {
+        let calendar = retainedCalendar(for: projection)
+        let projectionWindow = safeProjectionWindow(for: projection)
+        let windowDescription = describeProjectionWindow(projection, calendar: calendar)
+        let selectedDayDescription = describeSelectedDay(selectedDate, calendar: calendar)
+        let selectedDateIsFinite = selectedDate.timeIntervalSinceReferenceDate.isFinite
+        let selectedDay = selectedDateIsFinite ? calendar.dateInterval(of: .day, for: selectedDate) : nil
+        let selectedSleep = selectSleep(
+            projection.sleep,
+            selectedDate: selectedDate,
+            selectedDateIsFinite: selectedDateIsFinite,
+            calendar: calendar
+        )
+        let aggregateFreshness = aggregateFreshnessDescription(
+            projection: projection,
+            selectedDate: selectedDate,
+            selectedSleep: selectedSleep,
+            selectedDay: selectedDay,
+            calendar: calendar
+        )
+
+        var metricStates: [HealthKitMetricID: SourceState] = [:]
+        var evidence: [HealthKitMetricID: HealthKitFitnessCompositionEvidence] = [:]
+
+        func latestMapping(
+            _ metricID: HealthKitMetricID,
+            title: String,
+            unit: String,
+            hue: LifeOSTokens.Hue
+        ) -> MetricMapping {
+            let selected = selectLatestMetric(
+                projection.metric(metricID),
+                selectedDay: selectedDay
+            )
+            let state = selected.state
+            let provenance = selected.latest.map { [$0.provenance] } ?? selected.observations.map(\.provenance)
+            let fieldEvidence = makeEvidence(
+                state: state,
+                provenances: provenance,
+                window: windowDescription,
+                freshness: latestMetricFreshness(selected, calendar: calendar)
+            )
+            let detail = metricDetail(
+                state: state,
+                evidence: fieldEvidence,
+                reason: selected.reason
+            )
+            guard selectedValueIsDisplayable(state),
+                  let value = selected.latest?.quantity,
+                  value.metric == metricID else {
+                return MetricMapping(
+                    metricID: metricID,
+                    metric: unavailableMetric(
+                        title: title,
+                        unit: unit,
+                        detail: detail,
+                        hue: hue,
+                        id: metricID.rawValue,
+                        state: state,
+                        evidence: fieldEvidence
+                    ),
+                    state: state,
+                    evidence: fieldEvidence
+                )
+            }
+            return MetricMapping(
+                metricID: metricID,
+                metric: makeMetric(
+                    id: metricID.rawValue,
+                    title: title,
+                    value: formatNumber(value.value),
+                    unit: unit,
+                    detail: detail,
+                    quality: .observed,
+                    hue: hue,
+                    state: state,
+                    evidence: fieldEvidence
+                ),
+                state: state,
+                evidence: fieldEvidence
+            )
+        }
+
+        let restingHeartRate = latestMapping(.restingHeartRate, title: "Resting heart rate", unit: "bpm", hue: .pink)
+        let heartRate = latestMapping(.heartRate, title: "Heart rate", unit: "bpm", hue: .red)
+        let hrv = latestMapping(.heartRateVariabilitySDNN, title: "HRV", unit: "ms", hue: .teal)
+        let respiration = latestMapping(.respiratoryRate, title: "Respiration", unit: "/min", hue: .blue)
+        let oxygen = latestMapping(.oxygenSaturation, title: "Blood oxygen", unit: "%", hue: .green)
+        let bodyMass = latestMapping(.bodyMass, title: "Weight", unit: "kg", hue: .blue)
+        let bodyFat = latestMapping(.bodyFatPercentage, title: "Body fat", unit: "%", hue: .pink)
+        let leanBodyMass = latestMapping(.leanBodyMass, title: "Lean mass", unit: "kg", hue: .teal)
+        let vo2Max = latestMapping(.vo2Max, title: "VO₂ max", unit: "ml/kg/min", hue: .green)
+
+        for mapping in [restingHeartRate, heartRate, hrv, respiration, oxygen, bodyMass, bodyFat, leanBodyMass, vo2Max] {
+            metricStates[mapping.metricID] = mapping.state
+            evidence[mapping.metricID] = mapping.evidence
+        }
+
+        let dailySteps = dailyMapping(
+            projection: projection,
+            metricID: .steps,
+            title: "Steps",
+            unit: "",
+            hue: .teal,
+            selectedDate: selectedDate,
+            selectedDateIsFinite: selectedDateIsFinite,
+            selectedDayDescription: selectedDayDescription,
+            windowDescription: windowDescription
+        )
+        let dailyEnergy = dailyMapping(
+            projection: projection,
+            metricID: .activeEnergy,
+            title: "Total energy",
+            unit: "kcal",
+            hue: .orange,
+            selectedDate: selectedDate,
+            selectedDateIsFinite: selectedDateIsFinite,
+            selectedDayDescription: selectedDayDescription,
+            windowDescription: windowDescription
+        )
+        let dailyWater = dailyMapping(
+            projection: projection,
+            metricID: .water,
+            title: "Water",
+            unit: "ml",
+            hue: .blue,
+            selectedDate: selectedDate,
+            selectedDateIsFinite: selectedDateIsFinite,
+            selectedDayDescription: selectedDayDescription,
+            windowDescription: windowDescription
+        )
+        let dailyCaffeine = dailyMapping(
+            projection: projection,
+            metricID: .caffeine,
+            title: "Caffeine",
+            unit: "mg",
+            hue: .amber,
+            selectedDate: selectedDate,
+            selectedDateIsFinite: selectedDateIsFinite,
+            selectedDayDescription: selectedDayDescription,
+            windowDescription: windowDescription
+        )
+        metricStates[.steps] = dailySteps.state
+        metricStates[.activeEnergy] = dailyEnergy.state
+        metricStates[.water] = dailyWater.state
+        metricStates[.caffeine] = dailyCaffeine.state
+        evidence[.steps] = dailySteps.evidence
+        evidence[.activeEnergy] = dailyEnergy.evidence
+        evidence[.water] = dailyWater.evidence
+        evidence[.caffeine] = dailyCaffeine.evidence
+
+        // Synced HealthKit water/caffeine day totals reach the Nutrition
+        // surface as exact observed values. Targets stay nil because no
+        // reviewed target source exists here; an absent total stays nil so a
+        // missing observation never becomes a fabricated zero.
+        func displayableDayTotal(_ mapping: MetricMapping, _ metricID: HealthKitMetricID) -> Int? {
+            guard mapping.state == .observed,
+                  selectedDateIsFinite,
+                  let daily = projection.dailyTotal(for: metricID, on: selectedDate),
+                  let total = daily.total,
+                  total.metric == metricID else { return nil }
+            return Int(total.value.rounded())
+        }
+        let nutritionSnapshot = FitnessNutritionSnapshot(
+            calorieTarget: nil,
+            caloriesConsumed: nil,
+            sourceSupportedExpenditure: nil,
+            macroValues: FitnessNutritionSnapshot.unavailable.macroValues,
+            meals: [],
+            hydrationMilliliters: displayableDayTotal(dailyWater, .water),
+            hydrationTargetMilliliters: nil,
+            caffeineMilligrams: displayableDayTotal(dailyCaffeine, .caffeine),
+            alcoholUnits: nil
+        )
+
+        let rawSleepEvidence = makeEvidence(
+            state: selectedSleep.state,
+            provenances: selectedSleep.provenance,
+            window: selectedDayDescription + " · " + windowDescription,
+            freshness: sleepFreshness(selectedSleep, calendar: calendar)
+        )
+        let sleepState = reconciledSleepState(
+            source: selectedSleep.state,
+            night: makeSleepDetail(
+                selected: selectedSleep,
+                evidence: rawSleepEvidence,
+                timeZoneIdentifier: projection.bucketTimeZoneIdentifier
+            ).night.state
+        )
+        let sleepEvidence = makeEvidence(
+            state: sleepState,
+            provenances: selectedSleep.provenance,
+            window: selectedDayDescription + " · " + windowDescription,
+            freshness: sleepFreshness(selectedSleep, calendar: calendar)
+        )
+        evidence[.sleep] = sleepEvidence
+        metricStates[.sleep] = sleepState
+
+        let selectedWorkouts = selectedWorkouts(
+            projection.workouts,
+            selectedDate: selectedDate,
+            selectedDateIsFinite: selectedDateIsFinite,
+            calendar: calendar
+        )
+        let workoutState: SourceState = selectedWorkouts.isEmpty
+            ? .unavailable
+            : aggregateState(selectedWorkouts.map { SourceState($0.state) })
+        metricStates[.workout] = workoutState
+        evidence[.workout] = makeEvidence(
+            state: workoutState,
+            provenances: selectedWorkouts.map(\.provenance),
+            window: selectedDayDescription + " · " + windowDescription,
+            freshness: workoutFreshness(selectedWorkouts, calendar: calendar)
+        )
+
+        let aggregateStates = Array(metricStates.values) + [sleepState, workoutState]
+        let sourceState: SourceState = projection.issues.isEmpty
+            ? aggregateState(aggregateStates)
+            : .error
+
+        let sourceEvidence = makeEvidence(
+            state: sourceState,
+            provenances: aggregateProvenances(
+                projection: projection,
+                selectedDate: selectedDate,
+                selectedDateIsFinite: selectedDateIsFinite,
+                selectedSleep: selectedSleep,
+                selectedDay: selectedDay,
+                calendar: calendar
+            ),
+            window: windowDescription + " · " + selectedDayDescription,
+            freshness: aggregateFreshness
+        )
+        let source = FitnessSourceState(
+            status: fitnessSourceStatus(for: sourceState),
+            title: "HealthKit fitness source · \(sourceState.label)",
+            detail: sourceEvidence.summary,
+            freshness: aggregateFreshness
+        )
+
+        let sleepDetail = makeSleepDetail(
+            selected: selectedSleep,
+            evidence: sleepEvidence,
+            timeZoneIdentifier: projection.bucketTimeZoneIdentifier
+        )
+        // Reuses the identical gate `makeSleepDetail` already applied above
+        // (same `selected`/`night`/`hasUnsupportedStage` inputs) to also
+        // expose the raw seconds for `sourceDerivedSleepDurationHours`.
+        let sleepHasUnsupportedStage = selectedSleep.samples.contains { fitnessSleepStage(for: $0.stage) == nil }
+        let sleepSecondsByStage = sourceDerivedAsleepSecondsByStage(
+            selected: selectedSleep,
+            night: sleepDetail.night,
+            hasUnsupportedStage: sleepHasUnsupportedStage
+        )
+        let sourceDerivedSleepDurationSeconds = sleepSecondsByStage.map { derived in
+            [FitnessSleepStageSample.Stage.core, .deep, .rem].reduce(0) {
+                $0 + (derived.secondsByStage[$1] ?? 0)
+            }
+        }
+        let sourceDerivedSleepObservedAt = sourceDerivedSleepDurationSeconds != nil
+            ? sleepDetail.night.stageSamples.map(\.end).max()
+            : nil
+
+        // The Today Sleep card shows the exact validated asleep-stage sum —
+        // never a score or quality number. When even that exact sum is not
+        // derivable, the card stays unavailable with its reason.
+        let sleepSummary: FitnessMetric
+        if sleepDetail.duration.isValueAvailable, let durationValue = sleepDetail.duration.value {
+            sleepSummary = FitnessMetric(
+                id: "sleep",
+                title: "Sleep",
+                value: durationValue,
+                unit: "",
+                detail: sleepDetail.duration.detail,
+                quality: sleepDetail.duration.quality,
+                hue: .violet,
+                sourceState: sleepDetail.duration.sourceState,
+                provenance: sleepDetail.duration.provenance
+            )
+        } else {
+            sleepSummary = unavailableMetric(
+                title: "Sleep",
+                unit: "",
+                detail: "Unavailable · exact source stage sums require named HealthKit sleep stages; LifeOS does not calculate sleep quality.",
+                hue: .violet,
+                id: "sleep",
+                state: sleepState,
+                evidence: sleepEvidence
+            )
+        }
+
+        let unsupportedSkinTemperature = unavailableMetric(
+            title: "Skin temperature",
+            unit: "°C",
+            detail: "Unavailable · no supported HealthKit fitness mapping in this composition.",
+            hue: .orange,
+            id: "skin_temperature"
+        )
+        let unsupportedBaseline = unavailableMetric(
+            title: "HRV baseline",
+            unit: "ms",
+            detail: "Unavailable · LifeOS does not calculate a baseline in this composition.",
+            hue: .teal,
+            id: "hrv_baseline"
+        )
+
+        let healthMonitor = [
+            hrv.metric,
+            restingHeartRate.metric,
+            heartRate.metric,
+            respiration.metric,
+            oxygen.metric,
+            unsupportedSkinTemperature,
+            sleepSummary
+        ]
+        let bodyMetrics = [
+            bodyMass.metric,
+            bodyFat.metric,
+            leanBodyMass.metric,
+            vo2Max.metric,
+            unsupportedBaseline
+        ]
+
+        let biology = makeBiologySnapshot(
+            projection: projection,
+            evidence: evidence,
+            selectedDay: selectedDay
+        )
+
+        let workoutFacts: [FitnessWorkout] = workoutState == .observed
+            ? selectedWorkouts.map { makeWorkout($0, state: workoutState, evidence: evidence[.workout]!) }
+            : []
+
+        let loadDetail = makeLoadDetail(
+            dailySteps: dailySteps,
+            dailyEnergy: dailyEnergy
+        )
+
+        let snapshot = FitnessSnapshot(
+            source: source,
+            readiness: .unavailable("Readiness"),
+            strain: .unavailable("Strain"),
+            sleep: sleepSummary,
+            stress: .unavailable("Stress"),
+            energyReserve: .unavailable("Energy reserve"),
+            healthMonitor: healthMonitor,
+            bodyMetrics: bodyMetrics,
+            workouts: workoutFacts,
+            nutrition: nutritionSnapshot,
+            activity: .unavailable,
+            biology: biology,
+            loadDetail: loadDetail,
+            sleepDetail: sleepDetail,
+            stressDetail: .unavailable
+        )
+
+        return BuildResult(
+            snapshot: snapshot,
+            sourceState: sourceState,
+            metricStates: metricStates,
+            sleepState: sleepState,
+            workoutState: workoutState,
+            evidence: evidence,
+            projectionWindow: projectionWindow,
+            sourceDerivedSleepDurationSeconds: sourceDerivedSleepDurationSeconds,
+            sourceDerivedSleepObservedAt: sourceDerivedSleepObservedAt
+        )
+    }
+
+    private static func dailyMapping(
+        projection: HealthKitFitnessProjection,
+        metricID: HealthKitMetricID,
+        title: String,
+        unit: String,
+        hue: LifeOSTokens.Hue,
+        selectedDate: Date,
+        selectedDateIsFinite: Bool,
+        selectedDayDescription: String,
+        windowDescription: String
+    ) -> MetricMapping {
+        let daily = selectedDateIsFinite ? projection.dailyTotal(for: metricID, on: selectedDate) : nil
+        let state = daily.map { SourceState($0.state) } ?? .unavailable
+        let provenances = daily?.provenance ?? []
+        let fieldEvidence = makeEvidence(
+            state: state,
+            provenances: provenances,
+            window: selectedDayDescription + " · " + windowDescription,
+            freshness: dailyFreshness(daily, calendar: retainedCalendar(for: projection))
+        )
+        let reason = daily?.reason ?? "No selected-day \(title.lowercased()) source observation is available."
+        let detail = metricDetail(state: state, evidence: fieldEvidence, reason: reason)
+        guard selectedValueIsDisplayable(state),
+              let value = daily?.total,
+              value.metric == metricID else {
+            return MetricMapping(
+                metricID: metricID,
+                metric: unavailableMetric(
+                    title: title,
+                    unit: unit,
+                    detail: detail,
+                    hue: hue,
+                    id: metricID.rawValue,
+                    state: state,
+                    evidence: fieldEvidence
+                ),
+                state: state,
+                evidence: fieldEvidence
+            )
+        }
+        return MetricMapping(
+            metricID: metricID,
+            metric: makeMetric(
+                id: metricID.rawValue,
+                title: title,
+                value: formatNumber(value.value),
+                unit: unit,
+                detail: detail,
+                quality: .observed,
+                hue: hue,
+                state: state,
+                evidence: fieldEvidence
+            ),
+            state: state,
+            evidence: fieldEvidence
+        )
+    }
+
+    private static func makeLoadDetail(
+        dailySteps: MetricMapping,
+        dailyEnergy: MetricMapping
+    ) -> FitnessLoadDetail {
+        let defaults = FitnessLoadTrendID.allCases.map {
+            FitnessLoadTrendCard(id: $0, metric: .unavailable($0.title))
+        }
+        var cards = defaults
+        if let index = cards.firstIndex(where: { $0.id == .steps }) {
+            cards[index] = FitnessLoadTrendCard(id: .steps, metric: dailySteps.metric, evidence: fitnessEvidence(dailySteps.evidence))
+        }
+        if let index = cards.firstIndex(where: { $0.id == .totalEnergy }) {
+            cards[index] = FitnessLoadTrendCard(id: .totalEnergy, metric: dailyEnergy.metric, evidence: fitnessEvidence(dailyEnergy.evidence))
+        }
+        let energyMetric = FitnessMetric(
+            id: "active_energy",
+            title: "Energy expenditure",
+            value: dailyEnergy.metric.value,
+            unit: dailyEnergy.metric.unit,
+            detail: dailyEnergy.metric.detail,
+            quality: dailyEnergy.metric.quality,
+            hue: dailyEnergy.metric.hue,
+            sourceState: dailyEnergy.metric.sourceState,
+            provenance: dailyEnergy.metric.provenance
+        )
+        return FitnessLoadDetail(
+            energy: energyMetric,
+            trendCards: cards
+        )
+    }
+
+    private static func makeBiologySnapshot(
+        projection: HealthKitFitnessProjection,
+        evidence: [HealthKitMetricID: HealthKitFitnessCompositionEvidence],
+        selectedDay: DateInterval?
+    ) -> FitnessBiologySnapshot {
+        let directMappings: [(HealthKitMetricID, FitnessBiologyMetricID)] = [
+            (.bodyMass, .weight),
+            (.bodyFatPercentage, .bodyFat),
+            (.leanBodyMass, .fatFreeMass),
+            (.vo2Max, .vo2Max)
+        ]
+        let directMetrics = directMappings.map { metricID, biologyID in
+            makeBiologyMetric(
+                selected: selectLatestMetric(
+                    projection.metric(metricID),
+                    selectedDay: selectedDay
+                ),
+                metricID: metricID,
+                biologyID: biologyID,
+                evidence: evidence[metricID]
+            )
+        }
+        return FitnessBiologySnapshot(
+            biologicalAge: .unavailable,
+            metrics: directMetrics + [
+                .unavailable(.hrvBaseline, reason: "Unavailable · HRV baseline is not calculated by this composition."),
+                .unavailable(.rhrBaseline, reason: "Unavailable · RHR baseline is not calculated by this composition.")
+            ]
+        )
+    }
+
+    private static func makeBiologyMetric(
+        selected: SelectedLatestMetric,
+        metricID: HealthKitMetricID,
+        biologyID: FitnessBiologyMetricID,
+        evidence: HealthKitFitnessCompositionEvidence?
+    ) -> FitnessBiologyMetric {
+        let state = selected.state
+        guard state == .observed,
+              let latest = selected.latest,
+              latest.quantity.metric == metricID else {
+            return .unavailable(
+                biologyID,
+                reason: biologyUnavailableReason(
+                    selected.reason ?? "\(biologyID.title) is not an observed direct HealthKit value.",
+                    evidence: evidence
+                ),
+                sourceState: fitnessMetricSourceState(for: state)
+            )
+        }
+
+        let sourceEvidence = evidence ?? HealthKitFitnessCompositionEvidence(
+            state: state,
+            source: "HealthKit",
+            device: "Device metadata not supplied",
+            provenance: "HealthKit provenance unavailable",
+            window: "Projection window",
+            freshness: "Freshness unavailable"
+        )
+        let samples = selected.observations.compactMap { sample in
+            FitnessBiologySample(date: sample.startDate, value: sample.quantity.value)
+        }
+        guard let currentSample = FitnessBiologySample(date: latest.startDate, value: latest.quantity.value),
+              !samples.isEmpty else {
+            return .unavailable(
+                biologyID,
+                reason: biologyUnavailableReason(
+                    "\(biologyID.title) has no valid source sample timestamp.",
+                    evidence: evidence
+                ),
+                sourceState: .error
+            )
+        }
+        return FitnessBiologyMetric(
+            id: biologyID,
+            state: .observed(
+                value: currentSample.value,
+                unit: biologyID.unit,
+                sourceDevice: sourceEvidence.device,
+                sampleCount: samples.count,
+                freshness: sourceEvidence.freshness,
+                window: sourceEvidence.window,
+                provenance: sourceEvidence.provenance,
+                samples: samples
+            )
+        )
+    }
+
+    private static func biologyUnavailableReason(
+        _ reason: String,
+        evidence: HealthKitFitnessCompositionEvidence?
+    ) -> String {
+        guard let evidence else { return "Unavailable · \(reason)" }
+        return "\(evidence.summary) · \(reason)"
+    }
+
+    /// Select a latest metric as of the end of the selected local day. The
+    /// retained projection is intentionally rolling, so its `latest` may be
+    /// newer than the historical day being displayed. A sample exactly at
+    /// the local day end belongs to the following half-open day and is also
+    /// excluded.
+    private static func selectLatestMetric(
+        _ metric: HealthKitFitnessMetricProjection,
+        selectedDay: DateInterval?
+    ) -> SelectedLatestMetric {
+        guard let selectedDay,
+              selectedDay.start.timeIntervalSinceReferenceDate.isFinite,
+              selectedDay.end.timeIntervalSinceReferenceDate.isFinite,
+              selectedDay.end > selectedDay.start else {
+            return SelectedLatestMetric(
+                state: .unavailable,
+                reason: "Selected metric day is invalid.",
+                observations: [],
+                latest: nil,
+                committedAt: nil
+            )
+        }
+
+        let observations = metric.observations.filter { sample in
+            sample.endDate.timeIntervalSinceReferenceDate.isFinite
+                && sample.endDate < selectedDay.end
+        }
+        let latest = observations.last
+        let hasSelectedConflict = metric.conflicts.contains { conflict in
+            [conflict.existing.endDate, conflict.incoming.endDate].contains { date in
+                date.timeIntervalSinceReferenceDate.isFinite && date < selectedDay.end
+            }
+        }
+        let state: SourceState
+        let reason: String?
+        if hasSelectedConflict {
+            state = .conflict
+            reason = "Selected HealthKit observations contain a source conflict."
+        } else if observations.isEmpty {
+            if metric.observations.isEmpty, metric.conflicts.isEmpty {
+                state = SourceState(metric.state)
+                reason = metric.reason
+            } else {
+                state = .unavailable
+                reason = "No \(metric.metric.rawValue) observation exists by the selected day."
+            }
+        } else {
+            switch metric.state {
+            case .conflict, .error:
+                // These global states can be caused by a later conflict or a
+                // current sync failure. They must not poison a historical
+                // observation that is valid for this selected day.
+                state = .observed
+                reason = nil
+            default:
+                state = SourceState(metric.state)
+                reason = metric.reason
+            }
+        }
+        return SelectedLatestMetric(
+            state: state,
+            reason: reason,
+            observations: observations,
+            latest: latest,
+            committedAt: metric.lastCommittedAt
+        )
+    }
+
+    private static func selectSleep(
+        _ sleep: HealthKitFitnessSleepProjection,
+        selectedDate: Date,
+        selectedDateIsFinite: Bool,
+        calendar: Calendar
+    ) -> SelectedSleep {
+        guard selectedDateIsFinite,
+              let day = calendar.dateInterval(of: .day, for: selectedDate),
+              day.start.timeIntervalSinceReferenceDate.isFinite,
+              day.end.timeIntervalSinceReferenceDate.isFinite,
+              day.end > day.start else {
+            return SelectedSleep(
+                samples: [],
+                conflicts: [],
+                state: .unavailable,
+                reason: "Selected sleep day is invalid.",
+                start: nil,
+                end: nil,
+                provenance: []
+            )
+        }
+
+        func belongsToSelectedDay(_ endDate: Date) -> Bool {
+            endDate >= day.start && endDate < day.end
+        }
+
+        let samples = sleep.samples.filter { belongsToSelectedDay($0.endDate) }
+        let conflicts = sleep.conflicts.filter { conflict in
+            conflict.existing.metric == .sleep && conflict.incoming.metric == .sleep &&
+            (belongsToSelectedDay(conflict.existing.endDate) || belongsToSelectedDay(conflict.incoming.endDate))
+        }
+
+        let state: SourceState
+        if !conflicts.isEmpty {
+            // A selected revision conflict is terminal even if the enclosing
+            // projection reports a nominally synced state.
+            state = .conflict
+        } else {
+            switch sleep.syncState {
+            case .neverSynced:
+                state = .unavailable
+            case .syncing, .partial:
+                state = .partial
+            case .readIndeterminate:
+                state = .readIndeterminate
+            case .stale:
+                state = .stale
+            case .fullResyncRequired, .error:
+                state = .error
+            case .synced, .conflict:
+                // A raw conflict can exist elsewhere in the retained
+                // projection; it does not poison this selected day. A clean,
+                // empty selected bucket remains honestly unavailable.
+                state = samples.isEmpty ? .unavailable : .observed
+            }
+        }
+
+        let reason: String?
+        switch state {
+        case .unavailable:
+            reason = "No sleep sample ends in the selected day."
+        case .partial:
+            reason = sleep.reason ?? "Persisted HealthKit sleep observations are partial."
+        case .stale:
+            reason = sleep.reason ?? "Persisted HealthKit sleep observations are stale."
+        case .conflict:
+            reason = sleep.reason ?? "Selected HealthKit sleep observations contain a source conflict."
+        case .readIndeterminate:
+            reason = "HealthKit read access is indeterminate for sleep."
+        case .error:
+            reason = sleep.reason ?? "HealthKit sleep projection failed."
+        case .observed, .permissionRequired:
+            reason = nil
+        }
+
+        let provenance = samples.map(\.provenance) + conflicts.flatMap { conflict in
+            [conflict.existing.provenance, conflict.incoming.provenance]
+        }
+        return SelectedSleep(
+            samples: samples,
+            conflicts: conflicts,
+            state: state,
+            reason: reason,
+            start: samples.map(\.startDate).min(),
+            end: samples.map(\.endDate).max(),
+            provenance: provenance
+        )
+    }
+
+    /// A nominally observed retained projection can still fail the sleep-night
+    /// domain validator because named stages are incomplete or inconsistent.
+    /// Keep the composition state aligned with that final validated truth,
+    /// while never weakening an upstream stale/error/indeterminate state.
+    private static func reconciledSleepState(
+        source: SourceState,
+        night: FitnessSleepNight.State
+    ) -> SourceState {
+        guard source == .observed else { return source }
+        switch night {
+        case .observed: return .observed
+        case .partial: return .partial
+        case .conflict: return .conflict
+        case .unavailable: return .unavailable
+        }
+    }
+
+    private static func makeSleepDetail(
+        selected: SelectedSleep,
+        evidence: HealthKitFitnessCompositionEvidence,
+        timeZoneIdentifier: String
+    ) -> FitnessSleepDetail {
+        let knownStages = selected.samples.compactMap { sample -> FitnessSleepStageSample? in
+            guard let stage = fitnessSleepStage(for: sample.stage) else { return nil }
+            return FitnessSleepStageSample(
+                id: sample.identity.stableKey,
+                stage: stage,
+                start: sample.startDate,
+                end: sample.endDate
+            )
+        }
+        let hasUnsupportedStage = selected.samples.contains { fitnessSleepStage(for: $0.stage) == nil }
+        let nightState: FitnessSleepNight.State
+        switch selected.state {
+        case .observed:
+            nightState = .observed
+        case .partial:
+            nightState = .partial(reason: selected.reason ?? "The source supplied only part of this sleep night.")
+        case .stale:
+            nightState = .partial(reason: "The source sleep interval is stale; no freshness assumption is added.")
+        case .conflict:
+            nightState = .conflict(reason: selected.reason ?? "Source sleep observations disagree for this night.")
+        case .readIndeterminate:
+            nightState = .unavailable(reason: "HealthKit read access is indeterminate for sleep.")
+        case .permissionRequired:
+            nightState = .unavailable(reason: "HealthKit sleep permission state is not established.")
+        case .error:
+            nightState = .unavailable(reason: selected.reason ?? "HealthKit sleep projection failed.")
+        case .unavailable:
+            nightState = .unavailable(reason: selected.reason ?? "No source sleep interval is available.")
+        }
+
+        let boundary = FitnessSleepDayBoundary(
+            name: "Selected sleep day (end-date bucket)",
+            timeZone: timeZoneIdentifier
+        )
+        let sleepEvidenceState: FitnessSleepObservationEvidence.State
+        switch selected.state {
+        case .observed:
+            sleepEvidenceState = .observed(
+                source: evidence.source,
+                device: evidence.device,
+                provenance: evidence.provenance,
+                freshness: evidence.freshness
+            )
+        case .partial:
+            sleepEvidenceState = .partial(
+                reason: selected.reason ?? "The source supplied only part of this sleep night."
+            )
+        case .stale:
+            sleepEvidenceState = .stale(
+                reason: "The source sleep interval is outside its freshness window."
+            )
+        case .conflict:
+            sleepEvidenceState = .conflict(
+                reason: selected.reason ?? "Source sleep observations disagree for this night."
+            )
+        case .readIndeterminate:
+            sleepEvidenceState = .readIndeterminate(reason: "HealthKit read access is indeterminate for sleep.")
+        case .permissionRequired:
+            sleepEvidenceState = .permissionRequired(reason: "HealthKit sleep permission state is not established.")
+        case .error:
+            sleepEvidenceState = .error(reason: selected.reason ?? "HealthKit sleep projection failed.")
+        case .unavailable:
+            sleepEvidenceState = .unavailable(reason: "No source sleep interval is available.")
+        }
+        // Build once so the domain validator can downgrade an apparently
+        // observed interval when stage coverage is incomplete or otherwise
+        // invalid. The evidence on the final night must agree with that
+        // validated state; an observed evidence value must never survive a
+        // partial/conflict/unavailable downgrade.
+        let initialNight = FitnessSleepNight(
+            id: "healthkit-sleep-night",
+            start: selected.start,
+            end: selected.end,
+            stageSamples: knownStages,
+            boundary: boundary,
+            evidence: FitnessSleepObservationEvidence(state: sleepEvidenceState),
+            state: nightState
+        )
+        let finalSleepEvidence: FitnessSleepObservationEvidence
+        switch selected.state {
+        case .observed:
+            switch initialNight.state {
+            case .observed:
+                finalSleepEvidence = FitnessSleepObservationEvidence(state: .observed(
+                    source: evidence.source,
+                    device: evidence.device,
+                    provenance: evidence.provenance,
+                    freshness: evidence.freshness
+                ))
+            case .partial(let reason):
+                finalSleepEvidence = FitnessSleepObservationEvidence(state: .partial(reason: reason))
+            case .conflict(let reason):
+                finalSleepEvidence = FitnessSleepObservationEvidence(state: .conflict(reason: reason))
+            case .unavailable(let reason):
+                finalSleepEvidence = FitnessSleepObservationEvidence(state: .unavailable(reason: reason))
+            }
+        case .partial:
+            finalSleepEvidence = FitnessSleepObservationEvidence(state: .partial(
+                reason: selected.reason ?? "The source supplied only part of this sleep night."
+            ))
+        case .stale:
+            finalSleepEvidence = FitnessSleepObservationEvidence(state: .stale(
+                reason: "The source sleep interval is outside its freshness window."
+            ))
+        case .conflict:
+            finalSleepEvidence = FitnessSleepObservationEvidence(state: .conflict(
+                reason: selected.reason ?? "Source sleep observations disagree for this night."
+            ))
+        case .readIndeterminate:
+            finalSleepEvidence = FitnessSleepObservationEvidence(state: .readIndeterminate(reason: "HealthKit read access is indeterminate for sleep."))
+        case .permissionRequired:
+            finalSleepEvidence = FitnessSleepObservationEvidence(state: .permissionRequired(reason: "HealthKit sleep permission state is not established."))
+        case .error:
+            finalSleepEvidence = FitnessSleepObservationEvidence(state: .error(reason: selected.reason ?? "HealthKit sleep projection failed."))
+        case .unavailable:
+            finalSleepEvidence = FitnessSleepObservationEvidence(state: .unavailable(reason: "No source sleep interval is available."))
+        }
+        let night = FitnessSleepNight(
+            id: initialNight.id,
+            start: initialNight.start,
+            end: initialNight.end,
+            stageSamples: initialNight.stageSamples,
+            boundary: initialNight.boundary,
+            evidence: finalSleepEvidence,
+            state: initialNight.state
+        )
+
+        let effectiveState = reconciledSleepState(source: selected.state, night: night.state)
+        let sourceDerivedMetrics = sourceDerivedSleepMetrics(
+            selected: selected,
+            night: night,
+            evidence: evidence,
+            hasUnsupportedStage: hasUnsupportedStage
+        )
+        let duration = sourceDerivedMetrics?.duration ?? unavailableMetric(
+            title: "Sleep duration",
+            unit: "",
+            detail: metricDetail(
+                state: effectiveState,
+                evidence: evidence,
+                reason: "Source sleep interval retained; exact derived totals require a clean, non-overlapping named-stage timeline."
+            ),
+            hue: .violet,
+            id: "sleep_duration",
+            state: effectiveState,
+            evidence: evidence
+        )
+
+        let trendCards = makeSleepTrendCards(
+            duration: duration,
+            sourceDerivedMetrics: sourceDerivedMetrics,
+            evidence: evidence
+        )
+
+        return FitnessSleepDetail(
+            night: night,
+            quality: unavailableMetric(
+                title: "Sleep quality",
+                unit: "",
+                detail: "Unavailable · LifeOS does not calculate sleep quality from an interval or stage timeline.",
+                hue: .violet,
+                id: "sleep_quality"
+            ),
+            timeInBed: .unavailable("Time in bed"),
+            duration: duration,
+            sleepNeed: .unavailable("Sleep need requires a configured target; no target is fabricated."),
+            windDown: .unavailable("Wind-down requires a configured sleep schedule."),
+            insights: [],
+            trends: trendCards
+        )
+    }
+
+    private struct SourceDerivedSleepMetrics {
+        let duration: FitnessMetric
+        let stages: [FitnessSleepStageSample.Stage: FitnessMetric]
+    }
+
+    /// The exact validated gate shared by `sourceDerivedSleepMetrics` (the
+    /// formatted `FitnessSleepDetail` path) and
+    /// `sourceDerivedSleepDurationHours` (the raw-value seam for non-UI
+    /// consumers). Extracted so both call sites run the identical
+    /// gate instead of each maintaining their own copy that could silently
+    /// drift apart.
+    ///
+    /// Tier 1 keeps the original strict contract: a fully validated observed
+    /// night whose samples are all named stages. Tier 2 relaxes only the
+    /// completeness requirement while preserving every truth property: the
+    /// durable sync state must still be clean (`.observed`), the validated
+    /// night timeline must exist without conflicts, and the named stage
+    /// intervals must not overlap. Unnamed source intervals (`inBed`,
+    /// unspecified, unknown) are excluded from the sums — never counted as
+    /// sleep — and the caller labels the result Partial so incomplete stage
+    /// coverage stays visible instead of zeroing every derived total.
+    private static func sourceDerivedAsleepSecondsByStage(
+        selected: SelectedSleep,
+        night: FitnessSleepNight,
+        hasUnsupportedStage: Bool
+    ) -> (secondsByStage: [FitnessSleepStageSample.Stage: Int], isPartialCoverage: Bool)? {
+        let strictNightObserved: Bool
+        if case .observed = night.state { strictNightObserved = true } else { strictNightObserved = false }
+        if selected.state == .observed,
+           strictNightObserved,
+           case .observed = night.evidence.state,
+           !hasUnsupportedStage,
+           selected.samples.count == night.stageSamples.count,
+           let strictSeconds = exactStageSeconds(night.stageSamples) {
+            return (secondsByStage: strictSeconds, isPartialCoverage: false)
+        }
+
+        // Tier 2: exact partial-coverage sums for a clean, conflict-free
+        // retained night.
+        guard selected.state == .observed,
+              !night.isUnavailable,
+              strictNightObserved || isPartialNight(night.state),
+              !night.stageSamples.isEmpty else {
+            return nil
+        }
+        guard !hasOverlappingStageIntervals(night.stageSamples) else { return nil }
+        guard let seconds = exactStageSeconds(night.stageSamples) else { return nil }
+        // A relaxed result must actually relax something; otherwise the
+        // strict tier above already declined for a reason worth keeping.
+        guard hasUnsupportedStage || isPartialNight(night.state) else { return nil }
+        return (secondsByStage: seconds, isPartialCoverage: true)
+    }
+
+    private static func isPartialNight(_ state: FitnessSleepNight.State) -> Bool {
+        if case .partial = state { return true }
+        return false
+    }
+
+    private static func exactStageSeconds(
+        _ samples: [FitnessSleepStageSample]
+    ) -> [FitnessSleepStageSample.Stage: Int]? {
+        let durations = samples.reduce(into: [FitnessSleepStageSample.Stage: Double]()) { result, sample in
+            result[sample.stage, default: 0] += sample.end.timeIntervalSince(sample.start)
+        }
+        guard durations.values.allSatisfy({ $0.isFinite && $0 >= 0 }) else { return nil }
+        return durations.reduce(into: [FitnessSleepStageSample.Stage: Int]()) { result, entry in
+            result[entry.key] = Int(entry.value.rounded())
+        }
+    }
+
+    private static func hasOverlappingStageIntervals(_ samples: [FitnessSleepStageSample]) -> Bool {
+        let sorted = samples.sorted { $0.start < $1.start }
+        return zip(sorted, sorted.dropFirst()).contains { $0.end > $1.start }
+    }
+
+    /// Source-derived sleep totals are gated by the final
+    /// `FitnessSleepNight` validator.  The enclosing interval is not itself
+    /// asleep time: only the exact sums of named asleep stages are exposed.
+    /// When unnamed source stages or coverage gaps make the night partial,
+    /// the exact named-stage sums stay visible with an explicit Partial
+    /// label instead of disappearing entirely.
+    private static func sourceDerivedSleepMetrics(
+        selected: SelectedSleep,
+        night: FitnessSleepNight,
+        evidence: HealthKitFitnessCompositionEvidence,
+        hasUnsupportedStage: Bool
+    ) -> SourceDerivedSleepMetrics? {
+        guard let derived = sourceDerivedAsleepSecondsByStage(
+            selected: selected,
+            night: night,
+            hasUnsupportedStage: hasUnsupportedStage
+        ) else { return nil }
+        let secondsByStage = derived.secondsByStage
+
+        let asleepSeconds = [
+            FitnessSleepStageSample.Stage.core,
+            .deep,
+            .rem
+        ].reduce(0) { total, stage in total + (secondsByStage[stage] ?? 0) }
+        let detail: String
+        if derived.isPartialCoverage {
+            detail = "Partial · exact HealthKit interval sum of named stages only · unnamed source intervals excluded · \(evidence.source) · \(evidence.provenance) · \(evidence.freshness)"
+        } else {
+            detail = "Exact HealthKit interval sum · named stages · \(evidence.source) · \(evidence.provenance) · \(evidence.freshness)"
+        }
+        let derivedState: SourceState = derived.isPartialCoverage ? .partial : evidence.state
+        let duration = makeMetric(
+            id: "sleep_duration",
+            title: "Sleep duration",
+            value: formatDuration(seconds: asleepSeconds),
+            unit: "",
+            detail: detail,
+            quality: .observed,
+            hue: .violet,
+            state: derivedState,
+            evidence: evidence
+        )
+        let stageDefinitions: [(FitnessSleepStageSample.Stage, FitnessSleepTrendID, String, LifeOSTokens.Hue)] = [
+            (.rem, .rem, "REM sleep", .teal),
+            (.deep, .deep, "Deep sleep", .blue),
+            (.core, .core, "Core sleep", .green),
+            (.awake, .awake, "Awake time", .orange)
+        ]
+        let stages = stageDefinitions.reduce(into: [FitnessSleepStageSample.Stage: FitnessMetric]()) { result, definition in
+            // Do not turn an absent stage into a fabricated zero. A zero is
+            // source-derived only when that stage has an explicit interval;
+            // a complete timeline can still legitimately omit a stage.
+            guard let seconds = secondsByStage[definition.0] else { return }
+            result[definition.0] = makeMetric(
+                id: "sleep_\(definition.1.rawValue)",
+                title: definition.2,
+                value: formatDuration(seconds: seconds),
+                unit: "",
+                detail: detail,
+                quality: .observed,
+                hue: definition.3,
+                state: derivedState,
+                evidence: evidence
+            )
+        }
+        return SourceDerivedSleepMetrics(duration: duration, stages: stages)
+    }
+
+    private static func makeSleepTrendCards(
+        duration: FitnessMetric,
+        sourceDerivedMetrics: SourceDerivedSleepMetrics?,
+        evidence: HealthKitFitnessCompositionEvidence
+    ) -> [FitnessSleepTrendCard] {
+        let unavailable: (FitnessSleepTrendID) -> FitnessMetric = { id in
+            unavailableMetric(
+                title: id.title,
+                unit: "",
+                detail: "Unavailable · complete, non-overlapping named sleep stages are required.",
+                hue: .violet,
+                id: "sleep_\(id.rawValue)"
+            )
+        }
+        let metrics: [FitnessSleepTrendID: FitnessMetric] = [
+            .quality: unavailable(.quality),
+            .timeInBed: unavailable(.timeInBed),
+            .duration: duration,
+            .rem: sourceDerivedMetrics?.stages[.rem] ?? unavailable(.rem),
+            .deep: sourceDerivedMetrics?.stages[.deep] ?? unavailable(.deep),
+            .core: sourceDerivedMetrics?.stages[.core] ?? unavailable(.core),
+            .awake: sourceDerivedMetrics?.stages[.awake] ?? unavailable(.awake),
+            .heartRateDrop: unavailable(.heartRateDrop),
+            .sleepBalance: unavailable(.sleepBalance),
+            .wakeTime: unavailable(.wakeTime),
+            .sleepOnset: unavailable(.sleepOnset)
+        ]
+        return FitnessSleepTrendID.allCases.map { id in
+            let metric = metrics[id] ?? unavailable(id)
+            let cardEvidence: FitnessSourceEvidence? = sourceDerivedMetrics != nil && metric.quality == .observed
+                ? fitnessEvidence(evidence)
+                : nil
+            return FitnessSleepTrendCard(id: id, metric: metric, evidence: cardEvidence)
+        }
+    }
+
+    private static func makeWorkout(
+        _ workout: HealthKitFitnessWorkout,
+        state: SourceState,
+        evidence: HealthKitFitnessCompositionEvidence
+    ) -> FitnessWorkout {
+        let durationSeconds = max(0, Int(workout.durationSeconds.rounded()))
+        let duration = formatDuration(seconds: durationSeconds)
+        let energy: String
+        if let activeEnergy = workout.activeEnergyKilocalories {
+            energy = "Active energy \(formatNumber(activeEnergy)) kcal"
+        } else {
+            energy = "Active energy unavailable"
+        }
+        let rawReason = "Raw HealthKit activity type \(workout.activityTypeRawValue) · duration \(durationSeconds) s"
+        let detail = metricDetail(state: state, evidence: evidence, reason: rawReason) + " · \(energy)"
+        return FitnessWorkout(
+            id: workout.identity.stableKey,
+            name: "HealthKit activity type \(workout.activityTypeRawValue)",
+            kind: "HealthKit raw activity",
+            time: workout.startDate,
+            duration: duration,
+            detail: detail,
+            hue: .blue
+        )
+    }
+
+    private static func selectedWorkouts(
+        _ workouts: [HealthKitFitnessWorkout],
+        selectedDate: Date,
+        selectedDateIsFinite: Bool,
+        calendar: Calendar
+    ) -> [HealthKitFitnessWorkout] {
+        guard selectedDateIsFinite,
+              let day = calendar.dateInterval(of: .day, for: selectedDate) else { return [] }
+        return workouts.filter { workout in
+            let interval = DateInterval(start: workout.startDate, end: workout.endDate)
+            return interval.start < day.end && interval.end > day.start
+        }
+    }
+
+    private static func aggregateProvenances(
+        projection: HealthKitFitnessProjection,
+        selectedDate: Date,
+        selectedDateIsFinite: Bool,
+        selectedSleep: SelectedSleep,
+        selectedDay: DateInterval?,
+        calendar: Calendar
+    ) -> [HealthKitProvenance] {
+        var result: [HealthKitProvenance] = []
+        for metricID in latestMetricIDs {
+            result.append(contentsOf: selectLatestMetric(
+                projection.metric(metricID),
+                selectedDay: selectedDay
+            ).observations.map(\.provenance))
+        }
+        if selectedDateIsFinite {
+            for metricID in dailyMetricIDs {
+                result.append(contentsOf: projection.dailyTotal(for: metricID, on: selectedDate)?.provenance ?? [])
+            }
+        }
+        result.append(contentsOf: selectedSleep.provenance)
+        result.append(contentsOf: selectedWorkouts(projection.workouts, selectedDate: selectedDate, selectedDateIsFinite: selectedDateIsFinite, calendar: calendar).map(\.provenance))
+        return result
+    }
+
+    private static func aggregateState(_ states: [SourceState]) -> SourceState {
+        // The aggregate describes the strongest state of the source-backed
+        // fields that actually contribute data. An indeterminate/partial
+        // side-channel must not hide an observed metric, while conflict/error
+        // remain terminal because they invalidate accepted source facts.
+        if states.contains(.error) { return .error }
+        if states.contains(.conflict) { return .conflict }
+        if states.contains(.observed) {
+            if states.contains(.stale) { return .stale }
+            if states.contains(.partial) { return .partial }
+            return .observed
+        }
+        if states.contains(.readIndeterminate) { return .readIndeterminate }
+        if states.contains(.permissionRequired) { return .permissionRequired }
+        if states.contains(.stale) { return .stale }
+        if states.contains(.partial) { return .partial }
+        return .unavailable
+    }
+
+    private static func selectedValueIsDisplayable(_ state: SourceState) -> Bool {
+        switch state {
+        case .observed:
+            return true
+        case .unavailable, .permissionRequired, .partial, .stale, .conflict, .readIndeterminate, .error:
+            return false
+        }
+    }
+
+    public static func fitnessSourceStatus(for state: SourceState) -> FitnessSourceState.Status {
+        switch state {
+        case .observed: return .connected
+        case .stale: return .stale
+        case .permissionRequired: return .permissionRequired
+        case .unavailable, .partial, .conflict, .readIndeterminate, .error:
+            return .unavailable
+        }
+    }
+
+    /// Keep the HealthKit composition state and the generic Fitness metric
+    /// state aligned. The latter is what cards/widgets consume, so dropping
+    /// this mapping at the composition boundary would turn a partial or
+    /// conflicted source into a generic unavailable value.
+    private static func fitnessMetricSourceState(for state: SourceState) -> FitnessMetric.SourceState {
+        switch state {
+        case .unavailable: return .unavailable
+        case .permissionRequired: return .permissionRequired
+        case .observed: return .observed
+        case .partial: return .partial
+        case .stale: return .stale
+        case .conflict: return .conflict
+        case .readIndeterminate: return .readIndeterminate
+        case .error: return .error
+        }
+    }
+
+    private static func fitnessProvenance(
+        from evidence: HealthKitFitnessCompositionEvidence
+    ) -> FitnessMetric.Provenance? {
+        FitnessMetric.Provenance(
+            source: evidence.source,
+            device: evidence.device,
+            window: evidence.window,
+            freshness: evidence.freshness
+        )
+    }
+
+    private static func makeMetric(
+        id: String,
+        title: String,
+        value: String?,
+        unit: String,
+        detail: String,
+        quality: FitnessMetric.Quality,
+        hue: LifeOSTokens.Hue,
+        state: SourceState,
+        evidence: HealthKitFitnessCompositionEvidence,
+        progress: Double? = nil,
+        trend: [Double] = []
+    ) -> FitnessMetric {
+        FitnessMetric(
+            id: id,
+            title: title,
+            value: value,
+            unit: unit,
+            detail: detail,
+            quality: quality,
+            progress: progress,
+            hue: hue,
+            trend: trend,
+            sourceState: fitnessMetricSourceState(for: state),
+            provenance: fitnessProvenance(from: evidence)
+        )
+    }
+
+    private static func makeEvidence(
+        state: SourceState,
+        provenances: [HealthKitProvenance],
+        window: String,
+        freshness: String
+    ) -> HealthKitFitnessCompositionEvidence {
+        let uniqueProvenances = Array(Set(provenances)).sorted { lhs, rhs in
+            provenanceKey(lhs) < provenanceKey(rhs)
+        }
+        let matches = Array(Set(uniqueProvenances.map(\.helioMatch))).sorted { $0.rawValue < $1.rawValue }
+        let confirmed = !uniqueProvenances.isEmpty && uniqueProvenances.allSatisfy { $0.helioMatch == .confirmed }
+        let bundles = Array(Set(uniqueProvenances.compactMap { $0.source?.bundleIdentifier })).sorted()
+        let devices = Array(Set(uniqueProvenances.compactMap { provenance -> String? in
+            guard confirmed else { return nil }
+            if let model = provenance.device?.model { return model }
+            if let manufacturer = provenance.device?.manufacturer { return manufacturer }
+            return nil
+        })).sorted()
+        let source: String
+        let device: String
+        let provenance: String
+        if confirmed {
+            source = "Helio → Zepp → Apple Health → HealthKit"
+            device = devices.isEmpty ? "Reviewed Helio device" : devices.joined(separator: ", ")
+            provenance = "Helio provenance confirmed by the canonical reviewed registry"
+        } else {
+            source = bundles.isEmpty ? "HealthKit" : "HealthKit source bundle: \(bundles.joined(separator: ", "))"
+            device = "Device metadata not reviewed"
+            provenance = uniqueProvenances.isEmpty
+                ? "HealthKit provenance unavailable"
+                : "HealthKit provenance · reviewed device identity not confirmed"
+        }
+        return HealthKitFitnessCompositionEvidence(
+            state: state,
+            source: source,
+            device: device,
+            provenance: provenance,
+            window: window,
+            freshness: freshness,
+            sourceMatches: matches
+        )
+    }
+
+    private static func fitnessEvidence(
+        _ evidence: HealthKitFitnessCompositionEvidence
+    ) -> FitnessSourceEvidence {
+        switch evidence.state {
+        case .observed:
+            return FitnessSourceEvidence(state: .observed(
+                source: evidence.source,
+                device: evidence.device,
+                window: evidence.window,
+                freshness: evidence.freshness
+            ))
+        case .unavailable:
+            return .unavailable("Unavailable · \(evidence.provenance)")
+        case .permissionRequired:
+            return .init(state: .permissionRequired(reason: evidence.provenance))
+        case .partial:
+            return .init(state: .partial(reason: evidence.provenance))
+        case .stale:
+            return .init(state: .stale(reason: evidence.provenance))
+        case .conflict:
+            return .init(state: .conflict(reason: evidence.provenance))
+        case .readIndeterminate:
+            return .init(state: .readIndeterminate(reason: evidence.provenance))
+        case .error:
+            return .init(state: .error(reason: evidence.provenance))
+        }
+    }
+
+    private static func metricDetail(
+        state: SourceState,
+        evidence: HealthKitFitnessCompositionEvidence,
+        reason: String?
+    ) -> String {
+        let stateText = "\(state.label) · \(evidence.source) · \(evidence.window) · \(evidence.freshness)"
+        guard let reason, !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return stateText
+        }
+        return stateText + " · " + reason
+    }
+
+    private static func unavailableMetric(
+        title: String,
+        unit: String,
+        detail: String,
+        hue: LifeOSTokens.Hue,
+        id: String,
+        state: SourceState = .unavailable,
+        evidence: HealthKitFitnessCompositionEvidence? = nil
+    ) -> FitnessMetric {
+        FitnessMetric(
+            id: id,
+            title: title,
+            value: nil,
+            unit: unit,
+            detail: detail,
+            quality: .unavailable,
+            hue: hue,
+            sourceState: fitnessMetricSourceState(for: state),
+            provenance: evidence.flatMap(fitnessProvenance(from:))
+        )
+    }
+
+    private static func retainedCalendar(for projection: HealthKitFitnessProjection) -> Calendar {
+        var calendar = Calendar(identifier: projection.bucketCalendarIdentifier)
+        calendar.timeZone = TimeZone(identifier: projection.bucketTimeZoneIdentifier) ?? TimeZone(secondsFromGMT: 0)!
+        return calendar
+    }
+
+    private static func safeProjectionWindow(for projection: HealthKitFitnessProjection) -> DateInterval {
+        let start = projection.windowStart.timeIntervalSinceReferenceDate.isFinite ? projection.windowStart : .distantPast
+        let end = projection.windowEnd.timeIntervalSinceReferenceDate.isFinite && projection.windowEnd > start
+            ? projection.windowEnd
+            : start.addingTimeInterval(1)
+        return DateInterval(start: start, end: end)
+    }
+
+    private static func describeProjectionWindow(
+        _ projection: HealthKitFitnessProjection,
+        calendar: Calendar
+    ) -> String {
+        "Projection window \(formatDate(projection.windowStart, calendar: calendar))–\(formatDate(projection.windowEnd, calendar: calendar)) · \(calendar.timeZone.identifier)"
+    }
+
+    private static func describeSelectedDay(_ date: Date, calendar: Calendar) -> String {
+        guard date.timeIntervalSinceReferenceDate.isFinite else {
+            return "Selected day invalid · \(calendar.timeZone.identifier)"
+        }
+        return "Selected day \(formatDate(calendar.startOfDay(for: date), calendar: calendar, dateOnly: true)) · \(calendar.timeZone.identifier)"
+    }
+
+    private static func latestMetricFreshness(
+        _ metric: SelectedLatestMetric,
+        calendar: Calendar
+    ) -> String {
+        freshnessDescription(
+            committed: metric.committedAt,
+            observed: metric.observations.map(\.endDate).max(),
+            calendar: calendar
+        )
+    }
+
+    private static func dailyFreshness(
+        _ daily: HealthKitFitnessDailyTotal?,
+        calendar: Calendar
+    ) -> String {
+        freshnessDescription(
+            committed: nil,
+            observed: daily?.samples.map(\.endDate).max(),
+            calendar: calendar
+        )
+    }
+
+    private static func sleepFreshness(
+        _ sleep: SelectedSleep,
+        calendar: Calendar
+    ) -> String {
+        freshnessDescription(
+            committed: nil,
+            observed: sleep.samples.map(\.endDate).max(),
+            calendar: calendar
+        )
+    }
+
+    private static func workoutFreshness(
+        _ workouts: [HealthKitFitnessWorkout],
+        calendar: Calendar
+    ) -> String {
+        freshnessDescription(
+            committed: nil,
+            observed: workouts.map(\.endDate).max(),
+            calendar: calendar
+        )
+    }
+
+    private static func freshnessDescription(
+        committed: Date?,
+        observed: Date?,
+        calendar: Calendar
+    ) -> String {
+        var parts: [String] = []
+        if let committed {
+            parts.append("Committed \(formatDate(committed, calendar: calendar))")
+        }
+        if let observed {
+            parts.append("Observed through \(formatDate(observed, calendar: calendar))")
+        }
+        return parts.isEmpty ? "Freshness unavailable" : parts.joined(separator: " · ")
+    }
+
+    private static func aggregateFreshnessDescription(
+        projection: HealthKitFitnessProjection,
+        selectedDate: Date,
+        selectedSleep: SelectedSleep,
+        selectedDay: DateInterval?,
+        calendar: Calendar
+    ) -> String {
+        let selectedDateIsFinite = selectedDate.timeIntervalSinceReferenceDate.isFinite
+        let selectedWorkoutObservations = selectedWorkouts(
+            projection.workouts,
+            selectedDate: selectedDate,
+            selectedDateIsFinite: selectedDateIsFinite,
+            calendar: calendar
+        )
+        let selectedDailyDates = selectedDateIsFinite
+            ? dailyMetricIDs.flatMap { projection.dailyTotal(for: $0, on: selectedDate)?.samples.map(\.endDate) ?? [] }
+            : []
+        let selectedLatestMetrics = latestMetricIDs.map {
+            selectLatestMetric(projection.metric($0), selectedDay: selectedDay)
+        }
+        let committedDates = selectedLatestMetrics.compactMap(\.committedAt)
+        let observedDates = selectedLatestMetrics.flatMap { $0.observations.map(\.endDate) }
+            + selectedDailyDates
+            + selectedSleep.samples.map(\.endDate)
+            + selectedWorkoutObservations.map(\.endDate)
+        return freshnessDescription(
+            committed: committedDates.max(),
+            observed: observedDates.max(),
+            calendar: calendar
+        )
+    }
+
+    private static func provenanceKey(_ provenance: HealthKitProvenance) -> String {
+        let source = provenance.source?.bundleIdentifier ?? ""
+        let manufacturer = provenance.device?.manufacturer ?? ""
+        let model = provenance.device?.model ?? ""
+        return "\(source)|\(manufacturer)|\(model)|\(provenance.helioMatch.rawValue)"
+    }
+
+    private static func fitnessSleepStage(for stage: HealthKitSleepStage) -> FitnessSleepStageSample.Stage? {
+        switch stage {
+        case .asleepREM: .rem
+        case .asleepDeep: .deep
+        case .asleepCore: .core
+        case .awake: .awake
+        case .inBed, .asleepUnspecified, .unknown: nil
+        }
+    }
+
+    private static func formatNumber(_ value: Double) -> String {
+        guard value.isFinite else { return "—" }
+        let formatter = NumberFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.numberStyle = .decimal
+        formatter.usesGroupingSeparator = true
+        formatter.minimumFractionDigits = 0
+        formatter.maximumFractionDigits = 2
+        return formatter.string(from: NSNumber(value: value)) ?? String(format: "%.2f", locale: Locale(identifier: "en_US_POSIX"), value)
+    }
+
+    private static func formatDuration(seconds: Int) -> String {
+        guard seconds > 0 else { return "0 s" }
+        let hours = seconds / 3_600
+        let minutes = (seconds % 3_600) / 60
+        let remainder = seconds % 60
+        if hours > 0 {
+            return remainder == 0 ? "\(hours)h \(minutes)m" : "\(hours)h \(minutes)m \(remainder)s"
+        }
+        if minutes > 0 {
+            return remainder == 0 ? "\(minutes) min" : "\(minutes) min \(remainder)s"
+        }
+        return "\(remainder) s"
+    }
+
+    private static func formatDate(
+        _ date: Date,
+        calendar: Calendar,
+        dateOnly: Bool = false
+    ) -> String {
+        guard date.timeIntervalSinceReferenceDate.isFinite else { return "Invalid date" }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = calendar
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = dateOnly ? "yyyy-MM-dd" : "yyyy-MM-dd HH:mm:ss ZZZZ"
+        return formatter.string(from: date)
+    }
+}
+
+/// Projects retained HealthKit facts into the small settings model without
+/// treating an unavailable side-channel as evidence that retained data is
+/// absent. This is deliberately app-only: the shared settings surface does
+/// not need to know about HealthKit projection internals.
+extension RetainedHealthDataSettings {
+    static func from(projection: HealthKitFitnessProjection) -> Self {
+        struct Category {
+            let sampleCount: Int
+            let states: [HealthKitMetricState]
+            let provenances: [HealthKitProvenance]
+            let endDates: [Date]
+        }
+
+        var categories: [Category] = []
+        var emptyStates: [HealthKitMetricState] = []
+
+        for metric in projection.metrics.values where metric.metric.isQuantity && metric.metric.canonicalUnit != nil {
+            if metric.observations.isEmpty {
+                emptyStates.append(metric.state)
+                if projection.sourceFilter == .all {
+                    emptyStates.append(metric.persistedState)
+                }
+            } else {
+                categories.append(Category(
+                    sampleCount: metric.observations.count,
+                    states: [metric.state],
+                    provenances: metric.observations.map(\.provenance),
+                    endDates: metric.observations.map(\.endDate)
+                ))
+            }
+        }
+
+        if projection.sleep.samples.isEmpty {
+            emptyStates.append(projection.sleep.state)
+            if projection.sourceFilter == .all {
+                emptyStates.append(projection.sleep.persistedState)
+            }
+        } else {
+            categories.append(Category(
+                sampleCount: projection.sleep.samples.count,
+                states: [projection.sleep.state],
+                provenances: projection.sleep.samples.map(\.provenance),
+                endDates: projection.sleep.samples.map(\.endDate)
+            ))
+        }
+
+        if !projection.workouts.isEmpty {
+            categories.append(Category(
+                sampleCount: projection.workouts.count,
+                states: projection.workouts.map(\.state),
+                provenances: projection.workouts.map(\.provenance),
+                endDates: projection.workouts.map(\.endDate)
+            ))
+        } else if let workoutMetric = projection.metrics[.workout] {
+            // Workout facts have a dedicated typed projection, but an empty
+            // workout projection still carries a durable state that must not
+            // disappear from the settings summary.
+            emptyStates.append(workoutMetric.state)
+            if projection.sourceFilter == .all {
+                emptyStates.append(workoutMetric.persistedState)
+            }
+        }
+
+        let sampleCount = categories.reduce(0) { $0 + $1.sampleCount }
+        let confirmedCategoryCount = categories.reduce(into: 0) { result, category in
+            guard !category.provenances.isEmpty,
+                  category.provenances.allSatisfy({ $0.helioMatch == .confirmed }) else { return }
+            result += 1
+        }
+        let latestObservation = categories
+            .flatMap(\.endDates)
+            .filter { $0.timeIntervalSinceReferenceDate.isFinite }
+            .max()
+
+        let status: Status
+        if !projection.issues.isEmpty {
+            status = .error
+        } else if sampleCount > 0 {
+            status = resolvedStatus(for: categories.flatMap(\.states), hasSamples: true)
+        } else {
+            status = resolvedStatus(for: emptyStates, hasSamples: false)
+        }
+
+        return Self(
+            status: status,
+            sampleCount: sampleCount,
+            categoryCount: categories.count,
+            confirmedHelioCategoryCount: confirmedCategoryCount,
+            latestObservation: latestObservation
+        )
+    }
+
+    private static func resolvedStatus(
+        for states: [HealthKitMetricState],
+        hasSamples: Bool
+    ) -> Status {
+        if states.contains(.error) {
+            return .error
+        }
+        if states.contains(.conflict) {
+            return .conflict
+        }
+        if states.contains(.readIndeterminate) {
+            return .readIndeterminate
+        }
+        if states.contains(.stale) {
+            return .stale
+        }
+        if states.contains(.partial) {
+            return .partial
+        }
+        if states.contains(.unavailable) || states.contains(.permissionRequired) {
+            return .unavailable
+        }
+        return hasSamples ? .observed : .unavailable
+    }
+}
+#endif

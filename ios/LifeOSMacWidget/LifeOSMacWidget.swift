@@ -8,7 +8,22 @@ struct LifeOSMacWidgetBundle: WidgetBundle {
     }
 
     var body: some Widget {
-        LifeOSWidget()
         CalendarWidget()
+        NextEventWidget()
+        LifeOSUsageSmallWidget()
+        LifeOSWidget()
+        NetWorthWidget()
+        SpendRingWidget()
+        CashFlowWidget()
+        HealthMonitorWidget()
+        RecoveryRingWidget()
+        TasksWidget()
+        NutritionOverviewWidget()
+        CaloriesMacrosWidget()
+        NetEnergyWidget()
+        DailyOverviewWidget()
+        FitnessHealthMonitorWidget()
+        FitnessStressWidget()
+        FitnessEnergyReserveWidget()
     }
 }

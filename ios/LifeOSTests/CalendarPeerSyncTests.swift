@@ -22,6 +22,13 @@ final class CalendarPeerSyncTests: XCTestCase {
         }
     }
 
+    func testEnvelopeRejectsOversizedFramesBeforeDecoding() {
+        let oversized = Data(repeating: 0, count: CalendarPeerSyncEnvelope.maximumEncodedBytes + 1)
+        XCTAssertThrowsError(try CalendarPeerSyncEnvelope.decode(oversized)) { error in
+            XCTAssertEqual(error as? CalendarPeerSyncError, .snapshotTooLarge)
+        }
+    }
+
     func testEnvelopeRejectsInvalidMetadata() {
         XCTAssertThrowsError(try CalendarPeerSyncEnvelope(snapshot: CalendarSnapshot(), senderID: " ", revision: 0))
         XCTAssertThrowsError(try CalendarPeerSyncEnvelope(snapshot: CalendarSnapshot(), senderID: "mac", revision: -1))

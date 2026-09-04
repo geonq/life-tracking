@@ -1,10 +1,15 @@
 import Foundation
 
-public enum ProvisioningMode: String, Codable, Equatable, Sendable {
+public enum ProvisioningMode: String, Codable, CaseIterable, Equatable, Sendable {
     case personalTeam = "personal_team"
     case developerProgram = "developer_program"
     case sideloaded
     case unknown
+
+    /// `unknown` is a source/development state, not a valid release value.
+    public static let releaseModes: Set<Self> = [.personalTeam, .developerProgram, .sideloaded]
+
+    public var isReleaseMode: Bool { Self.releaseModes.contains(self) }
 }
 
 public enum SigningState: String, Codable, Equatable, Sendable {
@@ -26,18 +31,59 @@ public struct SigningStatus: Equatable, Sendable {
     }
 
     public var state: SigningState {
-        guard let expirationDate else { return .unknown }
+        // An expiration date without a recognized provisioning mode is not
+        // enough to claim a usable signed build.  Keep the presentation
+        // fail-closed until both pieces of bundle metadata are known.
+        // The checked-in project injects neither a release mode nor an
+        // expiration date. Until a release pipeline supplies both values,
+        // Settings must remain explicitly unavailable rather than infer a
+        // signing state from Xcode's build configuration.
+        guard mode.isReleaseMode, let expirationDate else { return .unknown }
         guard expirationDate > now else { return .expired }
         return expirationDate.timeIntervalSince(now) <= 3 * 86_400 ? .expiringSoon : .valid
     }
 
     public var daysRemaining: Int? {
-        guard let expirationDate else { return nil }
+        guard mode.isReleaseMode, let expirationDate else { return nil }
         return max(0, Int(ceil(expirationDate.timeIntervalSince(now) / 86_400)))
     }
 
     /// iOS does not allow an installed app to replace its own code signature.
     public var canSelfRenew: Bool { false }
+
+    public var modeTitle: String {
+        switch mode {
+        case .personalTeam: "Personal Team"
+        case .developerProgram: "Apple Developer Program"
+        case .sideloaded: "Sideloaded profile"
+        case .unknown: "Signing mode unavailable"
+        }
+    }
+
+    public var stateTitle: String {
+        guard let days = daysRemaining else { return "Signing expiration unavailable" }
+        switch state {
+        case .expired:
+            return "Signing expired"
+        case .expiringSoon:
+            return "Signing expiring: \(days) day\(days == 1 ? "" : "s") remaining"
+        case .valid:
+            return "Signing: \(days) day\(days == 1 ? "" : "s") remaining"
+        case .unknown:
+            return "Signing expiration unavailable"
+        }
+    }
+
+    public var metadataIsComplete: Bool {
+        mode.isReleaseMode && expirationDate != nil
+    }
+
+    /// A Settings status row is descriptive metadata only.  It cannot prove
+    /// profile membership, expanded entitlements, App Group access, or a
+    /// successful install on a physical device.
+    public var evidenceBoundary: String {
+        "Bundle signing metadata only; signed entitlements, App Group access, and successful installation on a physical device still require release verification."
+    }
 
     public var guidance: String {
         switch mode {

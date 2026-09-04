@@ -119,7 +119,8 @@ struct TaxDocumentsView: View {
                 HStack(alignment: .center, spacing: LifeOSTokens.spacing) {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Tax Documents")
-                            .font(.largeTitle.bold())
+                            .font(LifeOSFont.display())
+                            .tracking(-0.5)
                         Text("Private, on-device review")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
@@ -140,7 +141,7 @@ struct TaxDocumentsView: View {
                     Section {
                         HStack(alignment: .top, spacing: 8) {
                             LifeOSIcon(.security)
-                                .foregroundStyle(LifeOSTokens.accent)
+                                .foregroundStyle(LifeOSTokens.tertiaryText)
                                 .frame(width: 17, height: 17)
                             Text("Stored only on this device. Candidates are rule-based, not tax advice, and nothing is filed automatically.")
                                 .fixedSize(horizontal: false, vertical: true)
@@ -188,7 +189,7 @@ struct TaxDocumentReviewView: View {
                     Text("No tax advice is provided and no filing occurs automatically.").font(.footnote).foregroundStyle(.secondary)
                 }
                 if !document.warnings.isEmpty {
-                    Section("Warnings") { ForEach(document.warnings, id: \.self) { Text($0).foregroundStyle(.orange) } }
+                    Section("Warnings") { ForEach(document.warnings, id: \.self) { Text($0).foregroundStyle(LifeOSTokens.warning) } }
                 }
                 Section("Detected amounts") {
                     ForEach(Array(document.amounts.enumerated()), id: \.offset) { _, amount in

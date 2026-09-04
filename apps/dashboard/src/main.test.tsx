@@ -19,7 +19,7 @@ const unifiedUsage = {
     { provider: 'claude', window: 'seven_day', durationMinutes: 10080, availability: 'unavailable', provenance: { source: 'claude-connector', observedAt, freshness: 'unknown', official: false, quality: 'unavailable', connectorState: 'unavailable' } },
   ],
   estimates: [{ provider: 'codex', window: 'seven_day', projectedPercentAtReset: 41, confidence: 'insufficient', sampleSpanHours: 4, explanation: 'Insufficient history', official: false }],
-  connectors: { codex: 'healthy', claude: 'unavailable' },
+  connectors: { codex: 'healthy', claude: 'unavailable', glm: 'unavailable', deepseek: 'unavailable', google_ai_studio: 'unavailable' },
 };
 
 describe('dashboard API states and honesty labels', () => {

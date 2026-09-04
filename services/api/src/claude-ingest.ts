@@ -12,5 +12,5 @@ export function ingestClaudeStatusline(input: unknown, observedAt = new Date().t
   const limits = root.rate_limits && typeof root.rate_limits === 'object' ? root.rate_limits as Record<string, unknown> : root;
   return WINDOW_KEYS.map(key => normalizeWindow(limits[key], 'claude', key, 'claude.ai-statusline', observedAt));
 }
-export function validClaudeContentType(value: string | undefined): boolean { return !!value && value.toLowerCase().split(';')[0].trim() === 'application/json'; }
+export function validClaudeContentType(value: string | undefined): boolean { return value === 'application/json'; }
 export { MAX_BODY_BYTES };

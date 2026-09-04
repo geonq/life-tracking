@@ -1,0 +1,112 @@
+{
+  "version": 1,
+  "ci_timeout_minutes": 35,
+  "preferred_ios_simulator": "iPhone 17",
+  "lanes": {
+    "ios-logic": {
+      "kind": "debug",
+      "scheme": "LifeOSLogic",
+      "test_plan": "LifeOSLogic",
+      "platform": "ios",
+      "configuration": "Debug",
+      "destination": "platform=iOS Simulator,name=iPhone 17,OS=latest",
+      "simulator_name": "iPhone 17",
+      "only_testing": ["LifeOSTests"],
+      "minimum_tests": 386,
+      "timeout_minutes": 35,
+      "result_path": "lifeos-ios-logic.xcresult",
+      "log_path": "lifeos-ios-logic-xcodebuild.log",
+      "derived_data_path": "lifeos-derived-ios-logic"
+    },
+    "ios-ui": {
+      "kind": "debug",
+      "scheme": "LifeOSUI",
+      "test_plan": "LifeOSUI",
+      "platform": "ios",
+      "configuration": "Debug",
+      "destination": "platform=iOS Simulator,name=iPhone 17,OS=latest",
+      "simulator_name": "iPhone 17",
+      "only_testing": ["LifeOSUITests"],
+      "minimum_tests": 18,
+      "timeout_minutes": 35,
+      "result_path": "lifeos-ios-ui.xcresult",
+      "log_path": "lifeos-ios-ui-xcodebuild.log",
+      "derived_data_path": "lifeos-derived-ios-ui"
+    },
+    "mac-logic": {
+      "kind": "debug",
+      "scheme": "LifeOSMacLogic",
+      "test_plan": "LifeOSMacLogic",
+      "platform": "macos",
+      "configuration": "Debug",
+      "destination": "platform=macOS",
+      "only_testing": ["LifeOSMacSnapshotTests"],
+      "minimum_tests": 31,
+      "timeout_minutes": 35,
+      "result_path": "lifeos-mac-logic.xcresult",
+      "log_path": "lifeos-mac-logic-xcodebuild.log",
+      "derived_data_path": "lifeos-derived-mac-logic"
+    },
+    "mac-ui": {
+      "kind": "debug",
+      "scheme": "LifeOSMacUI",
+      "test_plan": "LifeOSMacUI",
+      "platform": "macos",
+      "configuration": "Debug",
+      "destination": "platform=macOS",
+      "only_testing": ["LifeOSMacUITests"],
+      "minimum_tests": 6,
+      "timeout_minutes": 35,
+      "result_path": "lifeos-mac-ui.xcresult",
+      "log_path": "lifeos-mac-ui-xcodebuild.log",
+      "derived_data_path": "lifeos-derived-mac-ui"
+    },
+    "widgets": {
+      "kind": "debug",
+      "scheme": "LifeOSWidgets",
+      "test_plan": "LifeOSWidgets",
+      "platform": "macos",
+      "configuration": "Debug",
+      "destination": "platform=macOS",
+      "only_testing": ["LifeOSWidgetSnapshotTests"],
+      "minimum_tests": 26,
+      "timeout_minutes": 35,
+      "result_path": "lifeos-widgets.xcresult",
+      "log_path": "lifeos-widgets-xcodebuild.log",
+      "derived_data_path": "lifeos-derived-widgets"
+    },
+    "prerelease-ios": {
+      "kind": "prerelease",
+      "scheme": "LifeOSPrereleaseIOS",
+      "test_plan": "LifeOSPrereleaseIOS",
+      "platform": "ios",
+      "configuration": "Release",
+      "destination": "platform=iOS Simulator,name=iPhone 17,OS=latest",
+      "simulator_name": "iPhone 17",
+      "only_testing": ["LifeOSTests", "LifeOSUITests"],
+      "minimum_tests": 404,
+      "timeout_minutes": 35,
+      "result_path": "LifeOSPrereleaseIOS.xcresult",
+      "log_path": "LifeOSPrereleaseIOS-xcodebuild.log",
+      "derived_data_path": "LifeOSPrereleaseIOS"
+    },
+    "prerelease-mac": {
+      "kind": "prerelease",
+      "scheme": "LifeOSPrereleaseMac",
+      "test_plan": "LifeOSPrereleaseMac",
+      "platform": "macos",
+      "configuration": "Release",
+      "destination": "platform=macOS",
+      "only_testing": [
+        "LifeOSMacSnapshotTests",
+        "LifeOSMacUITests",
+        "LifeOSWidgetSnapshotTests"
+      ],
+      "minimum_tests": 63,
+      "timeout_minutes": 35,
+      "result_path": "LifeOSPrereleaseMac.xcresult",
+      "log_path": "LifeOSPrereleaseMac-xcodebuild.log",
+      "derived_data_path": "LifeOSPrereleaseMac"
+    }
+  }
+}

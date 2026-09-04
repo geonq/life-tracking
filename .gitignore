@@ -73,3 +73,18 @@ artifacts/
 
 # Explicitly tracked public inputs include ios source, demo fixtures, tests,
 # project.yml, and plist/entitlements files.
+!ios/LifeOS/Modules/Finance/
+!ios/LifeOS/Modules/Finance/FinanceView.swift
+
+# The Windows service-host deployment toolkit is reviewed, reproducible source.
+# Runtime staging, backups, and machine-local state remain ignored by the rules above.
+lifeos-derived-*/
+!services/windows-service-host/deploy/Deployment.Common.ps1
+!services/windows-service-host/deploy/README.md
+!services/windows-service-host/deploy/gateway_launcher.py
+!services/windows-service-host/deploy/install.ps1
+!services/windows-service-host/deploy/preflight.ps1
+!services/windows-service-host/deploy/rollback.ps1
+!services/windows-service-host/deploy/verify.ps1
+!services/windows-service-host/deploy/tests/Deployment.Behavior.Tests.ps1
+!services/windows-service-host/deploy/tests/Deployment.Static.Tests.ps1

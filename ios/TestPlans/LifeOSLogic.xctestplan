@@ -1,0 +1,30 @@
+{
+  "configurations" : [
+    {
+      "id" : "B5AF5E6B-23F6-4E1A-9B0C-C60577F2E8E1",
+      "name" : "Debug",
+      "options" : {
+        "testExecutionOrdering" : "lexical"
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "codeCoverage" : false,
+    "targetForVariableExpansion" : {
+      "containerPath" : "container:LifeOS.xcodeproj",
+      "identifier" : "AD5DB9344CDCD6867ABB9D4E",
+      "name" : "LifeOS"
+    }
+  },
+  "testTargets" : [
+    {
+      "parallelizable" : false,
+      "target" : {
+        "containerPath" : "container:LifeOS.xcodeproj",
+        "identifier" : "B6DC0030DCD7D810745068F6",
+        "name" : "LifeOSTests"
+      }
+    }
+  ],
+  "version" : 1
+}

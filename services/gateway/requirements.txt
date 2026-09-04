@@ -1,0 +1,8 @@
+fastapi
+httpx
+PyJWT[crypto]>=2.8,<3
+python-multipart
+# Windows Python does not ship the IANA timezone database used at import time.
+tzdata>=2024.1,<2027
+uvicorn
+pytest

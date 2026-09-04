@@ -105,6 +105,143 @@ public enum LifeOSFont {
     public static func caption(_ size: CGFloat = 11) -> Font {
         inter(size, weight: .medium)
     }
+
+    // MARK: Semantic role aliases
+    //
+    // These aliases preserve the registered font families above while giving
+    // new surfaces a stable role vocabulary. `relativeTo` keeps the roles
+    // responsive to Dynamic Type without changing existing call sites.
+
+    private static func roleFont(
+        _ name: String,
+        size: CGFloat,
+        relativeTo textStyle: Font.TextStyle
+    ) -> Font {
+        .custom(name, size: size, relativeTo: textStyle)
+    }
+
+    /// KPI/display value. Space Grotesk remains the display face.
+    /// Design contract: 44 iOS / 52 macOS, Bold (the closest bundled
+    /// Space Grotesk weight to semibold), −0.3 tracking at call site,
+    /// `.monospacedDigit()` mandatory.
+    public static func kpi(_ size: CGFloat = {
+#if os(macOS)
+        52
+#else
+        44
+#endif
+    }()) -> Font {
+        roleFont(SpaceGrotesk.bold.rawValue, size: size, relativeTo: .largeTitle)
+            .monospacedDigit()
+    }
+
+    /// Screen titles ("Overview", "Fitness"). SG Bold 32 / 28; apply
+    /// `.tracking(-0.5)` at the call site per §3.
+    public static func display(_ size: CGFloat = {
+#if os(macOS)
+        28
+#else
+        32
+#endif
+    }()) -> Font {
+        roleFont(SpaceGrotesk.bold.rawValue, size: size, relativeTo: .largeTitle)
+    }
+
+    /// Sheet and navigation headers. SG Medium 22 / 20; apply `.tracking(-0.2)`.
+    public static func title(_ size: CGFloat = {
+#if os(macOS)
+        20
+#else
+        22
+#endif
+    }()) -> Font {
+        roleFont(SpaceGrotesk.medium.rawValue, size: size, relativeTo: .title2)
+    }
+
+    /// Descriptions, secondary rows. Inter Regular 13 both platforms.
+    public static func callout(_ size: CGFloat = 13) -> Font {
+        roleFont(Inter.regular.rawValue, size: size, relativeTo: .subheadline)
+    }
+
+    /// Micro labels that replace tinted pills (§4.2). Inter SemiBold 10,
+    /// +0.8 tracking, uppercase — apply `.tracking(0.8)` + `.textCase(.uppercase)`
+    /// at the call site (Font cannot carry tracking).
+    public static func overline(_ size: CGFloat = 10) -> Font {
+        roleFont(Inter.semiBold.rawValue, size: size, relativeTo: .caption2)
+    }
+
+    /// Large page title.
+    public static func pageTitle(_ size: CGFloat = {
+#if os(macOS)
+        28
+#else
+        32
+#endif
+    }()) -> Font {
+        roleFont(SpaceGrotesk.bold.rawValue, size: size, relativeTo: .largeTitle)
+    }
+
+    /// Section heading.
+    public static func sectionTitle(_ size: CGFloat = 20) -> Font {
+        roleFont(SpaceGrotesk.medium.rawValue, size: size, relativeTo: .title2)
+    }
+
+    /// Card heading.
+    public static func cardTitle(_ size: CGFloat = {
+#if os(macOS)
+        15
+#else
+        16
+#endif
+    }()) -> Font {
+        roleFont(SpaceGrotesk.medium.rawValue, size: size, relativeTo: .headline)
+    }
+
+    /// Body copy.
+    public static func bodyText(_ size: CGFloat = {
+#if os(macOS)
+        14
+#else
+        15
+#endif
+    }()) -> Font {
+        roleFont(Inter.regular.rawValue, size: size, relativeTo: .body)
+    }
+
+    /// Control label.
+    public static func control(_ size: CGFloat = 13) -> Font {
+        roleFont(Inter.semiBold.rawValue, size: size, relativeTo: .subheadline)
+    }
+
+    /// Primary navigation labels. This is intentionally a little larger than
+    /// the overline role: navigation is scanned repeatedly and must remain
+    /// legible at the default size and when Dynamic Type is enlarged.
+    public static func navigationLabel(_ size: CGFloat = 12) -> Font {
+        roleFont(Inter.semiBold.rawValue, size: size, relativeTo: .footnote)
+    }
+
+    /// Short supporting copy used beneath a title or metric. Keeping this
+    /// separate from metadata prevents descriptive text from being rendered
+    /// at the same visual weight as a source/timestamp label.
+    public static func supportingText(_ size: CGFloat = 14) -> Font {
+        roleFont(Inter.regular.rawValue, size: size, relativeTo: .body)
+    }
+
+    /// Compact widget header. The role keeps the widget title distinct from
+    /// the metric below it while still participating in Dynamic Type previews.
+    public static func widgetHeader(_ size: CGFloat = 13) -> Font {
+        roleFont(SpaceGrotesk.medium.rawValue, size: size, relativeTo: .headline)
+    }
+
+    /// Metadata and source labels.
+    public static func metadata(_ size: CGFloat = 12) -> Font {
+        roleFont(Inter.medium.rawValue, size: size, relativeTo: .caption)
+    }
+
+    /// Axis and micro labels.
+    public static func axis(_ size: CGFloat = 11) -> Font {
+        roleFont(Inter.medium.rawValue, size: size, relativeTo: .caption2)
+    }
 }
 
 // MARK: - Runtime Font Registration
