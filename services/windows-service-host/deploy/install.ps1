@@ -893,22 +893,24 @@ Save-InstallManifest $manifest $manifestPath
 $hostDirectory = Split-Path -Parent $hostTarget
 Set-DirectoryTraversalAcl $paths.InstallRoot $operatorSid @($apiSid, $gatewaySid) -RootOnly
 # Keep the shared host directory mutation root-only.  The service manager and
-# Defender can hold the freshly staged executable open; recursively applying
+# Defender can hold a freshly-created executable open; recursively applying
 # icacls to the directory therefore races on the binary itself.  Harden the
-# directory boundary first, then apply the exact read ACL to the one shared
-# executable as a file.
-Set-DirectoryTraversalAcl $hostDirectory $operatorSid @($apiSid, $gatewaySid) -RootOnly
+# directory boundary first and make that exact boundary ACL inheritable by
+# newly-created children.  This lets the verified binary arrive with its
+# final read-only service ACL without a second icacls mutation on a PE file.
+Set-DirectoryTraversalAcl $hostDirectory $operatorSid @($apiSid, $gatewaySid) -RootOnly -InheritToChildren
 if ($null -ne $hostStage.StagedPath) {
-    # Apply the ACL while the verified executable still has a randomized
-    # staging name. Defender is much less likely to hold that path open; the
-    # final rename then preserves the already-hardened DACL.
-    Set-RestrictedAcl $hostStage.StagedPath $operatorSid @($apiSid, $gatewaySid) @() -File -SkipSnapshot -MaxAttempts 30 -RetryDelayMilliseconds 1000
+    # The randomized file inherited the already-hardened host-directory ACL.
+    # Validate it without mutating the PE while Defender may have it open;
+    # the final rename then preserves that DACL.
+    Assert-RestrictedAcl $hostStage.StagedPath $operatorSid @($apiSid, $gatewaySid) @() -AllowInherited
     Move-Item -LiteralPath $hostStage.StagedPath -Destination $hostTarget -Force
     Assert-ExistingFile $hostTarget 'Hardened service host'
     if ((Get-FileSha256 $hostTarget) -ne [string]$hostStage.SourceHash) { throw 'Hardened service host hash verification failed.' }
+    Assert-RestrictedAcl $hostTarget $operatorSid @($apiSid, $gatewaySid) @() -AllowInherited
     $hostStage.StagedPath = $null
 } else {
-    Set-RestrictedAcl $hostTarget $operatorSid @($apiSid, $gatewaySid) @() -File -MaxAttempts 30 -RetryDelayMilliseconds 1000
+    Assert-RestrictedAcl $hostTarget $operatorSid @($apiSid, $gatewaySid) @() -AllowInherited
 }
 Complete-ManifestIntent $hostIntent $manifest $manifestPath $hostStage
 New-ServiceOrConfigure 'LifeOSAPI' $hostTarget 'auto' $apiAccount @() -ExpectedExistingBinary $serviceRegistrationTarget

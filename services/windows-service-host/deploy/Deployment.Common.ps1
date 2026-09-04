@@ -1192,8 +1192,12 @@ function Set-DirectoryTraversalAcl {
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][string]$OperatorSid,
         [Parameter(Mandatory)][string[]]$ReadSids,
-        [switch]$RootOnly
+        [switch]$RootOnly,
+        [switch]$InheritToChildren
     )
+    if ($InheritToChildren -and -not $RootOnly) {
+        throw 'InheritToChildren is only valid with RootOnly.'
+    }
     Ensure-Directory $Path
     # Some existing Hermes roots carry transient LogonSessionId ACEs or stale
     # virtual-service SID ACEs from a prior service registration. Neither is
@@ -1207,8 +1211,9 @@ function Set-DirectoryTraversalAcl {
         Assert-ExplicitAclAllowTree -Path $Path -OperatorSid $OperatorSid -ReadSids $ReadSids -ModifySids @()
     }
     Register-AclSnapshot $Path
-    $grant = @("*${OperatorSid}:(F)", '*S-1-5-18:(F)', '*S-1-5-32-544:(F)')
-    foreach ($sid in $ReadSids) { $grant += "*${sid}:(RX)" }
+    $inheritSuffix = if ($InheritToChildren) { '(OI)(CI)' } else { '' }
+    $grant = @("*${OperatorSid}:${inheritSuffix}(F)", "*S-1-5-18:${inheritSuffix}(F)", "*S-1-5-32-544:${inheritSuffix}(F)")
+    foreach ($sid in $ReadSids) { $grant += "*${sid}:${inheritSuffix}(RX)" }
     $broadSids = @('*S-1-1-0', '*S-1-5-11', '*S-1-5-32-545', '*S-1-5-4', '*S-1-5-7', '*S-1-5-2', '*S-1-5-19', '*S-1-5-20')
     $args = @($Path, '/inheritance:r', '/remove:g') + $broadSids + @('/grant:r') + $grant
     if (-not $RootOnly) { $args += @('/T', '/C') }
@@ -1243,9 +1248,15 @@ function Assert-ExplicitAclAllowTree {
 }
 
 function Assert-RestrictedAcl {
-    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$OperatorSid, [string[]]$ReadSids = @(), [string[]]$ModifySids = @())
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$OperatorSid,
+        [string[]]$ReadSids = @(),
+        [string[]]$ModifySids = @(),
+        [switch]$AllowInherited
+    )
     $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
-    if (-not $acl.AreAccessRulesProtected) { throw "ACL inheritance remains enabled on $Path" }
+    if (-not $AllowInherited -and -not $acl.AreAccessRulesProtected) { throw "ACL inheritance remains enabled on $Path" }
     $allowed = @($OperatorSid, 'S-1-5-18', 'S-1-5-32-544') + $ReadSids + $ModifySids
     foreach ($entry in $acl.Access) {
         if ($entry.AccessControlType -ne 'Allow') { continue }
