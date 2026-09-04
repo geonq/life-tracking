@@ -714,7 +714,7 @@ Complete-ManifestIntent $gatewayIntent $manifest $manifestPath $gatewayStage
 $hostPriorExists = Test-Path -LiteralPath $hostTarget -PathType Leaf
 $hostChanged = -not ($hostPriorExists -and (Get-FileSha256 $hostSource) -eq (Get-FileSha256 $hostTarget))
 $hostIntent = New-ManifestIntent -List $manifest.backups -Manifest $manifest -ManifestPath $manifestPath -Kind 'host-binary' -Source $hostSource -Destination $hostTarget -Backup (Join-Path $backupDirectory ('previous-' + [IO.Path]::GetFileName($hostTarget))) -PriorExists $hostPriorExists -Changed $hostChanged
-$hostStage = Copy-FileVerifiedAtomic $hostSource $hostTarget $backupDirectory -DeferMove
+$hostStage = $null
 $pythonStage = Get-ChildRuntimeStage $pythonSource $paths.RuntimeRoot $backupDirectory $manifest $manifestPath
 Invoke-NativeChecked $pythonStage.PythonPath @('-I', '-c', 'import fastapi,httpx,uvicorn,multipart') -Quiet | Out-Null
 $gatewayImportCheck = 'import importlib,os,pathlib,sys; assert sys.version_info[:2] == (3,12),sys.version; from zoneinfo import ZoneInfo; ZoneInfo("Europe/Berlin"); roots=[pathlib.Path(os.environ["LIFEOS_DEPLOY_STAGED_GATEWAY_SOURCE"]).resolve()]; sys.path[:0]=[str(root) for root in roots]; names=("main","enablebanking","supplement_catalog","gateway_launcher"); modules=[importlib.import_module(name) for name in names]; assert all(pathlib.Path(module.__file__).resolve().parent == roots[0] for module in modules), [(name,module.__file__) for name,module in zip(names,modules)]'
@@ -769,6 +769,12 @@ Set-DirectoryTraversalAcl $paths.SecretRoot $operatorSid @($apiSid, $gatewaySid)
 Set-DirectoryTraversalAcl $configDirectory $operatorSid @($apiSid, $gatewaySid)
 foreach ($directory in @($apiData, $apiTemp, $apiLogs)) { Ensure-Directory $directory; Set-RestrictedAcl $directory $operatorSid @() @($apiSid) }
 foreach ($directory in @($gatewayData, $gatewayTemp, (Join-Path $gatewayData 'documents'), $gatewayLogs)) { Ensure-Directory $directory; Set-RestrictedAcl $directory $operatorSid @() @($gatewaySid) }
+$hostDirectory = Split-Path -Parent $hostTarget
+# Prepare the shared host boundary before creating the executable staging
+# file.  Its inheritable child grants become the final PE ACL without a
+# Defender-sensitive icacls mutation on the executable itself.
+Set-DirectoryTraversalAcl $hostDirectory $operatorSid @($apiSid, $gatewaySid) -RootOnly -InheritToChildren
+$hostStage = Copy-FileVerifiedAtomic $hostSource $hostTarget $backupDirectory -DeferMove
 $catalogInitialized = Initialize-SupplementCatalog -PythonExecutable $pythonStage.PythonPath -GatewayDirectory $gatewayTarget -CatalogPath $supplementCatalog -BackupDirectory $backupDirectory -ManifestBackups $manifest.backups -Manifest $manifest -ManifestPath $manifestPath
 $manifest.supplementCatalogInitialized = $catalogInitialized
 Save-InstallManifest $manifest $manifestPath
@@ -890,15 +896,10 @@ Save-InstallManifest $manifest $manifestPath
 # staged code/runtime; Modify only to its own data/log/temp directories.  The
 # host binary is shared read-only; config files and secrets are per-service.
 # No profile, Users, Everyone, or shared-service grant is created.
-$hostDirectory = Split-Path -Parent $hostTarget
 Set-DirectoryTraversalAcl $paths.InstallRoot $operatorSid @($apiSid, $gatewaySid) -RootOnly
-# Keep the shared host directory mutation root-only.  The service manager and
-# Defender can hold a freshly-created executable open; recursively applying
-# icacls to the directory therefore races on the binary itself.  Harden the
-# directory boundary first and make that exact boundary ACL inheritable by
-# newly-created children.  This lets the verified binary arrive with its
-# final read-only service ACL without a second icacls mutation on a PE file.
-Set-DirectoryTraversalAcl $hostDirectory $operatorSid @($apiSid, $gatewaySid) -RootOnly -InheritToChildren
+# The shared host directory was hardened before the staging file was
+# created.  Keep this final section focused on validating and moving that
+# already-verified file; never mutate a Defender-sensitive PE ACL with icacls.
 if ($null -ne $hostStage.StagedPath) {
     # The randomized file inherited the already-hardened host-directory ACL.
     # Validate it without mutating the PE while Defender may have it open;
