@@ -1106,7 +1106,20 @@ function Set-RestrictedAcl {
     $broadSids = @('*S-1-1-0', '*S-1-5-11', '*S-1-5-32-545', '*S-1-5-4', '*S-1-5-7', '*S-1-5-2', '*S-1-5-19', '*S-1-5-20')
     $args = @($Path, '/inheritance:r', '/remove:g') + $broadSids + @('/grant:r') + $grant
     if (-not $File) { $args += @('/T', '/C') }
-    Invoke-NativeChecked 'icacls.exe' ([string[]]$args) -Quiet | Out-Null
+    # Windows can briefly hold a newly-created executable while Defender or
+    # the service manager inspects it. Retry only this bounded ACL mutation;
+    # persistent failures still abort the transaction and trigger rollback.
+    $aclAttempt = 0
+    while ($true) {
+        try {
+            Invoke-NativeChecked 'icacls.exe' ([string[]]$args) -Quiet | Out-Null
+            break
+        } catch {
+            $aclAttempt++
+            if ($aclAttempt -ge 5) { throw }
+            Start-Sleep -Milliseconds (500 * $aclAttempt)
+        }
+    }
     Remove-TransientLogonAclRules $Path -Recurse -KeepServiceSids @($ReadSids + $ModifySids)
     Assert-RestrictedAcl -Path $Path -OperatorSid $OperatorSid -ReadSids $ReadSids -ModifySids $ModifySids
 }
