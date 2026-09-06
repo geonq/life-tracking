@@ -29,6 +29,7 @@ public struct FinanceView: View {
 
     @State private var selectedDetail: FinanceDetail = .spend
     @State private var selectedRange: FinanceRange = .month
+    @State private var selectedChartMode: FinanceChartMode = .line
     @State private var selectedSpendPoint: String?
     @State private var selectedIncomePoint: String?
     @State private var selectedCashFlowPoint: String?
@@ -49,7 +50,8 @@ public struct FinanceView: View {
         onOpenConnections: (() -> Void)? = nil,
         onRefresh: (() async -> Void)? = nil,
         observationState: FinanceObservationState? = nil,
-        errorMessage: String? = nil
+        errorMessage: String? = nil,
+        initialChartMode: FinanceChartMode? = nil
     ) {
         self.summary = summary
         self.transactions = transactions
@@ -65,6 +67,7 @@ public struct FinanceView: View {
         case .netWorth: _selectedDetail = State(initialValue: .netWorth)
         case .spend, nil: _selectedDetail = State(initialValue: .spend)
         }
+        _selectedChartMode = State(initialValue: initialChartMode ?? .line)
     }
 
     public var body: some View {
@@ -292,7 +295,11 @@ public struct FinanceView: View {
                 points: snapshot.points(for: .spend, range: selectedRange),
                 selectedPoint: $selectedSpendPoint,
                 isDemo: snapshot.isDemo,
-                emptyDetail: "Spend history will appear after a reviewed account connection is available."
+                emptyDetail: "Spend history will appear after a reviewed account connection is available.",
+                mode: $selectedChartMode,
+                barBuckets: snapshot.barBuckets(for: .spend, range: selectedRange),
+                ringCategories: snapshot.categories,
+                ringCenterTitle: "Spend"
             )
         case .income:
             FinanceDetailChartCard(
@@ -302,7 +309,11 @@ public struct FinanceView: View {
                 points: snapshot.points(for: .income, range: selectedRange),
                 selectedPoint: $selectedIncomePoint,
                 isDemo: snapshot.isDemo,
-                emptyDetail: "Income history will appear after a reviewed account connection is available."
+                emptyDetail: "Income history will appear after a reviewed account connection is available.",
+                mode: $selectedChartMode,
+                barBuckets: snapshot.barBuckets(for: .income, range: selectedRange),
+                ringCategories: snapshot.incomeCategories,
+                ringCenterTitle: "Income"
             )
         case .cashFlow:
             FinanceDetailChartCard(
@@ -315,16 +326,33 @@ public struct FinanceView: View {
                 emptyDetail: "Cash-flow history needs a connected source with transaction history."
             )
         case .netWorth:
+            // The estimate is a trend derived from the FULL observed history
+            // (`snapshot.netWorthPoints`), never from `points` — the range
+            // window the chart line happens to be zoomed to. A short window
+            // (e.g. "1M" over 12 days of demo history) legitimately can't
+            // draw a continuous line, but that says nothing about whether
+            // enough real history exists to project from.
+            let netWorthPoints = snapshot.points(for: .netWorth, range: selectedRange)
             FinanceDetailChartCard(
                 title: "Net worth",
                 subtitle: "Balance trend",
                 metric: snapshot.netWorth,
-                points: snapshot.points(for: .netWorth, range: selectedRange),
+                points: netWorthPoints,
                 selectedPoint: $selectedNetWorthPoint,
                 isDemo: snapshot.isDemo,
-                emptyDetail: "Net-worth history is not available from the current Finance contract."
+                emptyDetail: "Net-worth history is not available from the current Finance contract.",
+                projection: Self.wealthProjection(from: snapshot.netWorthPoints)
             )
         }
+    }
+
+    /// RF-07: a linear projection is derived purely from real observed points
+    /// (never fabricated) via `FinanceWealthProjector`, the trusted boundary
+    /// for what counts as an "estimate". A 90-day horizon is a display
+    /// choice made here, not part of that boundary.
+    private static func wealthProjection(from points: [FinanceChartPoint]) -> FinanceWealthProjectionResult {
+        let observations = points.map { FinanceWealthObservationPoint(date: $0.date, valueCents: $0.value) }
+        return FinanceWealthProjector.project(observations: observations, horizonDays: 90)
     }
 
     private func selectLatestPoints(in snapshot: FinanceDisplaySnapshot) {
@@ -365,6 +393,39 @@ public struct FinanceView: View {
             hasObservedValue: snapshot.hasObservedValue,
             transactionTotalsAvailable: snapshot.transactionTotalsAvailable
         )
+    }
+
+    /// RF-08 acceptance seam: exercises the exact same `FinanceDisplaySnapshot
+    /// .barBuckets(for:range:)` adapter the bar-mode UI reads from, without
+    /// exposing the private `FinanceDisplaySnapshot`/`FinanceDetail`/
+    /// `FinanceRange` types themselves. `windowCalendarDays` mirrors a
+    /// `FinanceRange`'s day count (7/31/180/365); `nil` selects `.max`.
+    internal static func barBucketsForTesting(
+        transactions: [FinanceTransactionObservation],
+        isIncome: Bool,
+        windowCalendarDays: Int? = nil
+    ) -> [LifeOSBarBucket] {
+        let snapshot = FinanceDisplaySnapshot(summary: nil, transactions: transactions, usesVisualFixtures: false)
+        let detail: FinanceDetail = isIncome ? .income : .spend
+        let range: FinanceRange
+        switch windowCalendarDays {
+        case 7: range = .week
+        case 31: range = .month
+        case 180: range = .halfYear
+        case 365: range = .year
+        default: range = .max
+        }
+        return snapshot.barBuckets(for: detail, range: range)
+    }
+
+    /// RF-07 acceptance seam: exercises the exact same wiring the net-worth
+    /// detail card uses — `FinanceDisplaySnapshot.netWorthPoints` (populated
+    /// only by the demo/visual-fixture path today; a durable observation
+    /// store is a later, separate tranche) fed through
+    /// `FinanceWealthProjector` at the view's chosen horizon.
+    internal static func netWorthProjectionForTesting(usesVisualFixtures: Bool) -> FinanceWealthProjectionResult {
+        let snapshot = FinanceDisplaySnapshot(summary: nil, transactions: nil, usesVisualFixtures: usesVisualFixtures)
+        return Self.wealthProjection(from: snapshot.netWorthPoints)
     }
 }
 
@@ -773,6 +834,24 @@ private struct FinanceDetailChartCard: View {
     @Binding var selectedPoint: String?
     let isDemo: Bool
     let emptyDetail: String
+    /// Non-nil only for spend/income (RF-08): enables the line/bar/ring mode
+    /// switch. `nil` keeps cash-flow and net-worth exactly line-only, as before.
+    var mode: Binding<FinanceChartMode>? = nil
+    var barBuckets: [LifeOSBarBucket] = []
+    var ringCategories: [FinanceCategory] = []
+    var ringCenterTitle: String = ""
+    /// Non-nil only for net worth (RF-07).
+    var projection: FinanceWealthProjectionResult? = nil
+
+    private var effectiveMode: FinanceChartMode { mode?.wrappedValue ?? .line }
+
+    private var isEmpty: Bool {
+        switch effectiveMode {
+        case .line: return points.isEmpty
+        case .bar: return barBuckets.allSatisfy { $0.totalCents == nil }
+        case .ring: return ringCategories.isEmpty
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 15) {
@@ -790,26 +869,127 @@ private struct FinanceDetailChartCard: View {
                     .numericTransition()
             }
 
-            if points.isEmpty {
+            if let mode {
+                FinanceChartModeSwitcher(selection: mode)
+            }
+
+            if isEmpty {
                 FinanceUnavailableChart(detail: emptyDetail)
             } else {
-                FinanceLineChart(
-                    points: points,
-                    selectedPoint: $selectedPoint,
-                    isDemo: isDemo
-                )
-                FinanceChartSelectionDetail(
-                    points: points,
-                    selectedPoint: $selectedPoint,
-                    isDemo: isDemo
-                )
+                switch effectiveMode {
+                case .line:
+                    FinanceLineChart(
+                        points: points,
+                        selectedPoint: $selectedPoint,
+                        isDemo: isDemo,
+                        projection: projection
+                    )
+                    FinanceChartSelectionDetail(
+                        points: points,
+                        selectedPoint: $selectedPoint,
+                        isDemo: isDemo
+                    )
+                case .bar:
+                    FinanceBarChartView(
+                        buckets: LifeOSBarChartKit.normalizedBuckets(from: barBuckets),
+                        seriesID: title,
+                        selectedBucketID: $selectedPoint,
+                        isDemo: isDemo
+                    )
+                    FinanceBarSelectionDetail(
+                        buckets: barBuckets,
+                        seriesTitle: title,
+                        selectedBucketID: $selectedPoint,
+                        isDemo: isDemo
+                    )
+                case .ring:
+                    FinanceDetailRingView(categories: ringCategories, centerTitle: ringCenterTitle)
+                }
             }
+
+            projectionFootnote
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
         .flatCard()
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("finance-detail-chart-\(title.lowercased().replacingOccurrences(of: " ", with: "-"))")
+    }
+
+    /// RF-07: `.projected` is drawn inline on the chart itself (see
+    /// `FinanceLineChart`); every refusal case gets an explicit, honest note
+    /// here instead — never a flat or invented line.
+    @ViewBuilder
+    private var projectionFootnote: some View {
+        if let projection {
+            switch projection {
+            case .projected(let value):
+                // The estimate is drawn inline on the chart itself when
+                // there IS a visible line (`FinanceLineChart`). When the
+                // selected range is too short to draw one, the estimate
+                // — real, based on the full observed history — still
+                // deserves an honest surface rather than silently
+                // disappearing alongside the "not available" chart.
+                if points.isEmpty {
+                    Text("Est. net worth by \(FinanceDateFormatter.short(value.targetDate)): \(FinanceCurrencyFormatter.euro(cents: value.displayRoundedValueCents)) (based on the full observed history, not this range).")
+                        .font(LifeOSFont.axis())
+                        .foregroundStyle(LifeOSTokens.Hue.orange.base)
+                } else {
+                    EmptyView()
+                }
+            case .insufficientHistory(let provided, let minimumRequired):
+                Text("Not enough net-worth history to estimate (\(provided) of \(minimumRequired) minimum observations).")
+                    .font(LifeOSFont.axis())
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+            case .degenerateHistory:
+                Text("Net-worth history does not vary enough over time to estimate a trend.")
+                    .font(LifeOSFont.axis())
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+            case .invalidHorizon, .valueOutOfRange:
+                Text("A wealth estimate is not available for this period.")
+                    .font(LifeOSFont.axis())
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+            }
+        }
+    }
+}
+
+/// The line/bar/ring mode switch's ring option (RF-08). Reuses the exact same
+/// `FinanceCategoryRing` the always-visible category-breakdown section below
+/// already renders — this is a second place to reach it, not a second
+/// implementation of it.
+private struct FinanceDetailRingView: View {
+    let categories: [FinanceCategory]
+    let centerTitle: String
+
+    var body: some View {
+        if categories.isEmpty {
+            FinanceUnavailableChart(detail: "Category breakdown needs at least one observed transaction.")
+        } else {
+            HStack(alignment: .center, spacing: 16) {
+                FinanceCategoryRing(categories: categories, centerTitle: centerTitle)
+                    .frame(width: 126, height: 126)
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(categories.prefix(5)) { category in
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(category.hue.base)
+                                .frame(width: 8, height: 8)
+                            Text(category.name)
+                                .font(LifeOSFont.axis())
+                                .lineLimit(1)
+                            Spacer(minLength: 4)
+                            Text(category.amountText)
+                                .font(LifeOSFont.axis().weight(.semibold))
+                                .monospacedDigit()
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("\(centerTitle) category ring")
+        }
     }
 }
 
@@ -1003,6 +1183,11 @@ private struct FinanceLineChart: View {
     let points: [FinanceChartPoint]
     @Binding var selectedPoint: String?
     let isDemo: Bool
+    /// RF-07: an optional forward wealth estimate, drawn as a dashed
+    /// continuation of the observed line. `nil` for every series except net
+    /// worth — this never changes line/point rendering for spend, income, or
+    /// cash flow.
+    var projection: FinanceWealthProjectionResult? = nil
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var drawn: CGFloat = 0
@@ -1014,20 +1199,34 @@ private struct FinanceLineChart: View {
             .joined(separator: "|")
     }
 
+    /// Resolves by exact id first (today's behavior, unchanged for a
+    /// same-mode selection), then falls back to the nearest real point by
+    /// decoded timestamp. That fallback is what lets a selection made in bar
+    /// mode (a week-start id, not one of this array's own ids) resolve to a
+    /// real point here instead of silently vanishing when the user switches
+    /// back to line mode (RF-14) — it is a snap-to-nearest, never a
+    /// fabricated value.
     private var selectedDatum: FinanceChartPoint? {
         guard let selectedPoint else { return nil }
-        return points.first { $0.id == selectedPoint }
+        if let exact = points.first(where: { $0.id == selectedPoint }) { return exact }
+        guard let date = FinanceChartSelectionCodec.date(fromID: selectedPoint) else { return nil }
+        return points.min { abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date)) }
     }
 
     private var selectedIndex: Int? {
-        guard let selectedPoint else { return nil }
-        return points.firstIndex { $0.id == selectedPoint }
+        guard let datum = selectedDatum else { return nil }
+        return points.firstIndex { $0.id == datum.id }
+    }
+
+    private var projectedPoint: (date: Date, value: Int)? {
+        guard case .projected(let projection) = projection else { return nil }
+        return (projection.targetDate, projection.projectedValueCents)
     }
 
     var body: some View {
         GeometryReader { proxy in
             let size = proxy.size
-            let geometry = FinanceChartGeometry(points: points, size: size)
+            let geometry = FinanceChartGeometry(points: points, size: size, projectedPoint: projectedPoint)
 
             ZStack(alignment: .topLeading) {
                 FinanceChartGrid(zeroY: geometry.zeroY)
@@ -1038,6 +1237,44 @@ private struct FinanceLineChart: View {
                         LifeOSTokens.Series.observed,
                         style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round)
                     )
+
+                if case .projected(let projection) = projection,
+                   let lastIndex = points.indices.last,
+                   let end = geometry.projectedCoordinate() {
+                    let start = geometry.coordinate(for: lastIndex)
+                    // Motion §C: shares `drawn` with the solid line's `.trim`
+                    // so the estimate reveals together with it, one shot —
+                    // never a value animating up from zero.
+                    Path { path in
+                        path.move(to: start)
+                        path.addLine(to: end)
+                    }
+                    .trim(from: 0, to: drawn)
+                    .stroke(
+                        LifeOSTokens.Hue.orange.base,
+                        style: StrokeStyle(lineWidth: 1.5, lineCap: .round, dash: [3, 3])
+                    )
+
+                    Circle()
+                        .fill(LifeOSTokens.surface)
+                        .overlay(Circle().stroke(LifeOSTokens.Hue.orange.base, lineWidth: 1.5))
+                        .frame(width: 8, height: 8)
+                        .position(end)
+                        .opacity(drawn)
+
+                    Text("Est. \(FinanceDateFormatter.short(projection.targetDate)) · \(FinanceCurrencyFormatter.euro(cents: projection.displayRoundedValueCents))")
+                        .font(LifeOSFont.axis().weight(.semibold))
+                        .foregroundStyle(LifeOSTokens.Hue.orange.base)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(LifeOSTokens.surface, in: Capsule())
+                        .overlay(Capsule().stroke(LifeOSTokens.Hue.orange.base.opacity(0.4), lineWidth: 1))
+                        .position(x: min(max(end.x, 60), size.width - 60), y: max(end.y - 16, 12))
+                        .opacity(drawn)
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("Estimated net worth")
+                        .accessibilityValue("\(FinanceCurrencyFormatter.euro(cents: projection.displayRoundedValueCents)) by \(FinanceDateFormatter.short(projection.targetDate))")
+                }
 
                 if let selectedIndex, points.indices.contains(selectedIndex) {
                     let position = geometry.coordinate(for: selectedIndex)
@@ -1158,7 +1395,12 @@ private struct FinanceLineChart: View {
                 // before a replacement series arrives so a refreshed chart never reuses a stale
                 // completed mask.
                 drawn = 0
-                if let selectedPoint, !points.contains(where: { $0.id == selectedPoint }) {
+                // RF-14: clear only when NOTHING in this dataset resolves the
+                // selection (exact id, or nearest-by-date via `selectedDatum`)
+                // — not merely when it isn't an exact id match, which would
+                // otherwise wipe out a selection made in another chart mode
+                // every time this view (re)appears.
+                if selectedPoint != nil, selectedDatum == nil {
                     self.selectedPoint = nil
                 }
                 guard !reduceMotion else {
@@ -1229,20 +1471,44 @@ private struct FinanceChartGrid: View {
 private struct FinanceChartGeometry {
     let points: [FinanceChartPoint]
     let size: CGSize
+    /// RF-07: when present, the projected (estimate) value/date extends the
+    /// domain and range so the dashed estimate line is scaled identically to
+    /// (and never clipped relative to) the solid observed line.
+    var projectedPoint: (date: Date, value: Int)? = nil
 
     private let horizontalInset: CGFloat = 10
     private let topInset: CGFloat = 12
     private let bottomInset: CGFloat = 23
 
-    private var values: [Double] { points.map { Double($0.value) } }
+    private var values: [Double] {
+        var values = points.map { Double($0.value) }
+        if let projectedPoint { values.append(Double(projectedPoint.value)) }
+        return values
+    }
     private var firstDate: Date { points.first?.date ?? .now }
-    private var lastDate: Date { points.last?.date ?? firstDate }
+    private var lastDate: Date {
+        let observedLast = points.last?.date ?? firstDate
+        if let projectedDate = projectedPoint?.date, projectedDate > observedLast { return projectedDate }
+        return observedLast
+    }
     private var dateSpan: TimeInterval { max(lastDate.timeIntervalSince(firstDate), 1) }
     private var minimum: Double { min(values.min() ?? 0, 0) }
     private var maximum: Double { max(values.max() ?? 0, 0) }
     private var spread: Double { max(maximum - minimum, 1) }
 
     var zeroY: CGFloat { coordinate(for: 0).y }
+
+    /// The projected point's position, scaled by the same axes `coordinate(for:)`
+    /// uses. `nil` when there is no projection to draw.
+    func projectedCoordinate() -> CGPoint? {
+        guard let projectedPoint else { return nil }
+        let width = max(size.width - horizontalInset * 2, 1)
+        let height = max(size.height - topInset - bottomInset, 1)
+        let fraction = min(max(projectedPoint.date.timeIntervalSince(firstDate) / dateSpan, 0), 1)
+        let x = horizontalInset + width * CGFloat(fraction)
+        let normalized = min(max((Double(projectedPoint.value) - minimum) / spread, 0), 1)
+        return CGPoint(x: x, y: topInset + height * (1 - CGFloat(normalized)))
+    }
 
     func coordinate(for index: Int, value: Double? = nil) -> CGPoint {
         let width = max(size.width - horizontalInset * 2, 1)
@@ -1311,8 +1577,15 @@ private struct FinanceChartSelectionDetail: View {
     @Binding var selectedPoint: String?
     let isDemo: Bool
 
+    // RF-14: exact id match first, then nearest-by-decoded-date (so a bar-mode
+    // selection resolves here too instead of silently falling back to `.last`).
     private var point: FinanceChartPoint? {
-        selectedPoint.flatMap { id in points.first { $0.id == id } } ?? points.last
+        guard let selectedPoint else { return points.last }
+        if let exact = points.first(where: { $0.id == selectedPoint }) { return exact }
+        if let date = FinanceChartSelectionCodec.date(fromID: selectedPoint) {
+            return points.min { abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date)) } ?? points.last
+        }
+        return points.last
     }
 
     var body: some View {
@@ -2586,6 +2859,61 @@ private struct FinanceDisplaySnapshot {
         }
     }
 
+    /// RF-08 bar mode: buckets `spendPoints`/`incomePoints` (already daily
+    /// per-day sums) into calendar weeks via `LifeOSBarChartKit`. `coverageRange`
+    /// is the FULL observed history for the series (not clipped to the
+    /// selected range) — it is what a bucket's honesty (nil vs. a real zero)
+    /// is judged against. `displayRange` is the requested window, anchored to
+    /// the latest observed point rather than the wall clock (matching how
+    /// `points(in:calendarDays:)` already anchors the line chart's window) so
+    /// this stays deterministic under test. Weeks in `displayRange` older
+    /// than `coverageRange` — reachable when a selected range extends past
+    /// where the connection's history actually begins — get an honest
+    /// `nil` `totalCents`, never a fabricated zero.
+    func barBuckets(for detail: FinanceDetail, range: FinanceRange) -> [LifeOSBarBucket] {
+        let source: [FinanceChartPoint]
+        switch detail {
+        case .spend: source = spendPoints
+        case .income: source = incomePoints
+        case .cashFlow, .netWorth: return []
+        }
+        guard let overallStart = source.map(\.date).min(),
+              let overallEnd = source.map(\.date).max() else { return [] }
+
+        let calendar = Calendar.current
+        let coverageLower = calendar.startOfDay(for: overallStart)
+        let anchorDay = calendar.startOfDay(for: overallEnd)
+        guard let coverageUpper = calendar.date(byAdding: .day, value: 1, to: anchorDay) else { return [] }
+        let coverageRange = coverageLower..<coverageUpper
+
+        let displayRange: Range<Date>
+        if range == .max {
+            displayRange = coverageRange
+        } else {
+            let calendarDays: Int
+            switch range {
+            case .week: calendarDays = 7
+            case .month: calendarDays = 31
+            case .halfYear: calendarDays = 180
+            case .year: calendarDays = 365
+            case .max: calendarDays = 1
+            }
+            guard let displayLower = calendar.date(byAdding: .day, value: -(calendarDays - 1), to: anchorDay) else {
+                return []
+            }
+            displayRange = displayLower..<coverageUpper
+        }
+
+        let observations = source.map { LifeOSMoneyObservation(timestamp: $0.date, cents: $0.value) }
+        return LifeOSBarChartKit.weeklyBuckets(
+            observations: observations,
+            calendar: calendar,
+            displayRange: displayRange,
+            coverageRange: coverageRange,
+            now: overallEnd
+        )
+    }
+
     func availableRanges(for detail: FinanceDetail) -> Set<FinanceRange> {
         Set(FinanceRange.allCases.filter { !points(for: detail, range: $0).isEmpty })
     }
@@ -2795,7 +3123,7 @@ private enum FinanceRange: String, CaseIterable, Hashable {
     }
 }
 
-private enum FinanceCurrencyFormatter {
+enum FinanceCurrencyFormatter {
     static func euro(cents: Int?) -> String {
         guard let cents else { return "—" }
         let formatter = NumberFormatter()

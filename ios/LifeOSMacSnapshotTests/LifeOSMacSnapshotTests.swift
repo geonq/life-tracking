@@ -230,6 +230,67 @@ final class LifeOSMacSnapshotTests: XCTestCase {
         )
     }
 
+    // MARK: - RF-08 bar mode (LifeOSBarChart wired into Finance)
+    //
+    // The demo fixture's income/spend transactions only span ~11 days, while
+    // the default range is `.month` (31 days). `FinanceDisplaySnapshot
+    // .barBuckets(for:range:)` anchors the display window on the latest
+    // observed transaction and does NOT gate on the line chart's
+    // `hasDistinctHistory` continuity check, so this combination reliably
+    // produces, in one screen: several weeks before the fixture's observed
+    // history (an honest gap — `totalCents == nil`), real observed weeks
+    // (including a real zero if one occurs), and the still-accumulating
+    // current week (`isComplete == false`). This is the closest thing to a
+    // real device screenshot of the honesty contract without hand-built
+    // fixtures.
+
+    func testFinanceIncomeBarModeSnapshot() {
+        render(
+            FinanceView(
+                summary: nil,
+                usesVisualFixtures: true,
+                initialDetail: .income,
+                initialChartMode: .bar
+            ),
+            named: "FinanceView-income-bar-mode"
+        )
+    }
+
+    func testFinanceIncomeBarModeReduceMotionSnapshot() {
+        render(
+            FinanceView(
+                summary: nil,
+                usesVisualFixtures: true,
+                initialDetail: .income,
+                initialChartMode: .bar
+            ),
+            named: "FinanceView-income-bar-mode-reduce-motion",
+            colorScheme: .dark,
+            reduceMotion: true
+        )
+    }
+
+    func testFinanceSpendRingModeSnapshot() {
+        render(
+            FinanceView(
+                summary: nil,
+                usesVisualFixtures: true,
+                initialDetail: .spend,
+                initialChartMode: .ring
+            ),
+            named: "FinanceView-spend-ring-mode"
+        )
+    }
+
+    // MARK: - RF-07 wealth projection
+
+    func testFinanceNetWorthProjectionSnapshot() {
+        render(
+            FinanceView(summary: nil, usesVisualFixtures: true, initialDetail: .netWorth),
+            named: "FinanceView-net-worth-projection"
+        )
+    }
+
     func testFitnessTodaySnapshot() {
         render(
             FitnessView(
