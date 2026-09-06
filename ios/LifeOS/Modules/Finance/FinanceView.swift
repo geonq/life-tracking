@@ -89,7 +89,7 @@ public struct FinanceView: View {
                     financeDetailAndCategories(snapshot: snapshot)
 
                     financeMetricGrid(snapshot: snapshot)
-                    FinanceWealthCard(snapshot: snapshot)
+                    FinanceWealthCard(snapshot: snapshot, onOpenConnections: onOpenConnections)
                     FinanceAccountsCard(snapshot: snapshot, onOpenConnections: onOpenConnections)
                     FinanceImportCard()
                 }
@@ -640,6 +640,11 @@ private struct UnavailableMetricMark: View {
 
 private struct FinanceWealthCard: View {
     let snapshot: FinanceDisplaySnapshot
+    let onOpenConnections: (() -> Void)?
+
+    private var allocation: FinanceWealthAllocationBreakdown {
+        FinanceWealthAllocationEngine.breakdown(from: snapshot.wealth)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -683,6 +688,11 @@ private struct FinanceWealthCard: View {
                         }
                     }
                 }
+                if case .observed(let breakdown) = allocation {
+                    Divider()
+                        .overlay(LifeOSTokens.hairlineBorder)
+                    FinanceWealthAllocationSection(breakdown: breakdown)
+                }
                 Text("Separate from bank-account net worth. Investment orders and bank transactions never infer a holding value.")
                     .font(LifeOSFont.axis())
                     .foregroundStyle(LifeOSTokens.tertiaryText)
@@ -694,7 +704,9 @@ private struct FinanceWealthCard: View {
                 FinanceEmptyModuleRow(
                     icon: .investments,
                     title: "Wealth unavailable",
-                    detail: "No EUR holdings observation was supplied. Bank transactions and account balances are not used to estimate investments."
+                    detail: "No EUR holdings observation was supplied. Bank transactions and account balances are not used to estimate investments.",
+                    actionTitle: onOpenConnections == nil ? nil : "Manage connections",
+                    action: onOpenConnections
                 )
             }
         }
@@ -703,6 +715,69 @@ private struct FinanceWealthCard: View {
         .flatCard()
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("finance-wealth")
+    }
+}
+
+/// Allocation-breakdown ring for RF-06, over observed EUR holdings only.
+/// Reuses `FinanceCategoryRing` (the same ring the spend/income breakdowns
+/// use below) rather than a second ring implementation.
+private struct FinanceWealthAllocationSection: View {
+    let breakdown: FinanceWealthAllocationBreakdownValue
+
+    private var categories: [FinanceCategory] {
+        breakdown.categories.map { FinanceCategory(wealthAllocationCategory: $0) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text("Allocation")
+                    .font(LifeOSFont.axis().weight(.semibold))
+                    .foregroundStyle(LifeOSTokens.secondaryText)
+                if breakdown.isPartial {
+                    Text("Partial · \(breakdown.excludedHoldingCount) row\(breakdown.excludedHoldingCount == 1 ? "" : "s") unavailable")
+                        .font(LifeOSFont.axis())
+                        .foregroundStyle(LifeOSTokens.warning)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(LifeOSTokens.warning.opacity(0.12), in: Capsule())
+                }
+            }
+            HStack(alignment: .center, spacing: 16) {
+                FinanceCategoryRing(categories: categories, centerTitle: "Wealth")
+                    .frame(width: 108, height: 108)
+                VStack(alignment: .leading, spacing: 8) {
+                    // Zipped by index with `breakdown.categories` (same order,
+                    // same count as `categories` above) so the legend shows
+                    // the domain's exact integer-cent-derived `percentage`
+                    // rather than re-deriving a whole percent from `fraction`,
+                    // which would not be guaranteed to sum to 100.
+                    ForEach(Array(zip(breakdown.categories, categories)), id: \.0.id) { domainCategory, ringCategory in
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(ringCategory.hue.base)
+                                .frame(width: 8, height: 8)
+                            Text("\(domainCategory.name) · \(domainCategory.percentage)%")
+                                .font(LifeOSFont.axis())
+                                .lineLimit(1)
+                            Spacer(minLength: 4)
+                            Text(ringCategory.amountText)
+                                .font(LifeOSFont.axis().weight(.semibold))
+                                .monospacedDigit()
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if breakdown.isPartial {
+                Text("Rows with an unavailable value are excluded from this split, not counted as zero.")
+                    .font(LifeOSFont.axis())
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Wealth allocation by asset class")
     }
 }
 
@@ -3063,6 +3138,34 @@ private struct FinanceCategory: Identifiable {
             case "lifestyle", "entertainment": hue = .pink
             default: hue = .teal
             }
+        }
+    }
+
+    /// Wealth allocation categories (RF-06) are asset classes, not spend/income
+    /// categories, so they get their own keyword-to-hue mapping rather than
+    /// reusing `FinanceTransactionCategory`. `transactionCount` and
+    /// `contributingSources`/`provenanceFreshness` are unused by the ring
+    /// itself; they carry sane, honest values (holding count; the wealth
+    /// snapshot's own source and freshness) in case a future call site reads
+    /// them.
+    init(wealthAllocationCategory category: FinanceWealthAllocationCategory) {
+        id = category.id
+        name = category.name
+        amountCents = category.valueCents
+        transactionCount = category.holdingCount
+        fraction = category.fraction
+        contributingSources = []
+        provenanceFreshness = .unknown
+        switch category.name.lowercased() {
+        case "etf", "fund", "funds", "index fund", "index funds": hue = .blue
+        case "stock", "stocks", "equity", "equities": hue = .violet
+        case "bond", "bonds", "fixed income": hue = .teal
+        case "crypto", "cryptocurrency", "digital assets": hue = .orange
+        case "cash": hue = .lime
+        case "real estate", "property": hue = .pink
+        case "commodity", "commodities", "gold": hue = .amber
+        case "uncategorized": hue = .purple
+        default: hue = .red
         }
     }
 

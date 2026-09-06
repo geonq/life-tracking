@@ -291,6 +291,97 @@ final class LifeOSMacSnapshotTests: XCTestCase {
         )
     }
 
+    // MARK: - RF-06 wealth allocation
+
+    /// Builds a `FinanceSummary` with a wealth snapshot only (no accounts,
+    /// income, or transactions), so the resulting screenshot is focused
+    /// evidence for the allocation ring rather than a full dashboard.
+    /// `includeUnavailableHolding` adds one holding whose value is
+    /// unavailable, to render the partial-allocation disclosure.
+    private func wealthAllocationFinanceSummary(includeUnavailableHolding: Bool) throws -> FinanceSummary {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let now = ISO8601DateFormatter().date(from: "2026-08-08T12:05:00Z")!
+        let observedAt = formatter.string(from: now.addingTimeInterval(-60))
+
+        let unavailableMetric: [String: Any] = [
+            "availability": "unavailable",
+            "provenance": [
+                "source": "no-authorized-finance-source", "observedAt": observedAt,
+                "freshness": "unknown", "quality": "unavailable", "connectorState": "unavailable"
+            ]
+        ]
+        let wealthProvenance: [String: Any] = [
+            "source": "trade_republic", "observedAt": observedAt,
+            "freshness": "fresh", "quality": "observed", "connectorState": "healthy"
+        ]
+        func observedHolding(id: String, name: String, assetClass: String, valueCents: Int) -> [String: Any] {
+            [
+                "availability": "observed", "id": id, "name": name, "assetClass": assetClass,
+                "valueCents": valueCents, "currency": "EUR", "source": "trade_republic",
+                "provenance": wealthProvenance
+            ]
+        }
+        var holdings: [[String: Any]] = [
+            observedHolding(id: "1", name: "Vanguard All-World", assetClass: "ETF", valueCents: 4_250_000),
+            observedHolding(id: "2", name: "German Gov Bond 2030", assetClass: "Bonds", valueCents: 1_500_000),
+            observedHolding(id: "3", name: "Apple Inc.", assetClass: "Stocks", valueCents: 900_000)
+        ]
+        if includeUnavailableHolding {
+            holdings.append([
+                "availability": "unavailable", "id": "4", "name": "Unpriced position",
+                "assetClass": "Unknown", "currency": "EUR", "source": "trade_republic",
+                "provenance": [
+                    "source": "trade_republic", "observedAt": observedAt,
+                    "freshness": "unknown", "quality": "unavailable", "connectorState": "unavailable"
+                ]
+            ])
+        }
+        let payload: [String: Any] = [
+            "generatedAt": formatter.string(from: now), "currency": "EUR",
+            "monthlyIncome": unavailableMetric, "fixedCosts": unavailableMetric,
+            "discretionaryBuffer": unavailableMetric, "spent": unavailableMetric,
+            "savingsGoal": unavailableMetric, "saved": unavailableMetric,
+            "wealth": [
+                "availability": "observed", "holdings": holdings, "provenance": wealthProvenance
+            ]
+        ]
+        return try FinanceSummary.decode(JSONSerialization.data(withJSONObject: payload), now: now)
+    }
+
+    /// Taller than the standard `frame` -- the wealth card sits well below
+    /// the fold in the Finance scroll view, and these snapshots need the
+    /// allocation ring itself in frame, not just the top of the screen.
+    private var financeWealthFrame: CGSize { CGSize(width: 1512, height: 2200) }
+
+    func testFinanceWealthAllocationSnapshot() throws {
+        let summary = try wealthAllocationFinanceSummary(includeUnavailableHolding: true)
+        render(
+            FinanceView(summary: summary, usesVisualFixtures: false),
+            named: "FinanceView-wealth-allocation",
+            frameSize: financeWealthFrame
+        )
+    }
+
+    func testFinanceWealthAllocationReduceMotionSnapshot() throws {
+        let summary = try wealthAllocationFinanceSummary(includeUnavailableHolding: true)
+        render(
+            FinanceView(summary: summary, usesVisualFixtures: false),
+            named: "FinanceView-wealth-allocation-reduce-motion",
+            frameSize: financeWealthFrame,
+            colorScheme: .dark,
+            reduceMotion: true
+        )
+    }
+
+    func testFinanceWealthHoldingsUnavailableSnapshot() {
+        render(
+            FinanceView(summary: nil, usesVisualFixtures: false),
+            named: "FinanceView-wealth-unavailable",
+            frameSize: financeWealthFrame
+        )
+    }
+
     func testFitnessTodaySnapshot() {
         render(
             FitnessView(
