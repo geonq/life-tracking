@@ -260,6 +260,7 @@ public enum FinanceStatementImporter {
             }
             let isInvestmentOrder = detectedSource == .tradeRepublicCSV && isInvestmentRow(
                 type: rawType,
+                category: category,
                 assetClass: rawAssetClass,
                 symbol: rawSymbol,
                 quantity: rawQuantity,
@@ -566,12 +567,22 @@ public enum FinanceStatementImporter {
 
     private static func isInvestmentRow(
         type: String?,
+        category: String?,
         assetClass: String?,
         symbol: String?,
         quantity: String?,
         price: String?
     ) -> Bool {
-        let typeKey = type.map { normalizedField($0).lowercased() } ?? ""
+        // Some layouts (e.g. Trade Republic's German export) only carry a
+        // single "Typ" column, which column-detection claims as the CATEGORY
+        // header (categoryHeaders is checked first and already contains
+        // "typ"). In that case the dedicated type column is absent, so fall
+        // back to the category value as the classification source — without
+        // this, "Dividende"/"Zinsen" rows are invisible to the cash-income
+        // check below and get misclassified as investment orders whenever
+        // Symbol/Anzahl/Kurs happen to be populated too.
+        let classificationRaw = type ?? category
+        let typeKey = classificationRaw.map { normalizedField($0).lowercased() } ?? ""
         let cashIncomeTokens = [
             "dividend", "distribution", "interest", "dividende", "ausschüttung",
             "ausschuettung", "zins", "zinse"

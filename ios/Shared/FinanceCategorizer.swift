@@ -91,10 +91,16 @@ public enum FinanceCategorizer {
 
     private static let rules: [Rule] = [
         // Income — matched first since salary/refund keywords should win
-        // over any coincidental merchant-style overlap.
+        // over any coincidental merchant-style overlap. Dividend/interest
+        // tokens are included here (and checked before the `.investments`
+        // rule below) so a dividend or interest payment is never diverted
+        // to `.investments` just because its description also names the
+        // paying instrument (e.g. "ETF dividend" contains "etf").
         Rule(category: .income, keywords: [
             "gehalt", "lohn", "salary", "payroll", "rente", "pension",
-            "erstattung", "refund", "reimbursement"
+            "erstattung", "refund", "reimbursement",
+            "dividend", "dividende", "ausschüttung", "ausschuettung",
+            "distribution", "interest", "zinsen", "zinse", "zinsertrag"
         ], requiresInflow: true),
 
         // Groceries — DE + EN supermarket chains.
