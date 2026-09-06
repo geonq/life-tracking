@@ -199,4 +199,79 @@ final class FinanceAllocationStoreTests: XCTestCase {
         let store = try FinanceAllocationStore(url: url)
         XCTAssertTrue(try store.list().isEmpty)
     }
+
+    // MARK: 9. Regression -- F5 test gap: corrupt bytes are refused, not decoded into garbage
+
+    func testCorruptFileBytesThrowInvalidEnvelope() throws {
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data([0xFF, 0x00, 0xDE, 0xAD, 0xBE, 0xEF]).write(to: url)
+
+        let store = try FinanceAllocationStore(url: url)
+        XCTAssertThrowsError(try store.list()) { error in
+            XCTAssertEqual(error as? FinanceAllocationStoreError, .invalidEnvelope)
+        }
+    }
+
+    // MARK: 10. Regression -- F5 test gap: a schema version this store does not understand is refused
+
+    func testSchemaVersionMismatchThrowsInvalidEnvelope() throws {
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let json = #"{"schemaVersion":2,"rules":[]}"#
+        try json.data(using: .utf8)!.write(to: url)
+
+        let store = try FinanceAllocationStore(url: url)
+        XCTAssertThrowsError(try store.list()) { error in
+            XCTAssertEqual(error as? FinanceAllocationStoreError, .invalidEnvelope)
+        }
+    }
+
+    // MARK: 11. Regression -- F4: a persisted rule set with duplicate ids fails validation on load
+
+    func testPersistedDuplicateRuleIDsFailValidationOnLoad() throws {
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        let sharedID = UUID()
+        let rules = [
+            FinanceAllocationRule(id: sharedID, label: "A", bucket: "A", share: .fixedCents(500)),
+            FinanceAllocationRule(id: sharedID, label: "B", bucket: "B", share: .percentage(50))
+        ]
+        let envelope = FinanceAllocationStoreEnvelope(rules: rules)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(envelope)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: url)
+
+        let store = try FinanceAllocationStore(url: url)
+        XCTAssertThrowsError(try store.list()) { error in
+            XCTAssertEqual(error as? FinanceAllocationStoreError, .invalidEnvelope)
+        }
+    }
+
+    // MARK: 12. Regression -- F5 test gap: update preserves createdAt
+
+    func testUpdatePreservesCreatedAt() throws {
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        let store = try FinanceAllocationStore(url: url)
+        _ = try store.create(label: "Rent", bucket: "Rent", share: .percentage(40))
+        // Read back through the store (rather than trusting `create`'s
+        // in-memory return value) so `originalCreatedAt` is the same
+        // ISO8601-round-tripped value `update` will itself load from disk
+        // and compare against -- ISO8601 truncates sub-second precision, so
+        // comparing against the pre-persistence in-memory `Date` would be
+        // an apples-to-oranges precision mismatch, not a real regression.
+        let created = try store.list()[0]
+        let originalCreatedAt = created.createdAt
+
+        let updated = try store.update(id: created.id, label: "Rent2", bucket: "Rent2", share: .percentage(50))
+        XCTAssertEqual(updated.createdAt, originalCreatedAt)
+
+        let loaded = try store.list()
+        XCTAssertEqual(loaded.first?.createdAt, originalCreatedAt)
+    }
 }

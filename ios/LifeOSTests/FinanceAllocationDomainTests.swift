@@ -173,4 +173,165 @@ final class FinanceAllocationDomainTests: XCTestCase {
         let fixedData = try encoder.encode(fixed)
         XCTAssertEqual(try decoder.decode(FinanceAllocationShare.self, from: fixedData), fixed)
     }
+
+    // MARK: 12. Regression -- F1: preview must call its own validator and fail closed
+
+    func testPreviewRejectsPercentagesOverTotalingInsteadOfFailingOpen() {
+        let rules = [
+            rule(label: "A", bucket: "A", share: .percentage(60)),
+            rule(label: "B", bucket: "B", share: .percentage(60))
+        ]
+        let result = FinanceAllocationEngine.preview(rules: rules, incomeCents: 10_000)
+        XCTAssertEqual(result, .invalidRuleSet(.percentageTotalExceeds100))
+        // Specifically must NOT be the previously-observed failure mode: an
+        // `.allocated` result with 6000+6000 = 12000 allocated against a
+        // 10000 income and unallocatedCents == -2000.
+        if case .allocated = result {
+            XCTFail("preview must refuse an invalid rule set, never allocate against it")
+        }
+    }
+
+    func testPreviewRejectsAPercentageOver100InsteadOfOverAllocating() {
+        let rules = [rule(share: .percentage(500))]
+        let result = FinanceAllocationEngine.preview(rules: rules, incomeCents: 10_000)
+        XCTAssertEqual(result, .invalidRuleSet(.invalidShare))
+    }
+
+    func testPreviewRejectsANegativeFixedAmountInsteadOfProducingANegativeLineItem() {
+        let rules = [
+            rule(label: "Negative", bucket: "Negative", share: .fixedCents(-1_000)),
+            rule(label: "Rest", bucket: "Rest", share: .percentage(100))
+        ]
+        let result = FinanceAllocationEngine.preview(rules: rules, incomeCents: 10_000)
+        XCTAssertEqual(result, .invalidRuleSet(.invalidShare))
+    }
+
+    // MARK: 13. Regression -- F3: incomeCents is bounded like every other Finance entry point
+
+    func testPreviewRejectsIncomeAboveTheSharedMaximumCentsCeiling() {
+        let rules = [rule(share: .percentage(50))]
+        let result = FinanceAllocationEngine.preview(rules: rules, incomeCents: FinanceBudgetAmountParser.maximumCents + 1)
+        XCTAssertEqual(result, .invalidIncome)
+    }
+
+    func testPreviewAtIntMaxIncomeDoesNotTrap() {
+        // The reviewer's confirmed repro: this used to trap the process.
+        let rules = [rule(share: .percentage(50))]
+        let result = FinanceAllocationEngine.preview(rules: rules, incomeCents: Int.max)
+        XCTAssertEqual(result, .invalidIncome)
+    }
+
+    func testPreviewWithFixedTotalsThatWouldOverflowRefusesRatherThanTraps() {
+        let rules = [
+            rule(label: "A", bucket: "A", share: .fixedCents(FinanceBudgetAmountParser.maximumCents)),
+            rule(label: "B", bucket: "B", share: .fixedCents(FinanceBudgetAmountParser.maximumCents))
+        ]
+        let result = FinanceAllocationEngine.preview(rules: rules, incomeCents: FinanceBudgetAmountParser.maximumCents)
+        XCTAssertEqual(result, .fixedAmountsExceedIncome)
+    }
+
+    // MARK: 14. Regression -- F4: duplicate rule ids must not collapse into one amount
+
+    func testValidateRejectsDuplicateRuleIDs() {
+        let sharedID = UUID()
+        let rules = [
+            rule(id: sharedID, label: "Fixed", bucket: "Fixed", share: .fixedCents(500)),
+            rule(id: sharedID, label: "Percent", bucket: "Percent", share: .percentage(50))
+        ]
+        XCTAssertEqual(FinanceAllocationEngine.validate(rules), .duplicateRuleID)
+    }
+
+    func testPreviewRefusesDuplicateRuleIDsInsteadOfCollapsingTheirAmounts() {
+        let sharedID = UUID()
+        let rules = [
+            rule(id: sharedID, label: "Fixed", bucket: "Fixed", share: .fixedCents(500)),
+            rule(id: sharedID, label: "Percent", bucket: "Percent", share: .percentage(50))
+        ]
+        let result = FinanceAllocationEngine.preview(rules: rules, incomeCents: 2_500)
+        XCTAssertEqual(result, .invalidRuleSet(.duplicateRuleID))
+        // Specifically must NOT be the previously-observed failure mode: both
+        // line items reporting 1_000 because a dictionary keyed by `id`
+        // collapsed the two rules into one entry.
+        if case .allocated(let preview) = result {
+            XCTFail("must refuse duplicate ids, not allocate with collapsed amounts \(preview.lineItems)")
+        }
+    }
+
+    // MARK: 15. Regression -- F5 test gap: fixed total exactly equal to income
+
+    func testFixedTotalExactlyEqualsIncomeLeavesNoRemainder() {
+        let rules = [rule(label: "Rent", bucket: "Rent", share: .fixedCents(120_000))]
+        guard case .allocated(let preview) = FinanceAllocationEngine.preview(rules: rules, incomeCents: 120_000) else {
+            return XCTFail("expected an allocated preview")
+        }
+        XCTAssertEqual(preview.lineItems.first?.amountCents, 120_000)
+        XCTAssertEqual(preview.unallocatedCents, 0)
+    }
+
+    // MARK: 16. Regression -- F5 test gap: fixed + multiple percentages with a real remainder
+
+    func testMixedFixedAndMultiplePercentagesWithARealRemainder() {
+        // Remaining after the fixed rule is 10_007, split 40/20/40 across
+        // three percentage rules -- this does not divide evenly, so it
+        // exercises the largest-remainder distribution the algorithm exists
+        // for (the only prior fixed+percentage test landed on a clean,
+        // zero-remainder 70_000).
+        let rules = [
+            rule(label: "Rent", bucket: "Rent", share: .fixedCents(50_000)),
+            rule(label: "Savings", bucket: "Savings", share: .percentage(40)),
+            rule(label: "Free", bucket: "Free", share: .percentage(20)),
+            rule(label: "Fun", bucket: "Fun", share: .percentage(40))
+        ]
+        guard case .allocated(let preview) = FinanceAllocationEngine.preview(rules: rules, incomeCents: 60_007) else {
+            return XCTFail("expected an allocated preview")
+        }
+        XCTAssertEqual(preview.lineItems.first { $0.label == "Rent" }?.amountCents, 50_000)
+        let total = preview.lineItems.reduce(0) { $0 + $1.amountCents } + preview.unallocatedCents
+        XCTAssertEqual(total, 60_007)
+        // Percentages total exactly 100%, so every one of the remaining
+        // 10_007 cents must land on a percentage rule -- none unallocated.
+        XCTAssertEqual(preview.unallocatedCents, 0)
+        let percentageTotal = preview.lineItems
+            .filter { $0.label != "Rent" }
+            .reduce(0) { $0 + $1.amountCents }
+        XCTAssertEqual(percentageTotal, 10_007)
+    }
+
+    // MARK: 17. Regression -- F5 test gap: property-style cent-conservation sweep
+
+    func testCentConservationHoldsAcrossASweepOfIncomesAndPercentageSplits() {
+        let splits: [[Int]] = [
+            [100],
+            [50, 50],
+            [33, 33, 34],
+            [40, 20, 40],
+            [1, 1, 1],
+            [10, 20, 30, 40],
+            [25, 25, 25, 25],
+            [7, 13, 17, 63]
+        ]
+        for split in splits {
+            let rules = split.enumerated().map { index, percent in
+                rule(label: "Rule\(index)", bucket: "Bucket\(index)", share: .percentage(percent))
+            }
+            for incomeCents in stride(from: 1, through: 4_000, by: 37) {
+                guard case .allocated(let preview) = FinanceAllocationEngine.preview(rules: rules, incomeCents: incomeCents) else {
+                    return XCTFail("expected an allocated preview for split \(split) at income \(incomeCents)")
+                }
+                let total = preview.lineItems.reduce(0) { $0 + $1.amountCents } + preview.unallocatedCents
+                XCTAssertEqual(total, incomeCents, "cent conservation failed for split \(split) at income \(incomeCents)")
+
+                // No rule may drift more than 1 cent from its ideal
+                // (fractional) share of the income.
+                for (percent, item) in zip(split, preview.lineItems) {
+                    let idealShare = Double(incomeCents) * Double(percent) / 100.0
+                    let drift = abs(Double(item.amountCents) - idealShare)
+                    XCTAssertLessThanOrEqual(
+                        drift, 1.0,
+                        "rule at \(percent)% drifted \(drift) cents from its ideal share at income \(incomeCents)"
+                    )
+                }
+            }
+        }
+    }
 }

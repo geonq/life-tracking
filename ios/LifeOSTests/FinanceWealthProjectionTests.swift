@@ -39,9 +39,23 @@ final class FinanceWealthProjectionTests: XCTestCase {
         XCTAssertEqual(projection.basedOnPointCount, 3)
     }
 
-    // MARK: 3. Projection is never mistakeable for an observation (distinct type)
+    // MARK: 3. Projection honesty guarantee: only ever produced by the projector, never degenerate
 
-    func testProjectionIsADistinctTypeFromObservation() {
+    /// The previous version of this test asserted
+    /// `projection is FinanceWealthObservationPoint`, which is a
+    /// compile-time-constant `false` for two unrelated struct types (Swift
+    /// emits an "always fails" warning for it) -- it could never fail no
+    /// matter what the projector actually did. The real honesty guarantee
+    /// this type exists for is that `FinanceWealthProjector.project` is the
+    /// only producer, and it never emits an internally-inconsistent value:
+    /// every successful projection reports the exact point count it was
+    /// computed from, and every one of its stored fields is a finite,
+    /// representable value -- never the product of a trapped or
+    /// out-of-range conversion. See F2/F6 in the finance-allocation
+    /// hardening pass: `FinanceWealthObservationPoint` and
+    /// `FinanceWealthProjection` both dropped their public memberwise
+    /// inits to internal for exactly this reason.
+    func testEverySuccessfulProjectionIsInternallyConsistentAndNeverDegenerate() {
         let observations = [
             point(daysFromReference: 0, valueCents: 100_000),
             point(daysFromReference: 10, valueCents: 110_000),
@@ -50,11 +64,10 @@ final class FinanceWealthProjectionTests: XCTestCase {
         guard case .projected(let projection) = FinanceWealthProjector.project(observations: observations, horizonDays: 10) else {
             return XCTFail("expected a projection")
         }
-        // The type itself (FinanceWealthProjection) is not
-        // FinanceWealthObservationPoint or any FinanceDomain observed-wealth
-        // type -- this compiles only because they are unrelated types.
-        let isObservationPoint = projection is FinanceWealthObservationPoint
-        XCTAssertFalse(isObservationPoint)
+        XCTAssertEqual(projection.basedOnPointCount, observations.count)
+        XCTAssertGreaterThan(projection.basedOnPointCount, 0)
+        XCTAssertTrue(projection.asOfDate.timeIntervalSinceReferenceDate.isFinite)
+        XCTAssertTrue(projection.targetDate.timeIntervalSinceReferenceDate.isFinite)
     }
 
     // MARK: 4. Exact linear trend projects the exact expected value
@@ -143,5 +156,56 @@ final class FinanceWealthProjectionTests: XCTestCase {
         }
         XCTAssertEqual(projection.asOfDate, referenceDate.addingTimeInterval(12 * 86_400))
         XCTAssertEqual(projection.targetDate, referenceDate.addingTimeInterval(42 * 86_400))
+    }
+
+    // MARK: 10. Regression -- F5 test gap: minimumHistoryPointCount boundary (n-1)
+
+    func testOneFewerThanMinimumHistoryPointCountIsInsufficientHistory() {
+        let boundaryCount = FinanceWealthProjector.minimumHistoryPointCount - 1
+        let observations = (0..<boundaryCount).map { point(daysFromReference: $0, valueCents: 100_000 + $0 * 1_000) }
+        let result = FinanceWealthProjector.project(observations: observations, horizonDays: 30)
+        XCTAssertEqual(result, .insufficientHistory(pointsProvided: boundaryCount, minimumRequired: FinanceWealthProjector.minimumHistoryPointCount))
+    }
+
+    // MARK: 11. Regression -- F2: Int(Double) traps must never happen; honest .valueOutOfRange instead
+
+    func testExtremeHorizonDoesNotTrapAndIsRefusedAsOutOfRange() {
+        // The reviewer's confirmed repro: three honest observations (1000
+        // EUR, +10 EUR/day) with horizonDays: Int.max used to SIGTRAP the
+        // process (exit 133) because the guard checked `isFinite`, which a
+        // finite Double outside Int64's range still satisfies.
+        let observations = [
+            point(daysFromReference: 0, valueCents: 100_000),
+            point(daysFromReference: 1, valueCents: 101_000),
+            point(daysFromReference: 2, valueCents: 102_000)
+        ]
+        let result = FinanceWealthProjector.project(observations: observations, horizonDays: Int.max)
+        XCTAssertEqual(result, .valueOutOfRange)
+    }
+
+    func testConstructingAProjectionWithAnExtremeValueFailsHonestlyRatherThanTrapping() {
+        // The reviewer's confirmed repro: the (then-public) memberwise init
+        // `FinanceWealthProjection(basedOnPointCount: 0, asOfDate: .now,
+        // targetDate: .now, projectedValueCents: Int.max)` SIGTRAPped at
+        // `Int(roundedEuros * 100)`. The init is now internal and failable;
+        // this exercises it directly (available to the test target via
+        // @testable import) and must return nil, not trap.
+        let projection = FinanceWealthProjection(
+            basedOnPointCount: 0,
+            asOfDate: .now,
+            targetDate: .now,
+            projectedValueCents: Int.max
+        )
+        XCTAssertNil(projection)
+    }
+
+    func testConstructingAProjectionWithAZeroPointCountFailsHonestly() {
+        let projection = FinanceWealthProjection(
+            basedOnPointCount: 0,
+            asOfDate: .now,
+            targetDate: .now,
+            projectedValueCents: 100_000
+        )
+        XCTAssertNil(projection)
     }
 }

@@ -14,6 +14,7 @@ public enum FinanceAllocationStoreError: Error, Equatable, Sendable {
     case invalidBucket
     case invalidShare
     case percentageTotalExceeds100
+    case duplicateRuleID
     case ruleNotFound
 }
 
@@ -36,6 +37,8 @@ extension FinanceAllocationStoreError: LocalizedError {
             return "An allocation share must be a percentage from 1 to 100, or a positive fixed amount."
         case .percentageTotalExceeds100:
             return "Allocation rule percentages cannot add up to more than 100%."
+        case .duplicateRuleID:
+            return "Allocation rules cannot share an identifier."
         case .ruleNotFound:
             return "That allocation rule no longer exists."
         }
@@ -47,6 +50,7 @@ extension FinanceAllocationStoreError: LocalizedError {
         case .invalidBucket: self = .invalidBucket
         case .invalidShare: self = .invalidShare
         case .percentageTotalExceeds100: self = .percentageTotalExceeds100
+        case .duplicateRuleID: self = .duplicateRuleID
         }
     }
 }

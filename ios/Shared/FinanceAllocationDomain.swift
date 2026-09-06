@@ -119,6 +119,13 @@ public enum FinanceAllocationPreviewResult: Equatable, Sendable {
     case noAllocationConfigured
     case invalidIncome
     case fixedAmountsExceedIncome
+    /// `rules` failed `FinanceAllocationEngine.validate` — `preview` refuses
+    /// to compute a split for an unvalidated rule set rather than fail open
+    /// with an unbounded or otherwise nonsensical result. This is the case a
+    /// UI previewing a candidate rule set before saving is expected to hold
+    /// exactly (an array it has not yet validated), so this path must be
+    /// exercised, not just the store's own pre-save validation.
+    case invalidRuleSet(FinanceAllocationRuleSetError)
     case allocated(FinanceAllocationPreview)
 }
 
@@ -130,6 +137,11 @@ public enum FinanceAllocationRuleSetError: Error, Equatable, Sendable {
     case invalidBucket
     case invalidShare
     case percentageTotalExceeds100
+    /// Two or more rules share the same `id`. Rejected here rather than
+    /// merely by convention: `preview` indexes rules positionally (not by
+    /// `id`), and a corrupt or hand-edited file could otherwise smuggle
+    /// duplicate ids past everything except this check.
+    case duplicateRuleID
 }
 
 /// Pure, store-independent allocation logic. Deterministic: the same rule
@@ -140,7 +152,9 @@ public enum FinanceAllocationEngine {
     /// for a set with one rule replaced/added/removed). Order of `rules`
     /// does not affect validity — only content does.
     public static func validate(_ rules: [FinanceAllocationRule]) -> FinanceAllocationRuleSetError? {
+        var seenIDs = Set<UUID>()
         for rule in rules {
+            guard seenIDs.insert(rule.id).inserted else { return .duplicateRuleID }
             guard rule.hasNonEmptyText else {
                 return rule.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     ? .invalidLabel
@@ -158,7 +172,15 @@ public enum FinanceAllocationEngine {
     /// Produces the exact per-bucket split of `incomeCents` given `rules`,
     /// in rule order (the order of the `rules` array, which is the
     /// documented tie-break precedence — earlier rules win remainder cents
-    /// before later ones; a UUID comparison breaks any remaining tie).
+    /// before later ones).
+    ///
+    /// `rules` is validated via `FinanceAllocationEngine.validate` as the
+    /// very first step, before any arithmetic — the natural caller here is a
+    /// UI previewing a candidate rule set before it has been saved (and
+    /// therefore before the store's own pre-save validation has ever run
+    /// against it), so this function cannot assume its input is already
+    /// valid. An invalid rule set is refused via `.invalidRuleSet` rather
+    /// than silently producing an out-of-range or negative split.
     ///
     /// Remainder rule (largest-remainder / Hare-quota method), applied only
     /// to the percentage-share rules over whatever income remains after
@@ -179,25 +201,30 @@ public enum FinanceAllocationEngine {
     ///    baseline shares (always a small non-negative integer, bounded by
     ///    the rule count) is distributed one cent at a time to the rules
     ///    with the largest remainder from step 2, ties broken by earliest
-    ///    rule order and then by ascending `id` — a total order, so the
-    ///    result never depends on array/dictionary iteration order.
+    ///    rule order — every percentage rule has a distinct position in
+    ///    `rules`, so that alone is already a total order and no further
+    ///    tie-break (e.g. by `id`) is reachable.
     /// 4. Anything not claimed by a fixed or percentage rule — because
     ///    percentages under-total 100%, or because of the floor in step 3 —
     ///    is reported as `unallocatedCents`, never dropped or fabricated.
     ///
     /// This guarantees `sum(lineItems.amountCents) + unallocatedCents ==
-    /// incomeCents` exactly, for any valid input, every time.
+    /// incomeCents` exactly, for every input this function actually accepts
+    /// (i.e. every input that reaches `.allocated` rather than one of the
+    /// refusal cases above) — every time.
     public static func preview(rules: [FinanceAllocationRule], incomeCents: Int) -> FinanceAllocationPreviewResult {
-        guard incomeCents > 0 else { return .invalidIncome }
+        guard incomeCents > 0, incomeCents <= FinanceBudgetAmountParser.maximumCents else { return .invalidIncome }
         guard !rules.isEmpty else { return .noAllocationConfigured }
+        if let ruleSetError = validate(rules) { return .invalidRuleSet(ruleSetError) }
 
         var fixedTotal = 0
         for rule in rules {
             if case .fixedCents(let cents) = rule.share {
-                fixedTotal += cents
+                let (sum, overflowed) = fixedTotal.addingReportingOverflow(cents)
+                guard !overflowed, sum <= incomeCents else { return .fixedAmountsExceedIncome }
+                fixedTotal = sum
             }
         }
-        guard fixedTotal <= incomeCents else { return .fixedAmountsExceedIncome }
 
         let remaining = incomeCents - fixedTotal
         let percentageIndexed: [(index: Int, rule: FinanceAllocationRule, percent: Int)] = rules.enumerated().compactMap { index, rule in
@@ -222,10 +249,11 @@ public enum FinanceAllocationEngine {
 
         let distributionOrder = percentageIndexed.indices.sorted { lhs, rhs in
             if remainders[lhs] != remainders[rhs] { return remainders[lhs] > remainders[rhs] }
-            if percentageIndexed[lhs].index != percentageIndexed[rhs].index {
-                return percentageIndexed[lhs].index < percentageIndexed[rhs].index
-            }
-            return percentageIndexed[lhs].rule.id.uuidString < percentageIndexed[rhs].rule.id.uuidString
+            // `index` is each rule's position in `rules`, which is unique
+            // per percentage rule by construction (`enumerated()` above) —
+            // this is already a total order, so no further tie-break is
+            // reachable.
+            return percentageIndexed[lhs].index < percentageIndexed[rhs].index
         }
 
         var finalCents = baselineCents
@@ -235,24 +263,28 @@ public enum FinanceAllocationEngine {
             leftoverCentsToDistribute -= 1
         }
 
-        var amountByRuleID: [UUID: Int] = [:]
-        // Populate fixed-share amounts.
-        for rule in rules {
+        // Built positionally over `rules`, never keyed by `id` — a rule set
+        // could otherwise contain (or, pre-`validate`, previously did
+        // contain) two rules sharing a UUID, which would collapse into one
+        // entry in a dictionary keyed by `id` and silently misreport both
+        // rules' amounts. `rules.count`-many distinct array slots cannot
+        // collide this way.
+        var finalAmounts = [Int](repeating: 0, count: rules.count)
+        for (index, rule) in rules.enumerated() {
             if case .fixedCents(let cents) = rule.share {
-                amountByRuleID[rule.id] = cents
+                finalAmounts[index] = cents
             }
         }
-        // Populate percentage-share amounts using the distributed result.
         for (position, entry) in percentageIndexed.enumerated() {
-            amountByRuleID[entry.rule.id] = finalCents[position]
+            finalAmounts[entry.index] = finalCents[position]
         }
 
-        let lineItems = rules.map { rule in
+        let lineItems = rules.enumerated().map { index, rule in
             FinanceAllocationPreview.LineItem(
                 ruleID: rule.id,
                 label: rule.label,
                 bucket: rule.bucket,
-                amountCents: amountByRuleID[rule.id] ?? 0
+                amountCents: finalAmounts[index]
             )
         }
         let allocatedTotal = lineItems.reduce(0) { $0 + $1.amountCents }

@@ -6,11 +6,16 @@ import Foundation
 /// date. This is the minimal shape `FinanceWealthProjector` consumes; the
 /// durable history/observation store for these points is a separate,
 /// later tranche and out of scope here.
+///
+/// The memberwise init is internal, not public: nothing outside this module
+/// should be able to fabricate an "observation" out of thin air, since
+/// `FinanceWealthProjector.project` is meant to be the trusted boundary that
+/// decides what counts as observed history.
 public struct FinanceWealthObservationPoint: Equatable, Sendable {
     public let date: Date
     public let valueCents: Int
 
-    public init(date: Date, valueCents: Int) {
+    init(date: Date, valueCents: Int) {
         self.date = date
         self.valueCents = valueCents
     }
@@ -19,9 +24,16 @@ public struct FinanceWealthObservationPoint: Equatable, Sendable {
 /// A future wealth value derived from historical observations by
 /// extrapolation. Deliberately a distinct type from any observed-wealth
 /// type in `FinanceDomain` — a view must go out of its way to render a
-/// `FinanceWealthProjection` (e.g. via a dashed/labelled series), and can
-/// never receive one where an observation was expected, because the two
-/// are not interchangeable in the type system.
+/// `FinanceWealthProjection` (e.g. via a dashed/labelled series).
+///
+/// Its memberwise init is internal (not public) and failable, for the same
+/// reason `FinanceWealthObservationPoint`'s is internal: only
+/// `FinanceWealthProjector.project` produces these values, and it always
+/// does so from validated, in-range inputs — an out-of-module caller can
+/// receive one but never launder an observation into a projection, or
+/// construct a degenerate one (`basedOnPointCount <= 0`, or a
+/// `projectedValueCents` so extreme that the display-rounding computation
+/// below cannot represent it as an `Int`) that would otherwise trap.
 ///
 /// Exact-value semantics: `projectedValueCents` is the authoritative
 /// integer-cents value. `displayRoundedValueCents` rounds that to the
@@ -37,18 +49,39 @@ public struct FinanceWealthProjection: Equatable, Sendable {
     public let projectedValueCents: Int
     public let displayRoundedValueCents: Int
 
-    public init(
+    init?(
         basedOnPointCount: Int,
         asOfDate: Date,
         targetDate: Date,
         projectedValueCents: Int
     ) {
+        guard basedOnPointCount > 0 else { return nil }
+        guard asOfDate.timeIntervalSinceReferenceDate.isFinite,
+              targetDate.timeIntervalSinceReferenceDate.isFinite else { return nil }
+        let roundedEuros = (Double(projectedValueCents) / 100).rounded()
+        guard let displayCents = FinanceWealthProjection.safeInt(fromFiniteRangeChecked: roundedEuros * 100) else {
+            return nil
+        }
         self.basedOnPointCount = basedOnPointCount
         self.asOfDate = asOfDate
         self.targetDate = targetDate
         self.projectedValueCents = projectedValueCents
-        let roundedEuros = (Double(projectedValueCents) / 100).rounded()
-        self.displayRoundedValueCents = Int(roundedEuros * 100)
+        self.displayRoundedValueCents = displayCents
+    }
+
+    /// Converts a `Double` to `Int` without ever trapping. `Int(_:)` traps
+    /// for any finite `Double` outside the representable `Int` range (e.g.
+    /// `Int(Double(Int.max))` traps, since that `Double` rounds up past
+    /// `Int.max`), so `isFinite` alone is not sufficient — every
+    /// `Double`-to-`Int` money conversion in this file goes through this
+    /// helper instead. `Double(Int.min)` and `Double(Int.max) + 1` are both
+    /// exactly representable as `Double`, so this bound is exact, not an
+    /// approximation.
+    static func safeInt(fromFiniteRangeChecked value: Double) -> Int? {
+        let lowerBound = -0x1p63 // Double(Int.min), exactly representable.
+        let upperBound = 0x1p63 // Double(Int.max) + 1, exactly representable.
+        guard value.isFinite, value >= lowerBound, value < upperBound else { return nil }
+        return Int(value)
     }
 }
 
@@ -64,6 +97,12 @@ public enum FinanceWealthProjectionResult: Equatable, Sendable {
     case degenerateHistory
     /// `horizonDays` was not a positive number of days.
     case invalidHorizon
+    /// The regression produced a value (or a display-rounding of one) too
+    /// extreme to represent as an exact integer-cents `Int` — an honest
+    /// refusal instead of a silent process crash. Reachable from realistic
+    /// inputs: a small but nonzero slope times a very large `horizonDays`
+    /// can legitimately extrapolate past what `Int` cents can hold.
+    case valueOutOfRange
     case projected(FinanceWealthProjection)
 }
 
@@ -114,15 +153,25 @@ public enum FinanceWealthProjector {
         let intercept = (sumY - slope * sumX) / n
 
         let targetDate = last.date.addingTimeInterval(Double(horizonDays) * 86_400)
+        guard targetDate.timeIntervalSinceReferenceDate.isFinite else { return .valueOutOfRange }
         let targetX = targetDate.timeIntervalSince(first.date)
         let projectedValue = slope * targetX + intercept
-        guard projectedValue.isFinite else { return .degenerateHistory }
+        // `projectedValue.isFinite` alone is not a sufficient guard here: a
+        // finite `Double` can still sit outside the range `Int` can hold,
+        // and `Int(_:)` traps (not throws) on that — see
+        // `FinanceWealthProjection.safeInt(fromFiniteRangeChecked:)`.
+        guard let projectedValueCents = FinanceWealthProjection.safeInt(fromFiniteRangeChecked: projectedValue.rounded()) else {
+            return .valueOutOfRange
+        }
 
-        return .projected(FinanceWealthProjection(
+        guard let projection = FinanceWealthProjection(
             basedOnPointCount: sorted.count,
             asOfDate: last.date,
             targetDate: targetDate,
-            projectedValueCents: Int(projectedValue.rounded())
-        ))
+            projectedValueCents: projectedValueCents
+        ) else {
+            return .valueOutOfRange
+        }
+        return .projected(projection)
     }
 }
