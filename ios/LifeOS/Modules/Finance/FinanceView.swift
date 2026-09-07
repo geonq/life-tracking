@@ -744,7 +744,14 @@ private struct FinanceWealthAllocationSection: View {
                 }
             }
             HStack(alignment: .center, spacing: 16) {
-                FinanceCategoryRing(categories: categories, centerTitle: "Wealth")
+                // A partial split covers only the priced rows, so it must not
+                // claim 100%: the unpriced holdings' value is unknown, which
+                // makes any percentage of the true whole unknowable too.
+                FinanceCategoryRing(
+                    categories: categories,
+                    centerTitle: "Wealth",
+                    centerValue: breakdown.isPartial ? "Partial" : "100%"
+                )
                     .frame(width: 108, height: 108)
                 VStack(alignment: .leading, spacing: 8) {
                     // Zipped by index with `breakdown.categories` (same order,
@@ -2118,10 +2125,17 @@ private struct FinanceCategoriesCard: View {
 private struct FinanceCategoryRing: View {
     let categories: [FinanceCategory]
     let centerTitle: String
+    /// What the ring prints in its middle. Defaults to "100%" because the
+    /// shares always sum to the whole for a complete breakdown. A caller whose
+    /// breakdown covers only part of the truth MUST pass something else: an
+    /// unqualified "100%" next to a partial badge reads as "everything is
+    /// accounted for", which is the one thing it does not mean.
+    let centerValue: String
 
-    init(categories: [FinanceCategory], centerTitle: String = "Spend") {
+    init(categories: [FinanceCategory], centerTitle: String = "Spend", centerValue: String = "100%") {
         self.categories = categories
         self.centerTitle = centerTitle
+        self.centerValue = centerValue
     }
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -2142,12 +2156,12 @@ private struct FinanceCategoryRing: View {
                 Text(centerTitle)
                     .font(LifeOSFont.metadata())
                     .foregroundStyle(LifeOSTokens.tertiaryText)
-                Text("100%")
+                Text(centerValue)
                     .font(LifeOSFont.cardTitle().monospacedDigit())
             }
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(centerTitle) category ring")
+        .accessibilityLabel("\(centerTitle) category ring, \(centerValue)")
         .accessibilityValue(categories.map { "\($0.name) \(Int($0.fraction * 100)) percent" }.joined(separator: ", "))
         .task(id: "\(categoryID)-\(reduceMotion)") {
             if reduceMotion {
