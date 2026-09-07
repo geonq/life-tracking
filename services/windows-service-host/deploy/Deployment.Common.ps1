@@ -2200,12 +2200,17 @@ function Register-TailscaleSnapshotTask {
     # ScheduleByDay trigger resuming after boot. ExecutionTimeLimit is below
     # the repetition interval so one slow run cannot skip the next one under
     # IgnoreNew and open a two-interval gap.
+    # Windows' ScheduledTasks cmdlets generate a SYSTEM principal with the
+    # SID and RunLevel only. This host rejects the otherwise documented
+    # explicit <LogonType>ServiceAccount</LogonType> XML value with error 5,91.
+    # Task Scheduler infers the service-account logon type from S-1-5-18 and
+    # Get-ScheduledTask reports ServiceAccount after registration.
     $xml = @"
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo><Description>LifeOS Tailscale state snapshot</Description></RegistrationInfo>
   <Triggers><BootTrigger><Enabled>true</Enabled><Delay>PT15S</Delay></BootTrigger><CalendarTrigger><Enabled>true</Enabled><StartBoundary>$startBoundary</StartBoundary><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay><Repetition><Interval>PT1M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition></CalendarTrigger></Triggers>
-  <Principals><Principal id="Author"><UserId>S-1-5-18</UserId><LogonType>ServiceAccount</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
+  <Principals><Principal id="Author"><UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
   <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><ExecutionTimeLimit>PT30S</ExecutionTimeLimit><Enabled>true</Enabled></Settings>
   <Actions Context="Author"><Exec><Command>$commandXml</Command><Arguments>$argsXml</Arguments><WorkingDirectory>$workXml</WorkingDirectory></Exec></Actions>
 </Task>

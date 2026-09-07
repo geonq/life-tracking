@@ -63,7 +63,8 @@ def test_tailscale_snapshot_task_is_system_owned_acl_bound_and_reversible() -> N
     assert "function Start-TailscaleSnapshotTaskAndVerify" in common
     assert "function Assert-TailscaleSnapshotFile" in common
     assert "function Restore-TailscaleSnapshotTask" in common
-    assert "<UserId>S-1-5-18</UserId><LogonType>ServiceAccount</LogonType>" in common
+    assert "<UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel>" in common
+    assert "<UserId>S-1-5-18</UserId><LogonType>ServiceAccount</LogonType>" not in common
     assert "<Interval>PT1M</Interval>" in common
     # The snapshot file survives a reboot but its observedAt does not, and the
     # gateway is delayed-auto: without a boot trigger the launcher can lose the
