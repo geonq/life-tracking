@@ -214,6 +214,22 @@ def test_codex_task_has_file_only_secret_argument_and_cutover_gate() -> None:
     assert "Wait-CodexUsageObservation" in common
 
 
+def test_install_serializes_transactions_and_reports_tree_hash_path() -> None:
+    common = read("Deployment.Common.ps1")
+    install = read("install.ps1")
+    rollback = read("rollback.ps1")
+    assert "Global\\LifeOSDeploymentTransaction" in common
+    assert "function Enter-LifeOSDeploymentTransaction" in common
+    assert "WaitOne(0)" in common
+    assert "function Exit-LifeOSDeploymentTransaction" in common
+    assert "Could not hash tree item" in common
+    assert "Enter-LifeOSDeploymentTransaction" in install
+    assert "Exit-LifeOSDeploymentTransaction $deploymentMutex" in install
+    assert "Enter-LifeOSDeploymentTransaction" in rollback
+    assert "Exit-LifeOSDeploymentTransaction $deploymentMutex" in rollback
+    assert install.index("$deploymentMutex = Enter-LifeOSDeploymentTransaction") < install.index("$apiIntent = New-ManifestIntent")
+
+
 def test_rollback_requires_canonical_manifest_and_acl_snapshots() -> None:
     common = read("Deployment.Common.ps1")
     rollback = read("rollback.ps1")

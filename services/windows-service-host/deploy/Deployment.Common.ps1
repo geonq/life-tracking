@@ -21,6 +21,103 @@ $script:LifeOSDefaultPaths = [ordered]@{
 # the operator-managed token. The token itself never belongs in Serve flags.
 $script:LifeOSTrustedEdgeCapability = 'lifeos.example/trusted-edge'
 $script:LifeOSTailscaleEdgeTokenFileName = 'tailscale-edge.token'
+$script:LifeOSDeploymentMutexName = 'Global\LifeOSDeploymentTransaction'
+$script:LifeOSDeploymentMarkerName = '.lifeos-deployment-transaction.json'
+
+function Get-LifeOSDeploymentMarkerPath {
+    return (Join-Path $script:LifeOSDefaultPaths.BackupRoot $script:LifeOSDeploymentMarkerName)
+}
+
+function Enter-LifeOSDeploymentTransaction {
+    param([switch]$AllowRecovery)
+    # Every installer mutation, including rollback, must be serialized. A
+    # named OS mutex is released by Windows if an operator shell dies. The
+    # companion marker makes an abandoned owner fail closed on the next
+    # install; only an explicit rollback may classify and clear that state.
+    # Wait(0) deliberately fails fast: a second installer must not inspect or
+    # mutate trees while the first transaction is hashing, staging, or
+    # restoring them.
+    $mutex = [Threading.Mutex]::new($false, $script:LifeOSDeploymentMutexName)
+    $ownsMutex = $false
+    $markerPath = Get-LifeOSDeploymentMarkerPath
+    try {
+        try {
+            $ownsMutex = $mutex.WaitOne(0)
+        } catch [Threading.AbandonedMutexException] {
+            # The previous owner exited without releasing the mutex. The
+            # runtime grants ownership to this waiter, but a new install must
+            # still stop here until an explicit rollback classifies recovery.
+            $ownsMutex = $true
+            if (-not $AllowRecovery) {
+                throw 'A previous LifeOS deployment transaction was abandoned; explicit rollback/recovery is required before install.'
+            }
+        }
+        if (-not $ownsMutex) {
+            throw 'Another LifeOS deployment transaction is already active; refusing concurrent install or rollback.'
+        }
+        if (Test-Path -LiteralPath $markerPath -PathType Leaf) {
+            Assert-NoReparsePath $markerPath
+            $marker = Get-Content -LiteralPath $markerPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            if ([string]$marker.state -notin @('active', 'recovery_required') -or
+                [string]$marker.transactionId -notmatch '^[0-9a-f-]{36}$') {
+                throw 'The LifeOS deployment marker is invalid; operator-led recovery is required.'
+            }
+            if (-not $AllowRecovery) {
+                throw 'A previous LifeOS deployment did not report a clean terminal state; explicit rollback/recovery is required before install.'
+            }
+        }
+        $process = Get-Process -Id $PID -ErrorAction Stop
+        $transactionId = [Guid]::NewGuid().ToString()
+        Write-JsonAtomic $markerPath ([ordered]@{
+            schemaVersion = 1
+            state = 'active'
+            transactionId = $transactionId
+            processId = [int]$PID
+            processStartTimeUtc = $process.StartTime.ToUniversalTime().ToString('o')
+            acquiredAtUtc = (Get-Date).ToUniversalTime().ToString('o')
+        })
+        return [pscustomobject]@{ Mutex = $mutex; MarkerPath = $markerPath; TransactionId = $transactionId }
+    } catch {
+        if ($ownsMutex) {
+            try { $mutex.ReleaseMutex() } catch [ApplicationException] { }
+        }
+        $mutex.Dispose()
+        throw
+    }
+}
+
+function Exit-LifeOSDeploymentTransaction {
+    param([AllowNull()][object]$Transaction, [switch]$Completed)
+    if ($null -eq $Transaction) { return }
+    $mutex = $Transaction.Mutex
+    try {
+        if ($Completed -and (Test-Path -LiteralPath $Transaction.MarkerPath -PathType Leaf)) {
+            Assert-NoReparsePath $Transaction.MarkerPath
+            $marker = Get-Content -LiteralPath $Transaction.MarkerPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            if ([string]$marker.transactionId -eq [string]$Transaction.TransactionId) {
+                Remove-Item -LiteralPath $Transaction.MarkerPath -Force -ErrorAction Stop
+            }
+        } elseif (Test-Path -LiteralPath $Transaction.MarkerPath -PathType Leaf) {
+            # Keep an explicit recovery marker when the outer transaction did
+            # not reach a verified terminal state. A later install then fails
+            # closed until rollback has been run deliberately.
+            try {
+                Assert-NoReparsePath $Transaction.MarkerPath
+                $marker = Get-Content -LiteralPath $Transaction.MarkerPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                if ([string]$marker.transactionId -eq [string]$Transaction.TransactionId) {
+                    $marker.state = 'recovery_required'
+                    $marker.updatedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
+                    Write-JsonAtomic $Transaction.MarkerPath $marker
+                }
+            } catch { }
+        }
+        $mutex.ReleaseMutex()
+    } catch [ApplicationException] {
+        # A failed acquisition must not turn cleanup into a second failure.
+    } finally {
+        $mutex.Dispose()
+    }
+}
 
 function Get-LifeOSDefaultPaths {
     return [ordered]@{
@@ -871,7 +968,15 @@ function Resolve-TailscaleExecutable {
 function Get-FileSha256 {
     param([Parameter(Mandatory)][string]$Path)
     Assert-ExistingFile $Path 'Hash input'
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    try {
+        $record = Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop
+    } catch {
+        throw "Could not hash ${Path}: $($_.Exception.Message)"
+    }
+    if ($null -eq $record -or [string]::IsNullOrWhiteSpace([string]$record.Hash)) {
+        throw "Hash operation returned no SHA-256 value for $Path."
+    }
+    return ([string]$record.Hash).ToLowerInvariant()
 }
 
 function Assert-BoundedFile {
@@ -903,7 +1008,15 @@ function Get-TreeManifest {
             throw "Reparse point found below code/runtime root: $($item.FullName)"
         }
         $relative = $item.FullName.Substring($rootFull.Length).TrimStart('\')
-        [void]$items.Add([ordered]@{ path = $relative; sha256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant(); length = $item.Length })
+        try {
+            $hashRecord = Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256 -ErrorAction Stop
+        } catch {
+            throw "Could not hash tree item $($item.FullName): $($_.Exception.Message)"
+        }
+        if ($null -eq $hashRecord -or [string]::IsNullOrWhiteSpace([string]$hashRecord.Hash)) {
+            throw "Hash operation returned no SHA-256 value for tree item $($item.FullName)."
+        }
+        [void]$items.Add([ordered]@{ path = $relative; sha256 = ([string]$hashRecord.Hash).ToLowerInvariant(); length = $item.Length })
     }
     return @($items | Sort-Object -Property path)
 }

@@ -14,6 +14,9 @@ Assert-SafeTaskName $LegacyTaskName
 Assert-SafeTaskName $CodexTaskName
 Assert-SafeTaskName $TailscaleSnapshotTaskName
 Assert-WindowsAdministrator
+$deploymentMutex = Enter-LifeOSDeploymentTransaction -AllowRecovery
+$rollbackCompleted = $false
+try {
 Assert-ExistingFile $ManifestPath 'Rollback manifest'
 $manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json -ErrorAction Stop
 $manifestPath = (Get-FullPath $ManifestPath)
@@ -115,4 +118,8 @@ if ($null -ne $manifest.PSObject.Properties['tailscaleStatusBefore'] -and
 }
 
 Write-Warning 'Rollback restores prior LifeOS service registrations/state when the install manifest contains SCM snapshots; it never deletes the legacy LifeOSSyncServer task.'
+$rollbackCompleted = $true
 Write-Host 'LifeOS Windows rollback completed. New service state is disabled and prior task/data/code artifacts were restored or moved to the rollback backup.'
+} finally {
+    Exit-LifeOSDeploymentTransaction $deploymentMutex -Completed:$rollbackCompleted
+}

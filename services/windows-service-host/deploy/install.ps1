@@ -554,6 +554,10 @@ function Get-GatewayHostConfig {
 }
 
 Assert-WindowsAdministrator
+$deploymentMutex = Enter-LifeOSDeploymentTransaction
+$deploymentCompleted = $false
+$deploymentRollbackSucceeded = $false
+try {
 $paths = Get-LifeOSDefaultPaths
 $operatorSid = Get-InteractiveOperatorSid
 $tailscaleEdgeTokenPath = Assert-TailscaleEdgeTokenSource -Path $TailscaleEdgeTokenSource -ExpectedPath (Get-LifeOSTailscaleEdgeTokenPath $paths.SecretRoot) -OperatorSid $operatorSid
@@ -1046,34 +1050,40 @@ Save-InstallManifest $manifest $manifestPath
     $manifest.tailscaleStatusAfter = $serveStatus
     $manifest.cutoverCompletedAt = (Get-Date).ToUniversalTime().ToString('o')
     Save-InstallManifest $manifest $manifestPath
+    $deploymentCompleted = $true
     Write-Host 'LifeOS cutover completed; the legacy task was disabled but preserved.'
 } catch {
+    $deploymentRollbackSucceeded = $true
     if ($null -ne $hostStage -and $null -ne $hostStage.PSObject.Properties['StagedPath'] -and
         -not [string]::IsNullOrWhiteSpace([string]$hostStage.StagedPath) -and
         (Test-Path -LiteralPath ([string]$hostStage.StagedPath))) {
         Remove-Item -LiteralPath ([string]$hostStage.StagedPath) -Force -ErrorAction SilentlyContinue
     }
     foreach ($serviceName in @('LifeOSGateway', 'LifeOSAPI')) {
-        try { Stop-LifeOSService $serviceName } catch { Write-Warning ("Could not stop {0} during rollback: {1}" -f $serviceName, $_.Exception.Message) }
+        try { Stop-LifeOSService $serviceName } catch { $deploymentRollbackSucceeded = $false; Write-Warning ("Could not stop {0} during rollback: {1}" -f $serviceName, $_.Exception.Message) }
     }
     try {
         Restore-CodexCollectorTask $codexTask $CodexTaskName
     } catch {
+        $deploymentRollbackSucceeded = $false
         Write-Warning ("Could not restore Codex collector task: {0}" -f $_.Exception.Message)
     }
     try {
         Restore-TailscaleSnapshotTask $snapshotTask $TailscaleSnapshotTaskName
     } catch {
+        $deploymentRollbackSucceeded = $false
         Write-Warning ("Could not restore Tailscale snapshot task: {0}" -f $_.Exception.Message)
     }
     try {
         Restore-ManifestArtifacts $manifest $backupDirectory
     } catch {
+        $deploymentRollbackSucceeded = $false
         Write-Warning ("Could not restore all deployment artifacts: {0}" -f $_.Exception.Message)
     }
     try {
         Restore-AclSnapshots $manifest
     } catch {
+        $deploymentRollbackSucceeded = $false
         Write-Warning ("Could not restore ACL snapshots: {0}" -f $_.Exception.Message)
     }
     $legacyWasMutated = $legacyTaskMutated
@@ -1087,6 +1097,7 @@ Save-InstallManifest $manifest $manifestPath
                 Restore-LegacyGatewayListener -TaskSnapshot $legacy -ListenerSnapshot $manifest.legacyListener -TaskName $LegacyTaskName -TaskPath ([string]$legacy.TaskPath) -Port 8421
             }
         } catch {
+            $deploymentRollbackSucceeded = $false
             Write-Warning ("Could not restore legacy task/listener: {0}" -f $_.Exception.Message)
         }
     }
@@ -1094,6 +1105,7 @@ Save-InstallManifest $manifest $manifestPath
         try {
             Restore-LifeOSServiceSnapshot $serviceSnapshots[$serviceName]
         } catch {
+            $deploymentRollbackSucceeded = $false
             Write-Warning ("Could not restore service {0}: {1}" -f $serviceName, $_.Exception.Message)
         }
     }
@@ -1102,9 +1114,13 @@ Save-InstallManifest $manifest $manifestPath
         if ($manifest.Keys -contains 'tailscaleStatusAfter') { $tailscaleExpectedAfter = [string]$manifest.tailscaleStatusAfter }
         Restore-TailscaleServeSnapshot -TailscaleExecutable $tailscale -Json $tailscaleStatusBefore -ExpectedAfterJson $tailscaleExpectedAfter
     } catch {
+        $deploymentRollbackSucceeded = $false
         Write-Warning ("Could not restore Tailscale Serve state: {0}" -f $_.Exception.Message)
     }
     throw
+}
+} finally {
+    Exit-LifeOSDeploymentTransaction $deploymentMutex -Completed:($deploymentCompleted -or $deploymentRollbackSucceeded)
 }
 
 Write-Host ("Install manifest: {0}" -f (Join-Path $backupDirectory 'manifest.json'))
