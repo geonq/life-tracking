@@ -8,6 +8,10 @@ private final class PreflightURLProtocol: URLProtocol {
         case oversized
         case redirect
         case hanging
+        /// Declares a small, allowed Content-Length but then streams a body
+        /// past the byte bound anyway -- the attack a truthful
+        /// declared-length check alone cannot catch.
+        case lyingContentLength
     }
 
     struct Snapshot {
@@ -108,6 +112,20 @@ private final class PreflightURLProtocol: URLProtocol {
                 statusCode: 200,
                 httpVersion: nil,
                 headerFields: ["Content-Length": String(body.count)]
+            )!
+            client.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            Self.markBodyDelivered()
+            client.urlProtocol(self, didLoad: body)
+            client.urlProtocolDidFinishLoading(self)
+        case .lyingContentLength:
+            // Declared length is well within the 1_048_576-byte bound, but the
+            // actual body streamed is one byte past it.
+            let body = Data(repeating: 0x41, count: 1_048_576 + 1)
+            let response = HTTPURLResponse(
+                url: url,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Length": "2"]
             )!
             client.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             Self.markBodyDelivered()
@@ -502,5 +520,103 @@ final class TailscaleSyncClientSecurityTests: XCTestCase {
         XCTAssertThrowsError(try TailscaleSyncClient.parseCalendarPushResponse(data: Data(#"{"schemaVersion":2,"items":[]}"#.utf8), response: invalidConflict)) { error in
             XCTAssertEqual(error as? TailscaleSyncError, .invalidResponse)
         }
+    }
+
+    // MARK: - Additional negatives for SY-02
+
+    /// A non-approved host, a host that merely *contains* the approved
+    /// hostname as a substring, and a host that carries the approved
+    /// hostname as a prefix of an attacker-controlled domain must all be
+    /// refused. `validatedServerURL` matches on exact `Set` membership of
+    /// the parsed host, so none of these can slip through as a loose
+    /// "starts with" / "contains" match.
+    func testLookAlikeAndSubstringHostsAreRejected() {
+        let approved: Set<String> = ["lifeos.example-tailnet.ts.net"]
+        for value in [
+            // Approved host as a prefix of an attacker-controlled domain.
+            "https://lifeos.example-tailnet.ts.net.evil.com",
+            // Approved host as a suffix of a different, unapproved label.
+            "https://evillifeos.example-tailnet.ts.net",
+            // Approved host with an attacker-controlled subdomain prepended.
+            "https://sub.lifeos.example-tailnet.ts.net",
+            // Approved host as a substring inside a longer unapproved label.
+            "https://notlifeos.example-tailnet.ts.net",
+        ] {
+            XCTAssertNil(TailscaleSyncClient.validatedServerURL(value, approvedHosts: approved), value)
+        }
+    }
+
+    /// The exact look-alike shape called out for the real production host
+    /// configured in `project.yml` (`LIFEOS_SYNC_APPROVED_HOSTS`).
+    func testRealProductionHostLookAlikeIsRejected() {
+        let approved: Set<String> = ["geonqserver.tail5f8789.ts.net"]
+        XCTAssertNotNil(TailscaleSyncClient.validatedServerURL("https://geonqserver.tail5f8789.ts.net", approvedHosts: approved))
+        for value in [
+            "https://geonqserver.tail5f8789.ts.net.evil.com",
+            "http://geonqserver.tail5f8789.ts.net",
+            "https://geonqserver.tail5f8789.ts.net:8421",
+            "https://geonqserver.tail5f8789.ts.net/health",
+        ] {
+            XCTAssertNil(TailscaleSyncClient.validatedServerURL(value, approvedHosts: approved), value)
+        }
+    }
+
+    /// There is no parameter or seam anywhere in `TailscaleSyncClient` that
+    /// lets a caller attach a custom header to an outgoing request, so a
+    /// forged identity header (e.g. a spoofed `Tailscale-User-Login`) has no
+    /// injection point to begin with. Proving the built request carries no
+    /// headers at all is the strongest available evidence of that: nothing
+    /// downstream can ever read a caller-forged value because nothing is
+    /// ever there to read.
+    func testGatewayRequestCarriesNoHeadersAtAllSoNoForgedHeaderCanBeInjected() {
+        let url = URL(string: "https://lifeos.example-tailnet.ts.net:8420/usage")!
+        let request = TailscaleSyncClient.gatewayRequest(url: url)
+        XCTAssertTrue(request.allHTTPHeaderFields?.isEmpty ?? true,
+                      "a GET gateway request must carry zero headers -- there is no caller-supplied header surface to forge")
+    }
+
+    /// `performBoundedReadOnly` (the shared transport underneath every
+    /// read-only endpoint: usage, finance summary, clipper summary, the
+    /// nutrition-barcode lookup, bank-consent status polling, and the
+    /// connection preflight) explicitly rejects a non-GET request before
+    /// touching the network. This is the read-only boundary this client
+    /// actually enforces -- note that the client as a whole is not fully
+    /// read-only (Calendar push is a validated conditional PUT and bank
+    /// consent initiation is a validated POST), so this test proves the
+    /// property scoped to where the code actually enforces it.
+    func testBoundedReadOnlyTransportRejectsNonGETMethodBeforeAnyNetworkCall() async throws {
+        var request = try preflightRequest()
+        request.httpMethod = "PUT"
+        PreflightURLProtocol.configure(.success)
+        let session = preflightSession()
+        defer { session.invalidateAndCancel() }
+
+        let result = await TailscaleSyncClient.performConnectionPreflightForTesting(
+            session: session,
+            request: request
+        )
+        XCTAssertEqual(result, .invalidResponse)
+        let snapshot = PreflightURLProtocol.snapshot()
+        XCTAssertEqual(snapshot.requests.count, 0,
+                       "a non-GET request must be rejected before it ever reaches the network layer")
+    }
+
+    /// The declared-length preflight check alone cannot catch a server that
+    /// lies about `Content-Length`. This proves the second, independent
+    /// backstop: `collectBounded`'s streaming accumulation bound rejects the
+    /// response once actual bytes exceed `maximumReadOnlyResponseBytes`,
+    /// even though the declared length claimed the response was small.
+    func testStreamingCollectorRejectsAResponseThatLiesAboutItsDeclaredLength() async throws {
+        PreflightURLProtocol.configure(.lyingContentLength)
+        let session = preflightSession()
+        defer { session.invalidateAndCancel() }
+
+        let result = await TailscaleSyncClient.performConnectionPreflightForTesting(
+            session: session,
+            request: try preflightRequest()
+        )
+        XCTAssertEqual(result, .invalidResponse)
+        let snapshot = PreflightURLProtocol.snapshot()
+        XCTAssertEqual(snapshot.requests.count, 1)
     }
 }
