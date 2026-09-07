@@ -121,33 +121,26 @@ final class FinanceCategoryAggregationTests: XCTestCase {
 
     // MARK: - Property 2: percentages are honest
 
-    func testCategoryPercentagesUseHonestTruncationAndFractionsStayWithinBounds() throws {
+    func testCategoryPercentagesUseLargestRemainderAndFractionsStayWithinBounds() throws {
         let now = Date(timeIntervalSince1970: 1_754_659_800)
         let snap = snapshot(mixedLedger(now: now))
 
-        // Rounding rule found in FinanceView.swift's category legend: the
-        // displayed percentage is `Int(category.fraction * 100)`, i.e. a
-        // truncation toward zero (floor for non-negative fractions), not
-        // round-half-up. That means the displayed percentages do not
-        // necessarily sum to 100 -- verified below rather than assumed.
-        func displayedPercent(_ category: FinanceCategory) -> Int { Int(category.fraction * 100) }
-
         let spendByName = Dictionary(uniqueKeysWithValues: snap.categories.map { ($0.name, $0) })
-        XCTAssertEqual(displayedPercent(try XCTUnwrap(spendByName["Food"])), 14)
-        XCTAssertEqual(displayedPercent(try XCTUnwrap(spendByName["Transport"])), 7)
-        XCTAssertEqual(displayedPercent(try XCTUnwrap(spendByName["Home"])), 69)
-        XCTAssertEqual(displayedPercent(try XCTUnwrap(spendByName["Lifestyle"])), 8)
-        // Truncation loses fractional remainder: 14+7+69+8 = 98, not 100.
-        XCTAssertEqual(spendByName.values.reduce(0) { $0 + displayedPercent($1) }, 98)
+        XCTAssertEqual(try XCTUnwrap(spendByName["Food"]).percentage, 15)
+        XCTAssertEqual(try XCTUnwrap(spendByName["Transport"]).percentage, 8)
+        XCTAssertEqual(try XCTUnwrap(spendByName["Home"]).percentage, 69)
+        XCTAssertEqual(try XCTUnwrap(spendByName["Lifestyle"]).percentage, 8)
+        XCTAssertEqual(snap.categories.reduce(0) { $0 + $1.percentage }, 100)
 
         let incomeByName = Dictionary(uniqueKeysWithValues: snap.incomeCategories.map { ($0.name, $0) })
-        XCTAssertEqual(displayedPercent(try XCTUnwrap(incomeByName["Salary"])), 64)
-        XCTAssertEqual(displayedPercent(try XCTUnwrap(incomeByName["Freelance"])), 34)
-        XCTAssertEqual(displayedPercent(try XCTUnwrap(incomeByName["Shopping"])), 1)
-        XCTAssertEqual(displayedPercent(try XCTUnwrap(incomeByName["Interest"])), 0)
+        XCTAssertEqual(try XCTUnwrap(incomeByName["Salary"]).percentage, 64)
+        XCTAssertEqual(try XCTUnwrap(incomeByName["Freelance"]).percentage, 35)
+        XCTAssertEqual(try XCTUnwrap(incomeByName["Shopping"]).percentage, 1)
+        XCTAssertEqual(try XCTUnwrap(incomeByName["Interest"]).percentage, 0)
+        XCTAssertEqual(snap.incomeCategories.reduce(0) { $0 + $1.percentage }, 100)
 
-        // Every fraction is a real share of the whole: finite, within [0, 1],
-        // and the exact fractions (not the truncated display) sum to 1.0.
+        // Every fraction remains the real share used for ring geometry: finite,
+        // within [0, 1], and the exact fractions sum to 1.0.
         for category in snap.categories + snap.incomeCategories {
             XCTAssertTrue(category.fraction.isFinite)
             XCTAssertGreaterThanOrEqual(category.fraction, 0)

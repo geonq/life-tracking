@@ -2090,7 +2090,7 @@ private struct FinanceCategoriesCard: View {
                             Text(category.amountText)
                                 .font(LifeOSFont.axis().weight(.semibold))
                                 .monospacedDigit()
-                            Text("\(Int(category.fraction * 100))%")
+                            Text("\(category.percentage)%")
                                 .font(LifeOSFont.axis())
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                                 .monospacedDigit()
@@ -2105,7 +2105,7 @@ private struct FinanceCategoriesCard: View {
                 .buttonStyle(.plain)
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel(category.name)
-                .accessibilityValue("\(category.amountText), \(Int(category.fraction * 100)) percent, \(category.transactionCount) transactions, \(category.sourceDisclosure)")
+                .accessibilityValue("\(category.amountText), \(category.percentage) percent, \(category.transactionCount) transactions, \(category.sourceDisclosure)")
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -2253,7 +2253,7 @@ private struct FinanceCategoryRing: View {
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(centerTitle) category ring, \(centerValue)")
-        .accessibilityValue(categories.map { "\($0.name) \(Int($0.fraction * 100)) percent" }.joined(separator: ", "))
+        .accessibilityValue(categories.map { "\($0.name) \($0.percentage) percent" }.joined(separator: ", "))
         .task(id: "\(categoryID)-\(reduceMotion)") {
             if reduceMotion {
                 revealProgress = 1
@@ -2313,7 +2313,7 @@ private struct FinanceIncomeCategoryRow: View {
                         .minimumScaleFactor(0.72)
                 }
                 Spacer(minLength: 6)
-                Text(category.amountText)
+                Text("\(category.amountText) · \(category.percentage)%")
                     .font(LifeOSFont.axis().weight(.semibold).monospacedDigit())
                     .foregroundStyle(LifeOSTokens.success)
                 LifeOSIcon(.chevronRight)
@@ -2328,7 +2328,7 @@ private struct FinanceIncomeCategoryRow: View {
         .buttonStyle(.plain)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(category.name)
-        .accessibilityValue("\(category.amountText), \(category.transactionCount) deposits, \(category.sourceDisclosure), \(isSelected ? "Selected" : "Select to inspect")")
+        .accessibilityValue("\(category.amountText), \(category.percentage) percent, \(category.transactionCount) deposits, \(category.sourceDisclosure), \(isSelected ? "Selected" : "Select to inspect")")
     }
 }
 
@@ -2627,8 +2627,8 @@ struct FinanceDisplaySnapshot {
         netWorth = Self.overflowCheckedAccountTotal(accountObservations).map {
             FinanceDisplayMetric(cents: $0, detail: "Observed account balances")
         } ?? .unavailable("Not available")
-        categories = transactionTotals?.categoryObservations.map(FinanceCategory.init) ?? []
-        incomeCategories = transactionTotals?.incomeCategoryObservations.map(FinanceCategory.init) ?? []
+        categories = transactionTotals.map { Self.displayCategories(from: $0.categoryObservations) } ?? []
+        incomeCategories = transactionTotals.map { Self.displayCategories(from: $0.incomeCategoryObservations) } ?? []
         wealth = summary?.wealth
         netWorthPoints = []
         spendPoints = transactionTotals.flatMap { _ in
@@ -2811,6 +2811,16 @@ struct FinanceDisplaySnapshot {
         self.errorMessage = errorMessage
     }
 
+    private static func displayCategories(from observations: [FinanceCategoryObservation]) -> [FinanceCategory] {
+        guard let percentages = FinancePercentageAllocator.percentages(for: observations.map(\.amountCents)),
+              percentages.count == observations.count else {
+            return []
+        }
+        return zip(observations, percentages).map { observation, percentage in
+            FinanceCategory(observation, percentage: percentage)
+        }
+    }
+
     static let demo: FinanceDisplaySnapshot = {
         let now = Date.now
         let transactions = Self.demoTransactions(now: now)
@@ -2871,7 +2881,7 @@ struct FinanceDisplaySnapshot {
             saved: FinanceDisplayMetric(cents: 64_000, detail: "This month", progress: 0.64),
             savingsGoal: FinanceDisplayMetric(cents: 100_000, detail: "Monthly goal"),
             accounts: accounts,
-            categories: totals.categoryObservations.map(FinanceCategory.init),
+            categories: Self.displayCategories(from: totals.categoryObservations),
             netWorthPoints: points(netValues, "Net worth"),
             spendPoints: Self.transactionPoints(transactions, title: "Spend", series: .spending) ?? [],
             incomePoints: Self.transactionPoints(transactions, title: "Income", series: .income) ?? [],
@@ -3238,16 +3248,18 @@ struct FinanceCategory: Identifiable {
     let amountCents: Int
     let transactionCount: Int
     let fraction: Double
+    let percentage: Int
     let hue: LifeOSTokens.Hue
     let contributingSources: [String]
     let provenanceFreshness: FinancePayloadFreshness
 
-    init(_ observation: FinanceCategoryObservation) {
+    init(_ observation: FinanceCategoryObservation, percentage: Int) {
         id = observation.id
         name = observation.name
         amountCents = observation.amountCents
         transactionCount = observation.transactionCount
         fraction = observation.fraction
+        self.percentage = percentage
         contributingSources = observation.contributingSources
         provenanceFreshness = observation.provenance.freshness
         if let canonical = FinanceTransactionCategory.from(sourceCategory: observation.name) {
@@ -3276,6 +3288,7 @@ struct FinanceCategory: Identifiable {
         amountCents = category.valueCents
         transactionCount = category.holdingCount
         fraction = category.fraction
+        percentage = category.percentage
         contributingSources = []
         provenanceFreshness = .unknown
         switch category.name.lowercased() {

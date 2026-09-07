@@ -708,6 +708,67 @@ public enum FinanceTransactionTotalsError: Error, Equatable, Sendable {
     case aggregateOverflow
 }
 
+/// Allocates a positive integer amount list into whole percentage points.
+///
+/// The calculation uses the largest-remainder method over the original
+/// integer amounts. Floors are assigned first, then the remaining points go
+/// to the largest fractional remainders. Equal remainders are resolved by the
+/// larger amount and then the original index, so every caller gets stable
+/// output for the same ordered input. Returning `nil` keeps invalid or
+/// unrepresentable inputs out of the display layer.
+public enum FinancePercentageAllocator {
+    public static func percentages(for amounts: [Int]) -> [Int]? {
+        guard !amounts.isEmpty, amounts.allSatisfy({ $0 > 0 }) else {
+            return nil
+        }
+
+        var total = 0
+        for amount in amounts {
+            let (nextTotal, overflowed) = total.addingReportingOverflow(amount)
+            guard !overflowed, nextTotal > 0 else { return nil }
+            total = nextTotal
+        }
+
+        struct Share {
+            let amount: Int
+            let floorPercent: Int
+            let remainder: Int
+        }
+
+        var shares: [Share] = []
+        shares.reserveCapacity(amounts.count)
+        for amount in amounts {
+            let (scaledAmount, overflowed) = amount.multipliedReportingOverflow(by: 100)
+            guard !overflowed else { return nil }
+            shares.append(Share(
+                amount: amount,
+                floorPercent: scaledAmount / total,
+                remainder: scaledAmount % total
+            ))
+        }
+
+        let floorSum = shares.reduce(0) { partial, share in
+            let (next, overflowed) = partial.addingReportingOverflow(share.floorPercent)
+            return overflowed ? Int.max : next
+        }
+        guard floorSum <= 100 else { return nil }
+        let pointsToDistribute = 100 - floorSum
+        let distributionOrder = shares.indices.sorted { lhs, rhs in
+            let left = shares[lhs]
+            let right = shares[rhs]
+            if left.remainder != right.remainder { return left.remainder > right.remainder }
+            if left.amount != right.amount { return left.amount > right.amount }
+            return lhs < rhs
+        }
+
+        var percentages = shares.map(\.floorPercent)
+        for index in distributionOrder.prefix(pointsToDistribute) {
+            percentages[index] += 1
+        }
+        return percentages
+    }
+}
+
 /// Deterministic rollups used by the Finance detail surfaces and their tests.
 ///
 /// The initializer is throwing because each source row can be valid while the

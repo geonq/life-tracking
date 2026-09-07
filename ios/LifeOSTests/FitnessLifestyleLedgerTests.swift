@@ -816,6 +816,50 @@ final class FitnessLifestyleLedgerTests: XCTestCase {
         XCTAssertFalse(originalID.isEmpty)
     }
 
+    func testPersistedConflictSelectionIsDeterministicAcrossKinds() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("lifeos-lifestyle-conflict-order-\(UUID().uuidString)", isDirectory: true)
+        let url = root.appendingPathComponent("ledger.json")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let occurredAt = try XCTUnwrap(FitnessLifestyleTime.date(fromLocalDay: "2026-08-13", timeZoneIdentifier: timeZone))
+        let writer = FitnessLifestyleLedgerStore(persistenceURL: url)
+        _ = try writer.addQuantity(kind: .hydration, amount: 250, unit: .milliliters,
+                                   occurredAt: occurredAt, timeZoneIdentifier: timeZone, now: occurredAt)
+        _ = try writer.addQuantity(kind: .caffeine, amount: 50, unit: .milligrams,
+                                   occurredAt: occurredAt, timeZoneIdentifier: timeZone, now: occurredAt)
+
+        let valid = try Data(contentsOf: url)
+        guard var object = try JSONSerialization.jsonObject(with: valid) as? [String: Any],
+              let events = object["events"] as? [[String: Any]],
+              events.count == 2 else { return XCTFail("expected two encoded events") }
+
+        func explicitNoneCopy(of original: [String: Any]) -> [String: Any] {
+            var none = original
+            let id = UUID().uuidString
+            none["id"] = id
+            none["state"] = FitnessLifestyleEventState.explicitNone.rawValue
+            none["value"] = NSNull()
+            none["unit"] = NSNull()
+            none["lineage"] = ["rootEventID": id, "parentEventID": NSNull(), "revision": 1]
+            none["supersededAt"] = NSNull()
+            none["supersededBy"] = NSNull()
+            return none
+        }
+
+        object["events"] = events + events.map(explicitNoneCopy)
+        let conflict = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        try conflict.write(to: url, options: .atomic)
+
+        let reader = FitnessLifestyleLedgerStore(persistenceURL: url)
+        guard case .failed(let detail) = reader.loadStatus else {
+            return XCTFail("expected persisted conflicts to fail closed")
+        }
+        XCTAssertEqual(
+            detail,
+            "Lifestyle storage could not be read: conflicting lifestyle states in caffeine|\(timeZone)|2026-08-13"
+        )
+        XCTAssertEqual(try Data(contentsOf: url), conflict)
+    }
+
     func testPersistedMixedProvenanceConflictIsQuarantinedWithoutChoosingLatest() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("lifeos-lifestyle-mixed-source-\(UUID().uuidString)", isDirectory: true)
         let url = root.appendingPathComponent("ledger.json")

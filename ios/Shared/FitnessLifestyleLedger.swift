@@ -2770,7 +2770,8 @@ public final class FitnessLifestyleLedgerStore {
         let groups = Dictionary(grouping: events.filter(\.isActive), by: {
             "\($0.kind.rawValue)|\($0.timeZoneIdentifier)|\($0.localDay)"
         })
-        for (key, group) in groups {
+        for key in groups.keys.sorted() {
+            guard let group = groups[key] else { continue }
             let noneCount = group.filter { $0.state == .explicitNone }.count
             let quantityCount = group.filter { $0.state == .quantity }.count
             let alcoholFreeCount = group.filter { $0.state == .alcoholFree }.count

@@ -142,39 +142,18 @@ public enum FinanceWealthAllocationEngine {
                 return lhs.name < rhs.name
             }
 
-        let shares: [(category: RawCategory, floorPercent: Int, remainder: Int)] = rawCategories.map { category in
-            // `valueCents` is bounded well under Int64 / 100, so this
-            // product cannot overflow; `overflow` is checked defensively
-            // rather than assumed.
-            let scaled = category.valueCents.multipliedReportingOverflow(by: 100)
-            let numerator = scaled.overflow ? Int.max : scaled.partialValue
-            return (category, numerator / total, numerator % total)
+        guard let percentages = FinancePercentageAllocator.percentages(for: rawCategories.map(\.valueCents)) else {
+            return .unavailable
         }
 
-        let floorSum = shares.reduce(0) { $0 + $1.floorPercent }
-        let remainderPointsNeeded = max(0, 100 - floorSum)
-
-        let distributionOrder = shares.indices.sorted { lhsIndex, rhsIndex in
-            let lhs = shares[lhsIndex]
-            let rhs = shares[rhsIndex]
-            if lhs.remainder != rhs.remainder { return lhs.remainder > rhs.remainder }
-            if lhs.category.valueCents != rhs.category.valueCents { return lhs.category.valueCents > rhs.category.valueCents }
-            return lhs.category.name < rhs.category.name
-        }
-
-        var percentages = shares.map(\.floorPercent)
-        for index in distributionOrder.prefix(remainderPointsNeeded) {
-            percentages[index] += 1
-        }
-
-        let categories = shares.enumerated().map { offset, share in
+        let categories = rawCategories.enumerated().map { offset, category in
             FinanceWealthAllocationCategory(
-                id: share.category.name.lowercased(),
-                name: share.category.name,
-                valueCents: share.category.valueCents,
-                holdingCount: share.category.holdingCount,
+                id: category.name.lowercased(),
+                name: category.name,
+                valueCents: category.valueCents,
+                holdingCount: category.holdingCount,
                 percentage: percentages[offset],
-                fraction: Double(share.category.valueCents) / Double(total)
+                fraction: Double(category.valueCents) / Double(total)
             )
         }
 
