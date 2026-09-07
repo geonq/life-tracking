@@ -142,6 +142,8 @@ Assert-Text 'Assert-LegacyTaskUnchanged' 'Cutover and rollback revalidate the sa
 Assert-Text 'Get-LegacyLauncherRuntimeCandidates' 'Legacy launcher attribution uses a dedicated fail-closed parser.'
 Assert-Text 'Get-LegacyLauncherApprovalShape' 'Legacy launcher approval validates the complete fixed-root uvicorn shape.'
 Assert-Text 'function Normalize-WindowsAbsolutePath' 'Windows runtime paths are normalized before exact comparison.'
+Assert-Text 'unsafeLink = \$null -ne \$linkType -and \[string\]\$linkType -ne ''HardLink''' 'Safe hardlinks are accepted while path-redirection links remain rejected.'
+Assert-Text 'unsafeTarget = \$null -ne \$target -and \[string\]\$linkType -ne ''HardLink''' 'Target metadata is rejected unless it describes a safe hardlink.'
 Assert-Text 'rootAssignmentLines.Count -ne 1' 'Dynamic or multiply-assigned launcher roots are rejected.'
 Assert-Text 'rootAssignments.Count -ne 1' 'Only one fixed absolute launcher root assignment is accepted.'
 Assert-Text 'locationInvocations.Count -ne 1' 'The launcher must change to its fixed root exactly once.'

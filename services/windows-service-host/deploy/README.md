@@ -173,7 +173,7 @@ The trusted-edge token is required. Before preflight, an operator must create
 the canonical file `D:\Hermes\lifeos-secrets\tailscale-edge.token` with
 exactly 32-256 printable ASCII bytes and no newline or UTF-8 BOM. Pass its path
 as `-TailscaleEdgeTokenSource` to both preflight and install. No raw token is
-accepted as a parameter. The scripts validate ownership, reparse safety,
+accepted as a parameter. The scripts validate ownership, reparse/path-redirection safety,
 format, and broad ACLs without displaying the value; a missing or invalid
 source fails closed with an operator-actionable diagnostic. The installer
 records only the canonical path in `gateway.app.json` and the rollback

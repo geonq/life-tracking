@@ -97,9 +97,16 @@ function Assert-NoReparsePath {
         }
         $linkType = if ($null -ne $item.PSObject.Properties['LinkType']) { $item.LinkType } else { $null }
         $target = if ($null -ne $item.PSObject.Properties['Target']) { $item.Target } else { $null }
+        # Windows system executables can be exposed as hardlinks into WinSxS.
+        # A hardlink does not redirect path resolution, so it is safe here;
+        # junctions, symbolic links, and other reparse/path-redirection links
+        # remain rejected. Keep the Target fallback for hosts that expose a
+        # target without a LinkType property.
+        $unsafeLink = $null -ne $linkType -and [string]$linkType -ne 'HardLink'
+        $unsafeTarget = $null -ne $target -and [string]$linkType -ne 'HardLink'
         if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
-            $null -ne $linkType -or $null -ne $target) {
-            throw "Reparse points and symbolic links are not permitted: $current"
+            $unsafeLink -or $unsafeTarget) {
+            throw "Reparse points and path-redirection links are not permitted: $current"
         }
     }
 }

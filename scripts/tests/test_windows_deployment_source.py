@@ -138,6 +138,8 @@ def test_tailscale_snapshot_task_is_system_owned_acl_bound_and_reversible() -> N
     assert "$manifest.paths.tailscaleSnapshot" not in verify
     assert "tailscale_snapshot.ps1" in preflight
     assert "WindowsPowerShell\\v1.0\\powershell.exe" in preflight
+    assert "unsafeLink = $null -ne $linkType -and [string]$linkType -ne 'HardLink'" in common
+    assert "unsafeTarget = $null -ne $target -and [string]$linkType -ne 'HardLink'" in common
     assert '"LIFEOS_TAILSCALE_SNAPSHOT_PATH",' in config
     assert 'or "LIFEOS_TAILSCALE_SNAPSHOT_PATH")' in config
 

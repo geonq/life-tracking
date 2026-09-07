@@ -75,7 +75,9 @@ flag is `false`; enabling that feature makes the file a required startup
 dependency.
 
 The host requires executable, working, log, and referenced secret/config paths
-to exist and rejects reparse points/symbolic links where the OS exposes them.
+to exist and rejects reparse points, junctions, and symbolic/path-redirection
+links where the OS exposes them. Safe file hardlinks are accepted because they
+do not redirect path resolution.
 The usage-store path may be a new file, but its parent directory must exist and
 be non-reparse. Health URLs must be `http://` and literal loopback (`127.0.0.1`,
 `::1`, or `localhost`) with no credentials, query, or fragment.
