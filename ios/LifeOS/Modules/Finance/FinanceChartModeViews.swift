@@ -285,10 +285,19 @@ struct FinanceBarSelectionDetail: View {
         }
     }
 
+    /// Whether the data is a demo fixture and whether the week is finished are
+    /// independent facts, so both are stated. Returning early on `isDemo` hid
+    /// the coverage label exactly where it matters most: the current week reads
+    /// as a plain "0 €" with nothing marking it as still filling up.
     private func weekStatusLabel(_ bucket: LifeOSBarBucket) -> String {
-        if isDemo { return "Demo · not live" }
-        if bucket.isUnavailable { return "Outside observed history" }
-        return bucket.isComplete ? "Full week" : "Still accumulating"
+        var parts: [String] = []
+        if bucket.isUnavailable {
+            parts.append("Outside observed history")
+        } else {
+            parts.append(bucket.isComplete ? "Full week" : "Still accumulating")
+        }
+        if isDemo { parts.append("Demo · not live") }
+        return parts.joined(separator: " · ")
     }
 
     private func weekRangeLabel(_ bucket: LifeOSBarBucket) -> String {
