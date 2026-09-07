@@ -442,6 +442,11 @@ public actor HealthKitReconciliationCoordinator {
         var conflicts = current.conflicts
         var quarantine = current.quarantine
         var inserted = 0
+        // Which observation slots THIS page counted as an insertion. A deletion
+        // later in the same page may cancel one of those, but it must never
+        // cancel an insertion attributed to an earlier page: that would report
+        // zero new records while a genuinely new observation had landed.
+        var insertedIndicesThisPage = Set<Int>()
         var duplicates = 0
         var conflictCount = 0
         var observationIndex = HealthKitReconciliationIdentityIndex(observations: observations)
@@ -523,6 +528,7 @@ public actor HealthKitReconciliationCoordinator {
                         return HealthKitMetricReconciliationResult(metric: metric, state: .error, errorDescription: message, completion: .failure(message))
                     }
                     inserted += 1
+                    insertedIndicesThisPage.insert(index)
                 } else {
                     // Anchored queries may replay an older revision.  It is
                     // already superseded and must never be double-counted.
@@ -533,6 +539,7 @@ public actor HealthKitReconciliationCoordinator {
             observations.append(incoming)
             observationIndex.append(incoming.identity, index: observations.count - 1)
             inserted += 1
+            insertedIndicesThisPage.insert(observations.count - 1)
         }
 
         var activeObservationIndices = Set(observations.indices)
@@ -585,10 +592,13 @@ public actor HealthKitReconciliationCoordinator {
                 tombstones.append(normalizedDeletion)
                 tombstoneIndex.append(normalizedDeletion.identity, index: tombstones.count - 1)
             }
-            let removed = observationIndex.matchingIndices(for: normalizedIdentity)
+            // Every match is deactivated, including observations committed by an
+            // earlier page, but only the ones this page counted as inserted may
+            // reduce this page's insert count.
+            let removedIndices = observationIndex.matchingIndices(for: normalizedIdentity)
                 .filter { activeObservationIndices.remove($0) != nil }
-                .count
-            inserted = max(0, inserted - removed)
+            let removedFromThisPage = removedIndices.filter { insertedIndicesThisPage.remove($0) != nil }.count
+            inserted = max(0, inserted - removedFromThisPage)
         }
 
         if activeObservationIndices.count != observations.count {
