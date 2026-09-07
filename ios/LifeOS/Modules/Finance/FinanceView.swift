@@ -2595,8 +2595,8 @@ struct FinanceDisplaySnapshot {
         transactions = transactionRows
         hasTransactionSource = transactionSourceAvailable
         transactionTotalsAvailable = transactionTotals != nil
-        spent = transactionTotals.map {
-            FinanceDisplayMetric(cents: $0.spendingCents, detail: "\($0.transactionCount) transactions")
+        spent = transactionTotals.map { totals in
+            FinanceDisplayMetric(cents: totals.spendingCents, detail: "\(transactionRows.filter(\.isSpending).count) transactions")
         } ?? FinanceDisplayMetric(cents: summary?.spentCents, detail: summary == nil ? "Not connected" : "Observed total")
         spendBudget = FinanceDisplayMetric(cents: summary?.spendableBudgetCents, detail: summary == nil ? "Not connected" : "Available budget")
         cashFlow = transactionTotals.map {
@@ -2859,7 +2859,7 @@ struct FinanceDisplaySnapshot {
             hasTransactionSource: true,
             transactionTotalsAvailable: true,
             netWorth: FinanceDisplayMetric(cents: accountBalanceCents, detail: "Observed account balances"),
-            spent: FinanceDisplayMetric(cents: totals.spendingCents, detail: "\(totals.transactionCount) transactions", progress: 0.64),
+            spent: FinanceDisplayMetric(cents: totals.spendingCents, detail: "\(transactions.filter(\.isSpending).count) transactions", progress: 0.64),
             spendBudget: FinanceDisplayMetric(cents: 200_000, detail: "Monthly budget"),
             cashFlow: FinanceDisplayMetric(
                 cents: totals.netCashFlowCents,
