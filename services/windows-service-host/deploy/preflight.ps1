@@ -59,6 +59,12 @@ $pythonExecutable = $pythonRuntime.Executable
 $gatewayEntry = Resolve-GatewayEntryPoint $GatewayEntryPoint $GatewaySource
 $gatewayLauncher = Join-Path $PSScriptRoot 'gateway_launcher.py'
 Assert-ExistingFile $gatewayLauncher 'Gateway launcher'
+$tailscaleSnapshotScript = Join-Path $PSScriptRoot 'tailscale_snapshot.ps1'
+Assert-ExistingFile $tailscaleSnapshotScript 'Tailscale snapshot script'
+# The SYSTEM snapshot task runs under Windows PowerShell 5.1 by absolute path;
+# a missing host would only surface as a failed task after cutover.
+$windowsPowerShell = Join-Path ([Environment]::GetFolderPath('Windows')) 'System32\WindowsPowerShell\v1.0\powershell.exe'
+Assert-ExistingFile $windowsPowerShell 'Windows PowerShell host'
 $staticDeploymentTest = Join-Path $PSScriptRoot 'tests\Deployment.Static.Tests.ps1'
 Assert-ExistingFile $staticDeploymentTest 'Deployment static test'
 $behaviorDeploymentTest = Join-Path $PSScriptRoot 'tests\Deployment.Behavior.Tests.ps1'
@@ -106,7 +112,7 @@ try {
     # Keep the native `-c` payload quote-free for Windows PowerShell 5.1,
     # which strips nested quote characters while binding native arguments.
     $gatewayImportRunner = 'import os;exec(os.environ.get(chr(76)+chr(73)+chr(70)+chr(69)+chr(79)+chr(83)+chr(95)+chr(68)+chr(69)+chr(80)+chr(76)+chr(79)+chr(89)+chr(95)+chr(80)+chr(82)+chr(69)+chr(70)+chr(76)+chr(73)+chr(71)+chr(72)+chr(84)+chr(95)+chr(73)+chr(77)+chr(80)+chr(79)+chr(82)+chr(84)+chr(95)+chr(67)+chr(72)+chr(69)+chr(67)+chr(75)))'
-    Invoke-NativeChecked $pythonExecutable @('-I', '-c', $gatewayImportRunner) -Quiet | Out-Null
+    Invoke-NativeChecked -FilePath $pythonExecutable -ArgumentList ([string[]]@('-I', '-c', $gatewayImportRunner)) -Quiet | Out-Null
 } finally {
     if ($null -eq $previousAllowedLogin) { Remove-Item Env:LIFEOS_TAILSCALE_ALLOWED_LOGIN -ErrorAction SilentlyContinue }
     else { $env:LIFEOS_TAILSCALE_ALLOWED_LOGIN = $previousAllowedLogin }

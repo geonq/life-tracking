@@ -144,6 +144,7 @@ $expectedFiles = @(
     'deploy/install.ps1'
     'deploy/preflight.ps1'
     'deploy/rollback.ps1'
+    'deploy/tailscale_snapshot.ps1'
     'deploy/verify-candidate.ps1'
     'deploy/verify.ps1'
     'deploy/tests/Deployment.Behavior.Tests.ps1'

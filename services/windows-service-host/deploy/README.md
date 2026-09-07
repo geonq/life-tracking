@@ -44,13 +44,38 @@ calendar/documents/log directories. Both services can read the Claude secret.
 The current interactive operator is resolved to a SID at install time. No
 profile, `Users`, `Everyone`, or shared-service account grant is created.
 
-The v17 source bundle uses deterministic packaging and intentionally includes every
+Tailscale's LocalAPI on Windows is an Administrators-only named pipe, so
+`LifeOSGateway` — a virtual service account — cannot query it. A SYSTEM
+scheduled task (`LifeOSTailscaleSnapshot`) runs `tailscale_snapshot.ps1` every
+60 seconds and writes a bounded, non-secret snapshot of the Serve mapping plus
+the node's DNS name and login to `host\state\tailscale-state.json`. The
+identity half is pruned to `Self.DNSName`, so the file cannot leak tailnet
+topology. The state directory grants the gateway read/execute only; the
+operator, SYSTEM, and Administrators own it, keeping the SYSTEM task the single
+writer of that identity assertion. The gateway reads the file with exact-schema
+and 90-second freshness checks.
+
+The file survives a reboot but its `observedAt` does not, so the task also
+carries a boot trigger with a 15-second delay, and `LifeOSGateway` — which is
+delayed-auto — depends on `Schedule` (Task Scheduler) in addition to
+`LifeOSAPI` and `Tailscale`. Without both, the gateway's delayed autostart can
+beat the first post-boot snapshot run and exit on a stale file. `verify.ps1`
+asserts the task's principal and its exact command line, SHA-256s the staged
+`host\tailscale_snapshot.ps1` against the reviewed source, and asserts that
+neither service SID holds a write grant on the state directory or the file.
+
+This supplies configuration and identity only:
+the per-request proof that a connection actually arrived through Tailscale
+still comes from `GetExtendedTcpTable` and `QueryServiceStatusEx` against the
+running Tailscale SCM service.
+
+The v18 source bundle uses deterministic packaging and intentionally includes every
 trackable deployment file: `Deployment.Common.ps1`, `README.md`,
 `gateway_launcher.py`, `install.ps1`, `preflight.ps1`, `rollback.ps1`,
-`verify.ps1`, `verify-candidate.ps1`,
+`tailscale_snapshot.ps1`, `verify.ps1`, `verify-candidate.ps1`,
 `tests/Deployment.Behavior.Tests.ps1`, `tests/Deployment.LegacyServe.Tests.ps1`,
 and `tests/Deployment.Static.Tests.ps1`. The staged gateway release carries
-`bundleVersion: v17` plus a SHA-256/length record for every staged file.
+`bundleVersion: v18` plus a SHA-256/length record for every staged file.
 Runtime data and secret contents remain ignored; the bundle contains only the
 reviewed source and path references.
 
@@ -318,7 +343,7 @@ the unrelated fingerprint must both match the pre-install state. It never resets
 configuration. If a post-install snapshot is missing
 or the current state changed concurrently, rollback fails closed for
 operator-led recovery. Older manifests without a Serve snapshot or the
-optional v17 token-path field remain accepted by the canonical rollback
+optional v17 token-path and v18 snapshot-path fields remain accepted by the canonical rollback
 validator and require operator-led restoration of any missing token setup.
 
 ## Static and behavioral checks

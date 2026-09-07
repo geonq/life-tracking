@@ -283,6 +283,7 @@ deploy_files=(
     install.ps1
     preflight.ps1
     rollback.ps1
+    tailscale_snapshot.ps1
     verify-candidate.ps1
     verify.ps1
 )

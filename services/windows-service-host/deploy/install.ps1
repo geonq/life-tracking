@@ -14,6 +14,7 @@ param(
     [string]$TailscaleServiceName = 'Tailscale',
     [string]$LegacyTaskName = 'LifeOSSyncServer',
     [string]$CodexTaskName = 'LifeOSCodexCollector',
+    [string]$TailscaleSnapshotTaskName = 'LifeOSTailscaleSnapshot',
     # Optional provider inputs are file paths, never raw credentials. Their
     # presence opts into the corresponding live adapter during this install.
     [string]$ClipperIngestSecretSource,
@@ -35,6 +36,7 @@ $ErrorActionPreference = 'Stop'
 
 Assert-SafeTaskName $LegacyTaskName
 Assert-SafeTaskName $CodexTaskName
+Assert-SafeTaskName $TailscaleSnapshotTaskName
 
 function Add-ManifestItem {
     param([Parameter(Mandatory)][System.Collections.IList]$List, [Parameter(Mandatory)][object]$Value)
@@ -188,18 +190,22 @@ function Copy-GatewayCodeBundle {
         $bundleFiles = @(Get-ChildItem -LiteralPath $temp -File | Where-Object { $_.Name -ne 'gateway-release.manifest.json' } | ForEach-Object {
             [ordered]@{ path = $_.Name; sha256 = Get-FileSha256 $_.FullName; length = $_.Length }
         })
-        # v17 is the reviewed gateway bundle contract. Keep the file list and
-        # per-file hashes inside the staged bundle so the transferred release
-        # is reproducible and cannot silently omit a reviewed module.
+        # v18 is the reviewed gateway bundle contract. Its file list is
+        # unchanged from v17; the version marks the launcher no longer
+        # shelling out to Tailscale and reading the SYSTEM-written snapshot
+        # instead. The snapshot writer itself is not part of this bundle: it
+        # is staged separately from $PSScriptRoot into host\. Keep the file
+        # list and per-file hashes inside the staged bundle so the transferred
+        # release is reproducible and cannot silently omit a reviewed module.
         $releaseManifestPath = Join-Path $temp 'gateway-release.manifest.json'
         Write-JsonAtomic $releaseManifestPath ([ordered]@{
-            bundleVersion = 'v17'
+            bundleVersion = 'v18'
             mainSha256 = Get-FileSha256 (Join-Path $temp 'main.py')
             launcherSha256 = Get-FileSha256 (Join-Path $temp 'gateway_launcher.py')
             bundleFiles = $bundleFiles
         })
         $writtenManifest = Get-Content -LiteralPath $releaseManifestPath -Raw | ConvertFrom-Json -ErrorAction Stop
-        if ([string]$writtenManifest.bundleVersion -ne 'v17') { throw 'Gateway release manifest version is not v17.' }
+        if ([string]$writtenManifest.bundleVersion -ne 'v18') { throw 'Gateway release manifest version is not v18.' }
         foreach ($bundleFile in @($writtenManifest.bundleFiles)) {
             $bundlePath = Join-Path $temp ([string]$bundleFile.path)
             Assert-ExistingFile $bundlePath 'Gateway bundle manifest file'
@@ -267,7 +273,7 @@ function Initialize-SupplementCatalog {
         # argv still carries only the four explicit filesystem paths.
         $env:LIFEOS_DEPLOY_SUPPLEMENT_CATALOG_CHECK = $pythonCode
         $pythonRunner = 'import os;exec(os.environ.get(chr(76)+chr(73)+chr(70)+chr(69)+chr(79)+chr(83)+chr(95)+chr(68)+chr(69)+chr(80)+chr(76)+chr(79)+chr(89)+chr(95)+chr(83)+chr(85)+chr(80)+chr(80)+chr(76)+chr(69)+chr(77)+chr(69)+chr(78)+chr(84)+chr(95)+chr(67)+chr(65)+chr(84)+chr(65)+chr(76)+chr(79)+chr(71)+chr(95)+chr(67)+chr(72)+chr(69)+chr(67)+chr(75)))'
-        Invoke-NativeChecked $PythonExecutable @('-I', '-c', $pythonRunner, $temporaryCatalog, $existingCatalog, $schema, $seed) -Quiet | Out-Null
+        Invoke-NativeChecked -FilePath $PythonExecutable -ArgumentList ([string[]]@('-I', '-c', $pythonRunner, $temporaryCatalog, $existingCatalog, $schema, $seed)) -Quiet | Out-Null
         Assert-ExistingFile $temporaryCatalog 'Staged supplement catalog database'
         Assert-NoReparsePath $temporaryCatalog
         $backup = $null
@@ -499,6 +505,7 @@ function Get-GatewayHostConfig {
         [string]$EnableBankingApiBaseUrl,
         [string]$EnableBankingRedirectUri,
         [string]$TailscaleServiceName = 'Tailscale',
+        [Parameter(Mandatory)][string]$TailscaleSnapshotPath,
         [Parameter(Mandatory)][string]$ManagementSid
     )
     $systemRoot = if ([string]::IsNullOrWhiteSpace($env:SystemRoot)) { 'C:\Windows' } else { $env:SystemRoot }
@@ -515,6 +522,7 @@ function Get-GatewayHostConfig {
         PATH = $pythonRoot + ';' + (Join-Path $pythonRoot 'Scripts') + ';' + (Join-Path $systemRoot 'System32')
         LIFEOS_SUPPLEMENT_CATALOG_PATH = $SupplementCatalogPath
         LIFEOS_TAILSCALE_SERVICE_NAME = $TailscaleServiceName
+        LIFEOS_TAILSCALE_SNAPSHOT_PATH = $TailscaleSnapshotPath
     }
     $bankingValues = @($EnableBankingAppId, $EnableBankingPrivateKeyPath, $EnableBankingCertificatePath, $EnableBankingApiBaseUrl, $EnableBankingRedirectUri)
     $bankingMissingCount = @($bankingValues | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count
@@ -608,11 +616,22 @@ $backupDirectory = New-BackupDirectory $paths.BackupRoot 'install'
 Set-BackupAcl $backupDirectory $operatorSid
 $manifestPath = Join-Path $backupDirectory 'manifest.json'
 $configDirectory = Join-Path $paths.InstallRoot 'host\config'
+# The snapshot is machine state, not gateway data. Keeping it out of the data
+# root is deliberate: the gateway can write there, and a gateway that can
+# rewrite its own identity assertion would defeat the SYSTEM writer boundary.
+$stateDirectory = Join-Path $paths.InstallRoot 'host\state'
+$tailscaleSnapshotPath = Join-Path $stateDirectory 'tailscale-state.json'
 $hostTarget = Join-Path $paths.InstallRoot 'host\LifeOS.ServiceHost.exe'
 $apiTarget = Join-Path $paths.InstallRoot 'api'
 $gatewayTarget = Join-Path $paths.InstallRoot 'gateway'
 $launcherSource = Join-Path $PSScriptRoot 'gateway_launcher.py'
 Assert-ExistingFile $launcherSource 'Gateway launcher'
+$snapshotScriptSource = Join-Path $PSScriptRoot 'tailscale_snapshot.ps1'
+Assert-ExistingFile $snapshotScriptSource 'Tailscale snapshot script'
+# SYSTEM runs this script with -ExecutionPolicy Bypass every minute, so write
+# access to it is SYSTEM code execution. Stage it inside the host directory,
+# whose inheritable DACL already grants the services read/execute only.
+$snapshotScriptTarget = Join-Path $paths.InstallRoot 'host\tailscale_snapshot.ps1'
 $nodeTarget = Join-Path $paths.RuntimeRoot 'node'
 $apiData = Join-Path $paths.DataRoot 'api'
 $gatewayData = Join-Path $paths.DataRoot 'gateway'
@@ -635,6 +654,7 @@ $stateChanges = New-Object System.Collections.ArrayList
 
 $legacy = Get-ScheduledTaskSnapshot -TaskName $LegacyTaskName -BackupDirectory $backupDirectory
 $codexTask = Get-ScheduledTaskSnapshot -TaskName $CodexTaskName -BackupDirectory $backupDirectory
+$snapshotTask = Get-ScheduledTaskSnapshot -TaskName $TailscaleSnapshotTaskName -BackupDirectory $backupDirectory
 $legacyListener = Get-LegacyGatewayListenerSnapshot -TaskSnapshot $legacy -TaskName $LegacyTaskName -TaskPath ([string]$legacy.TaskPath) -Port 8421
 $serviceSnapshots = [ordered]@{}
 foreach ($serviceName in @('LifeOSAPI', 'LifeOSGateway')) {
@@ -674,6 +694,7 @@ $manifest = [ordered]@{
         Stopped = $false
     }
     codexTask = [ordered]@{ Name = $CodexTaskName; Exists = $codexTask.Exists; Enabled = $codexTask.Enabled; State = $codexTask.State; TaskPath = $codexTask.TaskPath; Backup = $codexTask.Backup; Operator = $operatorName }
+    snapshotTask = [ordered]@{ Name = $TailscaleSnapshotTaskName; Exists = $snapshotTask.Exists; Enabled = $snapshotTask.Enabled; State = $snapshotTask.State; TaskPath = $snapshotTask.TaskPath; Backup = $snapshotTask.Backup }
     serviceSnapshots = $serviceSnapshots
     services = @('LifeOSAPI', 'LifeOSGateway')
     paths = [ordered]@{
@@ -689,6 +710,7 @@ $manifest = [ordered]@{
         tailscaleEdgeToken = $tailscaleEdgeTokenPath
         usageHistory = $usageHistory; supplementCatalog = $supplementCatalog
         configDirectory = $configDirectory; apiConfig = $apiConfig; gatewayConfig = $gatewayServiceConfig
+        stateDirectory = $stateDirectory; tailscaleSnapshot = $tailscaleSnapshotPath; tailscaleSnapshotScript = $snapshotScriptTarget
         gatewayAppConfig = $gatewayConfig; backupDirectory = $backupDirectory; tailscaleExecutable = $tailscale
     }
     backups = New-Object System.Collections.ArrayList
@@ -700,7 +722,7 @@ Set-AclSnapshotContext -Manifest $manifest -ManifestPath $manifestPath -BackupDi
 # Capture ACLs of pre-existing deployment targets before any replacement. A
 # later snapshot of a newly-created path is still useful for a retry, while
 # these early snapshots preserve the old target's ACL for rollback.
-foreach ($aclTarget in @($hostTarget, $apiTarget, $gatewayTarget, $nodeTarget, $paths.RuntimeRoot, $paths.DataRoot, $paths.LogRoot, $paths.SecretRoot, $configDirectory, $tailscaleEdgeTokenPath)) {
+foreach ($aclTarget in @($hostTarget, $apiTarget, $gatewayTarget, $nodeTarget, $paths.RuntimeRoot, $paths.DataRoot, $paths.LogRoot, $paths.SecretRoot, $configDirectory, $stateDirectory, $snapshotScriptTarget, $tailscaleEdgeTokenPath)) {
     if (Test-Path -LiteralPath $aclTarget) { Register-AclSnapshot $aclTarget }
 }
 
@@ -720,7 +742,7 @@ $hostChanged = -not ($hostPriorExists -and (Get-FileSha256 $hostSource) -eq (Get
 $hostIntent = New-ManifestIntent -List $manifest.backups -Manifest $manifest -ManifestPath $manifestPath -Kind 'host-binary' -Source $hostSource -Destination $hostTarget -Backup (Join-Path $backupDirectory ('previous-' + [IO.Path]::GetFileName($hostTarget))) -PriorExists $hostPriorExists -Changed $hostChanged
 $hostStage = $null
 $pythonStage = Get-ChildRuntimeStage $pythonSource $paths.RuntimeRoot $backupDirectory $manifest $manifestPath
-Invoke-NativeChecked $pythonStage.PythonPath @('-I', '-c', 'import fastapi,httpx,uvicorn,multipart') -Quiet | Out-Null
+Invoke-NativeChecked -FilePath $pythonStage.PythonPath -ArgumentList ([string[]]@('-I', '-c', 'import fastapi,httpx,uvicorn,multipart')) -Quiet | Out-Null
 $gatewayImportCheck = 'import importlib,os,pathlib,sys; assert sys.version_info[:2] == (3,12),sys.version; from zoneinfo import ZoneInfo; ZoneInfo("Europe/Berlin"); roots=[pathlib.Path(os.environ["LIFEOS_DEPLOY_STAGED_GATEWAY_SOURCE"]).resolve()]; sys.path[:0]=[str(root) for root in roots]; names=("main","enablebanking","supplement_catalog","gateway_launcher"); modules=[importlib.import_module(name) for name in names]; assert all(pathlib.Path(module.__file__).resolve().parent == roots[0] for module in modules), [(name,module.__file__) for name,module in zip(names,modules)]'
 $previousAllowedLogin = $env:LIFEOS_TAILSCALE_ALLOWED_LOGIN
 $previousStagedGatewayImportSource = $env:LIFEOS_DEPLOY_STAGED_GATEWAY_SOURCE
@@ -732,7 +754,7 @@ try {
     # Keep the native `-c` payload quote-free for Windows PowerShell 5.1,
     # which strips nested quote characters while binding native arguments.
     $gatewayImportRunner = 'import os;exec(os.environ.get(chr(76)+chr(73)+chr(70)+chr(69)+chr(79)+chr(83)+chr(95)+chr(68)+chr(69)+chr(80)+chr(76)+chr(79)+chr(89)+chr(95)+chr(83)+chr(84)+chr(65)+chr(71)+chr(69)+chr(68)+chr(95)+chr(73)+chr(77)+chr(80)+chr(79)+chr(82)+chr(84)+chr(95)+chr(67)+chr(72)+chr(69)+chr(67)+chr(75)))'
-    Invoke-NativeChecked $pythonStage.PythonPath @('-I', '-c', $gatewayImportRunner) -Quiet | Out-Null
+    Invoke-NativeChecked -FilePath $pythonStage.PythonPath -ArgumentList ([string[]]@('-I', '-c', $gatewayImportRunner)) -Quiet | Out-Null
 } finally {
     if ($null -eq $previousAllowedLogin) { Remove-Item Env:LIFEOS_TAILSCALE_ALLOWED_LOGIN -ErrorAction SilentlyContinue }
     else { $env:LIFEOS_TAILSCALE_ALLOWED_LOGIN = $previousAllowedLogin }
@@ -757,7 +779,11 @@ Complete-ManifestIntent $nodeIntent $manifest $manifestPath $nodeStage
 # temporary transition.
 $serviceRegistrationTarget = Join-Path ([Environment]::GetFolderPath('Windows')) 'System32\svchost.exe'
 New-ServiceOrConfigure 'LifeOSAPI' $serviceRegistrationTarget 'auto' $apiAccount @() -ExpectedExistingBinary $hostTarget
-New-ServiceOrConfigure 'LifeOSGateway' $serviceRegistrationTarget 'delayed-auto' $gatewayAccount @('LifeOSAPI', $TailscaleServiceName) -ExpectedExistingBinary $hostTarget
+# `Schedule` is the Task Scheduler service: the gateway now refuses to start
+# on a snapshot older than 90 seconds, so it must not be started before the
+# SYSTEM task that republishes it can run. Task Scheduler depends only on
+# RpcSs, so this adds no cycle.
+New-ServiceOrConfigure 'LifeOSGateway' $serviceRegistrationTarget 'delayed-auto' $gatewayAccount @('LifeOSAPI', $TailscaleServiceName, 'Schedule') -ExpectedExistingBinary $hostTarget
 $apiSid = Get-ServiceSid 'LifeOSAPI'
 $gatewaySid = Get-ServiceSid 'LifeOSGateway'
 $manifest.apiServiceSid = $apiSid
@@ -789,6 +815,22 @@ $hostDirectory = Split-Path -Parent $hostTarget
 # file.  Its inheritable child grants become the final PE ACL without a
 # Defender-sensitive icacls mutation on the executable itself.
 Set-DirectoryTraversalAcl $hostDirectory $operatorSid @($apiSid, $gatewaySid) -RootOnly -InheritToChildren
+# The gateway may read its Tailscale snapshot and nothing more. Only the
+# operator, SYSTEM, and Administrators can write the directory, so the SYSTEM
+# task remains the single writer of that identity assertion. SYSTEM's grant is
+# inheritable here — unlike every other Set-RestrictedAcl caller, the intended
+# writer of this directory *is* SYSTEM, and without an inheritable ACE
+# tailscale-state.json would carry no SYSTEM entry at all and the writer's
+# atomic replace would survive only on FILE_DELETE_CHILD from the parent.
+Ensure-Directory $stateDirectory
+Set-RestrictedAcl -Path $stateDirectory -OperatorSid $operatorSid -ReadSids @($gatewaySid) -InheritableSystemFullControl
+Assert-NoBroadAcl $stateDirectory
+$snapshotScriptIntent = New-ManifestIntent -List $manifest.backups -Manifest $manifest -ManifestPath $manifestPath -Kind 'tailscale-snapshot-script' -Source $snapshotScriptSource -Destination $snapshotScriptTarget -Backup (Join-Path $backupDirectory 'previous-tailscale_snapshot.ps1') -PriorExists (Test-Path -LiteralPath $snapshotScriptTarget -PathType Leaf) -Changed $true
+$snapshotScriptStage = Copy-FileVerifiedAtomic $snapshotScriptSource $snapshotScriptTarget $backupDirectory 'previous-tailscale_snapshot.ps1'
+Complete-ManifestIntent $snapshotScriptIntent $manifest $manifestPath $snapshotScriptStage
+# The staged script inherited the hardened host-directory DACL; confirm it
+# rather than assuming inheritance succeeded.
+Assert-RestrictedAcl $snapshotScriptTarget $operatorSid @($apiSid, $gatewaySid) @() -AllowInherited
 $hostStage = Copy-FileVerifiedAtomic $hostSource $hostTarget $backupDirectory -DeferMove
 $catalogInitialized = Initialize-SupplementCatalog -PythonExecutable $pythonStage.PythonPath -GatewayDirectory $gatewayTarget -CatalogPath $supplementCatalog -BackupDirectory $backupDirectory -ManifestBackups $manifest.backups -Manifest $manifest -ManifestPath $manifestPath
 $manifest.supplementCatalogInitialized = $catalogInitialized
@@ -898,7 +940,7 @@ $configIntents[$apiConfig]['backup'] = if ([bool]$configIntents[$apiConfig]['pri
 $configIntents[$apiConfig]['phase'] = 'complete'
 Save-InstallManifest $manifest $manifestPath
 $launcherTarget = Join-Path $gatewayTarget 'gateway_launcher.py'
-$gatewayHost = Get-GatewayHostConfig -PythonExecutable $pythonStage.PythonPath -GatewayDirectory $gatewayTarget -GatewayEntryPoint $gatewayEntryTarget -GatewayConfig $gatewayConfig -ClaudeSecret $claudeSecret -SupplementCatalogPath $supplementCatalog -TempDirectory $gatewayTemp -LogDirectory $gatewayLogs -EnableBankingAppId $EnableBankingAppId -EnableBankingPrivateKeyPath $(if ($hasAllBankingValues) { $enableBankingPrivateKey } else { '' }) -EnableBankingCertificatePath $(if ($hasAllBankingValues) { $enableBankingCertificate } else { '' }) -EnableBankingApiBaseUrl $EnableBankingApiBaseUrl -EnableBankingRedirectUri $EnableBankingRedirectUri -TailscaleServiceName $TailscaleServiceName -ManagementSid $operatorSid
+$gatewayHost = Get-GatewayHostConfig -PythonExecutable $pythonStage.PythonPath -GatewayDirectory $gatewayTarget -GatewayEntryPoint $gatewayEntryTarget -GatewayConfig $gatewayConfig -ClaudeSecret $claudeSecret -SupplementCatalogPath $supplementCatalog -TempDirectory $gatewayTemp -LogDirectory $gatewayLogs -EnableBankingAppId $EnableBankingAppId -EnableBankingPrivateKeyPath $(if ($hasAllBankingValues) { $enableBankingPrivateKey } else { '' }) -EnableBankingCertificatePath $(if ($hasAllBankingValues) { $enableBankingCertificate } else { '' }) -EnableBankingApiBaseUrl $EnableBankingApiBaseUrl -EnableBankingRedirectUri $EnableBankingRedirectUri -TailscaleServiceName $TailscaleServiceName -TailscaleSnapshotPath $tailscaleSnapshotPath -ManagementSid $operatorSid
 $gatewayHost.arguments = @($launcherTarget, '--config', $gatewayConfig, '--entry-point', $gatewayEntryTarget, '--tailscale', $tailscale)
 Write-JsonAtomic $gatewayServiceConfig $gatewayHost
 Assert-PathOnlyJson $apiConfig
@@ -930,7 +972,7 @@ if ($null -ne $hostStage.StagedPath) {
 }
 Complete-ManifestIntent $hostIntent $manifest $manifestPath $hostStage
 New-ServiceOrConfigure 'LifeOSAPI' $hostTarget 'auto' $apiAccount @() -ExpectedExistingBinary $serviceRegistrationTarget
-New-ServiceOrConfigure 'LifeOSGateway' $hostTarget 'delayed-auto' $gatewayAccount @('LifeOSAPI', $TailscaleServiceName) -ExpectedExistingBinary $serviceRegistrationTarget
+New-ServiceOrConfigure 'LifeOSGateway' $hostTarget 'delayed-auto' $gatewayAccount @('LifeOSAPI', $TailscaleServiceName, 'Schedule') -ExpectedExistingBinary $serviceRegistrationTarget
 Assert-RestrictedAcl $apiTarget $operatorSid @($apiSid) @() -AllowInherited
 Assert-RestrictedAcl $gatewayTarget $operatorSid @($gatewaySid) @() -AllowInherited
 Assert-RestrictedAcl $nodeTarget $operatorSid @($apiSid) @() -AllowInherited
@@ -973,6 +1015,7 @@ Save-InstallManifest $manifest $manifestPath
     # configuration, ACLs, and data stores are all ready. Keeping this inside
     # the cutover transaction restores the prior definition on failure.
     Register-CodexCollectorTask -TaskName $CodexTaskName -OperatorName $operatorName -NodeExecutable (Join-Path $nodeTarget 'node.exe') -ApiDirectory $apiTarget -SecretFile $codexSecret
+    Register-TailscaleSnapshotTask -TaskName $TailscaleSnapshotTaskName -ScriptPath $snapshotScriptTarget -TailscaleExecutable $tailscale -OutputPath $tailscaleSnapshotPath
     Start-LifeOSService 'LifeOSAPI'
     if (-not (Wait-LoopbackHealth ([uri]'http://127.0.0.1:8787/health') 45)) { throw 'LifeOSAPI did not pass its loopback health check.' }
     Start-CodexCollectorAndVerify -TaskName $CodexTaskName -UsageUri ([uri]'http://127.0.0.1:8787/api/usage')
@@ -984,6 +1027,12 @@ Save-InstallManifest $manifest $manifestPath
     $serveStatus = Configure-TailscaleServe $tailscale
     $manifest.tailscaleStatusAfter = $serveStatus
     Save-InstallManifest $manifest $manifestPath
+    # The snapshot must be taken after Serve is configured and immediately
+    # before the gateway starts: the launcher rejects a snapshot that predates
+    # the route or is older than 90 seconds. The identity is re-derived here
+    # from the installer's own elevated Tailscale query, never from the file.
+    $tailscaleIdentity = Get-TailscaleIdentityFacts $tailscale
+    Start-TailscaleSnapshotTaskAndVerify -TaskName $TailscaleSnapshotTaskName -OutputPath $tailscaleSnapshotPath -ExpectedDnsName $tailscaleIdentity.DnsName -ExpectedLoginName $tailscaleIdentity.LoginName
     Start-LifeOSService 'LifeOSGateway'
     if (-not (Wait-LoopbackHealth ([uri]'http://127.0.0.1:8421/health') 45)) { throw 'LifeOSGateway did not pass its loopback health check.' }
     $serveStatus = Configure-TailscaleServe $tailscale
@@ -1004,6 +1053,11 @@ Save-InstallManifest $manifest $manifestPath
         Restore-CodexCollectorTask $codexTask $CodexTaskName
     } catch {
         Write-Warning ("Could not restore Codex collector task: {0}" -f $_.Exception.Message)
+    }
+    try {
+        Restore-TailscaleSnapshotTask $snapshotTask $TailscaleSnapshotTaskName
+    } catch {
+        Write-Warning ("Could not restore Tailscale snapshot task: {0}" -f $_.Exception.Message)
     }
     try {
         Restore-ManifestArtifacts $manifest $backupDirectory

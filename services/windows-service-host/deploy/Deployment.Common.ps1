@@ -299,7 +299,7 @@ function Assert-CanonicalLegacyListenerManifest {
 function Assert-CanonicalRollbackManifest {
     param([Parameter(Mandatory)][psobject]$Manifest, [Parameter(Mandatory)][string]$ManifestPath)
     $required = @('schemaVersion', 'createdAt', 'operatorSid', 'legacyTask', 'codexTask', 'serviceSnapshots', 'services', 'paths', 'backups', 'aclSnapshots', 'tailscaleStatusBefore')
-    $optional = @('apiServiceSid', 'gatewayServiceSid', 'supplementCatalogInitialized', 'tailscaleStatusAfter', 'cutoverCompletedAt', 'legacyListener')
+    $optional = @('apiServiceSid', 'gatewayServiceSid', 'supplementCatalogInitialized', 'tailscaleStatusAfter', 'cutoverCompletedAt', 'legacyListener', 'snapshotTask')
     $actual = @($Manifest.PSObject.Properties.Name | Sort-Object)
     $unknown = @($actual | Where-Object { $_ -notin ($required + $optional) })
     $missing = @($required | Where-Object { $_ -notin $actual })
@@ -322,9 +322,13 @@ function Assert-CanonicalRollbackManifest {
         throw 'Rollback manifest must be the manifest.json inside its own install backup directory.'
     }
     if ([string]$Manifest.operatorSid -notmatch '^S-1-[0-9-]+$') { throw 'Rollback operator SID is invalid.' }
-    foreach ($taskRecord in @(
+    $taskRecords = @(
         [pscustomobject]@{ Name = 'legacyTask'; Value = $Manifest.legacyTask }
-        [pscustomobject]@{ Name = 'codexTask'; Value = $Manifest.codexTask })) {
+        [pscustomobject]@{ Name = 'codexTask'; Value = $Manifest.codexTask })
+    if ($null -ne $Manifest.PSObject.Properties['snapshotTask']) {
+        $taskRecords += [pscustomobject]@{ Name = 'snapshotTask'; Value = $Manifest.snapshotTask }
+    }
+    foreach ($taskRecord in $taskRecords) {
         if ($null -eq $taskRecord.Value -or $null -eq $taskRecord.Value.PSObject.Properties['Name']) {
             throw "Rollback manifest is missing the bound $($taskRecord.Name) name."
         }
@@ -368,11 +372,16 @@ function Assert-CanonicalRollbackManifest {
         gatewayConfig = (Join-Path $defaults.InstallRoot 'host\config\LifeOSGateway.json')
         gatewayAppConfig = (Join-Path $defaults.InstallRoot 'host\config\gateway.app.json')
     }
-    # v17 adds only a canonical path reference for the operator-managed edge
-    # token.  Keep it optional when reading older v2 manifests so rollback
-    # remains compatible, while rejecting every non-canonical path.
+    # v17 added a canonical path reference for the operator-managed edge
+    # token; v18 adds the SYSTEM-written Tailscale snapshot, its state
+    # directory, and the staged snapshot script.  Keep them optional when
+    # reading older manifests so rollback remains compatible, while rejecting
+    # every non-canonical path.
     $optionalExpected = [ordered]@{
         tailscaleEdgeToken = (Get-LifeOSTailscaleEdgeTokenPath $defaults.SecretRoot)
+        stateDirectory = (Join-Path $defaults.InstallRoot 'host\state')
+        tailscaleSnapshot = (Join-Path $defaults.InstallRoot 'host\state\tailscale-state.json')
+        tailscaleSnapshotScript = (Join-Path $defaults.InstallRoot 'host\tailscale_snapshot.ps1')
     }
     $pathAllowed = @($expected.Keys) + @($optionalExpected.Keys) + @('backupDirectory', 'tailscaleExecutable')
     $pathActual = @($paths.PSObject.Properties.Name)
@@ -409,9 +418,13 @@ function Assert-CanonicalRollbackManifest {
     }
     $backupPrefix = $backupDirectory.TrimEnd('\') + '\'
     Assert-AuthenticatedBackup -Manifest $Manifest -ManifestPath $ManifestPath -BackupDirectory $backupDirectory
-    foreach ($taskRecord in @(
+    $backupTaskRecords = @(
         [pscustomobject]@{ Name = 'LifeOSSyncServer'; Value = $Manifest.legacyTask },
-        [pscustomobject]@{ Name = 'LifeOSCodexCollector'; Value = $Manifest.codexTask })) {
+        [pscustomobject]@{ Name = 'LifeOSCodexCollector'; Value = $Manifest.codexTask })
+    if ($null -ne $Manifest.PSObject.Properties['snapshotTask']) {
+        $backupTaskRecords += [pscustomobject]@{ Name = [string]$Manifest.snapshotTask.Name; Value = $Manifest.snapshotTask }
+    }
+    foreach ($taskRecord in $backupTaskRecords) {
         $task = $taskRecord.Value
         Assert-SafeTaskName $taskRecord.Name
         Assert-SafeTaskPath ([string]$task.TaskPath)
@@ -427,6 +440,15 @@ function Assert-CanonicalRollbackManifest {
         (Get-FullPath (Join-Path ([string]$expected['gatewayData']) 'enablebanking-connections.json')),
         (Get-FullPath (Join-Path ([string]$expected['gatewayData']) 'finance-summary.json'))
     )
+    # Only the staged snapshot writer is ever copied through a backup intent.
+    # `stateDirectory` and `tailscaleSnapshot` are created and written in
+    # place, never restored, so leaving them out keeps a manifest from
+    # declaring `tailscale-state.json` as an artifact restore destination.
+    # Both still belong to $canonicalAclDestinations below because
+    # Set-RestrictedAcl registers an ACL snapshot for the state directory.
+    foreach ($property in @('tailscaleSnapshotScript')) {
+        if ($property -in $pathActual) { $canonicalArtifactDestinations += Get-FullPath ([string]$optionalExpected[$property]) }
+    }
     foreach ($item in @($Manifest.backups)) {
         foreach ($field in @('destination', 'backup')) {
             $value = [string]$item.$field
@@ -519,7 +541,21 @@ function Invoke-NativeChecked {
         $global:LASTEXITCODE = 0
     }
     try {
-        $output = & $FilePath @ArgumentList 2>&1
+        if ($isPowerShellScript) {
+            # Windows PowerShell 5.1 cannot reliably splat an array containing
+            # named script parameters through the call operator: a later item
+            # such as `-OutputPath` can be rebound to this wrapper and fail
+            # before the child script starts. Invoke the reviewed Windows
+            # PowerShell host as a native process instead; its -File boundary
+            # receives the argv array exactly as the script declares it.
+            $windowsPowerShell = Join-Path ([Environment]::GetFolderPath('Windows')) 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            if (-not (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf)) {
+                throw 'Windows PowerShell host is missing.'
+            }
+            $output = & $windowsPowerShell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $FilePath @ArgumentList 2>&1
+        } else {
+            $output = & $FilePath @ArgumentList 2>&1
+        }
         # PowerShell scripts do not necessarily initialize LASTEXITCODE. Read
         # the automatic variable through the provider so StrictMode does not
         # turn a successful script invocation into an unbound-variable
@@ -1089,6 +1125,11 @@ function Set-RestrictedAcl {
         [string[]]$ModifySids = @(),
         [switch]$File,
         [switch]$SkipSnapshot,
+        # Opt-in only: existing callers keep the non-inheritable SYSTEM (F)
+        # below. Set this on a directory whose intended writer is SYSTEM
+        # itself, so the files it creates carry an explicit SYSTEM ACE rather
+        # than depending on FILE_DELETE_CHILD inherited from the parent.
+        [switch]$InheritableSystemFullControl,
         [int]$MaxAttempts = 5,
         [int]$RetryDelayMilliseconds = 500
     )
@@ -1101,6 +1142,7 @@ function Set-RestrictedAcl {
     # without it, virtual service SIDs fail name translation with 1332.
     $grant = @("*${OperatorSid}:(F)", '*S-1-5-18:(F)', '*S-1-5-32-544:(F)')
     if (-not $File) { $grant += "*${OperatorSid}:(OI)(CI)(F)" }
+    if (-not $File -and $InheritableSystemFullControl) { $grant += '*S-1-5-18:(OI)(CI)(F)' }
     foreach ($sid in $ReadSids) {
         if ($File) { $grant += "*${sid}:(R)" }
         else { $grant += "*${sid}:(OI)(CI)(RX)"; $grant += "*${sid}:(RX)" }
@@ -1118,7 +1160,7 @@ function Set-RestrictedAcl {
     $aclAttempt = 0
     while ($true) {
         try {
-            Invoke-NativeChecked 'icacls.exe' ([string[]]$args) -Quiet | Out-Null
+            Invoke-NativeChecked -FilePath 'icacls.exe' -ArgumentList ([string[]]$args) -Quiet | Out-Null
             break
         } catch {
             $aclAttempt++
@@ -1217,7 +1259,7 @@ function Set-DirectoryTraversalAcl {
     $broadSids = @('*S-1-1-0', '*S-1-5-11', '*S-1-5-32-545', '*S-1-5-4', '*S-1-5-7', '*S-1-5-2', '*S-1-5-19', '*S-1-5-20')
     $args = @($Path, '/inheritance:r', '/remove:g') + $broadSids + @('/grant:r') + $grant
     if (-not $RootOnly) { $args += @('/T', '/C') }
-    Invoke-NativeChecked 'icacls.exe' ([string[]]$args) -Quiet | Out-Null
+    Invoke-NativeChecked -FilePath 'icacls.exe' -ArgumentList ([string[]]$args) -Quiet | Out-Null
     Remove-TransientLogonAclRules $Path -Recurse:(!$RootOnly) -KeepServiceSids $ReadSids
     Assert-RestrictedAcl -Path $Path -OperatorSid $OperatorSid -ReadSids $ReadSids -ModifySids @()
 }
@@ -1289,7 +1331,7 @@ function Register-AclSnapshot {
         # tree's DACLs in one bounded artifact while the manifest remains
         # bound to the one canonical root being changed.
         $snapshotPath = Join-Path $context.BackupDirectory ('acl-' + ([Guid]::NewGuid().ToString('N')) + '.acl')
-        Invoke-NativeChecked 'icacls.exe' ([string[]]@($full, '/save', $snapshotPath, '/T', '/C')) -Quiet | Out-Null
+        Invoke-NativeChecked -FilePath 'icacls.exe' -ArgumentList ([string[]]@($full, '/save', $snapshotPath, '/T', '/C')) -Quiet | Out-Null
         [void]$context.Manifest.aclSnapshots.Add([ordered]@{ destination = $full; backup = $snapshotPath; priorExists = $true; mode = 'tree' })
     } else {
         $acl = Get-Acl -LiteralPath $full -ErrorAction Stop
@@ -1313,7 +1355,7 @@ function Restore-AclSnapshots {
             # restore target of the saved root would therefore duplicate the
             # leaf (for example, lifeos-secrets\lifeos-secrets).
             $restoreParent = Split-Path -Parent $destination
-            Invoke-NativeChecked 'icacls.exe' ([string[]]@($restoreParent, '/restore', $backup, '/C')) -Quiet | Out-Null
+            Invoke-NativeChecked -FilePath 'icacls.exe' -ArgumentList ([string[]]@($restoreParent, '/restore', $backup, '/C')) -Quiet | Out-Null
         } else {
             $acl = Get-Acl -LiteralPath $destination -ErrorAction Stop
             $acl.SetSecurityDescriptorSddlForm((Get-Content -LiteralPath $backup -Raw -ErrorAction Stop))
@@ -2033,7 +2075,10 @@ function Start-CodexCollectorAndVerify {
         $info = Get-ScheduledTaskInfo -TaskName $TaskName -TaskPath '\' -ErrorAction Stop
         $task = Get-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction Stop
         if ($info.LastRunTime -ge $startedAt.AddSeconds(-2) -and [string]$task.State -ne 'Running') {
-            if ([int]$info.LastTaskResult -ne 0) {
+            # LastTaskResult is a uint32; HRESULTs such as 0x8004131F exceed
+            # Int32 and a [int] cast throws a raw conversion error instead of
+            # this message.
+            if ([long]$info.LastTaskResult -ne 0) {
                 throw ('Codex collector task failed with result {0}.' -f $info.LastTaskResult)
             }
             $completed = $true
@@ -2084,6 +2129,215 @@ function Restore-CodexCollectorTask {
         # exact pre-install state; the legacy task has a separate name/path.
         Unregister-ScheduledTask -TaskName $TaskName -TaskPath $taskPath -Confirm:$false -ErrorAction Stop
     }
+}
+
+function Get-TailscaleSnapshotTaskAction {
+    param(
+        [Parameter(Mandatory)][string]$ScriptPath,
+        [Parameter(Mandatory)][string]$TailscaleExecutable,
+        [Parameter(Mandatory)][string]$OutputPath
+    )
+    # One definition of the executable action, shared by registration and by
+    # verification, so verify.ps1 cannot drift from what install registers.
+    # `$script` is the PowerShell scope-modifier prefix; keep this name distinct.
+    $snapshotScript = Get-FullPath $ScriptPath
+    Assert-ExistingFile $snapshotScript 'Tailscale snapshot script'
+    $tailscale = Get-FullPath $TailscaleExecutable
+    Assert-ExistingFile $tailscale 'Tailscale executable'
+    $output = Get-FullPath $OutputPath
+    $workingDirectory = Split-Path -Parent $snapshotScript
+    Assert-ExistingDirectory $workingDirectory 'Tailscale snapshot working directory'
+    # SYSTEM runs this script with -ExecutionPolicy Bypass, so write access to
+    # the script or its host is SYSTEM code execution. Resolve the Windows
+    # PowerShell host explicitly instead of trusting PATH or a shell variable.
+    $powershell = Join-Path ([Environment]::GetFolderPath('Windows')) 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    Assert-ExistingFile $powershell 'Windows PowerShell host'
+    # The field is WorkDir rather than the obvious name: the static suite pins
+    # that this file never dereferences a task action's working-directory
+    # property directly, because Get-LegacyTaskActionFingerprint must read that
+    # XML node through SelectSingleNode -- a missing node would otherwise throw
+    # under Set-StrictMode.
+    return [pscustomobject]@{
+        Command = $powershell
+        Arguments = ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $snapshotScript + '" -TailscaleExecutable "' + $tailscale + '" -OutputPath "' + $output + '"')
+        WorkDir = $workingDirectory
+        ScriptPath = $snapshotScript
+        OutputPath = $output
+    }
+}
+
+function Register-TailscaleSnapshotTask {
+    param(
+        [Parameter(Mandatory)][string]$TaskName,
+        [Parameter(Mandatory)][string]$ScriptPath,
+        [Parameter(Mandatory)][string]$TailscaleExecutable,
+        [Parameter(Mandatory)][string]$OutputPath
+    )
+    # The gateway service account is deliberately barred from Tailscale's
+    # Administrators-only LocalAPI pipe. This SYSTEM task is the only writer of
+    # the bounded, non-secret state file the gateway reads instead.
+    Assert-SafeTaskName $TaskName
+    $action = Get-TailscaleSnapshotTaskAction -ScriptPath $ScriptPath -TailscaleExecutable $TailscaleExecutable -OutputPath $OutputPath
+    $outputParent = Split-Path -Parent $action.OutputPath
+    Ensure-Directory $outputParent
+    Assert-NoReparsePath $outputParent
+    $esc = { param([string]$Value) [Security.SecurityElement]::Escape($Value) }
+    $commandXml = & $esc ([string]$action.Command)
+    $argsXml = & $esc ([string]$action.Arguments)
+    $workXml = & $esc ([string]$action.WorkDir)
+    $startBoundary = & $esc ((Get-Date).ToUniversalTime().ToString('s') + 'Z')
+    # The gateway is delayed-auto and refuses to start on a snapshot older than
+    # 90 seconds, so the file surviving a reboot is not enough: its observedAt
+    # does not. A BootTrigger republishes the snapshot before the gateway's
+    # delayed autostart, instead of relying on the repetition of a
+    # ScheduleByDay trigger resuming after boot. ExecutionTimeLimit is below
+    # the repetition interval so one slow run cannot skip the next one under
+    # IgnoreNew and open a two-interval gap.
+    $xml = @"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>LifeOS Tailscale state snapshot</Description></RegistrationInfo>
+  <Triggers><BootTrigger><Enabled>true</Enabled><Delay>PT15S</Delay></BootTrigger><CalendarTrigger><Enabled>true</Enabled><StartBoundary>$startBoundary</StartBoundary><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay><Repetition><Interval>PT1M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition></CalendarTrigger></Triggers>
+  <Principals><Principal id="Author"><UserId>S-1-5-18</UserId><LogonType>ServiceAccount</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
+  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><ExecutionTimeLimit>PT30S</ExecutionTimeLimit><Enabled>true</Enabled></Settings>
+  <Actions Context="Author"><Exec><Command>$commandXml</Command><Arguments>$argsXml</Arguments><WorkingDirectory>$workXml</WorkingDirectory></Exec></Actions>
+</Task>
+"@
+    Register-ScheduledTask -TaskName $TaskName -TaskPath '\' -Xml $xml -Force -ErrorAction Stop | Out-Null
+}
+
+function Assert-TailscaleSnapshotTaskAction {
+    param(
+        [Parameter(Mandatory)][string]$TaskName,
+        [Parameter(Mandatory)][string]$TaskPath,
+        [Parameter(Mandatory)][string]$ScriptPath,
+        [Parameter(Mandatory)][string]$TailscaleExecutable,
+        [Parameter(Mandatory)][string]$OutputPath
+    )
+    # Principal and enabled state say nothing about what the task runs. Bind
+    # the exact command, arguments, and working directory so a task repointed
+    # at another script fails verification.
+    Assert-SafeTaskName $TaskName
+    Assert-SafeTaskPath $TaskPath
+    $action = Get-TailscaleSnapshotTaskAction -ScriptPath $ScriptPath -TailscaleExecutable $TailscaleExecutable -OutputPath $OutputPath
+    $expected = @([string]$action.Command, [string]$action.Arguments, [string]$action.WorkDir) -join "`n"
+    $xml = Export-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction Stop
+    # Case-insensitive, like Assert-LegacyTaskUnchanged: the fingerprint is
+    # three Windows paths, and Task Scheduler is free to normalize their case.
+    if ((Get-LegacyTaskActionFingerprint ([string]$xml)) -ne $expected) {
+        throw 'The Tailscale snapshot task does not run the reviewed snapshot writer invocation.'
+    }
+}
+
+function Assert-TailscaleSnapshotFile {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$ExpectedDnsName,
+        [Parameter(Mandatory)][string]$ExpectedLoginName,
+        [int]$MaxAgeSeconds = 90,
+        [int]$MaxFutureSeconds = 5
+    )
+    # This mirrors the launcher's reader byte for byte in intent: exact field
+    # set, schema version, freshness window, identity match, and Serve shape.
+    # Keep the window in sync with TAILSCALE_SNAPSHOT_MAX_AGE_SECONDS and
+    # TAILSCALE_SNAPSHOT_MAX_FUTURE_SECONDS in gateway_launcher.py. Nothing
+    # read here is ever written to output; the assertions are the only signal.
+    Assert-ExistingFile $Path 'Tailscale snapshot'
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ([long]$item.Length -gt (256 * 1024)) { throw 'Tailscale snapshot is oversized.' }
+    try { $snapshot = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
+    catch { throw 'Tailscale snapshot is not readable JSON.' }
+    if ($null -eq $snapshot -or $snapshot -isnot [System.Management.Automation.PSCustomObject]) {
+        throw 'Tailscale snapshot is not a JSON object.'
+    }
+    $fieldNames = @($snapshot.PSObject.Properties | ForEach-Object { [string]$_.Name } | Sort-Object)
+    if (($fieldNames -join ',') -cne 'dnsName,identity,login,observedAt,schemaVersion,serve') {
+        throw 'Tailscale snapshot field set is not the reviewed schema.'
+    }
+    # The reader compares `!= 1` against the decoded JSON value, so the string
+    # "1" is rejected there. A [int] cast here would coerce it and let the two
+    # mirrored validators disagree; require the number ConvertFrom-Json emits.
+    if ($snapshot.schemaVersion -isnot [int] -or [int]$snapshot.schemaVersion -ne 1) { throw 'Tailscale snapshot schema version is not 1.' }
+    try {
+        $observedAt = [DateTimeOffset]::Parse(
+            [string]$snapshot.observedAt,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind).UtcDateTime
+    }
+    catch { throw 'Tailscale snapshot timestamp is invalid.' }
+    $ageSeconds = ((Get-Date).ToUniversalTime() - $observedAt).TotalSeconds
+    if ($ageSeconds -lt (0 - $MaxFutureSeconds) -or $ageSeconds -gt $MaxAgeSeconds) {
+        throw 'Tailscale snapshot is stale or clock-skewed.'
+    }
+    if ([string]$snapshot.dnsName -ine $ExpectedDnsName) {
+        throw 'Tailscale snapshot DNS name does not match the observed node identity.'
+    }
+    if ([string]$snapshot.login -cne $ExpectedLoginName) {
+        throw 'Tailscale snapshot login does not match the observed node identity.'
+    }
+    $identitySelf = Get-TailscalePropertyValue -Object $snapshot.identity -Name 'Self'
+    $identityDnsName = ([string](Get-TailscalePropertyValue -Object $identitySelf -Name 'DNSName')).TrimEnd('.')
+    if ($identityDnsName -ine $ExpectedDnsName) {
+        throw 'Tailscale snapshot identity payload does not match its own DNS name.'
+    }
+    if (-not (Test-TailscaleServeExact ($snapshot.serve | ConvertTo-Json -Depth 20))) {
+        throw 'Tailscale snapshot does not record the required private Serve mapping.'
+    }
+}
+
+function Start-TailscaleSnapshotTaskAndVerify {
+    param(
+        [Parameter(Mandatory)][string]$TaskName,
+        [Parameter(Mandatory)][string]$OutputPath,
+        [Parameter(Mandatory)][string]$ExpectedDnsName,
+        [Parameter(Mandatory)][string]$ExpectedLoginName,
+        [int]$TimeoutSeconds = 30
+    )
+    Assert-SafeTaskName $TaskName
+    $startedAt = Get-Date
+    Start-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction Stop
+    $deadline = $startedAt.AddSeconds($TimeoutSeconds)
+    $completed = $false
+    do {
+        $info = Get-ScheduledTaskInfo -TaskName $TaskName -TaskPath '\' -ErrorAction Stop
+        $task = Get-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction Stop
+        if ($info.LastRunTime -ge $startedAt.AddSeconds(-2) -and [string]$task.State -ne 'Running') {
+            # LastTaskResult is a uint32; see Start-CodexCollectorAndVerify.
+            if ([long]$info.LastTaskResult -ne 0) {
+                throw ('Tailscale snapshot task failed with result {0}.' -f $info.LastTaskResult)
+            }
+            $completed = $true
+            break
+        }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+    if (-not $completed) { throw 'Tailscale snapshot task did not complete successfully before cutover.' }
+    # Re-read the file the gateway will read, and re-derive the verdict from
+    # the installer's own elevated Tailscale query rather than trusting the
+    # task's report that it succeeded.
+    Assert-TailscaleSnapshotFile -Path $OutputPath -ExpectedDnsName $ExpectedDnsName -ExpectedLoginName $ExpectedLoginName
+}
+
+function Restore-TailscaleSnapshotTask {
+    param([Parameter(Mandatory)][psobject]$Snapshot, [Parameter(Mandatory)][string]$TaskName)
+    Assert-SafeTaskName $TaskName
+    $priorPath = if ($null -ne $Snapshot.PSObject.Properties['TaskPath']) { [string]$Snapshot.TaskPath } else { '\' }
+    if ([string]::IsNullOrWhiteSpace($priorPath)) { $priorPath = '\' }
+    Assert-SafeTaskPath $priorPath
+    # Register-TailscaleSnapshotTask always registers at the root task path.
+    # When a task of this name pre-existed under some other folder, install
+    # created a *second* one at '\'; restoring only the original would leave a
+    # SYSTEM task running -ExecutionPolicy Bypass every minute. Remove ours
+    # first in that case. When the prior task was itself at '\', the restore
+    # below overwrites it in place, so nothing is deleted before it is put
+    # back.
+    if ($priorPath -ne '\' -or -not [bool]$Snapshot.Exists) {
+        $created = Get-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction SilentlyContinue
+        if ($null -ne $created) {
+            Unregister-ScheduledTask -TaskName $TaskName -TaskPath '\' -Confirm:$false -ErrorAction Stop
+        }
+    }
+    if ([bool]$Snapshot.Exists) { Restore-LegacyTask $Snapshot $TaskName }
 }
 
 function Get-ServiceRecord {
@@ -2156,7 +2410,7 @@ function Restore-LifeOSServiceRegistrySnapshot {
     $sidPresent = [bool](Get-SnapshotValue $Snapshot 'ServiceSidTypePresent' $false)
     $sidType = [string](Get-SnapshotValue $Snapshot 'ServiceSidType' 'none')
     if ($sidType -notin @('none', 'unrestricted', 'restricted')) { throw "Unsupported prior service SID mode for ${Name}: $sidType" }
-    Invoke-NativeChecked 'sc.exe' @('sidtype', $Name, $sidType) -Quiet | Out-Null
+    Invoke-NativeChecked -FilePath 'sc.exe' -ArgumentList ([string[]]@('sidtype', $Name, $sidType)) -Quiet | Out-Null
     if (-not $sidPresent) {
         Remove-ItemProperty -LiteralPath $registryPath -Name 'ServiceSidType' -ErrorAction SilentlyContinue
     }
@@ -2218,7 +2472,7 @@ function Restore-LifeOSServiceSnapshot {
     if (-not $exists) {
         if ($null -ne $current) {
             Stop-LifeOSService $name
-            Invoke-NativeChecked 'sc.exe' @('delete', $name) -Quiet | Out-Null
+            Invoke-NativeChecked -FilePath 'sc.exe' -ArgumentList ([string[]]@('delete', $name)) -Quiet | Out-Null
         }
         return
     }
@@ -2233,7 +2487,7 @@ function Restore-LifeOSServiceSnapshot {
     if ([string]::IsNullOrWhiteSpace($binaryPath) -or [string]::IsNullOrWhiteSpace($startName)) {
         throw "Prior service configuration is incomplete: $name"
     }
-    Invoke-NativeChecked 'sc.exe' @('config', $name, 'binPath=', $binaryPath, 'obj=', $startName, 'password=', '', 'start=', $startMode, 'depend=', $dependencies) -Quiet | Out-Null
+    Invoke-NativeChecked -FilePath 'sc.exe' -ArgumentList ([string[]]@('config', $name, 'binPath=', $binaryPath, 'obj=', $startName, 'password=', '', 'start=', $startMode, 'depend=', $dependencies)) -Quiet | Out-Null
     Restore-LifeOSServiceRegistrySnapshot $name $Snapshot
     if ($stateValue -eq 'Running') { Start-Service -Name $name -ErrorAction Stop }
     else { Stop-LifeOSService $name }
@@ -2268,7 +2522,7 @@ function New-ServiceOrConfigure {
         # short interval. Treat only ERROR_SERVICE_EXISTS as retryable, then
         # re-read the service before configuring it.
         for ($attempt = 1; $attempt -le 20; $attempt++) {
-            $createExit = Invoke-NativeChecked 'sc.exe' @('create', $Name, 'binPath=', $quoted, 'obj=', $Account, 'start=', $StartMode) -AllowNonZero -Quiet
+            $createExit = Invoke-NativeChecked -FilePath 'sc.exe' -ArgumentList ([string[]]@('create', $Name, 'binPath=', $quoted, 'obj=', $Account, 'start=', $StartMode)) -AllowNonZero -Quiet
             if ($createExit -eq 0) { $created = $true; break }
             if ($createExit -ne 1073) { throw "Service creation failed for ${Name} (exit code $createExit)." }
             $existing = Get-ServiceRecord $Name
@@ -2279,19 +2533,19 @@ function New-ServiceOrConfigure {
     }
     if (-not $created) {
         Assert-ServiceIdentity -Name $Name -ExpectedAccount $Account -ExpectedBinary $ExpectedExistingBinary
-        Invoke-NativeChecked 'sc.exe' @('config', $Name, 'binPath=', $quoted, 'obj=', $Account, 'start=', $StartMode) -Quiet | Out-Null
+        Invoke-NativeChecked -FilePath 'sc.exe' -ArgumentList ([string[]]@('config', $Name, 'binPath=', $quoted, 'obj=', $Account, 'start=', $StartMode)) -Quiet | Out-Null
     }
-    Invoke-NativeChecked 'sc.exe' @('sidtype', $Name, 'unrestricted') -Quiet | Out-Null
+    Invoke-NativeChecked -FilePath 'sc.exe' -ArgumentList ([string[]]@('sidtype', $Name, 'unrestricted')) -Quiet | Out-Null
     $dependencyValue = ($Dependencies -join '/')
     if ($Dependencies.Count -eq 0) {
         # `sc.exe` uses `/` as the documented sentinel for clearing all
         # dependencies; an empty value is rejected by the native parser.
-        Invoke-NativeChecked 'sc.exe' @('config', $Name, 'depend=', '/') -Quiet | Out-Null
+        Invoke-NativeChecked -FilePath 'sc.exe' -ArgumentList ([string[]]@('config', $Name, 'depend=', '/')) -Quiet | Out-Null
     } else {
-        Invoke-NativeChecked 'sc.exe' @('config', $Name, 'depend=', $dependencyValue) -Quiet | Out-Null
+        Invoke-NativeChecked -FilePath 'sc.exe' -ArgumentList ([string[]]@('config', $Name, 'depend=', $dependencyValue)) -Quiet | Out-Null
     }
-    Invoke-NativeChecked 'sc.exe' @('failure', $Name, 'reset=', '86400', 'actions=', 'restart/60000/restart/60000/restart/60000') -Quiet | Out-Null
-    Invoke-NativeChecked 'sc.exe' @('failureflag', $Name, '1') -Quiet | Out-Null
+    Invoke-NativeChecked -FilePath 'sc.exe' -ArgumentList ([string[]]@('failure', $Name, 'reset=', '86400', 'actions=', 'restart/60000/restart/60000/restart/60000')) -Quiet | Out-Null
+    Invoke-NativeChecked -FilePath 'sc.exe' -ArgumentList ([string[]]@('failureflag', $Name, '1')) -Quiet | Out-Null
 }
 
 function Stop-LifeOSService {
@@ -2347,8 +2601,49 @@ function Assert-LoopbackUri {
 function Get-TailscaleStatusJson {
     param([Parameter(Mandatory)][string]$TailscaleExecutable)
     Assert-ExistingFile $TailscaleExecutable 'Tailscale executable'
-    $result = Invoke-NativeChecked $TailscaleExecutable @('serve', 'status', '--json')
+    $result = Invoke-NativeChecked -FilePath $TailscaleExecutable -ArgumentList ([string[]]@('serve', 'status', '--json'))
     return ($result.Output -join "`n")
+}
+
+function Get-TailscaleIdentityFacts {
+    param([Parameter(Mandatory)][string]$TailscaleExecutable)
+    # Serve configuration and node identity are different Tailscale payloads.
+    # The installer runs elevated and can still reach the LocalAPI, so it
+    # derives the expected identity itself and never has to trust the SYSTEM
+    # snapshot it is verifying. The login is returned for comparison only and
+    # is never written to output.
+    Assert-ExistingFile $TailscaleExecutable 'Tailscale executable'
+    $result = Invoke-NativeChecked -FilePath $TailscaleExecutable -ArgumentList ([string[]]@('status', '--json'))
+    try { $state = ($result.Output -join "`n") | ConvertFrom-Json -ErrorAction Stop }
+    catch { throw 'Tailscale status returned invalid JSON; refusing to derive a node identity.' }
+    if ($null -eq $state -or $state -isnot [System.Management.Automation.PSCustomObject]) {
+        throw 'Tailscale status returned a non-object JSON document; refusing to derive a node identity.'
+    }
+    $self = Get-TailscalePropertyValue -Object $state -Name 'Self'
+    $dnsName = ([string](Get-TailscalePropertyValue -Object $self -Name 'DNSName')).TrimEnd('.')
+    # `$` also matches immediately before a trailing newline in .NET; \A and
+    # \z anchor the whole string, matching the reader's re.fullmatch.
+    if ([string]::IsNullOrWhiteSpace($dnsName) -or $dnsName.Length -gt 253 -or
+        $dnsName -notmatch '\A(?i:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?i:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*\z') {
+        throw 'Tailscale node DNS name could not be resolved.'
+    }
+    # `$profile` is an automatic PowerShell variable; keep this local distinct.
+    $login = ''
+    $userId = Get-TailscalePropertyValue -Object $self -Name 'UserID'
+    $users = Get-TailscalePropertyValue -Object $state -Name 'User'
+    if ($null -ne $userId -and $null -ne $users) {
+        $userProfile = Get-TailscalePropertyValue -Object $users -Name ([string]$userId)
+        if ($null -ne $userProfile) { $login = [string](Get-TailscalePropertyValue -Object $userProfile -Name 'LoginName') }
+    }
+    if ([string]::IsNullOrWhiteSpace($login)) {
+        $userProfile = Get-TailscalePropertyValue -Object $self -Name 'UserProfile'
+        if ($null -ne $userProfile) { $login = [string](Get-TailscalePropertyValue -Object $userProfile -Name 'LoginName') }
+    }
+    if ([string]::IsNullOrWhiteSpace($login) -or $login.Length -gt 256 -or
+        $login -notmatch '\A[A-Za-z0-9._+\-]+@[A-Za-z0-9.-]+\z' -or $login.Split('@').Count -ne 2) {
+        throw 'Tailscale node login could not be resolved.'
+    }
+    return [pscustomobject]@{ DnsName = $dnsName; LoginName = $login }
 }
 
 function ConvertFrom-TailscaleServeJson {
@@ -2699,7 +2994,7 @@ function ConvertTo-TailscaleCanonicalValue {
 function Remove-LifeOSTailscaleServeRoute {
     param([Parameter(Mandatory)][string]$TailscaleExecutable)
     $trustedCapabilityArgument = '--accept-app-caps=' + (Get-LifeOSTrustedEdgeCapability)
-    Invoke-NativeChecked $TailscaleExecutable @('serve', '--yes', $trustedCapabilityArgument, '--https=8420', '--set-path=/', 'off') -Quiet | Out-Null
+    Invoke-NativeChecked -FilePath $TailscaleExecutable -ArgumentList ([string[]]@('serve', '--yes', $trustedCapabilityArgument, '--https=8420', '--set-path=/', 'off')) -Quiet | Out-Null
     $after = Get-TailscaleStatusJson $TailscaleExecutable
     $decision = Get-TailscaleServeDecision $after
     if ($decision.Action -ne 'Add') { throw 'Targeted Tailscale Serve rollback did not remove the LifeOS route.' }
@@ -2774,7 +3069,7 @@ function Configure-TailscaleServe {
         # other routes. The app capability is public policy metadata, not the
         # private token.
         $trustedCapabilityArgument = '--accept-app-caps=' + (Get-LifeOSTrustedEdgeCapability)
-        Invoke-NativeChecked $TailscaleExecutable @('serve', '--yes', '--bg', $trustedCapabilityArgument, '--https=8420', '--set-path=/', 'http://127.0.0.1:8421') -Quiet | Out-Null
+        Invoke-NativeChecked -FilePath $TailscaleExecutable -ArgumentList ([string[]]@('serve', '--yes', '--bg', $trustedCapabilityArgument, '--https=8420', '--set-path=/', 'http://127.0.0.1:8421')) -Quiet | Out-Null
         $status = Get-TailscaleStatusJson $TailscaleExecutable
         $afterDecision = Get-TailscaleServeDecision $status
         if ($afterDecision.Action -ne 'AlreadyConfigured') { throw 'Tailscale Serve did not expose the requested LifeOS route after configuration.' }
@@ -2833,7 +3128,7 @@ function Restore-TailscaleServeLegacyMapping {
     # Remove only the reviewed 8420 root route, then recreate its original
     # proxy-only shape. This is intentionally not `tailscale serve reset`.
     $trustedCapabilityArgument = '--accept-app-caps=' + (Get-LifeOSTrustedEdgeCapability)
-    Invoke-NativeChecked $TailscaleExecutable @('serve', '--yes', $trustedCapabilityArgument, '--https=8420', '--set-path=/', 'off') -Quiet | Out-Null
+    Invoke-NativeChecked -FilePath $TailscaleExecutable -ArgumentList ([string[]]@('serve', '--yes', $trustedCapabilityArgument, '--https=8420', '--set-path=/', 'off')) -Quiet | Out-Null
     $afterOff = Get-TailscaleStatusJson $TailscaleExecutable
     $afterOffDecision = Get-TailscaleServeDecision $afterOff
     if ($afterOffDecision.Action -ne 'Add' -or
@@ -2844,7 +3139,7 @@ function Restore-TailscaleServeLegacyMapping {
     # Omitting AcceptAppCaps is deliberate: the pre-install handler was
     # exactly proxy-only. The final authenticated snapshot comparison below
     # proves that Tailscale restored the same Web/TCP representation.
-    Invoke-NativeChecked $TailscaleExecutable @('serve', '--yes', '--bg', '--https=8420', '--set-path=/', 'http://127.0.0.1:8421') -Quiet | Out-Null
+    Invoke-NativeChecked -FilePath $TailscaleExecutable -ArgumentList ([string[]]@('serve', '--yes', '--bg', '--https=8420', '--set-path=/', 'http://127.0.0.1:8421')) -Quiet | Out-Null
     $restored = Get-TailscaleStatusJson $TailscaleExecutable
     $restoredDecision = Get-TailscaleServeDecision $restored
     if ($restoredDecision.Action -ne 'UpgradeLegacyMapping' -or

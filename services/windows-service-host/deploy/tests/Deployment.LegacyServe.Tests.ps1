@@ -27,20 +27,20 @@ try {
     $successfulScript = Join-Path $nativeFixtureRoot 'successful.ps1'
     [IO.File]::WriteAllText($successfulScript, "Write-Output 'ok'`r`n", [Text.UTF8Encoding]::new($false))
     $LASTEXITCODE = 23
-    $staleResult = Invoke-NativeChecked $successfulScript @()
+    $staleResult = Invoke-NativeChecked -FilePath $successfulScript -ArgumentList ([string[]]@())
     Assert-LegacyServe ([int]$staleResult.ExitCode -eq 0) 'a successful PowerShell script clears a stale nonzero LASTEXITCODE.'
     Assert-LegacyServe ([string]$staleResult.Output[0] -eq 'ok') 'successful script output is preserved with a stale LASTEXITCODE.'
     Assert-LegacyServe ([int]$LASTEXITCODE -eq 23) 'the caller LASTEXITCODE is restored after script invocation.'
 
     Remove-Variable -Name LASTEXITCODE -ErrorAction SilentlyContinue
-    $successResult = Invoke-NativeChecked $successfulScript @()
+    $successResult = Invoke-NativeChecked -FilePath $successfulScript -ArgumentList ([string[]]@())
     Assert-LegacyServe ([int]$successResult.ExitCode -eq 0) 'a successful PowerShell script without LASTEXITCODE is treated as exit code zero.'
     Assert-LegacyServe ([string]$successResult.Output[0] -eq 'ok') 'successful script output is preserved without LASTEXITCODE.'
 
     $failingScript = Join-Path $nativeFixtureRoot 'failing.ps1'
     [IO.File]::WriteAllText($failingScript, "Write-Output 'failure'`r`nexit 17`r`n", [Text.UTF8Encoding]::new($false))
     $LASTEXITCODE = 31
-    Assert-LegacyServeThrows { Invoke-NativeChecked $failingScript @() } 'a nonzero script exit remains a hard failure.'
+    Assert-LegacyServeThrows { Invoke-NativeChecked -FilePath $failingScript -ArgumentList ([string[]]@()) } 'a nonzero script exit remains a hard failure.'
     Assert-LegacyServe ([int]$LASTEXITCODE -eq 31) 'the caller LASTEXITCODE is restored after a failing script invocation.'
 } finally {
     Remove-Item -LiteralPath $nativeFixtureRoot -Recurse -Force -ErrorAction SilentlyContinue

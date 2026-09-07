@@ -163,6 +163,7 @@ public static class ServiceHostConfigValidator
         "LIFEOS_SUPPLEMENT_CATALOG_PATH",
         "LIFEOS_TAILSCALE_ALLOWED_LOGIN",
         "LIFEOS_TAILSCALE_SERVICE_NAME",
+        "LIFEOS_TAILSCALE_SNAPSHOT_PATH",
         "CLAUDE_INGEST_ENABLED",
         "CLAUDE_STATUSLINE_ENABLED",
         "CLAUDE_INGEST_SECRET_FILE",
@@ -448,7 +449,7 @@ public static class ServiceHostConfigValidator
                     ValidateNonReparsePath(value, "environment");
                 }
             }
-            else if (pair.Key is "USAGE_STORE_PATH" or "CLIPPER_STORE_PATH" or "LIFEOS_DATA_DIR" or "LIFEOS_SUPPLEMENT_CATALOG_PATH")
+            else if (pair.Key is "USAGE_STORE_PATH" or "CLIPPER_STORE_PATH" or "LIFEOS_DATA_DIR" or "LIFEOS_SUPPLEMENT_CATALOG_PATH" or "LIFEOS_TAILSCALE_SNAPSHOT_PATH")
             {
                 ValidateNonReparsePath(value, "environment");
             }

@@ -2,7 +2,8 @@
 param(
     [Parameter(Mandatory)][string]$ManifestPath,
     [string]$LegacyTaskName = 'LifeOSSyncServer',
-    [string]$CodexTaskName = 'LifeOSCodexCollector'
+    [string]$CodexTaskName = 'LifeOSCodexCollector',
+    [string]$TailscaleSnapshotTaskName = 'LifeOSTailscaleSnapshot'
 )
 
 Set-StrictMode -Version Latest
@@ -11,6 +12,7 @@ $ErrorActionPreference = 'Stop'
 
 Assert-SafeTaskName $LegacyTaskName
 Assert-SafeTaskName $CodexTaskName
+Assert-SafeTaskName $TailscaleSnapshotTaskName
 Assert-WindowsAdministrator
 Assert-ExistingFile $ManifestPath 'Rollback manifest'
 $manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json -ErrorAction Stop
@@ -63,6 +65,23 @@ if ($null -ne $manifest.PSObject.Properties['codexTask']) {
         $codexSnapshot.Xml = Get-Content -LiteralPath $codexBackup -Raw -ErrorAction Stop
     }
     Restore-CodexCollectorTask $codexSnapshot $CodexTaskName
+}
+
+$snapshotTaskSnapshot = [pscustomobject]@{ Exists = $false; Enabled = $false; State = 'Stopped'; TaskPath = '\'; Xml = $null }
+if ($null -ne $manifest.PSObject.Properties['snapshotTask']) {
+    if ([string]$manifest.snapshotTask.Name -ne $TailscaleSnapshotTaskName) {
+        throw 'Rollback Tailscale snapshot task name does not match the name bound into the install manifest.'
+    }
+    $snapshotTaskSnapshot.Exists = [bool]$manifest.snapshotTask.Exists
+    $snapshotTaskSnapshot.Enabled = [bool]$manifest.snapshotTask.Enabled
+    if ($null -ne $manifest.snapshotTask.PSObject.Properties['State']) { $snapshotTaskSnapshot.State = [string]$manifest.snapshotTask.State }
+    if ($null -ne $manifest.snapshotTask.PSObject.Properties['TaskPath']) { $snapshotTaskSnapshot.TaskPath = [string]$manifest.snapshotTask.TaskPath }
+    if ($snapshotTaskSnapshot.Exists) {
+        $snapshotBackup = [string]$manifest.snapshotTask.Backup
+        Assert-ExistingFile $snapshotBackup 'Tailscale snapshot task backup'
+        $snapshotTaskSnapshot.Xml = Get-Content -LiteralPath $snapshotBackup -Raw -ErrorAction Stop
+    }
+    Restore-TailscaleSnapshotTask $snapshotTaskSnapshot $TailscaleSnapshotTaskName
 }
 
 if ($null -ne $manifest.PSObject.Properties['serviceSnapshots']) {

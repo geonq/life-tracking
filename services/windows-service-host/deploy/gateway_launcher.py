@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+from datetime import datetime, timezone
 from email.header import decode_header
 import importlib
 import json
@@ -20,7 +21,6 @@ from pathlib import Path
 import re
 import socket
 import struct
-import subprocess
 import sys
 import threading
 from typing import Any
@@ -46,6 +46,9 @@ TRUSTED_EDGE_HEADER = b"x-lifeos-trusted-edge"
 TAILSCALE_APP_CAPABILITIES_HEADER = b"tailscale-app-capabilities"
 TAILSCALE_SERVICE_NAME_ENV = "LIFEOS_TAILSCALE_SERVICE_NAME"
 DEFAULT_TAILSCALE_SERVICE_NAME = "Tailscale"
+TAILSCALE_SNAPSHOT_PATH_ENV = "LIFEOS_TAILSCALE_SNAPSHOT_PATH"
+TAILSCALE_SNAPSHOT_MAX_AGE_SECONDS = 90
+TAILSCALE_SNAPSHOT_MAX_FUTURE_SECONDS = 5
 SERVE_CONFIG_KEYS = frozenset({"Web", "TCP", "Services", "AllowFunnel", "Foreground"})
 GATEWAY_LOOPBACK_PORT = 8421
 WINDOWS_AF_INET = 2
@@ -332,6 +335,63 @@ def _read_edge_token(path: Path) -> str:
         ) from exc
 
 
+def _read_tailscale_snapshot() -> tuple[dict[str, Any], str, str]:
+    """Read the SYSTEM-produced Tailscale state without crossing LocalAPI ACLs.
+
+    The gateway service runs as a virtual service account and intentionally
+    cannot query Tailscale's user-scoped LocalAPI.  A SYSTEM scheduled task
+    writes this bounded, non-secret snapshot into the ACL-protected host
+    directory.  Freshness and exact schema checks keep it from becoming a
+    long-lived identity assertion.
+
+    The whole file comes from that one trusted writer, so nothing in it is
+    independently corroborated here: the ``dnsName``/``identity`` cross-check
+    below is a consistency check on a single payload, not a second source.  It
+    catches a malformed or truncated write, which is a real failure mode; it
+    does not make the identity half trustworthy on its own.  Only the ACL on
+    the state directory keeps the gateway out of the writer role.
+    """
+    raw_path = os.environ.get(TAILSCALE_SNAPSHOT_PATH_ENV)
+    if not isinstance(raw_path, str) or not raw_path:
+        raise RuntimeError("tailscale snapshot path is not configured")
+    path = _safe_path(raw_path, file=True, directory=False)
+    try:
+        if path.stat().st_size > 256 * 1024:
+            raise RuntimeError("tailscale snapshot is oversized")
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError("tailscale snapshot is unreadable") from exc
+    expected_fields = {"schemaVersion", "observedAt", "dnsName", "login", "serve", "identity"}
+    if not isinstance(value, dict) or set(value) != expected_fields or value.get("schemaVersion") != 1:
+        raise RuntimeError("tailscale snapshot schema is invalid")
+    observed_at = value.get("observedAt")
+    if not isinstance(observed_at, str):
+        raise RuntimeError("tailscale snapshot timestamp is invalid")
+    try:
+        parsed_at = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+        if parsed_at.tzinfo is None:
+            raise ValueError("timestamp is missing timezone")
+        parsed_at = parsed_at.astimezone(timezone.utc)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise RuntimeError("tailscale snapshot timestamp is invalid") from exc
+    age = (datetime.now(timezone.utc) - parsed_at).total_seconds()
+    if age < -TAILSCALE_SNAPSHOT_MAX_FUTURE_SECONDS or age > TAILSCALE_SNAPSHOT_MAX_AGE_SECONDS:
+        raise RuntimeError("tailscale snapshot is stale")
+    serve = value.get("serve")
+    identity = value.get("identity")
+    if not isinstance(serve, dict) or not isinstance(identity, dict):
+        raise RuntimeError("tailscale snapshot payload is invalid")
+    expected_dns_name = value.get("dnsName")
+    if not isinstance(expected_dns_name, str) or expected_dns_name.casefold() != _tailscale_dns_name(identity).casefold():
+        raise RuntimeError("tailscale snapshot identity does not match its DNS name")
+    login = value.get("login")
+    if not isinstance(login, str) or not re.fullmatch(r"[A-Za-z0-9._+\-]+@[A-Za-z0-9.-]+", login) or login.count("@") != 1:
+        raise RuntimeError("tailscale snapshot login is invalid")
+    return serve, expected_dns_name.rstrip("."), login
+
+
 def _read_config(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -360,19 +420,6 @@ def _read_config(path: Path) -> dict[str, Any]:
     if not 32 <= len(secret) <= 256 or not re.fullmatch(r"[\x21-\x7e]+", secret):
         raise RuntimeError("gateway secret invalid")
     return value
-
-
-def _run_tailscale(executable: Path, *args: str) -> dict[str, Any]:
-    try:
-        result = subprocess.run([str(executable), *args], check=True, capture_output=True, text=True, shell=False, timeout=8)
-        if len(result.stdout) > 65536:
-            raise RuntimeError("tailscale response oversized")
-        parsed = json.loads(result.stdout)
-    except Exception as exc:
-        raise RuntimeError("tailscale query failed") from exc
-    if not isinstance(parsed, dict):
-        raise RuntimeError("tailscale response invalid")
-    return parsed
 
 
 def _truthy_private_flags(value: Any) -> list[str]:
@@ -643,44 +690,24 @@ def _serve_is_exact(status: dict[str, Any], expected_dns_name: str | None = None
     return _web_endpoint_is_exact(targets[0][0], targets[0][1], expected_dns_name)
 
 
-def _tailscale_login(executable: Path, status: dict[str, Any]) -> str:
-    self_node = status.get("Self")
-    login = None
-    if isinstance(self_node, dict):
-        users = status.get("User")
-        user_id = self_node.get("UserID")
-        profile = users.get(str(user_id)) if isinstance(users, dict) and user_id is not None else None
-        if isinstance(profile, dict):
-            login = profile.get("LoginName")
-        if not isinstance(login, str) or not login:
-            profile = self_node.get("UserProfile")
-            if isinstance(profile, dict):
-                login = profile.get("LoginName")
-        addresses = self_node.get("TailscaleIPs")
-        if not isinstance(login, str) or not login:
-            if isinstance(addresses, list) and addresses and isinstance(addresses[0], str):
-                whois = _run_tailscale(executable, "whois", "--json", addresses[0])
-                profile = whois.get("UserProfile")
-                if isinstance(profile, dict):
-                    login = profile.get("LoginName")
-    if not isinstance(login, str) or not login or len(login) > 256 or re.search(r"[\x00-\x1f\x7f]", login):
-        raise RuntimeError("tailscale login unavailable")
-    return login
-
-
 def run(config_path: Path, entry_point: Path, tailscale: Path) -> int:
     config = _read_config(config_path)
     edge_token = _read_edge_token(Path(config["tailscaleEdgeTokenPath"]))
     tailscale_service_name = _configured_tailscale_service_name()
-    # Serve configuration and node identity are different Tailscale JSON
-    # payloads.  Do not pass ServeConfig to the identity resolver: doing so
-    # makes a valid mapping fail closed before the gateway can start.
-    serve_status = _run_tailscale(tailscale, "serve", "status", "--json")
-    identity_status = _run_tailscale(tailscale, "status", "--json")
-    expected_dns_name = _tailscale_dns_name(identity_status)
+    # The installer still binds the Tailscale executable into the service
+    # command line.  This validates that argument only -- absolute, no reparse
+    # point, present on disk -- so a malformed or removed path fails at startup
+    # instead of being silently ignored.  It is not evidence about ingress: the
+    # per-request proof binds to the *running* Tailscale SCM service through
+    # QueryServiceStatusEx and GetExtendedTcpTable, which this file says
+    # nothing about.
+    _safe_path(str(tailscale), file=True, directory=False)
+    # The service account cannot access Tailscale's LocalAPI directly.  The
+    # SYSTEM snapshot task supplies the Serve payload and node identity while
+    # this process retains the exact route, DNS, login, and freshness checks.
+    serve_status, expected_dns_name, login = _read_tailscale_snapshot()
     if not _serve_is_exact(serve_status, expected_dns_name=expected_dns_name):
         raise RuntimeError("private Serve mapping invalid")
-    login = _tailscale_login(tailscale, identity_status)
     data_dir = Path(config["dataDirectory"])
     os.environ.update(
         {

@@ -16,15 +16,130 @@ def read(name: str) -> str:
 
 def test_gateway_uses_separate_serve_and_identity_payloads() -> None:
     source = read("gateway_launcher.py")
-    assert '"serve", "status", "--json"' in source
-    assert '"status", "--json"' in source
-    assert "_tailscale_dns_name(identity_status)" in source
+    writer = read("tailscale_snapshot.ps1")
+    # The gateway service account cannot reach Tailscale's Administrators-only
+    # LocalAPI pipe, so the launcher must never shell out to it. Check the
+    # import statements rather than the whole file: a future comment or
+    # docstring mentioning subprocess must not fail this, and an import hidden
+    # inside a function must not pass it.
+    assert not re.search(r"(?m)^\s*(?:import\s+subprocess\b|from\s+subprocess\b)", source)
+    assert "_run_tailscale" not in source
+    assert "_tailscale_login" not in source
+    assert "serve_status, expected_dns_name, login = _read_tailscale_snapshot()" in source
+    # The writer produces both halves, so this is a consistency check on one
+    # payload, not independent validation -- but it still catches a truncated
+    # or malformed write.
+    assert "_tailscale_dns_name(identity)" in source
     assert "_serve_is_exact(serve_status, expected_dns_name=expected_dns_name)" in source
-    assert "_tailscale_login(tailscale, identity_status)" in source
+    assert "LIFEOS_TAILSCALE_SNAPSHOT_PATH" in source
+    assert "TAILSCALE_SNAPSHOT_MAX_AGE_SECONDS = 90" in source
+    assert "TAILSCALE_SNAPSHOT_MAX_FUTURE_SECONDS = 5" in source
     assert "GetExtendedTcpTable" in source
     assert "QueryServiceStatusEx" in source
     assert "_is_tailscale_service_peer" in source
     assert "LIFEOS_TAILSCALE_SERVICE_NAME" in source
+    assert "'serve', 'status', '--json'" in writer
+    assert "'status', '--json'" in writer
+    # The identity half is pruned to the one field the reader consumes so the
+    # snapshot cannot leak peers, node keys, or tailnet addresses.
+    assert "$prunedIdentity = [ordered]@{" in writer
+    assert "Self = [ordered]@{ DNSName = $dnsName }" in writer
+    # `$profile` is an automatic variable; the local must not shadow it.
+    assert "$profile =" not in writer
+    assert "$userProfile =" in writer
+    assert "Tailscale snapshot payload is oversized." in writer
+
+
+def test_tailscale_snapshot_task_is_system_owned_acl_bound_and_reversible() -> None:
+    common = read("Deployment.Common.ps1")
+    install = read("install.ps1")
+    rollback = read("rollback.ps1")
+    verify = read("verify.ps1")
+    preflight = read("preflight.ps1")
+    config = (
+        ROOT / "services" / "windows-service-host" / "src" / "ServiceHostConfig.cs"
+    ).read_text(encoding="utf-8")
+    assert "function Register-TailscaleSnapshotTask" in common
+    assert "function Start-TailscaleSnapshotTaskAndVerify" in common
+    assert "function Assert-TailscaleSnapshotFile" in common
+    assert "function Restore-TailscaleSnapshotTask" in common
+    assert "<UserId>S-1-5-18</UserId><LogonType>ServiceAccount</LogonType>" in common
+    assert "<Interval>PT1M</Interval>" in common
+    # The snapshot file survives a reboot but its observedAt does not, and the
+    # gateway is delayed-auto: without a boot trigger the launcher can lose the
+    # startup race and exit.
+    assert "<BootTrigger><Enabled>true</Enabled><Delay>PT15S</Delay></BootTrigger>" in common
+    # Below the repetition interval, so one slow run cannot skip the next under
+    # IgnoreNew and open a two-interval gap.
+    assert "<ExecutionTimeLimit>PT30S</ExecutionTimeLimit>" in common
+    assert "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File" in common
+    assert "dnsName,identity,login,observedAt,schemaVersion,serve" in common
+    # Principal and enabled state say nothing about what the task runs.
+    assert "function Get-TailscaleSnapshotTaskAction" in common
+    assert "function Assert-TailscaleSnapshotTaskAction" in common
+    assert "Get-LegacyTaskActionFingerprint ([string]$xml)) -ne $expected" in common
+    # LastTaskResult is a uint32; [int] overflows on an HRESULT.
+    assert "[int]$info.LastTaskResult" not in common
+    assert "[long]$info.LastTaskResult -ne 0" in common
+    # Rollback must remove the task install registered at the root path even
+    # when it is restoring a pre-existing one from a different folder.
+    assert "Unregister-ScheduledTask -TaskName $TaskName -TaskPath '\\'" in common
+    # `$` also matches before a trailing newline in .NET, so the PowerShell
+    # validators must not use it where the reader uses re.fullmatch.
+    assert "'\\A[A-Za-z0-9._+\\-]+@[A-Za-z0-9.-]+\\z'" in common
+    assert "$login -notmatch '^[A-Za-z0-9" not in common
+    # The snapshot is machine state; a gateway able to write it could forge the
+    # identity assertion the launcher trusts.
+    assert "$stateDirectory = Join-Path $paths.InstallRoot 'host\\state'" in install
+    # SYSTEM is this directory's intended writer, so its grant must be
+    # inheritable or tailscale-state.json carries no SYSTEM ACE at all.
+    assert (
+        "Set-RestrictedAcl -Path $stateDirectory -OperatorSid $operatorSid "
+        "-ReadSids @($gatewaySid) -InheritableSystemFullControl"
+    ) in install
+    assert "if (-not $File -and $InheritableSystemFullControl) { $grant += '*S-1-5-18:(OI)(CI)(F)' }" in common
+    assert "Assert-NoBroadAcl $stateDirectory" in install
+    # The gateway must not outrace the SYSTEM task that republishes the
+    # snapshot it refuses to start without.
+    assert install.count("@('LifeOSAPI', $TailscaleServiceName, 'Schedule')") == 2
+    assert "@('LifeOSAPI', $TailscaleServiceName, 'Schedule') 'delayed-auto'" in verify
+    assert "LIFEOS_TAILSCALE_SNAPSHOT_PATH = $TailscaleSnapshotPath" in install
+    assert "Register-TailscaleSnapshotTask -TaskName $TailscaleSnapshotTaskName" in install
+    assert "Start-TailscaleSnapshotTaskAndVerify -TaskName $TailscaleSnapshotTaskName" in install
+    assert "Restore-TailscaleSnapshotTask $snapshotTask $TailscaleSnapshotTaskName" in install
+    assert "Restore-TailscaleSnapshotTask $snapshotTaskSnapshot $TailscaleSnapshotTaskName" in rollback
+    assert "Assert-TailscaleSnapshotFile -Path $tailscaleSnapshot" in verify
+    assert "$broadAclPaths += $stateDirectory" in verify
+    # Neither Assert-NoBroadAcl nor Assert-RestrictedAcl would catch a Modify
+    # grant to the gateway's own SID on the state it is only allowed to read.
+    assert "function Assert-SidHasNoWriteAcl" in verify
+    assert "Assert-SidHasNoWriteAcl -Path $stateDirectory -Sid $gatewaySid" in verify
+    assert "Assert-SidHasNoWriteAcl -Path $tailscaleSnapshot -Sid $gatewaySid" in verify
+    assert "Assert-SidHasNoAllowAcl -Path $stateDirectory -Sid $apiSid" in verify
+    # Get-Acl renders virtual service accounts as NT SERVICE\\<name>; compare
+    # translated SIDs so a forbidden service ACE cannot pass silently.
+    assert "function Assert-ServiceSidNotAllowed" in verify
+    assert "IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value" in verify
+    assert not re.search(r"IdentityReference\.Value.*DeniedSid", verify)
+    # SYSTEM runs the staged script with -ExecutionPolicy Bypass every minute.
+    assert "Get-FileSha256 $tailscaleSnapshotScript) -ne (Get-FileSha256 $reviewedSnapshotScript)" in verify
+    assert "Assert-TailscaleSnapshotTaskAction -TaskName $TailscaleSnapshotTaskName" in verify
+    # Get-ScheduledTask normalizes well-known principals.
+    assert "function Resolve-TaskPrincipalSid" in verify
+    assert "'S-1-5-18', 'SYSTEM', 'NT AUTHORITY\\SYSTEM'" in verify
+    # A transient ExecutionTimeLimit stop is not a verification failure; the
+    # published file is the verdict.
+    assert "[long]$snapshotInfo.LastTaskResult -ne 0" in verify
+    assert "Write-Warning ('The Tailscale snapshot task last reported result" in verify
+    # The v18 path keys are optional in the canonical validator, so verify must
+    # not dereference them on a pre-v18 manifest under Set-StrictMode.
+    assert "function Get-OptionalManifestPath" in verify
+    assert "$manifest.paths.stateDirectory" not in verify
+    assert "$manifest.paths.tailscaleSnapshot" not in verify
+    assert "tailscale_snapshot.ps1" in preflight
+    assert "WindowsPowerShell\\v1.0\\powershell.exe" in preflight
+    assert '"LIFEOS_TAILSCALE_SNAPSHOT_PATH",' in config
+    assert 'or "LIFEOS_TAILSCALE_SNAPSHOT_PATH")' in config
 
 
 def test_gateway_launcher_token_fixture_is_present_missing_and_redacted() -> None:
@@ -505,17 +620,18 @@ def test_deployment_bundle_is_explicit_and_all_source_files_are_unignored() -> N
         "install.ps1",
         "preflight.ps1",
         "rollback.ps1",
+        "tailscale_snapshot.ps1",
         "verify.ps1",
         "tests/Deployment.Behavior.Tests.ps1",
         "tests/Deployment.Static.Tests.ps1",
     ):
         assert f"services/windows-service-host/deploy/{relative}" in ignore
-    assert "bundleVersion = 'v17'" in install
+    assert "bundleVersion = 'v18'" in install
     assert "bundleFiles" in install
     assert "sourceSha256" in install
     assert "Get-TreeManifest" in install
     assert "bundleVersion" in static
-    assert "v17" in readme
+    assert "v18" in readme
 
 
 def test_static_suite_keeps_literal_powershell_variables_non_interpolated() -> None:
@@ -549,7 +665,7 @@ def test_python_runtime_resolver_supports_base_and_windows_venv_layouts() -> Non
     assert "Assert-TrustedSourcePath $pythonExecutable $operatorSid" in preflight
     assert "sys.version_info[:2] == (3,12)" in preflight
     assert "sys.version_info[:2] == (3,12)" in install
-    assert "Invoke-NativeChecked $pythonExecutable" in preflight
+    assert "Invoke-NativeChecked -FilePath $pythonExecutable" in preflight
     assert "Join-Path $pythonSource 'python.exe'" not in preflight
     assert "Join-Path $venvTarget 'python.exe'" not in install
     assert "Resolve-PythonRuntimeSource -Requested $venvTarget" in install
@@ -566,15 +682,41 @@ def test_python_import_checks_avoid_windows_native_c_argument_retokenization() -
     assert 'os.environ["LIFEOS_DEPLOY_PREFLIGHT_GATEWAY_SOURCE"]' in preflight
     assert 'os.environ["LIFEOS_DEPLOY_PREFLIGHT_LAUNCHER_SOURCE"]' in preflight
     assert 'os.environ["LIFEOS_DEPLOY_STAGED_GATEWAY_SOURCE"]' in install
-    assert '"import os;exec(os.environ[\'LIFEOS_DEPLOY_PREFLIGHT_IMPORT_CHECK\'])"' in preflight
-    assert '"import os;exec(os.environ[\'LIFEOS_DEPLOY_STAGED_IMPORT_CHECK\'])"' in install
-    assert "Invoke-NativeChecked $pythonExecutable @('-I', '-c', $gatewayImportRunner) -Quiet" in preflight
-    assert "Invoke-NativeChecked $pythonStage.PythonPath @('-I', '-c', $gatewayImportRunner) -Quiet" in install
+    # The runner spells the environment lookup with chr() so Windows
+    # PowerShell 5.1 cannot strip quotes from the native -c argument. Assert
+    # the safe runner shape and the bound variable instead of requiring the
+    # unsafe, quote-bearing spelling.
+    assert "$env:LIFEOS_DEPLOY_PREFLIGHT_IMPORT_CHECK = $gatewayImportCheck" in preflight
+    assert "gatewayImportRunner = 'import os;exec(os.environ.get(chr(" in preflight
+    assert "$env:LIFEOS_DEPLOY_STAGED_IMPORT_CHECK = $gatewayImportCheck" in install
+    assert "gatewayImportRunner = 'import os;exec(os.environ.get(chr(" in install
+    assert "Invoke-NativeChecked -FilePath $pythonExecutable -ArgumentList ([string[]]@('-I', '-c', $gatewayImportRunner)) -Quiet" in preflight
+    assert "Invoke-NativeChecked -FilePath $pythonStage.PythonPath -ArgumentList ([string[]]@('-I', '-c', $gatewayImportRunner)) -Quiet" in install
 
     # A path after -c is the exact regression that made Python parse the
     # Windows API path as its program under Windows PowerShell 5.1.
     assert "Invoke-NativeChecked $pythonExecutable @('-I', '-c', $gatewayImportCheck, $GatewaySource, $PSScriptRoot)" not in preflight
     assert "Invoke-NativeChecked $pythonStage.PythonPath @('-I', '-c', $gatewayImportCheck, $gatewayTarget)" not in install
+
+
+def test_native_invocations_bind_argument_arrays_by_name() -> None:
+    sources = [
+        read("Deployment.Common.ps1"),
+        read("preflight.ps1"),
+        read("install.ps1"),
+        read("verify.ps1"),
+        read("tests/Deployment.Behavior.Tests.ps1"),
+        read("tests/Deployment.LegacyServe.Tests.ps1"),
+    ]
+    # Passing @('-flag', value) positionally lets PowerShell bind '-flag' to
+    # Invoke-NativeChecked itself. Every call must bind the native argv array
+    # through the declared ArgumentList parameter, preserving option-shaped
+    # values for the child process.
+    for source in sources:
+        assert not re.search(r"Invoke-NativeChecked[^\r\n]*\s@\(", source)
+    assert "-ArgumentList ([string[]]@('-I', '-c', $gatewayImportRunner))" in read("preflight.ps1")
+    common = read("Deployment.Common.ps1")
+    assert "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File $FilePath @ArgumentList" in common
 
 
 def test_install_preflight_invocation_uses_named_parameter_splat() -> None:
