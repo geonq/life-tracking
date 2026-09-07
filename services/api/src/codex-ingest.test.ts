@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { request } from 'node:http';
-import { chmod, mkdir, mkdtemp, readFile, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { vi } from 'vitest';
 import { createApiServer, validateStartupConfiguration } from './server.js';
 import { main as collectorMain, postCodexPayload, runCodexCollector } from './codex-collector.js';
 
@@ -86,15 +87,19 @@ describe('sanitized Codex collector boundary', () => {
       process.argv = ['node', 'codex-collector', '--secret-file', secretPath];
       process.env.CODEX_INGEST_SECRET_FILE = join(directory, 'missing-secret');
       // The live app-server is intentionally unavailable in this test. A
-      // valid path must therefore get as far as the collector read, not fail
-      // argument parsing; main reports the bounded unavailable result.
-      expect(await collectorMain()).toBe(1);
+      // valid path must get as far as the collector read, not fail argument
+      // parsing. Use a deterministic provider result so this test does not
+      // depend on a Codex installation on the development machine.
+      expect(await collectorMain({
+        read: async () => ({ connectorState: 'unavailable', windows: [], failureReason: 'provider_rejected' }),
+      })).toBe(2);
       process.argv = ['node', 'codex-collector', '--secret-file', 'relative.secret'];
       expect(await collectorMain()).toBe(1);
     } finally {
       process.argv = previousArgv;
       if (previousSecretFile === undefined) delete process.env.CODEX_INGEST_SECRET_FILE;
       else process.env.CODEX_INGEST_SECRET_FILE = previousSecretFile;
+      await rm(directory, { recursive: true, force: true });
     }
   });
 
@@ -285,5 +290,35 @@ describe('sanitized Codex collector boundary', () => {
     });
     expect(posted).toEqual([{ windows: [{ minutes: 300, usedPercent: 22, resetAt: '2026-08-12T05:00:00.000Z' }] }]);
     await expect(postCodexPayload({ windows: [{ minutes: 300, usedPercent: 1 }] }, 's'.repeat(32), 1)).rejects.toThrow('collector_unavailable');
+  });
+
+  it('uses the provider-only exit code narrowly and never fabricates an observation', async () => {
+    const previousArgv = process.argv;
+    const directory = await mkdtemp(join(tmpdir(), 'usage-collector-exit-codes-'));
+    const secretPath = join(directory, 'codex.secret');
+    const post = vi.fn(async () => undefined);
+    try {
+      await writeFile(secretPath, 'e'.repeat(32), { mode: 0o600 });
+      process.argv = ['node', 'codex-collector', '--secret-file', secretPath];
+      expect(await collectorMain({
+        read: async () => ({ connectorState: 'unavailable', windows: [], failureReason: 'provider_rejected' }), post,
+      })).toBe(2);
+      expect(post).not.toHaveBeenCalled();
+
+      expect(await collectorMain({
+        read: async () => ({ connectorState: 'unavailable', windows: [], failureReason: 'invalid_response' }), post,
+      })).toBe(1);
+      expect(await collectorMain({
+        read: async () => ({ connectorState: 'healthy', windows: [{ minutes: 300, usedPercent: 100 }] }), post,
+      })).toBe(0);
+      expect(post).toHaveBeenCalledTimes(1);
+      expect(await collectorMain({
+        read: async () => ({ connectorState: 'healthy', windows: [{ minutes: 300, usedPercent: 50 }] }),
+        post: async () => { throw new Error('API unavailable'); },
+      })).toBe(1);
+    } finally {
+      process.argv = previousArgv;
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });

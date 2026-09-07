@@ -4,8 +4,24 @@ import { win32 } from 'node:path';
 import { parseStrictJSON } from './json-boundary.js';
 
 export type CodexWindow = { minutes: number; usedPercent: number; resetAt?: string };
-export type CodexLiveResult = { connectorState: 'healthy' | 'unavailable' | 'rate_limited'; windows: CodexWindow[]; observedAt?: string; error?: string };
+export type CodexFailureReason = 'provider_rejected' | 'transport' | 'invalid_response';
+export type CodexLiveResult = {
+  connectorState: 'healthy' | 'unavailable' | 'rate_limited';
+  windows: CodexWindow[];
+  observedAt?: string;
+  error?: string;
+  // Internal-only classification used by the scheduled collector. It is
+  // deliberately absent from the public usage payload.
+  failureReason?: CodexFailureReason;
+};
 export type Transport = ((request: Record<string, unknown>) => Promise<unknown>) & { close?: () => void };
+
+export class CodexRpcError extends Error {
+  constructor(readonly code: number | undefined, readonly method: string) {
+    super('Codex app-server request failed');
+    this.name = 'CodexRpcError';
+  }
+}
 
 const supportedCodexMinutes = new Set([300, 10_080]);
 
@@ -127,18 +143,46 @@ function spawnCodex(): ChildProcess {
 
 export function createCodexTransport(child: ChildProcess = spawnCodex()): Transport {
   let nextId = 1; let buffer = ''; let closed = false;
-  const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+  const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout>; method: string }>();
   const finish = (error?: Error) => { if (closed) return; closed = true; for (const p of [...pending.values()]) { clearTimeout(p.timer); p.reject(error ?? new Error('Codex app-server closed')); } pending.clear(); child.stdout?.removeAllListeners('data'); child.removeAllListeners('error'); child.removeAllListeners('exit'); if (child.stdin && !child.stdin.destroyed) child.stdin.end(); if (!child.killed) child.kill(); };
-  child.stdout?.on('data', chunk => { buffer += String(chunk); if (Buffer.byteLength(buffer, 'utf8') > maxProtocolBufferBytes) { finish(new Error('Codex app-server protocol frame exceeded size limit')); return; } const lines = buffer.split('\n'); buffer = lines.pop() ?? ''; for (const line of lines) { if (!line.trim()) continue; try { const msg = parseStrictJSON(line); if (!isObject(msg) || typeof msg.id !== 'number') continue; const p = pending.get(msg.id); if (!p) continue; pending.delete(msg.id); clearTimeout(p.timer); if (isObject(msg.error)) p.reject(new Error('Codex app-server JSON-RPC error')); else if (!('result' in msg)) p.reject(new Error('Malformed Codex app-server response')); else p.resolve(msg.result); } catch { /* malformed protocol is handled by request timeout/failure */ } } });
+  child.stdout?.on('data', chunk => { buffer += String(chunk); if (Buffer.byteLength(buffer, 'utf8') > maxProtocolBufferBytes) { finish(new Error('Codex app-server protocol frame exceeded size limit')); return; } const lines = buffer.split('\n'); buffer = lines.pop() ?? ''; for (const line of lines) { if (!line.trim()) continue; try { const msg = parseStrictJSON(line); if (!isObject(msg) || typeof msg.id !== 'number') continue; const p = pending.get(msg.id); if (!p) continue; pending.delete(msg.id); clearTimeout(p.timer); if (isObject(msg.error)) p.reject(new CodexRpcError(typeof msg.error.code === 'number' ? msg.error.code : undefined, p.method)); else if (!('result' in msg)) p.reject(new Error('Malformed Codex app-server response')); else p.resolve(msg.result); } catch { /* malformed protocol is handled by request timeout/failure */ } } });
   child.once('error', () => finish(new Error('Codex app-server process failed')));
   child.once('exit', code => { if (code !== 0) finish(new Error('Codex app-server process failed')); });
-  const request = ((payload: Record<string, unknown>) => new Promise((resolve, reject) => { if (closed || !child.stdin || child.stdin.destroyed) return reject(new Error('Codex app-server unavailable')); if (pending.size >= maxPendingRequests) return reject(new Error('Codex app-server request limit reached')); const id = nextId++; const timer = setTimeout(() => { pending.delete(id); finish(new Error('Codex app-server request timed out')); }, timeoutMs); pending.set(id, { resolve, reject, timer }); try { child.stdin.write(JSON.stringify({ ...payload, jsonrpc: '2.0', id }) + '\n'); } catch { pending.delete(id); clearTimeout(timer); finish(new Error('Codex app-server process failed')); } })) as Transport;
+  const request = ((payload: Record<string, unknown>) => new Promise((resolve, reject) => { if (closed || !child.stdin || child.stdin.destroyed) return reject(new Error('Codex app-server unavailable')); if (pending.size >= maxPendingRequests) return reject(new Error('Codex app-server request limit reached')); const id = nextId++; const method = typeof payload.method === 'string' ? payload.method : 'unknown'; const timer = setTimeout(() => { finish(new Error('Codex app-server request timed out')); }, timeoutMs); pending.set(id, { resolve, reject, timer, method }); try { child.stdin.write(JSON.stringify({ ...payload, jsonrpc: '2.0', id }) + '\n'); } catch { finish(new Error('Codex app-server process failed')); } })) as Transport;
   request.close = () => finish(new Error('Codex transport closed'));
   return request;
 }
 
 export async function readCodexAppServer(transportFactory: () => Transport = () => createCodexTransport()): Promise<CodexLiveResult> {
-  let transport: Transport | undefined; try { transport = transportFactory(); await transport({ method: 'initialize', params: { clientInfo: { name: 'iphone-life-os', version: '0.1.0' } } }); const limits = await transport({ method: 'account/rateLimits/read', params: {} }); const result = mapCodexResponse(limits); return result.windows.length ? { ...result, observedAt: new Date().toISOString() } : result; } catch { return { connectorState: 'unavailable', windows: [], error: 'Codex connector unavailable' }; } finally { transport?.close?.(); }
+  let transport: Transport | undefined;
+  try {
+    transport = transportFactory();
+    try {
+      await transport({ method: 'initialize', params: { clientInfo: { name: 'iphone-life-os', version: '0.1.0' } } });
+    } catch {
+      return { connectorState: 'unavailable', windows: [], error: 'Codex connector unavailable', failureReason: 'transport' };
+    }
+    let limits: unknown;
+    try {
+      limits = await transport({ method: 'account/rateLimits/read', params: {} });
+    } catch (error) {
+      // This is the one provider-level failure that may be accepted during
+      // installation: the app-server is reachable and initialized, but this
+      // optional account capability is unavailable. Keep the method and code
+      // allowlist narrow so spawn, auth, protocol, and timeout failures still
+      // fail closed.
+      if (error instanceof CodexRpcError && error.method === 'account/rateLimits/read' && error.code === -32603) {
+        return { connectorState: 'unavailable', windows: [], error: 'Codex rate-limit provider unavailable', failureReason: 'provider_rejected' };
+      }
+      return { connectorState: 'unavailable', windows: [], error: 'Codex connector unavailable', failureReason: 'transport' };
+    }
+    const result = mapCodexResponse(limits);
+    return result.windows.length
+      ? { ...result, observedAt: new Date().toISOString() }
+      : { ...result, failureReason: 'invalid_response' };
+  } catch {
+    return { connectorState: 'unavailable', windows: [], error: 'Codex connector unavailable', failureReason: 'transport' };
+  } finally { transport?.close?.(); }
 }
 
 export async function readCodexLive(transportFactory: () => Transport = () => createCodexTransport()): Promise<CodexLiveResult> {

@@ -306,7 +306,7 @@ function Assert-CanonicalLegacyListenerManifest {
 function Assert-CanonicalRollbackManifest {
     param([Parameter(Mandatory)][psobject]$Manifest, [Parameter(Mandatory)][string]$ManifestPath)
     $required = @('schemaVersion', 'createdAt', 'operatorSid', 'legacyTask', 'codexTask', 'serviceSnapshots', 'services', 'paths', 'backups', 'aclSnapshots', 'tailscaleStatusBefore')
-    $optional = @('apiServiceSid', 'gatewayServiceSid', 'supplementCatalogInitialized', 'tailscaleStatusAfter', 'cutoverCompletedAt', 'legacyListener', 'snapshotTask')
+    $optional = @('apiServiceSid', 'gatewayServiceSid', 'supplementCatalogInitialized', 'tailscaleStatusAfter', 'cutoverCompletedAt', 'legacyListener', 'snapshotTask', 'codexCollectorVerification')
     $actual = @($Manifest.PSObject.Properties.Name | Sort-Object)
     $unknown = @($actual | Where-Object { $_ -notin ($required + $optional) })
     $missing = @($required | Where-Object { $_ -notin $actual })
@@ -315,6 +315,23 @@ function Assert-CanonicalRollbackManifest {
     }
     if ([int]$Manifest.schemaVersion -ne 2) {
         throw 'Only schemaVersion 2 rollback manifests are accepted automatically; older schemas require operator-led recovery.'
+    }
+    if ($null -ne $Manifest.PSObject.Properties['codexCollectorVerification']) {
+        $verification = $Manifest.codexCollectorVerification
+        if ($null -eq $verification -or $null -eq $verification.PSObject.Properties['status'] -or
+            $null -eq $verification.PSObject.Properties['exitCode'] -or $null -eq $verification.PSObject.Properties['observation'] -or
+            $null -eq $verification.PSObject.Properties['verifiedAt']) {
+            throw 'Codex collector verification evidence is incomplete.'
+        }
+        $verificationStatus = [string]$verification.status
+        $verificationExit = [int]$verification.exitCode
+        $verificationObservation = [string]$verification.observation
+        if (($verificationStatus -eq 'observed' -and ($verificationExit -ne 0 -or $verificationObservation -ne 'observed')) -or
+            ($verificationStatus -eq 'provider_unavailable' -and ($verificationExit -ne 2 -or $verificationObservation -ne 'unverified')) -or
+            $verificationStatus -notin @('observed', 'provider_unavailable')) {
+            throw 'Codex collector verification evidence has an invalid status.'
+        }
+        try { [void][DateTimeOffset]::Parse([string]$verification.verifiedAt) } catch { throw 'Codex collector verification timestamp is invalid.' }
     }
     Assert-ExistingFile $ManifestPath 'Rollback manifest'
     $defaults = Get-LifeOSDefaultPaths
@@ -2071,6 +2088,7 @@ function Start-CodexCollectorAndVerify {
     param(
         [Parameter(Mandatory)][string]$TaskName,
         [Parameter(Mandatory)][uri]$UsageUri,
+        [switch]$AllowProviderUnavailable,
         [int]$TimeoutSeconds = 45
     )
     Assert-SafeTaskName $TaskName
@@ -2078,6 +2096,7 @@ function Start-CodexCollectorAndVerify {
     Start-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction Stop
     $deadline = $startedAt.AddSeconds($TimeoutSeconds)
     $completed = $false
+    $providerUnavailable = $false
     do {
         $info = Get-ScheduledTaskInfo -TaskName $TaskName -TaskPath '\' -ErrorAction Stop
         $task = Get-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction Stop
@@ -2085,7 +2104,18 @@ function Start-CodexCollectorAndVerify {
             # LastTaskResult is a uint32; HRESULTs such as 0x8004131F exceed
             # Int32 and a [int] cast throws a raw conversion error instead of
             # this message.
-            if ([long]$info.LastTaskResult -ne 0) {
+            $result = [long]$info.LastTaskResult
+            if ($result -eq 2 -and $AllowProviderUnavailable) {
+                # The collector process ran and reported that the optional
+                # Codex CLI provider is unavailable. Keep the scheduled task
+                # installed for later retries, but never treat an unlaunchable
+                # task, bad secret, or API/storage failure as a successful
+                # cutover.
+                $providerUnavailable = $true
+                $completed = $true
+                break
+            }
+            if ($result -ne 0) {
                 throw ('Codex collector task failed with result {0}.' -f $info.LastTaskResult)
             }
             $completed = $true
@@ -2094,9 +2124,14 @@ function Start-CodexCollectorAndVerify {
         Start-Sleep -Milliseconds 250
     } while ((Get-Date) -lt $deadline)
     if (-not $completed) { throw 'Codex collector task did not complete successfully before cutover.' }
+    if ($providerUnavailable) {
+        Write-Warning 'Codex collector is installed but its provider is currently unavailable; usage will remain unavailable until a later retry succeeds.'
+        return [pscustomobject]@{ status = 'provider_unavailable'; exitCode = 2; observation = 'unverified' }
+    }
     if (-not (Wait-CodexUsageObservation $UsageUri $TimeoutSeconds $startedAt)) {
         throw 'Codex collector completed but /api/usage did not expose an observation from this run.'
     }
+    return [pscustomobject]@{ status = 'observed'; exitCode = 0; observation = 'observed' }
 }
 
 function Wait-CodexUsageObservation {

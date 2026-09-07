@@ -1018,7 +1018,14 @@ Save-InstallManifest $manifest $manifestPath
     Register-TailscaleSnapshotTask -TaskName $TailscaleSnapshotTaskName -ScriptPath $snapshotScriptTarget -TailscaleExecutable $tailscale -OutputPath $tailscaleSnapshotPath
     Start-LifeOSService 'LifeOSAPI'
     if (-not (Wait-LoopbackHealth ([uri]'http://127.0.0.1:8787/health') 45)) { throw 'LifeOSAPI did not pass its loopback health check.' }
-    Start-CodexCollectorAndVerify -TaskName $CodexTaskName -UsageUri ([uri]'http://127.0.0.1:8787/api/usage')
+    $codexVerification = Start-CodexCollectorAndVerify -TaskName $CodexTaskName -UsageUri ([uri]'http://127.0.0.1:8787/api/usage') -AllowProviderUnavailable
+    $manifest.codexCollectorVerification = [ordered]@{
+        status = [string]$codexVerification.status
+        exitCode = [int]$codexVerification.exitCode
+        observation = [string]$codexVerification.observation
+        verifiedAt = (Get-Date).ToUniversalTime().ToString('o')
+    }
+    Save-InstallManifest $manifest $manifestPath
     $legacyCutover = Stop-LegacyGatewayForCutover -TaskSnapshot $legacy -ListenerSnapshot $manifest.legacyListener -Manifest $manifest -ManifestPath $manifestPath -TaskName $LegacyTaskName -TaskPath ([string]$legacy.TaskPath) -Port 8421
     $legacyTaskMutated = [bool]$legacyCutover.TaskMutated
     # Configure is idempotent and records the authenticated post-mutation

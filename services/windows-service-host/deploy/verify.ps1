@@ -139,6 +139,15 @@ Assert-WindowsAdministrator
 $paths = Get-LifeOSDefaultPaths
 $manifestFile = Resolve-LatestManifest $ManifestPath $paths.BackupRoot
 $manifest = Get-Content -LiteralPath $manifestFile -Raw | ConvertFrom-Json -ErrorAction Stop
+$codexVerificationProperty = $manifest.PSObject.Properties['codexCollectorVerification']
+if ($null -ne $codexVerificationProperty) {
+    $codexVerification = $codexVerificationProperty.Value
+    if ([string]$codexVerification.status -eq 'provider_unavailable') {
+        Write-Warning 'Codex collector is installed but its provider is currently unavailable; usage remains explicitly unverified.'
+    } elseif ([string]$codexVerification.status -ne 'observed') {
+        throw 'Codex collector verification evidence is invalid.'
+    }
+}
 $configDirectory = [string]$manifest.paths.configDirectory
 $apiConfig = [string]$manifest.paths.apiConfig
 $gatewayConfig = [string]$manifest.paths.gatewayConfig

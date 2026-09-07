@@ -12,6 +12,12 @@ const COLLECTOR_TIMEOUT_MS = 8_000;
 const MAX_RESPONSE_BYTES = 16 * 1024;
 const MAX_POST_ATTEMPTS = 3;
 
+// Exit code 2 is reserved for a healthy collector process whose optional
+// Codex provider is unavailable. Deployment may keep that integration
+// enabled for later retries, while treating every other non-zero result as a
+// real installation failure.
+export const CODEX_COLLECTOR_PROVIDER_UNAVAILABLE_EXIT_CODE = 2;
+
 type RequestFactory = (options: RequestOptions, callback: (response: import('node:http').IncomingMessage) => void) => import('node:http').ClientRequest;
 type CollectorDependencies = {
   read?: () => Promise<CodexLiveResult>;
@@ -110,11 +116,17 @@ async function postCodexPayloadOnce(
 
 export async function runCodexCollector(dependencies: CollectorDependencies = {}): Promise<void> {
   const secret = await (dependencies.secret ?? (() => readIngestSecretFile(process.env.CODEX_INGEST_SECRET_FILE)))();
-  if (!secret) throw new Error('collector_unavailable');
+  if (!secret) throw new Error('collector_configuration_unavailable');
   const result = await (dependencies.read ?? readCodexAppServer)();
-  if (!result.windows.length) throw new Error('collector_unavailable');
+  if (!result.windows.length) {
+    throw new Error(result.failureReason === 'provider_rejected' ? 'provider_unavailable' : 'collector_connector_unavailable');
+  }
   const windows = collectorWindows(result);
-  await (dependencies.post ?? ((payload, token) => postCodexPayload(payload, token)))({ windows, ...(result.observedAt ? { observedAt: result.observedAt } : {}) }, secret);
+  try {
+    await (dependencies.post ?? ((payload, token) => postCodexPayload(payload, token)))({ windows, ...(result.observedAt ? { observedAt: result.observedAt } : {}) }, secret);
+  } catch {
+    throw new Error('collector_api_unavailable');
+  }
 }
 
 function secretFileArgument(argv: string[]): string | undefined {
@@ -125,19 +137,21 @@ function secretFileArgument(argv: string[]): string | undefined {
   return resolve(argv[1]!);
 }
 
-export async function main(): Promise<number> {
+export async function main(overrides: Pick<CollectorDependencies, 'read' | 'post'> = {}): Promise<number> {
   try {
     const secretFile = secretFileArgument(process.argv.slice(2));
     await runCodexCollector({
+      ...overrides,
       // The scheduled task receives only this absolute path. The secret
       // itself remains file-backed and is never placed in task XML/arguments.
       secret: () => readIngestSecretFile(secretFile ?? process.env.CODEX_INGEST_SECRET_FILE),
     });
     process.stdout.write('success\n');
     return 0;
-  } catch {
+  } catch (error) {
     process.stdout.write('unavailable\n');
-    return 1;
+    return error instanceof Error && error.message === 'provider_unavailable'
+      ? CODEX_COLLECTOR_PROVIDER_UNAVAILABLE_EXIT_CODE : 1;
   }
 }
 
