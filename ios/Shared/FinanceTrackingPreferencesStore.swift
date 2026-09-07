@@ -180,6 +180,12 @@ public final class FinanceTrackingPreferencesStore: @unchecked Sendable {
         }
         Self.processTransactionLock.lock()
         defer { Self.processTransactionLock.unlock() }
+        // Fail closed if the existing file is corrupt/unreadable, exactly
+        // like every other mutator in this store. The result is discarded
+        // on purpose -- `commit` still always bypasses and clears any
+        // pending draft -- but a corrupt file must never be silently
+        // replaced by an unconditional overwrite.
+        _ = try loadUnlocked()
         let envelope = FinanceTrackingPreferencesEnvelope(committed: preferences, draft: nil)
         try saveUnlocked(envelope)
         return preferences
