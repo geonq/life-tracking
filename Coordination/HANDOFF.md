@@ -1,29 +1,31 @@
 # HANDOFF — life-tracking (LifeOS native app)
 
-Updated 2026-09-07 21:30 Europe/Berlin.
+Updated 2026-09-07 22:53 Europe/Berlin.
 
 ## Current verdict
 
-**NO-GO for completion.** The source foundation is substantially complete, but
-Windows runtime cutover, signed-device evidence, live provider consent, and
-physical widget/background checks remain open. `tasks/final-plan.md` and
-`tasks/luna-audit.md` are retained as product evidence; they are not current
-runtime state and are not Astra-authored.
+**NO-GO for completion or production cutover.** The source foundation is
+substantially complete, but Astra found P1 security, migration, authority, and
+sync blockers in addition to signed-device, provider-consent, and visual
+evidence gates. `tasks/final-plan.md` and `tasks/luna-audit.md` are retained as
+product evidence, not current runtime state. No Codex/Claude watcher or
+overnight scheduler is active.
 
-The Claude handoff was reviewed after Claude stopped. Luna Max completed the
-source/evidence pass, but the Codex weekly limit was reached before an Astra
-worker could run. No Astra review or plan exists; the current decisions below
-are manually verified Codex state. There is no active Codex/Claude watcher or
-overnight scheduler.
+Three Astra Medium read-only passes completed on this checkpoint: security and
+migration, cross-device automation and persistence, and UI/widgets. Their
+findings are the current planning baseline; no Astra worker edited, deployed,
+pushed, or created scheduling machinery.
 
 ## Source state
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- HEAD and origin: `c75c1cb` (`Make finance percentages deterministic`).
+- HEAD: `65b2140` (`Fix SYSTEM snapshot task registration`). The local origin
+  tracking ref remains `f600a44` because the external push was rejected by the
+  approval layer; do not claim remote parity until it is approved and pushed.
 - The Windows source changes are committed in `e1e1966`; PayPal/UI scope and
-  the percentage/conflict fixes are in later checkpoints.
-- Working tree was clean after the checkpoint push. Verify parity before the
-  next mutation; never reset or discard another worker's work.
+  finance/conflict fixes are in later checkpoints.
+- Working tree is clean at the local checkpoint. Never reset or discard another
+  worker's work.
 
 ## Verified evidence
 
@@ -32,11 +34,13 @@ overnight scheduler.
 - macOS unsigned logic suite: **47 tests, 0 failures** on the prior checkpoint;
   rerun after the next macOS-visible change.
 - API contracts build/typecheck/tests: **pass** (11 files, 91 tests).
-- Windows host source checks: PowerShell 5.1 static, behavioral, and legacy
-  Serve upgrade/rollback assertions: **pass** in a temporary secret-free bundle.
-- Windows source is not deployed. The host still needs staged candidate
-  preflight, service/ACL/readback, snapshot freshness, health, and rollback
-  evidence before cutover.
+- Windows source tests: PowerShell 5.1 static, behavioral, and legacy Serve
+  upgrade/rollback assertions: **pass** in a temporary secret-free bundle.
+- Windows candidate `65b2140` verifier: **pass**, 80 files; archive SHA-256
+  `b8b8948374a1729c335e9e497cf537b993cea84744306abfdd0088f151eb403f`.
+- Windows candidate preflight: **pass**; no service, ACL, task, data, or Serve
+  state was changed by preflight. The authorized install retry is active;
+  final service/readback evidence is pending.
 
 ## Product state
 
@@ -47,39 +51,47 @@ overnight scheduler.
 - Lifestyle persisted conflict selection is deterministic by sorted conflict
   key; mixed states still fail closed.
 - Calendar empty timed space creates on deliberate double tap.
-- Existing module/widget scope remains intact; no new top-level travel module
-  was invented. Finance analytics remains a Finance sub-surface.
+- Existing module/widget scope remains intact; Finance analytics remains a
+  Finance sub-surface.
 
-## Open gates
+## Open gates, in order
 
-- Build a clean Windows candidate with a standalone Windows `node.exe`; run
-  verifier and preflight on `domke@geonqserver`; deploy only after every
-  service identity, ACL, Tailscale Serve, snapshot, and rollback assertion is
-  read back from the host.
+- Close P1 security and authority gates: authenticated nearby pairing and
+  bounded Calendar revisions; authenticated gateway-to-API callers; raw
+  loopback identity through Uvicorn; runtime snapshot leases; quiesced,
+  versioned migration and rollback authority; rights-aware ACL verification;
+  complete Calendar item validation.
+- Finish Windows service identity, task XML, ACL, Tailscale Serve, snapshot,
+  protected endpoint, finance readback, and rollback evidence.
+- Add durable client outbox/acknowledgement semantics and a domain ownership
+  contract before calling Mac↔iPhone sync automated. Widgets stay projections.
 - Replace `group.com.hermes.lifeos.REPLACE_WITH_TEAM_CONFIGURED_ID` with the
-  real Personal Team App Group when signing; prove app/widget round-trip and
-  background refresh on the iPhone.
-- Complete Enable Banking consent/readback for Sparkasse Leipzig and Revolut
-  Personal. Trade Republic remains a manual import path.
+  real Personal Team App Group; prove signed app/widget round-trip and
+  background refresh on iPhone.
+- Complete Enable Banking consent/readback for Sparkasse Leipzig and Revolut;
+  Trade Republic remains a manual CSV import path.
 - Validate HealthKit/Zepp/Helio samples and provenance on the physical device.
-- Document and test the supported morning Zepp sync Shortcut and Mac USB
-  refresh/install Shortcut. They may report Apple permission/signing gates;
-  they cannot bypass them.
-- Decide whether the lifestyle ledger's full-file rewrite needs a larger
-  storage migration; do not change it as an unreviewed drive-by optimization.
+- Complete Tasks, Finance, and Fitness widget data paths, then verify all
+  widgets over the grey wallpaper in transparent-dark, tinted, and full-color
+  modes without changing the approved brand ramp.
+- Document and test the morning Zepp sync and Mac USB refresh/install Shortcuts;
+  report Apple permission/signing gates truthfully.
+- Decide whether the lifestyle ledger's full-file rewrite needs a separate
+  storage migration; do not mix it into another patch.
 
 ## Execution rules
 
-Make one bounded change set at a time, run the relevant checks, update this
-file and `PHASE_STATUS.md`, then commit and push. Keep secrets out of source,
+Make one bounded change set at a time, run relevant checks, update this file
+and `PHASE_STATUS.md`, then commit and attempt the authorized push. Record an
+approval block without weakening source provenance. Keep secrets out of source,
 logs, archives, prompts, and test output. Use unsigned Xcode settings for
-simulator/macOS checks. Treat missing entitlements, live consent, physical
-device behavior, and remote runtime state as external evidence gates.
+simulator/macOS checks. Treat entitlements, live consent, physical-device
+behavior, and remote runtime state as external evidence gates.
 
 ## Human gates
 
 Geonq must provide the real App Group during signed release, approve Apple
-device trust/Developer Mode and Health permissions, complete bank consent, and
-approve any persistent Windows admin cutover. The personal installation can
-use free Personal Team signing with periodic USB refresh if Apple permits it;
-the exact expiry and capability behavior must be shown from the signed device.
+device trust/Developer Mode and Health permissions, and complete bank consent.
+The personal installation can use free Personal Team signing with periodic USB
+refresh if Apple permits it; show exact expiry and capability behavior from the
+signed device.

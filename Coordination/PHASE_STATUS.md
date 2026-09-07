@@ -1,51 +1,76 @@
 # PHASE STATUS — LifeOS
 
-Updated 2026-09-07 21:30 Europe/Berlin.
+Updated 2026-09-07 22:53 Europe/Berlin.
 
 - Overall state: **NO-GO / manual continuation in progress**.
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- HEAD: `c75c1cb`, pushed to origin.
-- Astra did not run because the Codex weekly limit was reached after the Luna
-  source pass. No watcher or overnight scheduler is active.
+- Local HEAD: `65b2140`; local origin tracking ref: `f600a44`.
+- iOS logic: 1,245 tests passed. macOS logic: 47 passed on the prior
+  checkpoint. API contracts/typecheck/tests: 91 passed.
+- No Codex/Claude watcher or overnight scheduler is active.
+
+## Astra review baseline
+
+Three Astra Medium read-only passes completed at `65b2140`:
+
+- Security/migration: **REPLAN / NO-GO**. P1 findings cover nearby trust,
+  Calendar revision poisoning, unauthenticated local API callers, Uvicorn
+  proxy identity, runtime snapshot leases, migration quiescence/authority,
+  rollback, rights-aware ACLs, and malformed Calendar documents.
+- Cross-device/automation: durable client outbox and acknowledgements,
+  broader domain replication, persistent Finance cache, App Intents/Shortcuts,
+  HealthKit export, Zepp fallback, and verified USB signing remain open.
+- UI/widgets: preserve all 18 iOS and 17 Mac widget kinds; Tasks, Finance
+  visual data, and several Fitness states are underimplemented. Transparent
+  inner panels and grey-wallpaper readability need real host evidence.
 
 ## Closed source tranches
 
-- Finance allocation CRUD, preferences, wealth allocation, projection, and
+- Finance allocation CRUD, preferences, wealth allocation, projections, and
   line/bar/ring presentation are implemented and covered by logic tests.
-- Finance category percentages now use deterministic integer-cent rounding;
-  the display model, spend legend, income rows, ring accessibility, and wealth
-  allocation share the same allocator.
-- PayPal is removed from the active product/API scope.
+- Finance percentages use deterministic integer-cent rounding across spend,
+  income, and wealth displays.
+- PayPal is removed from active product/API scope.
 - Calendar empty-space creation follows the double-tap decision.
-- Windows gateway deployment source, PowerShell 5.1 behavior, and legacy Serve
-  rollback assertions pass in a temporary secret-free remote test bundle.
+- Windows deployment wrapper, source tests, and legacy Serve rollback tests
+  pass. SYSTEM task registration now uses the Windows-accepted XML shape.
 
 ## Active phase — Windows candidate and cutover
 
-The host currently retains the legacy `LifeOSSyncServer` path. Build a clean,
-hash-recorded candidate, locate a standalone Windows Node runtime, run the
-candidate verifier and preflight, and inspect the remote result before any
-admin cutover. The snapshot writer runs as SYSTEM and the gateway uses its
-virtual service account; ACL and service identity checks must be proven on the
-host. Keep rollback ready and test it with a harmless candidate.
+- Candidate verifier: **pass**, 80 files, source `65b2140`.
+- Candidate preflight: **pass** with no machine-state mutation.
+- Authorized installer retry is active on `domke@geonqserver`; final result is
+  pending. After it returns, read back service state/identity, task XML,
+  protected snapshot ACL and freshness, Tailscale Serve, protected endpoints,
+  finance status, manifest, and rollback behavior.
 
-Required readback: service state/identity, task XML, protected snapshot ACL,
-fresh snapshot schema, Tailscale Serve private state, `/health`, finance
-readback, and rollback restoration. A successful source test is not a live
-deployment claim.
+## Next implementation phase — security and authority
 
-## Remaining external gates
+Use disjoint ownership lanes and one review per coherent batch:
 
-- Personal Team App Group, signed iPhone install, widget storage round-trip,
-  transparent-dark widgets over the grey wallpaper, and background refresh.
-- Enable Banking consent/readback for Sparkasse Leipzig and Revolut Personal.
-- Physical HealthKit/Zepp/Helio observations and provenance.
-- Morning Zepp sync and Mac USB reauthentication/install Shortcuts.
-- Final visual pass on every existing widget/module and macOS pointer behavior.
+1. Nearby authenticated pairing and bounded/recoverable Calendar counters.
+2. Gateway→API scoped credential, Uvicorn socket identity, and runtime snapshot
+   lease enforcement.
+3. Full Calendar item validation and versioned migration inventory.
+4. Quiesced migration, reinstall classification, post-write rollback, and
+   rights-aware ACL verification.
+5. Durable Calendar outbox/receipts, then domain replication and Finance cache.
+6. HealthKit/Zepp reconciliation, App Intents, and USB Personal Team refresh.
+7. Widget data paths, transparent rendering, chart gestures, and final motion
+   polish with iPhone 17/Mac evidence.
 
-## Current evidence commands
+## External gates
 
-Use `CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""`
-for unsigned Xcode checks. The current iOS logic run passed 1,245 tests. The
-remote Windows source bundle passed static, behavioral, and legacy Serve tests;
-no secret or runtime state was copied into the repository.
+- Real Personal Team App Group and signed app/widget/background evidence.
+- Enable Banking consent/readback for Sparkasse Leipzig and Revolut.
+- Physical HealthKit/Zepp/Helio samples and provenance.
+- User trust/Developer Mode/Health permissions and any Apple signing prompts.
+- Final visual and interaction evidence for every registered widget and primary
+  destination.
+
+## Evidence discipline
+
+Builds, `/health`, source tests, and Shortcut notifications do not prove
+cross-device correctness. Final acceptance requires local durable commit →
+server receipt → second-device durable adoption → widget projection, plus
+security, migration, physical-device, and rollback evidence.
