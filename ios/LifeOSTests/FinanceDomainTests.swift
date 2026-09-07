@@ -56,7 +56,7 @@ final class FinanceDomainTests: XCTestCase {
     }
 
     func testFinanceConnectorCatalogFailsClosedUntilExplicitlyConfigured() {
-        XCTAssertEqual(FinanceConnectorCatalog.defaults.map(\.kind), [.sparkasse, .revolutPersonal, .revolutBusiness, .tradeRepublic, .paypalPersonal])
+        XCTAssertEqual(FinanceConnectorCatalog.defaults.map(\.kind), [.sparkasse, .revolutPersonal, .revolutBusiness, .tradeRepublic])
         XCTAssertTrue(FinanceConnectorCatalog.defaults.allSatisfy { !$0.isEnabled })
         XCTAssertTrue(FinanceConnectorCatalog.defaults.allSatisfy(\.requiresExplicitOptIn))
         XCTAssertTrue(FinanceConnectorCatalog.defaults.allSatisfy { !$0.provider.isEmpty && !$0.recommendation.isEmpty })
@@ -68,9 +68,6 @@ final class FinanceDomainTests: XCTestCase {
         XCTAssertEqual(FinanceConnectorCatalog.defaults.first { $0.kind == .tradeRepublic }?.accessMethod, .manualImport)
         XCTAssertEqual(FinanceConnectorCatalog.defaults.first { $0.kind == .tradeRepublic }?.provider, "Manual CSV/PDF import")
         XCTAssertEqual(FinanceConnectorCatalog.defaults.first { $0.kind == .tradeRepublic }?.risk, .manualImportOnly)
-        XCTAssertEqual(FinanceConnectorCatalog.defaults.first { $0.kind == .paypalPersonal }?.accessMethod, .officialOAuth)
-        XCTAssertEqual(FinanceConnectorCatalog.defaults.first { $0.kind == .paypalPersonal }?.provider, "Official PayPal Transaction Search API")
-        XCTAssertEqual(FinanceConnectorCatalog.defaults.first { $0.kind == .paypalPersonal }?.risk, .accountEligibilityRequired)
         XCTAssertTrue(FinanceAccessMethod.regulatedOpenBanking.usesEnableBankingConsent)
         XCTAssertFalse(FinanceAccessMethod.officialOAuth.usesEnableBankingConsent)
         XCTAssertFalse(FinanceAccessMethod.manualImport.usesEnableBankingConsent)
@@ -106,7 +103,7 @@ final class FinanceDomainTests: XCTestCase {
         }
         let catalogData = try JSONSerialization.data(withJSONObject: ["connectors": connectorArray])
         let catalog = try FinanceConnectorCatalog.decode(catalogData)
-        XCTAssertEqual(catalog.connectors.map(\.kind), [.sparkasse, .revolutPersonal, .revolutBusiness, .tradeRepublic, .paypalPersonal])
+        XCTAssertEqual(catalog.connectors.map(\.kind), [.sparkasse, .revolutPersonal, .revolutBusiness, .tradeRepublic])
 
         let incompleteData = try JSONSerialization.data(withJSONObject: ["connectors": Array(connectorArray.dropLast())])
         XCTAssertThrowsError(try FinanceConnectorCatalog.decode(incompleteData))

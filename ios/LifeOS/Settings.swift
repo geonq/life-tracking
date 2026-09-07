@@ -2533,7 +2533,6 @@ private struct FinanceConnectionsSettingsView: View {
         case .revolutPersonal: .finance
         case .revolutBusiness: .business
         case .tradeRepublic: .investments
-        case .paypalPersonal: .cashFlow
         }
     }
 
@@ -2545,7 +2544,6 @@ private struct FinanceConnectionsSettingsView: View {
         case .revolutPersonal: .lifeOSTeal500
         case .revolutBusiness: LifeOSTokens.Module.business
         case .tradeRepublic: .lifeOSPurple500
-        case .paypalPersonal: .lifeOSBlue500
         }
     }
 

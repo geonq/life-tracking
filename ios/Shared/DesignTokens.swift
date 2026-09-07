@@ -263,14 +263,10 @@ public extension Color {
         darkRed: 0xFF/255, darkGreen: 0xB2/255, darkBlue: 0x24/255,
         lightRed: 0xC2/255, lightGreen: 0x74/255, lightBlue: 0x03/255
     )
-    /// Current-estimate orange. `01-color-system-v2.md` binds the estimate
-    /// series to a vivid `#EF8600`, not the amber used for `warning`. The light
-    /// stop drops to orange 600 because that same doc requires the 600/700
-    /// stops on a light canvas so saturated hues stay readable.
-    static let lifeOSSeriesEstimate = lifeOSAdaptiveColor(
-        darkRed: 0xEF/255, darkGreen: 0x86/255, darkBlue: 0x00/255,
-        lightRed: 0xC8/255, lightGreen: 0x70/255, lightBlue: 0x04/255
-    )
+    /// Current estimate — a second green semantic, kept distinct from the
+    /// target green by the existing Finance green ramp and by its dashed line.
+    /// The current product decision supersedes the older orange estimate token.
+    static let lifeOSSeriesEstimate = lifeOSFinanceGreen
     /// Text-safe semantic green. Indicators may keep the more vivid `success`.
     static let lifeOSSuccessText = lifeOSAdaptiveColor(
         darkRed: 0x30/255, darkGreen: 0xD1/255, darkBlue: 0x58/255,
@@ -386,7 +382,7 @@ public enum LifeOSTokens {
     /// Text-safe success for normal-size labels; `success` stays vivid for dots,
     /// icons, and chart series.
     public static let successText = Color.lifeOSSuccessText
-    /// warning / near-limit / estimate → readable amber in both modes
+    /// warning / near-limit → readable amber in both modes
     public static let warning = Color.lifeOSWarning
     /// Text-safe warning for normal-size labels; `warning` stays vivid for dots,
     /// icons, and chart series.
@@ -408,7 +404,7 @@ public enum LifeOSTokens {
         public static let observed = LifeOSTokens.chartObserved
         /// Target pace — success green, dashed [6,4] at 1.25pt.
         public static let target = LifeOSTokens.success
-        /// Current estimate — vivid orange `#EF8600`, dashed [3,3] at 1.5pt.
+        /// Current estimate — vivid green, dashed [3,3] at 1.5pt.
         public static let estimate = Color.lifeOSSeriesEstimate
         /// Past estimate / account history — tertiary grey, dotted at 1.25pt.
         public static let history = LifeOSTokens.metadataText

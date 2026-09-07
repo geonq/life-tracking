@@ -243,7 +243,6 @@ describe('HTTP API', () => {
         'revolut_personal',
         'revolut_business',
         'trade_republic',
-        'paypal_personal',
       ]);
       expect(finance.body.connectors.every((connector: { enabled: boolean }) => !connector.enabled)).toBe(true);
       expect(finance.body.connectors.every((connector: { requiresExplicitOptIn: boolean }) => connector.requiresExplicitOptIn)).toBe(true);
@@ -259,12 +258,6 @@ describe('HTTP API', () => {
         provider: 'Manual CSV/PDF import',
         risk: 'manual_import_only',
       });
-      expect(finance.body.connectors.find((connector: { id: string }) => connector.id === 'paypal_personal')).toMatchObject({
-        accessMethod: 'official_oauth',
-        provider: 'Official PayPal Transaction Search API',
-        risk: 'account_eligibility_required',
-      });
-
       const financeSummary = await call('/api/finance/summary');
       expect(financeSummary.status).toBe(200);
       expect(financeSummary.body.currency).toBe('EUR');

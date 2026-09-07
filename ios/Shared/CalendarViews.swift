@@ -2253,11 +2253,11 @@ private struct CalendarDayTimeline: View {
         .allowsHitTesting(interactive && isInteractionEnabled)
     }
 
-    /// iOS empty-space creation is a simple tap: the editor opens anchored at
-    /// the tapped time with the 30-minute default block (double-tap retired;
-    /// press-and-drag below stretches the range before release).
+    /// iOS empty-space creation opens on a deliberate double tap, anchored at
+    /// the tapped time with the 30-minute default block. Press-and-drag below
+    /// remains the separate gesture for stretching a range before release.
     private var creationGesture: some Gesture {
-        SpatialTapGesture(count: 1, coordinateSpace: .local)
+        SpatialTapGesture(count: 2, coordinateSpace: .local)
             .onEnded { value in
                 guard isInteractionEnabled,
                       let interval = CalendarInteractionLayout.creationInterval(
@@ -2277,7 +2277,8 @@ private struct CalendarDayTimeline: View {
     /// both pager axes exactly like an event move, every finger sample maps
     /// through one pure layout function so the live ghost and the committed
     /// range can never disagree, and release commits either the drafted range
-    /// or the anchor's default block. Double-tap creation remains available.
+    /// or the anchor's default block. Double-tap creation remains the simple
+    /// editor-opening path; this gesture is for an intentional range drag.
 #if os(iOS)
     private func creationPressDragGesture(proxy: GeometryProxy) -> some Gesture {
             LongPressGesture(minimumDuration: CalendarInteractionLayout.creationPressHoldSeconds, maximumDistance: 12)

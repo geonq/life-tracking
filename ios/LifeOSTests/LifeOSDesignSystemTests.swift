@@ -38,10 +38,11 @@ final class LifeOSDesignSystemTests: XCTestCase {
         XCTAssertEqual(LifeOSTokens.info, LifeOSTokens.accent)
 
         // Chart series semantics per §2.4.
-        // `01-color-system-v2.md` binds the estimate series to vivid orange, which is
-        // deliberately NOT the amber `warning` semantic.
+        // Estimates are vivid green by current product decision, deliberately
+        // distinct from the amber `warning` semantic and target token.
         XCTAssertEqual(LifeOSTokens.Series.estimate, Color.lifeOSSeriesEstimate)
         XCTAssertNotEqual(LifeOSTokens.Series.estimate, LifeOSTokens.warning)
+        XCTAssertNotEqual(LifeOSTokens.Series.estimate, LifeOSTokens.Series.target)
         XCTAssertEqual(LifeOSTokens.Series.target, LifeOSTokens.success)
         XCTAssertEqual(LifeOSTokens.Series.history, LifeOSTokens.metadataText)
     }

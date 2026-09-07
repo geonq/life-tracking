@@ -3,7 +3,7 @@ import Charts
 
 // MARK: - Projection chart (02-charts-rings-widgets.md §2) — 4-series model.
 //
-// Target (green dashed) / Actual (blue solid, area fill) / Current estimate (orange dashed) /
+// Target (green dashed) / Actual (blue solid, area fill) / Current estimate (green dashed) /
 // Past estimate (grey dotted, only if a prior-estimate series is actually stored — it is not,
 // see DemoUsageAnalytics / UsageAnalyticsSnapshot, so this series is omitted rather than
 // fabricated).
