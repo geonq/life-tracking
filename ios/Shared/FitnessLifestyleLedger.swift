@@ -1982,13 +1982,31 @@ public final class FitnessLifestyleLedgerStore {
     private func insert(_ event: FitnessLifestyleEvent) throws -> FitnessLifestyleEvent {
         try mutate { state in
             try FitnessLifestyleValidation.validate(event)
-            guard !state.events.contains(where: { $0.id == event.id }) else {
+            // One pass builds both identity sets instead of two independent
+            // `.contains(where:)` scans over the full history; membership
+            // lookup afterward is O(1). Built fresh from `state.events` (the
+            // snapshot `mutate` just read from disk this call), so there is
+            // no cross-call cache to go stale.
+            var seenIDs = Set<UUID>()
+            var seenSourceSampleUUIDs = Set<UUID>()
+            seenIDs.reserveCapacity(state.events.count)
+            for existing in state.events {
+                seenIDs.insert(existing.id)
+                if let sourceSampleUUID = existing.sourceSampleUUID {
+                    seenSourceSampleUUIDs.insert(sourceSampleUUID)
+                }
+            }
+            guard !seenIDs.contains(event.id) else {
                 throw FitnessLifestyleStoreError.invalidEvent("duplicate id")
             }
             if let sourceSampleUUID = event.sourceSampleUUID,
-               state.events.contains(where: { $0.sourceSampleUUID == sourceSampleUUID }) {
+               seenSourceSampleUUIDs.contains(sourceSampleUUID) {
                 throw FitnessLifestyleStoreError.invalidEvent("duplicate source sample identity")
             }
+            // The new event is not part of the same-day group precomputed
+            // anywhere yet, so this one call still filters the full array —
+            // it happens once per insert (not once per active event), so it
+            // stays O(n), not O(n^2).
             try validateConflict(for: event, in: state.events)
             state.events.append(event)
             return event
@@ -2474,9 +2492,33 @@ public final class FitnessLifestyleLedgerStore {
         try validateLineageGraph(state.events)
         // Validate active conflicts as a final invariant, including a state
         // loaded from disk rather than only newly inserted events.
+        //
+        // Each event's conflict check only ever concerns other active events
+        // with the same (kind, localDay, timeZoneIdentifier) — the exact rule
+        // `validateConflict` filters for internally. Grouping once up front
+        // and handing each event only its own group (instead of the full
+        // `state.events` array) keeps this loop O(n) overall rather than
+        // O(n) work per active event (O(n^2) for the whole state): the
+        // grouping is unchanged, so the conflicts detected are identical,
+        // only the amount of array scanning changes.
+        let activeConflictGroups = Dictionary(
+            grouping: state.events.filter(\.isActive),
+            by: Self.conflictGroupKey(for:)
+        )
         for event in state.events where event.isActive {
-            try validateConflict(for: event, in: state.events, excluding: [event.id])
+            let sameGroup = activeConflictGroups[Self.conflictGroupKey(for: event)] ?? []
+            try validateConflict(for: event, in: sameGroup, excluding: [event.id])
         }
+    }
+
+    private struct ConflictGroupKey: Hashable {
+        let kind: FitnessLifestyleKind
+        let localDay: String
+        let timeZoneIdentifier: String
+    }
+
+    private static func conflictGroupKey(for event: FitnessLifestyleEvent) -> ConflictGroupKey {
+        ConflictGroupKey(kind: event.kind, localDay: event.localDay, timeZoneIdentifier: event.timeZoneIdentifier)
     }
 
     /// Validates the complete revision graph rather than only the new node.

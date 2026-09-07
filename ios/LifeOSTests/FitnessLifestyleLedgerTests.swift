@@ -1029,6 +1029,116 @@ final class FitnessLifestyleLedgerTests: XCTestCase {
         XCTAssertEqual(reloaded.reminderContext, .nightly)
         XCTAssertFalse(reader.hasLoadFailure)
     }
+
+    /// QA-04 perf-fix regression: `insert(_:)` and `validateState` no longer
+    /// scan the full event array per active event (see
+    /// `FitnessLifestyleLedgerStore.validateState`'s grouped conflict check
+    /// and `insert(_:)`'s single-pass id/source-sample sets). Both are
+    /// rebuilt fresh from the state `mutate` just read off disk on every
+    /// call, so there is no persisted index to go stale — this test proves
+    /// duplicate id rejection still holds at a scale large enough to have
+    /// exposed a broken or partially-updated index, and that it holds
+    /// exactly the same way against a store reloaded fresh from disk.
+    func testDuplicateInsertIsRejectedAtScaleAndRollsBackCompletely() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("lifeos-lifestyle-dup-id-\(UUID().uuidString)", isDirectory: true)
+        let url = root.appendingPathComponent("ledger.json")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = FitnessLifestyleLedgerStore(persistenceURL: url)
+        let base = Date(timeIntervalSince1970: 1_750_000_000)
+
+        var inserted: [FitnessLifestyleEvent] = []
+        for index in 0..<250 {
+            let occurredAt = base.addingTimeInterval(TimeInterval(-index * 6 * 3600))
+            let event = try store.addQuantity(
+                kind: .hydration, amount: 250, unit: .milliliters,
+                occurredAt: occurredAt, timeZoneIdentifier: timeZone, now: occurredAt
+            )
+            inserted.append(event)
+        }
+        XCTAssertEqual(store.events.count, 250)
+
+        // Re-inserting a manual root with an id collision must still be
+        // rejected against the full 250-event history, whether the
+        // colliding id belongs to the very first or the very last insert.
+        let duplicateOfFirst = FitnessLifestyleEvent(
+            id: inserted[0].id, kind: .hydration, state: .quantity, value: 500, unit: .milliliters,
+            occurredAt: base.addingTimeInterval(3600), timeZoneIdentifier: timeZone,
+            createdAt: base, provenance: .manual
+        )
+        let bytesBeforeRejection = try Data(contentsOf: url)
+        XCTAssertThrowsError(try store.insertRoot(duplicateOfFirst)) { error in
+            guard case FitnessLifestyleStoreError.invalidEvent(let reason) = error else {
+                return XCTFail("unexpected error: \(error)")
+            }
+            XCTAssertEqual(reason, "duplicate id")
+        }
+        // A rejected insert must roll back completely: no event retained in
+        // memory and not a single byte rewritten on disk. Without this the
+        // test would pass even if the duplicate were appended and only later
+        // refused, leaving a half-applied mutation behind.
+        XCTAssertEqual(store.events.count, 250, "a rejected insert must not retain the event")
+        XCTAssertEqual(try Data(contentsOf: url), bytesBeforeRejection, "a rejected insert must not rewrite the file")
+
+        let duplicateOfLast = FitnessLifestyleEvent(
+            id: inserted[249].id, kind: .hydration, state: .quantity, value: 500, unit: .milliliters,
+            occurredAt: base.addingTimeInterval(3600), timeZoneIdentifier: timeZone,
+            createdAt: base, provenance: .manual
+        )
+        XCTAssertThrowsError(try store.insertRoot(duplicateOfLast)) { error in
+            guard case FitnessLifestyleStoreError.invalidEvent(let reason) = error else {
+                return XCTFail("unexpected error: \(error)")
+            }
+            XCTAssertEqual(reason, "duplicate id")
+        }
+
+        // A genuinely new event still inserts cleanly, proving the checks
+        // above rejected on identity, not by coincidentally failing closed.
+        XCTAssertNoThrow(try store.addQuantity(
+            kind: .hydration, amount: 250, unit: .milliliters,
+            occurredAt: base.addingTimeInterval(-250 * 6 * 3600), timeZoneIdentifier: timeZone, now: base
+        ))
+        XCTAssertEqual(store.events.count, 251)
+
+        // Reload from disk into a fresh store instance and re-check. Note
+        // what this does and does not prove: duplicate rejection is enforced
+        // at TWO layers -- the guard in `insert` and the backstop in
+        // `validateState` -- and both throw the same reason, so this cannot
+        // attribute the rejection to either one. It proves the end-to-end
+        // contract holds at scale and across a reload, which is the property
+        // a caller actually depends on.
+        let reloaded = FitnessLifestyleLedgerStore(persistenceURL: url)
+        XCTAssertEqual(reloaded.events.count, 251)
+        let duplicateAfterReload = FitnessLifestyleEvent(
+            id: inserted[125].id, kind: .hydration, state: .quantity, value: 500, unit: .milliliters,
+            occurredAt: base.addingTimeInterval(3600), timeZoneIdentifier: timeZone,
+            createdAt: base, provenance: .manual
+        )
+        XCTAssertThrowsError(try reloaded.insertRoot(duplicateAfterReload)) { error in
+            guard case FitnessLifestyleStoreError.invalidEvent(let reason) = error else {
+                return XCTFail("unexpected error: \(error)")
+            }
+            XCTAssertEqual(reason, "duplicate id")
+        }
+
+        // Duplicate source-sample identity is checked the same way and must
+        // also still fail closed at this scale and after reload.
+        let sampleID = UUID()
+        _ = try reloaded.insertObservedQuantity(
+            kind: .caffeine, amount: 50, unit: .milligrams,
+            occurredAt: base.addingTimeInterval(-1000 * 3600), timeZoneIdentifier: timeZone,
+            sourceSampleUUID: sampleID, sourceSampleRevision: "uuid-fallback", now: base
+        )
+        XCTAssertThrowsError(try reloaded.insertObservedQuantity(
+            kind: .caffeine, amount: 50, unit: .milligrams,
+            occurredAt: base.addingTimeInterval(-1001 * 3600), timeZoneIdentifier: timeZone,
+            sourceSampleUUID: sampleID, sourceSampleRevision: "uuid-fallback", now: base
+        )) { error in
+            guard case FitnessLifestyleStoreError.invalidEvent(let reason) = error else {
+                return XCTFail("unexpected error: \(error)")
+            }
+            XCTAssertEqual(reason, "duplicate source sample identity")
+        }
+    }
 }
 
 private final class FitnessLifestyleReminderFakeClient: FitnessLifestyleNotificationClient {
