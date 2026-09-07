@@ -713,7 +713,28 @@ public struct ClipperSnapshot: Codable, Equatable, Sendable {
         let observed = metrics?.hasObservedMetric == true || accounts?.contains(where: clipperHasObservedDetail) == true
         let uniqueAccounts = accounts.map { Set($0.map(\.id)).count == $0.count } ?? true
         let uniqueBreakdowns = breakdowns.map { Set($0.map(\.id)).count == $0.count } ?? true
-        let uniqueTrends = trends.map { Set($0.map(\.id)).count == $0.count } ?? true
+        // Trend points form a time-series log, not identity-keyed entities:
+        // a corrected observation can legitimately share a timestamp with the
+        // one it supersedes (OverviewChartProjection.preferredClipperTrend
+        // resolves that tie by keeping the last source occurrence). What
+        // remains invalid is a byte-identical trend entry appearing twice,
+        // which signals replay/corruption rather than a correction.
+        // Two entries can only be equal if their timestamps are, so grouping by
+        // timestamp keeps this linear for realistic payloads instead of
+        // comparing every pair. Responses are already capped at
+        // `maximumReadOnlyResponseBytes`, and a pairwise scan over a full
+        // 1 MiB of trend points would be millions of struct comparisons on a
+        // decode path.
+        let uniqueTrends = trends.map { list -> Bool in
+            var seenByTimestamp: [Date: [ClipperTrendPoint]] = [:]
+            for point in list {
+                var sameTimestamp = seenByTimestamp[point.at, default: []]
+                if sameTimestamp.contains(point) { return false }
+                sameTimestamp.append(point)
+                seenByTimestamp[point.at] = sameTimestamp
+            }
+            return true
+        } ?? true
         var nestedObservationDates = [provenance.observedAt]
         if let metrics {
             nestedObservationDates.append(contentsOf: clipperMetricObservationDates(metrics))

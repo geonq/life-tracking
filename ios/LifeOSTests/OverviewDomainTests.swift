@@ -153,6 +153,24 @@ final class OverviewDomainTests: XCTestCase {
         XCTAssertEqual(selection.points.map(\.value), [220, 240])
     }
 
+    func testClipperTrendProjectionUsesLastSourceOccurrenceWhenSourceOrderIsReversed() throws {
+        // Regression guard: put the numerically larger observation FIRST in
+        // source order and the smaller one LAST, so a correct implementation
+        // must select the smaller (last-in-source) value. This rules out a
+        // fix that coincidentally picks the larger value, or the first
+        // occurrence, rather than genuinely tracking source order.
+        let now = Date()
+        let higherFirst = makeTrend(at: now.addingTimeInterval(-3_600), views: 220, subscribers: 11, revenueCents: 600)
+        let lowerLast = makeTrend(at: now.addingTimeInterval(-3_600), views: 100, subscribers: 10, revenueCents: 500)
+        let later = makeTrend(at: now.addingTimeInterval(-1_800), views: 240, subscribers: 12, revenueCents: 700)
+        let clipper = try makeClipperSnapshot(trends: [higherFirst, lowerLast, later])
+
+        let selection = try XCTUnwrap(OverviewChartProjection.preferredClipperTrend(from: clipper.trends ?? []))
+
+        XCTAssertEqual(selection.metric, .views)
+        XCTAssertEqual(selection.points.map(\.value), [100, 240])
+    }
+
     func testOverviewChartAxisUsesTimeForSubDayAndDayForLongerWindows() {
         let start = Date(timeIntervalSince1970: 1_800_000_000)
         let short = [
