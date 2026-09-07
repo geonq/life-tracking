@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 @testable import LifeOS
 
 final class LifeOSDesignSystemTests: XCTestCase {
@@ -37,7 +38,10 @@ final class LifeOSDesignSystemTests: XCTestCase {
         XCTAssertEqual(LifeOSTokens.info, LifeOSTokens.accent)
 
         // Chart series semantics per §2.4.
-        XCTAssertEqual(LifeOSTokens.Series.estimate, LifeOSTokens.warning)
+        // `01-color-system-v2.md` binds the estimate series to vivid orange, which is
+        // deliberately NOT the amber `warning` semantic.
+        XCTAssertEqual(LifeOSTokens.Series.estimate, Color.lifeOSSeriesEstimate)
+        XCTAssertNotEqual(LifeOSTokens.Series.estimate, LifeOSTokens.warning)
         XCTAssertEqual(LifeOSTokens.Series.target, LifeOSTokens.success)
         XCTAssertEqual(LifeOSTokens.Series.history, LifeOSTokens.metadataText)
     }

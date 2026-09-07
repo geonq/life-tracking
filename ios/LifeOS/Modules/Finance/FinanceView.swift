@@ -1015,7 +1015,7 @@ private struct FinanceDetailChartCard: View {
                 if points.isEmpty {
                     Text("Est. net worth by \(FinanceDateFormatter.short(value.targetDate)): \(FinanceCurrencyFormatter.euro(cents: value.displayRoundedValueCents)) (based on the full observed history, not this range).")
                         .font(LifeOSFont.axis())
-                        .foregroundStyle(LifeOSTokens.Hue.orange.base)
+                        .foregroundStyle(LifeOSTokens.Series.estimate)
                 } else {
                     EmptyView()
                 }
@@ -1333,24 +1333,24 @@ private struct FinanceLineChart: View {
                     }
                     .trim(from: 0, to: drawn)
                     .stroke(
-                        LifeOSTokens.Hue.orange.base,
+                        LifeOSTokens.Series.estimate,
                         style: StrokeStyle(lineWidth: 1.5, lineCap: .round, dash: [3, 3])
                     )
 
                     Circle()
                         .fill(LifeOSTokens.surface)
-                        .overlay(Circle().stroke(LifeOSTokens.Hue.orange.base, lineWidth: 1.5))
+                        .overlay(Circle().stroke(LifeOSTokens.Series.estimate, lineWidth: 1.5))
                         .frame(width: 8, height: 8)
                         .position(end)
                         .opacity(drawn)
 
                     Text("Est. \(FinanceDateFormatter.short(projection.targetDate)) · \(FinanceCurrencyFormatter.euro(cents: projection.displayRoundedValueCents))")
                         .font(LifeOSFont.axis().weight(.semibold))
-                        .foregroundStyle(LifeOSTokens.Hue.orange.base)
+                        .foregroundStyle(LifeOSTokens.Series.estimate)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 3)
                         .background(LifeOSTokens.surface, in: Capsule())
-                        .overlay(Capsule().stroke(LifeOSTokens.Hue.orange.base.opacity(0.4), lineWidth: 1))
+                        .overlay(Capsule().stroke(LifeOSTokens.Series.estimate.opacity(0.4), lineWidth: 1))
                         .position(x: min(max(end.x, 60), size.width - 60), y: max(end.y - 16, 12))
                         .opacity(drawn)
                         .accessibilityElement(children: .ignore)
