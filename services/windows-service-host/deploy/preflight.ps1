@@ -83,11 +83,14 @@ Assert-TrustedSourcePath $gatewayEntry $operatorSid
 Assert-TrustedSourcePath $hostSource $operatorSid
 
 # Exercise the transferred source before any service, task, data, ACL, or
-# Serve mutation. The behavioral fixture uses a local fake Tailscale command;
-# it never contacts or changes the machine's real Tailscale state.
-& $staticDeploymentTest | Out-Host
-& $behaviorDeploymentTest | Out-Host
-& $legacyServeDeploymentTest | Out-Host
+# Serve mutation. Run each suite through the reviewed native-command wrapper
+# so a fixture's `exit` can terminate only its child PowerShell process. The
+# behavioral fixtures use local fake Tailscale commands; they never contact or
+# change the machine's real Tailscale state.
+foreach ($deploymentTest in @($staticDeploymentTest, $behaviorDeploymentTest, $legacyServeDeploymentTest)) {
+    $testResult = Invoke-NativeChecked -FilePath $deploymentTest -ArgumentList ([string[]]@())
+    $testResult.Output | Out-Host
+}
 
 # Validate the complete source-side Python import closure before any service
 # is stopped. The installer later stages these exact files, so an import

@@ -140,6 +140,7 @@ Assert-Text 'Get-TailscaleServeFingerprint' 'Serve rollback fingerprints unrelat
 Assert-Text 'Remove-LifeOSTailscaleServeRoute' 'Serve rollback removes only the LifeOS route.'
 Assert-Text 'ExpectedAfterJson' 'Serve rollback requires an authenticated post-install snapshot.'
 Assert-Text 'Deployment.Behavior.Tests.ps1' 'Behavioral deployment coverage is transferred.'
+Assert-Text 'Invoke-NativeChecked -FilePath \$deploymentTest' 'Preflight runs deployment suites in isolated PowerShell processes.'
 Assert-Text 'Restore-TailscaleServeSnapshot' 'Tailscale Serve state is restored on rollback.'
 Assert-Text 'Set-SecretAcl \$tailscaleEdgeTokenPath' 'Gateway service can read only the token file.'
 Assert-Text 'Assert-NoBroadAcl \$tailscaleEdgeTokenPath' 'Trusted edge token ACL is checked for broad grants.'
