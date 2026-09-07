@@ -392,6 +392,16 @@ public struct FitnessLifestyleSettings: Codable, Equatable, Sendable {
     public var reminderEnabled: Bool
     public var reminderContext: FitnessLifestyleReminderContext
     public var reminderFoldPolicy: FitnessLifestyleLocalTimeFoldPolicy
+    /// A user-entered bedtime (minutes since local midnight), source for the
+    /// `.beforeBedtime` reminder context. `nil` means "not set" — this is
+    /// never inferred from HealthKit or defaulted; an absent value must
+    /// degrade the bedtime-relative cutoff honestly rather than assume a
+    /// clock time the user never entered.
+    public var bedtimeMinutes: Int?
+    /// Minutes before `bedtimeMinutes` at which the caffeine cutoff reminder
+    /// should fire. Caffeine-only; descriptive scheduling input, not a dose
+    /// or health recommendation.
+    public var caffeineCutoffOffsetMinutes: Int?
     public var updatedAt: Date
 
     public init(
@@ -403,6 +413,8 @@ public struct FitnessLifestyleSettings: Codable, Equatable, Sendable {
         reminderEnabled: Bool = false,
         reminderContext: FitnessLifestyleReminderContext = .custom,
         reminderFoldPolicy: FitnessLifestyleLocalTimeFoldPolicy = .earlierOffset,
+        bedtimeMinutes: Int? = nil,
+        caffeineCutoffOffsetMinutes: Int? = nil,
         updatedAt: Date = Date()
     ) {
         self.kind = kind
@@ -413,7 +425,19 @@ public struct FitnessLifestyleSettings: Codable, Equatable, Sendable {
         self.reminderEnabled = reminderEnabled
         self.reminderContext = reminderContext
         self.reminderFoldPolicy = reminderFoldPolicy
+        self.bedtimeMinutes = bedtimeMinutes
+        self.caffeineCutoffOffsetMinutes = caffeineCutoffOffsetMinutes
         self.updatedAt = updatedAt
+    }
+
+    /// Resolves a bedtime-relative caffeine cutoff to an absolute
+    /// minutes-since-local-midnight value, wrapping across midnight. Returns
+    /// `nil` when either input is absent or out of range — the caller must
+    /// treat that as "context unavailable", never substitute a default.
+    public static func resolvedBedtimeCutoffMinutes(bedtimeMinutes: Int?, offsetMinutes: Int?) -> Int? {
+        guard let bedtimeMinutes, (0..<1_440).contains(bedtimeMinutes),
+              let offsetMinutes, (0..<1_440).contains(offsetMinutes) else { return nil }
+        return ((bedtimeMinutes - offsetMinutes) % 1_440 + 1_440) % 1_440
     }
 
     public static func defaults(for kind: FitnessLifestyleKind) -> FitnessLifestyleSettings {
@@ -438,6 +462,10 @@ public enum FitnessLifestyleReminderContext: String, Codable, CaseIterable, Send
     case beforeLunch
     case nightly
     case custom
+    /// Caffeine-only. The reminder time is derived from `bedtimeMinutes`
+    /// minus `caffeineCutoffOffsetMinutes`, not entered directly. Descriptive
+    /// scheduling input only — not a health claim about sleep.
+    case beforeBedtime
 
     public var label: String {
         switch self {
@@ -445,6 +473,7 @@ public enum FitnessLifestyleReminderContext: String, Codable, CaseIterable, Send
         case .beforeLunch: return "Before lunch"
         case .nightly: return "Nightly"
         case .custom: return "Custom"
+        case .beforeBedtime: return "Before bedtime"
         }
     }
 }
@@ -1027,6 +1056,7 @@ public final class FitnessLifestyleReminderReconciler {
         case .beforeLunch: body = "Descriptive \(kindName) reminder · configured before lunch."
         case .nightly: body = "Descriptive \(kindName) reminder · configured nightly."
         case .custom: body = "Descriptive \(kindName) reminder · your configured time."
+        case .beforeBedtime: body = "Descriptive \(kindName) reminder · configured before your set bedtime."
         }
         let currentDay = FitnessLifestyleTime.localDay(for: now, timeZoneIdentifier: timeZoneIdentifier)
         guard !currentDay.isEmpty else {
@@ -1521,6 +1551,38 @@ private enum FitnessLifestyleValidation {
         guard !settings.reminderEnabled || settings.reminderTimeMinutes != nil else {
             throw FitnessLifestyleStoreError.invalidSettings("enabled reminder requires a time")
         }
+        if let bedtimeMinutes = settings.bedtimeMinutes {
+            guard (0..<24 * 60).contains(bedtimeMinutes) else {
+                throw FitnessLifestyleStoreError.invalidSettings("bedtime")
+            }
+        }
+        if let cutoffOffsetMinutes = settings.caffeineCutoffOffsetMinutes {
+            guard (0..<24 * 60).contains(cutoffOffsetMinutes) else {
+                throw FitnessLifestyleStoreError.invalidSettings("caffeine cutoff offset")
+            }
+        }
+        if settings.reminderContext == .beforeBedtime {
+            // Bedtime-relative scheduling is a caffeine-only descriptive
+            // concept; other kinds keep their own reminder contexts.
+            guard settings.kind == .caffeine else {
+                throw FitnessLifestyleStoreError.invalidSettings("beforeBedtime context is caffeine-only")
+            }
+            // The stored reminder time must always equal the resolved
+            // bedtime-minus-offset value. This keeps the existing reconciler
+            // path (which reads reminderTimeMinutes directly) authoritative
+            // without a parallel scheduling code path, and it prevents a
+            // stale reminderTimeMinutes from surviving a bedtime edit: an
+            // absent bedtime resolves to `nil`, and the "enabled reminder
+            // requires a time" rule above then forces reminderEnabled false —
+            // an honest degrade rather than a silently kept-alive schedule.
+            let resolved = FitnessLifestyleSettings.resolvedBedtimeCutoffMinutes(
+                bedtimeMinutes: settings.bedtimeMinutes,
+                offsetMinutes: settings.caffeineCutoffOffsetMinutes
+            )
+            guard settings.reminderTimeMinutes == resolved else {
+                throw FitnessLifestyleStoreError.invalidSettings("beforeBedtime reminder time must match bedtime minus offset")
+            }
+        }
         guard settings.updatedAt.timeIntervalSinceReferenceDate.isFinite else {
             throw FitnessLifestyleStoreError.invalidSettings("updatedAt")
         }
@@ -1689,6 +1751,8 @@ private struct FitnessLifestyleStorageSettings: Codable {
     let reminderEnabled: Bool
     let reminderContext: FitnessLifestyleReminderContext?
     let reminderFoldPolicy: FitnessLifestyleLocalTimeFoldPolicy?
+    let bedtimeMinutes: Int?
+    let caffeineCutoffOffsetMinutes: Int?
     let updatedAt: Date
 
     init(_ value: FitnessLifestyleSettings) {
@@ -1700,6 +1764,8 @@ private struct FitnessLifestyleStorageSettings: Codable {
         reminderEnabled = value.reminderEnabled
         reminderContext = value.reminderContext
         reminderFoldPolicy = value.reminderFoldPolicy
+        bedtimeMinutes = value.bedtimeMinutes
+        caffeineCutoffOffsetMinutes = value.caffeineCutoffOffsetMinutes
         updatedAt = value.updatedAt
     }
 
@@ -1708,11 +1774,13 @@ private struct FitnessLifestyleStorageSettings: Codable {
                                  reminderTimeMinutes: reminderTimeMinutes, reminderEnabled: reminderEnabled,
                                  reminderContext: reminderContext ?? .custom,
                                  reminderFoldPolicy: reminderFoldPolicy ?? .earlierOffset,
+                                 bedtimeMinutes: bedtimeMinutes,
+                                 caffeineCutoffOffsetMinutes: caffeineCutoffOffsetMinutes,
                                  updatedAt: updatedAt)
     }
 
     init(from decoder: Decoder) throws {
-        try rejectUnknownFitnessLifestyleKeys(decoder, allowed: ["kind", "goal", "quickAmount", "quickUnit", "reminderTimeMinutes", "reminderEnabled", "reminderContext", "reminderFoldPolicy", "updatedAt"])
+        try rejectUnknownFitnessLifestyleKeys(decoder, allowed: ["kind", "goal", "quickAmount", "quickUnit", "reminderTimeMinutes", "reminderEnabled", "reminderContext", "reminderFoldPolicy", "bedtimeMinutes", "caffeineCutoffOffsetMinutes", "updatedAt"])
         let c = try decoder.container(keyedBy: CodingKeys.self)
         kind = try c.decode(FitnessLifestyleKind.self, forKey: .kind)
         goal = try c.decodeIfPresent(Double.self, forKey: .goal)
@@ -1722,10 +1790,15 @@ private struct FitnessLifestyleStorageSettings: Codable {
         reminderEnabled = try c.decode(Bool.self, forKey: .reminderEnabled)
         reminderContext = try c.decodeIfPresent(FitnessLifestyleReminderContext.self, forKey: .reminderContext)
         reminderFoldPolicy = try c.decodeIfPresent(FitnessLifestyleLocalTimeFoldPolicy.self, forKey: .reminderFoldPolicy)
+        // Absent in a ledger written before this field existed. Decoding to
+        // `nil` here (never a fabricated clock time) is exactly the honest
+        // "not set" degrade the bedtime-relative cutoff depends on.
+        bedtimeMinutes = try c.decodeIfPresent(Int.self, forKey: .bedtimeMinutes)
+        caffeineCutoffOffsetMinutes = try c.decodeIfPresent(Int.self, forKey: .caffeineCutoffOffsetMinutes)
         updatedAt = try c.decode(Date.self, forKey: .updatedAt)
     }
 
-    private enum CodingKeys: String, CodingKey { case kind, goal, quickAmount, quickUnit, reminderTimeMinutes, reminderEnabled, reminderContext, reminderFoldPolicy, updatedAt }
+    private enum CodingKeys: String, CodingKey { case kind, goal, quickAmount, quickUnit, reminderTimeMinutes, reminderEnabled, reminderContext, reminderFoldPolicy, bedtimeMinutes, caffeineCutoffOffsetMinutes, updatedAt }
 }
 
 private struct FitnessLifestyleStorageEnvelope: Codable {

@@ -875,6 +875,160 @@ final class FitnessLifestyleLedgerTests: XCTestCase {
                                                     timeZoneIdentifier: timeZone))
         XCTAssertEqual(try Data(contentsOf: url), legacy)
     }
+
+    // MARK: - Bedtime-relative caffeine cutoff (BF-0431)
+
+    func testResolvedBedtimeCutoffMinutesIsAbsentWithoutBothInputs() {
+        XCTAssertNil(FitnessLifestyleSettings.resolvedBedtimeCutoffMinutes(bedtimeMinutes: nil, offsetMinutes: 360))
+        XCTAssertNil(FitnessLifestyleSettings.resolvedBedtimeCutoffMinutes(bedtimeMinutes: 23 * 60, offsetMinutes: nil))
+        XCTAssertNil(FitnessLifestyleSettings.resolvedBedtimeCutoffMinutes(bedtimeMinutes: -1, offsetMinutes: 60))
+        XCTAssertNil(FitnessLifestyleSettings.resolvedBedtimeCutoffMinutes(bedtimeMinutes: 60, offsetMinutes: 1_440))
+    }
+
+    /// Bedtime 00:30, cutoff 6h before bed. The naive subtraction goes
+    /// negative (30 - 360 = -330) and must wrap to the correct wall-clock
+    /// minute on the *previous* side of midnight (18:30), not clamp or crash.
+    func testResolvedBedtimeCutoffMinutesWrapsAcrossMidnight() {
+        let bedtime = 0 * 60 + 30
+        let offset = 6 * 60
+        let resolved = FitnessLifestyleSettings.resolvedBedtimeCutoffMinutes(bedtimeMinutes: bedtime, offsetMinutes: offset)
+        XCTAssertEqual(resolved, 18 * 60 + 30)
+    }
+
+    func testResolvedBedtimeCutoffMinutesHandlesExactMidnightBedtime() {
+        // Bedtime at local midnight, 2h cutoff: falls entirely on the prior
+        // day's clock face (22:00), still a single correct wrap.
+        let resolved = FitnessLifestyleSettings.resolvedBedtimeCutoffMinutes(bedtimeMinutes: 0, offsetMinutes: 2 * 60)
+        XCTAssertEqual(resolved, 22 * 60)
+    }
+
+    /// The wrapped minutes-of-day value must resolve through the same
+    /// timezone/DST-aware date machinery every other reminder context uses,
+    /// so a bedtime-relative cutoff crossing midnight still lands on the
+    /// correct local calendar day and absolute instant.
+    func testBeforeBedtimeCutoffCrossingMidnightResolvesToCorrectAbsoluteInstant() throws {
+        let cutoffMinutes = try XCTUnwrap(FitnessLifestyleSettings.resolvedBedtimeCutoffMinutes(bedtimeMinutes: 30, offsetMinutes: 6 * 60))
+        XCTAssertEqual(cutoffMinutes, 18 * 60 + 30)
+        let settings = FitnessLifestyleSettings(
+            kind: .caffeine,
+            reminderTimeMinutes: cutoffMinutes,
+            reminderEnabled: true,
+            reminderContext: .beforeBedtime,
+            bedtimeMinutes: 30,
+            caffeineCutoffOffsetMinutes: 6 * 60
+        )
+        let fixedNow = try FitnessLifestyleTime.date(
+            forLocalDay: "2026-11-01", timeMinutes: 6 * 60,
+            timeZoneIdentifier: timeZone, foldPolicy: .earlierOffset
+        )
+        let request = try XCTUnwrap(try FitnessLifestyleReminderReconciler.requests(
+            for: settings, timeZoneIdentifier: timeZone, now: fixedNow, lookAheadDays: 1
+        ).first)
+        XCTAssertEqual(request.hour, 18)
+        XCTAssertEqual(request.minute, 30)
+        let fireDate = try XCTUnwrap(request.fireDate)
+        let expected = try FitnessLifestyleTime.date(
+            forLocalDay: "2026-11-01", timeMinutes: 18 * 60 + 30,
+            timeZoneIdentifier: timeZone, foldPolicy: .earlierOffset
+        )
+        XCTAssertEqual(fireDate, expected)
+        XCTAssertTrue(request.body.lowercased().contains("bedtime"))
+    }
+
+    func testBeforeBedtimeContextIsCaffeineOnly() throws {
+        let cutoffMinutes = try XCTUnwrap(FitnessLifestyleSettings.resolvedBedtimeCutoffMinutes(bedtimeMinutes: 23 * 60, offsetMinutes: 6 * 60))
+        let hydration = FitnessLifestyleSettings(
+            kind: .hydration,
+            reminderTimeMinutes: cutoffMinutes,
+            reminderEnabled: true,
+            reminderContext: .beforeBedtime,
+            bedtimeMinutes: 23 * 60,
+            caffeineCutoffOffsetMinutes: 6 * 60
+        )
+        let store = FitnessLifestyleLedgerStore(persistenceURL: nil)
+        XCTAssertThrowsError(try store.saveSettings(hydration))
+    }
+
+    func testBeforeBedtimeContextRequiresReminderTimeToMatchResolvedCutoff() throws {
+        let store = FitnessLifestyleLedgerStore(persistenceURL: nil)
+        let mismatched = FitnessLifestyleSettings(
+            kind: .caffeine,
+            reminderTimeMinutes: 21 * 60, // does not equal bedtime(23:00) - offset(6h) = 17:00
+            reminderEnabled: true,
+            reminderContext: .beforeBedtime,
+            bedtimeMinutes: 23 * 60,
+            caffeineCutoffOffsetMinutes: 6 * 60
+        )
+        XCTAssertThrowsError(try store.saveSettings(mismatched))
+    }
+
+    /// A caffeine cutoff reminder enabled with `.beforeBedtime` but no
+    /// bedtime configured must never fall back to an assumed clock time —
+    /// resolved is `nil`, so `reminderTimeMinutes` must also be `nil`, which
+    /// the existing "enabled reminder requires a time" rule then rejects.
+    /// This is the honest degrade path, not a crash or silent default.
+    func testBeforeBedtimeContextWithoutBedtimeCannotBeEnabled() {
+        let store = FitnessLifestyleLedgerStore(persistenceURL: nil)
+        let noBedtime = FitnessLifestyleSettings(
+            kind: .caffeine,
+            reminderTimeMinutes: nil,
+            reminderEnabled: true,
+            reminderContext: .beforeBedtime,
+            bedtimeMinutes: nil,
+            caffeineCutoffOffsetMinutes: 6 * 60
+        )
+        XCTAssertThrowsError(try store.saveSettings(noBedtime))
+        // Disabled is fine: the source facts can be stored (or absent)
+        // without a schedulable reminder.
+        let disabled = FitnessLifestyleSettings(
+            kind: .caffeine,
+            reminderTimeMinutes: nil,
+            reminderEnabled: false,
+            reminderContext: .beforeBedtime,
+            bedtimeMinutes: nil,
+            caffeineCutoffOffsetMinutes: nil
+        )
+        XCTAssertNoThrow(try store.saveSettings(disabled))
+    }
+
+    /// A ledger written before this feature existed has no `bedtimeMinutes`
+    /// or `caffeineCutoffOffsetMinutes` keys at all. Decoding it must produce
+    /// an honest absent value for both — never a fabricated bedtime such as
+    /// 23:00 masquerading as something the user entered.
+    func testLegacyPersistedSettingsWithoutBedtimeFieldsDecodeToAbsentValues() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("lifeos-lifestyle-legacy-bedtime-\(UUID().uuidString)", isDirectory: true)
+        let url = root.appendingPathComponent("ledger.json")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let writer = FitnessLifestyleLedgerStore(persistenceURL: url)
+        try writer.saveSettings(FitnessLifestyleSettings(
+            kind: .caffeine,
+            goal: 200,
+            quickAmount: 50,
+            quickUnit: .milligrams,
+            reminderTimeMinutes: 21 * 60,
+            reminderEnabled: true,
+            reminderContext: .nightly,
+            updatedAt: Date(timeIntervalSince1970: 1_750_000_000)
+        ))
+        let onDisk = try Data(contentsOf: url)
+        guard let object = try JSONSerialization.jsonObject(with: onDisk) as? [String: Any],
+              let settingsArray = object["settings"] as? [[String: Any]],
+              let caffeineSettings = settingsArray.first(where: { ($0["kind"] as? String) == "caffeine" }) else {
+            return XCTFail("expected encoded caffeine settings")
+        }
+        // The pre-feature shape genuinely never wrote these keys — confirm
+        // the fixture matches that shape rather than asserting on a key this
+        // test removed itself.
+        XCTAssertNil(caffeineSettings["bedtimeMinutes"])
+        XCTAssertNil(caffeineSettings["caffeineCutoffOffsetMinutes"])
+
+        let reader = FitnessLifestyleLedgerStore(persistenceURL: url)
+        let reloaded = try XCTUnwrap(reader.savedSettings(for: .caffeine))
+        XCTAssertNil(reloaded.bedtimeMinutes)
+        XCTAssertNil(reloaded.caffeineCutoffOffsetMinutes)
+        XCTAssertEqual(reloaded.reminderContext, .nightly)
+        XCTAssertFalse(reader.hasLoadFailure)
+    }
 }
 
 private final class FitnessLifestyleReminderFakeClient: FitnessLifestyleNotificationClient {

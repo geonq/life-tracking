@@ -1090,7 +1090,15 @@ private struct FitnessLifestyleSettingsEditor: View {
     @State private var reminderTime: Date
     @State private var reminderContext: FitnessLifestyleReminderContext
     @State private var reminderFoldPolicy: FitnessLifestyleLocalTimeFoldPolicy
+    @State private var hasBedtime: Bool
+    @State private var bedtime: Date
+    @State private var cutoffOffsetMinutes: Int
     @State private var errorMessage: String?
+
+    /// Preset offsets shown in the cutoff picker. Purely a scheduling
+    /// convenience — the app draws no line about what offset is "correct";
+    /// the user picks it.
+    private static let cutoffOffsetPresets = [120, 180, 240, 300, 360, 420, 480, 540, 600]
 
     init(kind: FitnessLifestyleKind, initialSettings: FitnessLifestyleSettings, isFixture: Bool,
          onSave: @escaping (FitnessLifestyleSettings) -> Void) {
@@ -1109,6 +1117,45 @@ private struct FitnessLifestyleSettingsEditor: View {
         components.hour = minutes / 60
         components.minute = minutes % 60
         _reminderTime = State(initialValue: Calendar.current.date(from: components) ?? Date())
+        _hasBedtime = State(initialValue: initialSettings.bedtimeMinutes != nil)
+        let bedtimeMinutes = initialSettings.bedtimeMinutes ?? 23 * 60
+        var bedtimeComponents = DateComponents()
+        bedtimeComponents.hour = bedtimeMinutes / 60
+        bedtimeComponents.minute = bedtimeMinutes % 60
+        _bedtime = State(initialValue: Calendar.current.date(from: bedtimeComponents) ?? Date())
+        _cutoffOffsetMinutes = State(initialValue: initialSettings.caffeineCutoffOffsetMinutes ?? 360)
+    }
+
+    /// The bedtime-relative context is caffeine-only (BF-0431); other kinds
+    /// never show it as a choice.
+    private var availableReminderContexts: [FitnessLifestyleReminderContext] {
+        FitnessLifestyleReminderContext.allCases.filter { $0 != .beforeBedtime || kind == .caffeine }
+    }
+
+    private var bedtimeMinutesOfDay: Int? {
+        guard hasBedtime else { return nil }
+        let components = Calendar.current.dateComponents([.hour, .minute], from: bedtime)
+        guard let hour = components.hour, let minute = components.minute else { return nil }
+        return hour * 60 + minute
+    }
+
+    private var resolvedCutoffMinutes: Int? {
+        FitnessLifestyleSettings.resolvedBedtimeCutoffMinutes(
+            bedtimeMinutes: bedtimeMinutesOfDay,
+            offsetMinutes: cutoffOffsetMinutes
+        )
+    }
+
+    private static func clockLabel(minutes: Int) -> String {
+        let normalized = ((minutes % 1_440) + 1_440) % 1_440
+        return String(format: "%02d:%02d", normalized / 60, normalized % 60)
+    }
+
+    private static func offsetDurationLabel(minutes: Int) -> String {
+        let hours = minutes / 60
+        let remainder = minutes % 60
+        if remainder == 0 { return "\(hours)h before" }
+        return "\(hours)h \(remainder)m before"
     }
 
     var body: some View {
@@ -1135,8 +1182,9 @@ private struct FitnessLifestyleSettingsEditor: View {
                 }
                 Section("Reminder preference") {
                     Toggle("Enabled", isOn: $reminderEnabled)
+                        .disabled(reminderContext == .beforeBedtime && resolvedCutoffMinutes == nil)
                     Picker("Context", selection: $reminderContext) {
-                        ForEach(FitnessLifestyleReminderContext.allCases, id: \.self) { context in
+                        ForEach(availableReminderContexts, id: \.self) { context in
                             Text(context.label).tag(context)
                         }
                     }
@@ -1145,8 +1193,29 @@ private struct FitnessLifestyleSettingsEditor: View {
                             Text(policy == .earlierOffset ? "Earlier offset" : "Later offset").tag(policy)
                         }
                     }
-                    DatePicker("Time", selection: $reminderTime, displayedComponents: .hourAndMinute)
-                        .disabled(!reminderEnabled)
+                    if reminderContext == .beforeBedtime {
+                        Toggle("Bedtime set", isOn: $hasBedtime)
+                        DatePicker("Bedtime", selection: $bedtime, displayedComponents: .hourAndMinute)
+                            .disabled(!hasBedtime)
+                        Picker("Cutoff before bedtime", selection: $cutoffOffsetMinutes) {
+                            ForEach(Self.cutoffOffsetPresets, id: \.self) { offset in
+                                Text(Self.offsetDurationLabel(minutes: offset)).tag(offset)
+                            }
+                        }
+                        .disabled(!hasBedtime)
+                        if let resolvedCutoffMinutes {
+                            LabeledContent("Reminder time", value: Self.clockLabel(minutes: resolvedCutoffMinutes))
+                        } else {
+                            Text("Set a bedtime to enable this reminder. The offset you choose is not a health recommendation — it only tells LifeOS when to remind you.")
+                                .font(LifeOSFont.caption(10))
+                                .foregroundStyle(LifeOSTokens.warning)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .accessibilityIdentifier("fitness-lifestyle-bedtime-unavailable")
+                        }
+                    } else {
+                        DatePicker("Time", selection: $reminderTime, displayedComponents: .hourAndMinute)
+                            .disabled(!reminderEnabled)
+                    }
                     Text("Local reminder is reconciled from this preference. Context is descriptive only; it is not medical advice or a causal recommendation.")
                         .font(LifeOSFont.caption(10))
                         .foregroundStyle(LifeOSTokens.warning)
@@ -1182,12 +1251,28 @@ private struct FitnessLifestyleSettingsEditor: View {
         let calendar = Calendar.current
         let components = calendar.dateComponents([.hour, .minute], from: reminderTime)
         let minutes = (components.hour ?? 0) * 60 + (components.minute ?? 0)
+        let bedtimeMinutes = bedtimeMinutesOfDay
+        let effectiveReminderTimeMinutes: Int?
+        let effectiveReminderEnabled: Bool
+        switch reminderContext {
+        case .beforeBedtime:
+            // Derived, never entered directly. An unavailable bedtime
+            // resolves to `nil` here, which forces the reminder off rather
+            // than silently keeping a stale or assumed fire time.
+            effectiveReminderTimeMinutes = resolvedCutoffMinutes
+            effectiveReminderEnabled = reminderEnabled && resolvedCutoffMinutes != nil
+        default:
+            effectiveReminderTimeMinutes = reminderEnabled ? minutes : nil
+            effectiveReminderEnabled = reminderEnabled
+        }
         let updated = FitnessLifestyleSettings(kind: kind, goal: goal, quickAmount: quick,
                                                quickUnit: quick == nil ? nil : quickUnit,
-                                               reminderTimeMinutes: reminderEnabled ? minutes : nil,
-                                               reminderEnabled: reminderEnabled,
+                                               reminderTimeMinutes: effectiveReminderTimeMinutes,
+                                               reminderEnabled: effectiveReminderEnabled,
                                                reminderContext: reminderContext,
-                                               reminderFoldPolicy: reminderFoldPolicy)
+                                               reminderFoldPolicy: reminderFoldPolicy,
+                                               bedtimeMinutes: bedtimeMinutes,
+                                               caffeineCutoffOffsetMinutes: reminderContext == .beforeBedtime ? cutoffOffsetMinutes : initialSettings.caffeineCutoffOffsetMinutes)
         do {
             try FitnessLifestyleValidationProxy.validate(updated)
             onSave(updated)
