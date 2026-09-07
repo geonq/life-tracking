@@ -22,6 +22,11 @@ struct OverviewView: View {
 
     private enum OverviewDetail: Hashable {
         case clipper
+        /// RF-20: pushed from the Finance card's Wealth row. Renders the
+        /// exact same real wealth surface Finance's own screen uses
+        /// (`FinanceWealthCard`, sourced from `FinanceWealthAllocationEngine`
+        /// over `FinanceSummary.wealth`), not a second implementation.
+        case financeWealth
     }
 
     init(
@@ -83,6 +88,11 @@ struct OverviewView: View {
                             clipperState: clipperState
                         ),
                         sourceID: OverviewSectionKind.clipper.rawValue
+                    )
+                case .financeWealth:
+                    zoomTransitioned(
+                        OverviewFinanceWealthDetail(financeSummary: financeSummary),
+                        sourceID: "finance-wealth"
                     )
                 }
             }
@@ -373,7 +383,17 @@ struct OverviewView: View {
                         usageSnapshots: usageSnapshots,
                         fitnessSnapshot: fitnessSnapshot,
                         financeSummary: financeSummary,
-                        financeState: financeState
+                        financeState: financeState,
+                        onOpenWealth: {
+                            if reduceMotion {
+                                selectedDetail = .financeWealth
+                            } else {
+                                withAnimation(LifeOSMotion.heroMorph) {
+                                    selectedDetail = .financeWealth
+                                }
+                            }
+                        },
+                        wealthHeroNamespace: reduceMotion ? nil : cardNamespace
                     )
                 }
                 .buttonStyle(.plain)
@@ -427,6 +447,55 @@ struct OverviewView: View {
 #else
         content
 #endif
+    }
+}
+
+/// Tags the Finance card's Wealth row as the zoom source for
+/// `OverviewDetail.financeWealth`, mirroring `OverviewView.zoomSource` but
+/// callable from `OverviewMetricCard`, a different type in this file that
+/// can't reach `OverviewView`'s private members.
+private extension View {
+    @ViewBuilder
+    func financeWealthHeroSource(namespace: Namespace.ID?, reduceMotion: Bool) -> some View {
+#if os(iOS)
+        if reduceMotion || namespace == nil {
+            self
+        } else if #available(iOS 18.0, *), let namespace {
+            self.matchedTransitionSource(id: "finance-wealth", in: namespace)
+        } else {
+            self
+        }
+#else
+        self
+#endif
+    }
+}
+
+/// RF-20: the Overview push destination for the Finance card's Wealth row.
+/// Reuses `FinanceWealthCard` verbatim (constructing the same
+/// `FinanceDisplaySnapshot` Finance's own screen builds), so this is the
+/// exact same real wealth surface, not a second implementation of it.
+private struct OverviewFinanceWealthDetail: View {
+    let financeSummary: FinanceSummary?
+
+    var body: some View {
+        ScrollView {
+            LifeOSResponsiveContentContainer(topPadding: 16, bottomPadding: 16) {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Wealth")
+                        .font(LifeOSFont.display())
+                        .tracking(-0.5)
+                    FinanceWealthCard(
+                        snapshot: FinanceDisplaySnapshot(summary: financeSummary, transactions: nil, usesVisualFixtures: false),
+                        onOpenConnections: nil
+                    )
+                }
+            }
+        }
+        .scrollIndicators(.hidden)
+        .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
+        .navigationTitle("Wealth")
+        .accessibilityIdentifier("overview-finance-wealth-detail")
     }
 }
 
@@ -526,6 +595,16 @@ private struct OverviewMetricCard: View {
     let fitnessSnapshot: FitnessSnapshot
     let financeSummary: FinanceSummary?
     let financeState: FinanceLoadState
+    /// RF-20: non-nil only for the Finance card, and only when a wealth
+    /// observation exists to route to. A nested `Button` inside the card's
+    /// own whole-card `Button` is deliberate — SwiftUI hit-tests innermost
+    /// views first, so this row remains independently tappable without
+    /// changing the outer card's existing "open Finance" behavior.
+    let onOpenWealth: (() -> Void)?
+    /// Threaded from `OverviewView.cardNamespace`, `nil` under Reduce Motion.
+    /// Only the Wealth row uses it (`matchedTransitionSource`) — the card's
+    /// own whole-card tap keeps its existing plain-push behavior.
+    let wealthHeroNamespace: Namespace.ID?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
 
@@ -533,7 +612,8 @@ private struct OverviewMetricCard: View {
          usageAnalytics: [UsageAnalyticsSnapshot] = [],
          clipperState: ClipperLoadState = .unavailable, clipperSnapshot: ClipperSnapshot? = nil,
          fitnessSnapshot: FitnessSnapshot = .unavailable, financeSummary: FinanceSummary? = nil,
-         financeState: FinanceLoadState = .unavailable) {
+         financeState: FinanceLoadState = .unavailable, onOpenWealth: (() -> Void)? = nil,
+         wealthHeroNamespace: Namespace.ID? = nil) {
         self.section = section
         self.featured = featured
         self.usageSnapshots = usageSnapshots
@@ -543,6 +623,8 @@ private struct OverviewMetricCard: View {
         self.fitnessSnapshot = fitnessSnapshot
         self.financeSummary = financeSummary
         self.financeState = financeState
+        self.onOpenWealth = onOpenWealth
+        self.wealthHeroNamespace = wealthHeroNamespace
     }
 
     private var title: String {
@@ -858,6 +940,7 @@ private struct OverviewMetricCard: View {
                     OverviewChartUnavailable(detail: "Finance summary is not connected.")
                         .frame(minHeight: 58)
                 }
+                financeWealthRow
             }
         case .llm:
             EmptyView()
@@ -926,6 +1009,53 @@ private struct OverviewMetricCard: View {
         return candidates.compactMap { label, metric in
             guard let metric, metric.availability == .observed, let cents = metric.amountCents else { return nil }
             return OverviewDisplayMetric(label: label, value: overviewCurrency(cents: cents))
+        }
+    }
+
+    /// RF-20: wealth is a distinct source from `financeOverviewMetrics` above
+    /// (bank cash flow) — `FinanceWealthSnapshot.observedValueCents` never
+    /// derives from transactions or account balances. `nil` here means no
+    /// wealth observation exists, and the row renders an honest unavailable
+    /// state rather than a zero.
+    private var financeWealthCents: Int? {
+        financeSummary?.wealth?.observedValueCents
+    }
+
+    @ViewBuilder
+    private var financeWealthRow: some View {
+        if let onOpenWealth {
+            Button(action: onOpenWealth) {
+                HStack(spacing: 8) {
+                    LifeOSIcon(.investments)
+                        .foregroundStyle(LifeOSTokens.Module.finance)
+                        .frame(width: 14, height: 14)
+                    Text("Wealth")
+                        .font(LifeOSFont.axis().weight(.medium))
+                        .foregroundStyle(.primary)
+                    Spacer(minLength: 6)
+                    if let financeWealthCents {
+                        Text(overviewCurrency(cents: financeWealthCents))
+                            .font(LifeOSFont.axis().weight(.semibold))
+                            .monospacedDigit()
+                    } else {
+                        Text("Unavailable")
+                            .font(LifeOSFont.axis())
+                            .foregroundStyle(LifeOSTokens.tertiaryText)
+                    }
+                    LifeOSIcon(.chevronRight)
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .frame(width: 10, height: 10)
+                }
+                .padding(.vertical, 8)
+                .padding(.horizontal, 10)
+                .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .financeWealthHeroSource(namespace: wealthHeroNamespace, reduceMotion: reduceMotion)
+            .accessibilityIdentifier("overview-finance-wealth-link")
+            .accessibilityLabel("Wealth")
+            .accessibilityValue(financeWealthCents != nil ? overviewCurrency(cents: financeWealthCents!) : "Unavailable")
+            .accessibilityHint("Opens the Finance wealth surface")
         }
     }
 

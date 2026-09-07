@@ -76,6 +76,27 @@ final class LifeOSMacSnapshotTests: XCTestCase {
         )
     }
 
+    /// RF-20: the Finance card's Wealth row shows the real observed wealth
+    /// value (never derived from cash transactions/account balances — see
+    /// `FinanceWealthSnapshot.observedValueCents`) and is the entry point
+    /// into the same real wealth surface Finance's own screen renders.
+    func testOverviewFinanceWealthRowSnapshot() throws {
+        let summary = try wealthAllocationFinanceSummary(includeUnavailableHolding: false)
+        render(
+            OverviewView(
+                snapshot: DemoDataProvider.overview,
+                usageSnapshots: DemoDataProvider.providers,
+                usageAnalytics: DemoUsageAnalytics.snapshots,
+                usageState: .demo,
+                financeSummary: summary,
+                financeState: .observed,
+                openDestination: { _ in }
+            ),
+            named: "Overview-finance-wealth-row",
+            frameSize: CGSize(width: 1_200, height: frame.height)
+        )
+    }
+
     func testResponsivePrimarySurfacesAtReviewWidths() {
         let surfaces: [(String, AnyView)] = [
             ("home", rootSurface(module: .home)),
@@ -378,6 +399,120 @@ final class LifeOSMacSnapshotTests: XCTestCase {
         render(
             FinanceView(summary: nil, usesVisualFixtures: false),
             named: "FinanceView-wealth-unavailable",
+            frameSize: financeWealthFrame
+        )
+    }
+
+    // MARK: - RF-03/RF-02(honest half)/RF-20/RF-21 Analytics & Tools
+
+    func testFinanceAnalyticsEntryListSnapshot() {
+        render(
+            FinanceAnalyticsView(
+                snapshot: FinanceDisplaySnapshot(summary: nil, transactions: nil, usesVisualFixtures: true),
+                onOpenConnections: nil,
+                selectedRange: .constant(.month),
+                selectedNetWorthPoint: .constant(nil),
+                initialEntry: nil,
+                heroNamespace: nil,
+                onClose: {}
+            ),
+            named: "FinanceAnalytics-entry-list"
+        )
+    }
+
+    func testFinanceAnalyticsEntryListReduceMotionSnapshot() {
+        render(
+            FinanceAnalyticsView(
+                snapshot: FinanceDisplaySnapshot(summary: nil, transactions: nil, usesVisualFixtures: true),
+                onOpenConnections: nil,
+                selectedRange: .constant(.month),
+                selectedNetWorthPoint: .constant(nil),
+                initialEntry: nil,
+                heroNamespace: nil,
+                onClose: {}
+            ),
+            named: "FinanceAnalytics-entry-list-reduce-motion",
+            colorScheme: .dark,
+            reduceMotion: true
+        )
+    }
+
+    /// RF-03: Wealth is a real, working Analytics route — allocation
+    /// breakdown, holdings, and the net-worth chart + linear projection, the
+    /// exact same `FinanceWealthCard`/`FinanceDetailChartCard` the main
+    /// Finance screen renders.
+    func testFinanceAnalyticsWealthSnapshot() throws {
+        let summary = try wealthAllocationFinanceSummary(includeUnavailableHolding: true)
+        render(
+            FinanceAnalyticsView(
+                snapshot: FinanceDisplaySnapshot(summary: summary, transactions: nil, usesVisualFixtures: false),
+                onOpenConnections: nil,
+                selectedRange: .constant(.month),
+                selectedNetWorthPoint: .constant(nil),
+                initialEntry: .wealth,
+                heroNamespace: nil,
+                onClose: {}
+            ),
+            named: "FinanceAnalytics-wealth",
+            frameSize: financeWealthFrame
+        )
+    }
+
+    /// RF-03: spending-abroad has no data source — `FinanceStatementImporter`
+    /// rejects non-EUR rows at import — so this must render an honest
+    /// unavailable state naming that reason, never a fabricated screen.
+    func testFinanceAnalyticsSpendingAbroadUnavailableSnapshot() {
+        render(
+            FinanceAnalyticsView(
+                snapshot: FinanceDisplaySnapshot(summary: nil, transactions: nil, usesVisualFixtures: true),
+                onOpenConnections: nil,
+                selectedRange: .constant(.month),
+                selectedNetWorthPoint: .constant(nil),
+                initialEntry: .spendingAbroad,
+                heroNamespace: nil,
+                onClose: {}
+            ),
+            named: "FinanceAnalytics-spending-abroad-unavailable"
+        )
+    }
+
+    /// RF-02 (honest-state half): no country/foreign-currency data is
+    /// ingested, so Travel renders an honest unavailable state rather than a
+    /// globe, map, or fabricated trip count. The feature half (trip model,
+    /// map UI) is out of scope pending a product decision — see HANDOFF.
+    func testFinanceAnalyticsTravelUnavailableSnapshot() {
+        render(
+            FinanceAnalyticsView(
+                snapshot: FinanceDisplaySnapshot(summary: nil, transactions: nil, usesVisualFixtures: true),
+                onOpenConnections: nil,
+                selectedRange: .constant(.month),
+                selectedNetWorthPoint: .constant(nil),
+                initialEntry: .travel,
+                heroNamespace: nil,
+                onClose: {}
+            ),
+            named: "FinanceAnalytics-travel-unavailable"
+        )
+    }
+
+    /// RF-20/RF-21: `FinanceDetailRoute.wealth` opens Finance directly into
+    /// the Analytics wealth route (not a bespoke wealth-only screen), and the
+    /// range/asset selection this view starts with is the same `@State` the
+    /// main detail panel uses — there is no parallel selection model to fall
+    /// out of sync.
+    func testFinanceViewWealthRouteOpensAnalyticsSnapshot() throws {
+        let summary = try wealthAllocationFinanceSummary(includeUnavailableHolding: false)
+        render(
+            FinanceView(summary: summary, usesVisualFixtures: false, initialDetail: .wealth),
+            named: "FinanceView-wealth-route",
+            frameSize: financeWealthFrame
+        )
+    }
+
+    func testFinanceAnalyticsEntryCardOnMainScreenSnapshot() {
+        render(
+            FinanceView(summary: nil, usesVisualFixtures: true, initialDetail: .spend),
+            named: "FinanceView-analytics-entry-card",
             frameSize: financeWealthFrame
         )
     }

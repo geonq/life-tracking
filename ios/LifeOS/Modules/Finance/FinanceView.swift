@@ -5,11 +5,16 @@ import UIKit
 #endif
 
 /// Public route values used by callers that open a specific Finance detail.
+/// `wealth` (RF-20) opens the Analytics & Tools surface directly to its
+/// Wealth entry — Overview's finance card routes here rather than to a
+/// bespoke wealth-only screen, so Wealth stays a single implementation
+/// reached from two entry points.
 public enum FinanceDetailRoute: String, CaseIterable, Hashable, Sendable {
     case spend
     case income
     case cashFlow
     case netWorth
+    case wealth
 }
 
 // MARK: - Finance screen contract
@@ -38,6 +43,14 @@ public struct FinanceView: View {
     @State private var selectedCategorySource: String?
     @State private var selectedIncomeCategoryID: String?
     @State private var isRefreshing = false
+    /// RF-03/RF-20: the Analytics & Tools surface is an in-place hero morph
+    /// overlay, not a pushed screen — see `financeHeroNamespace` below and
+    /// Motion §A (`03-motion-revolut.md`). It shares `selectedRange` and
+    /// `selectedNetWorthPoint` with the main detail panel (RF-21) rather than
+    /// keeping a parallel selection model.
+    @State private var showAnalytics = false
+    @State private var analyticsInitialEntry: FinanceAnalyticsView.Entry?
+    @Namespace private var financeHeroNamespace
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// A small public route value keeps deep-link callers independent from the private
@@ -65,9 +78,11 @@ public struct FinanceView: View {
         case .income: _selectedDetail = State(initialValue: .income)
         case .cashFlow: _selectedDetail = State(initialValue: .cashFlow)
         case .netWorth: _selectedDetail = State(initialValue: .netWorth)
-        case .spend, nil: _selectedDetail = State(initialValue: .spend)
+        case .spend, .wealth, nil: _selectedDetail = State(initialValue: .spend)
         }
         _selectedChartMode = State(initialValue: initialChartMode ?? .line)
+        _showAnalytics = State(initialValue: initialDetail == .wealth)
+        _analyticsInitialEntry = State(initialValue: initialDetail == .wealth ? .wealth : nil)
     }
 
     public var body: some View {
@@ -79,25 +94,24 @@ public struct FinanceView: View {
             errorMessage: financeErrorMessage
         )
 
-        ScrollView {
-            LifeOSResponsiveContentContainer(topPadding: 16, bottomPadding: 16) {
-                VStack(alignment: .leading, spacing: 16) {
-                    financeHeader(snapshot: snapshot)
-                    FinanceStateNotice(snapshot: snapshot, onRefresh: onRefresh)
-                    FinanceHeroCard(snapshot: snapshot)
-
-                    financeDetailAndCategories(snapshot: snapshot)
-
-                    financeMetricGrid(snapshot: snapshot)
-                    FinanceWealthCard(snapshot: snapshot, onOpenConnections: onOpenConnections)
-                    FinanceAccountsCard(snapshot: snapshot, onOpenConnections: onOpenConnections)
-                    FinanceImportCard()
-                }
+        ZStack {
+            if showAnalytics {
+                FinanceAnalyticsView(
+                    snapshot: snapshot,
+                    onOpenConnections: onOpenConnections,
+                    selectedRange: $selectedRange,
+                    selectedNetWorthPoint: $selectedNetWorthPoint,
+                    initialEntry: analyticsInitialEntry,
+                    heroNamespace: reduceMotion ? nil : financeHeroNamespace,
+                    onClose: { closeAnalytics() }
+                )
+                .transition(reduceMotion ? .opacity : .identity)
+            } else {
+                mainScrollContent(snapshot: snapshot)
+                    .transition(reduceMotion ? .opacity : .identity)
             }
-
         }
         .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
-        .scrollIndicators(.hidden)
         .onAppear {
             selectLatestPoints(in: snapshot)
         }
@@ -110,17 +124,94 @@ public struct FinanceView: View {
         }
         .onChange(of: initialDetail) { _, route in
             let requestedDetail = detail(for: route)
-            guard selectedDetail != requestedDetail else { return }
-            if reduceMotion {
-                selectedDetail = requestedDetail
-            } else {
-                withAnimation(LifeOSMotion.snappy) {
+            if route == .wealth {
+                openAnalytics(entry: .wealth)
+            } else if selectedDetail != requestedDetail {
+                if reduceMotion {
                     selectedDetail = requestedDetail
+                } else {
+                    withAnimation(LifeOSMotion.snappy) {
+                        selectedDetail = requestedDetail
+                    }
                 }
             }
             selectLatestPoints(in: snapshot)
         }
         .accessibilityIdentifier("finance-view")
+    }
+
+    private func mainScrollContent(snapshot: FinanceDisplaySnapshot) -> some View {
+        ScrollView {
+            LifeOSResponsiveContentContainer(topPadding: 16, bottomPadding: 16) {
+                VStack(alignment: .leading, spacing: 16) {
+                    financeHeader(snapshot: snapshot)
+                    FinanceStateNotice(snapshot: snapshot, onRefresh: onRefresh)
+                    FinanceHeroCard(snapshot: snapshot)
+
+                    financeDetailAndCategories(snapshot: snapshot)
+
+                    financeMetricGrid(snapshot: snapshot)
+                    FinanceWealthCard(snapshot: snapshot, onOpenConnections: onOpenConnections)
+                    FinanceAccountsCard(snapshot: snapshot, onOpenConnections: onOpenConnections)
+                    financeAnalyticsEntryCard
+                    FinanceImportCard()
+                }
+            }
+        }
+        .scrollIndicators(.hidden)
+    }
+
+    /// RF-03: the single entry point into the Analytics & Tools surface.
+    /// Tapping it hero-morphs (Motion §A) into `FinanceAnalyticsView`'s entry
+    /// list; Reduce Motion collapses that to a cross-fade (no
+    /// `matchedGeometryEffect`, per `03-motion-revolut.md`).
+    private var financeAnalyticsEntryCard: some View {
+        Button {
+            openAnalytics(entry: nil)
+        } label: {
+            HStack(alignment: .center, spacing: 12) {
+                FinanceSectionHeader(
+                    title: "Analytics & Tools",
+                    subtitle: "Wealth, spending abroad, and travel",
+                    icon: .graphUp,
+                    accent: LifeOSTokens.Module.finance
+                )
+                Spacer(minLength: 8)
+                LifeOSIcon(.chevronRight)
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .frame(width: 14, height: 14)
+            }
+            .padding(18)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .flatCard()
+            .modifier(FinanceHeroMorphTag(id: "finance-analytics-hero", namespace: reduceMotion ? nil : financeHeroNamespace))
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("finance-analytics-entry")
+        .accessibilityLabel("Analytics and tools")
+        .accessibilityHint("Opens wealth, spending abroad, and travel analyses")
+    }
+
+    private func openAnalytics(entry: FinanceAnalyticsView.Entry?) {
+        analyticsInitialEntry = entry
+        guard !showAnalytics else { return }
+        if reduceMotion {
+            showAnalytics = true
+        } else {
+            withAnimation(LifeOSMotion.heroMorph) {
+                showAnalytics = true
+            }
+        }
+    }
+
+    private func closeAnalytics() {
+        if reduceMotion {
+            showAnalytics = false
+        } else {
+            withAnimation(LifeOSMotion.heroMorph) {
+                showAnalytics = false
+            }
+        }
     }
 
     private func financeHeader(snapshot: FinanceDisplaySnapshot) -> some View {
@@ -367,7 +458,7 @@ public struct FinanceView: View {
         case .income: .income
         case .cashFlow: .cashFlow
         case .netWorth: .netWorth
-        case .spend, nil: .spend
+        case .spend, .wealth, nil: .spend
         }
     }
 
@@ -638,7 +729,7 @@ private struct UnavailableMetricMark: View {
     }
 }
 
-private struct FinanceWealthCard: View {
+struct FinanceWealthCard: View {
     let snapshot: FinanceDisplaySnapshot
     let onOpenConnections: (() -> Void)?
 
@@ -908,7 +999,7 @@ private struct FinanceMetricCard: View {
 
 // MARK: - Detail charts
 
-private struct FinanceDetailChartCard: View {
+struct FinanceDetailChartCard: View {
     let title: String
     let subtitle: String
     let metric: FinanceDisplayMetric
@@ -2276,7 +2367,7 @@ private struct FinanceTransactionRow: View {
     }
 }
 
-private struct FinanceEmptyModuleRow: View {
+struct FinanceEmptyModuleRow: View {
     let icon: LifeOSIconName
     let title: String
     let detail: String
@@ -2330,7 +2421,7 @@ private struct FinanceEmptyModuleRow: View {
 
 // MARK: - Range controls and reusable chrome
 
-private struct FinanceRangePills: View {
+struct FinanceRangePills: View {
     @Binding var selection: FinanceRange
     let availableRanges: Set<FinanceRange>
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -2376,7 +2467,24 @@ private struct FinanceRangePills: View {
     }
 }
 
-private struct FinanceSectionHeader: View {
+/// Applies `matchedGeometryEffect` only when a namespace is supplied. Callers
+/// pass `nil` under Reduce Motion so the hero morph (Motion §A) degrades to a
+/// plain cross-fade instead of an interpolated frame — never an unconditional
+/// `matchedGeometryEffect` that would still animate positions.
+struct FinanceHeroMorphTag: ViewModifier {
+    let id: String
+    let namespace: Namespace.ID?
+
+    func body(content: Content) -> some View {
+        if let namespace {
+            content.matchedGeometryEffect(id: id, in: namespace)
+        } else {
+            content
+        }
+    }
+}
+
+struct FinanceSectionHeader: View {
     let title: String
     let subtitle: String
     let icon: LifeOSIconName?
@@ -2426,7 +2534,7 @@ private struct FinanceMiniSparkline: View {
 
 // MARK: - Display models
 
-private struct FinanceDisplaySnapshot {
+struct FinanceDisplaySnapshot {
     let isDemo: Bool
     let transactions: [FinanceTransactionObservation]
     let hasTransactionSource: Bool
@@ -3047,7 +3155,7 @@ private struct FinanceDisplaySnapshot {
     }
 }
 
-private struct FinanceDisplayMetric {
+struct FinanceDisplayMetric {
     let cents: Int?
     let detail: String
     let progress: Double?
@@ -3067,7 +3175,7 @@ private struct FinanceDisplayMetric {
     var accessibilityValue: String { isUnavailable ? "not available" : valueText }
 }
 
-private struct FinanceChartPoint: Identifiable {
+struct FinanceChartPoint: Identifiable {
     let date: Date
     let value: Int
     let seriesTitle: String
@@ -3096,7 +3204,7 @@ private struct FinanceChartPoint: Identifiable {
     var sourceDisclosure: String { "\(sourceLabel) · \(FinanceFreshnessLabel.text(freshness))" }
 }
 
-private struct FinanceAccount: Identifiable {
+struct FinanceAccount: Identifiable {
     let id: String
     let name: String
     let detail: String
@@ -3124,7 +3232,7 @@ private struct FinanceAccount: Identifiable {
     var isUnavailable: Bool { availability == .unavailable || balanceCents == nil }
 }
 
-private struct FinanceCategory: Identifiable {
+struct FinanceCategory: Identifiable {
     let id: String
     let name: String
     let amountCents: Int
@@ -3190,7 +3298,7 @@ private struct FinanceCategory: Identifiable {
     }
 }
 
-private enum FinanceDetail: String, CaseIterable, Hashable {
+enum FinanceDetail: String, CaseIterable, Hashable {
     case spend
     case income
     case cashFlow
@@ -3212,7 +3320,7 @@ private enum FinanceTransactionSeries {
     case cashFlow
 }
 
-private enum FinanceRange: String, CaseIterable, Hashable {
+enum FinanceRange: String, CaseIterable, Hashable {
     case week
     case month
     case halfYear
