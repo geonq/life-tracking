@@ -90,6 +90,8 @@ Delete `ios/LifeOS/Modules/Advisor/`, `ios/Shared/AdvisorClient.swift`, `Advisor
 
 Each worker must read this plan, the target repo handoff, and only the files in its scope. It must make small commits, update coordination state under 200 lines, run focused tests, and report changed files, commands, failures, and remaining device-only gates.
 
+Every implementation must leave the owned scope smaller or clearer: delete dead files, unreachable routes, obsolete wrappers, duplicate state paths, and unused tokens. Prefer one-pass `O(n)` aggregation; use `O(n log n)` only when deterministic ordering is required and never introduce nested scans over unbounded input. Keep external collections bounded, preserve explicit invariants, remove warnings, and never silence a failing test or compiler diagnostic to make a batch pass.
+
 1. **Foundation/removal — Luna Max:** token typography migration, font resource removal, Advisor deletion, navigation/deep-link cleanup, project membership, negative checks. Owns token/nav/project files until complete.
 2. **Calendar — Luna Max:** iPhone scroll architecture, Mac magnification, timeline layout, pairing presentation, focused tests. Owns Calendar files only after step 1.
 3. **Finance/Fitness/Nutrition — Luna Max:** screen hierarchy, states, controls, responsive sheets, motion integration, focused tests. Owns module files only.
