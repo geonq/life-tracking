@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import XCTest
 @testable import LifeOS
 
@@ -142,6 +143,59 @@ private final class PreflightURLProtocol: URLProtocol {
 final class TailscaleSyncClientSecurityTests: XCTestCase {
     private let calendarJSON = Data(#"{"items":[],"schemaVersion":1}"#.utf8)
 
+    private func importedRecord(
+        id: UUID = UUID(),
+        amountCents: Int = -1_890,
+        category: FinanceTransactionCategory? = nil,
+        sourceRevision: Int = 0
+    ) throws -> FinanceImportedSyncRecord {
+        let now = Date(timeIntervalSince1970: 1_786_449_600)
+        try FinanceImportedSyncRecord(
+            recordID: id,
+            sourceRevision: sourceRevision,
+            bookedAt: now.addingTimeInterval(-120),
+            amountCents: amountCents,
+            description: "Restaurant",
+            categoryOverride: category,
+            sourceCategory: "Food",
+            providerCode: nil,
+            source: .tradeRepublicCSV,
+            importedAt: now.addingTimeInterval(-60),
+            kind: .cash,
+            investment: nil
+        )
+    }
+
+    private func importedResponse(
+        statusCode: Int = 200,
+        snapshot: FinanceImportedSyncSnapshot? = nil,
+        body: Data? = nil,
+        revision: Int? = nil,
+        contentType: String = "application/json",
+        extraHeaders: [String: String] = [:]
+    ) throws -> (Data, HTTPURLResponse) {
+        let resolvedSnapshot = try snapshot ?? FinanceImportedSyncSnapshot(revision: revision ?? 0, records: [], tombstones: [])
+        let resolvedBody = try body ?? JSONEncoder.lifeOS.encode(resolvedSnapshot)
+        let resolvedRevision = revision ?? resolvedSnapshot.revision
+        let digest = SHA256.hash(data: resolvedBody).map { String(format: "%02x", $0) }.joined()
+        var headers = [
+            "Content-Type": contentType,
+            "ETag": "\"finance-imported-v2-r\(resolvedRevision)-\(digest)\"",
+            "X-LifeOS-Revision": String(resolvedRevision),
+            "X-LifeOS-Schema-Version": "2",
+        ]
+        headers.merge(extraHeaders) { _, incoming in incoming }
+        return (
+            resolvedBody,
+            HTTPURLResponse(
+                url: URL(string: "https://lifeos.example-tailnet.ts.net:8420/finance/imported")!,
+                statusCode: statusCode,
+                httpVersion: nil,
+                headerFields: headers
+            )!
+        )
+    }
+
     private func preflightRequest() throws -> URLRequest {
         let url = URL(string: "https://lifeos.example-tailnet.ts.net:8420/usage")!
         return TailscaleSyncClient.gatewayRequest(url: url)
@@ -219,6 +273,7 @@ final class TailscaleSyncClientSecurityTests: XCTestCase {
             base.appendingPathComponent("documents"),
             base.appendingPathComponent("usage"),
             base.appendingPathComponent("finance/summary"),
+            base.appendingPathComponent("finance/imported"),
             base.appendingPathComponent("clipper/summary"),
             base.appendingPathComponent("nutrition/barcode/4006381333931"),
             URL(string: "wss://lifeos.example-tailnet.ts.net:8420/ws")!,
@@ -519,6 +574,127 @@ final class TailscaleSyncClientSecurityTests: XCTestCase {
         let invalidConflict = HTTPURLResponse(url: url, statusCode: 412, httpVersion: nil, headerFields: ["ETag": validETag])!
         XCTAssertThrowsError(try TailscaleSyncClient.parseCalendarPushResponse(data: Data(#"{"schemaVersion":2,"items":[]}"#.utf8), response: invalidConflict)) { error in
             XCTAssertEqual(error as? TailscaleSyncError, .invalidResponse)
+        }
+    }
+
+    func testFinanceImportedRequestUsesOnlyConditionalHeaders() throws {
+        let url = URL(string: "https://lifeos.example-tailnet.ts.net:8420/finance/imported")!
+        let body = Data(#"{"schemaVersion":2,"baseRevision":0,"operations":[]}"#.utf8)
+        let etag = #""finance-imported-v2-r0-0000000000000000000000000000000000000000000000000000000000000000""#
+        let request = try XCTUnwrap(TailscaleSyncClient.conditionalFinanceImportedRequest(
+            url: url,
+            body: body,
+            ifMatch: etag,
+            idempotencyKey: "finance-import-1"
+        ))
+        XCTAssertEqual(request.httpMethod, "PUT")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "If-Match"), etag)
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Idempotency-Key"), "finance-import-1")
+        XCTAssertEqual(Set(request.allHTTPHeaderFields?.map(\.key) ?? []), ["Content-Type", "If-Match", "Idempotency-Key"])
+        XCTAssertEqual(request.httpBody, body)
+        assertNoCredentialHeaders(request)
+    }
+
+    func testFinanceImportedETagAndIdempotencyValidationFailClosed() {
+        let valid = #""finance-imported-v2-r0-0000000000000000000000000000000000000000000000000000000000000000""#
+        XCTAssertEqual(TailscaleSyncClient.validatedFinanceImportedETag(valid), valid)
+        XCTAssertEqual(TailscaleSyncClient.financeImportedETagRevision(valid), 0)
+        for value in [
+            nil,
+            "",
+            "finance-imported-v2-r0-deadbeef",
+            "W/\"finance-imported-v2-r0-0000000000000000000000000000000000000000000000000000000000000000\"",
+            "\"finance-imported-v2-r01-0000000000000000000000000000000000000000000000000000000000000000\"",
+            "\"finance-imported-v2-r0-000000000000000000000000000000000000000000000000000000000000000G\"",
+        ] {
+            XCTAssertNil(TailscaleSyncClient.validatedFinanceImportedETag(value), value ?? "nil")
+        }
+        XCTAssertNil(TailscaleSyncClient.validatedFinanceImportedIdempotencyKey("bad\nkey"))
+        XCTAssertNil(TailscaleSyncClient.validatedFinanceImportedIdempotencyKey(String(repeating: "x", count: 129)))
+    }
+
+    func testFinanceImportedResponseAcceptsSuccessAndSurfacesAuthoritativeConflict() throws {
+        let record = try importedRecord(category: .groceries, sourceRevision: 3)
+        let snapshot = try FinanceImportedSyncSnapshot(revision: 3, records: [record], tombstones: [])
+        let successPayload = try importedResponse(snapshot: snapshot)
+        let success = try TailscaleSyncClient.parseFinanceImportedResponse(
+            data: successPayload.0,
+            response: successPayload.1
+        )
+        XCTAssertEqual(success.snapshot, snapshot)
+        XCTAssertEqual(success.etag, successPayload.1.value(forHTTPHeaderField: "ETag"))
+        XCTAssertFalse(success.wasReplay)
+
+        let conflictPayload = try importedResponse(
+            statusCode: 412,
+            snapshot: snapshot,
+            extraHeaders: ["X-LifeOS-Conflict": "true"]
+        )
+        XCTAssertThrowsError(try TailscaleSyncClient.parseFinanceImportedResponse(
+            data: conflictPayload.0,
+            response: conflictPayload.1
+        )) { error in
+            guard case .conflict(let conflictSnapshot, let conflictETag) = error as? FinanceImportedSyncError else {
+                return XCTFail("expected typed authoritative finance conflict, got \(error)")
+            }
+            XCTAssertEqual(conflictSnapshot, snapshot)
+            XCTAssertEqual(conflictETag, conflictPayload.1.value(forHTTPHeaderField: "ETag"))
+        }
+    }
+
+    func testFinanceImportedResponseRejectsWrongContentTypeStatusAndRevision() throws {
+        let valid = try importedResponse()
+        let wrongType = try importedResponse(contentType: "text/plain")
+        XCTAssertThrowsError(try TailscaleSyncClient.parseFinanceImportedResponse(data: wrongType.0, response: wrongType.1)) { error in
+            XCTAssertEqual(error as? FinanceImportedSyncError, .invalidContentType)
+        }
+
+        let serverError = try importedResponse(statusCode: 503)
+        XCTAssertThrowsError(try TailscaleSyncClient.parseFinanceImportedResponse(data: serverError.0, response: serverError.1)) { error in
+            XCTAssertEqual(error as? FinanceImportedSyncError, .httpError(503))
+        }
+
+        var mismatchedHeaders = valid.1.allHeaderFields.reduce(into: [String: String]()) { result, pair in
+            if let key = pair.key as? String, let value = pair.value as? String { result[key] = value }
+        }
+        mismatchedHeaders["X-LifeOS-Revision"] = "1"
+        let mismatched = HTTPURLResponse(
+            url: valid.1.url!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: mismatchedHeaders
+        )!
+        XCTAssertThrowsError(try TailscaleSyncClient.parseFinanceImportedResponse(data: valid.0, response: mismatched)) { error in
+            XCTAssertEqual(error as? FinanceImportedSyncError, .invalidRevision)
+        }
+    }
+
+    func testFinanceImportedResponseRejectsUnknownSchemaAndOversizedBody() throws {
+        let valid = try importedResponse()
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: valid.0) as? [String: Any])
+        object["schemaVersion"] = 99
+        let unknownSchemaBody = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        let unknownSchema = try importedResponse(body: unknownSchemaBody)
+        XCTAssertThrowsError(try TailscaleSyncClient.parseFinanceImportedResponse(
+            data: unknownSchema.0,
+            response: unknownSchema.1
+        )) { error in
+            XCTAssertEqual(error as? FinanceImportedSyncError, .invalidResponse)
+        }
+
+        let oversizedBody = Data(repeating: 0x20, count: TailscaleSyncClient.maximumFinanceImportedResponseBytes + 1)
+        let oversizedResponse = HTTPURLResponse(
+            url: valid.1.url!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        XCTAssertThrowsError(try TailscaleSyncClient.parseFinanceImportedResponse(
+            data: oversizedBody,
+            response: oversizedResponse
+        )) { error in
+            XCTAssertEqual(error as? FinanceImportedSyncError, .responseTooLarge)
         }
     }
 

@@ -156,6 +156,16 @@ class FakeClient:
         return self.response
 
 
+class CapturingClient(FakeClient):
+    def __init__(self, calls, response=None, error=None, **kwargs):
+        super().__init__(response, error, **kwargs)
+        self.calls = calls
+
+    def stream(self, method, url, **kwargs):
+        self.calls.append((method, url, kwargs))
+        return super().stream(method, url, **kwargs)
+
+
 class FakeIngestUpstreamResponse:
     def __init__(self, status_code=204, body=b"", *, include_content_length=True, chunk_size=None):
         self.status_code = status_code
@@ -230,6 +240,23 @@ def test_usage_healthy_proxy():
     assert response.status_code == 200
     assert response.json() == VALID
     assert response.headers["cache-control"] == "no-store"
+
+
+def test_usage_forwards_local_service_bearer():
+    calls = []
+    body = json.dumps(VALID).encode()
+    with patch(
+        "main.httpx.AsyncClient",
+        lambda **kwargs: CapturingClient(calls, FakeResponse(body), **kwargs),
+    ):
+        response = client.get("/usage", headers=AUTH)
+
+    assert response.status_code == 200
+    assert len(calls) == 1
+    method, url, options = calls[0]
+    assert method == "GET"
+    assert url == main.USAGE_UPSTREAM
+    assert options["headers"] == {"Authorization": "Bearer " + "l" * 64}
 
 
 def test_identity_authorizes_with_obsolete_bearer_for_cutover_compatibility():
@@ -322,6 +349,102 @@ def test_health_probe_remains_available_without_identity_or_bearer():
     assert client.get("/health").status_code == 200
 
 
+def test_browser_origin_policy_comes_from_the_enable_banking_redirect_origin(monkeypatch):
+    monkeypatch.setenv(
+        "ENABLE_BANKING_REDIRECT_URI",
+        "https://GeonqServer.tail5f8789.ts.net:8420/finance/callback",
+    )
+    assert main._configured_browser_origins() == frozenset({
+        "https://geonqserver.tail5f8789.ts.net:8420",
+    })
+    monkeypatch.setenv(
+        "ENABLE_BANKING_REDIRECT_URI",
+        "https://geonqserver.tail5f8789.ts.net:8420/finance/callback?unexpected=query",
+    )
+    assert main._configured_browser_origins() == frozenset()
+
+
+@pytest.mark.parametrize(("method", "path"), [
+    ("put", "/calendar"),
+    ("post", "/documents"),
+    ("post", "/finance/connect"),
+    ("delete", "/finance/connect/test-institution"),
+    ("put", "/finance/imported"),
+    ("post", "/nutrition/photo-proposal"),
+])
+def test_cross_origin_mutations_are_rejected_before_route_body_handling(method, path):
+    response = client.request(
+        method.upper(),
+        path,
+        headers={
+            **AUTH,
+            "Origin": "https://evil.example",
+            "Sec-Fetch-Site": "cross-site",
+            "Content-Type": "application/json",
+        },
+        content=b"this body must not reach the route",
+    )
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Untrusted browser origin"}
+
+
+def test_originless_native_calendar_mutation_remains_accepted(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "CALENDAR_PATH", tmp_path / "calendar.json")
+    initial = client.get("/calendar", headers=AUTH)
+    response = client.put(
+        "/calendar",
+        headers=calendar_write_headers(initial.headers["etag"], "originless-native"),
+        json={"schemaVersion": 1, "items": [calendar_item("native")]},
+    )
+    assert response.status_code == 200
+
+
+def test_allowed_browser_origin_can_mutate_with_same_origin_fetch_metadata(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "ALLOWED_BROWSER_ORIGINS", frozenset({
+        "https://geonqserver.tail5f8789.ts.net:8420",
+    }))
+    monkeypatch.setattr(main, "CALENDAR_PATH", tmp_path / "calendar.json")
+    initial = client.get("/calendar", headers=AUTH)
+    headers = calendar_write_headers(initial.headers["etag"], "trusted-browser")
+    headers.update({
+        "Origin": "https://GeonqServer.tail5f8789.ts.net:8420/",
+        "Sec-Fetch-Site": "same-origin",
+    })
+    response = client.put(
+        "/calendar",
+        headers=headers,
+        json={"schemaVersion": 1, "items": [calendar_item("browser")]},
+    )
+    assert response.status_code == 200
+
+
+def test_enable_banking_callback_allows_provider_cross_site_navigation(monkeypatch):
+    async def callback(_query):
+        return SimpleNamespace(valid=True, linked=True)
+
+    monkeypatch.setattr(main.enable_banking, "callback", callback)
+    response = client.get(
+        "/finance/callback?code=provider-code&state=one-time-state",
+        headers={
+            **AUTH,
+            "Origin": "https://provider.example",
+            "Sec-Fetch-Site": "cross-site",
+        },
+    )
+    assert response.status_code == 200
+    assert "Connected" in response.text
+
+
+def calendar_item(title="Event", **overrides):
+    return {
+        "id": "01234567-89ab-cdef-0123-456789abcdef",
+        "title": title, "status": "planned", "kind": "event",
+        "start": "2026-09-08T08:00:00Z", "end": "2026-09-08T09:00:00Z",
+        "createdAt": "2026-09-07T08:00:00Z", "updatedAt": "2026-09-07T08:00:00Z",
+        **overrides,
+    }
+
+
 def test_calendar_uses_versioned_etag_if_match_and_bounded_idempotent_replay(tmp_path, monkeypatch):
     import main
 
@@ -333,7 +456,7 @@ def test_calendar_uses_versioned_etag_if_match_and_bounded_idempotent_replay(tmp
     assert initial.headers["x-lifeos-schema-version"] == "1"
     assert initial.headers["x-lifeos-revision"] == "0"
 
-    first_body = {"schemaVersion": 1, "items": [{"id": "event-1", "isDeleted": False}]}
+    first_body = {"schemaVersion": 1, "items": [calendar_item("event-1")]}
     first_headers = {
         **AUTH,
         "content-type": "application/json",
@@ -350,7 +473,7 @@ def test_calendar_uses_versioned_etag_if_match_and_bounded_idempotent_replay(tmp
     stale = client.put(
         "/calendar",
         headers={**first_headers, "idempotency-key": "calendar-stale"},
-        content=json.dumps({"schemaVersion": 1, "items": [{"id": "stale"}]}),
+        content=json.dumps({"schemaVersion": 1, "items": [calendar_item("stale")]}),
     )
     assert stale.status_code == 412
     assert stale.content == accepted.content
@@ -364,7 +487,7 @@ def test_calendar_uses_versioned_etag_if_match_and_bounded_idempotent_replay(tmp
 
     reuse = client.put(
         "/calendar", headers=first_headers,
-        content=json.dumps({"schemaVersion": 1, "items": [{"id": "different"}]}),
+        content=json.dumps({"schemaVersion": 1, "items": [calendar_item("different")]}),
     )
     assert reuse.status_code == 409
     assert reuse.content == accepted.content
@@ -377,7 +500,7 @@ def test_calendar_idempotency_window_rolls_forward_and_survives_restart(tmp_path
     current = client.get("/calendar", headers=AUTH)
     accepted = []
     for index in range(3):
-        body = {"schemaVersion": 1, "items": [{"id": f"rollover-{index}"}]}
+        body = {"schemaVersion": 1, "items": [calendar_item(f"rollover-{index}")]}
         headers = {
             **AUTH,
             "content-type": "application/json",
@@ -461,7 +584,7 @@ def test_calendar_ignores_an_interrupted_temporary_publish_and_keeps_last_commit
 
     monkeypatch.setattr(main, "CALENDAR_PATH", tmp_path / "calendar.json")
     initial = client.get("/calendar", headers=AUTH)
-    body = {"schemaVersion": 1, "items": [{"id": "committed"}]}
+    body = {"schemaVersion": 1, "items": [calendar_item("committed")]}
     accepted = client.put(
         "/calendar",
         headers={
@@ -503,7 +626,7 @@ def test_calendar_authoritative_commit_survives_projection_failure_and_replay_re
 
     monkeypatch.setattr(main, "_atomic_write_bytes", fail_projection_once)
     initial = client.get("/calendar", headers=AUTH)
-    body = {"schemaVersion": 1, "items": [{"id": "projection-recovery"}]}
+    body = {"schemaVersion": 1, "items": [calendar_item("projection-recovery")]}
     headers = {
         **AUTH,
         "content-type": "application/json",
@@ -541,7 +664,7 @@ def test_calendar_broadcast_failure_returns_success_and_replay_rebroadcasts(tmp_
 
     monkeypatch.setattr(main.broadcaster, "broadcast", fail_broadcast)
     initial = client.get("/calendar", headers=AUTH)
-    body = {"schemaVersion": 1, "items": [{"id": "broadcast-recovery"}]}
+    body = {"schemaVersion": 1, "items": [calendar_item("broadcast-recovery")]}
     headers = {
         **AUTH,
         "content-type": "application/json",
@@ -563,6 +686,226 @@ def test_calendar_broadcast_failure_returns_success_and_replay_rebroadcasts(tmp_
     assert replay.status_code == 200
     assert replay.headers["x-lifeos-idempotent-replay"] == "true"
     assert replayed == [{"type": "calendar_changed", "revision": 1}]
+
+
+
+def calendar_files(path):
+    return {file.name: file.read_bytes() for file in path.iterdir() if file.is_file()}
+
+
+def calendar_write_headers(etag, key="validation-write"):
+    return {**AUTH, "content-type": "application/json", "if-match": etag, "idempotency-key": key}
+
+
+@pytest.mark.parametrize("item", [
+    None, True, 1, "event", [], {}, {"id": "not-a-uuid"},
+    calendar_item(unknown=True), calendar_item(revision=2**63 - 1),
+    calendar_item(title="  "), calendar_item(title=None), calendar_item(id="not-a-uuid"),
+    calendar_item(status="unknown"), calendar_item(status=[]), calendar_item(kind={}),
+    calendar_item(start="yesterday"), calendar_item(end="2026-09-08T08:00:00Z"),
+    calendar_item(createdAt=123), calendar_item(updatedAt="2026-09-08"),
+    calendar_item(deletedAt=False), calendar_item(icon=[]), calendar_item(systemIconName=2),
+    calendar_item(timeZoneIdentifier={}), calendar_item(iconAsset={}),
+    calendar_item(iconAsset={"format": "png", "bytes": "AAAA"}),
+    calendar_item(recurrence=[]), calendar_item(recurrence={"frequency": "daily", "extra": 1}),
+    calendar_item(recurrence={"frequency": "invalid"}),
+    calendar_item(recurrence={"frequency": "daily", "interval": True}),
+    calendar_item(recurrence={"frequency": "daily", "interval": 1.5}),
+    calendar_item(recurrence={"frequency": "daily", "interval": 2**63 - 1}),
+    calendar_item(recurrence={"frequency": "daily", "until": "NaN"}),
+    calendar_item(title="\ud800"),
+])
+def test_calendar_rejects_malformed_items_without_mutating_authority(item, tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "CALENDAR_PATH", tmp_path / "calendar.json")
+    initial = client.get("/calendar", headers=AUTH)
+    seed = client.put("/calendar", headers=calendar_write_headers(initial.headers["etag"], "seed"),
+                      json={"schemaVersion": 1, "items": [calendar_item()]})
+    assert seed.status_code == 200
+    before = calendar_files(tmp_path)
+    # Include a valid item first: validation must be all-or-nothing.
+    body = json.dumps({"schemaVersion": 1, "items": [calendar_item(), item]})
+    rejected = client.put("/calendar", headers=calendar_write_headers(seed.headers["etag"]), content=body)
+    assert rejected.status_code == 400
+    assert calendar_files(tmp_path) == before
+    # Rejection must not consume the idempotency key.
+    accepted = client.put("/calendar", headers=calendar_write_headers(seed.headers["etag"]),
+                         json={"schemaVersion": 1, "items": [calendar_item("Corrected")]})
+    assert accepted.status_code == 200
+    assert accepted.headers["x-lifeos-revision"] == "2"
+
+
+@pytest.mark.parametrize("body,status", [
+    (b'{"schemaVersion":true,"items":[]}', 400),
+    (b'{"schemaVersion":1.0,"items":[]}', 400),
+    (b'{"schemaVersion":1,"items":null}', 400),
+    (b'{"schemaVersion":1,"items":[],"revision":9223372036854775807}', 400),
+    (b'{"schemaVersion":1,"items":[null]}', 400),
+    (b'{"schemaVersion":1,"items":[],"items":[]}', 400),
+    (b'{"schemaVersion":1,"items":[' + b'[' * 1100 + b'0' + b']' * 1100 + b']}', 400),
+    (b' ' * (main.CALENDAR_MAX_BODY_SIZE + 1), 413),
+])
+def test_calendar_invalid_documents_leave_fresh_authority_absent(body, status, tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "CALENDAR_PATH", tmp_path / "calendar.json")
+    initial = client.get("/calendar", headers=AUTH)
+    rejected = client.put("/calendar", headers=calendar_write_headers(initial.headers["etag"]), content=body)
+    assert rejected.status_code == status
+    assert calendar_files(tmp_path) == {}
+
+
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity", "1e999", "9223372036854775807"])
+def test_calendar_rejects_nonfinite_and_unsafe_nested_numbers(literal, tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "CALENDAR_PATH", tmp_path / "calendar.json")
+    initial = client.get("/calendar", headers=AUTH)
+    item = calendar_item(recurrence={"frequency": "daily", "interval": "NUMBER"})
+    body = json.dumps({"schemaVersion": 1, "items": [item]}).replace('"NUMBER"', literal)
+    response = client.put("/calendar", headers=calendar_write_headers(initial.headers["etag"]), content=body)
+    assert response.status_code == 400
+    assert calendar_files(tmp_path) == {}
+
+
+def test_calendar_valid_legacy_body_adopts_without_rewriting_and_replays(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "CALENDAR_PATH", tmp_path / "calendar.json")
+    item = calendar_item(status="blocked", recurrence={"frequency": "weekly", "interval": 0})
+    del item["kind"]
+    body = json.dumps({"schemaVersion": 1, "items": [item]}).encode()
+    main.CALENDAR_PATH.write_bytes(body)  # Valid legacy body without metadata.
+    initial = client.get("/calendar", headers=AUTH)
+    assert initial.status_code == 200 and initial.content == body
+    assert initial.headers["x-lifeos-revision"] == "0"
+    assert calendar_files(tmp_path) == {"calendar.json": body}
+    item.update(kind="daily_schedule", icon=None, timeZoneIdentifier="Europe/Berlin", deletedAt=None)
+    item["recurrence"] = {"frequency": "monthly", "until": None}
+    body = json.dumps({"schemaVersion": 1, "items": [item]}).encode()
+    headers = calendar_write_headers(initial.headers["etag"])
+    accepted = client.put("/calendar", headers=headers, content=body)
+    assert accepted.status_code == 200 and accepted.content == body
+    before = calendar_files(tmp_path)
+    replay = client.put("/calendar", headers=headers, content=body)
+    assert replay.status_code == 200 and replay.content == body
+    assert replay.headers["x-lifeos-idempotent-replay"] == "true"
+    assert replay.headers["x-lifeos-revision"] == "1"
+    assert calendar_files(tmp_path) == before
+
+
+@pytest.mark.parametrize("revision", [str(main.CALENDAR_MAX_REVISION + 1), str(2**63 - 1), "9" * 5000])
+def test_calendar_unsafe_etag_revisions_cannot_change_counter(revision, tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "CALENDAR_PATH", tmp_path / "calendar.json")
+    etag = '"calendar-v1-r' + revision + '-' + 'a' * 64 + '"'
+    response = client.put("/calendar", headers=calendar_write_headers(etag),
+                          json={"schemaVersion": 1, "items": [calendar_item()]})
+    assert response.status_code == 400
+    assert calendar_files(tmp_path) == {}
+
+
+def test_calendar_maximum_revision_allows_last_commit_and_replay_but_no_wrap(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "CALENDAR_PATH", tmp_path / "calendar.json")
+    body = main._calendar_default_body()
+    metadata = main._calendar_default_metadata(body)
+    metadata["revision"] = main.CALENDAR_MAX_REVISION - 1
+    main._calendar_state_path().write_text(json.dumps({
+        "schemaVersion": 1, "bodyBase64": base64.b64encode(body).decode(), "metadata": metadata,
+    }))
+    initial = client.get("/calendar", headers=AUTH)
+    headers = calendar_write_headers(initial.headers["etag"])
+    document = {"schemaVersion": 1, "items": [calendar_item()]}
+    accepted = client.put("/calendar", headers=headers, json=document)
+    assert accepted.status_code == 200
+    assert accepted.headers["x-lifeos-revision"] == str(main.CALENDAR_MAX_REVISION)
+    before = calendar_files(tmp_path)
+    replay = client.put("/calendar", headers=headers, json=document)
+    assert replay.status_code == 200 and replay.headers["x-lifeos-idempotent-replay"] == "true"
+    assert calendar_files(tmp_path) == before
+    exhausted = client.put("/calendar", headers=calendar_write_headers(accepted.headers["etag"], "new-key"), json=document)
+    assert exhausted.status_code == 503
+    assert exhausted.content == accepted.content
+    assert exhausted.headers["etag"] == accepted.headers["etag"]
+    assert calendar_files(tmp_path) == before
+    stale = client.put("/calendar", headers=calendar_write_headers(initial.headers["etag"], "stale-key"), json=document)
+    assert stale.status_code == 412 and calendar_files(tmp_path) == before
+    reused = client.put("/calendar", headers=calendar_write_headers(accepted.headers["etag"]), json=document)
+    assert reused.status_code == 409 and calendar_files(tmp_path) == before
+
+
+@pytest.mark.parametrize("revision", [True, 1.0, -1, main.CALENDAR_MAX_REVISION + 1, 2**63 - 1])
+def test_calendar_invalid_durable_revision_fails_closed_without_repair(revision, tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "CALENDAR_PATH", tmp_path / "calendar.json")
+    body = main._calendar_default_body()
+    metadata = main._calendar_default_metadata(body)
+    metadata["revision"] = revision
+    main._calendar_state_path().write_text(json.dumps({
+        "schemaVersion": 1, "bodyBase64": base64.b64encode(body).decode(), "metadata": metadata,
+    }))
+    before = calendar_files(tmp_path)
+    assert client.get("/calendar", headers=AUTH).status_code == 503
+    response = client.put("/calendar", headers=calendar_write_headers(main._calendar_etag(0, main._calendar_digest(body))),
+                          json={"schemaVersion": 1, "items": [calendar_item()]})
+    assert response.status_code == 503
+    assert calendar_files(tmp_path) == before
+
+
+
+@pytest.mark.parametrize("field", ["id", "title", "status", "start", "end", "createdAt", "updatedAt"])
+def test_calendar_requires_every_required_item_field(field):
+    item = calendar_item()
+    del item[field]
+    with pytest.raises(main.HTTPException) as rejected:
+        main._parse_calendar_document(json.dumps({"schemaVersion": 1, "items": [item]}).encode())
+    assert rejected.value.status_code == 400
+
+
+def test_calendar_enforces_item_count_without_dropping_existing_data(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "CALENDAR_PATH", tmp_path / "calendar.json")
+    monkeypatch.setattr(main, "CALENDAR_MAX_ITEMS", 2)
+    initial = client.get("/calendar", headers=AUTH)
+    response = client.put("/calendar", headers=calendar_write_headers(initial.headers["etag"]),
+                          json={"schemaVersion": 1, "items": [calendar_item()] * 3})
+    assert response.status_code == 400 and calendar_files(tmp_path) == {}
+
+
+def test_calendar_maximum_incoming_etag_is_a_conflict_not_counter_assignment(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "CALENDAR_PATH", tmp_path / "calendar.json")
+    initial = client.get("/calendar", headers=AUTH)
+    etag = main._calendar_etag(main.CALENDAR_MAX_REVISION, "a" * 64)
+    response = client.put("/calendar", headers=calendar_write_headers(etag),
+                          json={"schemaVersion": 1, "items": [calendar_item()]})
+    assert response.status_code == 412
+    assert response.headers["etag"] == initial.headers["etag"]
+    assert response.headers["x-lifeos-revision"] == "0"
+    assert calendar_files(tmp_path) == {}
+
+
+@pytest.mark.parametrize("branch", ["metadata", "idempotency", "tombstone"])
+@pytest.mark.parametrize("revision", [True, 1.0, -1, main.CALENDAR_MAX_REVISION + 1, 2**63 - 1])
+def test_calendar_all_persisted_revision_branches_are_bounded(branch, revision):
+    body = main._calendar_default_body()
+    metadata = main._calendar_default_metadata(body)
+    metadata["revision"] = main.CALENDAR_MAX_REVISION
+    if branch == "metadata":
+        metadata["revision"] = revision
+    elif branch == "idempotency":
+        metadata["idempotency"] = [{"key": "record", "fingerprint": "a" * 64, "revision": revision}]
+    else:
+        metadata["tombstones"] = [{
+            "schemaVersion": 1, "domain": "calendar", "entityID": "entry", "revision": revision,
+            "idempotencyKey": "deleted", "authority": "gateway", "deletedAt": "2020-01-01T00:00:00Z",
+        }]
+    with pytest.raises(main._CalendarStateUnavailable):
+        main._validate_calendar_metadata(metadata, body)
+
+
+def test_calendar_icon_wire_contract_and_legacy_optional_hash():
+    # A real single-pixel PNG. Native ImageIO remains responsible for decoding.
+    raw = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=")
+    asset = {"format": "png", "bytes": base64.b64encode(raw).decode()}
+    document = {"schemaVersion": 1, "items": [calendar_item(iconAsset=asset)]}
+    assert main._parse_calendar_document(json.dumps(document).encode()) == document
+    asset.update(schemaVersion=1, contentHash=hashlib.sha256(raw).hexdigest())
+    assert main._parse_calendar_document(json.dumps(document).encode()) == document
+    for override in ({"format": "jpeg"}, {"format": []}, {"bytes": "!"}, {"schemaVersion": True},
+                     {"schemaVersion": 1.0}, {"contentHash": "f" * 64}, {"unknown": "path"}):
+        invalid = {"schemaVersion": 1, "items": [calendar_item(iconAsset={**asset, **override})]}
+        with pytest.raises(main.HTTPException):
+            main._parse_calendar_document(json.dumps(invalid).encode())
 
 
 def test_websocket_requires_identity():
@@ -590,6 +933,63 @@ def test_websocket_rejects_canonical_identity_without_trusted_edge():
         with client.websocket_connect("/ws", headers=TAILSCALE_IDENTITY):
             pass
     assert missing_edge.value.code == 4403
+
+
+def test_websocket_rejects_cross_origin_browser_handshake():
+    with pytest.raises(WebSocketDisconnect) as rejected:
+        with client.websocket_connect(
+            "/ws",
+            headers={
+                **AUTH,
+                "Origin": "https://evil.example",
+                "Sec-Fetch-Site": "cross-site",
+            },
+        ):
+            pass
+    assert rejected.value.code == 4403
+
+
+def test_broadcaster_evicts_stalled_sends_without_blocking_other_clients():
+    class HealthySocket:
+        def __init__(self):
+            self.messages = []
+
+        async def send_json(self, message):
+            self.messages.append(message)
+
+        async def close(self, **_):
+            return None
+
+    class StalledSocket:
+        def __init__(self):
+            self.never = asyncio.Event()
+            self.closed = False
+
+        async def send_json(self, _message):
+            await self.never.wait()
+
+        async def close(self, **_):
+            self.closed = True
+
+    async def exercise():
+        fanout = main.ChangeBroadcaster()
+        fanout.SEND_TIMEOUT = 0.01
+        fanout.BROADCAST_TIMEOUT = 0.02
+        healthy = HealthySocket()
+        stalled = StalledSocket()
+        assert await fanout.register(healthy)
+        assert await fanout.register(stalled)
+        delivered = await asyncio.wait_for(
+            fanout.broadcast({"type": "calendar_changed", "revision": 1}),
+            timeout=0.2,
+        )
+        return delivered, healthy, stalled, fanout
+
+    delivered, healthy, stalled, fanout = asyncio.run(exercise())
+    assert delivered is False
+    assert healthy.messages == [{"type": "calendar_changed", "revision": 1}]
+    assert stalled.closed is True
+    assert stalled not in fanout._sockets
 
 
 def test_usage_malformed_payload():
@@ -1487,6 +1887,81 @@ def test_photo_lineage_recomputes_digest_length_and_magic_before_forwarding():
     assert main._photo_lineage(forged_context_key) is None
 
 
+def test_nutrition_photo_forwards_valid_request_with_local_service_bearer():
+    data = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+    manifest = _photo_manifest_for_gateway(data)
+    lineage = main._photo_lineage(manifest)
+    assert lineage is not None
+    request_body = json.dumps(manifest).encode()
+    proposal = {
+        "schemaVersion": 1,
+        "mealID": lineage[0],
+        "proposalID": "proposal-1",
+        "requestID": lineage[1],
+        "state": "needs_confirmation",
+        "generatedAt": "2026-08-26T12:00:01Z",
+        "provenance": {
+            "provider": "google-ai-studio",
+            "modelIdentifier": "food-model",
+            "modelVersion": "food-model-v1",
+            "policyVersion": "lifeos-food-photo-v1",
+            "requestTimestamp": "2026-08-26T12:00:00Z",
+            "sanitizedImageHashes": lineage[2],
+        },
+        "items": [{
+            "itemID": "item-1",
+            "estimatedLabel": "Plain yogurt",
+            "labelSource": "recognized",
+            "quantity": 1,
+            "unit": "portion",
+            "grams": {"estimate": 100, "min": 90, "max": 110},
+            "calories": {"estimate": 100, "min": 90, "max": 110},
+            "protein": {"estimate": 5, "min": 4, "max": 6},
+            "carbs": {"estimate": 10, "min": 8, "max": 12},
+            "fat": {"estimate": 2, "min": 1, "max": 3},
+            "confidence": "medium",
+            "flags": ["needs_confirmation"],
+        }],
+        "totals": {
+            "grams": {"estimate": 100, "min": 90, "max": 110},
+            "calories": {"estimate": 100, "min": 90, "max": 110},
+            "protein": {"estimate": 5, "min": 4, "max": 6},
+            "carbs": {"estimate": 10, "min": 8, "max": 12},
+            "fat": {"estimate": 2, "min": 1, "max": 3},
+        },
+        "flags": ["needs_confirmation"],
+        "uncertaintyNotes": ["Portion remains estimated."],
+    }
+    calls = []
+    with patch(
+        "main.httpx.AsyncClient",
+        lambda **kwargs: CapturingClient(
+            calls,
+            FakeResponse(json.dumps(proposal).encode()),
+            **kwargs,
+        ),
+    ):
+        response = client.post(
+            "/nutrition/photo-proposal",
+            headers={**AUTH, "content-type": "application/json"},
+            content=request_body,
+        )
+
+    assert response.status_code == 200
+    assert response.json()["mealID"] == "meal-1"
+    assert len(calls) == 1
+    method, url, options = calls[0]
+    assert method == "POST"
+    assert url == main.NUTRITION_PHOTO_UPSTREAM
+    assert options["headers"] == {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + "l" * 64,
+    }
+    assert options["content"] == request_body
+
+
 def test_finance_summary_without_linked_connection_is_unavailable():
     response = client.get("/finance/summary", headers=AUTH)
     assert response.status_code == 503
@@ -1951,6 +2426,114 @@ def test_document_upload_rejects_non_object_metadata(tmp_path, monkeypatch):
     assert not (tmp_path / "documents").exists()
 
 
+def test_document_upload_rejects_corrupt_index_without_replacing_it(tmp_path, monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(main, "DOCUMENTS_INDEX_PATH", tmp_path / "documents.json")
+    monkeypatch.setattr(main, "DOCUMENTS_DIR", tmp_path / "documents")
+    corrupt = b"not-json"
+    main.DOCUMENTS_INDEX_PATH.write_bytes(corrupt)
+    response = client.post(
+        "/documents",
+        headers=AUTH,
+        data={"metadata": json.dumps({"id": "55555555-5555-4555-8555-555555555555"})},
+        files={"file": ("return.pdf", b"new", "application/pdf")},
+    )
+    assert response.status_code == 503
+    assert main.DOCUMENTS_INDEX_PATH.read_bytes() == corrupt
+    assert not (tmp_path / "documents").exists()
+
+
+def test_document_upload_rejects_serialized_index_threshold_before_file_publication(tmp_path, monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(main, "DOCUMENTS_INDEX_PATH", tmp_path / "documents.json")
+    monkeypatch.setattr(main, "DOCUMENTS_DIR", tmp_path / "documents")
+    first_id = "66666666-6666-4666-8666-666666666666"
+    first = client.post(
+        "/documents",
+        headers=AUTH,
+        data={"metadata": json.dumps({"id": first_id, "label": "first"})},
+        files={"file": ("return.pdf", b"old", "application/pdf")},
+    )
+    assert first.status_code == 200
+    before = main.DOCUMENTS_INDEX_PATH.read_bytes()
+    monkeypatch.setattr(main, "DOCUMENT_INDEX_MAX_SIZE", len(before) + 1)
+    second_id = "77777777-7777-4777-8777-777777777777"
+    response = client.post(
+        "/documents",
+        headers=AUTH,
+        data={"metadata": json.dumps({"id": second_id, "label": "x" * 128})},
+        files={"file": ("return.pdf", b"new", "application/pdf")},
+    )
+    assert response.status_code == 413
+    assert main.DOCUMENTS_INDEX_PATH.read_bytes() == before
+    assert not (tmp_path / "documents" / second_id).exists()
+
+
+def test_document_upload_rejects_entry_count_threshold_before_file_publication(tmp_path, monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(main, "DOCUMENTS_INDEX_PATH", tmp_path / "documents.json")
+    monkeypatch.setattr(main, "DOCUMENTS_DIR", tmp_path / "documents")
+    monkeypatch.setattr(main, "DOCUMENT_INDEX_MAX_ENTRIES", 1)
+    first_id = "88888888-8888-4888-8888-888888888888"
+    assert client.post(
+        "/documents",
+        headers=AUTH,
+        data={"metadata": json.dumps({"id": first_id})},
+        files={"file": ("return.pdf", b"old", "application/pdf")},
+    ).status_code == 200
+    before = main.DOCUMENTS_INDEX_PATH.read_bytes()
+    second_id = "99999999-9999-4999-8999-999999999999"
+    response = client.post(
+        "/documents",
+        headers=AUTH,
+        data={"metadata": json.dumps({"id": second_id})},
+        files={"file": ("return.pdf", b"new", "application/pdf")},
+    )
+    assert response.status_code == 413
+    assert main.DOCUMENTS_INDEX_PATH.read_bytes() == before
+    assert not (tmp_path / "documents" / second_id).exists()
+
+
+def test_document_upload_failed_index_publication_preserves_previous_file_and_index(tmp_path, monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(main, "DOCUMENTS_INDEX_PATH", tmp_path / "documents.json")
+    monkeypatch.setattr(main, "DOCUMENTS_DIR", tmp_path / "documents")
+    document_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    assert client.post(
+        "/documents",
+        headers=AUTH,
+        data={"metadata": json.dumps({"id": document_id})},
+        files={"file": ("return.pdf", b"old", "application/pdf")},
+    ).status_code == 200
+    before_index = main.DOCUMENTS_INDEX_PATH.read_bytes()
+    original_write = main._atomic_write_bytes
+
+    def fail_index(path, data):
+        if path == main.DOCUMENTS_INDEX_PATH:
+            raise OSError("simulated index publication failure")
+        return original_write(path, data)
+
+    monkeypatch.setattr(main, "_atomic_write_bytes", fail_index)
+    response = client.post(
+        "/documents",
+        headers=AUTH,
+        data={"metadata": json.dumps({"id": document_id})},
+        files={"file": ("return.png", b"new", "image/png")},
+    )
+    assert response.status_code == 503
+    assert main.DOCUMENTS_INDEX_PATH.read_bytes() == before_index
+    assert (tmp_path / "documents" / document_id / "original.pdf").read_bytes() == b"old"
+    assert not (tmp_path / "documents" / document_id / "original.png").exists()
+
+
 def test_document_reupload_replaces_prior_original(tmp_path, monkeypatch):
     import main
 
@@ -2010,3 +2593,450 @@ def test_document_retrieval_rejects_oversized_existing_file(tmp_path, monkeypatc
 def test_document_retrieval_rejects_invalid_id():
     response = client.get("/documents/not-a-uuid/file", headers=AUTH)
     assert response.status_code == 400
+
+
+def imported_finance_record(record_id="00000000-0000-4000-8000-000000000001", *, amount=-1890, category=None, description="Restaurant", source_revision=0):
+    observed_at = "2026-06-06T12:00:00Z"
+    return {
+        "recordID": record_id,
+        "sourceRevision": source_revision,
+        "bookedAt": observed_at,
+        "amountCents": amount,
+        "description": description,
+        "categoryOverride": category,
+        "sourceCategory": "Food",
+        "providerCode": None,
+        "source": "tradeRepublicCSV",
+        "importedAt": "2026-06-07T12:00:00Z",
+        "kind": "cash",
+        "investment": None,
+    }
+
+
+def imported_finance_request(base_revision, operations):
+    return {"schemaVersion": 2, "baseRevision": base_revision, "operations": operations}
+
+
+def imported_finance_headers(etag, key):
+    return {
+        **AUTH,
+        "Content-Type": "application/json",
+        "If-Match": etag,
+        "Idempotency-Key": key,
+    }
+
+
+def test_imported_finance_authority_supports_readback_correction_override_and_tombstone(tmp_path, monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "FINANCE_IMPORTED_PATH", tmp_path / "finance-imported.json")
+    initial = client.get("/finance/imported", headers=AUTH)
+    assert initial.status_code == 200
+    assert initial.json()["revision"] == 0
+    record_id = "00000000-0000-4000-8000-000000000001"
+    original = imported_finance_record(record_id)
+    upsert = {"operation": "upsert", "record": original, "expectedSourceRevision": 0}
+
+    first = client.put(
+        "/finance/imported",
+        headers=imported_finance_headers(initial.headers["etag"], "import-1"),
+        json=imported_finance_request(0, [upsert]),
+    )
+    assert first.status_code == 200
+    assert first.json()["revision"] == 1
+    assert len(first.json()["records"]) == 1
+
+    replay = client.put(
+        "/finance/imported",
+        headers=imported_finance_headers(initial.headers["etag"], "import-1"),
+        json=imported_finance_request(0, [upsert]),
+    )
+    assert replay.status_code == 200
+    assert replay.headers["x-lifeos-idempotent-replay"] == "true"
+    assert replay.json()["revision"] == 1
+
+    corrected = imported_finance_record(record_id, amount=-2575, description="Corrected merchant", source_revision=1)
+    corrected_upsert = {
+        "operation": "upsert",
+        "record": corrected,
+        "expectedSourceRevision": 1,
+    }
+    corrected_response = client.put(
+        "/finance/imported",
+        headers=imported_finance_headers(first.headers["etag"], "import-2"),
+        json=imported_finance_request(1, [corrected_upsert]),
+    )
+    assert corrected_response.status_code == 200
+    assert corrected_response.json()["revision"] == 2
+    assert corrected_response.json()["records"][0]["amountCents"] == -2575
+
+    override_response = client.put(
+        "/finance/imported",
+        headers=imported_finance_headers(corrected_response.headers["etag"], "import-3"),
+        json=imported_finance_request(2, [{
+            "operation": "categorySet",
+            "recordID": record_id,
+            "expectedSourceRevision": 2,
+            "categoryOverride": "groceries",
+        }]),
+    )
+    assert override_response.status_code == 200
+    assert override_response.json()["records"][0]["categoryOverride"] == "groceries"
+
+    deleted = client.put(
+        "/finance/imported",
+        headers=imported_finance_headers(override_response.headers["etag"], "import-4"),
+        json=imported_finance_request(3, [{
+            "operation": "delete",
+            "recordID": record_id,
+            "expectedSourceRevision": 2,
+            "deletedAt": "2026-06-08T12:00:00Z",
+        }]),
+    )
+    assert deleted.status_code == 200
+    assert deleted.json()["records"] == []
+    assert deleted.json()["tombstones"] == [{
+        "recordID": record_id,
+        "revision": 4,
+        "deletedAt": "2026-06-08T12:00:00Z",
+    }]
+
+    stale = client.put(
+        "/finance/imported",
+        headers=imported_finance_headers(deleted.headers["etag"], "stale-write"),
+        json=imported_finance_request(4, [upsert]),
+    )
+    assert stale.status_code == 409
+    assert stale.headers["x-lifeos-conflict-reason"] == "deleted_record"
+    assert stale.headers["etag"] == deleted.headers["etag"]
+    assert stale.json()["revision"] == 4
+
+    restored = client.put(
+        "/finance/imported",
+        headers=imported_finance_headers(deleted.headers["etag"], "restore-1"),
+        json=imported_finance_request(4, [{
+            "operation": "restore",
+            "record": original,
+            "expectedTombstoneRevision": 4,
+        }]),
+    )
+    assert restored.status_code == 200
+    assert restored.json()["revision"] == 5
+    assert restored.json()["records"][0]["sourceRevision"] == 5
+    assert restored.json()["tombstones"] == []
+
+
+def test_imported_finance_authority_rejects_malformed_oversized_and_ambiguous_writes(tmp_path, monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "FINANCE_IMPORTED_PATH", tmp_path / "finance-imported.json")
+    initial = client.get("/finance/imported", headers=AUTH)
+    valid_headers = imported_finance_headers(initial.headers["etag"], "validation")
+    invalid = client.put(
+        "/finance/imported",
+        headers=valid_headers,
+        json={"schemaVersion": 99, "baseRevision": 0, "operations": []},
+    )
+    assert invalid.status_code == 400
+    assert not (tmp_path / "finance-imported.json").exists()
+
+    wrong_type = client.put(
+        "/finance/imported",
+        headers={**valid_headers, "Content-Type": "text/plain"},
+        content=b"{}",
+    )
+    assert wrong_type.status_code == 415
+
+    oversized = client.put(
+        "/finance/imported",
+        headers={**valid_headers, "Content-Length": str(main.FINANCE_IMPORTED_MAX_BODY_SIZE + 1)},
+        content=b"{}",
+    )
+    assert oversized.status_code == 413
+
+    valid = imported_finance_record(source_revision=0)
+    for index, invalid_record in enumerate([
+        {**valid, "description": " Restaurant"},
+        {**valid, "description": "é" * 300},
+        {**valid, "amountCents": 1.5},
+        {**valid, "recordID": valid["recordID"].upper()},
+        {**valid, "unknown": True},
+    ]):
+        response = client.put(
+            "/finance/imported",
+            headers=imported_finance_headers(initial.headers["etag"], f"invalid-{index}"),
+            json=imported_finance_request(0, [{
+                "operation": "upsert",
+                "record": invalid_record,
+                "expectedSourceRevision": 0,
+            }]),
+        )
+        # Uppercase UUID is canonicalized and remains valid; all other
+        # fixtures are rejected by the shared boundary validator.
+        if index == 3:
+            assert response.status_code == 200
+        else:
+            assert response.status_code == 400
+
+
+def test_imported_finance_replays_exact_body_after_authority_advances(tmp_path, monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "FINANCE_IMPORTED_PATH", tmp_path / "finance-imported.json")
+    initial = client.get("/finance/imported", headers=AUTH)
+    original = imported_finance_record()
+    first_request = imported_finance_request(0, [{
+        "operation": "upsert",
+        "record": original,
+        "expectedSourceRevision": 0,
+    }])
+    first = client.put(
+        "/finance/imported",
+        headers=imported_finance_headers(initial.headers["etag"], "lost-response"),
+        json=first_request,
+    )
+    assert first.status_code == 200
+
+    corrected = imported_finance_record(amount=-2_000, source_revision=1)
+    second = client.put(
+        "/finance/imported",
+        headers=imported_finance_headers(first.headers["etag"], "advance-authority"),
+        json=imported_finance_request(1, [{
+            "operation": "upsert",
+            "record": corrected,
+            "expectedSourceRevision": 1,
+        }]),
+    )
+    assert second.status_code == 200
+    assert second.json()["revision"] == 2
+
+    replay = client.put(
+        "/finance/imported",
+        headers=imported_finance_headers(initial.headers["etag"], "lost-response"),
+        json=first_request,
+    )
+    assert replay.status_code == 200
+    assert replay.headers["x-lifeos-idempotent-replay"] == "true"
+    assert replay.json()["revision"] == 2
+    assert replay.json()["records"][0]["amountCents"] == -2_000
+
+    misuse = client.put(
+        "/finance/imported",
+        headers=imported_finance_headers(initial.headers["etag"], "lost-response"),
+        json=imported_finance_request(0, [{
+            "operation": "upsert",
+            "record": imported_finance_record(amount=-2_001),
+            "expectedSourceRevision": 0,
+        }]),
+    )
+    assert misuse.status_code == 409
+    assert misuse.headers["x-lifeos-conflict"] == "true"
+    assert misuse.json()["revision"] == 2
+
+
+def test_imported_finance_rejects_stale_source_and_category_preconditions_atomically(tmp_path, monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "FINANCE_IMPORTED_PATH", tmp_path / "finance-imported.json")
+    initial = client.get("/finance/imported", headers=AUTH)
+    record_id = "00000000-0000-4000-8000-000000000001"
+    first = client.put(
+        "/finance/imported",
+        headers=imported_finance_headers(initial.headers["etag"], "source-1"),
+        json=imported_finance_request(0, [{
+            "operation": "upsert",
+            "record": imported_finance_record(record_id),
+            "expectedSourceRevision": 0,
+        }]),
+    )
+    corrected = imported_finance_record(record_id, amount=-2_100, source_revision=1)
+    second = client.put(
+        "/finance/imported",
+        headers=imported_finance_headers(first.headers["etag"], "source-2"),
+        json=imported_finance_request(1, [{
+            "operation": "upsert",
+            "record": corrected,
+            "expectedSourceRevision": 1,
+        }]),
+    )
+    assert second.status_code == 200
+    assert second.json()["revision"] == 2
+
+    stale_category = client.put(
+        "/finance/imported",
+        headers=imported_finance_headers(second.headers["etag"], "category-stale"),
+        json=imported_finance_request(2, [{
+            "operation": "categorySet",
+            "recordID": record_id,
+            "expectedSourceRevision": 1,
+            "categoryOverride": "groceries",
+        }]),
+    )
+    assert stale_category.status_code == 409
+    assert stale_category.headers["x-lifeos-conflict-reason"] == "source_revision"
+
+    stale_source = client.put(
+        "/finance/imported",
+        headers=imported_finance_headers(second.headers["etag"], "source-stale"),
+        json=imported_finance_request(2, [{
+            "operation": "upsert",
+            "record": imported_finance_record(record_id, source_revision=1),
+            "expectedSourceRevision": 1,
+        }]),
+    )
+    assert stale_source.status_code == 409
+    assert stale_source.headers["x-lifeos-conflict-reason"] == "source_revision"
+
+    second_id = "00000000-0000-4000-8000-000000000002"
+    atomic_failure = client.put(
+        "/finance/imported",
+        headers=imported_finance_headers(second.headers["etag"], "atomic-failure"),
+        json=imported_finance_request(2, [
+            {
+                "operation": "upsert",
+                "record": imported_finance_record(second_id),
+                "expectedSourceRevision": 0,
+            },
+            {
+                "operation": "categoryClear",
+                "recordID": record_id,
+                "expectedSourceRevision": 1,
+            },
+        ]),
+    )
+    assert atomic_failure.status_code == 409
+    assert client.get("/finance/imported", headers=AUTH).json()["revision"] == 2
+    assert second_id not in {row["recordID"] for row in client.get("/finance/imported", headers=AUTH).json()["records"]}
+
+
+def test_imported_finance_state_reload_preserves_authority_and_replay_journal(tmp_path, monkeypatch):
+    import importlib
+    import main
+
+    path = tmp_path / "finance-imported.json"
+    monkeypatch.setattr(main, "FINANCE_IMPORTED_PATH", path)
+    initial = client.get("/finance/imported", headers=AUTH)
+    first = client.put(
+        "/finance/imported",
+        headers=imported_finance_headers(initial.headers["etag"], "reload-key"),
+        json=imported_finance_request(0, [{
+            "operation": "upsert",
+            "record": imported_finance_record(),
+            "expectedSourceRevision": 0,
+        }]),
+    )
+    assert first.status_code == 200
+
+    reloaded_main = importlib.reload(main)
+    monkeypatch.setattr(reloaded_main, "FINANCE_IMPORTED_PATH", path)
+    reloaded_client = TestClient(reloaded_main.app)
+    replay = reloaded_client.put(
+        "/finance/imported",
+        headers=imported_finance_headers(initial.headers["etag"], "reload-key"),
+        json=imported_finance_request(0, [{
+            "operation": "upsert",
+            "record": imported_finance_record(),
+            "expectedSourceRevision": 0,
+        }]),
+    )
+    assert replay.status_code == 200
+    assert replay.headers["x-lifeos-idempotent-replay"] == "true"
+    assert replay.json()["revision"] == 1
+
+
+def test_imported_finance_legacy_state_is_explicitly_migrated_to_v2(tmp_path, monkeypatch):
+    import main
+
+    path = tmp_path / "finance-imported.json"
+    monkeypatch.setattr(main, "FINANCE_IMPORTED_PATH", path)
+    legacy_record = imported_finance_record()
+    legacy_record.pop("sourceRevision")
+    legacy_snapshot = {
+        "schemaVersion": 1,
+        "domain": "finance",
+        "ledger": "manual_import",
+        "authority": "gateway",
+        "revision": 1,
+        "records": [legacy_record],
+        "tombstones": [],
+    }
+    legacy_body = json.dumps(legacy_snapshot, separators=(",", ":"), ensure_ascii=False).encode()
+    legacy_metadata = {
+        "schemaVersion": 1,
+        "domain": "finance",
+        "authority": "gateway",
+        "revision": 1,
+        "bodyDigest": hashlib.sha256(legacy_body).hexdigest(),
+        "idempotency": [],
+    }
+    path.write_bytes(json.dumps({
+        "schemaVersion": 1,
+        "bodyBase64": base64.b64encode(legacy_body).decode("ascii"),
+        "metadata": legacy_metadata,
+    }, sort_keys=True, separators=(",", ":")).encode())
+
+    response = client.get("/finance/imported", headers=AUTH)
+    assert response.status_code == 200
+    assert response.json()["schemaVersion"] == 2
+    assert response.json()["records"][0]["sourceRevision"] == 1
+    migrated = json.loads(path.read_text())
+    assert migrated["schemaVersion"] == 2
+    assert json.loads(base64.b64decode(migrated["bodyBase64"]))["schemaVersion"] == 2
+
+    after_migration = client.put(
+        "/finance/imported",
+        headers=imported_finance_headers(response.headers["etag"], "after-migration"),
+        json=imported_finance_request(1, [{
+            "operation": "categorySet",
+            "recordID": legacy_record["recordID"],
+            "expectedSourceRevision": 1,
+            "categoryOverride": "groceries",
+        }]),
+    )
+    assert after_migration.status_code == 200
+    assert after_migration.json()["revision"] == 2
+    assert after_migration.json()["records"][0]["categoryOverride"] == "groceries"
+
+
+def test_imported_finance_duplicate_key_with_different_fingerprint_is_conflict(tmp_path, monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "FINANCE_IMPORTED_PATH", tmp_path / "finance-imported.json")
+    initial = client.get("/finance/imported", headers=AUTH)
+    first = client.put(
+        "/finance/imported",
+        headers=imported_finance_headers(initial.headers["etag"], "same-key"),
+        json=imported_finance_request(0, [{
+            "operation": "upsert",
+            "record": imported_finance_record(),
+            "expectedSourceRevision": 0,
+        }]),
+    )
+    assert first.status_code == 200
+    different = imported_finance_record(amount=-1999)
+    conflict = client.put(
+        "/finance/imported",
+        headers=imported_finance_headers(initial.headers["etag"], "same-key"),
+        json=imported_finance_request(0, [{
+            "operation": "upsert",
+            "record": different,
+            "expectedSourceRevision": 0,
+        }]),
+    )
+    assert conflict.status_code == 409
+    assert conflict.headers["x-lifeos-conflict"] == "true"
+    assert conflict.json()["revision"] == 1
+
+
+# Ephemeral local service capability only. Never read operator credentials or use network.
+@pytest.fixture(autouse=True)
+def service_credentials(tmp_path_factory, monkeypatch):
+    import main
+
+    tmp_path = tmp_path_factory.mktemp("gateway-service-auth")
+    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
+    path = tmp_path / main.LOCAL_API_SECRET_ENV
+    path.write_text("l" * 64)
+    path.chmod(0o600)
+    monkeypatch.setenv(main.LOCAL_API_SECRET_ENV, str(path))
+    return {main.LOCAL_API_SECRET_ENV: path}

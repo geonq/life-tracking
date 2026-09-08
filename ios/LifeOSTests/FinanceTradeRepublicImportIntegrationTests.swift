@@ -296,4 +296,23 @@ final class FinanceTradeRepublicImportIntegrationTests: XCTestCase {
         XCTAssertEqual(result.duplicateCount, 2)
         XCTAssertEqual(try store.all().count, 2)
     }
+
+    // MARK: 7. Local-first sync handoff
+
+    func testTradeRepublicImportPersistsBeforeNetworkAndLeavesDurableSyncWork() throws {
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        let store = try FinanceImportedTransactionStore(url: url)
+        let parsed = FinanceStatementImporter.parseCSV(germanStatementInitial)
+
+        let result = try store.add(parsed.transactions)
+
+        XCTAssertEqual(result.insertedCount, 3)
+        XCTAssertEqual(try store.all().count, 3)
+        XCTAssertEqual(try store.pendingSyncEntryCount(), 1)
+        let relaunched = try FinanceImportedTransactionStore(url: url)
+        XCTAssertEqual(try relaunched.all().count, 3)
+        XCTAssertEqual(try relaunched.pendingSyncEntryCount(), 1)
+        XCTAssertNil(try relaunched.pendingSyncRequest(), "a push must wait until a gateway ETag has been fetched")
+    }
 }

@@ -2,9 +2,9 @@
 
 Stores the LifeOS app's Calendar snapshot and Tax documents as opaque JSON
 blobs, exactly as the Swift app encodes them (iso8601 dates, sorted keys).
-This server does not model CalendarItem/TaxDocument itself on purpose: the
-Swift client already contains tested merge logic (CalendarSnapshot.merged in
-ios/Shared/CalendarDomain.swift) and pushes an already-merged snapshot here.
+Calendar item shape is validated here before authority changes; item merge
+semantics remain in the Swift client (CalendarSnapshot.merged in
+ios/Shared/CalendarDomain.swift), which pushes an already-merged snapshot.
 This service is deliberately a dumb, authoritative store reachable over the
 Tailscale tailnet, not a second place that re-implements merge semantics.
 
@@ -168,6 +168,154 @@ def _request_has_allowed_tailscale_identity(scope) -> bool:
     )
 
 
+def _scope_header_values(scope, name: str) -> list[bytes]:
+    wanted = name.lower().encode("ascii")
+    return [
+        value for header, value in scope.get("headers", [])
+        if isinstance(header, bytes)
+        and isinstance(value, bytes)
+        and header.lower() == wanted
+    ]
+
+
+def _canonical_browser_origin(value: str) -> str | None:
+    """Canonicalize one exact HTTPS origin, rejecting path and credential data."""
+    if not isinstance(value, str) or not value or len(value) > 512:
+        return None
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except (TypeError, ValueError):
+        return None
+    if (
+        parsed.scheme.casefold() != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+        or any(ord(char) < 0x21 or ord(char) == 0x7F for char in value)
+    ):
+        return None
+    hostname = parsed.hostname.casefold().rstrip(".")
+    if not hostname:
+        return None
+    try:
+        hostname = hostname.encode("idna").decode("ascii")
+    except UnicodeError:
+        return None
+    if ":" in hostname:
+        host = f"[{hostname}]"
+    else:
+        host = hostname
+    if port is None or port == 443:
+        return f"https://{host}"
+    return f"https://{host}:{port}"
+
+
+def _configured_browser_origins() -> frozenset[str]:
+    """Use the configured Enable Banking redirect host as the sole web origin.
+
+    The native app does not send an Origin header. A browser may use the
+    public Tailscale Serve origin, which is already required as the exact
+    Enable Banking redirect URI. No wildcard or Host-derived origin is safe.
+    """
+    redirect_uri = os.environ.get("ENABLE_BANKING_REDIRECT_URI")
+    if not isinstance(redirect_uri, str) or not redirect_uri:
+        return frozenset()
+    try:
+        parsed = urlsplit(redirect_uri)
+        if (
+            parsed.scheme.casefold() != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or any(ord(char) < 0x21 or ord(char) == 0x7F for char in redirect_uri)
+        ):
+            return frozenset()
+        origin = _canonical_browser_origin(
+            f"https://{parsed.netloc}"
+        )
+    except (TypeError, ValueError):
+        return frozenset()
+    return frozenset({origin}) if origin is not None else frozenset()
+
+
+ALLOWED_BROWSER_ORIGINS = _configured_browser_origins()
+MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+CONSENT_CALLBACK_PATH = "/finance/callback"
+
+
+def _is_browser_mutation_scope(scope) -> bool:
+    path = scope.get("path")
+    method = str(scope.get("method", "")).upper()
+    return method in MUTATING_METHODS and (
+        path in {"/calendar", "/documents", "/finance/connect", "/finance/imported", "/nutrition/photo-proposal"}
+        or (isinstance(path, str) and path.startswith("/finance/connect/"))
+    )
+
+
+def _request_has_allowed_browser_origin(scope) -> bool:
+    """Reject browser cross-site requests while keeping native clients originless.
+
+    Enable Banking returns through a provider-initiated top-level navigation;
+    its callback is allowed to carry cross-site fetch metadata because the
+    callback handler validates the one-time provider state before persistence.
+    """
+    if (
+        scope.get("path") == CONSENT_CALLBACK_PATH
+        and str(scope.get("method", "")).upper() == "GET"
+    ):
+        return True
+
+    origin_values = _scope_header_values(scope, "origin")
+    fetch_site_values = _scope_header_values(scope, "sec-fetch-site")
+    if len(origin_values) > 1 or len(fetch_site_values) > 1:
+        return False
+
+    fetch_site: str | None = None
+    if fetch_site_values:
+        try:
+            fetch_site = fetch_site_values[0].decode("ascii").casefold()
+        except UnicodeDecodeError:
+            return False
+        if fetch_site not in {"same-origin", "same-site", "none"}:
+            return False
+
+    if not origin_values:
+        return fetch_site != "cross-site"
+    try:
+        origin = origin_values[0].decode("ascii")
+    except UnicodeDecodeError:
+        return False
+    canonical = _canonical_browser_origin(origin)
+    return canonical is not None and canonical in ALLOWED_BROWSER_ORIGINS
+
+
+def _document_transport_error(scope) -> JSONResponse | None:
+    """Reject a declared oversized document request before multipart parsing."""
+    if scope.get("path") != "/documents" or str(scope.get("method", "")).upper() != "POST":
+        return None
+    values = _scope_header_values(scope, "content-length")
+    if len(values) > 1:
+        return JSONResponse({"error": "invalid_request"}, status_code=400)
+    if not values:
+        return None
+    try:
+        declared_length = int(values[0].decode("ascii"))
+    except (UnicodeDecodeError, ValueError):
+        return JSONResponse({"error": "invalid_request"}, status_code=400)
+    if declared_length < 0:
+        return JSONResponse({"error": "invalid_request"}, status_code=400)
+    maximum = DOCUMENT_MAX_UPLOAD_SIZE + DOCUMENT_METADATA_MAX_SIZE + DOCUMENT_MULTIPART_OVERHEAD
+    if declared_length > maximum:
+        return JSONResponse({"error": "request_too_large"}, status_code=413)
+    return None
+
+
 DATA_DIR = Path(os.environ.get("LIFEOS_DATA_DIR", Path(__file__).parent / "data"))
 CALENDAR_PATH = DATA_DIR / "calendar.json"
 DOCUMENTS_INDEX_PATH = DATA_DIR / "documents.json"
@@ -233,6 +381,35 @@ CALENDAR_BODY_TIMEOUT = 8.0
 CALENDAR_IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[\x21-\x7e]{1,128}$")
 CALENDAR_ETAG_PATTERN = re.compile(r'^"calendar-v1-r([0-9]+)-([0-9a-f]{64})"$')
 SYNC_FINGERPRINT_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+# Manual imported finance is a separate, gateway-authoritative ledger. It is
+# deliberately not part of the Enable Banking summary route: CSV rows carry
+# user-confirmed history, while `/finance/summary` carries live connector
+# observations. These bounds are mirrored by the native client and contracts.
+FINANCE_IMPORTED_LEGACY_SCHEMA_VERSION = 1
+FINANCE_IMPORTED_SCHEMA_VERSION = 2
+FINANCE_IMPORTED_MAX_RECORDS = 10_000
+FINANCE_IMPORTED_MAX_TOMBSTONES = 10_000
+FINANCE_IMPORTED_MAX_OPERATIONS = 512
+FINANCE_IMPORTED_MAX_IDEMPOTENCY_RECORDS = 10_000
+FINANCE_IMPORTED_MAX_BODY_SIZE = 512 * 1024
+FINANCE_IMPORTED_MAX_RESPONSE_SIZE = 4 * 1024 * 1024
+FINANCE_IMPORTED_MAX_STATE_SIZE = 8 * 1024 * 1024
+FINANCE_IMPORTED_MAX_REVISION = CALENDAR_MAX_REVISION
+FINANCE_IMPORTED_BODY_TIMEOUT = 8.0
+FINANCE_IMPORTED_IDEMPOTENCY_KEY_PATTERN = CALENDAR_IDEMPOTENCY_KEY_PATTERN
+FINANCE_IMPORTED_ETAG_PATTERN = re.compile(r'^"finance-imported-v2-r([0-9]+)-([0-9a-f]{64})"$')
+FINANCE_IMPORTED_WHITESPACE = frozenset({
+    0x0009, 0x000A, 0x000B, 0x000C, 0x000D, 0x0020, 0x0085, 0x00A0, 0x1680,
+    *range(0x2000, 0x200B), 0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF,
+})
+FINANCE_IMPORTED_PATH = DATA_DIR / "finance-imported.json"
+FINANCE_IMPORTED_SOURCES = frozenset({"tradeRepublicCSV", "genericCSV"})
+FINANCE_IMPORTED_KINDS = frozenset({"cash", "investmentOrder"})
+FINANCE_IMPORTED_CATEGORIES = frozenset({
+    "groceries", "dining", "transport", "shopping", "bills", "subscriptions",
+    "health", "travel", "transfers", "fees", "taxes", "investments", "income",
+    "cash", "uncategorized",
+})
 USAGE_MAX_RESPONSE_SIZE = 256 * 1024
 # Strict per-operation timeout plus an outer wall-clock deadline.
 USAGE_REQUEST_TIMEOUT = httpx.Timeout(5.0, connect=2.0)
@@ -252,6 +429,14 @@ NUTRITION_PHOTO_BODY_TIMEOUT = 30.0
 DOCUMENT_MAX_UPLOAD_SIZE = int(os.environ.get("LIFEOS_DOCUMENT_MAX_UPLOAD_SIZE", 64 * 1024 * 1024))
 DOCUMENT_READ_CHUNK_SIZE = 1024 * 1024
 DOCUMENT_ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".heic"}
+DOCUMENT_INDEX_MAX_SIZE = 256 * 1024
+DOCUMENT_INDEX_MAX_ENTRIES = 512
+DOCUMENT_METADATA_MAX_SIZE = 64 * 1024
+DOCUMENT_METADATA_MAX_FIELDS = 128
+DOCUMENT_MULTIPART_OVERHEAD = 128 * 1024
+DOCUMENT_INDEX_FILENAME_PATTERN = re.compile(
+    r"^original(?:-[0-9a-f]{32})?\.(?:pdf|png|jpg|jpeg|heic|bin)$"
+)
 
 # Sensitive keys that must not appear in the usage payload
 SENSITIVE_KEYS = {
@@ -270,6 +455,7 @@ USAGE_MAX_STRUCTURE_NODES = 10_000
 
 calendar_lock = asyncio.Lock()
 documents_lock = asyncio.Lock()
+finance_imported_lock = asyncio.Lock()
 calendar_revision = 0
 documents_revision = 0
 
@@ -289,6 +475,11 @@ async def require_tailscale_identity(request: Request, call_next):
             if path in {"/usage/claude-ingest", "/usage/claude-ingest/"}:
                 response.headers["Cache-Control"] = "no-store"
             return response
+        if _is_browser_mutation_scope(request.scope) and not _request_has_allowed_browser_origin(request.scope):
+            return JSONResponse({"detail": "Untrusted browser origin"}, status_code=403)
+        transport_error = _document_transport_error(request.scope)
+        if transport_error is not None:
+            return transport_error
     response = await call_next(request)
     if path in {"/usage/claude-ingest", "/usage/claude-ingest/"}:
         response.headers["Cache-Control"] = "no-store"
@@ -299,31 +490,62 @@ class ChangeBroadcaster:
     """Push-only fan-out so clients don't have to poll. Costs ~nothing while idle:
     connections just sit parked until a write happens, no timers, no background loop."""
 
+    MAX_CONNECTIONS = 32
+    SEND_TIMEOUT = 0.25
+    BROADCAST_TIMEOUT = 0.50
+
     def __init__(self) -> None:
         self._sockets: set[WebSocket] = set()
         self._lock = asyncio.Lock()
 
-    async def register(self, ws: WebSocket) -> None:
+    async def register(self, ws: WebSocket) -> bool:
         async with self._lock:
+            if ws not in self._sockets and len(self._sockets) >= self.MAX_CONNECTIONS:
+                return False
             self._sockets.add(ws)
+            return True
 
     async def unregister(self, ws: WebSocket) -> None:
         async with self._lock:
             self._sockets.discard(ws)
 
-    async def broadcast(self, message: dict) -> None:
+    async def _close_evicted(self, ws: WebSocket) -> None:
+        try:
+            await asyncio.wait_for(ws.close(code=1011), timeout=self.SEND_TIMEOUT)
+        except Exception:
+            pass
+
+    async def broadcast(self, message: dict) -> bool:
         async with self._lock:
             targets = list(self._sockets)
-        dead: list[WebSocket] = []
-        for ws in targets:
-            try:
-                await ws.send_json(message)
-            except Exception:
-                dead.append(ws)
+        if not targets:
+            return True
+
+        tasks = {
+            asyncio.create_task(
+                asyncio.wait_for(ws.send_json(message), timeout=self.SEND_TIMEOUT)
+            ): ws
+            for ws in targets
+        }
+        _done, pending = await asyncio.wait(tasks, timeout=self.BROADCAST_TIMEOUT)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+        dead = [
+            ws for task, ws in tasks.items()
+            if task.cancelled() or task.exception() is not None
+        ]
         if dead:
             async with self._lock:
                 for ws in dead:
                     self._sockets.discard(ws)
+            await asyncio.gather(
+                *(self._close_evicted(ws) for ws in dead),
+                return_exceptions=True,
+            )
+        return not dead
 
 
 broadcaster = ChangeBroadcaster()
@@ -425,11 +647,14 @@ def _validated_ingest_secret(value: bytes) -> str | None:
 
 
 def _read_ingest_secret() -> str | None:
-    path = _ingest_secret_path()
+    return _read_strict_secret(_ingest_secret_path())
+
+
+def _read_strict_secret(path: Path) -> str | None:
     descriptor: int | None = None
     try:
         before = os.lstat(path)
-        if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode):
+        if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode) or before.st_size > CLAUDE_INGEST_SECRET_MAX_BYTES:
             return None
         if os.name == "posix" and stat.S_IMODE(before.st_mode) & 0o077:
             return None
@@ -445,6 +670,8 @@ def _read_ingest_secret() -> str | None:
         ):
             return None
         value = os.read(descriptor, CLAUDE_INGEST_SECRET_MAX_BYTES + 1)
+        if len(value) != after.st_size:
+            return None
     except (OSError, ValueError):
         return None
     finally:
@@ -454,6 +681,27 @@ def _read_ingest_secret() -> str | None:
             except OSError:
                 pass
     return _validated_ingest_secret(value)
+
+
+LOCAL_API_SECRET_ENV = "LIFEOS_LOCAL_API_SECRET_FILE"
+
+
+def _configured_service_secret(environment: str) -> str | None:
+    value = os.environ.get(environment)
+    if not value or not Path(value).is_absolute():
+        return None
+    return _read_strict_secret(Path(value))
+
+
+def _service_secret() -> str | None:
+    """Read the local service capability; never derive it from client headers."""
+    secret = _configured_service_secret(LOCAL_API_SECRET_ENV)
+    if secret is None:
+        return None
+    for forbidden in (_read_ingest_secret(), LIFEOS_TAILSCALE_EDGE_TOKEN):
+        if forbidden is not None and hmac.compare_digest(secret, forbidden):
+            return None
+    return secret
 
 
 CLAUDE_INGEST_WINDOWS = {"five_hour", "seven_day"}
@@ -1243,8 +1491,13 @@ async def ws_changes(websocket: WebSocket) -> None:
     if not _request_has_allowed_tailscale_identity(websocket.scope):
         await websocket.close(code=4403)
         return
+    if not _request_has_allowed_browser_origin(websocket.scope):
+        await websocket.close(code=4403)
+        return
     await websocket.accept()
-    await broadcaster.register(websocket)
+    if not await broadcaster.register(websocket):
+        await websocket.close(code=4429)
+        return
     try:
         while True:
             # No client->server messages are expected; this just detects disconnects.
@@ -1329,6 +1582,674 @@ def _read_bounded_state_file(path: Path, maximum: int) -> bytes | None:
     return body
 
 
+class _FinanceImportedStateUnavailable(Exception):
+    """The manual imported-finance authority snapshot is missing or unsafe."""
+
+
+class _FinanceImportedLimitExceeded(Exception):
+    """A valid delta would exceed the bounded authority snapshot."""
+
+
+class _FinanceImportedOperationConflict(Exception):
+    """A valid operation's immutable per-record precondition is no longer true."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _finance_imported_uuid(value: object) -> str:
+    if not isinstance(value, str) or not re.fullmatch(
+        r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+        value,
+    ):
+        raise ValueError("invalid imported finance record id")
+    try:
+        return str(uuid.UUID(value)).lower()
+    except (ValueError, AttributeError) as exc:
+        raise ValueError("invalid imported finance record id") from exc
+
+
+def _finance_imported_timestamp(value: object) -> str:
+    if not isinstance(value, str) or not FINANCE_DATETIME_PATTERN.fullmatch(value):
+        raise ValueError("invalid imported finance timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed > datetime.now(timezone.utc) + timedelta(seconds=5):
+            raise ValueError("future imported finance timestamp")
+    except (TypeError, ValueError, OverflowError, OSError) as exc:
+        raise ValueError("invalid imported finance timestamp") from exc
+    return value
+
+
+def _finance_imported_text(value: object, maximum: int, *, nullable: bool = False) -> str | None:
+    if value is None and nullable:
+        return None
+    if not isinstance(value, str) or not value or ord(value[0]) in FINANCE_IMPORTED_WHITESPACE or ord(value[-1]) in FINANCE_IMPORTED_WHITESPACE:
+        raise ValueError("invalid imported finance text")
+    try:
+        if len(value.encode("utf-8")) > maximum:
+            raise ValueError("imported finance text exceeds UTF-8 byte limit")
+    except UnicodeEncodeError as exc:
+        raise ValueError("invalid imported finance text") from exc
+    return value
+
+
+def _finance_imported_cents(value: object, *, nullable: bool = False) -> int | None:
+    if value is None and nullable:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or abs(value) > CALENDAR_MAX_REVISION:
+        raise ValueError("invalid imported finance cents")
+    return value
+
+
+def _finance_imported_revision(value: object, *, positive: bool = False) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("invalid imported finance revision")
+    minimum = 1 if positive else 0
+    if value < minimum or value > FINANCE_IMPORTED_MAX_REVISION:
+        raise ValueError("invalid imported finance revision")
+    return value
+
+
+def _validate_finance_imported_investment(value: object) -> dict | None:
+    if value is None:
+        return None
+    required = {"symbol", "assetClass", "quantity", "unitPriceCents", "tradeType", "currency"}
+    if not isinstance(value, dict) or set(value) != required or value.get("currency") != "EUR":
+        raise ValueError("invalid imported finance investment details")
+    return {
+        "symbol": _finance_imported_text(value["symbol"], 64, nullable=True),
+        "assetClass": _finance_imported_text(value["assetClass"], 64, nullable=True),
+        "quantity": _finance_imported_text(value["quantity"], 128, nullable=True),
+        "unitPriceCents": _finance_imported_cents(value["unitPriceCents"], nullable=True),
+        "tradeType": _finance_imported_text(value["tradeType"], 64, nullable=True),
+        "currency": "EUR",
+    }
+
+
+def _validate_finance_imported_record(value: object, *, legacy: bool = False, snapshot_revision: int | None = None) -> dict:
+    base_fields = {
+        "recordID", "bookedAt", "amountCents", "description", "categoryOverride",
+        "sourceCategory", "providerCode", "source", "importedAt", "kind", "investment",
+    }
+    required = base_fields if legacy else base_fields | {"sourceRevision"}
+    if not isinstance(value, dict) or set(value) != required:
+        raise ValueError("invalid imported finance record")
+    source_revision = 0 if legacy else _finance_imported_revision(value["sourceRevision"])
+    if snapshot_revision is not None:
+        if source_revision <= 0 or source_revision > snapshot_revision:
+            raise ValueError("invalid imported finance source revision")
+    category_override = value["categoryOverride"]
+    if category_override is not None and (
+        not isinstance(category_override, str) or category_override not in FINANCE_IMPORTED_CATEGORIES
+    ):
+        raise ValueError("invalid imported finance category override")
+    record = {
+        "recordID": _finance_imported_uuid(value["recordID"]),
+        "sourceRevision": source_revision,
+        "bookedAt": _finance_imported_timestamp(value["bookedAt"]),
+        "amountCents": _finance_imported_cents(value["amountCents"]),
+        "description": _finance_imported_text(value["description"], 512),
+        "categoryOverride": category_override,
+        "sourceCategory": _finance_imported_text(value["sourceCategory"], 128, nullable=True),
+        "providerCode": _finance_imported_text(value["providerCode"], 64, nullable=True),
+        "source": value["source"],
+        "importedAt": _finance_imported_timestamp(value["importedAt"]),
+        "kind": value["kind"],
+        "investment": _validate_finance_imported_investment(value["investment"]),
+    }
+    if record["source"] not in FINANCE_IMPORTED_SOURCES or record["kind"] not in FINANCE_IMPORTED_KINDS:
+        raise ValueError("invalid imported finance source or kind")
+    if record["kind"] == "cash" and record["investment"] is not None:
+        raise ValueError("cash row cannot carry investment details")
+    return record
+
+
+def _validate_finance_imported_tombstone(value: object, *, maximum_revision: int) -> dict:
+    required = {"recordID", "revision", "deletedAt"}
+    if not isinstance(value, dict) or set(value) != required:
+        raise ValueError("invalid imported finance tombstone")
+    record_revision = _finance_imported_revision(value["revision"], positive=True)
+    if record_revision > maximum_revision:
+        raise ValueError("invalid imported finance tombstone revision")
+    return {
+        "recordID": _finance_imported_uuid(value["recordID"]),
+        "revision": record_revision,
+        "deletedAt": _finance_imported_timestamp(value["deletedAt"]),
+    }
+
+
+def _normalize_finance_imported_snapshot(value: object, *, legacy: bool = False) -> dict:
+    required = {"schemaVersion", "domain", "ledger", "authority", "revision", "records", "tombstones"}
+    expected_version = FINANCE_IMPORTED_LEGACY_SCHEMA_VERSION if legacy else FINANCE_IMPORTED_SCHEMA_VERSION
+    if not isinstance(value, dict) or set(value) != required:
+        raise ValueError("invalid imported finance snapshot")
+    revision = value["revision"]
+    if (
+        type(value["schemaVersion"]) is not int
+        or value["schemaVersion"] != expected_version
+        or value["domain"] != "finance"
+        or value["ledger"] != "manual_import"
+        or value["authority"] != "gateway"
+        or isinstance(revision, bool)
+        or not isinstance(revision, int)
+        or revision < 0
+        or revision > FINANCE_IMPORTED_MAX_REVISION
+        or not isinstance(value["records"], list)
+        or len(value["records"]) > FINANCE_IMPORTED_MAX_RECORDS
+        or not isinstance(value["tombstones"], list)
+        or len(value["tombstones"]) > FINANCE_IMPORTED_MAX_TOMBSTONES
+    ):
+        raise ValueError("invalid imported finance snapshot")
+    if legacy and revision == 0 and value["records"]:
+        raise ValueError("legacy imported finance records require a positive revision")
+
+    records: list[dict] = []
+    record_ids: set[str] = set()
+    for raw_record in value["records"]:
+        record = _validate_finance_imported_record(
+            raw_record,
+            legacy=legacy,
+            snapshot_revision=revision if not legacy else None,
+        )
+        if legacy:
+            record["sourceRevision"] = revision
+        if record["recordID"] in record_ids:
+            raise ValueError("duplicate imported finance record id")
+        record_ids.add(record["recordID"])
+        records.append(record)
+
+    tombstones: list[dict] = []
+    tombstone_ids: set[str] = set()
+    for raw_tombstone in value["tombstones"]:
+        tombstone = _validate_finance_imported_tombstone(raw_tombstone, maximum_revision=revision)
+        if tombstone["recordID"] in tombstone_ids or tombstone["recordID"] in record_ids:
+            raise ValueError("duplicate or live imported finance tombstone id")
+        tombstone_ids.add(tombstone["recordID"])
+        tombstones.append(tombstone)
+
+    records.sort(key=lambda record: record["recordID"])
+    tombstones.sort(key=lambda tombstone: tombstone["recordID"])
+    return {
+        "schemaVersion": FINANCE_IMPORTED_SCHEMA_VERSION,
+        "domain": "finance",
+        "ledger": "manual_import",
+        "authority": "gateway",
+        "revision": revision,
+        "records": records,
+        "tombstones": tombstones,
+    }
+
+
+def _parse_finance_imported_snapshot(body: bytes, *, allow_legacy: bool = False) -> dict:
+    if len(body) > FINANCE_IMPORTED_MAX_RESPONSE_SIZE:
+        raise ValueError("imported finance snapshot exceeds limit")
+    try:
+        decoded = json.loads(
+            body.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite_constant,
+            parse_int=_calendar_integer,
+        )
+        if not isinstance(decoded, dict):
+            raise ValueError("invalid imported finance snapshot")
+        raw_version = decoded.get("schemaVersion")
+        if raw_version == FINANCE_IMPORTED_LEGACY_SCHEMA_VERSION and allow_legacy:
+            snapshot = _normalize_finance_imported_snapshot(decoded, legacy=True)
+        else:
+            snapshot = _normalize_finance_imported_snapshot(decoded)
+        # Reject lone surrogates and ensure the normalized form is publishable.
+        json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        return snapshot
+    except (UnicodeDecodeError, UnicodeEncodeError, json.JSONDecodeError, ValueError, TypeError, OverflowError, RecursionError) as exc:
+        raise ValueError("invalid imported finance snapshot") from exc
+
+
+def _finance_imported_snapshot_bytes(snapshot: dict) -> bytes:
+    try:
+        body = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    except (UnicodeError, TypeError, ValueError, OverflowError, RecursionError) as exc:
+        raise ValueError("imported finance snapshot cannot be serialized") from exc
+    if len(body) > FINANCE_IMPORTED_MAX_RESPONSE_SIZE:
+        raise ValueError("imported finance snapshot exceeds limit")
+    return body
+
+
+def _parse_finance_imported_request(body: bytes) -> dict:
+    if len(body) > FINANCE_IMPORTED_MAX_BODY_SIZE:
+        raise HTTPException(status_code=413, detail="imported finance request exceeds limit")
+    try:
+        decoded = json.loads(
+            body.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite_constant,
+            parse_int=_calendar_integer,
+        )
+        required = {"schemaVersion", "baseRevision", "operations"}
+        if not isinstance(decoded, dict) or set(decoded) != required:
+            raise ValueError("invalid imported finance request")
+        base_revision = _finance_imported_revision(decoded["baseRevision"])
+        operations_value = decoded["operations"]
+        if (
+            type(decoded["schemaVersion"]) is not int
+            or decoded["schemaVersion"] != FINANCE_IMPORTED_SCHEMA_VERSION
+            or not isinstance(operations_value, list)
+            or len(operations_value) > FINANCE_IMPORTED_MAX_OPERATIONS
+        ):
+            raise ValueError("invalid imported finance request")
+
+        operations: list[dict] = []
+        record_ids: set[str] = set()
+        for operation in operations_value:
+            if not isinstance(operation, dict) or not isinstance(operation.get("operation"), str):
+                raise ValueError("invalid imported finance operation")
+            kind = operation["operation"]
+            if kind == "upsert":
+                if set(operation) != {"operation", "record", "expectedSourceRevision"}:
+                    raise ValueError("invalid imported finance upsert")
+                expected_source_revision = _finance_imported_revision(operation["expectedSourceRevision"])
+                record = _validate_finance_imported_record(operation["record"])
+                if record["sourceRevision"] != expected_source_revision:
+                    raise ValueError("source precondition must match record source revision")
+                record_id = record["recordID"]
+                normalized = {
+                    "operation": "upsert",
+                    "record": record,
+                    "expectedSourceRevision": expected_source_revision,
+                }
+            elif kind == "categorySet":
+                if set(operation) != {"operation", "recordID", "expectedSourceRevision", "categoryOverride"}:
+                    raise ValueError("invalid imported finance category set")
+                record_id = _finance_imported_uuid(operation["recordID"])
+                expected_source_revision = _finance_imported_revision(operation["expectedSourceRevision"])
+                category = operation["categoryOverride"]
+                if not isinstance(category, str) or category not in FINANCE_IMPORTED_CATEGORIES:
+                    raise ValueError("invalid imported finance category override")
+                normalized = {
+                    "operation": "categorySet",
+                    "recordID": record_id,
+                    "expectedSourceRevision": expected_source_revision,
+                    "categoryOverride": category,
+                }
+            elif kind == "categoryClear":
+                if set(operation) != {"operation", "recordID", "expectedSourceRevision"}:
+                    raise ValueError("invalid imported finance category clear")
+                record_id = _finance_imported_uuid(operation["recordID"])
+                expected_source_revision = _finance_imported_revision(operation["expectedSourceRevision"])
+                normalized = {
+                    "operation": "categoryClear",
+                    "recordID": record_id,
+                    "expectedSourceRevision": expected_source_revision,
+                }
+            elif kind == "delete":
+                if set(operation) != {"operation", "recordID", "expectedSourceRevision", "deletedAt"}:
+                    raise ValueError("invalid imported finance delete")
+                record_id = _finance_imported_uuid(operation["recordID"])
+                expected_source_revision = _finance_imported_revision(operation["expectedSourceRevision"])
+                normalized = {
+                    "operation": "delete",
+                    "recordID": record_id,
+                    "expectedSourceRevision": expected_source_revision,
+                    "deletedAt": _finance_imported_timestamp(operation["deletedAt"]),
+                }
+            elif kind == "restore":
+                if set(operation) != {"operation", "record", "expectedTombstoneRevision"}:
+                    raise ValueError("invalid imported finance restore")
+                expected_tombstone_revision = _finance_imported_revision(operation["expectedTombstoneRevision"], positive=True)
+                record = _validate_finance_imported_record(operation["record"])
+                if record["sourceRevision"] != 0:
+                    raise ValueError("restore record must not carry a new authority revision")
+                record_id = record["recordID"]
+                normalized = {
+                    "operation": "restore",
+                    "record": record,
+                    "expectedTombstoneRevision": expected_tombstone_revision,
+                }
+            else:
+                raise ValueError("unknown imported finance operation")
+            if record_id in record_ids:
+                raise ValueError("duplicate imported finance operation id")
+            record_ids.add(record_id)
+            operations.append(normalized)
+        return {
+            "schemaVersion": FINANCE_IMPORTED_SCHEMA_VERSION,
+            "baseRevision": base_revision,
+            "operations": operations,
+        }
+    except HTTPException:
+        raise
+    except (UnicodeDecodeError, UnicodeEncodeError, json.JSONDecodeError, ValueError, TypeError, OverflowError, RecursionError) as exc:
+        raise HTTPException(status_code=400, detail="invalid imported finance request") from exc
+
+
+def _finance_imported_digest(body: bytes) -> str:
+    return hashlib.sha256(body).hexdigest()
+
+
+def _finance_imported_etag(revision: int, digest: str) -> str:
+    return f'"finance-imported-v2-r{revision}-{digest}"'
+
+
+def _valid_finance_imported_etag(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    match = FINANCE_IMPORTED_ETAG_PATTERN.fullmatch(value)
+    if match is None:
+        return False
+    revision_text = match.group(1)
+    if len(revision_text) > len(str(FINANCE_IMPORTED_MAX_REVISION)):
+        return False
+    try:
+        revision = int(revision_text)
+    except (TypeError, ValueError):
+        return False
+    return revision <= FINANCE_IMPORTED_MAX_REVISION and str(revision) == revision_text
+
+
+def _finance_imported_default_snapshot() -> dict:
+    return {
+        "schemaVersion": FINANCE_IMPORTED_SCHEMA_VERSION,
+        "domain": "finance",
+        "ledger": "manual_import",
+        "authority": "gateway",
+        "revision": 0,
+        "records": [],
+        "tombstones": [],
+    }
+
+
+def _finance_imported_default_metadata(body: bytes, *, revision: int = 0) -> dict:
+    return {
+        "schemaVersion": FINANCE_IMPORTED_SCHEMA_VERSION,
+        "domain": "finance",
+        "authority": "gateway",
+        "revision": revision,
+        "bodyDigest": _finance_imported_digest(body),
+        "idempotency": [],
+    }
+
+
+def _finance_imported_idempotency_window(records: list[dict], new_record: dict) -> list[dict]:
+    return [*records, new_record][-max(1, FINANCE_IMPORTED_MAX_IDEMPOTENCY_RECORDS):]
+
+
+def _validate_finance_imported_metadata(value: object, body: bytes, *, schema_version: int = FINANCE_IMPORTED_SCHEMA_VERSION) -> dict:
+    required = {"schemaVersion", "domain", "authority", "revision", "bodyDigest", "idempotency"}
+    if not isinstance(value, dict) or set(value) != required:
+        raise _FinanceImportedStateUnavailable
+    revision = value["revision"]
+    if (
+        type(value["schemaVersion"]) is not int
+        or value["schemaVersion"] != schema_version
+        or value["domain"] != "finance"
+        or value["authority"] != "gateway"
+        or isinstance(revision, bool)
+        or not isinstance(revision, int)
+        or revision < 0
+        or revision > FINANCE_IMPORTED_MAX_REVISION
+        or not isinstance(value["bodyDigest"], str)
+        or not SYNC_FINGERPRINT_PATTERN.fullmatch(value["bodyDigest"])
+        or value["bodyDigest"] != _finance_imported_digest(body)
+        or not isinstance(value["idempotency"], list)
+        or len(value["idempotency"]) > FINANCE_IMPORTED_MAX_IDEMPOTENCY_RECORDS
+    ):
+        raise _FinanceImportedStateUnavailable
+    keys: set[str] = set()
+    for record in value["idempotency"]:
+        if not isinstance(record, dict) or set(record) != {"key", "fingerprint", "revision"}:
+            raise _FinanceImportedStateUnavailable
+        key = record["key"]
+        record_revision = record["revision"]
+        if (
+            not isinstance(key, str)
+            or not FINANCE_IMPORTED_IDEMPOTENCY_KEY_PATTERN.fullmatch(key)
+            or key in keys
+            or not isinstance(record["fingerprint"], str)
+            or not SYNC_FINGERPRINT_PATTERN.fullmatch(record["fingerprint"])
+            or isinstance(record_revision, bool)
+            or not isinstance(record_revision, int)
+            or record_revision < 0
+            or record_revision > revision
+        ):
+            raise _FinanceImportedStateUnavailable
+        keys.add(key)
+    return value
+
+
+def _finance_imported_state_bytes(body: bytes, metadata: dict) -> bytes:
+    envelope = {
+        "schemaVersion": FINANCE_IMPORTED_SCHEMA_VERSION,
+        "bodyBase64": base64.b64encode(body).decode("ascii"),
+        "metadata": metadata,
+    }
+    try:
+        encoded = json.dumps(envelope, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+        raise ValueError("imported finance state cannot be serialized") from exc
+    if len(encoded) > FINANCE_IMPORTED_MAX_STATE_SIZE:
+        raise ValueError("imported finance state exceeds limit")
+    return encoded
+
+
+def _decode_finance_imported_state(state_body: bytes) -> tuple[bytes, dict, dict]:
+    try:
+        decoded = json.loads(
+            state_body.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite_constant,
+        )
+        if not isinstance(decoded, dict) or set(decoded) != {"schemaVersion", "bodyBase64", "metadata"}:
+            raise ValueError("invalid imported finance state envelope")
+        state_version = decoded["schemaVersion"]
+        if type(state_version) is not int or state_version not in {
+            FINANCE_IMPORTED_LEGACY_SCHEMA_VERSION,
+            FINANCE_IMPORTED_SCHEMA_VERSION,
+        }:
+            raise ValueError("invalid imported finance state version")
+        encoded_body = decoded["bodyBase64"]
+        if not isinstance(encoded_body, str) or not encoded_body:
+            raise ValueError("invalid imported finance state body")
+        body = base64.b64decode(encoded_body.encode("ascii"), validate=True)
+        if len(body) > FINANCE_IMPORTED_MAX_RESPONSE_SIZE or base64.b64encode(body).decode("ascii") != encoded_body:
+            raise ValueError("invalid imported finance state body")
+        if state_version == FINANCE_IMPORTED_LEGACY_SCHEMA_VERSION:
+            # Version 1 used whole-record upserts without per-record source
+            # revisions. It is safe to migrate a valid snapshot only by
+            # assigning every live source row the conservative authority
+            # revision of that snapshot and dropping the obsolete replay
+            # journal. The old v1 ETag/body cannot be replayed against v2.
+            legacy_snapshot = _parse_finance_imported_snapshot(body, allow_legacy=True)
+            _validate_finance_imported_metadata(
+                decoded["metadata"],
+                body,
+                schema_version=FINANCE_IMPORTED_LEGACY_SCHEMA_VERSION,
+            )
+            snapshot = legacy_snapshot
+            body = _finance_imported_snapshot_bytes(snapshot)
+            metadata = _finance_imported_default_metadata(body, revision=snapshot["revision"])
+            return body, snapshot, metadata
+
+        snapshot = _parse_finance_imported_snapshot(body)
+        metadata = _validate_finance_imported_metadata(decoded["metadata"], body)
+        if metadata["revision"] != snapshot["revision"]:
+            raise ValueError("imported finance revision mismatch")
+        return body, snapshot, metadata
+    except (UnicodeDecodeError, UnicodeEncodeError, ValueError, binascii.Error, json.JSONDecodeError, RecursionError) as exc:
+        raise _FinanceImportedStateUnavailable from exc
+
+
+def _load_finance_imported_state() -> tuple[bytes, dict, dict]:
+    try:
+        state_body = _read_bounded_state_file(FINANCE_IMPORTED_PATH, FINANCE_IMPORTED_MAX_STATE_SIZE)
+    except (_CalendarStateUnavailable, OSError) as exc:
+        raise _FinanceImportedStateUnavailable from exc
+    if state_body is None:
+        snapshot = _finance_imported_default_snapshot()
+        body = _finance_imported_snapshot_bytes(snapshot)
+        return body, snapshot, _finance_imported_default_metadata(body)
+    body, snapshot, metadata = _decode_finance_imported_state(state_body)
+    # `_decode_finance_imported_state` returns a v2 body for a v1 envelope.
+    # Persist that conversion before exposing it so a crash cannot repeatedly
+    # reinterpret a legacy replay journal as current authority state.
+    try:
+        decoded_version = json.loads(
+            state_body.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite_constant,
+        ).get("schemaVersion")
+        if decoded_version == FINANCE_IMPORTED_LEGACY_SCHEMA_VERSION:
+            _atomic_write_bytes(FINANCE_IMPORTED_PATH, _finance_imported_state_bytes(body, metadata))
+    except (UnicodeDecodeError, UnicodeEncodeError, ValueError, TypeError, OSError, binascii.Error, json.JSONDecodeError, RecursionError) as exc:
+        raise _FinanceImportedStateUnavailable from exc
+    return body, snapshot, metadata
+
+
+def _finance_imported_response(
+    body: bytes,
+    revision: int,
+    *,
+    status_code: int = 200,
+    replay: bool = False,
+    conflict: bool = False,
+    noop: bool = False,
+    conflict_reason: str | None = None,
+) -> Response:
+    headers = {
+        "Cache-Control": "no-store",
+        "ETag": _finance_imported_etag(revision, _finance_imported_digest(body)),
+        "X-LifeOS-Revision": str(revision),
+        "X-LifeOS-Schema-Version": str(FINANCE_IMPORTED_SCHEMA_VERSION),
+    }
+    if replay:
+        headers["X-LifeOS-Idempotent-Replay"] = "true"
+    if conflict:
+        headers["X-LifeOS-Conflict"] = "true"
+    if conflict_reason is not None:
+        headers["X-LifeOS-Conflict-Reason"] = conflict_reason
+    if noop:
+        headers["X-LifeOS-Noop"] = "true"
+    return Response(content=body, status_code=status_code, media_type="application/json", headers=headers)
+
+
+async def _read_bounded_finance_imported_request(request: Request) -> bytes:
+    try:
+        async with asyncio.timeout(FINANCE_IMPORTED_BODY_TIMEOUT):
+            length_values = _raw_header_values(request, "content-length")
+            if len(length_values) > 1:
+                raise HTTPException(status_code=400, detail="duplicate content length")
+            raw_length = _calendar_header(request, "content-length")
+            if raw_length is not None:
+                try:
+                    content_length = int(raw_length)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail="invalid content length") from exc
+                if content_length < 0 or content_length > FINANCE_IMPORTED_MAX_BODY_SIZE:
+                    raise HTTPException(status_code=413, detail="imported finance request exceeds limit")
+            body = bytearray()
+            async for chunk in request.stream():
+                if len(body) + len(chunk) > FINANCE_IMPORTED_MAX_BODY_SIZE:
+                    raise HTTPException(status_code=413, detail="imported finance request exceeds limit")
+                body.extend(chunk)
+            return bytes(body)
+    except TimeoutError as exc:
+        raise HTTPException(status_code=408, detail="imported finance request timeout") from exc
+
+
+def _calendar_integer(value: str) -> int:
+    # Bound conversion before int(): this also avoids interpreter-specific
+    # limits becoming an uncaught exception on hostile integer literals.
+    if len(value.lstrip("-")) > len(str(CALENDAR_MAX_REVISION)):
+        raise ValueError("unsafe calendar integer")
+    number = int(value)
+    if abs(number) > CALENDAR_MAX_REVISION:
+        raise ValueError("unsafe calendar integer")
+    return number
+
+
+def _calendar_float(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("non-finite calendar number")
+    return number
+
+
+def _calendar_timestamp(value: object) -> datetime:
+    if not isinstance(value, str) or not FINANCE_DATETIME_PATTERN.fullmatch(value):
+        raise ValueError("invalid calendar timestamp")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    # Conversion verifies representability at timezone boundaries, too.
+    return parsed.astimezone(timezone.utc)
+
+
+def _validate_calendar_icon_asset(value: object) -> None:
+    # CalendarIconAsset's legacy decoder permits omitted/null version/hash.
+    if not isinstance(value, dict) or not {"format", "bytes"}.issubset(value) or set(value) - {
+        "schemaVersion", "contentHash", "format", "bytes",
+    }:
+        raise ValueError("invalid calendar icon asset")
+    version = value.get("schemaVersion")
+    if version is not None and (type(version) is not int or version != 1):
+        raise ValueError("invalid calendar icon version")
+    if not _is_choice(value["format"], {"png", "jpeg"}) or not isinstance(value["bytes"], str):
+        raise ValueError("invalid calendar icon encoding")
+    raw = base64.b64decode(value["bytes"].encode("ascii"), validate=True)
+    if not raw or len(raw) > 256 * 1024 or base64.b64encode(raw).decode("ascii") != value["bytes"]:
+        raise ValueError("invalid calendar icon bytes")
+    signature = b"\x89PNG\r\n\x1a\n" if value["format"] == "png" else b"\xff\xd8\xff"
+    if not raw.startswith(signature):
+        raise ValueError("invalid calendar icon format")
+    digest = value.get("contentHash")
+    if digest is not None and (not isinstance(digest, str) or digest != hashlib.sha256(raw).hexdigest()):
+        raise ValueError("invalid calendar icon digest")
+    # Actual single-frame image decoding/dimension validation remains the
+    # native ImageIO boundary; the gateway has no image decoder dependency.
+
+
+def _validate_calendar_item(value: object) -> None:
+    required = {"id", "title", "status", "start", "end", "createdAt", "updatedAt"}
+    optional = {"kind", "icon", "iconAsset", "systemIconName", "timeZoneIdentifier", "recurrence", "deletedAt"}
+    if not isinstance(value, dict) or not required.issubset(value) or set(value) - required - optional:
+        raise ValueError("invalid calendar item fields")
+    identifier = value["id"]
+    if not isinstance(identifier, str) or not re.fullmatch(
+        r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", identifier
+    ):
+        raise ValueError("invalid calendar item id")
+    if not isinstance(value["title"], str) or not value["title"].strip():
+        raise ValueError("invalid calendar title")
+    if not _is_choice(value["status"], {"planned", "in_progress", "done", "aborted", "blocked"}):
+        raise ValueError("invalid calendar progress")
+    kind = value.get("kind")
+    if kind is not None and not _is_choice(kind, {"event", "todo", "dailySchedule", "daily_schedule"}):
+        raise ValueError("invalid calendar kind")
+    if _calendar_timestamp(value["end"]) <= _calendar_timestamp(value["start"]):
+        raise ValueError("invalid calendar interval")
+    for field in ("createdAt", "updatedAt"):
+        _calendar_timestamp(value[field])
+    if value.get("deletedAt") is not None:
+        _calendar_timestamp(value["deletedAt"])
+    # Optional icon/timezone strings are normalized by the native decoder
+    # (unsupported symbols/zones are discarded). Preserve that legacy policy.
+    for field in ("icon", "systemIconName", "timeZoneIdentifier"):
+        if value.get(field) is not None and not isinstance(value[field], str):
+            raise ValueError("invalid calendar optional text")
+    if value.get("iconAsset") is not None:
+        _validate_calendar_icon_asset(value["iconAsset"])
+    recurrence = value.get("recurrence")
+    if recurrence is not None:
+        if not isinstance(recurrence, dict) or "frequency" not in recurrence or set(recurrence) - {"frequency", "interval", "until"}:
+            raise ValueError("invalid calendar recurrence")
+        if not _is_choice(recurrence["frequency"], {"daily", "weekly", "monthly", "yearly"}):
+            raise ValueError("invalid calendar frequency")
+        interval = recurrence.get("interval")
+        # Swift explicitly defaults omitted/null to 1 and clamps <=0 to 1.
+        if interval is not None and (type(interval) is not int or abs(interval) > CALENDAR_MAX_REVISION):
+            raise ValueError("invalid calendar recurrence interval")
+        if recurrence.get("until") is not None:
+            _calendar_timestamp(recurrence["until"])
+
+
 def _parse_calendar_document(body: bytes) -> dict:
     if len(body) > CALENDAR_MAX_BODY_SIZE:
         raise HTTPException(status_code=413, detail="calendar body exceeds limit")
@@ -1337,18 +2258,29 @@ def _parse_calendar_document(body: bytes) -> dict:
             body.decode("utf-8"),
             object_pairs_hook=_reject_duplicate_keys,
             parse_constant=_reject_nonfinite_constant,
+            parse_int=_calendar_integer,
+            parse_float=_calendar_float,
         )
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail="invalid calendar JSON") from exc
-    if (
-        not isinstance(decoded, dict)
-        or set(decoded) != {"schemaVersion", "items"}
-        or isinstance(decoded["schemaVersion"], bool)
-        or decoded["schemaVersion"] != CALENDAR_SCHEMA_VERSION
-        or not isinstance(decoded["items"], list)
-        or len(decoded["items"]) > CALENDAR_MAX_ITEMS
-    ):
-        raise HTTPException(status_code=400, detail="invalid calendar resource")
+        if (
+            not isinstance(decoded, dict)
+            or set(decoded) != {"schemaVersion", "items"}
+            or type(decoded["schemaVersion"]) is not int
+            or decoded["schemaVersion"] != CALENDAR_SCHEMA_VERSION
+            or not isinstance(decoded["items"], list)
+            or len(decoded["items"]) > CALENDAR_MAX_ITEMS
+        ):
+            raise ValueError("invalid calendar resource")
+        identifiers = set()
+        for item in decoded["items"]:
+            _validate_calendar_item(item)
+            identifier = item["id"].lower()
+            if identifier in identifiers:
+                raise ValueError("duplicate calendar item id")
+            identifiers.add(identifier)
+        # Reject escaped lone surrogates that Swift cannot decode as UTF-8.
+        json.dumps(decoded, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    except (UnicodeError, ValueError, TypeError, OverflowError, RecursionError) as exc:
+        raise HTTPException(status_code=400, detail="invalid calendar resource") from exc
     return decoded
 
 
@@ -1367,6 +2299,8 @@ def _valid_calendar_etag(value: object) -> bool:
     if match is None:
         return False
     revision_text = match.group(1)
+    if len(revision_text) > len(str(CALENDAR_MAX_REVISION)):
+        return False
     try:
         revision = int(revision_text)
     except (TypeError, ValueError):
@@ -1413,7 +2347,8 @@ def _validate_calendar_metadata(value: object, body: bytes) -> dict:
         raise _CalendarStateUnavailable
     revision = value["revision"]
     if (
-        value["schemaVersion"] != 1
+        type(value["schemaVersion"]) is not int
+        or value["schemaVersion"] != 1
         or isinstance(revision, bool)
         or not isinstance(revision, int)
         or revision < 0
@@ -1460,7 +2395,8 @@ def _validate_calendar_metadata(value: object, body: bytes) -> dict:
         tombstone_revision = tombstone["revision"]
         deleted_at = tombstone["deletedAt"]
         if (
-            tombstone["schemaVersion"] != 1
+            type(tombstone["schemaVersion"]) is not int
+            or tombstone["schemaVersion"] != 1
             or tombstone["domain"] != "calendar"
             or tombstone["authority"] != "gateway"
             or not isinstance(entity_id, str)
@@ -1497,7 +2433,7 @@ def _decode_calendar_state(state_body: bytes) -> tuple[bytes, dict, dict]:
         )
         if not isinstance(decoded, dict) or set(decoded) != {
             "schemaVersion", "bodyBase64", "metadata",
-        } or decoded["schemaVersion"] != CALENDAR_STATE_SCHEMA_VERSION:
+        } or type(decoded["schemaVersion"]) is not int or decoded["schemaVersion"] != CALENDAR_STATE_SCHEMA_VERSION:
             raise ValueError("invalid calendar state envelope")
         encoded_body = decoded["bodyBase64"]
         if not isinstance(encoded_body, str) or not encoded_body:
@@ -1508,7 +2444,7 @@ def _decode_calendar_state(state_body: bytes) -> tuple[bytes, dict, dict]:
         document = _parse_calendar_document(body)
         metadata = _validate_calendar_metadata(decoded["metadata"], body)
         return body, document, metadata
-    except (UnicodeDecodeError, UnicodeEncodeError, ValueError, binascii.Error, HTTPException) as exc:
+    except (UnicodeDecodeError, UnicodeEncodeError, ValueError, binascii.Error, HTTPException, RecursionError) as exc:
         raise _CalendarStateUnavailable from exc
 
 
@@ -1536,7 +2472,7 @@ def _load_calendar_state() -> tuple[bytes, dict, dict]:
             object_pairs_hook=_reject_duplicate_keys,
             parse_constant=_reject_nonfinite_constant,
         )
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
         raise _CalendarStateUnavailable from exc
     metadata = _validate_calendar_metadata(decoded_metadata, calendar_body)
     return calendar_body, document, metadata
@@ -1618,12 +2554,15 @@ def _repair_calendar_projections(body: bytes, metadata: dict) -> bool:
 async def _broadcast_calendar_revision(revision: int) -> bool:
     """Never turn a committed Calendar revision into an HTTP failure."""
     try:
-        await broadcaster.broadcast({"type": "calendar_changed", "revision": revision})
+        delivered = await broadcaster.broadcast({"type": "calendar_changed", "revision": revision})
     except Exception:
         # The durable retry marker remains in place. A replay or a subsequent
         # authoritative read repeats the notification without losing state.
         return False
-    return True
+    # Test doubles from the existing suite predate the boolean result. Treat
+    # their implicit None as successful while real bounded fan-out reports a
+    # failed delivery explicitly and keeps the retry marker durable.
+    return delivered is not False
 
 
 def _calendar_response(
@@ -1706,6 +2645,151 @@ def _safe_document_id(value) -> str:
         return str(uuid.UUID(str(value)))
     except (ValueError, TypeError, AttributeError) as exc:
         raise HTTPException(status_code=400, detail="metadata.id must be a UUID") from exc
+
+
+class _DocumentIndexError(Exception):
+    """The durable document index is missing, malformed, or unsafe."""
+
+
+class _DocumentIndexTooLarge(_DocumentIndexError):
+    """A new document index cannot fit the published response contract."""
+
+
+def _valid_document_index_filename(value: object) -> bool:
+    return isinstance(value, str) and DOCUMENT_INDEX_FILENAME_PATTERN.fullmatch(value) is not None
+
+
+def _serialize_document_index(index: list[dict]) -> bytes:
+    if len(index) > DOCUMENT_INDEX_MAX_ENTRIES:
+        raise _DocumentIndexTooLarge("document index entry limit exceeded")
+    try:
+        body = json.dumps(
+            index,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (UnicodeError, TypeError, ValueError, OverflowError, RecursionError) as exc:
+        raise _DocumentIndexError("document index cannot be serialized") from exc
+    if len(body) > DOCUMENT_INDEX_MAX_SIZE:
+        raise _DocumentIndexTooLarge("document index size limit exceeded")
+    return body
+
+
+def _document_index_id(value: object) -> str:
+    if not isinstance(value, str):
+        raise _DocumentIndexError("document index id is invalid")
+    try:
+        return str(uuid.UUID(value))
+    except (ValueError, AttributeError) as exc:
+        raise _DocumentIndexError("document index id is invalid") from exc
+
+
+def _load_document_index() -> tuple[list[dict], bytes | None]:
+    """Load the index without filtering or repairing corrupt durable state."""
+    try:
+        body = _read_bounded_state_file(DOCUMENTS_INDEX_PATH, DOCUMENT_INDEX_MAX_SIZE)
+    except (OSError, _CalendarStateUnavailable) as exc:
+        raise _DocumentIndexError("document index is unavailable") from exc
+    if body is None:
+        return [], None
+    try:
+        decoded = json.loads(
+            body.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite_constant,
+        )
+    except (UnicodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
+        raise _DocumentIndexError("document index is malformed") from exc
+    if not isinstance(decoded, list) or len(decoded) > DOCUMENT_INDEX_MAX_ENTRIES:
+        raise _DocumentIndexError("document index entry limit exceeded")
+    identifiers: set[str] = set()
+    for entry in decoded:
+        if not isinstance(entry, dict):
+            raise _DocumentIndexError("document index entry is invalid")
+        identifier = _document_index_id(entry.get("id"))
+        if identifier in identifiers:
+            raise _DocumentIndexError("document index contains duplicate ids")
+        identifiers.add(identifier)
+        if "_originalFile" in entry and not _valid_document_index_filename(entry["_originalFile"]):
+            raise _DocumentIndexError("document index file name is invalid")
+    # Validate the canonical publication form as well as the raw read bound.
+    _serialize_document_index(decoded)
+    return decoded, body
+
+
+def _parse_document_metadata(value: object) -> dict:
+    if not isinstance(value, str):
+        raise HTTPException(status_code=400, detail="metadata must be a JSON object")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise HTTPException(status_code=400, detail="metadata is not valid JSON") from exc
+    if len(encoded) > DOCUMENT_METADATA_MAX_SIZE:
+        raise HTTPException(status_code=413, detail="metadata exceeds limit")
+    try:
+        meta = json.loads(
+            value,
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite_constant,
+        )
+    except (UnicodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
+        raise HTTPException(status_code=400, detail="metadata is not valid JSON") from exc
+    if not isinstance(meta, dict):
+        raise HTTPException(status_code=400, detail="metadata must be a JSON object")
+    if len(meta) > DOCUMENT_METADATA_MAX_FIELDS:
+        raise HTTPException(status_code=413, detail="metadata field limit exceeded")
+    raw_doc_id = meta.get("id")
+    if not raw_doc_id:
+        raise HTTPException(status_code=400, detail="metadata.id is required")
+    doc_id = _safe_document_id(raw_doc_id)
+    meta["id"] = doc_id
+    try:
+        canonical_size = len(
+            json.dumps(meta, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+            .encode("utf-8")
+        )
+    except (UnicodeError, TypeError, ValueError, OverflowError, RecursionError) as exc:
+        raise HTTPException(status_code=400, detail="metadata is not valid JSON") from exc
+    if canonical_size > DOCUMENT_METADATA_MAX_SIZE:
+        raise HTTPException(status_code=413, detail="metadata exceeds limit")
+    return meta
+
+
+def _document_original_files(doc_dir: Path) -> list[Path]:
+    """Return only safe regular original files; reject suspicious state."""
+    try:
+        directory = doc_dir.lstat()
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise _DocumentIndexError("document directory is unavailable") from exc
+    if stat.S_ISLNK(directory.st_mode) or not stat.S_ISDIR(directory.st_mode):
+        raise _DocumentIndexError("document directory is unsafe")
+    files: list[Path] = []
+    try:
+        for path in doc_dir.iterdir():
+            if not path.name.startswith("original"):
+                continue
+            if not path.name.startswith("original.") and not path.name.startswith("original-"):
+                continue
+            if not _valid_document_index_filename(path.name):
+                raise _DocumentIndexError("document file name is invalid")
+            metadata = path.lstat()
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+                raise _DocumentIndexError("document file is unsafe")
+            files.append(path)
+    except OSError as exc:
+        raise _DocumentIndexError("document directory is unavailable") from exc
+    return sorted(files)
+
+
+def _document_destination_name(suffix: str, existing: list[Path]) -> str:
+    preferred = f"original{suffix}"
+    if all(path.name != preferred for path in existing):
+        return preferred
+    return f"original-{uuid.uuid4().hex}{suffix}"
 
 
 async def _read_bounded_upload(file: UploadFile) -> bytes:
@@ -1877,8 +2961,8 @@ async def put_calendar(request: Request) -> Response:
 async def list_documents() -> Response:
     async with documents_lock:
         try:
-            body = _read_bounded_state_file(DOCUMENTS_INDEX_PATH, CALENDAR_MAX_RESPONSE_SIZE)
-        except _CalendarStateUnavailable:
+            _index, body = _load_document_index()
+        except _DocumentIndexError:
             return JSONResponse({"error": "documents_unavailable"}, status_code=503)
         if body is None:
             body = b"[]"
@@ -1891,17 +2975,8 @@ async def upload_document(
     metadata: str = Form(...),
 ) -> JSONResponse:
     """`metadata` is the client's TaxDocument JSON (must include an `id` field)."""
-    try:
-        meta = json.loads(metadata)
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail=f"metadata is not valid JSON: {exc}") from exc
-    if not isinstance(meta, dict):
-        raise HTTPException(status_code=400, detail="metadata must be a JSON object")
-    raw_doc_id = meta.get("id")
-    if not raw_doc_id:
-        raise HTTPException(status_code=400, detail="metadata.id is required")
-    doc_id = _safe_document_id(raw_doc_id)
-    meta["id"] = doc_id
+    meta = _parse_document_metadata(metadata)
+    doc_id = meta["id"]
 
     original_bytes = await _read_bounded_upload(file)
     candidate_suffix = Path(file.filename or "").suffix.lower()
@@ -1909,30 +2984,91 @@ async def upload_document(
 
     global documents_revision
     async with documents_lock:
-        doc_dir = DOCUMENTS_DIR / doc_id
-        doc_dir.mkdir(parents=True, exist_ok=True)
-        destination = doc_dir / f"original{suffix}"
-        _atomic_write_bytes(destination, original_bytes)
-        for prior in doc_dir.glob("original.*"):
-            if prior != destination:
-                prior.unlink(missing_ok=True)
+        try:
+            index, _existing_index_body = _load_document_index()
+        except _DocumentIndexError as exc:
+            raise HTTPException(status_code=503, detail="documents are unavailable") from exc
 
-        index = []
-        if DOCUMENTS_INDEX_PATH.exists():
+        doc_dir = DOCUMENTS_DIR / doc_id
+        had_directory = doc_dir.exists()
+        if had_directory:
             try:
-                decoded_index = json.loads(DOCUMENTS_INDEX_PATH.read_bytes())
-                if isinstance(decoded_index, list):
-                    index = [entry for entry in decoded_index if isinstance(entry, dict)]
-            except json.JSONDecodeError:
-                index = []
-        index = [entry for entry in index if entry.get("id") != doc_id]
-        meta["_originalFile"] = f"original{suffix}"
-        index.append(meta)
-        _atomic_write_bytes(DOCUMENTS_INDEX_PATH, json.dumps(index, sort_keys=True).encode())
+                existing_files = _document_original_files(doc_dir)
+            except _DocumentIndexError as exc:
+                raise HTTPException(status_code=503, detail="documents are unavailable") from exc
+        else:
+            existing_files = []
+        destination_name = _document_destination_name(suffix, existing_files)
+        destination = doc_dir / destination_name
+        next_index = [entry for entry in index if _document_index_id(entry.get("id")) != doc_id]
+        meta["_originalFile"] = destination_name
+        next_index.append(meta)
+        try:
+            next_index_body = _serialize_document_index(next_index)
+        except _DocumentIndexTooLarge as exc:
+            raise HTTPException(status_code=413, detail="document index exceeds limit") from exc
+        except _DocumentIndexError as exc:
+            raise HTTPException(status_code=503, detail="documents are unavailable") from exc
+
+        file_published = False
+        index_published = False
+        try:
+            doc_dir.mkdir(parents=True, exist_ok=True)
+            _atomic_write_bytes(destination, original_bytes)
+            file_published = True
+            # The index is the commit point. Files are published first so a
+            # crash between the two operations leaves the old index usable.
+            _atomic_write_bytes(DOCUMENTS_INDEX_PATH, next_index_body)
+            index_published = True
+        except (OSError, ValueError) as exc:
+            # `_atomic_write_bytes` can report a directory-fsync failure after
+            # its atomic replace. Re-read the bounded target to distinguish a
+            # committed index from a failed publication before rolling back.
+            if not index_published:
+                try:
+                    index_published = _read_bounded_state_file(
+                        DOCUMENTS_INDEX_PATH,
+                        DOCUMENT_INDEX_MAX_SIZE,
+                    ) == next_index_body
+                except (OSError, _CalendarStateUnavailable):
+                    index_published = False
+            if index_published:
+                file_published = True
+            else:
+                try:
+                    file_published = destination.is_file() and not destination.is_symlink()
+                except OSError:
+                    file_published = False
+            if not index_published and file_published:
+                try:
+                    destination.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            if not index_published and not had_directory:
+                try:
+                    doc_dir.rmdir()
+                except OSError:
+                    pass
+            if not index_published:
+                raise HTTPException(status_code=503, detail="documents are unavailable") from exc
+
+        for prior in existing_files:
+            if prior != destination:
+                try:
+                    prior.unlink(missing_ok=True)
+                except OSError:
+                    # The committed index points at destination; an orphan is
+                    # harmless and can be pruned by the next upload.
+                    pass
         documents_revision += 1
         revision = documents_revision
 
-    await broadcaster.broadcast({"type": "documents_changed", "revision": revision})
+    try:
+        # Persistence is already committed; bounded fan-out must not turn a
+        # successful upload into an HTTP failure.
+        await broadcaster.broadcast({"type": "documents_changed", "revision": revision})
+    except Exception:
+        pass
     return JSONResponse({"status": "ok", "id": doc_id})
 
 
@@ -1943,10 +3079,25 @@ async def get_document_file(doc_id: str) -> Response:
         doc_dir = DOCUMENTS_DIR / safe_id
         if not doc_dir.exists():
             raise HTTPException(status_code=404, detail="Unknown document id")
-        candidates = sorted(path for path in doc_dir.glob("original.*") if path.is_file())
-        if not candidates:
+        try:
+            index, _body = _load_document_index()
+            entry = next((item for item in index if _document_index_id(item.get("id")) == safe_id), None)
+            candidates = _document_original_files(doc_dir)
+        except _DocumentIndexError as exc:
+            raise HTTPException(status_code=503, detail="documents are unavailable") from exc
+        if entry is not None:
+            selected_name = entry.get("_originalFile")
+            if not _valid_document_index_filename(selected_name):
+                raise HTTPException(status_code=503, detail="documents are unavailable")
+            selected = doc_dir / selected_name
+            if selected not in candidates:
+                raise HTTPException(status_code=404, detail="Original file missing")
+        elif _body is not None:
+            raise HTTPException(status_code=404, detail="Unknown document id")
+        elif not candidates:
             raise HTTPException(status_code=404, detail="Original file missing")
-        selected = candidates[0]
+        else:
+            selected = candidates[0]
         if selected.stat().st_size > DOCUMENT_MAX_UPLOAD_SIZE:
             raise HTTPException(status_code=413, detail="Document exceeds retrieval limit")
         body = selected.read_bytes()
@@ -1964,11 +3115,16 @@ async def _proxy_validated_json(
     max_response_size: int | None = None,
     request_timeout: httpx.Timeout | None = None,
     total_timeout: float | None = None,
+    local_auth: bool = False,
 ) -> Response:
     max_response_size = USAGE_MAX_RESPONSE_SIZE if max_response_size is None else max_response_size
     request_timeout = USAGE_REQUEST_TIMEOUT if request_timeout is None else request_timeout
     total_timeout = USAGE_TOTAL_TIMEOUT if total_timeout is None else total_timeout
     error = json.dumps({"error": f"{error_label} unavailable"}, separators=(",", ":")).encode()
+    secret = _service_secret() if local_auth else None
+    if local_auth and secret is None:
+        return Response(content=error, media_type="application/json", status_code=503)
+    headers = {"Authorization": f"Bearer {secret}"} if local_auth else {}
     try:
         async with asyncio.timeout(total_timeout):
             async with httpx.AsyncClient(
@@ -1976,7 +3132,7 @@ async def _proxy_validated_json(
                 follow_redirects=False,
                 trust_env=False,
             ) as client:
-                async with client.stream("GET", upstream_url) as upstream:
+                async with client.stream("GET", upstream_url, headers=headers) as upstream:
                     if upstream.status_code != 200:
                         return Response(content=error, media_type="application/json", status_code=503)
                     content_length = upstream.headers.get("content-length")
@@ -2479,6 +3635,9 @@ async def post_nutrition_photo_proposal(request: Request) -> Response:
         error = "request_too_large" if exc.status_code == 413 else "request_timeout" if exc.status_code == 408 else "invalid_request"
         return JSONResponse({"error": error}, status_code=exc.status_code)
 
+    secret = _service_secret()
+    if secret is None:
+        return JSONResponse({"error": "nutrition_unavailable"}, status_code=503)
     try:
         async with asyncio.timeout(NUTRITION_PHOTO_TOTAL_TIMEOUT):
             async with httpx.AsyncClient(
@@ -2490,7 +3649,7 @@ async def post_nutrition_photo_proposal(request: Request) -> Response:
                     "POST",
                     NUTRITION_PHOTO_UPSTREAM,
                     content=body,
-                    headers={"Content-Type": "application/json"},
+                    headers={"Content-Type": "application/json", "Authorization": f"Bearer {secret}"},
                 ) as upstream:
                     if upstream.status_code != 200:
                         return JSONResponse({"error": "nutrition_unavailable"}, status_code=503)
@@ -2551,7 +3710,241 @@ async def get_supplement_catalog(request: Request) -> Response:
 
 @app.get("/usage")
 async def get_usage() -> Response:
-    return await _proxy_validated_json(USAGE_UPSTREAM, _validate_usage_payload, "usage")
+    return await _proxy_validated_json(USAGE_UPSTREAM, _validate_usage_payload, "usage", local_auth=True)
+
+
+def _finance_imported_source_observation(record: dict) -> tuple:
+    """Return only provider-observed fields; category and authority metadata are excluded."""
+    return (
+        record["bookedAt"],
+        record["amountCents"],
+        record["description"],
+        record["sourceCategory"],
+        record["providerCode"],
+        record["source"],
+        record["kind"],
+        json.dumps(record["investment"], sort_keys=True, separators=(",", ":"), ensure_ascii=False),
+    )
+
+
+def _apply_finance_imported_operations(snapshot: dict, operations: list[dict], next_revision: int) -> dict:
+    """Apply one validated delta in O(n) using identity dictionaries.
+
+    Every branch checks the operation's captured record/tombstone precondition
+    before mutating the copies. The caller publishes the returned snapshot only
+    after the whole batch succeeds, so one conflict or limit failure preserves
+    the previous authority state byte-for-byte.
+    """
+    records = {record["recordID"]: dict(record) for record in snapshot["records"]}
+    tombstones = {tombstone["recordID"]: dict(tombstone) for tombstone in snapshot["tombstones"]}
+    current_revision = snapshot["revision"]
+
+    for operation in operations:
+        kind = operation["operation"]
+        if kind == "upsert":
+            incoming = dict(operation["record"])
+            record_id = incoming["recordID"]
+            expected_source_revision = operation["expectedSourceRevision"]
+            existing = records.get(record_id)
+            if record_id in tombstones:
+                raise _FinanceImportedOperationConflict("deleted_record")
+            if existing is None:
+                if expected_source_revision != 0:
+                    raise _FinanceImportedOperationConflict("source_revision")
+                incoming["sourceRevision"] = next_revision
+                records[record_id] = incoming
+            else:
+                if existing["sourceRevision"] != expected_source_revision:
+                    raise _FinanceImportedOperationConflict("source_revision")
+                # importedAt is the first local confirmation, not a provider
+                # observation. Category is edited through its own operation.
+                incoming["importedAt"] = existing["importedAt"]
+                if incoming["categoryOverride"] != existing["categoryOverride"]:
+                    raise _FinanceImportedOperationConflict("category_operation_required")
+                incoming["categoryOverride"] = existing["categoryOverride"]
+                if _finance_imported_source_observation(existing) != _finance_imported_source_observation(incoming):
+                    incoming["sourceRevision"] = next_revision
+                    records[record_id] = incoming
+        elif kind in {"categorySet", "categoryClear"}:
+            record_id = operation["recordID"]
+            existing = records.get(record_id)
+            if existing is None or record_id in tombstones:
+                raise _FinanceImportedOperationConflict("deleted_record" if record_id in tombstones else "missing_record")
+            if existing["sourceRevision"] != operation["expectedSourceRevision"]:
+                raise _FinanceImportedOperationConflict("source_revision")
+            next_category = operation.get("categoryOverride") if kind == "categorySet" else None
+            if existing["categoryOverride"] != next_category:
+                updated = dict(existing)
+                updated["categoryOverride"] = next_category
+                records[record_id] = updated
+        elif kind == "delete":
+            record_id = operation["recordID"]
+            existing = records.get(record_id)
+            if record_id in tombstones:
+                raise _FinanceImportedOperationConflict("deleted_record")
+            if existing is None:
+                if operation["expectedSourceRevision"] != 0:
+                    raise _FinanceImportedOperationConflict("missing_record")
+                # A local-first add followed by a local delete may reach the
+                # authority as a tombstone without ever publishing the row.
+                # Expected revision zero is the explicit create-tombstone
+                # precondition; it cannot delete or resurrect an authority
+                # row that the caller has not observed.
+                tombstones[record_id] = {
+                    "recordID": record_id,
+                    "revision": next_revision,
+                    "deletedAt": operation["deletedAt"],
+                }
+            else:
+                if existing["sourceRevision"] != operation["expectedSourceRevision"]:
+                    raise _FinanceImportedOperationConflict("source_revision")
+                records.pop(record_id)
+                tombstones[record_id] = {
+                    "recordID": record_id,
+                    "revision": next_revision,
+                    "deletedAt": operation["deletedAt"],
+                }
+        elif kind == "restore":
+            incoming = dict(operation["record"])
+            record_id = incoming["recordID"]
+            existing_tombstone = tombstones.get(record_id)
+            if existing_tombstone is None:
+                raise _FinanceImportedOperationConflict("missing_tombstone")
+            if existing_tombstone["revision"] != operation["expectedTombstoneRevision"]:
+                raise _FinanceImportedOperationConflict("tombstone_revision")
+            if record_id in records:
+                raise _FinanceImportedOperationConflict("live_record")
+            incoming["sourceRevision"] = next_revision
+            records[record_id] = incoming
+            tombstones.pop(record_id)
+        else:
+            raise _FinanceImportedOperationConflict("unknown_operation")
+
+        if len(records) > FINANCE_IMPORTED_MAX_RECORDS or len(tombstones) > FINANCE_IMPORTED_MAX_TOMBSTONES:
+            raise _FinanceImportedLimitExceeded
+
+    changed = records != {record["recordID"]: dict(record) for record in snapshot["records"]}
+    changed = changed or tombstones != {tombstone["recordID"]: dict(tombstone) for tombstone in snapshot["tombstones"]}
+    return {
+        "schemaVersion": FINANCE_IMPORTED_SCHEMA_VERSION,
+        "domain": "finance",
+        "ledger": "manual_import",
+        "authority": "gateway",
+        "revision": next_revision if changed else current_revision,
+        "records": sorted(records.values(), key=lambda record: record["recordID"]),
+        "tombstones": sorted(tombstones.values(), key=lambda tombstone: tombstone["recordID"]),
+    }
+
+
+@app.get("/finance/imported")
+async def get_finance_imported() -> Response:
+    """Return the bounded, gateway-authoritative manual-import ledger."""
+    async with finance_imported_lock:
+        try:
+            body, snapshot, _metadata = _load_finance_imported_state()
+        except (_FinanceImportedStateUnavailable, OSError, ValueError):
+            return JSONResponse({"error": "finance_imported_unavailable"}, status_code=503)
+        if snapshot["revision"] < 0 or len(body) > FINANCE_IMPORTED_MAX_RESPONSE_SIZE:
+            return JSONResponse({"error": "finance_imported_unavailable"}, status_code=503)
+        return _finance_imported_response(body, snapshot["revision"])
+
+
+@app.put("/finance/imported")
+async def put_finance_imported(request: Request) -> Response:
+    """Conditionally apply a bounded manual-ledger delta exactly once."""
+    if _calendar_header(request, "content-type") != "application/json":
+        return JSONResponse({"error": "content_type"}, status_code=415)
+    if_match = _calendar_header(request, "if-match")
+    idempotency_key = _calendar_header(request, "idempotency-key")
+    if if_match is None:
+        return JSONResponse({"error": "missing_if_match"}, status_code=428)
+    if idempotency_key is None:
+        return JSONResponse({"error": "missing_idempotency_key"}, status_code=400)
+    if not _valid_finance_imported_etag(if_match):
+        return JSONResponse({"error": "invalid_if_match"}, status_code=400)
+    if not FINANCE_IMPORTED_IDEMPOTENCY_KEY_PATTERN.fullmatch(idempotency_key):
+        return JSONResponse({"error": "invalid_idempotency_key"}, status_code=400)
+
+    try:
+        body = await _read_bounded_finance_imported_request(request)
+        parsed_request = _parse_finance_imported_request(body)
+    except HTTPException as exc:
+        error = "request_timeout" if exc.status_code == 408 else "request_too_large" if exc.status_code == 413 else "invalid_request"
+        return JSONResponse({"error": error}, status_code=exc.status_code)
+
+    # The idempotency key binds one exact request body for its entire replay
+    # lifetime. If a response was lost and another writer advanced the
+    # authority, the original If-Match is intentionally allowed to replay;
+    # including it in this fingerprint would turn a safe retry into a second
+    # write or a false conflict.
+    fingerprint = hashlib.sha256(body).hexdigest()
+    async with finance_imported_lock:
+        try:
+            current_body, current_snapshot, metadata = _load_finance_imported_state()
+        except (_FinanceImportedStateUnavailable, OSError, ValueError):
+            return JSONResponse({"error": "finance_imported_unavailable"}, status_code=503)
+
+        current_revision = current_snapshot["revision"]
+        current_etag = _finance_imported_etag(current_revision, _finance_imported_digest(current_body))
+        previous = next((record for record in metadata["idempotency"] if record["key"] == idempotency_key), None)
+        if previous is not None:
+            if previous["fingerprint"] != fingerprint:
+                return _finance_imported_response(current_body, current_revision, status_code=409, conflict=True)
+            return _finance_imported_response(current_body, current_revision, replay=True)
+        if if_match != current_etag or parsed_request["baseRevision"] != current_revision:
+            return _finance_imported_response(current_body, current_revision, status_code=412, conflict=True)
+        if current_revision >= FINANCE_IMPORTED_MAX_REVISION:
+            return _finance_imported_response(current_body, current_revision, status_code=503)
+
+        next_revision = current_revision + 1
+        try:
+            next_snapshot = _apply_finance_imported_operations(
+                current_snapshot,
+                parsed_request["operations"],
+                next_revision,
+            )
+        except _FinanceImportedOperationConflict as exc:
+            return _finance_imported_response(
+                current_body,
+                current_revision,
+                status_code=409,
+                conflict=True,
+                conflict_reason=exc.reason,
+            )
+        except _FinanceImportedLimitExceeded:
+            return JSONResponse({"error": "finance_imported_limit"}, status_code=413)
+        changed = next_snapshot["revision"] != current_revision
+        try:
+            next_body = current_body if not changed else _finance_imported_snapshot_bytes(next_snapshot)
+        except ValueError:
+            return JSONResponse({"error": "finance_imported_limit"}, status_code=413)
+        idempotency_record = {
+            "key": idempotency_key,
+            "fingerprint": fingerprint,
+            "revision": next_snapshot["revision"],
+        }
+        next_metadata = {
+            "schemaVersion": FINANCE_IMPORTED_SCHEMA_VERSION,
+            "domain": "finance",
+            "authority": "gateway",
+            "revision": next_snapshot["revision"],
+            "bodyDigest": _finance_imported_digest(next_body),
+            "idempotency": _finance_imported_idempotency_window(metadata["idempotency"], idempotency_record),
+        }
+        try:
+            # A no-op still publishes its bounded replay record atomically, so
+            # a retry cannot consume another revision after process restart.
+            next_metadata["bodyDigest"] = _finance_imported_digest(next_body)
+            state_body = _finance_imported_state_bytes(next_body, next_metadata)
+            _atomic_write_bytes(FINANCE_IMPORTED_PATH, state_body)
+        except (OSError, TypeError, ValueError, OverflowError, RecursionError):
+            return JSONResponse({"error": "finance_imported_unavailable"}, status_code=503)
+
+        return _finance_imported_response(
+            next_body,
+            next_snapshot["revision"],
+            noop=not changed,
+        )
 
 
 @app.get("/finance/summary")
@@ -2564,11 +3957,21 @@ async def get_finance_summary() -> Response:
         # converts only age-inconsistent observed provenance to stale/
         # refresh_due; malformed or incomplete cache state still fails closed.
         payload = enable_banking.load_cached_summary()
-        if payload is None:
-            return _finance_consent_response({"error": "finance unavailable"}, 503)
     revision_reader = getattr(enable_banking, "summary_revision", None)
     revision = revision_reader() if callable(revision_reader) else None
-    return _finance_consent_response(payload, 200, revision=revision)
+    response = _finance_consent_response(payload if payload is not None else {"error": "finance unavailable"}, 200 if payload is not None else 503, revision=revision if payload is not None else None)
+    status_reader = getattr(enable_banking, "runtime_status", None)
+    if callable(status_reader):
+        try:
+            status = status_reader()
+        except Exception:
+            return _finance_consent_response({"error": "finance unavailable"}, 503)
+        response.headers["X-LifeOS-Banking-State"] = "consent" if status["blocked"] else status["failure"] or ("partial" if status["partial"] else "healthy")
+        response.headers["X-LifeOS-Banking-Partial"] = "true" if status["partial"] else "false"
+        for field, header in (("lastSuccess", "X-LifeOS-Banking-Last-Success"), ("lastFailure", "X-LifeOS-Banking-Last-Failure")):
+            if status[field] is not None:
+                response.headers[header] = status[field]
+    return response
 
 
 @app.get("/clipper/summary")
@@ -2580,6 +3983,7 @@ async def get_clipper_summary() -> Response:
         max_response_size=CLIPPER_MAX_RESPONSE_SIZE,
         request_timeout=CLIPPER_REQUEST_TIMEOUT,
         total_timeout=CLIPPER_TOTAL_TIMEOUT,
+        local_auth=True,
     )
 
 

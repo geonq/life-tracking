@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 public enum TailscaleSyncError: Error, Equatable, Sendable {
@@ -162,6 +163,63 @@ final class StrictSyncSessionDelegate: NSObject, URLSessionWebSocketDelegate, UR
     }
 }
 
+/// Captures a URLSession task at creation time so cancellation of an async
+/// caller can cancel a request before `URLSession.bytes(for:)` has delivered
+/// its response and exposed `AsyncBytes.task`.
+///
+/// The lock protects the short task/cancellation state transition. It stores
+/// no request, body, response, or error text.
+private final class CancellableSyncTaskDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private var task: URLSessionTask?
+    private var cancellationRequested = false
+    private var finished = false
+
+    func urlSession(_ session: URLSession, didCreateTask task: URLSessionTask) {
+        setTask(task)
+    }
+
+    func setTask(_ task: URLSessionTask) {
+        lock.lock()
+        guard !finished else {
+            lock.unlock()
+            return
+        }
+        if cancellationRequested {
+            lock.unlock()
+            task.cancel()
+        } else {
+            self.task = task
+            lock.unlock()
+        }
+    }
+
+    func cancel() {
+        lock.lock()
+        cancellationRequested = true
+        let task = self.task
+        lock.unlock()
+        task?.cancel()
+    }
+
+    func finish() {
+        lock.lock()
+        finished = true
+        task = nil
+        lock.unlock()
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest,
+                    completionHandler: @escaping (URLRequest?) -> Void) {
+        // The configured private endpoint is canonical. Keep the same
+        // fail-closed redirect policy as the session-level delegate when this
+        // per-task delegate is used by the async byte transport.
+        completionHandler(nil)
+    }
+}
+
 /// Reads the private server URL from UserDefaults. Tailscale Serve supplies the
 /// device identity to the loopback-only gateway; LifeOS deliberately does not
 /// mint, store, or forward a bearer or any `Tailscale-User-*` header.
@@ -180,6 +238,9 @@ public actor TailscaleSyncClient {
     private static let backoffSteps: [UInt64] = [2, 5, 15, 30] // seconds, capped
     private static let maximumReadOnlyResponseBytes = 1_048_576
     static let maximumCalendarResourceBytes = 256 * 1024
+    static let maximumFinanceImportedRequestBytes = 512 * 1024
+    static let maximumFinanceImportedResponseBytes = 4 * 1024 * 1024
+    static let maximumFinanceImportedRevision = FinanceImportedSyncRecord.maximumSafeCents
     static let maximumNutritionPhotoRequestBytes = 30 * 1024 * 1024
     static let maximumNutritionPhotoResponseBytes = 1 * 1024 * 1024
     static let calendarTimeout: TimeInterval = 8
@@ -207,6 +268,17 @@ public actor TailscaleSyncClient {
         self.defaults = defaults
         self.approvedHosts = Self.configuredApprovedHosts()
     }
+
+#if DEBUG
+    /// Fixture-only transport injection. Release builds retain the production
+    /// session construction above, so no shipped caller can replace the
+    /// Tailscale transport or widen the approved-host boundary.
+    init(session: URLSession, defaults: UserDefaults = .standard, approvedHosts: Set<String>) {
+        self.session = session
+        self.defaults = defaults
+        self.approvedHosts = Set(approvedHosts.map { $0.lowercased() })
+    }
+#endif
 
     public var isConfigured: Bool {
         Self.validatedServerURL(serverURLString, approvedHosts: approvedHosts) != nil
@@ -296,6 +368,46 @@ public actor TailscaleSyncClient {
         return rawValue
     }
 
+    static func validatedFinanceImportedIdempotencyKey(_ rawValue: String?) -> String? {
+        guard let rawValue, (1...128).contains(rawValue.utf8.count),
+              rawValue.unicodeScalars.allSatisfy({ (0x21...0x7E).contains($0.value) }) else { return nil }
+        return rawValue
+    }
+
+    /// Strong ETags bind the response bytes to one gateway revision. The
+    /// digest is checked again after decoding so a proxy cannot pair a valid
+    /// revision header with a different JSON body.
+    static func validatedFinanceImportedETag(_ rawValue: String?) -> String? {
+        guard let rawValue, rawValue.first == "\"", rawValue.last == "\"" else { return nil }
+        let inner = String(rawValue.dropFirst().dropLast())
+        let prefix = "finance-imported-v2-r"
+        guard inner.hasPrefix(prefix) else { return nil }
+        let remainder = String(inner.dropFirst(prefix.count))
+        guard let separator = remainder.firstIndex(of: "-") else { return nil }
+        let revisionText = String(remainder[..<separator])
+        let digest = String(remainder[remainder.index(after: separator)...])
+        guard !revisionText.isEmpty,
+              revisionText.unicodeScalars.allSatisfy({ (0x30...0x39).contains($0.value) }),
+              let revision = Int(revisionText),
+              revision >= 0,
+              revision <= maximumFinanceImportedRevision,
+              String(revision) == revisionText,
+              digest.count == 64,
+              digest.unicodeScalars.allSatisfy({
+                  (0x30...0x39).contains($0.value) || (0x61...0x66).contains($0.value)
+              }) else { return nil }
+        return rawValue
+    }
+
+    static func financeImportedETagRevision(_ rawValue: String?) -> Int? {
+        guard let rawValue = validatedFinanceImportedETag(rawValue) else { return nil }
+        let inner = String(rawValue.dropFirst().dropLast())
+        let prefix = "finance-imported-v2-r"
+        let remainder = String(inner.dropFirst(prefix.count))
+        guard let separator = remainder.firstIndex(of: "-") else { return nil }
+        return Int(remainder[..<separator])
+    }
+
     /// Enable Banking institution ids are short ASCII catalog keys sent in the
     /// consent-initiation body. Reuses the printable-ASCII, no-whitespace
     /// shape already proven for the Calendar idempotency key.
@@ -352,6 +464,24 @@ public actor TailscaleSyncClient {
     ) -> URLRequest? {
         guard let etag = validatedCalendarETag(ifMatch),
               let key = validatedCalendarIdempotencyKey(idempotencyKey) else { return nil }
+        var request = Self.gatewayRequest(url: url)
+        request.httpMethod = "PUT"
+        request.httpBody = body
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(etag, forHTTPHeaderField: "If-Match")
+        request.setValue(key, forHTTPHeaderField: "Idempotency-Key")
+        return request
+    }
+
+    nonisolated static func conditionalFinanceImportedRequest(
+        url: URL,
+        body: Data,
+        ifMatch: String,
+        idempotencyKey: String
+    ) -> URLRequest? {
+        guard body.count <= maximumFinanceImportedRequestBytes,
+              let etag = validatedFinanceImportedETag(ifMatch),
+              let key = validatedFinanceImportedIdempotencyKey(idempotencyKey) else { return nil }
         var request = Self.gatewayRequest(url: url)
         request.httpMethod = "PUT"
         request.httpBody = body
@@ -562,14 +692,25 @@ public actor TailscaleSyncClient {
         request: URLRequest,
         maximumBytes: Int
     ) async -> TailscaleConnectionPreflightState? {
-        do {
-            try Task.checkCancellation()
-            _ = try await performBoundedReadOnly(session: session, request: request, maximumBytes: maximumBytes)
-            try Task.checkCancellation()
-            return .reachable
-        } catch {
-            return Self.connectionPreflightState(for: error)
-        }
+        let taskDelegate = CancellableSyncTaskDelegate()
+        return await withTaskCancellationHandler(operation: {
+            defer { taskDelegate.finish() }
+            do {
+                try Task.checkCancellation()
+                _ = try await performBoundedReadOnly(
+                    session: session,
+                    request: request,
+                    maximumBytes: maximumBytes,
+                    taskDelegate: taskDelegate
+                )
+                try Task.checkCancellation()
+                return .reachable
+            } catch {
+                return Self.connectionPreflightState(for: error)
+            }
+        }, onCancel: {
+            taskDelegate.cancel()
+        })
     }
 
 #if DEBUG
@@ -638,6 +779,150 @@ public actor TailscaleSyncClient {
     public func fetchFinanceSummary() async throws -> FinanceSummary {
         let data = try await fetchBoundedReadOnly(pathComponents: ["finance", "summary"])
         return try FinanceSummary.decode(data)
+    }
+
+    // MARK: - Gateway-authoritative manual imported-finance ledger
+
+    /// Reads the manually imported ledger. This route is intentionally
+    /// separate from `fetchFinanceSummary()`: Enable Banking remains the live
+    /// connector source, while CSV rows are user-confirmed history owned by
+    /// the Windows gateway.
+    public func fetchFinanceImportedLedger() async throws -> FinanceImportedSyncResult {
+        let url = try baseURL().appendingPathComponent("finance").appendingPathComponent("imported")
+        let (data, response) = try await financeImportedRequest(request(url: url))
+        return try Self.parseFinanceImportedResponse(data: data, response: response)
+    }
+
+    /// Conditionally applies one bounded local outbox entry. The gateway
+    /// authenticates the request through the existing trusted Tailscale edge;
+    /// this client adds no credential or identity header.
+    @discardableResult
+    public func pushFinanceImportedLedger(
+        _ syncRequest: FinanceImportedSyncRequest,
+        ifMatch: String,
+        idempotencyKey: String
+    ) async throws -> FinanceImportedSyncResult {
+        guard Self.validatedFinanceImportedETag(ifMatch) != nil else {
+            throw FinanceImportedSyncError.malformedETag
+        }
+        guard Self.validatedFinanceImportedIdempotencyKey(idempotencyKey) != nil else {
+            throw FinanceImportedSyncError.invalidIdempotencyKey
+        }
+        guard Self.financeImportedETagRevision(ifMatch) == syncRequest.baseRevision else {
+            throw FinanceImportedSyncError.invalidRevision
+        }
+        let body: Data
+        do { body = try syncRequest.canonicalData() }
+        catch let error as FinanceImportedSyncError { throw error }
+        catch { throw FinanceImportedSyncError.invalidRequest }
+        return try await pushFinanceImportedLedger(body: body, ifMatch: ifMatch, idempotencyKey: idempotencyKey)
+    }
+
+    /// Sends the exact canonical bytes persisted by the local outbox. This is
+    /// the only overload used for retries: it never re-encodes a logical
+    /// request after a timeout or relaunch.
+    public func pushFinanceImportedLedger(
+        body: Data,
+        ifMatch: String,
+        idempotencyKey: String
+    ) async throws -> FinanceImportedSyncResult {
+        guard body.count <= Self.maximumFinanceImportedRequestBytes else {
+            throw FinanceImportedSyncError.requestTooLarge
+        }
+        guard Self.validatedFinanceImportedETag(ifMatch) != nil else {
+            throw FinanceImportedSyncError.malformedETag
+        }
+        guard Self.validatedFinanceImportedIdempotencyKey(idempotencyKey) != nil else {
+            throw FinanceImportedSyncError.invalidIdempotencyKey
+        }
+        guard let decoded = try? JSONDecoder.lifeOS.decode(FinanceImportedSyncRequest.self, from: body),
+              let canonical = try? decoded.canonicalData(),
+              canonical == body,
+              Self.financeImportedETagRevision(ifMatch) == decoded.baseRevision else {
+            throw FinanceImportedSyncError.invalidRequest
+        }
+        let url = try baseURL().appendingPathComponent("finance").appendingPathComponent("imported")
+        guard let request = Self.conditionalFinanceImportedRequest(
+            url: url,
+            body: body,
+            ifMatch: ifMatch,
+            idempotencyKey: idempotencyKey
+        ) else {
+            throw FinanceImportedSyncError.invalidRequest
+        }
+        let (data, response) = try await financeImportedRequest(request)
+        return try Self.parseFinanceImportedResponse(data: data, response: response)
+    }
+
+    nonisolated static func parseFinanceImportedResponse(
+        data: Data,
+        response: HTTPURLResponse
+    ) throws -> FinanceImportedSyncResult {
+        guard data.count <= maximumFinanceImportedResponseBytes else {
+            throw FinanceImportedSyncError.responseTooLarge
+        }
+        guard response.value(forHTTPHeaderField: "Content-Type")?.lowercased() == "application/json" else {
+            throw FinanceImportedSyncError.invalidContentType
+        }
+        if response.statusCode == 428 {
+            throw FinanceImportedSyncError.missingIfMatch
+        }
+        guard (200...299).contains(response.statusCode) || response.statusCode == 409 || response.statusCode == 412 else {
+            throw FinanceImportedSyncError.httpError(response.statusCode)
+        }
+        guard let etag = validatedFinanceImportedETag(response.value(forHTTPHeaderField: "ETag")) else {
+            throw response.value(forHTTPHeaderField: "ETag") == nil
+                ? FinanceImportedSyncError.missingETag
+                : FinanceImportedSyncError.malformedETag
+        }
+        guard let revisionText = response.value(forHTTPHeaderField: "X-LifeOS-Revision"),
+              let revision = Int(revisionText), revision >= 0,
+              revision <= maximumFinanceImportedRevision,
+              String(revision) == revisionText,
+              response.value(forHTTPHeaderField: "X-LifeOS-Schema-Version") == "2" else {
+            throw FinanceImportedSyncError.invalidRevision
+        }
+        guard financeImportedETagRevision(etag) == revision else {
+            throw FinanceImportedSyncError.invalidRevision
+        }
+        guard let digest = financeImportedETagDigest(etag),
+              digest == SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() else {
+            throw FinanceImportedSyncError.malformedETag
+        }
+        let snapshot: FinanceImportedSyncSnapshot
+        do {
+            snapshot = try JSONDecoder.lifeOS.decode(FinanceImportedSyncSnapshot.self, from: data)
+        } catch {
+            throw FinanceImportedSyncError.invalidResponse
+        }
+        guard snapshot.revision == revision else {
+            throw FinanceImportedSyncError.invalidRevision
+        }
+        if response.statusCode == 409 || response.statusCode == 412 {
+            throw FinanceImportedSyncError.conflict(snapshot: snapshot, etag: etag)
+        }
+        return FinanceImportedSyncResult(
+            snapshot: snapshot,
+            etag: etag,
+            wasReplay: response.value(forHTTPHeaderField: "X-LifeOS-Idempotent-Replay") == "true"
+        )
+    }
+
+    private static func financeImportedETagDigest(_ rawValue: String) -> String? {
+        guard let rawValue = validatedFinanceImportedETag(rawValue) else { return nil }
+        let inner = String(rawValue.dropFirst().dropLast())
+        let prefix = "finance-imported-v2-r"
+        let remainder = String(inner.dropFirst(prefix.count))
+        guard let separator = remainder.firstIndex(of: "-") else { return nil }
+        return String(remainder[remainder.index(after: separator)...])
+    }
+
+    private func financeImportedRequest(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        try await Self.performBoundedMutating(
+            session: session,
+            request: request,
+            maximumBytes: Self.maximumFinanceImportedResponseBytes
+        )
     }
 
     // MARK: - Read-only supplement reference catalog
@@ -777,11 +1062,15 @@ public actor TailscaleSyncClient {
     nonisolated private static func performBoundedReadOnly(
         session: URLSession,
         request: URLRequest,
-        maximumBytes: Int
+        maximumBytes: Int,
+        taskDelegate: URLSessionTaskDelegate? = nil
     ) async throws -> Data {
         guard request.httpMethod == "GET" else { throw TailscaleSyncError.invalidResponse }
         recordNetworkTaskCreated()
-        let (bytes, response) = try await session.bytes(for: request)
+        let (bytes, response) = try await session.bytes(for: request, delegate: taskDelegate)
+        taskDelegate.map { delegate in
+            (delegate as? CancellableSyncTaskDelegate)?.setTask(bytes.task)
+        }
         guard let http = response as? HTTPURLResponse else { throw TailscaleSyncError.invalidResponse }
         try Self.checkHTTPStatus(http)
         let declaredLength = http.value(forHTTPHeaderField: "Content-Length")

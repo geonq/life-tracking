@@ -2,20 +2,77 @@ import Foundation
 
 // MARK: - Durable local storage for manually imported bank-statement transactions
 
-/// Stable, user-visible failures for the local Finance import store. Mirrors
-/// `NutritionMealStoreError`: no filesystem paths or decoder details leak
-/// into the public error surface.
 public enum FinanceImportedTransactionStoreError: Error, Equatable, Sendable {
     case applicationSupportUnavailable
     case readFailed
     case invalidEnvelope
     case writeFailed
     case transactionNotFound
+    case stateTooLarge
+    case syncOutboxFull
+    case syncPayloadTooLarge
+    case syncRetryExpired
+    case syncAttemptsExhausted
+    case syncSnapshotRewound
+    case syncSnapshotETagMismatch
 }
 
-/// Result of an import write. A replay is successful but reports duplicate
-/// rows explicitly; a source correction with the same stable identity is
-/// reported as an update rather than silently discarded.
+public enum FinanceImportedSyncBlockReason: String, Codable, Equatable, Sendable, CaseIterable {
+    case conflict
+    case retryExpired
+    case attemptsExhausted
+    case payloadTooLarge
+    case invalidEnvelope
+}
+
+public enum FinanceImportedPendingSyncState: String, Codable, Equatable, Sendable {
+    case pending
+    case blocked
+}
+
+public struct FinanceImportedSyncStatus: Equatable, Sendable {
+    public let pendingEntryCount: Int
+    public let blockedEntryCount: Int
+    public let pendingOperationCount: Int
+    public let blockedOperationCount: Int
+    public let blockedReasons: [FinanceImportedSyncBlockReason]
+
+    public init(
+        pendingEntryCount: Int,
+        blockedEntryCount: Int,
+        pendingOperationCount: Int,
+        blockedOperationCount: Int,
+        blockedReasons: [FinanceImportedSyncBlockReason]
+    ) {
+        self.pendingEntryCount = pendingEntryCount
+        self.blockedEntryCount = blockedEntryCount
+        self.pendingOperationCount = pendingOperationCount
+        self.blockedOperationCount = blockedOperationCount
+        self.blockedReasons = blockedReasons
+    }
+}
+
+extension FinanceImportedTransactionStoreError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .applicationSupportUnavailable: return "Local Finance import storage is unavailable."
+        case .readFailed: return "Local Finance import storage could not be read."
+        case .invalidEnvelope: return "Local Finance import storage is invalid and was not loaded."
+        case .writeFailed: return "Imported transaction changes could not be saved."
+        case .transactionNotFound: return "The imported transaction to remove was not found."
+        case .stateTooLarge: return "The imported Finance ledger exceeds its safe storage limit."
+        case .syncOutboxFull: return "Imported Finance changes are waiting for sync. The bounded outbox is full."
+        case .syncPayloadTooLarge: return "The imported Finance sync payload exceeds its safe size."
+        case .syncRetryExpired: return "An imported Finance sync change is too old to retry safely."
+        case .syncAttemptsExhausted: return "An imported Finance sync change needs manual recovery after repeated failures."
+        case .syncSnapshotRewound: return "The gateway returned an older Finance snapshot."
+        case .syncSnapshotETagMismatch: return "The gateway returned conflicting Finance revision metadata."
+        }
+    }
+}
+
+/// Result of a local import write. Source corrections are reported as
+/// updates, while stable-ID reimports are reported as duplicates.
 public struct FinanceImportSaveResult: Equatable, Sendable {
     public let requestedCount: Int
     public let insertedCount: Int
@@ -38,284 +95,1068 @@ public struct FinanceImportSaveResult: Equatable, Sendable {
     }
 }
 
-extension FinanceImportedTransactionStoreError: LocalizedError {
-    public var errorDescription: String? {
-        switch self {
-        case .applicationSupportUnavailable:
-            return "Local Finance import storage is unavailable."
-        case .readFailed:
-            return "Local Finance import storage could not be read."
-        case .invalidEnvelope:
-            return "Local Finance import storage is invalid and was not loaded."
-        case .writeFailed:
-            return "Imported transaction changes could not be saved."
-        case .transactionNotFound:
-            return "The imported transaction to remove was not found."
+/// The immutable request that was (or is about to be) transmitted. Keeping
+/// the exact bytes and headers makes a timeout/relaunch retry the same
+/// operation, even if a later fetch observes a newer authority revision.
+public struct FinanceImportedAttemptedSyncRequest: Codable, Equatable, Sendable {
+    public static let maximumBodyBytes = FinanceImportedSyncRequest.maximumRequestBytes
+
+    public let baseRevision: Int
+    public let ifMatch: String
+    public let idempotencyKey: String
+    public let body: Data
+
+    private enum CodingKeys: String, CodingKey, CaseIterable { case baseRevision, ifMatch, idempotencyKey, body }
+
+    public init(baseRevision: Int, ifMatch: String, idempotencyKey: String, body: Data) throws {
+        guard baseRevision >= 0,
+              baseRevision <= FinanceImportedSyncRecord.maximumSafeCents,
+              TailscaleSyncClient.validatedFinanceImportedETag(ifMatch) != nil,
+              TailscaleSyncClient.financeImportedETagRevision(ifMatch) == baseRevision,
+              TailscaleSyncClient.validatedFinanceImportedIdempotencyKey(idempotencyKey) != nil,
+              body.count <= Self.maximumBodyBytes else {
+            throw FinanceImportedTransactionStoreError.invalidEnvelope
         }
-    }
-}
-
-/// Versioned on-disk envelope. An absent file decodes to an honest empty
-/// state (no imported transactions); this is not the same as an invalid
-/// file, which throws. Mirrors `NutritionMealStoreEnvelope`.
-public struct FinanceImportedTransactionStoreEnvelope: Codable, Equatable, Sendable {
-    public static let currentSchemaVersion = 1
-
-    public let schemaVersion: Int
-    public let transactions: [FinanceImportedTransaction]
-
-    private enum CodingKeys: String, CodingKey {
-        case schemaVersion, transactions
-    }
-
-    public init(transactions: [FinanceImportedTransaction] = []) {
-        self.schemaVersion = Self.currentSchemaVersion
-        self.transactions = transactions
+        do {
+            let request = try JSONDecoder.lifeOS.decode(FinanceImportedSyncRequest.self, from: body)
+            guard request.baseRevision == baseRevision, try request.canonicalData() == body else {
+                throw FinanceImportedTransactionStoreError.invalidEnvelope
+            }
+        } catch let error as FinanceImportedTransactionStoreError {
+            throw error
+        } catch {
+            throw FinanceImportedTransactionStoreError.invalidEnvelope
+        }
+        self.baseRevision = baseRevision
+        self.ifMatch = ifMatch
+        self.idempotencyKey = idempotencyKey
+        self.body = body
     }
 
     public init(from decoder: Decoder) throws {
+        try rejectUnknownLifeOSKeys(decoder, allowed: Set(CodingKeys.allCases.map(\.stringValue)))
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
-        transactions = try container.decodeIfPresent([FinanceImportedTransaction].self, forKey: .transactions) ?? []
+        guard Set(container.allKeys) == Set(CodingKeys.allCases) else {
+            throw FinanceImportedTransactionStoreError.invalidEnvelope
+        }
+        try self.init(
+            baseRevision: container.decode(Int.self, forKey: .baseRevision),
+            ifMatch: container.decode(String.self, forKey: .ifMatch),
+            idempotencyKey: container.decode(String.self, forKey: .idempotencyKey),
+            body: container.decode(Data.self, forKey: .body)
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(baseRevision, forKey: .baseRevision)
+        try container.encode(ifMatch, forKey: .ifMatch)
+        try container.encode(idempotencyKey, forKey: .idempotencyKey)
+        try container.encode(body, forKey: .body)
+    }
+
+    public func decodedRequest() throws -> FinanceImportedSyncRequest {
+        do {
+            return try JSONDecoder.lifeOS.decode(FinanceImportedSyncRequest.self, from: body)
+        } catch {
+            throw FinanceImportedTransactionStoreError.invalidEnvelope
+        }
     }
 }
 
-/// Atomic, Application-Support-backed local storage for manually imported
-/// bank-statement transactions. Structurally mirrors `NutritionMealStore`:
-/// an in-process transaction lock guards read-modify-write cycles, writes go
-/// through a temp file plus `replaceItemAt`/`moveItem`, and iOS writes
-/// request `.completeFileProtection`. The URL is injectable only for
-/// deterministic tests; the default path has no temporary-directory or
-/// home-directory fallback — if Application Support cannot be resolved,
-/// initialization fails closed.
+/// One durable outbox entry. The attempted request is immutable after the
+/// first attempt. A conflict may replace the unattempted logical envelope
+/// with a safe rebase, but it never resets attemptCount.
+public struct FinanceImportedPendingSyncEntry: Codable, Equatable, Sendable {
+    public static let maximumOperations = 512
+    public static let maximumAttempts = 32
+
+    public let idempotencyKey: String
+    public let operations: [FinanceImportedSyncOperation]
+    public let createdAt: Date
+    public var attemptCount: Int
+    public var lastAttemptAt: Date?
+    public var state: FinanceImportedPendingSyncState
+    public var blockedReason: FinanceImportedSyncBlockReason?
+    public var attemptedRequest: FinanceImportedAttemptedSyncRequest?
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case idempotencyKey, operations, createdAt, attemptCount, lastAttemptAt
+        case state, blockedReason, attemptedRequest
+    }
+
+    public init(
+        idempotencyKey: String,
+        operations: [FinanceImportedSyncOperation],
+        createdAt: Date = .now,
+        attemptCount: Int = 0,
+        lastAttemptAt: Date? = nil,
+        state: FinanceImportedPendingSyncState = .pending,
+        blockedReason: FinanceImportedSyncBlockReason? = nil,
+        attemptedRequest: FinanceImportedAttemptedSyncRequest? = nil
+    ) throws {
+        guard TailscaleSyncClient.validatedFinanceImportedIdempotencyKey(idempotencyKey) != nil,
+              !operations.isEmpty,
+              operations.count <= Self.maximumOperations,
+              (0...Self.maximumAttempts).contains(attemptCount),
+              Set(operations.map(\.recordID)).count == operations.count,
+              createdAt.timeIntervalSinceNow <= 5,
+              lastAttemptAt == nil || lastAttemptAt!.timeIntervalSince(createdAt) >= 0,
+              lastAttemptAt == nil || lastAttemptAt!.timeIntervalSinceNow <= 5,
+              (state == .blocked) == (blockedReason != nil),
+              attemptedRequest == nil || attemptedRequest!.idempotencyKey == idempotencyKey else {
+            throw FinanceImportedTransactionStoreError.invalidEnvelope
+        }
+        self.idempotencyKey = idempotencyKey
+        self.operations = operations
+        self.createdAt = createdAt
+        self.attemptCount = attemptCount
+        self.lastAttemptAt = lastAttemptAt
+        self.state = state
+        self.blockedReason = blockedReason
+        self.attemptedRequest = attemptedRequest
+    }
+
+    public init(from decoder: Decoder) throws {
+        try rejectUnknownLifeOSKeys(decoder, allowed: Set(CodingKeys.allCases.map(\.stringValue)))
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        // Schema 2 entries predate the v3 retry metadata. Keep their durable
+        // logical work and initialize the new counters instead of making a
+        // readable local ledger unavailable during migration.
+        let required = Set([CodingKeys.idempotencyKey, .operations, .createdAt])
+        guard required.isSubset(of: Set(container.allKeys)) else {
+            throw FinanceImportedTransactionStoreError.invalidEnvelope
+        }
+        try self.init(
+            idempotencyKey: container.decode(String.self, forKey: .idempotencyKey),
+            operations: container.decode([FinanceImportedSyncOperation].self, forKey: .operations),
+            createdAt: container.decode(Date.self, forKey: .createdAt),
+            attemptCount: container.decodeIfPresent(Int.self, forKey: .attemptCount) ?? 0,
+            lastAttemptAt: container.decodeIfPresent(Date.self, forKey: .lastAttemptAt),
+            state: container.decodeIfPresent(FinanceImportedPendingSyncState.self, forKey: .state) ?? .pending,
+            blockedReason: container.decodeIfPresent(FinanceImportedSyncBlockReason.self, forKey: .blockedReason),
+            attemptedRequest: container.decodeIfPresent(FinanceImportedAttemptedSyncRequest.self, forKey: .attemptedRequest)
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        guard !operations.contains(where: { $0.isLegacy }) else {
+            throw FinanceImportedTransactionStoreError.invalidEnvelope
+        }
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(idempotencyKey, forKey: .idempotencyKey)
+        try container.encode(operations, forKey: .operations)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(attemptCount, forKey: .attemptCount)
+        try container.encode(lastAttemptAt, forKey: .lastAttemptAt)
+        try container.encode(state, forKey: .state)
+        try container.encode(blockedReason, forKey: .blockedReason)
+        try container.encode(attemptedRequest, forKey: .attemptedRequest)
+    }
+}
+
+public struct FinanceImportedPendingSyncRequest: Equatable, Sendable {
+    public let request: FinanceImportedSyncRequest
+    public let body: Data
+    public let ifMatch: String
+    public let idempotencyKey: String
+
+    public init(request: FinanceImportedSyncRequest, body: Data, ifMatch: String, idempotencyKey: String) {
+        self.request = request
+        self.body = body
+        self.ifMatch = ifMatch
+        self.idempotencyKey = idempotencyKey
+    }
+}
+
+/// Version 3 adds per-record authority metadata, tombstone metadata, and
+/// immutable attempted envelopes. Versions 1 and 2 are decoded only to run a
+/// one-time explicit migration; unknown versions fail closed.
+public struct FinanceImportedTransactionStoreEnvelope: Codable, Equatable, Sendable {
+    public static let legacySchemaVersion = 1
+    public static let previousSchemaVersion = 2
+    public static let currentSchemaVersion = 3
+
+    public let schemaVersion: Int
+    public let transactions: [FinanceImportedTransaction]
+    public let remoteRevision: Int
+    public let remoteETag: String?
+    public let remoteRecordRevisions: [String: Int]
+    public let remoteTombstones: [FinanceImportedSyncTombstone]
+    public let outbox: [FinanceImportedPendingSyncEntry]
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case schemaVersion, transactions, remoteRevision, remoteETag
+        case remoteRecordRevisions, remoteTombstones, outbox
+    }
+
+    public init(
+        transactions: [FinanceImportedTransaction] = [],
+        remoteRevision: Int = 0,
+        remoteETag: String? = nil,
+        remoteRecordRevisions: [String: Int] = [:],
+        remoteTombstones: [FinanceImportedSyncTombstone] = [],
+        outbox: [FinanceImportedPendingSyncEntry] = []
+    ) {
+        schemaVersion = Self.currentSchemaVersion
+        self.transactions = transactions
+        self.remoteRevision = remoteRevision
+        self.remoteETag = remoteETag
+        self.remoteRecordRevisions = remoteRecordRevisions
+        self.remoteTombstones = remoteTombstones
+        self.outbox = outbox
+    }
+
+    public init(from decoder: Decoder) throws {
+        try rejectUnknownLifeOSKeys(decoder, allowed: Set(CodingKeys.allCases.map(\.stringValue)))
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        switch schemaVersion {
+        case Self.legacySchemaVersion:
+            guard Set(container.allKeys) == Set([CodingKeys.schemaVersion, .transactions]) else {
+                throw FinanceImportedTransactionStoreError.invalidEnvelope
+            }
+            self.schemaVersion = schemaVersion
+            transactions = try container.decode([FinanceImportedTransaction].self, forKey: .transactions)
+            remoteRevision = 0
+            remoteETag = nil
+            remoteRecordRevisions = [:]
+            remoteTombstones = []
+            outbox = []
+        case Self.previousSchemaVersion:
+            guard Set(container.allKeys) == Set([CodingKeys.schemaVersion, .transactions, .remoteRevision, .remoteETag, .outbox]) else {
+                throw FinanceImportedTransactionStoreError.invalidEnvelope
+            }
+            self.schemaVersion = schemaVersion
+            transactions = try container.decode([FinanceImportedTransaction].self, forKey: .transactions)
+            remoteRevision = try container.decode(Int.self, forKey: .remoteRevision)
+            remoteETag = try container.decodeIfPresent(String.self, forKey: .remoteETag)
+            remoteRecordRevisions = [:]
+            remoteTombstones = []
+            outbox = try container.decode([FinanceImportedPendingSyncEntry].self, forKey: .outbox)
+        case Self.currentSchemaVersion:
+            guard Set(container.allKeys) == Set(CodingKeys.allCases) else {
+                throw FinanceImportedTransactionStoreError.invalidEnvelope
+            }
+            self.schemaVersion = schemaVersion
+            transactions = try container.decode([FinanceImportedTransaction].self, forKey: .transactions)
+            remoteRevision = try container.decode(Int.self, forKey: .remoteRevision)
+            remoteETag = try container.decodeIfPresent(String.self, forKey: .remoteETag)
+            remoteRecordRevisions = try container.decode([String: Int].self, forKey: .remoteRecordRevisions)
+            remoteTombstones = try container.decode([FinanceImportedSyncTombstone].self, forKey: .remoteTombstones)
+            outbox = try container.decode([FinanceImportedPendingSyncEntry].self, forKey: .outbox)
+        default:
+            throw FinanceImportedTransactionStoreError.invalidEnvelope
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        guard schemaVersion == Self.currentSchemaVersion else { throw FinanceImportedTransactionStoreError.invalidEnvelope }
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(transactions, forKey: .transactions)
+        try container.encode(remoteRevision, forKey: .remoteRevision)
+        try container.encode(remoteETag, forKey: .remoteETag)
+        try container.encode(remoteRecordRevisions, forKey: .remoteRecordRevisions)
+        try container.encode(remoteTombstones, forKey: .remoteTombstones)
+        try container.encode(outbox, forKey: .outbox)
+    }
+}
+
+private actor FinanceImportedSyncGate {
+    private var busy = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func acquire() async {
+        if !busy {
+            busy = true
+            return
+        }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func release() {
+        if let next = waiters.first {
+            waiters.removeFirst()
+            next.resume()
+        } else {
+            busy = false
+        }
+    }
+}
+
+/// Atomic Application-Support-backed storage with a bounded local-first
+/// outbox. File locks protect only synchronous read-modify-write sections;
+/// synchronize uses an actor gate for its network lifecycle.
 public final class FinanceImportedTransactionStore: @unchecked Sendable {
     public static let fileName = "finance-imported-transactions.json"
+    public static let maximumTransactions = 10_000
+    public static let maximumOutboxEntries = 64
+    public static let maximumPendingOperations = 10_000
+    public static let maximumStateBytes = 8 * 1024 * 1024
+    public static let maximumRetryAge: TimeInterval = 90 * 24 * 60 * 60
+
     private static let processTransactionLock = NSLock()
+    private static let maximumOperationsPerEntry = FinanceImportedPendingSyncEntry.maximumOperations
+
+    private struct State {
+        var transactions: [FinanceImportedTransaction]
+        var remoteRevision: Int
+        var remoteETag: String?
+        var remoteRecordRevisions: [UUID: Int]
+        var remoteTombstones: [UUID: FinanceImportedSyncTombstone]
+        var outbox: [FinanceImportedPendingSyncEntry]
+    }
 
     public let fileURL: URL
     private let fileManager: FileManager
+    private let synchronizationGate = FinanceImportedSyncGate()
 
     public init(url: URL? = nil, fileManager: FileManager = .default) throws {
         self.fileManager = fileManager
-        if let url {
-            self.fileURL = url
-        } else {
-            self.fileURL = try Self.defaultURL(fileManager: fileManager)
-        }
+        if let url { fileURL = url } else { fileURL = try Self.defaultURL(fileManager: fileManager) }
     }
 
     public static func defaultURL(fileManager: FileManager = .default) throws -> URL {
-        guard let support = fileManager.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first else {
+        guard let support = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
             throw FinanceImportedTransactionStoreError.applicationSupportUnavailable
         }
-        return support
-            .appendingPathComponent("LifeOS", isDirectory: true)
-            .appendingPathComponent(fileName, isDirectory: false)
+        return support.appendingPathComponent("LifeOS", isDirectory: true).appendingPathComponent(fileName, isDirectory: false)
     }
 
-    /// Loads all durable imported transactions. An absent file returns an
-    /// empty array rather than throwing or fabricating data.
     public func all() throws -> [FinanceImportedTransaction] {
         Self.processTransactionLock.lock()
         defer { Self.processTransactionLock.unlock() }
-        return try loadUnlocked()
+        return try loadStateUnlocked().transactions
     }
 
-    /// Adds the given transactions (already parsed and confirmed by the user
-    /// via the import preview) to the durable store. Stable importer IDs make
-    /// retrying the same CSV idempotent while allowing source corrections to
-    /// replace the old observation. Existing user category overrides survive
-    /// an incoming row that has no explicit category.
     @discardableResult
     public func add(_ transactions: [FinanceImportedTransaction]) throws -> FinanceImportSaveResult {
         guard !transactions.isEmpty else {
-            return FinanceImportSaveResult(
-                requestedCount: 0,
-                insertedCount: 0,
-                duplicateCount: 0,
-                storedCount: try all().count
-            )
+            return FinanceImportSaveResult(requestedCount: 0, insertedCount: 0, duplicateCount: 0, storedCount: try all().count)
         }
         Self.processTransactionLock.lock()
         defer { Self.processTransactionLock.unlock() }
-        var existing = try loadUnlocked()
-        var indexByID: [UUID: Int] = [:]
-        for (index, transaction) in existing.enumerated() {
-            indexByID[transaction.id] = index
-        }
+        var state = try loadStateUnlocked()
+        guard state.transactions.count <= Self.maximumTransactions else { throw FinanceImportedTransactionStoreError.stateTooLarge }
+        var indexByID = Dictionary(uniqueKeysWithValues: state.transactions.enumerated().map { ($0.element.id, $0.offset) })
         var seenIncomingIDs = Set<UUID>()
         var additions: [FinanceImportedTransaction] = []
+        var changedOperations: [FinanceImportedSyncOperation] = []
         var updatedCount = 0
         var duplicateCount = 0
-        var changed = false
 
         for incoming in transactions {
-            guard seenIncomingIDs.insert(incoming.id).inserted else {
-                duplicateCount += 1
-                continue
-            }
+            guard seenIncomingIDs.insert(incoming.id).inserted else { duplicateCount += 1; continue }
+            let expected = state.remoteRecordRevisions[incoming.id] ?? 0
             if let index = indexByID[incoming.id] {
+                let existing = state.transactions[index]
                 var candidate = incoming
-                if candidate.category == nil {
-                    candidate.category = existing[index].category
-                }
-                if existing[index].hasSameSourceObservation(as: candidate),
-                   existing[index].category == candidate.category {
+                if candidate.category == nil { candidate.category = existing.category }
+                candidate = FinanceImportedTransaction(
+                    id: candidate.id, bookedAt: candidate.bookedAt, amountCents: candidate.amountCents,
+                    description: candidate.description, category: candidate.category, source: candidate.source,
+                    importedAt: existing.importedAt, sourceCategory: candidate.sourceCategory,
+                    providerCode: candidate.providerCode, kind: candidate.kind, investment: candidate.investment
+                )
+                if existing.hasSameSourceObservation(as: candidate), existing.category == candidate.category {
                     duplicateCount += 1
                 } else {
-                    existing[index] = candidate
+                    state.transactions[index] = candidate
+                    changedOperations.append(.upsert(
+                        record: try FinanceImportedSyncRecord(validating: candidate, sourceRevision: expected),
+                        expectedSourceRevision: expected
+                    ))
                     updatedCount += 1
-                    changed = true
                 }
             } else {
-                indexByID[incoming.id] = existing.count + additions.count
+                indexByID[incoming.id] = state.transactions.count + additions.count
                 additions.append(incoming)
-                changed = true
+                changedOperations.append(.upsert(
+                    record: try FinanceImportedSyncRecord(validating: incoming, sourceRevision: expected),
+                    expectedSourceRevision: expected
+                ))
             }
         }
-        let result = FinanceImportSaveResult(
-            requestedCount: transactions.count,
-            insertedCount: additions.count,
-            updatedCount: updatedCount,
-            duplicateCount: duplicateCount,
-            storedCount: existing.count + additions.count
-        )
-        guard changed else { return result }
-        existing.append(contentsOf: additions)
-        try saveUnlocked(existing)
+        state.transactions.append(contentsOf: additions)
+        let result = FinanceImportSaveResult(requestedCount: transactions.count, insertedCount: additions.count,
+                                             updatedCount: updatedCount, duplicateCount: duplicateCount,
+                                             storedCount: state.transactions.count)
+        guard !changedOperations.isEmpty else { return result }
+        try appendToOutbox(changedOperations, state: &state)
+        try saveStateUnlocked(state)
         return result
     }
 
-    /// Removes a single imported transaction by id.
     public func remove(id: UUID) throws {
         Self.processTransactionLock.lock()
         defer { Self.processTransactionLock.unlock() }
-        var existing = try loadUnlocked()
-        guard let index = existing.firstIndex(where: { $0.id == id }) else {
-            throw FinanceImportedTransactionStoreError.transactionNotFound
-        }
-        existing.remove(at: index)
-        try saveUnlocked(existing)
+        var state = try loadStateUnlocked()
+        guard let index = state.transactions.firstIndex(where: { $0.id == id }) else { throw FinanceImportedTransactionStoreError.transactionNotFound }
+        state.transactions.remove(at: index)
+        try appendToOutbox([.delete(recordID: id, expectedSourceRevision: state.remoteRecordRevisions[id] ?? 0, deletedAt: .now)], state: &state)
+        try saveStateUnlocked(state)
     }
 
-    /// Persists a canonical category override for one imported transaction.
-    /// Passing `nil` clears the override and restores the parsed provider
-    /// category (then the normal heuristic fallback). The enum boundary
-    /// prevents an arbitrary provider label from becoming a saved LifeOS
-    /// category.
     public func setCategory(_ category: FinanceTransactionCategory?, for id: UUID) throws {
         Self.processTransactionLock.lock()
         defer { Self.processTransactionLock.unlock() }
-        var existing = try loadUnlocked()
-        guard let index = existing.firstIndex(where: { $0.id == id }) else {
-            throw FinanceImportedTransactionStoreError.transactionNotFound
-        }
-        existing[index].category = category?.rawValue
-        try saveUnlocked(existing)
+        var state = try loadStateUnlocked()
+        guard let index = state.transactions.firstIndex(where: { $0.id == id }) else { throw FinanceImportedTransactionStoreError.transactionNotFound }
+        state.transactions[index].category = category?.rawValue
+        let expected = state.remoteRecordRevisions[id] ?? 0
+        let operation: FinanceImportedSyncOperation = category.map {
+            .categorySet(recordID: id, expectedSourceRevision: expected, categoryOverride: $0)
+        } ?? .categoryClear(recordID: id, expectedSourceRevision: expected)
+        try appendToOutbox([operation], state: &state)
+        try saveStateUnlocked(state)
     }
 
-    /// Explicit spelling for the destructive part of category editing. It
-    /// clears only the user override; a parsed provider category remains
-    /// available to the precedence resolver.
-    public func clearCategoryOverride(for id: UUID) throws {
-        try setCategory(nil, for: id)
-    }
+    public func clearCategoryOverride(for id: UUID) throws { try setCategory(nil, for: id) }
 
-    /// Removes every imported transaction, leaving an honest empty store.
     public func clearAll() throws {
         Self.processTransactionLock.lock()
         defer { Self.processTransactionLock.unlock() }
-        try saveUnlocked([])
+        var state = try loadStateUnlocked()
+        guard !state.transactions.isEmpty else { return }
+        let deletions = state.transactions.map {
+            FinanceImportedSyncOperation.delete(recordID: $0.id, expectedSourceRevision: state.remoteRecordRevisions[$0.id] ?? 0, deletedAt: .now)
+        }
+        state.transactions.removeAll(keepingCapacity: false)
+        try appendToOutbox(deletions, state: &state)
+        try saveStateUnlocked(state)
     }
 
-    /// Imported transactions whose `bookedAt` falls within `interval`, sorted
-    /// by `bookedAt` ascending. `nil` interval returns every transaction.
     public func transactions(in interval: DateInterval?) throws -> [FinanceImportedTransaction] {
         let existing = try all()
         let filtered = interval.map { range in existing.filter { range.contains($0.bookedAt) } } ?? existing
-        return filtered.sorted { $0.bookedAt < $1.bookedAt }
+        return filtered.sorted {
+            if $0.bookedAt != $1.bookedAt { return $0.bookedAt < $1.bookedAt }
+            return $0.id.uuidString < $1.id.uuidString
+        }
     }
 
-    private func loadUnlocked() throws -> [FinanceImportedTransaction] {
-        guard fileManager.fileExists(atPath: fileURL.path) else { return [] }
-        let data: Data
-        do {
-            data = try Data(contentsOf: fileURL)
-        } catch {
-            throw FinanceImportedTransactionStoreError.readFailed
+    public func pendingSyncEntryCount() throws -> Int {
+        Self.processTransactionLock.lock()
+        defer { Self.processTransactionLock.unlock() }
+        return try loadStateUnlocked().outbox.count
+    }
+
+    public func syncStatus() throws -> FinanceImportedSyncStatus {
+        Self.processTransactionLock.lock()
+        defer { Self.processTransactionLock.unlock() }
+        let state = try loadStateUnlocked()
+        var pendingEntries = 0
+        var blockedEntries = 0
+        var pendingOperations = 0
+        var blockedOperations = 0
+        var reasons = Set<FinanceImportedSyncBlockReason>()
+        for entry in state.outbox {
+            if entry.state == .blocked {
+                blockedEntries += 1
+                blockedOperations += entry.operations.count
+                if let reason = entry.blockedReason { reasons.insert(reason) }
+            } else {
+                pendingEntries += 1
+                pendingOperations += entry.operations.count
+            }
         }
+        return FinanceImportedSyncStatus(
+            pendingEntryCount: pendingEntries,
+            blockedEntryCount: blockedEntries,
+            pendingOperationCount: pendingOperations,
+            blockedOperationCount: blockedOperations,
+            blockedReasons: reasons.sorted { $0.rawValue < $1.rawValue }
+        )
+    }
+
+    public func pendingSyncRequest() throws -> FinanceImportedPendingSyncRequest? {
+        Self.processTransactionLock.lock()
+        defer { Self.processTransactionLock.unlock() }
+        var state = try loadStateUnlocked()
+        normalizeDeferredOperations(&state)
+        try saveStateUnlocked(state)
+        return try prepareHeadUnlocked(state: &state, incrementAttempt: false)
+    }
+
+    @discardableResult
+    public func synchronize(using client: TailscaleSyncClient) async throws -> FinanceImportedSyncResult {
+        await synchronizationGate.acquire()
         do {
-            let envelope = try JSONDecoder.financeImportedTransaction.decode(FinanceImportedTransactionStoreEnvelope.self, from: data)
-            guard envelope.schemaVersion == FinanceImportedTransactionStoreEnvelope.currentSchemaVersion else {
+            let result = try await synchronizeSerially(using: client)
+            await synchronizationGate.release()
+            return result
+        } catch {
+            await synchronizationGate.release()
+            throw error
+        }
+    }
+
+    private func synchronizeSerially(using client: TailscaleSyncClient) async throws -> FinanceImportedSyncResult {
+        var latest = try await client.fetchFinanceImportedLedger()
+        try adoptRemote(latest)
+        while try pendingSyncRequest() != nil {
+            let attempted = try beginAttempt()
+            do {
+                let pushed = try await client.pushFinanceImportedLedger(
+                    body: attempted.body, ifMatch: attempted.ifMatch, idempotencyKey: attempted.idempotencyKey
+                )
+                try completeAttempt(pushed, idempotencyKey: attempted.idempotencyKey)
+                latest = pushed
+            } catch let error as FinanceImportedSyncError {
+                guard case .conflict(let snapshot, let etag) = error else { throw error }
+                let canRetry = try handleConflict(FinanceImportedSyncResult(snapshot: snapshot, etag: etag))
+                if !canRetry { throw error }
+            }
+        }
+        return latest
+    }
+
+    public func adoptRemote(_ result: FinanceImportedSyncResult) throws {
+        guard TailscaleSyncClient.validatedFinanceImportedETag(result.etag) != nil,
+              TailscaleSyncClient.financeImportedETagRevision(result.etag) == result.snapshot.revision else {
+            throw FinanceImportedTransactionStoreError.invalidEnvelope
+        }
+        Self.processTransactionLock.lock()
+        defer { Self.processTransactionLock.unlock() }
+        var state = try loadStateUnlocked()
+        try validateRemoteOrdering(result, state: state)
+        mergeRemoteUnlocked(result, state: &state)
+        normalizeDeferredOperations(&state)
+        try saveStateUnlocked(state)
+    }
+
+    private func beginAttempt() throws -> FinanceImportedPendingSyncRequest {
+        Self.processTransactionLock.lock()
+        defer { Self.processTransactionLock.unlock() }
+        var state = try loadStateUnlocked()
+        normalizeDeferredOperations(&state)
+        guard let request = try prepareHeadUnlocked(state: &state, incrementAttempt: true) else {
+            throw FinanceImportedTransactionStoreError.syncPayloadTooLarge
+        }
+        return request
+    }
+
+    private func completeAttempt(_ result: FinanceImportedSyncResult, idempotencyKey: String) throws {
+        Self.processTransactionLock.lock()
+        defer { Self.processTransactionLock.unlock() }
+        var state = try loadStateUnlocked()
+        guard state.outbox.first?.idempotencyKey == idempotencyKey else { throw FinanceImportedTransactionStoreError.invalidEnvelope }
+        try validateRemoteOrdering(result, state: state)
+        state.outbox.removeFirst()
+        mergeRemoteUnlocked(result, state: &state)
+        normalizeDeferredOperations(&state)
+        try saveStateUnlocked(state)
+    }
+
+    private func handleConflict(_ result: FinanceImportedSyncResult) throws -> Bool {
+        Self.processTransactionLock.lock()
+        defer { Self.processTransactionLock.unlock() }
+        var state = try loadStateUnlocked()
+        try validateRemoteOrdering(result, state: state)
+        mergeRemoteUnlocked(result, state: &state)
+        normalizeDeferredOperations(&state)
+        guard let head = state.outbox.first, head.state == .pending else {
+            try saveStateUnlocked(state)
+            return false
+        }
+        guard head.attemptCount < FinanceImportedPendingSyncEntry.maximumAttempts else {
+            state.outbox[0].state = .blocked
+            state.outbox[0].blockedReason = .attemptsExhausted
+            try saveStateUnlocked(state)
+            return false
+        }
+        guard head.operations.allSatisfy({ canSafelyRebase($0, state: state) }) else {
+            state.outbox[0].state = .blocked
+            state.outbox[0].blockedReason = .conflict
+            try saveStateUnlocked(state)
+            return false
+        }
+        state.outbox[0] = try FinanceImportedPendingSyncEntry(
+            idempotencyKey: "finance-import-\(UUID().uuidString)",
+            operations: head.operations,
+            createdAt: head.createdAt,
+            attemptCount: head.attemptCount,
+            lastAttemptAt: head.lastAttemptAt,
+            state: .pending,
+            blockedReason: nil,
+            attemptedRequest: nil
+        )
+        try saveStateUnlocked(state)
+        return true
+    }
+
+    private func prepareHeadUnlocked(state: inout State, incrementAttempt: Bool) throws -> FinanceImportedPendingSyncRequest? {
+        guard !state.outbox.isEmpty, state.outbox[0].state == .pending, let etag = state.remoteETag else { return nil }
+        let entry = state.outbox[0]
+        guard Date().timeIntervalSince(entry.createdAt) <= Self.maximumRetryAge else {
+            state.outbox[0].state = .blocked
+            state.outbox[0].blockedReason = .retryExpired
+            try saveStateUnlocked(state)
+            return nil
+        }
+        guard entry.attemptCount < FinanceImportedPendingSyncEntry.maximumAttempts else {
+            state.outbox[0].state = .blocked
+            state.outbox[0].blockedReason = .attemptsExhausted
+            try saveStateUnlocked(state)
+            return nil
+        }
+
+        if let persisted = entry.attemptedRequest {
+            let request = try persisted.decodedRequest()
+            guard persisted.idempotencyKey == entry.idempotencyKey, request.operations == entry.operations else {
+                state.outbox[0].state = .blocked
+                state.outbox[0].blockedReason = .invalidEnvelope
+                try saveStateUnlocked(state)
+                return nil
+            }
+            if incrementAttempt {
+                state.outbox[0].attemptCount += 1
+                state.outbox[0].lastAttemptAt = .now
+                try saveStateUnlocked(state)
+            }
+            return FinanceImportedPendingSyncRequest(request: request, body: persisted.body,
+                                                     ifMatch: persisted.ifMatch, idempotencyKey: persisted.idempotencyKey)
+        }
+
+        let request: FinanceImportedSyncRequest
+        let body: Data
+        do {
+            request = try FinanceImportedSyncRequest(baseRevision: state.remoteRevision, operations: entry.operations)
+            body = try request.canonicalData()
+        } catch let error as FinanceImportedSyncError where error == .requestTooLarge {
+            state.outbox[0].state = .blocked
+            state.outbox[0].blockedReason = .payloadTooLarge
+            try saveStateUnlocked(state)
+            return nil
+        } catch {
+            state.outbox[0].state = .blocked
+            state.outbox[0].blockedReason = .invalidEnvelope
+            try saveStateUnlocked(state)
+            return nil
+        }
+        state.outbox[0].attemptedRequest = try FinanceImportedAttemptedSyncRequest(
+            baseRevision: state.remoteRevision, ifMatch: etag, idempotencyKey: entry.idempotencyKey, body: body
+        )
+        if incrementAttempt {
+            state.outbox[0].attemptCount += 1
+            state.outbox[0].lastAttemptAt = .now
+        }
+        try saveStateUnlocked(state)
+        return FinanceImportedPendingSyncRequest(request: request, body: body, ifMatch: etag, idempotencyKey: entry.idempotencyKey)
+    }
+
+    private func validateRemoteOrdering(_ result: FinanceImportedSyncResult, state: State) throws {
+        if result.snapshot.revision < state.remoteRevision { throw FinanceImportedTransactionStoreError.syncSnapshotRewound }
+        if result.snapshot.revision == state.remoteRevision, let currentETag = state.remoteETag, currentETag != result.etag {
+            throw FinanceImportedTransactionStoreError.syncSnapshotETagMismatch
+        }
+    }
+
+    private func mergeRemoteUnlocked(_ result: FinanceImportedSyncResult, state: inout State) {
+        let protectedIDs = Set(state.outbox.flatMap { $0.operations.map(\.recordID) })
+        var byID = Dictionary(uniqueKeysWithValues: state.transactions.map { ($0.id, $0) })
+        for record in result.snapshot.records where !protectedIDs.contains(record.recordID) {
+            byID[record.recordID] = record.transaction
+        }
+        for tombstone in result.snapshot.tombstones where !protectedIDs.contains(tombstone.recordID) {
+            byID.removeValue(forKey: tombstone.recordID)
+        }
+        state.transactions = byID.values.sorted {
+            if $0.bookedAt != $1.bookedAt { return $0.bookedAt < $1.bookedAt }
+            return $0.id.uuidString < $1.id.uuidString
+        }
+        state.remoteRevision = result.snapshot.revision
+        state.remoteETag = result.etag
+        state.remoteRecordRevisions = Dictionary(uniqueKeysWithValues: result.snapshot.records.map { ($0.recordID, $0.sourceRevision) })
+        state.remoteTombstones = Dictionary(uniqueKeysWithValues: result.snapshot.tombstones.map { ($0.recordID, $0) })
+    }
+
+    private func canSafelyRebase(_ operation: FinanceImportedSyncOperation, state: State) -> Bool {
+        switch operation {
+        case .upsert(let record, let expected):
+            guard state.remoteTombstones[record.recordID] == nil else { return false }
+            return (state.remoteRecordRevisions[record.recordID] ?? 0) == expected && record.sourceRevision == expected
+        case .categorySet(let id, let expected, _), .categoryClear(let id, let expected):
+            guard state.remoteTombstones[id] == nil else { return false }
+            return expected >= 0 && state.remoteRecordRevisions[id] == expected
+        case .delete(let id, let expected, _):
+            guard state.remoteTombstones[id] == nil else { return false }
+            return (state.remoteRecordRevisions[id] ?? 0) == expected
+        case .restore(let record, let expected):
+            return record.sourceRevision == 0 && state.remoteRecordRevisions[record.recordID] == nil
+                && state.remoteTombstones[record.recordID]?.revision == expected
+        case .legacyUpsert, .legacyDelete:
+            return false
+        }
+    }
+
+    private func normalizeDeferredOperations(_ state: inout State) {
+        for index in state.outbox.indices where state.outbox[index].state == .pending
+            && state.outbox[index].attemptedRequest == nil
+            && state.outbox[index].attemptCount == 0 {
+            let oldOperations = state.outbox[index].operations
+            var changed = false
+            let operations = oldOperations.map { operation -> FinanceImportedSyncOperation in
+                switch operation {
+                case .categorySet(let id, let expected, let category) where expected == 0:
+                    guard let revision = state.remoteRecordRevisions[id], revision > 0,
+                          state.remoteTombstones[id] == nil else { return operation }
+                    changed = true
+                    return .categorySet(recordID: id, expectedSourceRevision: revision, categoryOverride: category)
+                case .categoryClear(let id, let expected) where expected == 0:
+                    guard let revision = state.remoteRecordRevisions[id], revision > 0,
+                          state.remoteTombstones[id] == nil else { return operation }
+                    changed = true
+                    return .categoryClear(recordID: id, expectedSourceRevision: revision)
+                case .delete(let id, let expected, let deletedAt) where expected == 0:
+                    guard let revision = state.remoteRecordRevisions[id], revision > 0,
+                          state.remoteTombstones[id] == nil else { return operation }
+                    changed = true
+                    return .delete(recordID: id, expectedSourceRevision: revision, deletedAt: deletedAt)
+                default:
+                    return operation
+                }
+            }
+            guard changed, let replacement = try? FinanceImportedPendingSyncEntry(
+                idempotencyKey: state.outbox[index].idempotencyKey, operations: operations,
+                createdAt: state.outbox[index].createdAt, attemptCount: state.outbox[index].attemptCount,
+                lastAttemptAt: state.outbox[index].lastAttemptAt
+            ) else { continue }
+            state.outbox[index] = replacement
+        }
+    }
+
+    private func canonicalOperationByteCount(_ operation: FinanceImportedSyncOperation) throws -> Int {
+        let encoder = JSONEncoder.lifeOS
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(operation).count
+    }
+
+    private func emptyCanonicalRequestByteCount(baseRevision: Int) throws -> Int {
+        let request = try FinanceImportedSyncRequest(baseRevision: baseRevision, operations: [])
+        return try request.canonicalData().count
+    }
+
+    /// Partitions operations with an incremental byte budget. Encoding each
+    /// operation once keeps migration and local import batching linear in the
+    /// encoded input size; it avoids re-encoding the growing candidate request
+    /// for every row. The preferred key stays on the final unattempted chunk
+    /// when an existing entry must be split.
+    private func partitionOperations(
+        _ operations: [FinanceImportedSyncOperation],
+        baseRevision: Int,
+        createdAt: Date,
+        attemptCount: Int = 0,
+        lastAttemptAt: Date? = nil,
+        preferredFinalKey: String? = nil
+    ) throws -> [FinanceImportedPendingSyncEntry] {
+        guard !operations.isEmpty else { return [] }
+        let emptyRequestBytes = try emptyCanonicalRequestByteCount(baseRevision: baseRevision)
+        var chunks: [[FinanceImportedSyncOperation]] = []
+        var blockedChunks = [Bool]()
+        var current: [FinanceImportedSyncOperation] = []
+        var currentRequestBytes = emptyRequestBytes
+
+        func emitCurrent() {
+            guard !current.isEmpty else { return }
+            chunks.append(current)
+            blockedChunks.append(false)
+            current.removeAll(keepingCapacity: true)
+            currentRequestBytes = emptyRequestBytes
+        }
+
+        for operation in operations {
+            let operationBytes = try canonicalOperationByteCount(operation)
+            if current.count >= Self.maximumOperationsPerEntry {
+                emitCurrent()
+            }
+            let candidateBytes = current.isEmpty
+                ? emptyRequestBytes + operationBytes
+                : currentRequestBytes + 1 + operationBytes
+            if candidateBytes <= FinanceImportedSyncRequest.maximumRequestBytes {
+                current.append(operation)
+                currentRequestBytes = candidateBytes
+                continue
+            }
+
+            if !current.isEmpty {
+                emitCurrent()
+            }
+            if emptyRequestBytes + operationBytes <= FinanceImportedSyncRequest.maximumRequestBytes {
+                current = [operation]
+                currentRequestBytes = emptyRequestBytes + operationBytes
+            } else {
+                chunks.append([operation])
+                blockedChunks.append(true)
+            }
+        }
+        emitCurrent()
+
+        return try chunks.enumerated().map { index, operations in
+            let isLast = index == chunks.count - 1
+            return try FinanceImportedPendingSyncEntry(
+                idempotencyKey: isLast ? (preferredFinalKey ?? "finance-import-\(UUID().uuidString)") : "finance-import-\(UUID().uuidString)",
+                operations: operations,
+                createdAt: createdAt,
+                attemptCount: attemptCount,
+                lastAttemptAt: lastAttemptAt,
+                state: blockedChunks[index] ? .blocked : .pending,
+                blockedReason: blockedChunks[index] ? .payloadTooLarge : nil
+            )
+        }
+    }
+
+    private func appendToOutbox(_ operations: [FinanceImportedSyncOperation], state: inout State, createdAt: Date = .now) throws {
+        guard operations.count <= Self.maximumPendingOperations else { throw FinanceImportedTransactionStoreError.syncOutboxFull }
+        let existingOperationCount = state.outbox.reduce(into: 0) { count, entry in
+            count += entry.operations.count
+        }
+        guard existingOperationCount <= Self.maximumPendingOperations - operations.count else {
+            throw FinanceImportedTransactionStoreError.syncOutboxFull
+        }
+        let additions = try partitionOperations(
+            operations,
+            baseRevision: state.remoteRevision,
+            createdAt: createdAt
+        )
+        guard state.outbox.count + additions.count <= Self.maximumOutboxEntries else { throw FinanceImportedTransactionStoreError.syncOutboxFull }
+        state.outbox.append(contentsOf: additions)
+    }
+
+    private func loadStateUnlocked() throws -> State {
+        guard fileManager.fileExists(atPath: fileURL.path) else {
+            return State(transactions: [], remoteRevision: 0, remoteETag: nil,
+                         remoteRecordRevisions: [:], remoteTombstones: [:], outbox: [])
+        }
+        let data: Data
+        do { data = try Data(contentsOf: fileURL) } catch { throw FinanceImportedTransactionStoreError.readFailed }
+        guard data.count <= Self.maximumStateBytes else { throw FinanceImportedTransactionStoreError.stateTooLarge }
+        let envelope: FinanceImportedTransactionStoreEnvelope
+        do { envelope = try JSONDecoder.lifeOS.decode(FinanceImportedTransactionStoreEnvelope.self, from: data) }
+        catch let error as FinanceImportedTransactionStoreError { throw error }
+        catch { throw FinanceImportedTransactionStoreError.invalidEnvelope }
+
+        var revisions: [UUID: Int] = [:]
+        for (rawID, revision) in envelope.remoteRecordRevisions {
+            guard let id = UUID(uuidString: rawID), rawID.lowercased() == id.uuidString.lowercased(),
+                  revision > 0, revision <= FinanceImportedSyncRecord.maximumSafeCents else {
                 throw FinanceImportedTransactionStoreError.invalidEnvelope
             }
-            return envelope.transactions
-        } catch {
+            revisions[id] = revision
+        }
+        var tombstones: [UUID: FinanceImportedSyncTombstone] = [:]
+        for tombstone in envelope.remoteTombstones {
+            guard tombstones[tombstone.recordID] == nil else { throw FinanceImportedTransactionStoreError.invalidEnvelope }
+            tombstones[tombstone.recordID] = tombstone
+        }
+
+        var state = State(
+            transactions: envelope.transactions, remoteRevision: envelope.remoteRevision, remoteETag: envelope.remoteETag,
+            remoteRecordRevisions: revisions, remoteTombstones: tombstones, outbox: envelope.outbox
+        )
+        guard envelope.remoteRevision >= 0, envelope.remoteRevision <= FinanceImportedSyncRecord.maximumSafeCents else {
             throw FinanceImportedTransactionStoreError.invalidEnvelope
+        }
+        var changed = envelope.schemaVersion != FinanceImportedTransactionStoreEnvelope.currentSchemaVersion
+        if let etag = state.remoteETag,
+           (TailscaleSyncClient.validatedFinanceImportedETag(etag) == nil
+            || TailscaleSyncClient.financeImportedETagRevision(etag) != state.remoteRevision) {
+            state.remoteETag = nil
+            changed = true
+        }
+
+        if envelope.schemaVersion == FinanceImportedTransactionStoreEnvelope.legacySchemaVersion {
+            let migrated = try state.transactions.map {
+                try FinanceImportedSyncOperation.upsert(
+                    record: FinanceImportedSyncRecord(validating: $0, sourceRevision: 0), expectedSourceRevision: 0
+                )
+            }
+            state.outbox = try makeEntries(for: migrated, state: state)
+            changed = true
+        } else {
+            var rebuilt: [FinanceImportedPendingSyncEntry] = []
+            for entry in state.outbox {
+                let operations = try migrateLegacyOperations(entry.operations, state: state)
+                let migratedEntry = try FinanceImportedPendingSyncEntry(
+                    idempotencyKey: entry.idempotencyKey, operations: operations, createdAt: entry.createdAt,
+                    attemptCount: entry.attemptCount, lastAttemptAt: entry.lastAttemptAt, state: entry.state,
+                    blockedReason: entry.blockedReason, attemptedRequest: entry.attemptedRequest
+                )
+                if operations != entry.operations { changed = true }
+                if migratedEntry.attemptedRequest == nil && migratedEntry.state == .pending {
+                    let split = try splitEntryIfNeeded(migratedEntry, state: state)
+                    rebuilt.append(contentsOf: split)
+                    if split.count != 1 || split[0] != migratedEntry { changed = true }
+                } else {
+                    rebuilt.append(migratedEntry)
+                }
+            }
+            if rebuilt != state.outbox { state.outbox = rebuilt; changed = true }
+        }
+
+        if state.remoteRecordRevisions.isEmpty, state.remoteRevision > 0, !state.transactions.isEmpty {
+            var derivedRevision = false
+            for transaction in state.transactions where state.remoteTombstones[transaction.id] == nil {
+                state.remoteRecordRevisions[transaction.id] = state.remoteRevision
+                derivedRevision = true
+            }
+            changed = derivedRevision || changed
+        }
+        try validateState(state)
+        changed = markIneligibleEntries(&state) || changed
+        if changed { try saveStateUnlocked(state) }
+        return state
+    }
+
+    private func migrateLegacyOperations(_ operations: [FinanceImportedSyncOperation], state: State) throws -> [FinanceImportedSyncOperation] {
+        try operations.map { operation in
+            switch operation {
+            case .legacyUpsert(let record, let action):
+                let expected = state.remoteRecordRevisions[record.recordID] ?? (state.remoteRevision > 0 ? state.remoteRevision : 0)
+                if expected > 0 {
+                    switch action {
+                    case .set:
+                        if let category = record.categoryOverride {
+                            return .categorySet(recordID: record.recordID, expectedSourceRevision: expected, categoryOverride: category)
+                        }
+                    case .clear:
+                        return .categoryClear(recordID: record.recordID, expectedSourceRevision: expected)
+                    case .preserve:
+                        break
+                    }
+                }
+                // A legacy whole-record operation has no immutable source
+                // precondition. Preserve its local source data, but send it
+                // as a new create candidate so it can never overwrite a row
+                // observed by another device during migration.
+                return .upsert(record: try record.withSourceRevision(0), expectedSourceRevision: 0)
+            case .legacyDelete(let id, let deletedAt):
+                return .delete(recordID: id, expectedSourceRevision: state.remoteRecordRevisions[id] ?? 0, deletedAt: deletedAt)
+            default:
+                return operation
+            }
         }
     }
 
-    private func saveUnlocked(_ transactions: [FinanceImportedTransaction]) throws {
-        let data: Data
-        do {
-            data = try JSONEncoder.financeImportedTransaction.encode(FinanceImportedTransactionStoreEnvelope(transactions: transactions))
-        } catch {
+    private func makeEntries(for operations: [FinanceImportedSyncOperation], state: State) throws -> [FinanceImportedPendingSyncEntry] {
+        return try partitionOperations(
+            operations,
+            baseRevision: state.remoteRevision,
+            createdAt: .now
+        )
+    }
+
+    private func splitEntryIfNeeded(_ entry: FinanceImportedPendingSyncEntry, state: State) throws -> [FinanceImportedPendingSyncEntry] {
+        // A legacy entry with a nonzero attempt count has already entered the
+        // transmission lifecycle even if it predates persisted request bytes.
+        // Leave it intact so it can be surfaced as blocked rather than split
+        // into a different set of writes.
+        guard entry.attemptedRequest == nil, entry.attemptCount == 0, entry.state == .pending else { return [entry] }
+        return try partitionOperations(
+            entry.operations,
+            baseRevision: state.remoteRevision,
+            createdAt: entry.createdAt,
+            attemptCount: entry.attemptCount,
+            lastAttemptAt: entry.lastAttemptAt,
+            preferredFinalKey: entry.idempotencyKey
+        )
+    }
+
+    private func markIneligibleEntries(_ state: inout State) -> Bool {
+        var changed = false
+        for index in state.outbox.indices where state.outbox[index].state == .pending {
+            if state.outbox[index].attemptCount > 0 && state.outbox[index].attemptedRequest == nil {
+                // A pre-v3 entry reports that transmission began but has no
+                // immutable bytes to replay. Do not invent a new request
+                // body during migration; preserve the work as recoverable
+                // blocked state instead.
+                state.outbox[index].state = .blocked
+                state.outbox[index].blockedReason = .invalidEnvelope
+                changed = true
+            } else if Date().timeIntervalSince(state.outbox[index].createdAt) > Self.maximumRetryAge {
+                state.outbox[index].state = .blocked
+                state.outbox[index].blockedReason = .retryExpired
+                changed = true
+            } else if state.outbox[index].attemptCount >= FinanceImportedPendingSyncEntry.maximumAttempts {
+                state.outbox[index].state = .blocked
+                state.outbox[index].blockedReason = .attemptsExhausted
+                changed = true
+            }
+        }
+        return changed
+    }
+
+    private func validateState(_ state: State) throws {
+        guard state.transactions.count <= Self.maximumTransactions,
+              state.remoteRevision >= 0, state.remoteRevision <= FinanceImportedSyncRecord.maximumSafeCents,
+              state.remoteRecordRevisions.count <= Self.maximumTransactions,
+              state.remoteTombstones.count <= FinanceImportedSyncSnapshot.maximumTombstones,
+              state.outbox.count <= Self.maximumOutboxEntries,
+              state.outbox.flatMap({ $0.operations }).count <= Self.maximumPendingOperations else {
             throw FinanceImportedTransactionStoreError.invalidEnvelope
         }
-        do {
-            try atomicReplace(data)
-        } catch {
-            throw FinanceImportedTransactionStoreError.writeFailed
+        guard Set(state.transactions.map(\.id)).count == state.transactions.count else { throw FinanceImportedTransactionStoreError.invalidEnvelope }
+        if let etag = state.remoteETag,
+           (TailscaleSyncClient.validatedFinanceImportedETag(etag) == nil
+            || TailscaleSyncClient.financeImportedETagRevision(etag) != state.remoteRevision) {
+            throw FinanceImportedTransactionStoreError.invalidEnvelope
         }
+        for transaction in state.transactions {
+            do { _ = try FinanceImportedSyncRecord(validating: transaction) }
+            catch { throw FinanceImportedTransactionStoreError.invalidEnvelope }
+        }
+        for (id, revision) in state.remoteRecordRevisions {
+            guard revision > 0, revision <= FinanceImportedSyncRecord.maximumSafeCents, state.remoteTombstones[id] == nil else {
+                throw FinanceImportedTransactionStoreError.invalidEnvelope
+            }
+        }
+        for (id, tombstone) in state.remoteTombstones {
+            guard id == tombstone.recordID, tombstone.revision <= state.remoteRevision else { throw FinanceImportedTransactionStoreError.invalidEnvelope }
+        }
+        for entry in state.outbox {
+            guard entry.operations.count <= FinanceImportedPendingSyncEntry.maximumOperations,
+                  Set(entry.operations.map(\.recordID)).count == entry.operations.count else {
+                throw FinanceImportedTransactionStoreError.invalidEnvelope
+            }
+            if let attempted = entry.attemptedRequest {
+                guard attempted.idempotencyKey == entry.idempotencyKey else { throw FinanceImportedTransactionStoreError.invalidEnvelope }
+                _ = try attempted.decodedRequest()
+            }
+        }
+    }
+
+    private func saveStateUnlocked(_ state: State) throws {
+        try validateState(state)
+        let envelope = FinanceImportedTransactionStoreEnvelope(
+            transactions: state.transactions,
+            remoteRevision: state.remoteRevision,
+            remoteETag: state.remoteETag,
+            remoteRecordRevisions: Dictionary(uniqueKeysWithValues: state.remoteRecordRevisions.map { ($0.key.uuidString.lowercased(), $0.value) }),
+            remoteTombstones: state.remoteTombstones.values.sorted { $0.recordID.uuidString < $1.recordID.uuidString },
+            outbox: state.outbox
+        )
+        let data: Data
+        do { data = try JSONEncoder.lifeOS.encode(envelope) }
+        catch let error as FinanceImportedTransactionStoreError { throw error }
+        catch { throw FinanceImportedTransactionStoreError.invalidEnvelope }
+        guard data.count <= Self.maximumStateBytes else { throw FinanceImportedTransactionStoreError.stateTooLarge }
+        do { try atomicReplace(data) } catch { throw FinanceImportedTransactionStoreError.writeFailed }
     }
 
     private func atomicReplace(_ data: Data) throws {
         let directory = fileURL.deletingLastPathComponent()
-        try fileManager.createDirectory(
-            at: directory,
-            withIntermediateDirectories: true,
-            attributes: nil
-        )
-
-        let temporary = directory.appendingPathComponent(
-            ".\(fileURL.lastPathComponent).\(UUID().uuidString).tmp",
-            isDirectory: false
-        )
-        defer {
-            if fileManager.fileExists(atPath: temporary.path) {
-                try? fileManager.removeItem(at: temporary)
-            }
-        }
-
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true, attributes: nil)
+        let temporary = directory.appendingPathComponent(".\(fileURL.lastPathComponent).\(UUID().uuidString).tmp", isDirectory: false)
+        defer { if fileManager.fileExists(atPath: temporary.path) { try? fileManager.removeItem(at: temporary) } }
 #if os(iOS)
         try data.write(to: temporary, options: [.atomic, .completeFileProtection])
 #else
         try data.write(to: temporary, options: [.atomic])
 #endif
-
-        if fileManager.fileExists(atPath: fileURL.path) {
-            _ = try fileManager.replaceItemAt(fileURL, withItemAt: temporary)
-        } else {
-            try fileManager.moveItem(at: temporary, to: fileURL)
-        }
+        if fileManager.fileExists(atPath: fileURL.path) { _ = try fileManager.replaceItemAt(fileURL, withItemAt: temporary) }
+        else { try fileManager.moveItem(at: temporary, to: fileURL) }
     }
-}
-
-private extension JSONDecoder {
-    static let financeImportedTransaction: JSONDecoder = {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return decoder
-    }()
-}
-
-private extension JSONEncoder {
-    static let financeImportedTransaction: JSONEncoder = {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        return encoder
-    }()
 }

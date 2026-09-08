@@ -26,8 +26,35 @@ repeated, or over-limit pagination fails closed instead of presenting a
 partial ledger as complete. A failed refresh can serve the last complete,
 validated snapshot; its original observation time is retained and aged
 observations are marked `stale`/`refresh_due`, while malformed cache state
-still fails closed. PayPal remains a separate official-eligibility gate and
-is not enabled by this source alone.
+still fails closed. Only the reviewed Enable Banking connector is enabled for
+live bank data; unsupported providers remain unavailable until implemented and
+reviewed. Its URL boundary is fail-closed: the API base must be exactly
+`https://api.enablebanking.com`, the registered redirect must be exactly
+`https://geonqserver.tail5f8789.ts.net:8420/finance/callback`, and the provider
+handoff must be an HTTPS `https://auth.enablebanking.com/ais/start` URL carrying
+only its bounded opaque session query. The gateway never follows provider
+redirects, and the callback page is static; neither destination is taken from
+the request or reflected provider text.
+
+Manual CSV history has a separate gateway authority at `GET`/conditional `PUT
+/finance/imported`. The v2 `finance/manual_import` snapshot uses stable
+lowercase UUID rows, EUR integer cents, UTF-8 bounded source text, per-row
+`sourceRevision` values, and deletion tombstones. Source corrections use an
+`upsert` with a matching immutable `expectedSourceRevision`; category changes
+use `categorySet`/`categoryClear` with the same source precondition. A deleted
+ID can only be brought back by `restore` naming the matching tombstone
+revision, so a normal CSV reimport cannot resurrect it.
+
+`PUT` requires the current strong `If-Match` ETag and a printable
+`Idempotency-Key`. The native outbox persists the canonical request bytes,
+base revision, headers, and lifetime attempt count before transmission. Exact
+key/body retries replay the original receipt even after the authority advances;
+key/body changes conflict. Each request is capped at 512 KiB and 512
+operations, and the state envelope is atomically replaced with restrictive
+file permissions and an explicitly migrated, bounded replay journal. The phone
+keeps its local import and durable outbox first, then fetches and pushes through
+the existing Tailscale trusted edge; this route never changes the live Enable
+Banking summary.
 
 When loading an older valid snapshot, the adapter conservatively re-runs the
 current merchant categorizer only for rows still labeled `Uncategorized`; it
