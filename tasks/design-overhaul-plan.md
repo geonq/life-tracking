@@ -28,6 +28,8 @@ Create one `LifeOSTypography` facade backed only by SF Pro/system styles, with e
 
 Centralize canvas, surface, elevated surface, text, border, focus, semantic, and module accent tokens. Add contrast-safe variants for transparent widget backgrounds and grey wallpaper. Keep spacing, radius, control height, chart stroke, and content-width values in tokens; do not repair individual screens with arbitrary constants.
 
+Before screen work, define canonical `LifeOSPageFrame`, card, status row, button, selector, and sheet recipes. Resolve competing `pagePadding`/`pageGutter` and `lifeOSCard`/`flatCard` APIs with an explicit migration path. Add `onAccent` and state-specific foreground pairs; validate normal text at 4.5:1 and essential graphics at 3:1 in supported appearances and pressed/selected states. Define minimum card widths, column collapse rules, numeric/unit wrapping, and metadata truncation so small phones, narrow Mac windows, and large text cannot clip essential content.
+
 ## 4. Shell and navigation
 
 Files: `ios/LifeOS/Modules/ModuleNavigation.swift`, `ios/LifeOS/LifeOSApp.swift`, `ios/LifeOSMac/LifeOSMacApp.swift`, shared shell components, and navigation tests.
@@ -44,6 +46,8 @@ Replace the screenshot’s oversized unavailable block with a compact status hea
 
 Preserve truthful unavailable, stale, partial, and live states. Make chart controls disappear from hit testing when unavailable. Keep estimates/projections green and distinguish them from observed values using tokenized line/fill styles. Ensure transitions do not interpolate unrelated datasets and reset zoom/scrub when the observed model changes.
 
+Specify four finance availability policies: first-load/no-source is compact, refresh preserves stable geometry, filtered-empty explains the filter, and lost availability preserves only truthful stale context. Availability is evaluated per chart mode and range so an empty selection never traps the user; distinguish observed zero from no observations. Chart identity, dataset revision, mode, and range decide which inspection state survives.
+
 ## 6. Calendar
 
 Files: `ios/LifeOS/CalendarView.swift`, `ios/Shared/CalendarViews.swift`, `CalendarLayout.swift`, `CalendarCoordinator.swift`, `CalendarPeerSync.swift`, Calendar widgets, and Calendar tests.
@@ -51,6 +55,8 @@ Files: `ios/LifeOS/CalendarView.swift`, `ios/Shared/CalendarViews.swift`, `Calen
 On iPhone, use one vertically scrollable timeline viewport with a single time-label column, a horizontally paged day/week region, and a content height derived from the visible time range plus bottom inset. The scroll container must own vertical scrolling; event gestures must not consume the entire viewport. Keep the current-time marker singular: one line, one label, one marker per displayed day column. Test content beyond 10:00 and the last event so scrolling is observable.
 
 On Mac, add a Notion-like trackpad magnification interaction for timeline density. Map `MagnificationGesture`/native magnification input to a bounded timeline scale, preserve the focal time under the pointer, animate only user initiated scale changes, and keep a small accessible fallback control. Do not use the same gesture to trigger navigation. Define minimum/maximum scale, clamping, cancellation, and state restoration in `CalendarLayout` tests.
+
+Freeze gesture ownership: vertical pan scrolls, horizontal pan pages, tap opens, long-press then drag creates, event drag moves, edge drag resizes, and magnification changes density. Diagonal pans must not create/edit; cancelled drafts are discarded; zoom during editing has deterministic behavior. Preserve wall-clock and DST semantics, including repeated/nonexistent times. Render one intended now-marker assembly for today, and make the last late-day content reachable without accidental blank tail space.
 
 Retain secure manual pairing, encrypted frames, replay/freshness checks, outbox receipts, and revoke behavior. Redesign their presentation as a quiet connection status and focused pairing sheet; never expose keys or raw transport details in the main calendar.
 
@@ -64,6 +70,8 @@ Biology needs a stable page header, compact date navigation, a readable experime
 
 Rebuild the recipe/meal review sheet with a clear title block, grouped form fields, left aligned labels, readable input text, predictable keyboard behavior, and an obvious action order: keep manual, apply local preview, save meal. Use one surface hierarchy and remove the current nested oversized form panel. Preserve the disclaimer and durable local save semantics.
 
+Define draft ownership before changing the controls: keep-manual, local-preview, and save each have explicit persistence and dismissal semantics; failed saves retain edits; repeated save is idempotent; edits after success clear the saved state. Save meal is the sole primary action. Define focus order, keyboard Next/Done, inline validation, dirty-dismiss behavior, and focus return independently of visual icon size.
+
 Keep calorie picture tracking as the sole AI feature. Any nutrition photo request must show source/status, confidence, editable result, and local-save behavior without exposing an Advisor-like chat or generic life advice surface.
 
 ## 8. Widgets
@@ -71,6 +79,8 @@ Keep calorie picture tracking as the sole AI feature. Any nutrition photo reques
 Files: `ios/LifeOSWidget/FutureModuleWidgets.swift`, `CalendarWidget.swift`, every widget family/snapshot fixture, `WidgetSnapshotPublisher.swift`, and widget tests.
 
 Review every existing widget in small, medium, large, lock-screen, clear, dark, and tinted modes. Use opaque or contrast-managed panels over transparent/tinted backgrounds, especially grey wallpaper. Make all labels readable at glance, keep the primary metric dominant, and avoid tiny metadata. Keep semantic meaning stable: observed values, estimates, stale states, and unavailable states must be visually distinct. Verify all existing widgets before deleting any; only remove a widget when its information duplicates another and tests/documentation are updated.
+
+For each module, maintain a reference matrix with destination, viewport, state (live, zero, empty, stale, partial, error), expected hierarchy, and interaction evidence. Store captures or snapshot assertions for every matrix row; use short recordings/manual evidence for scroll, pinch, scrub, interrupted transitions, sheet entry, and keyboard behavior.
 
 ## 9. Advisor removal boundary
 
