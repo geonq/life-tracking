@@ -92,12 +92,15 @@ Each worker must read this plan, the target repo handoff, and only the files in 
 
 Every implementation must leave the owned scope smaller or clearer: delete dead files, unreachable routes, obsolete wrappers, duplicate state paths, and unused tokens. Prefer one-pass `O(n)` aggregation; use `O(n log n)` only when deterministic ordering is required and never introduce nested scans over unbounded input. Keep external collections bounded, preserve explicit invariants, remove warnings, and never silence a failing test or compiler diagnostic to make a batch pass.
 
+Before screen rewrites, an Astra Medium design pass must write root `design.md`. It must inspect this plan, the current native Swift code, `colors.md`, [Forever Components Infinite](https://forevercomponents.com/infinite/), and [Skills UI Clean](https://www.skillsui.app/skills/clean). Treat both sites as reference material: adapt their restraint, state completeness, component consistency, purposeful motion, and cheap/mobile-ready principles to SwiftUI; add no web dependency and copy no web markup. The document must specify shared primitives, per-screen layouts, state matrices, SF Symbols, gesture ownership, motion timings, responsive breakpoints, widget modes, and screenshot/interaction evidence.
+
 1. **Foundation/removal — Luna Max:** token typography migration, font resource removal, Advisor deletion, navigation/deep-link cleanup, project membership, negative checks. Owns token/nav/project files until complete.
-2. **Calendar — Luna Max:** iPhone scroll architecture, Mac magnification, timeline layout, pairing presentation, focused tests. Owns Calendar files only after step 1.
-3. **Finance/Fitness/Nutrition — Luna Max:** screen hierarchy, states, controls, responsive sheets, motion integration, focused tests. Owns module files only.
-4. **Widgets/shell/motion — Luna Max:** widget variants/snapshots, remaining shell polish, shared motion fixes. Owns widget/snapshot/motion files after earlier merges.
-5. **Windows/backend — Luna Max:** resolve deployment review blockers in `services/windows-service-host` and server/gateway source without changing UI. Validate fail-closed auth, rollback, inventory evolution, recovery, and service snapshot rules.
-6. **Final integration/review — Luna Max:** inspect the complete diff, run all feasible suites/builds, remove regressions, update handoff/phase/decision/task docs, and produce a device acceptance checklist. Use batched review by subsystem to control tokens.
+2. **Visual specification — Astra Medium:** write and commit root `design.md`; review it against the reference/state matrix before code changes.
+3. **Calendar — Luna Max:** iPhone scroll architecture, Mac magnification, timeline layout, pairing presentation, focused tests. Owns Calendar files only after step 2.
+4. **Finance/Fitness/Nutrition — Luna Max:** screen hierarchy, states, controls, responsive sheets, motion integration, focused tests. Owns module files only.
+5. **Widgets/shell/motion — Luna Max:** widget variants/snapshots, remaining shell polish, shared motion fixes. Owns widget/snapshot/motion files after earlier merges.
+6. **Windows/backend — Luna Max:** resolve deployment review blockers in `services/windows-service-host` and server/gateway source without changing UI. Validate fail-closed auth, rollback, inventory evolution, recovery, and service snapshot rules.
+7. **Final integration/review — Luna Max:** inspect the complete diff, run all feasible suites/builds, remove regressions, update handoff/phase/decision/task docs, and produce a device acceptance checklist. Use batched review by subsystem to control tokens.
 
 ## 11. Verification
 
