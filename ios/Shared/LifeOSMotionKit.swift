@@ -15,40 +15,198 @@ import UIKit
 // morphs → cross-fade, ring sweeps → static, chart draw → instant, scrub still works but
 // the bubble jumps (no follow spring), pills swap without slide.
 
+// MARK: - Deterministic motion ownership
+
+private struct LifeOSReduceMotionKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    /// Additive app/preview override. `false` never defeats the system preference.
+    public var lifeOSReduceMotion: Bool {
+        get { self[LifeOSReduceMotionKey.self] }
+        set { self[LifeOSReduceMotionKey.self] = newValue }
+    }
+}
+
+/// A gesture owns presentation drafts only. Commit/discard effects are returned once;
+/// the caller owns data mutation. Animation completion must carry the returned settle ID.
+/// A new gesture invalidates that ID, so interrupted animations cannot finish a newer one.
+public struct LifeOSMotionLifecycle: Equatable, Sendable {
+    public enum Event: Equatable, Sendable {
+        case hover(Bool), focus(Bool), enabled(Bool)
+        case press, drag, scrub, end, cancel
+        case settled(UUID)
+    }
+    public enum Effect: Equatable, Sendable { case none, commit, discard }
+    public private(set) var phase: LifeOSInteractionPhase = .idle
+    public private(set) var settlementID: UUID?
+    public private(set) var isEnabled = true
+    private var hovered = false
+    private var focused = false
+    public init() {}
+
+    private var restingPhase: LifeOSInteractionPhase {
+        focused ? .focus : (hovered ? .hover : .idle)
+    }
+    private var ownsGesture: Bool {
+        phase == .pressed || phase == .dragging || phase == .scrubbing
+    }
+
+    @discardableResult
+    public mutating func send(_ event: Event) -> Effect {
+        switch event {
+        case let .enabled(enabled):
+            guard isEnabled != enabled else { return .none }
+            let effect: Effect = ownsGesture ? .discard : .none
+            isEnabled = enabled
+            hovered = false; focused = false; settlementID = nil; phase = .idle
+            return effect
+        case let .settled(id):
+            guard settlementID == id else { return .none }
+            settlementID = nil
+            phase = isEnabled ? restingPhase : .idle
+        default:
+            guard isEnabled else { return .none }
+            switch event {
+            case let .hover(value):
+                hovered = value
+                if !ownsGesture && settlementID == nil { phase = restingPhase }
+            case let .focus(value):
+                focused = value
+                if !ownsGesture && settlementID == nil { phase = restingPhase }
+            case .press, .drag, .scrub:
+                settlementID = nil
+                phase = event == .press ? .pressed : (event == .drag ? .dragging : .scrubbing)
+            case .end:
+                guard ownsGesture else { return .none }
+                phase = .settling; settlementID = UUID()
+                return .commit
+            case .cancel:
+                guard ownsGesture || phase == .settling else { return .none }
+                let effect: Effect = ownsGesture ? .discard : .none
+                phase = .cancelled; settlementID = UUID()
+                return effect
+            case .enabled, .settled: break
+            }
+        }
+        return .none
+    }
+}
+
+public enum LifeOSChartMotionPolicy {
+    /// Reveal only a newly mounted plot. Refresh/range changes keep existing data visible;
+    /// never replay a hidden mask while the user is inspecting it.
+    public static func shouldReveal(hasPresented: Bool, interacting: Bool, reduceMotion: Bool) -> Bool {
+        !hasPresented && !interacting && !reduceMotion
+    }
+    public static func progress(_ value: CGFloat) -> CGFloat {
+        value.isFinite ? min(max(value, 0), 1) : 1
+    }
+}
+
+/// Lives with the presentation owner, including temporary unavailable states.
+public struct LifeOSChartPresentationState {
+    public private(set) var hasPresented = false
+    public private(set) var reservedHeight: CGFloat = 0
+    public private(set) var hasRecordedContent = false
+
+    public mutating func reveal(interacting: Bool, reduceMotion: Bool) -> Bool {
+        defer { hasPresented = true }
+        return LifeOSChartMotionPolicy.shouldReveal(
+            hasPresented: hasPresented, interacting: interacting, reduceMotion: reduceMotion)
+    }
+
+    /// Marks the current presentation as settled after an interaction,
+    /// cancellation, or disappearance. A later data update may replace the
+    /// pixels, but it cannot replay the entrance reveal for this owner.
+    public mutating func settle() {
+        hasPresented = true
+    }
+
+    public mutating func recordHeight(_ height: CGFloat, isEmpty: Bool) {
+        guard !isEmpty, height.isFinite, height > 0 else { return }
+        reservedHeight = height
+        hasRecordedContent = true
+    }
+}
+
+/// Owns a chart's one-shot reveal for the lifetime of a mounted detail route.
+/// Mode views receive the same progress binding, so changing a line/bar/ring
+/// renderer or its range cannot create a new animation owner. Interruption and
+/// Reduce Motion settle the current presentation immediately.
+public struct LifeOSChartRevealOwner<Content: View>: View {
+    private let identity: AnyHashable
+    private let interacting: Bool
+    private let content: (Binding<CGFloat>) -> Content
+
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    @Environment(\.lifeOSReduceMotion) private var requestedReduceMotion
+    @State private var progress: CGFloat = 0
+    @State private var presentation = LifeOSChartPresentationState()
+
+    private var reduceMotion: Bool { systemReduceMotion || requestedReduceMotion }
+
+    public init<ID: Hashable>(
+        identity: ID,
+        interacting: Bool = false,
+        @ViewBuilder content: @escaping (Binding<CGFloat>) -> Content
+    ) {
+        self.identity = AnyHashable(identity)
+        self.interacting = interacting
+        self.content = content
+    }
+
+    public var body: some View {
+        content($progress)
+            .environment(
+                \.lifeOSChartDrawn,
+                reduceMotion || interacting ? 1 : LifeOSChartMotionPolicy.progress(progress)
+            )
+            .task(id: identity) {
+                let reveal = presentation.reveal(
+                    interacting: interacting,
+                    reduceMotion: reduceMotion
+                )
+                guard reveal else {
+                    settle()
+                    return
+                }
+                withAnimation(LifeOSMotion.chartDraw) { progress = 1 }
+            }
+            .onChange(of: reduceMotion) { _, reduced in
+                if reduced { settle() }
+            }
+            .onChange(of: interacting) { _, active in
+                if active { settle() }
+            }
+            .onDisappear { settle() }
+    }
+
+    private func settle() {
+        presentation.settle()
+        LifeOSMotion.withoutAnimation { progress = 1 }
+    }
+}
+
 // MARK: - A. Progress Ring
 
 /// A progress ring that sweeps in once with `LifeOSMotion.ringReveal` and ends
 /// crisp: no halo, no glow, no angular gradient (Quiet Machine §5.5/§2.4 —
 /// solid accent arcs only; status rings resolve a semantic color upstream).
 ///
-/// `hue` is retained for source compatibility with un-migrated call sites and
-/// is IGNORED for rendering; new call sites should omit it via the convenience
-/// initializer below.
 public struct GlowRing<Center: View>: View {
     public let progress: Double
-    public let hue: LifeOSTokens.Hue
     public let diameter: CGFloat
     public let lineWidth: CGFloat
     private let center: () -> Center
 
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    @Environment(\.lifeOSReduceMotion) private var requestedReduceMotion
+    private var reduceMotion: Bool { systemReduceMotion || requestedReduceMotion }
     @State private var animatedProgress: Double = 0
+    @State private var presentation = LifeOSChartPresentationState()
 
-    public init(
-        progress: Double,
-        hue: LifeOSTokens.Hue,
-        diameter: CGFloat = 120,
-        lineWidth: CGFloat = 8,
-        @ViewBuilder center: @escaping () -> Center = { EmptyView() }
-    ) {
-        self.progress = progress
-        self.hue = hue
-        self.diameter = diameter
-        self.lineWidth = lineWidth
-        self.center = center
-    }
-
-    /// Preferred initializer: the arc renders solid accent.
     public init(
         progress: Double,
         diameter: CGFloat = 120,
@@ -56,14 +214,13 @@ public struct GlowRing<Center: View>: View {
         @ViewBuilder center: @escaping () -> Center = { EmptyView() }
     ) {
         self.progress = progress
-        self.hue = .blue
         self.diameter = diameter
         self.lineWidth = lineWidth
         self.center = center
     }
 
     private var clampedTarget: Double {
-        min(max(progress, 0), 1)
+        Double(LifeOSChartMotionPolicy.progress(CGFloat(progress)))
     }
 
     public var body: some View {
@@ -74,7 +231,7 @@ public struct GlowRing<Center: View>: View {
 
             // Crisp progress arc — one flat color, round caps.
             Circle()
-                .trim(from: 0, to: animatedProgress)
+                .trim(from: 0, to: reduceMotion ? clampedTarget : animatedProgress)
                 .stroke(
                     LifeOSTokens.Ring.progressArc,
                     style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
@@ -89,8 +246,10 @@ public struct GlowRing<Center: View>: View {
         .accessibilityElement(children: .combine)
         .accessibilityValue(Text(clampedTarget, format: .percent.precision(.fractionLength(0))))
         .task(id: "\(clampedTarget)-\(reduceMotion)") {
-            if reduceMotion {
-                animatedProgress = clampedTarget
+            let reveal = presentation.reveal(
+                interacting: false, reduceMotion: reduceMotion)
+            if !reveal {
+                LifeOSMotion.withoutAnimation { animatedProgress = clampedTarget }
                 return
             }
             withAnimation(LifeOSMotion.ringReveal) { animatedProgress = clampedTarget }
@@ -108,7 +267,9 @@ public struct SpringPillSelector<T: Hashable, Label: View>: View {
     @Binding public var selection: T
     private let label: (T, Bool) -> Label
 
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    @Environment(\.lifeOSReduceMotion) private var requestedReduceMotion
+    private var reduceMotion: Bool { systemReduceMotion || requestedReduceMotion }
     @Namespace private var namespace
     private let highlightID = "lifeos.pillSelector.highlight"
 
@@ -127,13 +288,21 @@ public struct SpringPillSelector<T: Hashable, Label: View>: View {
             ForEach(options, id: \.self) { option in
                 let isSelected = option == selection
                 Button {
+                    guard selection != option else { return }
                     if reduceMotion {
-                        selection = option
+                        LifeOSMotion.withoutAnimation { selection = option }
                     } else {
-                        withAnimation(LifeOSMotion.snappy) { selection = option }
+                        withAnimation(LifeOSMotion.selector) { selection = option }
                     }
                 } label: {
                     label(option, isSelected)
+                        // Selection changes update label styling, but label
+                        // geometry must remain stationary. The highlight is
+                        // the only element that receives the animated
+                        // transaction through matchedGeometryEffect below.
+                        .transaction { transaction in
+                            transaction.animation = nil
+                        }
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
                         .frame(minWidth: LifeOSTokens.Control.minimumTarget)
@@ -152,6 +321,7 @@ public struct SpringPillSelector<T: Hashable, Label: View>: View {
                         }
                 }
                 .buttonStyle(.plain)
+                .accessibilityAddTraits(isSelected ? .isSelected : [])
             }
         }
     }
@@ -162,17 +332,19 @@ public struct SpringPillSelector<T: Hashable, Label: View>: View {
 /// Tracks a `drawn` progress value (0→1) that animates on appear with `LifeOSMotion.chartDraw`,
 /// for driving `.trim(from:to:)` on chart strokes/masks. Instant under Reduce-Motion.
 public struct DrawOnProgress: DynamicProperty {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    @Environment(\.lifeOSReduceMotion) private var requestedReduceMotion
+    private var reduceMotion: Bool { systemReduceMotion || requestedReduceMotion }
     @State private var drawn: CGFloat = 0
 
     public init() {}
 
-    public var value: CGFloat { drawn }
+    public var value: CGFloat { reduceMotion ? 1 : drawn }
 
     /// Call once, e.g. from `.task { drawOn.start() }`.
     public func start() {
         if reduceMotion {
-            drawn = 1
+            LifeOSMotion.withoutAnimation { drawn = 1 }
         } else {
             withAnimation(LifeOSMotion.chartDraw) { drawn = 1 }
         }
@@ -180,28 +352,49 @@ public struct DrawOnProgress: DynamicProperty {
 
     /// Resets to 0 without animating (e.g. before re-running `start()` on new data).
     public func reset() {
-        drawn = 0
+        LifeOSMotion.withoutAnimation { drawn = reduceMotion ? 1 : 0 }
+    }
+
+    /// Call when interaction starts or its owner disappears; never leave a partial plot.
+    public func cancel() {
+        LifeOSMotion.withoutAnimation { drawn = 1 }
     }
 }
 
 private struct ChartDrawOnModifier<ID: Equatable>: ViewModifier {
     let id: ID
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let interacting: Bool
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    @Environment(\.lifeOSReduceMotion) private var requestedReduceMotion
+    private var reduceMotion: Bool { systemReduceMotion || requestedReduceMotion }
     @State private var drawn: CGFloat = 0
+    @State private var presentation = LifeOSChartPresentationState()
 
     func body(content: Content) -> some View {
         content
             .task(id: id) {
-                // Reset synchronously before revealing a new dataset. The identity is supplied
-                // by the chart's source data, so unrelated parent redraws do not restart motion.
-                drawn = 0
-                if reduceMotion {
-                    drawn = 1
-                } else {
+                let reveal = presentation.reveal(
+                    interacting: interacting, reduceMotion: reduceMotion)
+                if reveal {
                     withAnimation(LifeOSMotion.chartDraw) { drawn = 1 }
+                } else {
+                    LifeOSMotion.withoutAnimation { drawn = 1 }
                 }
             }
-            .environment(\.lifeOSChartDrawn, drawn)
+            .onChange(of: reduceMotion) { _, reduced in
+                if reduced { LifeOSMotion.withoutAnimation { drawn = 1 } }
+            }
+            .onChange(of: interacting) { _, active in
+                if active { LifeOSMotion.withoutAnimation { drawn = 1 } }
+            }
+            .onDisappear { LifeOSMotion.withoutAnimation { drawn = 1 } }
+            .environment(\.lifeOSChartDrawn, reduceMotion || interacting ? 1 : drawn)
+            .transaction { transaction in
+                if reduceMotion || interacting {
+                    transaction.animation = nil
+                    transaction.disablesAnimations = true
+                }
+            }
     }
 }
 
@@ -230,7 +423,7 @@ public struct LifeOSChartDrawReveal<Content: View>: View {
                     Rectangle()
                         .fill(.white)
                         .frame(
-                            width: geometry.size.width * min(max(drawn, 0), 1),
+                            width: geometry.size.width * LifeOSChartMotionPolicy.progress(drawn),
                             height: geometry.size.height,
                             alignment: .leading
                         )
@@ -256,10 +449,10 @@ extension View {
         chartDrawOn(id: true)
     }
 
-    /// Drives the reveal once for each source-data identity. Pass a stable value derived from
-    /// the plotted dataset so refreshes reset the mask, while parent redraws do not replay it.
-    public func chartDrawOn<ID: Equatable>(id: ID) -> some View {
-        modifier(ChartDrawOnModifier(id: id))
+    /// Stable data identity cancels an old reveal without blanking a refreshed plot.
+    /// Pass gesture activity to interrupt the initial reveal on the very first scrub.
+    public func chartDrawOn<ID: Equatable>(id: ID, interacting: Bool = false) -> some View {
+        modifier(ChartDrawOnModifier(id: id, interacting: interacting))
     }
 
     /// Applies the current draw-on mask inside the view subtree. Use this on
@@ -271,9 +464,8 @@ extension View {
 
 // MARK: - D. Scrub bubble
 
-/// A value bubble that follows an x-position with `LifeOSMotion.track`, for chart scrubbing
-/// (`03-motion-revolut.md` §D). Elevation-3 surface. Reduce-Motion: bubble jumps to position
-/// with no follow spring (scrub still works).
+/// A bounded value bubble that tracks the selected sample directly in every motion mode.
+/// Its position never lags behind its label or the chart crosshair.
 public struct ScrubBubble<Content: View>: View {
     public let x: CGFloat
     public let y: CGFloat
@@ -283,7 +475,9 @@ public struct ScrubBubble<Content: View>: View {
     public let inset: CGFloat
     private let content: () -> Content
 
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    @Environment(\.lifeOSReduceMotion) private var requestedReduceMotion
+    private var reduceMotion: Bool { systemReduceMotion || requestedReduceMotion }
     @State private var measuredSize: CGSize = .zero
 
     public init(
@@ -302,7 +496,7 @@ public struct ScrubBubble<Content: View>: View {
 
     public var body: some View {
         content()
-            .font(.caption2.monospacedDigit())
+            .lifeOSTypography(.metadata).monospacedDigit()
             .padding(.horizontal, LifeOSTokens.Space.xs)
             .padding(.vertical, LifeOSTokens.Space.xs)
             .background(LifeOSTokens.floatingOverlay.opacity(0.96), in: RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous))
@@ -319,8 +513,12 @@ public struct ScrubBubble<Content: View>: View {
             .frame(width: renderedFrame?.width, height: renderedFrame?.height)
             .clipped()
             .position(x: renderedPosition.x, y: renderedPosition.y)
-            .animation(reduceMotion ? nil : LifeOSMotion.track, value: x)
-            .animation(reduceMotion ? nil : LifeOSMotion.track, value: y)
+            // The selected datum and its bubble must agree on every frame. Never
+            // trail the crosshair with a second, independently retargeted spring.
+            .transaction { transaction in
+                transaction.animation = nil
+                transaction.disablesAnimations = true
+            }
     }
 
     private var renderedPosition: CGPoint {
@@ -370,7 +568,7 @@ extension View {
     @ViewBuilder
     public func numericTransition() -> some View {
         if #available(iOS 17, macOS 14, *) {
-            self.contentTransition(.numericText())
+            self.modifier(LifeOSNumericTransitionModifier())
         } else {
             self
         }
@@ -382,18 +580,106 @@ extension View {
 // Usage: a parent view owns `@Namespace private var heroNamespace` and applies
 // `.matchedCard(id:in:)` with the SAME id to both the source card and the destination
 // detail header, then toggles a `@State` selection inside
-// `withAnimation(LifeOSMotion.heroMorph) { ... }`. Under Reduce-Motion, skip the
-// `matchedGeometryEffect` entirely and cross-fade with `.opacity` instead — do not call
-// `.matchedCard` when `LifeOSMotion.reduceMotion` is true.
+// `withAnimation(LifeOSMotion.curve(for: .navigation, reduceMotion: reduced)?.animation)`.
+// The helper reads the live environment and replaces geometry with opacity when reduced.
 //
 // This helper does not wire any cross-screen navigation morph; that requires the owning
 // screen's redesign and is out of scope for the motion-system foundation.
 
 extension View {
     /// Tags this view as one endpoint of a hero-morph transition. Apply the same `id` in the
-    /// same `namespace` to both the source card and the destination detail header. Caller is
-    /// responsible for skipping this (using a cross-fade instead) under Reduce-Motion.
+    /// same `namespace` to both endpoints. Reduced motion uses opacity instead of geometry;
+    /// the owner supplies `LifeOSMotion.curve(for: .navigation, reduceMotion:)` on selection.
     public func matchedCard(id: some Hashable, in namespace: Namespace.ID) -> some View {
-        matchedGeometryEffect(id: id, in: namespace)
+        modifier(LifeOSMatchedCardModifier(id: id, namespace: namespace))
+    }
+}
+
+private struct LifeOSMatchedCardModifier<ID: Hashable>: ViewModifier {
+    let id: ID
+    let namespace: Namespace.ID
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    @Environment(\.lifeOSReduceMotion) private var requestedReduceMotion
+
+    @ViewBuilder func body(content: Content) -> some View {
+        if systemReduceMotion || requestedReduceMotion {
+            content.transition(.opacity)
+        } else {
+            content.matchedGeometryEffect(id: id, in: namespace)
+        }
+    }
+}
+
+private struct LifeOSNumericTransitionModifier: ViewModifier {
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    @Environment(\.lifeOSReduceMotion) private var requestedReduceMotion
+    func body(content: Content) -> some View {
+        content.contentTransition(systemReduceMotion || requestedReduceMotion ? .opacity : .numericText())
+    }
+}
+
+/// Availability changes visibility, never the identity or layout ownership of a plot.
+/// Hidden content receives current (possibly empty) data, not a cached/fake series.
+public struct LifeOSChartAvailabilityPolicy: Equatable {
+    public let isEmpty: Bool
+    public var contentOpacity: Double { isEmpty ? 0 : 1 }
+    public var allowsInspection: Bool { !isEmpty }
+}
+
+private struct ChartAvailabilityModifier<Placeholder: View>: ViewModifier {
+    let isEmpty: Bool
+    let identity: AnyHashable
+    @ViewBuilder let placeholder: () -> Placeholder
+    @State private var presentation = LifeOSChartPresentationState()
+
+    func body(content: Content) -> some View {
+        let policy = LifeOSChartAvailabilityPolicy(isEmpty: isEmpty)
+        ZStack {
+            if !isEmpty || presentation.hasRecordedContent {
+                content
+                    .background {
+                        GeometryReader { geometry in
+                            Color.clear.preference(key: ChartPresentationHeightKey.self, value: geometry.size.height)
+                        }
+                    }
+                    .opacity(policy.contentOpacity)
+                    .allowsHitTesting(policy.allowsInspection)
+                    .disabled(!policy.allowsInspection)
+                    .accessibilityHidden(!policy.allowsInspection)
+            }
+            if isEmpty { placeholder() }
+        }
+        // A first-load/no-source state must stay compact. Once a real plot has
+        // been presented, the owner keeps its geometry during a transient
+        // refresh so the page does not jump while retained values remain on
+        // screen.
+        .frame(minHeight: isEmpty && presentation.hasRecordedContent ? presentation.reservedHeight : 0)
+        .onPreferenceChange(ChartPresentationHeightKey.self) { height in
+            presentation.recordHeight(height, isEmpty: isEmpty)
+        }
+        .onChange(of: identity) { _, _ in
+            // A new source/window/mode owns a new plot geometry. Without an
+            // explicit identity, an old populated chart can leave a large
+            // empty reservation behind after a range or source change.
+            presentation = LifeOSChartPresentationState()
+        }
+        .animation(nil, value: isEmpty)
+    }
+}
+
+private struct ChartPresentationHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+extension View {
+    public func chartAvailability<Placeholder: View>(
+        isEmpty: Bool,
+        identity: AnyHashable = "default",
+        @ViewBuilder placeholder: @escaping () -> Placeholder
+    ) -> some View {
+        modifier(ChartAvailabilityModifier(isEmpty: isEmpty, identity: identity, placeholder: placeholder))
     }
 }

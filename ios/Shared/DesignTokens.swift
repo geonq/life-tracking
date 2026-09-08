@@ -6,6 +6,16 @@ import AppKit
 import UIKit
 #endif
 
+/// The selected-navigation colors are kept as named sRGB contract values so
+/// tests can verify both appearance pairs without attempting to introspect a
+/// platform-specific adaptive `Color` provider.
+enum LifeOSSelectedNavigationPalette {
+    static let darkForegroundHex: UInt32 = 0xB8D5FE
+    static let darkBackgroundHex: UInt32 = 0x011E47
+    static let lightForegroundHex: UInt32 = 0x0244A2
+    static let lightBackgroundHex: UInt32 = 0xE6F0FF
+}
+
 // MARK: - Branded Color Palette
 
 public extension Color {
@@ -43,6 +53,27 @@ public extension Color {
         })
     }
 #endif
+
+    private static func lifeOSAdaptiveHex(dark: UInt32, light: UInt32) -> Color {
+        func components(_ hex: UInt32) -> (red: Double, green: Double, blue: Double) {
+            (
+                red: Double((hex >> 16) & 0xFF) / 255,
+                green: Double((hex >> 8) & 0xFF) / 255,
+                blue: Double(hex & 0xFF) / 255
+            )
+        }
+
+        let darkComponents = components(dark)
+        let lightComponents = components(light)
+        return lifeOSAdaptiveColor(
+            darkRed: darkComponents.red,
+            darkGreen: darkComponents.green,
+            darkBlue: darkComponents.blue,
+            lightRed: lightComponents.red,
+            lightGreen: lightComponents.green,
+            lightBlue: lightComponents.blue
+        )
+    }
 
     /// Convenience initializer from a packed 24-bit hex value, e.g. `Color(hex: 0x036BFC)`.
     init(hex: UInt32) {
@@ -193,6 +224,18 @@ public extension Color {
         lightRed: 0x02/255, lightGreen: 0x53/255, lightBlue: 0xC4/255
     )
 
+    /// The selected-navigation pair is deliberately distinct from focus
+    /// blue: a row needs a stable filled surface and a text color that stays
+    /// readable in both appearances.
+    static let lifeOSSelectedNavigationFill = lifeOSAdaptiveHex(
+        dark: LifeOSSelectedNavigationPalette.darkBackgroundHex,
+        light: LifeOSSelectedNavigationPalette.lightBackgroundHex
+    )
+    static let lifeOSSelectedNavigationText = lifeOSAdaptiveHex(
+        dark: LifeOSSelectedNavigationPalette.darkForegroundHex,
+        light: LifeOSSelectedNavigationPalette.lightForegroundHex
+    )
+
     // Module identity accents. These stay vivid on the dark canvas and move
     // to the deeper sibling ramp in light mode so labels remain readable.
     static let lifeOSFinanceGreen = lifeOSAdaptiveColor(
@@ -298,13 +341,18 @@ public enum LifeOSTokens {
         public static let xl: CGFloat = 24
         public static let xxl: CGFloat = 32
         public static let xxxl: CGFloat = 40
+        /// The large page section gap. `xxxl` remains for older surfaces that
+        /// still use the pre-overhaul scale.
+        public static let xxxxl: CGFloat = 48
     }
 
     /// Allowed corner radii. Capsules are used for status/selectors.
     public enum Radius {
-        public static let control: CGFloat = 8
-        public static let card: CGFloat = 12
-        public static let hero: CGFloat = 16
+        public static let control: CGFloat = 10
+        public static let card: CGFloat = 16
+        public static let hero: CGFloat = 24
+        public static let tooltip: CGFloat = 8
+        public static let widget: CGFloat = 12
     }
 
     /// Platform minimums for interactive controls and pointer targets.
@@ -328,7 +376,10 @@ public enum LifeOSTokens {
     public static let pageGutter: CGFloat = 16
 #endif
 
-    public static let contentMaxWidth: CGFloat = 1240
+    /// Standard page-frame content width. Viewport surfaces such as Calendar
+    /// intentionally bypass the shared content container when they need the
+    /// full available canvas.
+    public static let contentMaxWidth: CGFloat = 1120
     public static let chartMaxWidth: CGFloat = 1440
 
     // MARK: Legacy geometry aliases
@@ -356,6 +407,15 @@ public enum LifeOSTokens {
     public static let darkCanvas = Color.lifeOSDarkCanvas
     public static let lightCanvas = Color.lifeOSLightCanvas
 
+    // MARK: Widget readability
+
+    /// The approved inner contrast surface for clear/accented widgets. It is
+    /// independent of the WidgetKit container so grey wallpapers cannot erase
+    /// the text hierarchy.
+    public static let widgetTransparentBacking = Color.lifeOSBlack.opacity(0.60)
+    public static let widgetTransparentSupporting = Color(hex: 0xE6E6E6)
+    public static let widgetTransparentPanel = Color.lifeOSWhite.opacity(0.10)
+
     // Exact branded light/dark canvas, selected by the platform appearance.
     public static var screenCanvas: Color { canvas }
 
@@ -367,6 +427,8 @@ public enum LifeOSTokens {
     public static let accentHover = Color.lifeOSAccentHover
     public static let accentPressed = Color.lifeOSAccentPressed
     public static let accentLight = Color.lifeOSBlue50
+    public static let selectedNavigationFill = Color.lifeOSSelectedNavigationFill
+    public static let selectedNavigationText = Color.lifeOSSelectedNavigationText
 
     public static let chartObserved = Color.lifeOSObservedBlue
     public static let primaryText = Color.lifeOSPrimaryText
@@ -549,43 +611,102 @@ public enum LifeOSTokens {
 // MARK: - Motion (Reduce Motion aware)
 
 public enum LifeOSMotion {
+
+    /// Inspectable timing specifications. Spring response is not a completion deadline;
+    /// gesture owners use animation completion callbacks, never delayed timers.
+    public enum Curve: Equatable, Sendable {
+        case easeOut(Double)
+        case easeInOut(Double)
+        case spring(response: Double, damping: Double)
+        case interactive(response: Double, damping: Double)
+
+        public var animation: Animation {
+            switch self {
+            case let .easeOut(duration): return .easeOut(duration: duration)
+            case let .easeInOut(duration): return .easeInOut(duration: duration)
+            case let .spring(response, damping):
+                return .spring(response: response, dampingFraction: damping)
+            case let .interactive(response, damping):
+                return .interactiveSpring(response: response, dampingFraction: damping)
+            }
+        }
+    }
+
+    public enum Timing {
+        public static let press = Curve.easeOut(0.08)
+        public static let release = Curve.easeOut(0.14)
+        public static let hover = Curve.easeOut(0.12)
+        public static let feedback = Curve.easeOut(0.12)
+        public static let primary = Curve.spring(response: 0.42, damping: 0.86)
+        public static let snappy = Curve.spring(response: 0.24, damping: 0.90)
+        public static let hero = Curve.spring(response: 0.32, damping: 0.92)
+        public static let tracking = Curve.interactive(response: 0.18, damping: 0.90)
+        public static let chart = Curve.easeOut(0.36)
+        public static let ring = Curve.easeOut(0.42)
+    }
+
+    /// Feedback is opacity/fill only under Reduce Motion; geometry stays direct.
+    public enum Intent: CaseIterable, Sendable {
+        case press, release, hover, selection, navigation, reveal, scrub, cancel
+    }
+
+    public static func curve(for intent: Intent, reduceMotion: Bool) -> Curve? {
+        switch intent {
+        case .press: return reduceMotion ? nil : Timing.press
+        case .release: return reduceMotion ? nil : Timing.release
+        case .hover: return reduceMotion ? nil : Timing.hover
+        case .selection: return reduceMotion ? nil : Timing.snappy
+        case .navigation: return reduceMotion ? Timing.feedback : Timing.hero
+        case .reveal: return reduceMotion ? nil : Timing.chart
+        case .scrub: return nil // selection, marker and bubble follow the same sample
+        case .cancel: return reduceMotion ? nil : Timing.snappy
+        }
+    }
+
+    /// Explicitly clears inherited animation for direct tracking/reset/cancellation.
+    public static func withoutAnimation(_ update: () -> Void) {
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction, update)
+    }
+
     // MARK: Canonical micro interactions
 
     /// Press feedback: short, user-triggered and never a decorative reveal.
-    public static let press = Animation.easeOut(duration: 0.08)
+    public static let press = Timing.press.animation
 
     /// Release feedback: lets controls settle without a lift or scale effect.
-    public static let release = Animation.easeOut(duration: 0.18)
+    public static let release = Timing.release.animation
 
     /// Pointer hover/focus feedback.
-    public static let hover = Animation.easeOut(duration: 0.12)
+    public static let hover = Timing.hover.animation
 
     /// Named aliases make intent explicit at call sites while preserving the
     /// existing canonical primitives below.
-    public static let selector = Animation.spring(response: 0.30, dampingFraction: 0.86)
-    public static let card = Animation.spring(response: 0.42, dampingFraction: 0.82)
-    public static let fingerTracking = Animation.interactiveSpring(response: 0.18, dampingFraction: 0.86)
+    public static let selector = Timing.snappy.animation
+    public static let card = Timing.primary.animation
+    public static let fingerTracking = Timing.tracking.animation
 
     // MARK: Canonical tokens (03-motion-revolut.md "Canonical spring tokens")
 
     /// Primary — screen & card transitions. Smooth settle, barely-there life.
-    public static let primary = Animation.spring(response: 0.42, dampingFraction: 0.82)
+    public static let primary = Timing.primary.animation
 
     /// Snappy — pills, toggles, small controls.
-    public static let snappy = Animation.spring(response: 0.30, dampingFraction: 0.86)
+    public static let snappy = Timing.snappy.animation
 
     /// Hero morph — card→detail expansion (paired with matchedGeometryEffect).
-    public static let heroMorph = Animation.spring(response: 0.50, dampingFraction: 0.85)
+    public static let heroMorph = Timing.hero.animation
 
     /// Finger tracking — scrub bubble, drag-follow. No response lag.
-    public static let track = Animation.interactiveSpring(response: 0.18, dampingFraction: 0.86)
+    public static let track = Timing.tracking.animation
 
     /// Chart draw-on — the ONE longer, one-shot reveal. Never loops.
-    public static let chartDraw = Animation.easeOut(duration: 0.72)
+    public static let chartDraw = Timing.chart.animation
 
     /// One-shot ring reveal on appear. Any optional halo is removed when the reveal settles;
     /// Reduce Motion renders the final ring without a halo.
-    public static let ringReveal = Animation.spring(response: 0.7, dampingFraction: 0.9)
+    public static let ringReveal = Timing.ring.animation
 
     /// Horizontal calendar pager settle (snap-back and page-commit). Snappy, non-bouncy —
     /// matches the native paging deceleration feel without overshoot.
@@ -633,11 +754,6 @@ public enum LifeOSMotion {
 // MARK: - Branded Modifier Helpers
 
 extension View {
-    /// Apply a quiet content surface with a neutral hairline and no decorative shadow.
-    func lifeOSCard() -> some View {
-        modifier(LifeOSCardModifier())
-    }
-
     /// Status indicator (Quiet Machine §4.2): a 6pt semantic dot plus
     /// overline-style text in the same semantic color. No background, no
     /// stroke — tinted capsules are retired. Uppercase per the overline role.
@@ -648,7 +764,7 @@ extension View {
                     .fill(color)
                     .frame(width: 6, height: 6)
                 Text(text)
-                    .font(LifeOSFont.overline())
+                    .font(LifeOSTypography.label())
                     .tracking(0.8)
                     .textCase(.uppercase)
                     .foregroundStyle(color)
@@ -665,21 +781,6 @@ extension View {
         modifier(LifeOSFlatCardModifier(cornerRadius: cornerRadius, featured: featured))
     }
 
-    /// DEPRECATED alias of `flatCard` (Quiet Machine §4.1). All call sites are
-    /// migrated; new code must use `flatCard` directly.
-    @available(*, deprecated, renamed: "flatCard")
-    func glassCard(cornerRadius: CGFloat = LifeOSTokens.overviewCardCorner, featured: Bool = false) -> some View {
-        flatCard(cornerRadius: cornerRadius, featured: featured)
-    }
-}
-
-private struct LifeOSCardModifier: ViewModifier {
-    func body(content: Content) -> some View {
-        content
-            .padding(LifeOSTokens.cardPadding)
-            .background(LifeOSTokens.surface, in: LifeOSTokens.cardShape)
-            .overlay(LifeOSTokens.cardShape.stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
-    }
 }
 
 private struct LifeOSFlatCardModifier: ViewModifier {
@@ -711,21 +812,36 @@ public struct LifeOSButtonStyle: ButtonStyle {
     public enum Variant { case primary, secondary, destructive }
 
     public let variant: Variant
-    @Environment(\.isEnabled) private var isEnabled
 
     public init(_ variant: Variant = .secondary) {
         self.variant = variant
     }
 
     public func makeBody(configuration: Configuration) -> some View {
-        let pressed = configuration.isPressed
+        LifeOSButtonBody(configuration: configuration, variant: variant)
+    }
+}
+
+private struct LifeOSButtonBody: View {
+    let configuration: ButtonStyleConfiguration
+    let variant: LifeOSButtonStyle.Variant
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.isFocused) private var isFocused
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    @Environment(\.lifeOSReduceMotion) private var requestedReduceMotion
+    @State private var hovered = false
+
+    var body: some View {
+        let pressed = isEnabled && configuration.isPressed
+        let highlighted = isEnabled && (hovered || isFocused)
+        let reduceMotion = systemReduceMotion || requestedReduceMotion
         return configuration.label
-            .font(LifeOSFont.control())
-            .foregroundStyle(labelColor(pressed: pressed))
+            .lifeOSTypography(.button)
+            .foregroundStyle(labelColor)
             .padding(.horizontal, LifeOSTokens.Space.md)
             .frame(minHeight: LifeOSTokens.Control.standardHeight)
             .background(
-                fillColor(pressed: pressed),
+                fillColor(pressed: pressed, highlighted: highlighted),
                 in: RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
             )
             .overlay {
@@ -734,23 +850,46 @@ public struct LifeOSButtonStyle: ButtonStyle {
                         .stroke(LifeOSTokens.hairlineBorder, lineWidth: 1)
                 }
             }
-            .opacity(isEnabled ? 1 : 0.5)
-            .animation(LifeOSMotion.press, value: pressed)
+            .scaleEffect(isEnabled && !reduceMotion && pressed ? 0.98 : 1)
+            .overlay {
+                if isEnabled && isFocused {
+                    RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
+                        .stroke(LifeOSTokens.accent, lineWidth: 2)
+                        .padding(-3)
+                }
+            }
+            .onHover { hovered = $0 }
+            .onChange(of: isEnabled) { _, enabled in
+                if !enabled { hovered = false }
+            }
+            .onDisappear { hovered = false }
+            .animation(
+                LifeOSMotion.curve(for: .hover, reduceMotion: reduceMotion)?.animation,
+                value: highlighted
+            )
+            .animation(
+                LifeOSMotion.curve(for: pressed ? .press : .release,
+                                   reduceMotion: reduceMotion)?.animation,
+                value: pressed
+            )
     }
 
-    private func fillColor(pressed: Bool) -> Color {
+    private func fillColor(pressed: Bool, highlighted: Bool) -> Color {
+        guard isEnabled else { return LifeOSTokens.raised }
         switch variant {
         case .primary:
-            if pressed { return LifeOSTokens.accentPressed }
-            return isEnabled ? LifeOSTokens.accent : LifeOSTokens.strongBorder
+            if pressed { return Color.lifeOSBlue800 }
+            if highlighted { return Color.lifeOSBlue700 }
+            return Color.lifeOSBlue600
         case .secondary:
-            return pressed ? LifeOSTokens.strongBorder : .clear
+            return pressed ? LifeOSTokens.strongBorder : (highlighted ? LifeOSTokens.raised : .clear)
         case .destructive:
-            return pressed ? LifeOSTokens.strongBorder : .clear
+            return pressed ? LifeOSTokens.strongBorder : (highlighted ? LifeOSTokens.raised : .clear)
         }
     }
 
-    private func labelColor(pressed: Bool) -> Color {
+    private var labelColor: Color {
+        guard isEnabled else { return LifeOSTokens.quaternaryText }
         switch variant {
         case .primary:
             return .white

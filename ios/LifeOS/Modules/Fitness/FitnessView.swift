@@ -504,6 +504,7 @@ public enum FitnessSection: String, CaseIterable, Identifiable, Sendable {
     case today = "Today"
     case journal = "Journal"
     case fitness = "Fitness"
+    case training = "Training"
     case biology = "Biology"
     case nutrition = "Nutrition"
     case supplements = "Supplements"
@@ -516,6 +517,7 @@ public enum FitnessSection: String, CaseIterable, Identifiable, Sendable {
         case .today: .overview
         case .journal: .more
         case .fitness: .fitness
+        case .training: .graphUp
         case .biology: .health
         case .nutrition: .grocery
         case .supplements: .verified
@@ -528,6 +530,7 @@ public enum FitnessSection: String, CaseIterable, Identifiable, Sendable {
         case .today: "Your day, with evidence"
         case .journal: "Small facts, kept useful"
         case .fitness: "Activity and training detail"
+        case .training: "Workouts, sets, and progress"
         case .biology: "Source-backed body signals"
         case .nutrition: "Meals, macros, and energy"
         case .supplements: "Your plan, reminders, and stock"
@@ -665,6 +668,11 @@ public struct FitnessView: View {
     private let initialSection: FitnessSection
     private let initialNutritionEntryPoint: FitnessNutritionEntryPoint?
     private let initialFitnessEntryPoint: FitnessWidgetEntryPoint?
+    /// The app shell injects its single durable training coordinator. Optional
+    /// injection keeps fixture and snapshot callers source-compatible; those
+    /// callers fall back to the training view's own StateObject only when they
+    /// actually open the Training section.
+    private let trainingCoordinator: FitnessTrainingCoordinator?
     @State private var selectedSection: FitnessSection
     @State private var selectedDate: Date
     @State private var showingSourceGate = false
@@ -697,7 +705,8 @@ public struct FitnessView: View {
         selectedDate: Date = .now,
         usesVisualFixtures: Bool = false,
         onSourceReview: (() -> Void)? = nil,
-        journalStore: FitnessJournalStore? = nil
+        journalStore: FitnessJournalStore? = nil,
+        trainingCoordinator: FitnessTrainingCoordinator? = nil
     ) {
         let fixtureMode = FitnessJournalFixturePolicy.isFixtureMode(
             usesVisualFixtures: usesVisualFixtures,
@@ -710,6 +719,7 @@ public struct FitnessView: View {
         self.initialSection = initialSection
         self.initialNutritionEntryPoint = initialNutritionEntryPoint
         self.initialFitnessEntryPoint = initialFitnessEntryPoint
+        self.trainingCoordinator = trainingCoordinator
         _selectedSection = State(initialValue: initialSection)
         _selectedDate = State(initialValue: selectedDate)
         let seededRecords = snapshot.journalRecords.map { record in
@@ -752,6 +762,7 @@ public struct FitnessView: View {
                                 selectedDate: $selectedDate,
                                 nutritionEntryPoint: initialNutritionEntryPoint,
                                 fitnessEntryPoint: initialFitnessEntryPoint,
+                                trainingCoordinator: trainingCoordinator,
                                 journalStore: journalStore,
                                 usesVisualFixtures: usesVisualFixtures,
                                 onSourceTap: { showingSourceGate = true }
@@ -829,10 +840,10 @@ private struct FitnessHeader: View {
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Fitness")
-                        .font(LifeOSFont.display(30))
+                        .lifeOSTypography(.pageTitle)
                         .tracking(-0.5)
                     Text(source.status == .demo ? "Visual review" : "Local-first health journal")
-                        .font(LifeOSFont.bodyText(14))
+                        .lifeOSTypography(.body)
                         .foregroundStyle(LifeOSTokens.secondaryText)
                 }
 
@@ -843,7 +854,7 @@ private struct FitnessHeader: View {
                     HStack(spacing: 6) {
                         Circle().fill(source.status.color).frame(width: 6, height: 6)
                         Text(source.status.label)
-                            .font(LifeOSFont.overline())
+                            .lifeOSTypography(.label)
                             .tracking(0.8)
                             .textCase(.uppercase)
                             .foregroundStyle(source.status.color)
@@ -853,8 +864,13 @@ private struct FitnessHeader: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Health source status")
-                .accessibilityValue(source.status.label)
+                .accessibilityValue("\(source.title). \(source.freshness)")
             }
+
+            Text("\(source.title) · \(source.freshness)")
+                .lifeOSTypography(.metadata)
+                .foregroundStyle(LifeOSTokens.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
 
             HStack(spacing: 8) {
                 LifeOSIcon(.calendar)
@@ -879,7 +895,7 @@ private struct FitnessHeader: View {
                     showingDatePicker = true
                 } label: {
                     Text(selectedDate.fitnessHeaderDateLabel)
-                        .font(LifeOSFont.control())
+                        .lifeOSTypography(.button)
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                         .frame(minHeight: 44, alignment: .leading)
@@ -918,7 +934,7 @@ private struct FitnessHeader: View {
             NavigationStack {
                 VStack(alignment: .leading, spacing: 14) {
                     Text("Choose the day to review")
-                        .font(LifeOSFont.header(18))
+                        .lifeOSTypography(.sectionTitle)
                     DatePicker("Selected date", selection: $selectedDate, displayedComponents: .date)
                         .labelsHidden()
 #if os(iOS)
@@ -1034,7 +1050,7 @@ private struct FitnessSectionPicker: View {
                 LifeOSIcon(selection.icon)
                     .frame(width: 15, height: 15)
                 Text(selection.rawValue)
-                    .font(LifeOSFont.inter(12, weight: .semiBold))
+                    .lifeOSTypography(.body, weight: .semibold)
                 Spacer(minLength: 0)
                 LifeOSIcon(.chevronRight)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
@@ -1065,7 +1081,7 @@ private struct FitnessSectionPicker: View {
                         .frame(width: 15, height: 15)
                         .foregroundStyle(selection == section ? LifeOSTokens.Module.fitness : LifeOSTokens.secondaryText)
                     Text(section.rawValue)
-                        .font(LifeOSFont.inter(12, weight: .semiBold))
+                        .lifeOSTypography(.body, weight: .semibold)
                         .fixedSize(horizontal: true, vertical: false)
                 }
                 .foregroundStyle(selection == section ? LifeOSTokens.primaryText : LifeOSTokens.secondaryText)
@@ -1193,7 +1209,7 @@ private struct FitnessFixtureBanner: View {
         HStack(spacing: 8) {
             LifeOSIcon(.warning).frame(width: 14, height: 14)
             Text("DEMO FIXTURES · NOT LIVE DATA")
-                .font(LifeOSFont.inter(10, weight: .bold))
+                .lifeOSTypography(.body, weight: .bold)
                 .tracking(0.45)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -1213,6 +1229,7 @@ private struct FitnessSectionContent: View {
     @Binding var selectedDate: Date
     let nutritionEntryPoint: FitnessNutritionEntryPoint?
     let fitnessEntryPoint: FitnessWidgetEntryPoint?
+    let trainingCoordinator: FitnessTrainingCoordinator?
     @ObservedObject var journalStore: FitnessJournalStore
     let usesVisualFixtures: Bool
     let onSourceTap: () -> Void
@@ -1240,6 +1257,12 @@ private struct FitnessSectionContent: View {
                 usesVisualFixtures: usesVisualFixtures,
                 onSourceTap: onSourceTap
             )
+        case .training:
+            if let trainingCoordinator {
+                FitnessTrainingView(coordinator: trainingCoordinator)
+            } else {
+                FitnessTrainingView()
+            }
         case .biology:
             VStack(alignment: .leading, spacing: 14) {
                 if snapshot.source.status.needsReview {
@@ -1248,9 +1271,9 @@ private struct FitnessSectionContent: View {
                 FitnessBiologyDetailSurface(
                     snapshot: snapshot.biology,
                     selectedDate: $selectedDate,
-                    usesVisualFixtures: usesVisualFixtures || snapshot.source.status == .demo
+                    usesVisualFixtures: usesVisualFixtures || snapshot.source.status == .demo,
+                    embeddedInParentScroll: true
                 )
-                .id(selectedDate)
             }
         case .nutrition:
             FitnessNutritionView(snapshot: snapshot, selectedDate: selectedDate, initialEntryPoint: nutritionEntryPoint)
@@ -1302,18 +1325,6 @@ private enum FitnessCoreRoute: Hashable {
         }
     }
 
-    var accent: LifeOSTokens.Hue {
-        switch self {
-        case .readiness: .green
-        case .load: .blue
-        case .sleep: .violet
-        case .stress: .orange
-        case .energyReserve: .teal
-        case .healthMonitor: .pink
-        case .healthMetric: .pink
-        case .workout: .blue
-        }
-    }
 }
 
 private extension FitnessWidgetEntryPoint {
@@ -1386,19 +1397,94 @@ private struct FitnessCoreSectionLabel: View {
     let detail: String
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Capsule()
-                .fill(LifeOSTokens.Module.fitness)
-                .frame(width: 3, height: 16)
-                .accessibilityHidden(true)
+        VStack(alignment: .leading, spacing: 3) {
             Text(title)
-                .font(LifeOSFont.cardTitle(15))
+                .lifeOSTypography(.cardTitle)
             Text(detail)
-                .font(LifeOSFont.metadata())
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.secondaryText)
-            Spacer(minLength: 0)
         }
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// The Today/detail column contract is shared with the page-width system:
+/// two columns are a deliberate choice at 720pt, while accessibility sizes
+/// always use the vertical reading order.
+enum FitnessCoreColumnsPolicy {
+    static func columnCount(
+        for width: CGFloat,
+        minColumnWidth: CGFloat,
+        spacing: CGFloat,
+        subviewCount: Int,
+        forceSingleColumn: Bool = false
+    ) -> Int {
+        guard subviewCount > 0 else { return 0 }
+        guard !forceSingleColumn else { return 1 }
+
+        let availableWidth = width.isFinite ? max(0, width) : 0
+        guard availableWidth >= LifeOSResponsiveMetrics.twoColumnBreakpoint else { return 1 }
+
+        let minimum = max(1, minColumnWidth)
+        let gap = max(0, spacing)
+        let fittingColumns = Int(floor((availableWidth + gap) / (minimum + gap)))
+        return min(max(fittingColumns, 1), min(3, subviewCount))
+    }
+}
+
+/// The Recovery hero keeps the metric and ring in one row only when the card
+/// can give both content groups a readable width. This boundary is evaluated
+/// from the layout proposal, so it works for split view, phone widths, and
+/// window resizing without relying on size classes.
+enum FitnessReadinessHeroLayoutPolicy {
+    static let regularMinimumWidth: CGFloat = 340
+
+    static func usesStackedLayout(contentWidth: CGFloat, accessibilitySize: Bool) -> Bool {
+        accessibilitySize
+            || !contentWidth.isFinite
+            || contentWidth < regularMinimumWidth
+    }
+}
+
+private struct FitnessReadinessHeroLayout: Layout {
+    let forceStacked: Bool
+
+    private func selectedIndex(for width: CGFloat, subviewCount: Int) -> Int {
+        guard subviewCount > 1 else { return 0 }
+        return FitnessReadinessHeroLayoutPolicy.usesStackedLayout(
+            contentWidth: width,
+            accessibilitySize: forceStacked
+        ) ? 1 : 0
+    }
+
+    func sizeThatFits(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) -> CGSize {
+        guard !subviews.isEmpty else { return .zero }
+        let width = proposal.width ?? 0
+        let index = selectedIndex(for: width, subviewCount: subviews.count)
+        let childSize = subviews[index].sizeThatFits(proposal)
+        return CGSize(
+            width: proposal.width ?? childSize.width,
+            height: childSize.height
+        )
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
+        guard !subviews.isEmpty else { return }
+        let index = selectedIndex(for: bounds.width, subviewCount: subviews.count)
+        subviews[index].place(
+            at: bounds.origin,
+            anchor: .topLeading,
+            proposal: ProposedViewSize(width: bounds.width, height: nil)
+        )
     }
 }
 
@@ -1406,14 +1492,47 @@ private struct FitnessCoreSectionLabel: View {
 /// one column on a phone, two columns at normal Mac widths, and three columns
 /// when the maximised content can actually support them. It intentionally
 /// avoids a fixed max-width container or a mechanically adaptive fourth row.
-private struct FitnessCoreColumns: Layout {
+private struct FitnessCoreColumns<Content: View>: View {
     let minColumnWidth: CGFloat
-    let spacing: CGFloat = 12
+    let spacing: CGFloat
+    private let content: Content
 
-    private func columnCount(for width: CGFloat) -> Int {
-        if width >= minColumnWidth * 3 + spacing * 2 { return 3 }
-        if width >= minColumnWidth * 2 + spacing { return 2 }
-        return 1
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    init(
+        minColumnWidth: CGFloat,
+        spacing: CGFloat = 12,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.minColumnWidth = minColumnWidth
+        self.spacing = spacing
+        self.content = content()
+    }
+
+    var body: some View {
+        FitnessCoreColumnsLayout(
+            minColumnWidth: minColumnWidth,
+            spacing: spacing,
+            forceSingleColumn: dynamicTypeSize.isAccessibilitySize
+        ) {
+            content
+        }
+    }
+}
+
+private struct FitnessCoreColumnsLayout: Layout {
+    let minColumnWidth: CGFloat
+    let spacing: CGFloat
+    let forceSingleColumn: Bool
+
+    private func columnCount(for width: CGFloat, subviewCount: Int) -> Int {
+        FitnessCoreColumnsPolicy.columnCount(
+            for: width,
+            minColumnWidth: minColumnWidth,
+            spacing: spacing,
+            subviewCount: subviewCount,
+            forceSingleColumn: forceSingleColumn
+        )
     }
 
     func sizeThatFits(
@@ -1422,7 +1541,7 @@ private struct FitnessCoreColumns: Layout {
         cache: inout ()
     ) -> CGSize {
         let width = proposal.width ?? minColumnWidth
-        let count = min(columnCount(for: width), max(subviews.count, 1))
+        let count = max(1, columnCount(for: width, subviewCount: subviews.count))
         let columnWidth = max(1, (width - spacing * CGFloat(count - 1)) / CGFloat(count))
         var height: CGFloat = 0
         var rowHeight: CGFloat = 0
@@ -1444,7 +1563,7 @@ private struct FitnessCoreColumns: Layout {
         subviews: Subviews,
         cache: inout ()
     ) {
-        let count = min(columnCount(for: bounds.width), max(subviews.count, 1))
+        let count = max(1, columnCount(for: bounds.width, subviewCount: subviews.count))
         let columnWidth = max(1, (bounds.width - spacing * CGFloat(count - 1)) / CGFloat(count))
         var y = bounds.minY
         var rowHeight: CGFloat = 0
@@ -1469,42 +1588,77 @@ private struct FitnessCoreColumns: Layout {
 
 private struct FitnessCoreReadinessHero: View {
     let metric: FitnessMetric
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
-        FitnessCoreNavigationCard(route: .readiness, accent: .green) {
-            HStack(alignment: .center, spacing: 14) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("Recovery")
-                        .font(LifeOSFont.header(18))
-                    Text("Readiness score")
-                        .font(LifeOSFont.caption(11))
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
-                    HStack(alignment: .firstTextBaseline, spacing: 4) {
-                        Text(metric.value ?? "—")
-                            .font(LifeOSFont.spaceGrotesk(40, weight: .bold))
-                            .monospacedDigit()
-                        if metric.value != nil, !metric.unit.isEmpty {
-                            Text(metric.unit)
-                                .font(LifeOSFont.caption(12))
-                                .foregroundStyle(LifeOSTokens.tertiaryText)
-                        }
-                    }
-                    FitnessCoreProvenance(metric: metric)
+        FitnessCoreNavigationCard(route: .readiness) {
+            if metric.isValueAvailable {
+                FitnessReadinessHeroLayout(forceStacked: dynamicTypeSize.isAccessibilitySize) {
+                    regularReadinessLayout
+                    stackedReadinessLayout
                 }
-                Spacer(minLength: 8)
-                if let progress = metric.progress, metric.isValueAvailable {
-                    FitnessRing(progress: progress, hue: metric.hue, size: 78, color: FitnessRingPalette.threshold(progress))
-                        .accessibilityHidden(true)
-                } else {
-                    FitnessCoreUnavailableMark(size: 58)
-                }
+                Text(readinessContext)
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                FitnessCoreUnavailableMetricState(title: "Recovery", subtitle: "Readiness score", metric: metric)
             }
-            Text(readinessContext)
-                .font(LifeOSFont.caption(10))
-                .foregroundStyle(LifeOSTokens.tertiaryText)
-                .lineLimit(1)
         }
         .accessibilityIdentifier("fitness-core-recovery-card")
+    }
+
+    private var readinessMetricBlock: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("Recovery")
+                .lifeOSTypography(.sectionTitle)
+            Text("Readiness score")
+                .lifeOSTypography(.metadata)
+                .foregroundStyle(LifeOSTokens.tertiaryText)
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text(metric.value ?? "")
+                    .lifeOSTypography(.metric)
+                    .monospacedDigit()
+                    .fixedSize(horizontal: true, vertical: false)
+                if !metric.unit.isEmpty {
+                    Text(metric.unit)
+                        .lifeOSTypography(.metadata)
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .fixedSize(horizontal: true, vertical: false)
+                }
+            }
+            FitnessCoreProvenance(metric: metric)
+        }
+    }
+
+    @ViewBuilder
+    private var readinessRing: some View {
+        if let progress = metric.progress {
+            FitnessRing(progress: progress, hue: metric.hue, size: 78, color: FitnessRingPalette.threshold(progress))
+                .accessibilityHidden(true)
+        }
+    }
+
+    private var regularReadinessLayout: some View {
+        HStack(alignment: .center, spacing: 14) {
+            readinessMetricBlock
+                .layoutPriority(1)
+            Spacer(minLength: 8)
+            readinessRing
+        }
+    }
+
+    private var stackedReadinessLayout: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            readinessMetricBlock
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if metric.progress != nil {
+                HStack {
+                    Spacer(minLength: 0)
+                    readinessRing
+                }
+            }
+        }
     }
 
     private var readinessContext: String {
@@ -1528,35 +1682,36 @@ private struct FitnessCoreMetricCard: View {
     var emphasis = false
 
     var body: some View {
-        FitnessCoreNavigationCard(route: route, accent: route.accent) {
-            HStack(alignment: .top, spacing: 12) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(route.title)
-                        .font(LifeOSFont.header(emphasis ? 17 : 15))
-                    HStack(alignment: .firstTextBaseline, spacing: 4) {
-                        Text(metric.value ?? "—")
-                            .font(LifeOSFont.spaceGrotesk(emphasis ? 34 : 28, weight: .bold))
-                            .monospacedDigit()
-                        if metric.value != nil, !metric.unit.isEmpty {
-                            Text(metric.unit)
-                                .font(LifeOSFont.caption(11))
-                                .foregroundStyle(LifeOSTokens.tertiaryText)
+        FitnessCoreNavigationCard(route: route) {
+            if metric.isValueAvailable {
+                HStack(alignment: .top, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(route.title)
+                            .lifeOSTypography(.sectionTitle)
+                        HStack(alignment: .firstTextBaseline, spacing: 4) {
+                            Text(metric.value ?? "—")
+                                .lifeOSTypography(.sectionTitle, weight: .bold)
+                                .monospacedDigit()
+                            if !metric.unit.isEmpty {
+                                Text(metric.unit)
+                                    .lifeOSTypography(.metadata)
+                                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                            }
                         }
                     }
+                    Spacer(minLength: 4)
+                    if let progress = metric.progress {
+                        FitnessRing(progress: progress, hue: metric.hue, size: emphasis ? 58 : 48, color: FitnessRingPalette.color(route: route, progress: progress))
+                            .accessibilityHidden(true)
+                    }
                 }
-                Spacer(minLength: 4)
-                if let progress = metric.progress, metric.isValueAvailable {
-                    FitnessRing(progress: progress, hue: metric.hue, size: emphasis ? 58 : 48, color: FitnessRingPalette.color(route: route, progress: progress))
-                        .accessibilityHidden(true)
-                } else {
-                    FitnessCoreUnavailableMark(size: 42)
+                if !metric.trend.isEmpty {
+                    FitnessCoreSparkline(values: metric.trend, role: metric.fitnessTrendSemanticRole)
+                    FitnessTrendSemanticLabel(role: metric.fitnessTrendSemanticRole)
                 }
-            }
-            if metric.trend.isEmpty {
                 FitnessCoreProvenance(metric: metric)
             } else {
-                FitnessCoreSparkline(values: metric.trend)
-                FitnessCoreProvenance(metric: metric)
+                FitnessCoreUnavailableMetricState(title: route.title, metric: metric)
             }
         }
         .accessibilityIdentifier("fitness-core-\(route.title.lowercased().replacingOccurrences(of: " ", with: "-"))-card")
@@ -1565,10 +1720,12 @@ private struct FitnessCoreMetricCard: View {
 
 private struct FitnessCoreNavigationCard<Content: View>: View {
     let route: FitnessCoreRoute
-    let accent: LifeOSTokens.Hue
     @ViewBuilder let content: Content
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    @Environment(\.lifeOSReduceMotion) private var requestedReduceMotion
     @State private var hovering = false
+
+    private var reduceMotion: Bool { systemReduceMotion || requestedReduceMotion }
 
     var body: some View {
         NavigationLink(value: route) {
@@ -1578,13 +1735,6 @@ private struct FitnessCoreNavigationCard<Content: View>: View {
             .padding(13)
             .frame(maxWidth: .infinity, alignment: .leading)
             .flatCard()
-            .overlay(alignment: .topLeading) {
-                Capsule()
-                    .fill(accent.base)
-                    .frame(width: 3, height: 28)
-                    .padding(.top, 14)
-                    .accessibilityHidden(true)
-            }
             .overlay(
                 LifeOSTokens.cardShape.stroke(
                     hovering ? LifeOSTokens.strongBorder : Color.clear,
@@ -1597,7 +1747,7 @@ private struct FitnessCoreNavigationCard<Content: View>: View {
 #if os(macOS)
         .onHover { hovering = $0 }
 #endif
-        .animation(reduceMotion ? nil : LifeOSMotion.springSnappy, value: hovering)
+        .animation(LifeOSMotion.curve(for: .hover, reduceMotion: reduceMotion)?.animation, value: hovering)
         .accessibilityHint("Opens \(route.title) detail")
     }
 }
@@ -1611,14 +1761,14 @@ private struct FitnessCoreProvenance: View {
                 .fill(fitnessMetricStateColor(metric.sourceState))
                 .frame(width: 6, height: 6)
             Text(metric.sourceState.label)
-                .font(LifeOSFont.inter(10, weight: .semiBold))
+                .lifeOSTypography(.metadata, weight: .semibold)
                 .foregroundStyle(fitnessMetricStateColor(metric.sourceState))
             Text("·")
                 .foregroundStyle(Color.secondary)
             Text(compactDetail)
-                .font(LifeOSFont.caption(11))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(Color.secondary)
-                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .accessibilityElement(children: .combine)
     }
@@ -1642,31 +1792,108 @@ private func fitnessMetricStateColor(_ state: FitnessMetric.SourceState) -> Colo
     }
 }
 
-private struct FitnessCoreUnavailableMark: View {
-    let size: CGFloat
+/// A trend's visual role describes how its values were produced. The role is
+/// deliberately source-driven: a title such as "Energy reserve" cannot turn
+/// an observed series into an estimate by itself.
+enum FitnessTrendSemanticRole: String, Equatable, Sendable {
+    case observed
+    case estimated
 
-    init(size: CGFloat = 54) { self.size = size }
+    var label: String {
+        switch self {
+        case .observed: "Observed"
+        case .estimated: "Derived / Estimated"
+        }
+    }
+
+    var tokenName: String {
+        switch self {
+        case .observed: "observed"
+        case .estimated: "estimate"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .observed: LifeOSTokens.Series.observed
+        case .estimated: LifeOSTokens.Series.estimate
+        }
+    }
+
+    static func forMetric(_ metric: FitnessMetric) -> FitnessTrendSemanticRole {
+        if metric.quality == .derived || metric.sourceState == .derived {
+            return .estimated
+        }
+        let sourceCopy = "\(metric.detail) \(metric.provenanceSummary)"
+        if sourceCopy.localizedCaseInsensitiveContains("derived")
+            || sourceCopy.localizedCaseInsensitiveContains("estimated")
+            || sourceCopy.localizedCaseInsensitiveContains("projection") {
+            return .estimated
+        }
+        return .observed
+    }
+}
+
+extension FitnessMetric {
+    var fitnessTrendSemanticRole: FitnessTrendSemanticRole {
+        FitnessTrendSemanticRole.forMetric(self)
+    }
+}
+
+private struct FitnessTrendSemanticLabel: View {
+    let role: FitnessTrendSemanticRole
 
     var body: some View {
-        ZStack {
-            Circle().stroke(LifeOSTokens.quietBorder, lineWidth: 5)
-            Text("—")
-                .font(LifeOSFont.spaceGrotesk(size * 0.34, weight: .bold))
-                .foregroundStyle(LifeOSTokens.tertiaryText)
+        HStack(spacing: 5) {
+            Circle()
+                .fill(role.color)
+                .frame(width: 6, height: 6)
+            Text(role.label)
+                .lifeOSTypography(.metadata, weight: .semibold)
+                .foregroundStyle(role.color)
         }
-        .frame(width: size, height: size)
-        .accessibilityHidden(true)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(role.label) trend")
+    }
+}
+
+private struct FitnessCoreUnavailableMetricState: View {
+    let title: String
+    var subtitle: String? = nil
+    let metric: FitnessMetric
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .lifeOSTypography(.sectionTitle)
+            if let subtitle {
+                Text(subtitle)
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+            }
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text("—")
+                    .lifeOSTypography(.sectionTitle, weight: .semibold)
+                    .monospacedDigit()
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                if !metric.unit.isEmpty {
+                    Text(metric.unit)
+                        .lifeOSTypography(.metadata)
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                }
+            }
+            FitnessCoreProvenance(metric: metric)
+        }
     }
 }
 
 private struct FitnessCoreSparkline: View {
     let values: [Double]
-    // §5.5: the trend sparkline is the one chromatic element on neutral
-    // metric cards — always accent. The legacy `hue` init arg is dropped.
-    var accent: Color = LifeOSTokens.accent
+    let role: FitnessTrendSemanticRole
 
-    init(values: [Double]) {
+    init(values: [Double], role: FitnessTrendSemanticRole = .observed) {
         self.values = values
+        self.role = role
     }
 
     var body: some View {
@@ -1674,14 +1901,14 @@ private struct FitnessCoreSparkline: View {
         HStack(alignment: .bottom, spacing: 4) {
             ForEach(Array(normalized.enumerated()), id: \.offset) { _, value in
                 RoundedRectangle(cornerRadius: 2, style: .continuous)
-                    .fill(accent.opacity(0.42 + value * 0.42))
+                    .fill(role.color.opacity(0.42 + value * 0.42))
                     .frame(maxWidth: .infinity, minHeight: 4, maxHeight: 34)
                     .frame(height: max(4, min(34, CGFloat(value) * 30 + 4)))
             }
         }
         .frame(height: 34, alignment: .bottom)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Trend")
+        .accessibilityLabel("\(role.label) trend")
         .accessibilityValue(values.map { $0.formatted(.number.precision(.fractionLength(0...1))) }.joined(separator: ", "))
     }
 }
@@ -1690,13 +1917,13 @@ private struct FitnessCoreHealthMonitorCard: View {
     let metrics: [FitnessMetric]
 
     var body: some View {
-        FitnessCoreNavigationCard(route: .healthMonitor, accent: .pink) {
+        FitnessCoreNavigationCard(route: .healthMonitor) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Health Monitor")
-                        .font(LifeOSFont.header(17))
+                        .lifeOSTypography(.sectionTitle)
                     Text("Independent observations; missing fields stay unavailable")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
                 Spacer(minLength: 0)
@@ -1724,15 +1951,15 @@ private struct FitnessCoreMiniMetric: View {
                 .frame(width: 7, height: 7)
             VStack(alignment: .leading, spacing: 2) {
                 Text(metric.title)
-                    .font(LifeOSFont.caption(10))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                 HStack(alignment: .firstTextBaseline, spacing: 3) {
                     Text(metric.value ?? "—")
-                        .font(LifeOSFont.spaceGrotesk(18, weight: .bold))
+                        .lifeOSTypography(.sectionTitle, weight: .bold)
                         .monospacedDigit()
                     if !metric.unit.isEmpty {
                         Text(metric.unit)
-                            .font(LifeOSFont.caption(9))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                     }
                 }
@@ -1782,14 +2009,14 @@ private struct FitnessCoreTimelineCard: View {
                 HStack(alignment: .firstTextBaseline) {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Timeline")
-                            .font(LifeOSFont.header(17))
+                            .lifeOSTypography(.sectionTitle)
                         Text("Chronological record for the selected day")
-                            .font(LifeOSFont.caption(10))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                     }
                     Spacer(minLength: 0)
                     Text("Date-scoped")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
                 if items.isEmpty {
@@ -1803,14 +2030,14 @@ private struct FitnessCoreTimelineCard: View {
                                 .overlay(LifeOSIcon(item.icon).foregroundStyle(LifeOSTokens.secondaryText).frame(width: 15, height: 15))
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(item.title)
-                                    .font(LifeOSFont.inter(12, weight: .medium))
+                                    .lifeOSTypography(.body, weight: .medium)
                                 Text(item.detail)
-                                    .font(LifeOSFont.caption(10))
+                                    .lifeOSTypography(.metadata)
                                     .foregroundStyle(LifeOSTokens.tertiaryText)
                             }
                             Spacer(minLength: 8)
                             Text(item.trailing)
-                                .font(LifeOSFont.caption(10))
+                                .lifeOSTypography(.metadata)
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                         }
                         .accessibilityElement(children: .combine)
@@ -1976,19 +2203,19 @@ private struct FitnessCoreLoadGaugeCard: View {
     var body: some View {
         FitnessCard {
             VStack(alignment: .leading, spacing: 9) {
-                Text("Gauge and target").font(LifeOSFont.header(14))
+                Text("Gauge and target").lifeOSTypography(.sectionTitle)
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(metric.value ?? "No data")
-                        .font(LifeOSFont.spaceGrotesk(27, weight: .bold))
+                        .lifeOSTypography(.sectionTitle, weight: .bold)
                         .monospacedDigit()
                     if !metric.unit.isEmpty, metric.value != nil {
                         Text(metric.unit)
-                            .font(LifeOSFont.caption(11))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                     }
                     Spacer(minLength: 8)
                     Text(gauge.targetLabel)
-                        .font(LifeOSFont.inter(11, weight: .medium))
+                        .lifeOSTypography(.body, weight: .medium)
                         .multilineTextAlignment(.trailing)
                         .foregroundStyle(gauge.currentProgress == nil ? LifeOSTokens.tertiaryText : LifeOSTokens.accent)
                 }
@@ -1996,16 +2223,16 @@ private struct FitnessCoreLoadGaugeCard: View {
                     ProgressView(value: progress)
                         .tint(LifeOSTokens.accent)
                     Text("Source target band · no proprietary load formula is reproduced")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 } else {
                     Text(loadGaugeReason)
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Text(reconciliation.label)
-                    .font(LifeOSFont.caption(10))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(reconciliationLabelColor)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -2038,20 +2265,20 @@ private struct FitnessCoreMeasurementCard: View {
         FitnessCard {
             VStack(alignment: .leading, spacing: 7) {
                 Text(title)
-                    .font(LifeOSFont.caption(11))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(Color.secondary)
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
                     Text(metric.value ?? "No data")
-                        .font(LifeOSFont.spaceGrotesk(25, weight: .bold))
+                        .lifeOSTypography(.sectionTitle, weight: .bold)
                         .monospacedDigit()
                     if metric.value != nil, !metric.unit.isEmpty {
                         Text(metric.unit)
-                            .font(LifeOSFont.caption(11))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(Color.secondary)
                     }
                 }
                 Text(evidence?.summary ?? metric.detail)
-                    .font(LifeOSFont.caption(11))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(Color.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -2066,7 +2293,7 @@ private struct FitnessCoreHeartRateZones: View {
     var body: some View {
         FitnessCard {
             VStack(alignment: .leading, spacing: 9) {
-                Text("Heart-rate zones").font(LifeOSFont.header(14))
+                Text("Heart-rate zones").lifeOSTypography(.sectionTitle)
                 if zones.isEmpty {
                     FitnessEmptyRow(title: "Unavailable", detail: "No typed source zone sample is present. LifeOS does not infer zones from duration or a generic load value.", icon: .health)
                 } else {
@@ -2096,23 +2323,23 @@ private struct FitnessCoreHeartRateZoneRow: View {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 9) {
                     Text("Z\(zone.id)")
-                        .font(LifeOSFont.inter(11, weight: .semiBold))
+                        .lifeOSTypography(.body, weight: .semibold)
                         .foregroundStyle(LifeOSTokens.accent)
                         .frame(width: 25, alignment: .leading)
                     Text(zone.duration)
-                        .font(LifeOSFont.inter(12, weight: .medium))
+                        .lifeOSTypography(.body, weight: .medium)
                         .monospacedDigit()
                     Spacer(minLength: 6)
                     Text(zone.range)
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                     Image(systemName: isExpanded ? "info.circle.fill" : "info.circle")
-                        .font(.caption2)
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(isExpanded || hovering ? LifeOSTokens.accent : LifeOSTokens.tertiaryText)
                 }
                 if isExpanded {
                     Text(zone.evidence.summary)
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -2156,8 +2383,8 @@ private struct FitnessCoreLoadTrends: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Load trends").font(LifeOSFont.header(15))
-                    Text("\(selectedDate.fitnessDayLabel) · source history only").font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
+                    Text("Load trends").lifeOSTypography(.sectionTitle)
+                    Text("\(selectedDate.fitnessDayLabel) · source history only").lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
                 }
                 Spacer()
                 Menu {
@@ -2167,7 +2394,7 @@ private struct FitnessCoreLoadTrends: View {
                     }
                 } label: {
                         Label(enabledRanges.isEmpty ? "History unavailable" : activeRange.title, systemImage: "calendar")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                     }
                 .menuStyle(.borderlessButton)
                 .disabled(enabledRanges.count <= 1)
@@ -2203,30 +2430,31 @@ private struct FitnessCoreLoadTrendCard: View {
         } label: {
             VStack(alignment: .leading, spacing: 7) {
                 HStack(spacing: 8) {
-                    Text(card.id.title).font(LifeOSFont.inter(12, weight: .medium))
+                    Text(card.id.title).lifeOSTypography(.body, weight: .medium)
                     Spacer()
                     Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .font(.caption2)
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
-                    Text(card.metric.value ?? "No data").font(LifeOSFont.spaceGrotesk(24, weight: .bold)).monospacedDigit()
-                    Text(card.metric.unit).font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
+                    Text(card.metric.value ?? "No data").lifeOSTypography(.sectionTitle, weight: .bold).monospacedDigit()
+                    Text(card.metric.unit).lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
                 }
                 if let selectedSeries, !selectedSeries.isEmpty {
-                    FitnessCoreSparkline(values: selectedSeries)
+                    FitnessCoreSparkline(values: selectedSeries, role: card.metric.fitnessTrendSemanticRole)
+                    FitnessTrendSemanticLabel(role: card.metric.fitnessTrendSemanticRole)
                     Text("\(card.truth.label) · \(selectedRange.title) series")
-                        .font(LifeOSFont.inter(10, weight: .semiBold))
+                        .lifeOSTypography(.body, weight: .semibold)
                         .foregroundStyle(truthColor)
                 } else {
                     Text(!card.metric.isValueAvailable
                          ? card.truth.label
                          : "\(card.metric.sourceState.label) · source series unavailable · range not relabelled")
-                        .font(LifeOSFont.inter(10, weight: .semiBold))
+                        .lifeOSTypography(.body, weight: .semibold)
                         .foregroundStyle(truthColor)
                 }
                 Text(card.evidence.summary)
-                    .font(LifeOSFont.caption(9))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                     .lineLimit(2)
                 if isExpanded {
@@ -2272,18 +2500,18 @@ private struct FitnessCoreLoadTrendEvidenceDetail: View {
         VStack(alignment: .leading, spacing: 4) {
             if let target = card.target {
                 Text("Target band · \(target.lower.formatted(.number.precision(.fractionLength(0...1))))–\(target.upper.formatted(.number.precision(.fractionLength(0...1)))) \(target.unit)")
-                    .font(LifeOSFont.inter(10, weight: .semiBold))
+                    .lifeOSTypography(.body, weight: .semibold)
             } else {
                 Text("Target · not configured for this metric")
-                    .font(LifeOSFont.inter(10, weight: .semiBold))
+                    .lifeOSTypography(.body, weight: .semibold)
             }
             Text(card.availableSeriesRanges.isEmpty
                  ? "History ranges · insufficient source history"
                  : "History ranges · \(card.availableSeriesRanges.sorted { $0.rawValue < $1.rawValue }.map(\.title).joined(separator: ", "))")
-                .font(LifeOSFont.caption(10))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
             Text(card.evidence.summary)
-                .font(LifeOSFont.caption(10))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -2332,8 +2560,8 @@ private struct FitnessCoreRecoveryTrends: View {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("Recovery trends").font(LifeOSFont.header(15))
-                        Text("\(selectedDate.fitnessDayLabel) · each metric keeps its own source evidence").font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
+                        Text("Recovery trends").lifeOSTypography(.sectionTitle)
+                        Text("\(selectedDate.fitnessDayLabel) · each metric keeps its own source evidence").lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
                     }
                     Spacer()
                     Menu {
@@ -2345,7 +2573,7 @@ private struct FitnessCoreRecoveryTrends: View {
                         }
                     } label: {
                         Label(activeRange.title, systemImage: "calendar")
-                            .font(LifeOSFont.caption(10))
+                            .lifeOSTypography(.metadata)
                     }
                     .disabled(enabledRanges.count <= 1)
                     .accessibilityLabel("Recovery trend range")
@@ -2401,22 +2629,23 @@ private struct FitnessCoreRecoveryTrendButton: View {
         Button(action: onToggle) {
             VStack(alignment: .leading, spacing: 5) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(card.id.title).font(LifeOSFont.inter(12, weight: .medium))
+                    Text(card.id.title).lifeOSTypography(.body, weight: .medium)
                     Spacer()
-                    Text(card.metric.value ?? "No data").font(LifeOSFont.inter(12, weight: .semiBold))
+                    Text(card.metric.value ?? "No data").lifeOSTypography(.body, weight: .semibold)
                     Image(systemName: isSelected ? "chevron.up" : "chevron.down")
-                        .font(.caption2)
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
                 if let series = card.series(for: range), !series.isEmpty {
-                    FitnessCoreSparkline(values: series)
+                    FitnessCoreSparkline(values: series, role: card.metric.fitnessTrendSemanticRole)
+                    FitnessTrendSemanticLabel(role: card.metric.fitnessTrendSemanticRole)
                 } else if card.metric.isValueAvailable {
                     Text("Source series unavailable · range not relabelled")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
                 Text(!card.metric.isValueAvailable ? card.metric.detail : "\(card.metric.sourceState.label) · \(card.evidence.summary)")
-                    .font(LifeOSFont.caption(10))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                     .multilineTextAlignment(.leading)
             }
@@ -2444,18 +2673,18 @@ private struct FitnessCoreRecoveryEvidenceDetail: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Detail · \(range.title)")
-                .font(LifeOSFont.inter(10, weight: .semiBold))
+                .lifeOSTypography(.body, weight: .semibold)
             Text(card.evidence.summary)
-                .font(LifeOSFont.caption(10))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .fixedSize(horizontal: false, vertical: true)
             if !card.availableSeriesRanges.isEmpty && !card.availableSeriesRanges.contains(range) {
                 Text("Insufficient history · \(range.title) is not available for this metric")
-                    .font(LifeOSFont.caption(10))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             } else if card.series(for: range)?.isEmpty != false {
                 Text("Insufficient history · no source series across this range")
-                    .font(LifeOSFont.caption(10))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
         }
@@ -2531,14 +2760,14 @@ private struct FitnessSleepTimelineCard: View {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Observed night")
-                            .font(LifeOSFont.header(14))
+                            .lifeOSTypography(.sectionTitle)
                         Text("Timeline only · no proprietary score or formula")
-                            .font(LifeOSFont.caption(11))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(Color.secondary)
                     }
                     Spacer(minLength: 8)
                     Text(night.state.label)
-                        .font(LifeOSFont.inter(9, weight: .semiBold))
+                        .lifeOSTypography(.body, weight: .semibold)
                         .foregroundStyle(statusColor)
                 }
                 switch night.state {
@@ -2547,26 +2776,26 @@ private struct FitnessSleepTimelineCard: View {
                 case .partial(let reason):
                     timelineTrack
                     Text("Partial · \(reason)")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.warning)
                 case .conflict(let reason):
                     FitnessEmptyRow(title: "Timeline withheld", detail: reason, icon: .sleep)
                     Text("Conflict · no stage geometry is treated as authoritative")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.warning)
                 case .observed:
                     timelineTrack
                     Text("Observed interval and stage samples")
-                        .font(LifeOSFont.caption(11))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(Color.secondary)
                 }
                 if let boundary = night.boundary {
                     Text("Sleep-day boundary · \(boundary.summary)")
-                        .font(LifeOSFont.caption(11))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(Color.secondary)
                 }
                 Text(night.evidence.summary)
-                    .font(LifeOSFont.caption(11))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(Color.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -2601,7 +2830,7 @@ private struct FitnessSleepTimelineCard: View {
                     Spacer()
                     Text(end, style: .time)
                 }
-                .font(LifeOSFont.caption(10))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 HStack(spacing: 9) {
                     ForEach(FitnessSleepStageSample.Stage.allCases) { stage in
@@ -2611,7 +2840,7 @@ private struct FitnessSleepTimelineCard: View {
                         }
                     }
                 }
-                .font(LifeOSFont.caption(9))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
             }
         } else {
@@ -2651,15 +2880,15 @@ private struct FitnessCoreSleepScheduleCard: View {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Sleep schedule")
-                        .font(LifeOSFont.header(15))
+                        .lifeOSTypography(.sectionTitle)
                     Text("Targets are shown only when explicitly configured or supplied")
-                        .font(LifeOSFont.caption(11))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(Color.secondary)
                 }
                 Spacer(minLength: 8)
                 if source.status == .demo {
                     Text("DEMO · NOT LIVE")
-                        .font(LifeOSFont.inter(9, weight: .semiBold))
+                        .lifeOSTypography(.body, weight: .semibold)
                         .foregroundStyle(LifeOSTokens.warning)
                         .padding(.horizontal, 7)
                         .padding(.vertical, 4)
@@ -2686,7 +2915,7 @@ private struct FitnessCoreSleepScheduleCard: View {
                 icon: .sleep
             )
             Text("Source status · \(source.title) · \(source.freshness)")
-                .font(LifeOSFont.caption(11))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(Color.secondary)
         case .configured(
             let windDownMinutes,
@@ -2702,7 +2931,7 @@ private struct FitnessCoreSleepScheduleCard: View {
                 ("Sleep need", FitnessSleepSchedule.durationLabel(minutes: sleepNeedMinutes))
             ])
             Text(schedule.evidenceSummary)
-                .font(LifeOSFont.caption(11))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(Color.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -2728,9 +2957,9 @@ private struct FitnessSleepScheduleRadial: View {
                             .frame(width: 22, height: 22)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                         Text("Schedule unavailable")
-                            .font(LifeOSFont.inter(12, weight: .semiBold))
+                            .lifeOSTypography(.body, weight: .semibold)
                         Text("No radial target is inferred")
-                            .font(LifeOSFont.caption(10))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                     }
                 case .configured(
@@ -2756,13 +2985,13 @@ private struct FitnessSleepScheduleRadial: View {
                     scheduleMarker(minutes: wakeTargetMinutes, radius: min(proxy.size.width, proxy.size.height) * 0.44, color: LifeOSTokens.success, size: 14, in: proxy.size)
                     VStack(spacing: 4) {
                         Text("Sleep window")
-                            .font(LifeOSFont.caption(10))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                         Text("\(FitnessSleepSchedule.clockLabel(minutes: targetBedtimeMinutes)) → \(FitnessSleepSchedule.clockLabel(minutes: wakeTargetMinutes))")
-                            .font(LifeOSFont.inter(13, weight: .semiBold))
+                            .lifeOSTypography(.body, weight: .semibold)
                             .monospacedDigit()
                         Text(FitnessSleepSchedule.durationLabel(minutes: sleepNeedMinutes) + " need")
-                            .font(LifeOSFont.caption(10))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                     }
                 }
@@ -2835,9 +3064,9 @@ private struct FitnessCoreSleepTrends: View {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Sleep trends")
-                        .font(LifeOSFont.header(15))
+                        .lifeOSTypography(.sectionTitle)
                     Text("\(selectedDate.fitnessDayLabel) · source history only")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
                 Spacer(minLength: 8)
@@ -2848,7 +3077,7 @@ private struct FitnessCoreSleepTrends: View {
                     }
                 } label: {
                     Label(enabledRanges.isEmpty ? "History unavailable" : activeRange.title, systemImage: "calendar")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                 }
                 .menuStyle(.borderlessButton)
                 .disabled(enabledRanges.count <= 1)
@@ -2857,7 +3086,7 @@ private struct FitnessCoreSleepTrends: View {
             }
             if source.status == .demo {
                 Text("DEMO · NOT LIVE · trend values appear only when an explicit fixture card supplies them")
-                    .font(LifeOSFont.caption(10))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.warning)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -2893,38 +3122,39 @@ private struct FitnessCoreSleepTrendCard: View {
                         .frame(width: 16, height: 16)
                         .foregroundStyle(card.metric.isValueAvailable ? LifeOSTokens.accent : fitnessMetricStateColor(card.metric.sourceState))
                     Text(card.id.title)
-                        .font(LifeOSFont.inter(12, weight: .medium))
+                        .lifeOSTypography(.body, weight: .medium)
                     Spacer(minLength: 8)
                     Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .font(.caption2)
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
                     Text(card.metric.value ?? "No data")
-                        .font(LifeOSFont.spaceGrotesk(24, weight: .bold))
+                        .lifeOSTypography(.sectionTitle, weight: .bold)
                         .monospacedDigit()
                     if card.metric.value != nil, !card.metric.unit.isEmpty {
                         Text(card.metric.unit)
-                            .font(LifeOSFont.caption(10))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                     }
                 }
                 if let selectedSeries, !selectedSeries.isEmpty {
-                    FitnessCoreSparkline(values: selectedSeries)
+                    FitnessCoreSparkline(values: selectedSeries, role: card.metric.fitnessTrendSemanticRole)
+                    FitnessTrendSemanticLabel(role: card.metric.fitnessTrendSemanticRole)
                     if FitnessTrendSeries(values: selectedSeries) != nil {
                         Text(sourceContext(selectedSeries))
-                            .font(LifeOSFont.caption(9))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                             .monospacedDigit()
                     }
                     Text("\(selectedRange.title) source history")
-                        .font(LifeOSFont.inter(10, weight: .medium))
+                        .lifeOSTypography(.body, weight: .medium)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 } else {
                     Text(card.metric.isValueAvailable
                          ? "\(card.metric.sourceState.label) · trend unavailable"
                          : "\(card.metric.sourceState.label) · no trend available")
-                        .font(LifeOSFont.inter(10, weight: .semiBold))
+                        .lifeOSTypography(.body, weight: .semibold)
                         .foregroundStyle(fitnessMetricStateColor(card.metric.sourceState))
                 }
                 if isExpanded {
@@ -2994,19 +3224,19 @@ private struct FitnessCoreSleepTrendEvidenceDetail: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Trend detail")
-                .font(LifeOSFont.caption(10))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
             Text(card.metric.isValueAvailable ? "Unit · \(card.metric.unit.isEmpty ? "not specified" : card.metric.unit)" : "\(card.metric.sourceState.label) · \(card.metric.detail)")
-                .font(LifeOSFont.caption(10))
+                .lifeOSTypography(.metadata)
                 .fixedSize(horizontal: false, vertical: true)
             Text(card.availableSeriesRanges.isEmpty
                  ? "History ranges · insufficient source history"
                  : "History ranges · \(card.availableSeriesRanges.sorted { $0.rawValue < $1.rawValue }.map(\.title).joined(separator: ", "))")
-                .font(LifeOSFont.caption(10))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .fixedSize(horizontal: false, vertical: true)
             Text(card.evidence.summary)
-                .font(LifeOSFont.caption(10))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -3024,19 +3254,20 @@ private struct FitnessCoreTrendCard: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(title)
-                    .font(LifeOSFont.inter(12, weight: .medium))
+                    .lifeOSTypography(.body, weight: .medium)
                 Spacer(minLength: 8)
                 Text(metric.value ?? "No data")
-                    .font(LifeOSFont.inter(12, weight: .semiBold))
+                    .lifeOSTypography(.body, weight: .semibold)
                         .foregroundStyle(metric.isValueAvailable ? .primary : fitnessMetricStateColor(metric.sourceState))
             }
             if !metric.trend.isEmpty {
-                FitnessCoreSparkline(values: metric.trend)
+                FitnessCoreSparkline(values: metric.trend, role: metric.fitnessTrendSemanticRole)
+                FitnessTrendSemanticLabel(role: metric.fitnessTrendSemanticRole)
             }
             Text(!metric.isValueAvailable
                  ? metric.detail
                  : metric.trend.isEmpty ? "\(metric.sourceState.label) value · trend unavailable" : "\(metric.sourceState.label) trend · \(source.freshness)")
-                .font(LifeOSFont.caption(10))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -3054,21 +3285,21 @@ private struct FitnessCoreSourceCopyCard: View {
     var body: some View {
         FitnessCard {
             VStack(alignment: .leading, spacing: 7) {
-                Text(title).font(LifeOSFont.header(14))
+                Text(title).lifeOSTypography(.sectionTitle)
                 switch copy.state {
                 case .unavailable(let reason):
                     Text("No data")
-                        .font(LifeOSFont.inter(13, weight: .semiBold))
+                        .lifeOSTypography(.body, weight: .semibold)
                     Text(reason)
-                        .font(LifeOSFont.body(12))
+                        .lifeOSTypography(.body)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 case .observed(let text, let window, let provenance), .demo(let text, let window, let provenance):
                     Text(text)
-                        .font(LifeOSFont.body(12))
+                        .lifeOSTypography(.body)
                         .fixedSize(horizontal: false, vertical: true)
                     Text("\(window) · \(provenance)")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
             }
@@ -3083,17 +3314,17 @@ private struct FitnessCoreCopyRow: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 9) {
             Text(title)
-                .font(LifeOSFont.caption(11))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
             Spacer(minLength: 8)
             switch copy.state {
             case .unavailable(let reason):
                 Text("Unavailable · \(reason)")
-                    .font(LifeOSFont.inter(11, weight: .medium))
+                    .lifeOSTypography(.body, weight: .medium)
                     .multilineTextAlignment(.trailing)
             case .observed(let text, _, _), .demo(let text, _, _):
                 Text(text)
-                    .font(LifeOSFont.inter(11, weight: .medium))
+                    .lifeOSTypography(.body, weight: .medium)
                     .multilineTextAlignment(.trailing)
             }
         }
@@ -3106,29 +3337,31 @@ private struct FitnessCoreDetailHero: View {
 
     var body: some View {
         FitnessCard {
-            HStack(spacing: 20) {
-                VStack(alignment: .leading, spacing: 7) {
-                    Text(route.title)
-                        .font(LifeOSFont.header(18))
-                    HStack(alignment: .firstTextBaseline, spacing: 4) {
-                        Text(metric.value ?? "—")
-                            .font(LifeOSFont.spaceGrotesk(43, weight: .bold))
-                            .monospacedDigit()
-                        if metric.value != nil, !metric.unit.isEmpty {
-                            Text(metric.unit)
-                                .font(LifeOSFont.caption(12))
-                                .foregroundStyle(LifeOSTokens.tertiaryText)
+            if metric.isValueAvailable {
+                HStack(spacing: 20) {
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text(route.title)
+                            .lifeOSTypography(.sectionTitle)
+                        HStack(alignment: .firstTextBaseline, spacing: 4) {
+                            Text(metric.value ?? "—")
+                                .lifeOSTypography(.sectionTitle, weight: .bold)
+                                .monospacedDigit()
+                            if !metric.unit.isEmpty {
+                                Text(metric.unit)
+                                    .lifeOSTypography(.metadata)
+                                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                            }
                         }
+                        FitnessCoreProvenance(metric: metric)
                     }
-                    FitnessCoreProvenance(metric: metric)
+                    Spacer(minLength: 0)
+                    if let progress = metric.progress {
+                        FitnessRing(progress: progress, hue: metric.hue, size: 112, color: FitnessRingPalette.color(route: route, progress: progress))
+                            .accessibilityHidden(true)
+                    }
                 }
-                Spacer(minLength: 0)
-                if let progress = metric.progress, metric.isValueAvailable {
-                    FitnessRing(progress: progress, hue: metric.hue, size: 112, color: FitnessRingPalette.color(route: route, progress: progress))
-                        .accessibilityHidden(true)
-                } else {
-                    FitnessCoreUnavailableMark(size: 66)
-                }
+            } else {
+                FitnessCoreUnavailableMetricState(title: route.title, metric: metric)
             }
         }
     }
@@ -3143,15 +3376,15 @@ private struct FitnessCoreAvailabilityNote: View {
         FitnessCard {
             VStack(alignment: .leading, spacing: 7) {
                 Text(metric.isValueAvailable ? "Source and freshness" : "Why this is unavailable")
-                    .font(LifeOSFont.header(14))
+                    .lifeOSTypography(.sectionTitle)
                 Text(!metric.isValueAvailable
                      ? "LifeOS does not substitute zero or a guessed score. Connect the reviewed sensor chain and grant only the HealthKit categories you want to use."
                      : "\(metric.sourceState.label) · \(source.title) · \(source.freshness)")
-                    .font(LifeOSFont.body(12))
+                    .lifeOSTypography(.body)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                     .fixedSize(horizontal: false, vertical: true)
                 Button("Review source and permissions", action: onSourceTap)
-                    .font(LifeOSFont.inter(11, weight: .semiBold))
+                    .lifeOSTypography(.body, weight: .semibold)
                     .buttonStyle(.bordered)
                     .tint(LifeOSTokens.accent)
             }
@@ -3166,15 +3399,15 @@ private struct FitnessCoreDetailRows: View {
     var body: some View {
         FitnessCard {
             VStack(alignment: .leading, spacing: 10) {
-                Text(title).font(LifeOSFont.header(14))
+                Text(title).lifeOSTypography(.sectionTitle)
                 ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
                     HStack(alignment: .firstTextBaseline, spacing: 12) {
                         Text(row.0)
-                            .font(LifeOSFont.caption(11))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                         Spacer(minLength: 8)
                         Text(row.1)
-                            .font(LifeOSFont.inter(11, weight: .medium))
+                            .lifeOSTypography(.body, weight: .medium)
                             .multilineTextAlignment(.trailing)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -3194,13 +3427,14 @@ private struct FitnessCoreTrendDetail: View {
     var body: some View {
         FitnessCard {
             VStack(alignment: .leading, spacing: 10) {
-                Text(title).font(LifeOSFont.header(14))
+                Text(title).lifeOSTypography(.sectionTitle)
                 if metric.trend.isEmpty {
                     FitnessEmptyRow(title: "Trend unavailable", detail: "A trend needs source samples across a named window. Missing days are not converted to zero.", icon: .more)
                 } else {
-                    FitnessCoreSparkline(values: metric.trend)
-                    Text("Observed window · source samples are shown as supplied")
-                        .font(LifeOSFont.caption(10))
+                    FitnessCoreSparkline(values: metric.trend, role: metric.fitnessTrendSemanticRole)
+                    FitnessTrendSemanticLabel(role: metric.fitnessTrendSemanticRole)
+                    Text("\(metric.fitnessTrendSemanticRole.label) window · source samples are shown as supplied")
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
             }
@@ -3244,16 +3478,16 @@ private struct FitnessCoreStressScrubDetail: View {
     var body: some View {
         FitnessCard {
             VStack(alignment: .leading, spacing: 10) {
-                Text("Daily stress trend").font(LifeOSFont.header(14))
+                Text("Daily stress trend").lifeOSTypography(.sectionTitle)
                 if metric.trend.isEmpty {
                     FitnessEmptyRow(title: "Trend unavailable", detail: "A trend needs source samples across a named window. Missing days are not converted to zero.", icon: .more)
                 } else {
                     HStack(alignment: .firstTextBaseline, spacing: 7) {
                         Text("\(selectedValue)")
-                            .font(LifeOSFont.spaceGrotesk(25, weight: .bold))
+                            .lifeOSTypography(.sectionTitle, weight: .bold)
                             .monospacedDigit()
                         Text("/100 · \(selectedTime)")
-                            .font(LifeOSFont.caption(11))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                     }
                     FitnessCoreStressScrubChart(
@@ -3264,12 +3498,12 @@ private struct FitnessCoreStressScrubDetail: View {
                     )
 #if os(macOS)
                     Text("Hover or focus the chart; arrow keys move the selected bucket")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
 #else
                     Text("Drag to scrub aggregate buckets")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
 #endif
@@ -3380,7 +3614,7 @@ private struct FitnessCoreWorkoutList: View {
     var body: some View {
         FitnessCard {
             VStack(alignment: .leading, spacing: 9) {
-                Text("Workout timeline").font(LifeOSFont.header(14))
+                Text("Workout timeline").lifeOSTypography(.sectionTitle)
                 if workouts.isEmpty {
                     FitnessEmptyRow(title: "No workouts", detail: "No source workout records are available for this date.", icon: .fitness)
                 } else {
@@ -3411,8 +3645,8 @@ private struct FitnessCoreWorkoutDetail: View {
                                 .frame(width: 42, height: 42)
                                 .overlay(LifeOSIcon(.fitness).foregroundStyle(LifeOSTokens.secondaryText).frame(width: 19, height: 19))
                             VStack(alignment: .leading, spacing: 3) {
-                                Text(workout.name).font(LifeOSFont.header(17))
-                                Text(workout.kind).font(LifeOSFont.caption(11)).foregroundStyle(LifeOSTokens.tertiaryText)
+                                Text(workout.name).lifeOSTypography(.sectionTitle)
+                                Text(workout.kind).lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
                             }
                         }
                         FitnessCoreDetailRows(title: "Observed workout", rows: [
@@ -3442,20 +3676,20 @@ private struct FitnessCoreHealthDetail: View {
     var body: some View {
         FitnessCard {
             VStack(alignment: .leading, spacing: 10) {
-                Text("Independent observations").font(LifeOSFont.header(14))
+                Text("Independent observations").lifeOSTypography(.sectionTitle)
                 ForEach(metrics) { metric in
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
                         Circle()
                             .fill(fitnessMetricStateColor(metric.sourceState))
                             .frame(width: 7, height: 7)
-                        Text(metric.title).font(LifeOSFont.inter(12, weight: .medium))
+                        Text(metric.title).lifeOSTypography(.body, weight: .medium)
                         Spacer(minLength: 8)
                         Text(metric.value.map { "\($0) \(metric.unit)" } ?? metric.sourceState.label)
-                            .font(LifeOSFont.inter(12, weight: .semiBold))
+                            .lifeOSTypography(.body, weight: .semibold)
                             .multilineTextAlignment(.trailing)
                     }
                     Text(!metric.isValueAvailable ? "\(metric.sourceState.label) · \(metric.detail)" : "\(metric.sourceState.label) · \(source.freshness)")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .padding(.leading, 17)
                 }
@@ -3469,18 +3703,12 @@ struct FitnessSectionHeading: View {
     let subtitle: String
 
     var body: some View {
-        HStack(alignment: .top, spacing: 9) {
-            Capsule()
-                .fill(LifeOSTokens.Module.fitness)
-                .frame(width: 3, height: 27)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(LifeOSFont.sectionTitle())
-                Text(subtitle)
-                    .font(LifeOSFont.metadata())
-                    .foregroundStyle(LifeOSTokens.secondaryText)
-            }
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .lifeOSTypography(.sectionTitle)
+            Text(subtitle)
+                .lifeOSTypography(.metadata)
+                .foregroundStyle(LifeOSTokens.secondaryText)
         }
         .padding(.bottom, 2)
     }
@@ -3489,16 +3717,6 @@ struct FitnessSectionHeading: View {
 private struct FitnessSourceGateCard: View {
     let source: FitnessSourceState
     let onSourceTap: () -> Void
-
-    private var title: String {
-        switch source.status {
-        case .unavailable: "Health source unavailable"
-        case .stale: "Health source is stale"
-        case .permissionRequired: "Health permissions needed"
-        case .connected: "Health source connected"
-        case .demo: "Demo health source"
-        }
-    }
 
     private var summary: String {
         switch source.status {
@@ -3517,31 +3735,28 @@ private struct FitnessSourceGateCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                ZStack {
-                    Circle().fill(LifeOSTokens.accent.opacity(0.13))
-                    LifeOSIcon(.health).foregroundStyle(LifeOSTokens.accent).padding(9)
-                }
-                .frame(width: 42, height: 42)
+            HStack(alignment: .center, spacing: 10) {
+                LifeOSIcon(.health)
+                    .foregroundStyle(source.status.color)
+                    .frame(width: 24, height: 24)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(title)
-                        .font(LifeOSFont.header(15))
-                    Text(summary)
-                        .font(LifeOSFont.caption(11))
+                    Text(source.title)
+                        .lifeOSTypography(.cardTitle)
+                    Text(source.status.label)
+                        .lifeOSTypography(.metadata, weight: .semibold)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
+                Spacer(minLength: 8)
+                Button("Review", action: onSourceTap)
+                    .buttonStyle(LifeOSButtonStyle(.primary))
+                    .accessibilityIdentifier("fitness-source-review")
             }
-            Text("The sensor authority is the Helio Strap. Zepp and Apple Health transport its samples to HealthKit; HealthKit permission and source metadata are required before LifeOS can show a metric. Current source: \(source.title) · \(source.detail) · \(source.freshness).")
-                .font(LifeOSFont.body(13))
-                .foregroundStyle(.primary)
+            Text("\(source.detail) · \(source.freshness) · \(summary)")
+                .lifeOSTypography(.metadata)
+                .foregroundStyle(LifeOSTokens.tertiaryText)
                 .fixedSize(horizontal: false, vertical: true)
-            Button("Review source and permissions", action: onSourceTap)
-                .font(LifeOSFont.inter(12, weight: .semiBold))
-                .buttonStyle(.borderedProminent)
-                .tint(LifeOSTokens.accent)
-                .accessibilityIdentifier("fitness-source-review")
         }
-        .padding(16)
+        .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .flatCard()
         .accessibilityElement(children: .contain)
@@ -3560,18 +3775,18 @@ private struct FitnessMetricCard: View {
                 HStack(alignment: .top, spacing: 12) {
                     VStack(alignment: .leading, spacing: 7) {
                         Text(metric.title)
-                            .font(LifeOSFont.metadata())
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.secondaryText)
                             .fixedSize(horizontal: false, vertical: true)
                         HStack(alignment: .firstTextBaseline, spacing: 4) {
                             Text(metric.value ?? "—")
-                                .font(LifeOSFont.spaceGrotesk(emphasis ? 29 : 23, weight: .bold))
+                                .lifeOSTypography(.sectionTitle, weight: .bold)
                                 .monospacedDigit()
                                 .foregroundStyle(metric.isValueAvailable ? metric.hue.base : fitnessMetricStateColor(metric.sourceState))
                                 .fixedSize(horizontal: true, vertical: false)
                             if metric.value != nil, !metric.unit.isEmpty {
                                 Text(metric.unit)
-                                    .font(LifeOSFont.metadata())
+                                    .lifeOSTypography(.metadata)
                                     .foregroundStyle(LifeOSTokens.secondaryText)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
@@ -3587,8 +3802,8 @@ private struct FitnessMetricCard: View {
                 // and banner. Keep the card focused on the metric itself;
                 // unavailable/observed records still explain their status.
                 if metric.sourceState != .demo {
-                    Text(metric.detail)
-                        .font(LifeOSFont.metadata())
+                    Text(metric.compactProvenanceSummary)
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(metric.isValueAvailable ? LifeOSTokens.secondaryText : LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                     HStack(spacing: 6) {
@@ -3597,7 +3812,7 @@ private struct FitnessMetricCard: View {
                         let dotColor = fitnessMetricStateColor(metric.sourceState)
                         Circle().fill(dotColor).frame(width: 5, height: 5)
                         Text(metric.sourceState.label)
-                            .font(LifeOSFont.inter(10, weight: .semiBold))
+                            .lifeOSTypography(.body, weight: .semibold)
                             .foregroundStyle(dotColor)
                         Spacer(minLength: 0)
                     }
@@ -3702,15 +3917,15 @@ private struct FitnessJournalView: View {
 
             FitnessCard {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Quick log").font(LifeOSFont.header(15))
+                    Text("Quick log").lifeOSTypography(.sectionTitle)
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), spacing: 8)], spacing: 8) {
                         ForEach(quickLogs, id: \.0) { item in
                             Button { sheet = .new(seed: template(for: item.0)) } label: {
                                 HStack(spacing: 7) {
-                                    Text(item.1).font(.system(size: 18)).frame(width: 20, height: 20)
+                                    Text(item.1).lifeOSTypography(.cardTitle).frame(width: 20, height: 20)
                                     VStack(alignment: .leading, spacing: 2) {
-                                        Text(item.0).font(LifeOSFont.inter(12, weight: .semiBold))
-                                        Text(item.2).font(LifeOSFont.inter(10)).foregroundStyle(LifeOSTokens.tertiaryText)
+                                        Text(item.0).lifeOSTypography(.body, weight: .semibold)
+                                        Text(item.2).lifeOSTypography(.body).foregroundStyle(LifeOSTokens.tertiaryText)
                                     }
                                     Spacer(minLength: 0)
                                 }
@@ -3724,15 +3939,15 @@ private struct FitnessJournalView: View {
                         }
                     }
                     Text("Entries stay on this device until you choose a reviewed sync or source flow.")
-                        .font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
+                        .lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
                     if let lastSaveError = journalStore.lastSaveError {
                         Text(lastSaveError)
-                            .font(LifeOSFont.caption(10))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.danger)
                     }
                     if let integrityWarning = journalStore.integrityWarning {
                         Text(integrityWarning)
-                            .font(LifeOSFont.caption(10))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.warning)
                     }
                 }
@@ -3751,9 +3966,9 @@ private struct FitnessJournalView: View {
 
             FitnessCard {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Associations, not causation").font(LifeOSFont.header(14))
+                    Text("Associations, not causation").lifeOSTypography(.sectionTitle)
                     Text("Journal correlations can show dates that co-occur in your selected data. They do not establish that a food, supplement, sleep event, or activity caused a health change.")
-                        .font(LifeOSFont.body(12)).foregroundStyle(LifeOSTokens.tertiaryText)
+                        .lifeOSTypography(.body).foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -3842,7 +4057,7 @@ private struct FitnessJournalGroup: View {
     var body: some View {
         FitnessCard {
             VStack(alignment: .leading, spacing: 9) {
-                Text(title).font(LifeOSFont.header(15)).foregroundStyle(.secondary)
+                Text(title).lifeOSTypography(.sectionTitle).foregroundStyle(.secondary)
                 if records.isEmpty {
                     FitnessEmptyRow(title: "No entries", detail: "A blank day is not the same as zero consumption or zero stress.", icon: .more)
                 } else {
@@ -3863,9 +4078,9 @@ private struct FitnessJournalAutomaticGroup: View {
         FitnessCard {
             VStack(alignment: .leading, spacing: 9) {
                 HStack(alignment: .firstTextBaseline) {
-                    Text("Automatic").font(LifeOSFont.header(15)).foregroundStyle(.secondary)
+                    Text("Automatic").lifeOSTypography(.sectionTitle).foregroundStyle(.secondary)
                     Spacer()
-                    Text("Observed / derived only").font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
+                    Text("Observed / derived only").lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
                 }
                 if records.isEmpty {
                     FitnessEmptyRow(title: "No automatic observations", detail: "Connect HealthKit or an approved importer. LifeOS does not reproduce thresholds or fill this section with guesses.", icon: .health)
@@ -3887,29 +4102,29 @@ private struct FitnessJournalRow: View {
     let onAutomaticDetail: ((FitnessJournalRecord) -> Void)?
     var body: some View {
         HStack(spacing: 10) {
-            Text(record.emoji).font(.system(size: 22)).frame(width: 30, height: 30)
+            Text(record.emoji).lifeOSTypography(.cardTitle).frame(width: 30, height: 30)
             VStack(alignment: .leading, spacing: 2) {
-                Text(record.title).font(LifeOSFont.inter(13, weight: .medium))
-                Text(provenanceLabel).font(LifeOSFont.caption(9)).foregroundStyle(LifeOSTokens.tertiaryText).lineLimit(1)
+                Text(record.title).lifeOSTypography(.body, weight: .medium)
+                Text(provenanceLabel).lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText).lineLimit(1)
             }
             Spacer()
             if let quantity = record.quantity, let unit = record.unit {
                 Button { onEdit?(record) } label: {
-                    Text("\(quantity.formatted(.number.precision(.fractionLength(0...1)))) \(unit)").font(LifeOSFont.inter(12, weight: .semiBold)).foregroundStyle(.primary)
+                    Text("\(quantity.formatted(.number.precision(.fractionLength(0...1)))) \(unit)").lifeOSTypography(.body, weight: .semibold).foregroundStyle(.primary)
                 }.buttonStyle(.plain)
             } else if record.unit != nil {
                 Button { onEdit?(record) } label: {
-                    Text("— \(record.unit ?? "")").font(LifeOSFont.inter(12, weight: .semiBold)).foregroundStyle(LifeOSTokens.tertiaryText)
+                    Text("— \(record.unit ?? "")").lifeOSTypography(.body, weight: .semibold).foregroundStyle(LifeOSTokens.tertiaryText)
                 }.buttonStyle(.plain)
             } else if record.isAutomaticObservation {
                 if record.source == .unavailable || record.observedValue?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
-                    Text("Unavailable").font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
+                    Text("Unavailable").lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
                 } else if let observedValue = record.observedValue {
-                    Text(observedValue).font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
+                    Text(observedValue).lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
                     FitnessJournalStatusMark(state: record.tagState, automatic: true)
                 }
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 10, weight: .semibold))
+                    .lifeOSTypography(.metadata, weight: .semibold)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             } else {
                 FitnessJournalTriState(record: record, store: store, onEdit: onEdit)
@@ -3975,7 +4190,7 @@ private struct FitnessJournalMonthCalendar: View {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
                     Text(monthStart.formatted(.dateTime.month(.wide).year()))
-                        .font(LifeOSFont.header(16))
+                        .lifeOSTypography(.sectionTitle)
                     Spacer(minLength: 0)
                     Button {
                         moveMonth(by: -1)
@@ -4002,7 +4217,7 @@ private struct FitnessJournalMonthCalendar: View {
                 HStack(spacing: 0) {
                     ForEach(weekdaySymbols, id: \.self) { symbol in
                         Text(symbol)
-                            .font(LifeOSFont.inter(10, weight: .semiBold))
+                            .lifeOSTypography(.body, weight: .semibold)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                             .frame(maxWidth: .infinity)
                     }
@@ -4019,7 +4234,7 @@ private struct FitnessJournalMonthCalendar: View {
                     }
                 }
                 Text("Green checks mark manual entries only.")
-                    .font(LifeOSFont.caption(10))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
         }
@@ -4049,14 +4264,14 @@ private struct FitnessJournalMonthCalendar: View {
         } label: {
             VStack(spacing: 2) {
                 Text(date.formatted(.dateTime.day()))
-                    .font(LifeOSFont.inter(12, weight: selected ? .bold : .medium))
+                    .lifeOSTypography(.body, weight: selected ? .bold : .medium)
                     .foregroundStyle(selectable ? (selected ? LifeOSTokens.accent : Color.primary) : LifeOSTokens.tertiaryText.opacity(0.45))
                 Circle()
                     .fill(completed ? LifeOSTokens.success : .clear)
                     .overlay {
                         Circle().stroke(completed ? LifeOSTokens.success : LifeOSTokens.quietBorder, lineWidth: 1.2)
                         if completed {
-                            Text("✓").font(.system(size: 8, weight: .bold)).foregroundStyle(.white)
+                            Text("✓").lifeOSTypography(.metadata, weight: .bold).foregroundStyle(.white)
                         }
                     }
                     .frame(width: 14, height: 14)
@@ -4104,11 +4319,11 @@ private struct FitnessJournalAutomaticDetail: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     HStack(spacing: 10) {
-                        Text(record.emoji).font(.system(size: 28))
+                        Text(record.emoji).lifeOSTypography(.cardTitle)
                         VStack(alignment: .leading, spacing: 3) {
-                            Text(record.title).font(LifeOSFont.header(18))
+                            Text(record.title).lifeOSTypography(.sectionTitle)
                             Text("Automatic observation · read-only")
-                                .font(LifeOSFont.caption(10))
+                                .lifeOSTypography(.metadata)
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                         }
                     }
@@ -4126,7 +4341,7 @@ private struct FitnessJournalAutomaticDetail: View {
                         }
                     }
                     Text("LifeOS displays the importer’s explicit observation and does not infer completion, a threshold, or a zero value from missing samples.")
-                        .font(LifeOSFont.body(12))
+                        .lifeOSTypography(.body)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -4155,10 +4370,10 @@ private struct FitnessJournalDetailField: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title.uppercased())
-                .font(LifeOSFont.caption(9))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
             Text(value)
-                .font(LifeOSFont.body(13))
+                .lifeOSTypography(.body)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -4182,7 +4397,7 @@ private struct FitnessJournalTriState: View {
                     }
                 } label: {
                     Text(symbol(for: state))
-                        .font(.system(size: 13, weight: .medium))
+                        .lifeOSTypography(.metadata, weight: .medium)
                         .foregroundStyle(record.tagState == state ? color(for: state) : LifeOSTokens.tertiaryText.opacity(0.62))
                         .frame(width: 28, height: 28)
                         .background(record.tagState == state ? color(for: state).opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -4218,7 +4433,7 @@ private struct FitnessJournalStatusMark: View {
 
     var body: some View {
         Text(symbol)
-            .font(.system(size: 13, weight: .bold))
+            .lifeOSTypography(.metadata, weight: .bold)
             .foregroundStyle(color)
             .frame(width: 27, height: 27)
             .background(color.opacity(0.12), in: Circle())
@@ -4271,7 +4486,7 @@ private struct FitnessJournalEditor: View {
                 Section("Entry") {
                     TextField("Name", text: $title)
                     Text("\(seed.emoji) · \(selectedDate.fitnessDayLabel)")
-                        .font(LifeOSFont.caption(11)).foregroundStyle(LifeOSTokens.tertiaryText)
+                        .lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
                 }
                 if isQuantity {
                     Section("Amount") {
@@ -4296,14 +4511,14 @@ private struct FitnessJournalEditor: View {
                 }
                 if let saveError {
                     Text(saveError)
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.danger)
                 }
                 Section("Source") {
                     Text("Manual · stored locally")
-                        .font(LifeOSFont.caption(11)).foregroundStyle(LifeOSTokens.tertiaryText)
+                        .lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
                     Text("No health value is inferred from an empty field.")
-                        .font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
+                        .lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
                 }
             }
             .navigationTitle(seed.id.hasPrefix("new-") ? "Add journal entry" : "Edit journal entry")
@@ -4435,7 +4650,7 @@ private struct FitnessActivityView: View {
 
             FitnessCard {
                 VStack(alignment: .leading, spacing: 7) {
-                    Text("Workout records").font(LifeOSFont.header(14))
+                    Text("Workout records").lifeOSTypography(.sectionTitle)
                     if snapshot.workouts.isEmpty {
                         FitnessEmptyRow(title: "No workouts", detail: "No source workout records are available for this window.", icon: .fitness)
                     } else {
@@ -4446,7 +4661,7 @@ private struct FitnessActivityView: View {
                 }
             }
             Text("\(selectedDate.fitnessDayLabel) is a context date. Values require a named source window; LifeOS does not reproduce proprietary load formulas.")
-                .font(LifeOSFont.caption(11))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -4486,9 +4701,9 @@ private struct FitnessActivityCalendarCard: View {
             VStack(alignment: .leading, spacing: 13) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("Activity calendar").font(LifeOSFont.header(15))
+                        Text("Activity calendar").lifeOSTypography(.sectionTitle)
                         Text("Last 30 days · two-month view")
-                            .font(LifeOSFont.caption(10))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                     }
                     Spacer(minLength: 8)
@@ -4525,18 +4740,18 @@ private struct FitnessActivityCalendarCard: View {
                     legendItem(color: LifeOSTokens.info, text: "2")
                     legendItem(color: LifeOSTokens.accent, text: "3+")
                     Text("activities")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel("Activity legend: one, two, or three or more activities")
                 Text(sourceCoverageLabel)
-                    .font(LifeOSFont.caption(10))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                     .fixedSize(horizontal: false, vertical: true)
                 if snapshot.activityCalendarDays.isEmpty {
                     Text("Activity history unavailable · no source observations")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
             }
@@ -4591,11 +4806,11 @@ private struct FitnessActivityCalendarCard: View {
         let datesStart = leadingStart + leading
 
         VStack(alignment: .leading, spacing: 7) {
-            Text(monthStart.activityMonthLabel).font(LifeOSFont.inter(13, weight: .semiBold))
+            Text(monthStart.activityMonthLabel).lifeOSTypography(.body, weight: .semibold)
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 4), count: 7), spacing: 5) {
                 ForEach(daySymbols.indices, id: \.self) { index in
                     Text(String(daySymbols[index].prefix(1)))
-                        .font(LifeOSFont.caption(9))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .frame(maxWidth: .infinity)
                 }
@@ -4667,7 +4882,7 @@ private struct FitnessActivityCalendarCard: View {
     private func legendItem(color: Color, text: String) -> some View {
         HStack(spacing: 5) {
             Circle().fill(color).frame(width: 7, height: 7)
-            Text(text).font(LifeOSFont.inter(10, weight: .medium))
+            Text(text).lifeOSTypography(.body, weight: .medium)
         }
         .foregroundStyle(LifeOSTokens.tertiaryText)
     }
@@ -4684,11 +4899,11 @@ private struct FitnessActivitySummaryCard: View {
                     FitnessActivityCardHeader(title: "Activity summary", icon: .fitness, accent: .orange)
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Text(FitnessActivityMetricFormatter.value(snapshot.activityTotal))
-                            .font(LifeOSFont.spaceGrotesk(31, weight: .bold))
+                            .lifeOSTypography(.sectionTitle, weight: .bold)
                             .monospacedDigit()
                         Spacer(minLength: 0)
                         Text(selectedDate.activityRangeLabel)
-                            .font(LifeOSFont.caption(10))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                     }
                     FitnessActivityLineChart(points: snapshot.activitySeries, accent: snapshot.activityTotal.hue, yAxisLabel: "minutes")
@@ -4719,13 +4934,13 @@ private struct FitnessPerformanceTargetCard: View {
                     HStack(alignment: .bottom, spacing: 12) {
                         VStack(alignment: .leading, spacing: 3) {
                             Text("Source comparison")
-                                .font(LifeOSFont.caption(10))
+                                .lifeOSTypography(.metadata)
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                             Text(FitnessPerformanceTargetFormatter.value(target))
-                                .font(LifeOSFont.spaceGrotesk(31, weight: .bold))
+                                .lifeOSTypography(.sectionTitle, weight: .bold)
                                 .monospacedDigit()
                             Text(FitnessPerformanceTargetFormatter.status(target))
-                                .font(LifeOSFont.inter(13, weight: .semiBold))
+                                .lifeOSTypography(.body, weight: .semibold)
                                 .foregroundStyle(FitnessPerformanceTargetFormatter.statusColor(target))
                         }
                         FitnessActivityLineChart(
@@ -4738,7 +4953,7 @@ private struct FitnessPerformanceTargetCard: View {
                         .frame(minWidth: 140, maxWidth: 360)
                     }
                     Text(FitnessPerformanceTargetFormatter.detail(target))
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -4763,6 +4978,10 @@ private struct FitnessActivityMetricCard: View {
     let route: FitnessActivityRoute
     let metric: FitnessActivityMetric
     @State private var hovering = false
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    @Environment(\.lifeOSReduceMotion) private var requestedReduceMotion
+
+    private var reduceMotion: Bool { systemReduceMotion || requestedReduceMotion }
 
     var body: some View {
         NavigationLink(value: route) {
@@ -4770,10 +4989,10 @@ private struct FitnessActivityMetricCard: View {
                 VStack(alignment: .leading, spacing: 10) {
                     FitnessActivityCardHeader(title: metric.title, icon: .fitness, accent: metric.hue)
                     Text(FitnessActivityMetricFormatter.value(metric))
-                        .font(LifeOSFont.spaceGrotesk(27, weight: .bold))
+                        .lifeOSTypography(.sectionTitle, weight: .bold)
                         .monospacedDigit()
                     Text(FitnessActivityMetricFormatter.status(metric))
-                        .font(LifeOSFont.inter(12, weight: .semiBold))
+                        .lifeOSTypography(.body, weight: .semibold)
                         .foregroundStyle(FitnessActivityMetricFormatter.statusColor(metric))
                     FitnessActivityMetricFooter(metric: metric)
                 }
@@ -4794,7 +5013,7 @@ private struct FitnessActivityMetricCard: View {
                 lineWidth: 1
             )
         )
-        .animation(LifeOSMotion.reduceMotion ? nil : LifeOSMotion.springSnappy, value: hovering)
+        .animation(LifeOSMotion.curve(for: .hover, reduceMotion: reduceMotion)?.animation, value: hovering)
         .accessibilityIdentifier("fitness-\(metric.id)-card")
         .accessibilityHint("Opens \(metric.title) detail")
     }
@@ -4811,7 +5030,7 @@ private struct FitnessActivityCardHeader: View {
                 .frame(width: 16, height: 16)
                 .foregroundStyle(LifeOSTokens.secondaryText)
             Text(title)
-                .font(LifeOSFont.header(14))
+                .lifeOSTypography(.sectionTitle)
                 .lineLimit(1)
             Spacer(minLength: 0)
             LifeOSIcon(.chevronRight)
@@ -4830,11 +5049,129 @@ private struct FitnessActivityMetricFooter: View {
                 .fill(FitnessActivityMetricFormatter.statusColor(metric))
                 .frame(width: 6, height: 6)
             Text(FitnessActivityMetricFormatter.provenance(metric))
-                .font(LifeOSFont.caption(10))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .lineLimit(2)
         }
         .accessibilityElement(children: .combine)
+    }
+}
+
+struct FitnessActivityTargetBandRevision: Equatable, Hashable, Sendable {
+    let lowerBits: UInt64?
+    let upperBits: UInt64?
+
+    init(_ targetBand: (Double, Double)?) {
+        lowerBits = targetBand?.0.bitPattern
+        upperBits = targetBand?.1.bitPattern
+    }
+}
+
+struct FitnessActivitySeriesRevision: Equatable, Hashable, Sendable {
+    let sampleCount: Int
+    let sampleFingerprint: UInt64
+    let targetBand: FitnessActivityTargetBandRevision
+}
+
+/// Prepared activity samples for one source revision. The chart can map a
+/// selected date and scrub to its nearest observed sample without sorting,
+/// serializing, or scanning the full dataset during a render callback.
+struct FitnessActivitySeriesIndex: Sendable {
+    let points: [FitnessActivitySeriesPoint]
+    let selectableIndices: [Int]
+    let firstDate: Date?
+    let lastDate: Date?
+    let minimumValue: Double?
+    let maximumValue: Double?
+    let lastValueIndex: Int?
+    let revision: FitnessActivitySeriesRevision
+    private let indexByDate: [Date: Int]
+    private let selectableRankByIndex: [Int: Int]
+
+    init(points: [FitnessActivitySeriesPoint], targetBand: (Double, Double)? = nil) {
+        let ordered = Self.chronological(points)
+        self.points = ordered
+
+        var indexByDate: [Date: Int] = [:]
+        var selectableIndices: [Int] = []
+        var minimumValue: Double?
+        var maximumValue: Double?
+        var lastValueIndex: Int?
+        var selectableRankByIndex: [Int: Int] = [:]
+        var fingerprint: UInt64 = 14_695_981_039_346_656_037
+        for (index, point) in ordered.enumerated() {
+            if indexByDate[point.date] == nil {
+                indexByDate[point.date] = index
+            }
+            fingerprint ^= point.date.timeIntervalSinceReferenceDate.bitPattern
+            fingerprint &*= 1_099_511_628_211
+            fingerprint ^= point.value?.bitPattern ?? 11_400_714_819_323_198_469
+            fingerprint &*= 1_099_511_628_211
+            guard let value = point.value else { continue }
+            selectableRankByIndex[index] = selectableIndices.count
+            selectableIndices.append(index)
+            minimumValue = minimumValue.map { min($0, value) } ?? value
+            maximumValue = maximumValue.map { max($0, value) } ?? value
+            lastValueIndex = index
+        }
+        self.indexByDate = indexByDate
+        self.selectableRankByIndex = selectableRankByIndex
+        self.selectableIndices = selectableIndices
+        self.firstDate = ordered.first?.date
+        self.lastDate = ordered.last?.date
+        self.minimumValue = minimumValue
+        self.maximumValue = maximumValue
+        self.lastValueIndex = lastValueIndex
+        self.revision = FitnessActivitySeriesRevision(
+            sampleCount: ordered.count,
+            sampleFingerprint: fingerprint,
+            targetBand: FitnessActivityTargetBandRevision(targetBand)
+        )
+    }
+
+    func index(for date: Date) -> Int? {
+        indexByDate[date]
+    }
+
+    func point(for date: Date) -> FitnessActivitySeriesPoint? {
+        guard let index = index(for: date), points.indices.contains(index) else { return nil }
+        return points[index]
+    }
+
+    func selectableRank(for index: Int) -> Int? {
+        selectableRankByIndex[index]
+    }
+
+    /// Returns the nearest selectable source point in O(log n).
+    func nearestIndex(toX x: CGFloat, width: CGFloat) -> Int? {
+        guard width > 0, !selectableIndices.isEmpty,
+              let firstDate, let lastDate else { return nil }
+        let clampedX = min(max(x, 0), width)
+        let span = max(lastDate.timeIntervalSince(firstDate), 1)
+        let targetDate = firstDate.addingTimeInterval(span * Double(clampedX / width))
+        var lower = 0
+        var upper = selectableIndices.count - 1
+        while lower < upper {
+            let middle = (lower + upper) / 2
+            let point = points[selectableIndices[middle]]
+            if point.date < targetDate {
+                lower = middle + 1
+            } else {
+                upper = middle
+            }
+        }
+        guard lower > 0 else { return selectableIndices[0] }
+        let previousIndex = selectableIndices[lower - 1]
+        let currentIndex = selectableIndices[lower]
+        let previousDistance = abs(points[previousIndex].date.timeIntervalSince(targetDate))
+        let currentDistance = abs(points[currentIndex].date.timeIntervalSince(targetDate))
+        return previousDistance <= currentDistance ? previousIndex : currentIndex
+    }
+
+    private static func chronological(_ points: [FitnessActivitySeriesPoint]) -> [FitnessActivitySeriesPoint] {
+        guard points.count > 1 else { return points }
+        let alreadyChronological = zip(points, points.dropFirst()).allSatisfy { $0.date <= $1.date }
+        return alreadyChronological ? points : points.sorted { $0.date < $1.date }
     }
 }
 
@@ -4847,32 +5184,35 @@ private struct FitnessActivityLineChart: View {
     /// Refreshes can reorder or replace points; the user's selected day must
     /// not silently jump to a different observation.
     @State private var selectedPointID: Date?
+    @State private var series: FitnessActivitySeriesIndex
 
-    private var orderedPoints: [FitnessActivitySeriesPoint] {
-        points.sorted { $0.date < $1.date }
+    init(
+        points: [FitnessActivitySeriesPoint],
+        accent: LifeOSTokens.Hue,
+        yAxisLabel: String,
+        targetBand: (Double, Double)? = nil
+    ) {
+        self.points = points
+        self.accent = accent
+        self.yAxisLabel = yAxisLabel
+        self.targetBand = targetBand
+        _series = State(initialValue: FitnessActivitySeriesIndex(points: points, targetBand: targetBand))
     }
 
-    private var chartDatasetID: String {
-        let values = orderedPoints.map { point in
-            let value = point.value.map { String($0) } ?? "gap"
-            return "\(point.date.timeIntervalSinceReferenceDate):\(value)"
-        }
-        let band = targetBand.map { "|band:\($0.0):\($0.1)" } ?? ""
-        return values.joined(separator: "|") + band
+    private var targetBandRevision: FitnessActivityTargetBandRevision {
+        FitnessActivityTargetBandRevision(targetBand)
     }
 
     private var selectedIndex: Int? {
         guard let selectedPointID else { return nil }
-        return orderedPoints.firstIndex { $0.date == selectedPointID }
+        return series.index(for: selectedPointID)
     }
 
     var body: some View {
         GeometryReader { proxy in
-            let plotPoints = orderedPoints
-            let values = plotPoints.map(\.value)
-            let observed = values.compactMap { $0 }
-            let lower = min(observed.min() ?? 0, targetBand?.0 ?? .greatestFiniteMagnitude)
-            let upper = max(observed.max() ?? 1, targetBand?.1 ?? 0)
+            let plotPoints = series.points
+            let lower = min(series.minimumValue ?? 0, targetBand?.0 ?? .greatestFiniteMagnitude)
+            let upper = max(series.maximumValue ?? 1, targetBand?.1 ?? 0)
             let range = max(upper - lower, 1)
             ZStack(alignment: .topLeading) {
                 LifeOSChartDrawReveal(content: ZStack(alignment: .topLeading) {
@@ -4886,23 +5226,23 @@ private struct FitnessActivityLineChart: View {
                     }
                     Path { path in
                         var started = false
-                        for (index, value) in values.enumerated() {
-                            guard let value, proxy.size.width > 0 else {
+                        for point in plotPoints {
+                            guard let value = point.value, proxy.size.width > 0 else {
                                 started = false
                                 continue
                             }
-                            let x = chartX(for: plotPoints[index].date, width: proxy.size.width)
+                            let x = chartX(for: point.date, width: proxy.size.width)
                             let y = proxy.size.height * CGFloat(1 - (value - lower) / range)
                             if started { path.addLine(to: CGPoint(x: x, y: y)) }
                             else { path.move(to: CGPoint(x: x, y: y)); started = true }
                         }
                     }
-                    .stroke(LifeOSTokens.accent, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
-                    if let lastIndex = values.lastIndex(where: { $0 != nil }), let last = values[lastIndex] {
+                    .stroke(accent.base, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                    if let lastIndex = series.lastValueIndex, let last = plotPoints[lastIndex].value {
                         let x = chartX(for: plotPoints[lastIndex].date, width: proxy.size.width)
                         let y = proxy.size.height * CGFloat(1 - (last - lower) / range)
                         Circle()
-                            .fill(LifeOSTokens.accent)
+                            .fill(accent.base)
                             .frame(width: 8, height: 8)
                             .position(x: x, y: y)
                     }
@@ -4911,20 +5251,20 @@ private struct FitnessActivityLineChart: View {
                     let x = chartX(for: selectedIndex, width: proxy.size.width)
                     let y = chartY(for: selectedPoint.value, lower: lower, range: range, height: proxy.size.height)
                     Rectangle()
-                        .fill(LifeOSTokens.accent.opacity(0.22))
+                        .fill(accent.base.opacity(0.22))
                         .frame(width: 1, height: proxy.size.height)
                         .position(x: x, y: proxy.size.height / 2)
                     Circle()
                         .fill(LifeOSTokens.screenCanvas)
                         .frame(width: 12, height: 12)
-                        .overlay(Circle().stroke(LifeOSTokens.accent, lineWidth: 2))
+                        .overlay(Circle().stroke(accent.base, lineWidth: 2))
                         .position(x: x, y: y)
                     chartTooltip(for: selectedPoint, at: CGPoint(x: x, y: y), chartSize: proxy.size)
                 }
             }
             .overlay(alignment: .bottomLeading) {
                 Text(yAxisLabel)
-                    .font(LifeOSFont.caption(9))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
             .contentShape(Rectangle())
@@ -4951,10 +5291,12 @@ private struct FitnessActivityLineChart: View {
 #endif
         }
         .frame(minHeight: 82)
-        .chartDrawOn(id: chartDatasetID)
-        .task(id: chartDatasetID) {
+        .chartDrawOn(id: series.revision)
+        .onChange(of: points) { _, _ in rebuildSeries() }
+        .onChange(of: targetBandRevision) { _, _ in rebuildSeries() }
+        .task(id: series.revision) {
             guard let selectedPointID else { return }
-            if !orderedPoints.contains(where: { $0.date == selectedPointID && $0.value != nil }) {
+            if series.point(for: selectedPointID)?.value == nil {
                 self.selectedPointID = nil
             }
         }
@@ -4965,29 +5307,30 @@ private struct FitnessActivityLineChart: View {
         .accessibilityAdjustableAction { direction in
             let indices = selectableIndices
             guard !indices.isEmpty else { return }
-            let current = selectedIndex.flatMap { indices.firstIndex(of: $0) } ?? (direction == .increment ? -1 : indices.count)
+            let current = selectedIndex.flatMap(series.selectableRank) ?? (direction == .increment ? -1 : indices.count)
             let next: Int
             switch direction {
             case .increment: next = min(indices.count - 1, current + 1)
             case .decrement: next = max(0, current - 1)
             @unknown default: next = current
             }
-            selectedPointID = orderedPoints[indices[next]].date
+            selectedPointID = series.points[indices[next]].date
         }
     }
 
     private var selectableIndices: [Int] {
-        orderedPoints.indices.filter { orderedPoints[$0].value != nil }
+        series.selectableIndices
     }
 
     private var selectedPoint: FitnessActivitySeriesPoint? {
         guard let selectedPointID else { return nil }
-        return orderedPoints.first { $0.date == selectedPointID && $0.value != nil }
+        guard let point = series.point(for: selectedPointID), point.value != nil else { return nil }
+        return point
     }
 
     private var accessibilityValue: String {
         guard let selectedPoint else {
-            return orderedPoints.compactMap(\.value).isEmpty
+            return series.selectableIndices.isEmpty
                 ? "Unavailable"
                 : "Observed source points; no point selected"
         }
@@ -4995,20 +5338,16 @@ private struct FitnessActivityLineChart: View {
     }
 
     private func nearestIndex(toX x: CGFloat, width: CGFloat) -> Int? {
-        guard width > 0, !selectableIndices.isEmpty else { return nil }
-        return selectableIndices.min { left, right in
-            abs(chartX(for: orderedPoints[left].date, width: width) - x)
-                < abs(chartX(for: orderedPoints[right].date, width: width) - x)
-        }
+        series.nearestIndex(toX: x, width: width)
     }
 
     private func chartX(for index: Int, width: CGFloat) -> CGFloat {
-        guard orderedPoints.indices.contains(index) else { return width / 2 }
-        return chartX(for: orderedPoints[index].date, width: width)
+        guard series.points.indices.contains(index) else { return width / 2 }
+        return chartX(for: series.points[index].date, width: width)
     }
 
     private func chartX(for date: Date, width: CGFloat) -> CGFloat {
-        guard let first = orderedPoints.first?.date, let last = orderedPoints.last?.date else {
+        guard let first = series.firstDate, let last = series.lastDate else {
             return width / 2
         }
         let span = max(last.timeIntervalSince(first), 1)
@@ -5026,10 +5365,10 @@ private struct FitnessActivityLineChart: View {
         let tooltipWidth: CGFloat = 154
         VStack(alignment: .leading, spacing: 2) {
             Text(point.date.activityDayLabel)
-                .font(LifeOSFont.caption(10))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
             Text(chartValue(point.value))
-                .font(LifeOSFont.inter(12, weight: .semiBold))
+                .lifeOSTypography(.body, weight: .semibold)
                 .monospacedDigit()
         }
         .padding(.horizontal, 8)
@@ -5047,6 +5386,15 @@ private struct FitnessActivityLineChart: View {
         guard let value else { return "Unavailable" }
         let formatted = value.formatted(.number.precision(.fractionLength(0...1)))
         return "\(formatted) \(yAxisLabel)"
+    }
+
+    private func rebuildSeries() {
+        let next = FitnessActivitySeriesIndex(points: points, targetBand: targetBand)
+        series = next
+        guard let selectedPointID else { return }
+        if next.point(for: selectedPointID)?.value == nil {
+            self.selectedPointID = nil
+        }
     }
 }
 
@@ -5104,7 +5452,7 @@ private struct FitnessActivityDetailView: View {
                     FitnessCard {
                         VStack(alignment: .leading, spacing: 12) {
                             Text(FitnessActivityMetricFormatter.value(snapshot.activityTotal))
-                                .font(LifeOSFont.spaceGrotesk(40, weight: .bold))
+                                .lifeOSTypography(.sectionTitle, weight: .bold)
                             FitnessActivityLineChart(points: snapshot.activitySeries, accent: snapshot.activityTotal.hue, yAxisLabel: "minutes")
                                 .accessibilityIdentifier("fitness-activity-summary-detail-chart")
                             FitnessActivityMetricFooter(metric: snapshot.activityTotal)
@@ -5114,10 +5462,10 @@ private struct FitnessActivityDetailView: View {
                     FitnessCard {
                         VStack(alignment: .leading, spacing: 12) {
                             Text("Source comparison")
-                                .font(LifeOSFont.caption(10))
+                                .lifeOSTypography(.metadata)
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                             Text(FitnessPerformanceTargetFormatter.value(snapshot.performanceTarget))
-                                .font(LifeOSFont.spaceGrotesk(40, weight: .bold))
+                                .lifeOSTypography(.sectionTitle, weight: .bold)
                             FitnessActivityLineChart(
                                 points: snapshot.performanceTarget.series,
                                 accent: .blue,
@@ -5126,7 +5474,7 @@ private struct FitnessActivityDetailView: View {
                             )
                             .accessibilityIdentifier("fitness-performance-target-detail-chart")
                             Text(FitnessPerformanceTargetFormatter.detail(snapshot.performanceTarget))
-                                .font(LifeOSFont.body(12))
+                                .lifeOSTypography(.body)
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                         }
                     }
@@ -5136,34 +5484,34 @@ private struct FitnessActivityDetailView: View {
                     FitnessCard {
                         VStack(alignment: .leading, spacing: 10) {
                             Text(date.activityDayLabel)
-                                .font(LifeOSFont.header(15))
+                                .lifeOSTypography(.sectionTitle)
                             if let day = snapshot.activityCalendarDays.first(where: { Calendar(identifier: .gregorian).isDate($0.date, inSameDayAs: date) }) {
                                 switch day.state {
                                 case .observed(let count, let window, let provenance), .demo(let count, let window, let provenance):
                                     Text("\(count) activities")
-                                        .font(LifeOSFont.spaceGrotesk(32, weight: .bold))
+                                        .lifeOSTypography(.sectionTitle, weight: .bold)
                                         .monospacedDigit()
                                     Text(day.state.isDemo ? "Demo fixture · not live" : "Explicit source count")
-                                        .font(LifeOSFont.caption(10))
+                                        .lifeOSTypography(.metadata)
                                         .foregroundStyle(day.state.isDemo ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)
                                     Text("\(window) · \(provenance)")
-                                        .font(LifeOSFont.caption(10))
+                                        .lifeOSTypography(.metadata)
                                         .foregroundStyle(LifeOSTokens.tertiaryText)
                                 case .unavailable(let reason, let window, let provenance):
                                     Text("Activity unavailable")
-                                        .font(LifeOSFont.spaceGrotesk(28, weight: .bold))
+                                        .lifeOSTypography(.sectionTitle, weight: .bold)
                                     Text(reason)
-                                        .font(LifeOSFont.body(12))
+                                        .lifeOSTypography(.body)
                                         .foregroundStyle(LifeOSTokens.tertiaryText)
                                     Text("\(window) · \(provenance)")
-                                        .font(LifeOSFont.caption(10))
+                                        .lifeOSTypography(.metadata)
                                         .foregroundStyle(LifeOSTokens.tertiaryText)
                                 }
                             } else {
                                 Text("Activity unavailable")
-                                    .font(LifeOSFont.spaceGrotesk(28, weight: .bold))
+                                    .lifeOSTypography(.sectionTitle, weight: .bold)
                                 Text("No source observation is available for this day; LifeOS does not substitute zero.")
-                                    .font(LifeOSFont.body(12))
+                                    .lifeOSTypography(.body)
                                     .foregroundStyle(LifeOSTokens.tertiaryText)
                             }
                         }
@@ -5173,12 +5521,12 @@ private struct FitnessActivityDetailView: View {
                         FitnessCard {
                             VStack(alignment: .leading, spacing: 9) {
                                 Text(FitnessActivityMetricFormatter.value(metric))
-                                    .font(LifeOSFont.spaceGrotesk(40, weight: .bold))
+                                    .lifeOSTypography(.sectionTitle, weight: .bold)
                                 Text(FitnessActivityMetricFormatter.status(metric))
-                                    .font(LifeOSFont.inter(14, weight: .semiBold))
+                                    .lifeOSTypography(.body, weight: .semibold)
                                     .foregroundStyle(FitnessActivityMetricFormatter.statusColor(metric))
                                 Text(FitnessActivityMetricFormatter.detail(metric))
-                                    .font(LifeOSFont.body(12))
+                                    .lifeOSTypography(.body)
                                     .foregroundStyle(LifeOSTokens.tertiaryText)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
@@ -5187,12 +5535,12 @@ private struct FitnessActivityDetailView: View {
                 }
                 FitnessCard {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Source boundary").font(LifeOSFont.header(14))
+                        Text("Source boundary").lifeOSTypography(.sectionTitle)
                         Text("Values are shown only when the source supplies a named window, provenance, and the required observations. Missing or calibrating data is not converted to zero.")
-                            .font(LifeOSFont.body(12))
+                            .lifeOSTypography(.body)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                         Button("Review source and permissions", action: onSourceTap)
-                            .font(LifeOSFont.inter(11, weight: .semiBold))
+                            .lifeOSTypography(.body, weight: .semibold)
                             .buttonStyle(.bordered)
                             .tint(LifeOSTokens.accent)
                     }
@@ -5409,14 +5757,14 @@ private struct FitnessWorkoutRow: View {
                 .frame(width: 35, height: 35)
                 .overlay(LifeOSIcon(.fitness).foregroundStyle(LifeOSTokens.secondaryText).frame(width: 17, height: 17))
             VStack(alignment: .leading, spacing: 2) {
-                Text(workout.name).font(LifeOSFont.inter(13, weight: .semiBold))
-                Text("\(workout.kind) · \(workout.duration)").font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
+                Text(workout.name).lifeOSTypography(.body, weight: .semibold)
+                Text("\(workout.kind) · \(workout.duration)").lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
             }
             Spacer()
-            Text(workout.time.fitnessTimeLabel).font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
+            Text(workout.time.fitnessTimeLabel).lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
             if showsDisclosure {
                 Image(systemName: "chevron.right")
-                    .font(.caption2)
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
         }
@@ -5433,11 +5781,15 @@ private struct FitnessCompactMetric: View {
         HStack(spacing: 8) {
             Circle().fill(fitnessMetricStateColor(metric.sourceState)).frame(width: 7, height: 7)
             VStack(alignment: .leading, spacing: 2) {
-                Text(metric.title).font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
+                Text(metric.title).lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
                 HStack(alignment: .firstTextBaseline, spacing: 3) {
-                    Text(metric.value ?? "—").font(LifeOSFont.spaceGrotesk(18, weight: .bold)).monospacedDigit()
-                    if !metric.unit.isEmpty { Text(metric.unit).font(LifeOSFont.caption(9)).foregroundStyle(LifeOSTokens.tertiaryText) }
+                    Text(metric.value ?? "—").lifeOSTypography(.sectionTitle, weight: .bold).monospacedDigit()
+                    if metric.isValueAvailable, !metric.unit.isEmpty { Text(metric.unit).lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText) }
                 }
+                Text("\(metric.sourceState.label) · \(metric.compactProvenanceSummary)")
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 0)
         }
@@ -5461,10 +5813,10 @@ private struct FitnessHealthMonitorCard: View {
             VStack(alignment: .leading, spacing: 11) {
                 HStack {
                     Text("Health Monitor")
-                        .font(LifeOSFont.header(15))
+                        .lifeOSTypography(.sectionTitle)
                     Spacer()
-                    Button("Why no data?", action: onSourceTap)
-                        .font(LifeOSFont.caption(10))
+                    Button("Source details", action: onSourceTap)
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.accent)
                         .buttonStyle(.plain)
                 }
@@ -5488,10 +5840,10 @@ private struct FitnessTimelineCard: View {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
                     Text("Timeline")
-                        .font(LifeOSFont.header(15))
+                        .lifeOSTypography(.sectionTitle)
                     Spacer()
                     Text("Date-scoped")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
                 if workouts.isEmpty && journalEntries.isEmpty && supplements.isEmpty {
@@ -5507,10 +5859,10 @@ private struct FitnessTimelineCard: View {
                         HStack(spacing: 10) {
                             LifeOSIcon(.verified).foregroundStyle(LifeOSTokens.accent).frame(width: 18, height: 18)
                             Text("\(supplement.name) · planned \(supplement.timing)")
-                                .font(LifeOSFont.inter(12, weight: .medium))
+                                .lifeOSTypography(.body, weight: .medium)
                             Spacer()
                             Text("Local")
-                                .font(LifeOSFont.caption(10))
+                                .lifeOSTypography(.metadata)
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                         }
                     }
@@ -5531,14 +5883,14 @@ private struct FitnessTimelineEntryRow: View {
                 .overlay(LifeOSIcon(.more).foregroundStyle(LifeOSTokens.info).frame(width: 15, height: 15))
             VStack(alignment: .leading, spacing: 2) {
                 Text(entry.title)
-                    .font(LifeOSFont.inter(12, weight: .medium))
+                    .lifeOSTypography(.body, weight: .medium)
                 Text(entry.source.rawValue)
-                    .font(LifeOSFont.caption(10))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
             Spacer(minLength: 8)
             Text(entry.time.fitnessTimeLabel)
-                .font(LifeOSFont.caption(10))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
         }
     }
@@ -5559,29 +5911,29 @@ private struct FitnessSettingsView: View {
             FitnessCard {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Health source")
-                        .font(LifeOSFont.header(15))
+                        .lifeOSTypography(.sectionTitle)
                     Text("Helio Strap is the sensor authority. Apple Health and HealthKit are transport and permission layers, not a substitute sensor.")
-                        .font(LifeOSFont.body(12))
+                        .lifeOSTypography(.body)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                     Label("Read-only HealthKit access", systemImage: "lock.shield")
-                        .font(LifeOSFont.body(12))
+                        .lifeOSTypography(.body)
                     Text("This build never writes meals, nutrition, scores, or device settings to HealthKit.")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
             }
             FitnessCard {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Privacy")
-                        .font(LifeOSFont.header(15))
+                        .lifeOSTypography(.sectionTitle)
                     Toggle("Allow opt-in photo assistance", isOn: $photoInference)
                     Text(photoInference ? "Each opted-in photo leaves this PC and is sent to Google for inference. Estimates stay proposals until you edit and confirm them." : "Local/manual only · no photo leaves this PC")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                     Toggle("Redact detail on lock screen", isOn: $lockScreenPrivacy)
                     Text("Lock-screen surfaces omit supplement names/doses, meal photos, detailed body values, and journal text by default.")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
             }
@@ -5589,14 +5941,14 @@ private struct FitnessSettingsView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         Text("Retention budget")
-                            .font(LifeOSFont.header(15))
+                            .lifeOSTypography(.sectionTitle)
                         Spacer()
                         Text("≤ 10 GB / rolling 12 months")
-                            .font(LifeOSFont.caption(10))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.success)
                     }
                     Text("Warnings at 8 GB, structured-only/transient-photo mode at 9 GB, and no silent deletion at the hard cap. Originals default to 90 days; structured records remain independent.")
-                        .font(LifeOSFont.body(12))
+                        .lifeOSTypography(.body)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -5619,12 +5971,12 @@ private struct FitnessSourceGateSheet: View {
                     FitnessCard {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("What this gate means")
-                                .font(LifeOSFont.header(15))
+                                .lifeOSTypography(.sectionTitle)
                             Text("LifeOS will ask for HealthKit categories one at a time with plain-language reasons. Denying one category leaves unrelated manual logs available and does not create a replacement value.")
-                                .font(LifeOSFont.body(12))
+                                .lifeOSTypography(.body)
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                             Text("No private Zepp protocol or invented Bevel-compatible score is used.")
-                                .font(LifeOSFont.caption(10))
+                                .lifeOSTypography(.metadata)
                                 .foregroundStyle(LifeOSTokens.warning)
                         }
                     }
@@ -5669,8 +6021,8 @@ struct FitnessEmptyRow: View {
         HStack(spacing: 10) {
             LifeOSIcon(icon).foregroundStyle(LifeOSTokens.tertiaryText).frame(width: 18, height: 18)
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(LifeOSFont.inter(13, weight: .semiBold))
-                Text(detail).font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText).fixedSize(horizontal: false, vertical: true)
+                Text(title).lifeOSTypography(.body, weight: .semibold)
+                Text(detail).lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText).fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
         }
@@ -5706,6 +6058,9 @@ private struct FitnessRing: View {
     var color: Color = LifeOSTokens.Ring.progressArc
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var displayedProgress = 0.0
+    @State private var hasRevealed = false
+
+    private var safeProgress: Double { progress.isFinite ? min(max(progress, 0), 1) : 0 }
 
     /// Detail rings ≥90pt stroke 8; mid cards 6; minis 3. Solid, no gradient.
     private var stroke: CGFloat {
@@ -5721,14 +6076,22 @@ private struct FitnessRing: View {
                 .rotationEffect(.degrees(-90))
         }
         .frame(width: size, height: size)
-        .task {
-            displayedProgress = reduceMotion ? progress : 0
-            guard !reduceMotion else { return }
-            withAnimation(LifeOSMotion.ringReveal) { displayedProgress = progress }
+        .onAppear {
+            guard !hasRevealed else { return }
+            hasRevealed = true
+            withAnimation(reduceMotion ? nil : LifeOSMotion.ringReveal) {
+                displayedProgress = safeProgress
+            }
         }
-        .onChange(of: progress) { _, newValue in
-            if reduceMotion { displayedProgress = newValue }
-            else { withAnimation(LifeOSMotion.ringReveal) { displayedProgress = newValue } }
+        .onChange(of: safeProgress) { _, newValue in
+            LifeOSMotion.withoutAnimation {
+                displayedProgress = newValue
+            }
+        }
+        .onChange(of: reduceMotion) { _, _ in
+            LifeOSMotion.withoutAnimation {
+                displayedProgress = safeProgress
+            }
         }
         .accessibilityHidden(true)
     }
