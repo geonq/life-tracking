@@ -13,6 +13,7 @@ public enum FinanceImportedTransactionStoreError: Error, Equatable, Sendable {
     case syncPayloadTooLarge
     case syncRetryExpired
     case syncAttemptsExhausted
+    case syncReceiptUnresolved
     case syncSnapshotRewound
     case syncSnapshotETagMismatch
 }
@@ -65,6 +66,7 @@ extension FinanceImportedTransactionStoreError: LocalizedError {
         case .syncPayloadTooLarge: return "The imported Finance sync payload exceeds its safe size."
         case .syncRetryExpired: return "An imported Finance sync change is too old to retry safely."
         case .syncAttemptsExhausted: return "An imported Finance sync change needs manual recovery after repeated failures."
+        case .syncReceiptUnresolved: return "A previous Finance sync could not be proven safe to replay, so the change was paused."
         case .syncSnapshotRewound: return "The gateway returned an older Finance snapshot."
         case .syncSnapshotETagMismatch: return "The gateway returned conflicting Finance revision metadata."
         }
@@ -167,9 +169,47 @@ public struct FinanceImportedAttemptedSyncRequest: Codable, Equatable, Sendable 
 /// One durable outbox entry. The attempted request is immutable after the
 /// first attempt. A conflict may replace the unattempted logical envelope
 /// with a safe rebase, but it never resets attemptCount.
+fileprivate struct FinanceImportedSupersededAttemptReceipt: Codable, Equatable, Sendable {
+    let idempotencyKey: String
+    let recordIDs: [UUID]
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case idempotencyKey, recordIDs
+    }
+
+    init(idempotencyKey: String, recordIDs: [UUID]) throws {
+        guard TailscaleSyncClient.validatedFinanceImportedIdempotencyKey(idempotencyKey) != nil,
+              recordIDs.count <= FinanceImportedSyncRequest.maximumOperations,
+              Set(recordIDs).count == recordIDs.count else {
+            throw FinanceImportedTransactionStoreError.invalidEnvelope
+        }
+        self.idempotencyKey = idempotencyKey
+        self.recordIDs = recordIDs
+    }
+
+    init(from decoder: Decoder) throws {
+        try rejectUnknownLifeOSKeys(decoder, allowed: Set(CodingKeys.allCases.map(\.stringValue)))
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        guard Set(container.allKeys) == Set(CodingKeys.allCases) else {
+            throw FinanceImportedTransactionStoreError.invalidEnvelope
+        }
+        try self.init(
+            idempotencyKey: container.decode(String.self, forKey: .idempotencyKey),
+            recordIDs: container.decode([UUID].self, forKey: .recordIDs)
+        )
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(idempotencyKey, forKey: .idempotencyKey)
+        try container.encode(recordIDs, forKey: .recordIDs)
+    }
+}
+
 public struct FinanceImportedPendingSyncEntry: Codable, Equatable, Sendable {
     public static let maximumOperations = 512
     public static let maximumAttempts = 32
+    fileprivate static let maximumSupersededAttemptReceipts = 4
 
     public let idempotencyKey: String
     public let operations: [FinanceImportedSyncOperation]
@@ -179,10 +219,15 @@ public struct FinanceImportedPendingSyncEntry: Codable, Equatable, Sendable {
     public var state: FinanceImportedPendingSyncState
     public var blockedReason: FinanceImportedSyncBlockReason?
     public var attemptedRequest: FinanceImportedAttemptedSyncRequest?
+    /// Receipts for requests whose payload was removed by clear-all while
+    /// transmission was in progress. These carry no merchant payload; the
+    /// record IDs bind a late response to only the corresponding delete
+    /// preconditions.
+    fileprivate var supersededAttemptReceipts: [FinanceImportedSupersededAttemptReceipt]
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
         case idempotencyKey, operations, createdAt, attemptCount, lastAttemptAt
-        case state, blockedReason, attemptedRequest
+        case state, blockedReason, attemptedRequest, supersededAttemptKeys
     }
 
     public init(
@@ -215,6 +260,45 @@ public struct FinanceImportedPendingSyncEntry: Codable, Equatable, Sendable {
         self.state = state
         self.blockedReason = blockedReason
         self.attemptedRequest = attemptedRequest
+        self.supersededAttemptReceipts = []
+    }
+
+    fileprivate init(
+        idempotencyKey: String,
+        operations: [FinanceImportedSyncOperation],
+        createdAt: Date = .now,
+        attemptCount: Int = 0,
+        lastAttemptAt: Date? = nil,
+        state: FinanceImportedPendingSyncState = .pending,
+        blockedReason: FinanceImportedSyncBlockReason? = nil,
+        attemptedRequest: FinanceImportedAttemptedSyncRequest? = nil,
+        supersededAttemptReceipts: [FinanceImportedSupersededAttemptReceipt]
+    ) throws {
+        try self.init(
+            idempotencyKey: idempotencyKey,
+            operations: operations,
+            createdAt: createdAt,
+            attemptCount: attemptCount,
+            lastAttemptAt: lastAttemptAt,
+            state: state,
+            blockedReason: blockedReason,
+            attemptedRequest: attemptedRequest
+        )
+        try setSupersededAttemptReceipts(supersededAttemptReceipts)
+    }
+
+    fileprivate mutating func setSupersededAttemptReceipts(
+        _ receipts: [FinanceImportedSupersededAttemptReceipt]
+    ) throws {
+        let keys = receipts.map(\.idempotencyKey)
+        let recordIDCount = receipts.reduce(into: 0) { $0 += $1.recordIDs.count }
+        guard receipts.count <= Self.maximumSupersededAttemptReceipts,
+              recordIDCount <= Self.maximumOperations * Self.maximumSupersededAttemptReceipts,
+              Set(keys).count == keys.count,
+              !keys.contains(idempotencyKey) else {
+            throw FinanceImportedTransactionStoreError.invalidEnvelope
+        }
+        supersededAttemptReceipts = receipts
     }
 
     public init(from decoder: Decoder) throws {
@@ -227,6 +311,21 @@ public struct FinanceImportedPendingSyncEntry: Codable, Equatable, Sendable {
         guard required.isSubset(of: Set(container.allKeys)) else {
             throw FinanceImportedTransactionStoreError.invalidEnvelope
         }
+        let receipts: [FinanceImportedSupersededAttemptReceipt]
+        if let decoded = try? container.decode(
+            [FinanceImportedSupersededAttemptReceipt].self,
+            forKey: .supersededAttemptKeys
+        ) {
+            receipts = decoded
+        } else if let legacyKeys = try? container.decode([String].self, forKey: .supersededAttemptKeys) {
+            receipts = try legacyKeys.map {
+                try FinanceImportedSupersededAttemptReceipt(idempotencyKey: $0, recordIDs: [])
+            }
+        } else if container.contains(.supersededAttemptKeys) {
+            throw FinanceImportedTransactionStoreError.invalidEnvelope
+        } else {
+            receipts = []
+        }
         try self.init(
             idempotencyKey: container.decode(String.self, forKey: .idempotencyKey),
             operations: container.decode([FinanceImportedSyncOperation].self, forKey: .operations),
@@ -235,7 +334,8 @@ public struct FinanceImportedPendingSyncEntry: Codable, Equatable, Sendable {
             lastAttemptAt: container.decodeIfPresent(Date.self, forKey: .lastAttemptAt),
             state: container.decodeIfPresent(FinanceImportedPendingSyncState.self, forKey: .state) ?? .pending,
             blockedReason: container.decodeIfPresent(FinanceImportedSyncBlockReason.self, forKey: .blockedReason),
-            attemptedRequest: container.decodeIfPresent(FinanceImportedAttemptedSyncRequest.self, forKey: .attemptedRequest)
+            attemptedRequest: container.decodeIfPresent(FinanceImportedAttemptedSyncRequest.self, forKey: .attemptedRequest),
+            supersededAttemptReceipts: receipts
         )
     }
 
@@ -252,6 +352,7 @@ public struct FinanceImportedPendingSyncEntry: Codable, Equatable, Sendable {
         try container.encode(state, forKey: .state)
         try container.encode(blockedReason, forKey: .blockedReason)
         try container.encode(attemptedRequest, forKey: .attemptedRequest)
+        try container.encode(supersededAttemptReceipts, forKey: .supersededAttemptKeys)
     }
 }
 
@@ -520,12 +621,25 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
         Self.processTransactionLock.lock()
         defer { Self.processTransactionLock.unlock() }
         var state = try loadStateUnlocked()
-        guard !state.transactions.isEmpty else { return }
-        let deletions = state.transactions.map {
-            FinanceImportedSyncOperation.delete(recordID: $0.id, expectedSourceRevision: state.remoteRecordRevisions[$0.id] ?? 0, deletedAt: .now)
-        }
+        // A prior local import can still be represented only by an outbox
+        // upsert after a crash or an older client cleared its in-memory rows.
+        // Include those payload-bearing IDs so clear-all is a durable privacy
+        // operation even when the visible transaction list is already empty.
+        let clearedIDs = Set(state.transactions.map(\.id)).union(
+            state.outbox.flatMap { entry in
+                entry.operations.compactMap { operation -> UUID? in
+                    switch operation {
+                    case .upsert(let record, _), .restore(let record, _), .legacyUpsert(let record, _):
+                        return record.recordID
+                    case .categorySet, .categoryClear, .delete, .legacyDelete:
+                        return nil
+                    }
+                }
+            }
+        )
+        guard !clearedIDs.isEmpty else { return }
         state.transactions.removeAll(keepingCapacity: false)
-        try appendToOutbox(deletions, state: &state)
+        try compactOutboxForClearAll(clearedIDs: clearedIDs, state: &state, deletedAt: .now)
         try saveStateUnlocked(state)
     }
 
@@ -597,6 +711,7 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
     private func synchronizeSerially(using client: TailscaleSyncClient) async throws -> FinanceImportedSyncResult {
         var latest = try await client.fetchFinanceImportedLedger()
         try adoptRemote(latest)
+        try await reconcileSupersededAttemptReceipts(using: client, latest: &latest)
         while try pendingSyncRequest() != nil {
             let attempted = try beginAttempt()
             do {
@@ -607,7 +722,10 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
                 latest = pushed
             } catch let error as FinanceImportedSyncError {
                 guard case .conflict(let snapshot, let etag) = error else { throw error }
-                let canRetry = try handleConflict(FinanceImportedSyncResult(snapshot: snapshot, etag: etag))
+                let canRetry = try handleConflict(
+                    FinanceImportedSyncResult(snapshot: snapshot, etag: etag),
+                    supersededAttemptKey: attempted.idempotencyKey
+                )
                 if !canRetry { throw error }
             }
         }
@@ -643,21 +761,56 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
         Self.processTransactionLock.lock()
         defer { Self.processTransactionLock.unlock() }
         var state = try loadStateUnlocked()
-        guard state.outbox.first?.idempotencyKey == idempotencyKey else { throw FinanceImportedTransactionStoreError.invalidEnvelope }
+        let isCurrentHead = state.outbox.first?.idempotencyKey == idempotencyKey
+        let reconciliationReceipt = state.outbox.lazy.compactMap { entry in
+            entry.supersededAttemptReceipts.first { $0.idempotencyKey == idempotencyKey }
+        }.first
+        guard isCurrentHead || reconciliationReceipt != nil else {
+            throw FinanceImportedTransactionStoreError.invalidEnvelope
+        }
         try validateRemoteOrdering(result, state: state)
-        state.outbox.removeFirst()
+        if let reconciliationReceipt, result.wasReplay {
+            // A replay returns the gateway's current snapshot, which may be
+            // newer than the revision committed by the original request. It
+            // cannot prove that the returned row revision belongs to that
+            // request, so never advance a superseded clear-all delete from it.
+            mergeRemoteUnlocked(result, state: &state)
+            blockSupersededAttemptReceiptUnlocked(reconciliationReceipt.idempotencyKey, state: &state)
+            try saveStateUnlocked(state)
+            throw FinanceImportedTransactionStoreError.syncReceiptUnresolved
+        }
+        if isCurrentHead {
+            state.outbox.removeFirst()
+        }
         mergeRemoteUnlocked(result, state: &state)
+        if let reconciliationReceipt {
+            try rebaseSupersededDeletes(
+                receipt: reconciliationReceipt,
+                result: result,
+                state: &state
+            )
+        }
+        removeSupersededAttemptKey(idempotencyKey, state: &state)
         normalizeDeferredOperations(&state)
         try saveStateUnlocked(state)
     }
 
-    private func handleConflict(_ result: FinanceImportedSyncResult) throws -> Bool {
+    private func handleConflict(
+        _ result: FinanceImportedSyncResult,
+        supersededAttemptKey: String? = nil
+    ) throws -> Bool {
         Self.processTransactionLock.lock()
         defer { Self.processTransactionLock.unlock() }
         var state = try loadStateUnlocked()
         try validateRemoteOrdering(result, state: state)
         mergeRemoteUnlocked(result, state: &state)
-        normalizeDeferredOperations(&state)
+        // A conflict response is authoritative evidence that this request was
+        // rejected. Its snapshot may contain another writer's newer row, so it
+        // can never serve as proof for rebasing a superseded delete. Only the
+        // exact committed receipt path below may advance that precondition.
+        if let supersededAttemptKey {
+            removeSupersededAttemptKey(supersededAttemptKey, state: &state)
+        }
         guard let head = state.outbox.first, head.state == .pending else {
             try saveStateUnlocked(state)
             return false
@@ -668,6 +821,10 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
             try saveStateUnlocked(state)
             return false
         }
+        // Check the original source preconditions before any helper can
+        // promote expected revision zero from the returned snapshot. A
+        // rejected create followed by clear-all must never become a delete
+        // of a competing writer's row.
         guard head.operations.allSatisfy({ canSafelyRebase($0, state: state) }) else {
             state.outbox[0].state = .blocked
             state.outbox[0].blockedReason = .conflict
@@ -682,10 +839,153 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
             lastAttemptAt: head.lastAttemptAt,
             state: .pending,
             blockedReason: nil,
-            attemptedRequest: nil
+            attemptedRequest: nil,
+            supersededAttemptReceipts: head.supersededAttemptReceipts
         )
         try saveStateUnlocked(state)
         return true
+    }
+
+    private func reconcileSupersededAttemptReceipts(
+        using client: TailscaleSyncClient,
+        latest: inout FinanceImportedSyncResult
+    ) async throws {
+        let receipts = try loadSupersededAttemptReceipts()
+        for receipt in receipts {
+            let proof = try await client.fetchFinanceImportedReceipt(receipt.idempotencyKey)
+            guard proof.state == .committed, let proofRevision = proof.revision else {
+                try blockSupersededAttemptReceipt(receipt.idempotencyKey)
+                throw FinanceImportedTransactionStoreError.syncReceiptUnresolved
+            }
+
+            if latest.snapshot.revision < proofRevision {
+                latest = try await client.fetchFinanceImportedLedger()
+                try adoptRemote(latest)
+            }
+            guard latest.snapshot.revision == proofRevision else {
+                // A current snapshot newer than the receipt may include a
+                // different writer's edit. Without historical snapshots, a
+                // delete based on that response is not safe to infer.
+                try blockSupersededAttemptReceipt(receipt.idempotencyKey)
+                throw FinanceImportedTransactionStoreError.syncReceiptUnresolved
+            }
+            try applyCommittedSupersededAttemptReceipt(receipt, result: latest)
+        }
+    }
+
+    private func loadSupersededAttemptReceipts() throws -> [FinanceImportedSupersededAttemptReceipt] {
+        Self.processTransactionLock.lock()
+        defer { Self.processTransactionLock.unlock() }
+        let state = try loadStateUnlocked()
+        return state.outbox.flatMap(\.supersededAttemptReceipts)
+    }
+
+    private func applyCommittedSupersededAttemptReceipt(
+        _ receipt: FinanceImportedSupersededAttemptReceipt,
+        result: FinanceImportedSyncResult
+    ) throws {
+        Self.processTransactionLock.lock()
+        defer { Self.processTransactionLock.unlock() }
+        var state = try loadStateUnlocked()
+        guard state.outbox.contains(where: { entry in
+            entry.supersededAttemptReceipts.contains { $0.idempotencyKey == receipt.idempotencyKey }
+        }) else { return }
+        try validateRemoteOrdering(result, state: state)
+        try rebaseSupersededDeletes(receipt: receipt, result: result, state: &state)
+        removeSupersededAttemptKey(receipt.idempotencyKey, state: &state)
+        normalizeDeferredOperations(&state)
+        try saveStateUnlocked(state)
+    }
+
+    private func blockSupersededAttemptReceipt(_ idempotencyKey: String) throws {
+        Self.processTransactionLock.lock()
+        defer { Self.processTransactionLock.unlock() }
+        var state = try loadStateUnlocked()
+        blockSupersededAttemptReceiptUnlocked(idempotencyKey, state: &state)
+        try saveStateUnlocked(state)
+    }
+
+    private func blockSupersededAttemptReceiptUnlocked(
+        _ idempotencyKey: String,
+        state: inout State
+    ) {
+        guard let index = state.outbox.firstIndex(where: { entry in
+            entry.supersededAttemptReceipts.contains { $0.idempotencyKey == idempotencyKey }
+        }) else { return }
+        state.outbox[index].state = .blocked
+        state.outbox[index].blockedReason = .conflict
+    }
+
+    private func removeSupersededAttemptKey(_ key: String, state: inout State) {
+        for index in state.outbox.indices {
+            state.outbox[index].supersededAttemptReceipts.removeAll { $0.idempotencyKey == key }
+        }
+    }
+
+    /// A clear-all delete may have been created from the row's old source
+    /// revision while a correction for that same row was already in flight.
+    /// The late correction response is an exact receipt for that delete, so
+    /// its source revision can be advanced to the response's authoritative
+    /// row revision. The receipt binds this narrowly to the superseded
+    /// correction; ordinary deletes continue through conflict handling.
+    private func rebaseSupersededDeletes(
+        receipt: FinanceImportedSupersededAttemptReceipt,
+        result: FinanceImportedSyncResult,
+        state: inout State
+    ) throws {
+        let receiptIDs = Set(receipt.recordIDs)
+        guard !receiptIDs.isEmpty else { return }
+        let authoritativeRevisions = Dictionary(
+            uniqueKeysWithValues: result.snapshot.records.map { ($0.recordID, $0.sourceRevision) }
+        )
+
+        for index in state.outbox.indices {
+            let entry = state.outbox[index]
+            var changed = false
+            let operations = entry.operations.map { operation -> FinanceImportedSyncOperation in
+                guard case .delete(let recordID, let expectedSourceRevision, let deletedAt) = operation,
+                      receiptIDs.contains(recordID),
+                      let authoritativeRevision = authoritativeRevisions[recordID],
+                      authoritativeRevision > 0,
+                      authoritativeRevision != expectedSourceRevision else {
+                    return operation
+                }
+                changed = true
+                return .delete(
+                    recordID: recordID,
+                    expectedSourceRevision: authoritativeRevision,
+                    deletedAt: deletedAt
+                )
+            }
+            guard changed else { continue }
+
+            // A clear-all delete is normally unattempted. If a future caller
+            // has already prepared a request for this entry, discard those
+            // stale bytes and issue a fresh logical request after the receipt
+            // updates the authoritative cursor.
+            state.outbox[index] = try FinanceImportedPendingSyncEntry(
+                idempotencyKey: entry.attemptedRequest == nil
+                    ? entry.idempotencyKey
+                    : "finance-import-\(UUID().uuidString)",
+                operations: operations,
+                createdAt: entry.createdAt,
+                attemptCount: entry.attemptCount,
+                lastAttemptAt: entry.lastAttemptAt,
+                state: .pending,
+                blockedReason: nil,
+                attemptedRequest: nil,
+                supersededAttemptReceipts: entry.supersededAttemptReceipts
+            )
+        }
+    }
+
+    private func appendUniqueSupersededAttemptReceipts(
+        _ newReceipts: [FinanceImportedSupersededAttemptReceipt],
+        to receipts: inout [FinanceImportedSupersededAttemptReceipt]
+    ) {
+        for receipt in newReceipts where !receipts.contains(where: { $0.idempotencyKey == receipt.idempotencyKey }) {
+            receipts.append(receipt)
+        }
     }
 
     private func prepareHeadUnlocked(state: inout State, incrementAttempt: Bool) throws -> FinanceImportedPendingSyncRequest? {
@@ -799,6 +1099,7 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
             && state.outbox[index].attemptCount == 0 {
             let oldOperations = state.outbox[index].operations
             var changed = false
+            var blockedByCompetingDelete = false
             let operations = oldOperations.map { operation -> FinanceImportedSyncOperation in
                 switch operation {
                 case .categorySet(let id, let expected, let category) where expected == 0:
@@ -811,22 +1112,193 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
                           state.remoteTombstones[id] == nil else { return operation }
                     changed = true
                     return .categoryClear(recordID: id, expectedSourceRevision: revision)
-                case .delete(let id, let expected, let deletedAt) where expected == 0:
-                    guard let revision = state.remoteRecordRevisions[id], revision > 0,
-                          state.remoteTombstones[id] == nil else { return operation }
-                    changed = true
-                    return .delete(recordID: id, expectedSourceRevision: revision, deletedAt: deletedAt)
+                case .delete(let id, let expected, _) where expected == 0:
+                    // An expected-zero delete may represent a local row that
+                    // never reached the server. A later snapshot can contain
+                    // another writer's row with the same stable ID, so its
+                    // current revision is not proof that this delete belongs
+                    // to that row. Keep the zero precondition and fail closed
+                    // before a new request can transmit it.
+                    guard state.remoteRecordRevisions[id] == nil,
+                          state.remoteTombstones[id] == nil else {
+                        blockedByCompetingDelete = true
+                        return operation
+                    }
+                    return operation
                 default:
                     return operation
                 }
             }
+            if blockedByCompetingDelete {
+                state.outbox[index].state = .blocked
+                state.outbox[index].blockedReason = .conflict
+                continue
+            }
             guard changed, let replacement = try? FinanceImportedPendingSyncEntry(
                 idempotencyKey: state.outbox[index].idempotencyKey, operations: operations,
                 createdAt: state.outbox[index].createdAt, attemptCount: state.outbox[index].attemptCount,
-                lastAttemptAt: state.outbox[index].lastAttemptAt
+                lastAttemptAt: state.outbox[index].lastAttemptAt,
+                supersededAttemptReceipts: state.outbox[index].supersededAttemptReceipts
             ) else { continue }
             state.outbox[index] = replacement
         }
+    }
+
+    /// Removes payload-bearing work for cleared records while retaining
+    /// unrelated outbox operations. A delete operation is the only retained
+    /// work for a cleared record because it contains no transaction payload.
+    /// The whole state is saved once by `clearAll`, so compaction remains
+    /// atomic with the local hard delete and cannot leave a half-compacted
+    /// envelope after a crash.
+    private func compactOutboxForClearAll(
+        clearedIDs: Set<UUID>,
+        state: inout State,
+        deletedAt: Date
+    ) throws {
+        var retainedEntries: [FinanceImportedPendingSyncEntry] = []
+        retainedEntries.reserveCapacity(state.outbox.count)
+        var retainedDeleteIDs = Set<UUID>()
+        var orphanedSupersededAttemptReceipts: [FinanceImportedSupersededAttemptReceipt] = []
+
+        for entry in state.outbox {
+            let clearedOperationRecordIDs = entry.operations.compactMap { operation in
+                clearedIDs.contains(operation.recordID) ? operation.recordID : nil
+            }
+            let retainedOperations = entry.operations.compactMap { operation -> FinanceImportedSyncOperation? in
+                guard clearedIDs.contains(operation.recordID) else { return operation }
+
+                // Keep the first existing delete for a record. It may already
+                // have entered the transmission lifecycle, so replacing it
+                // would discard useful retry/idempotency metadata.
+                guard case .delete = operation,
+                      state.remoteTombstones[operation.recordID] == nil,
+                      retainedDeleteIDs.insert(operation.recordID).inserted else {
+                    return nil
+                }
+                return operation
+            }
+            guard !retainedOperations.isEmpty else {
+                appendUniqueSupersededAttemptReceipts(
+                    entry.supersededAttemptReceipts,
+                    to: &orphanedSupersededAttemptReceipts
+                )
+                if let attempted = entry.attemptedRequest {
+                    let receipt = try FinanceImportedSupersededAttemptReceipt(
+                        idempotencyKey: attempted.idempotencyKey,
+                        recordIDs: clearedOperationRecordIDs
+                    )
+                    appendUniqueSupersededAttemptReceipts(
+                        [receipt],
+                        to: &orphanedSupersededAttemptReceipts
+                    )
+                }
+                continue
+            }
+
+            if retainedOperations == entry.operations {
+                retainedEntries.append(entry)
+            } else {
+                var supersededReceipts = entry.supersededAttemptReceipts
+                if let attempted = entry.attemptedRequest {
+                    let receipt = try FinanceImportedSupersededAttemptReceipt(
+                        idempotencyKey: attempted.idempotencyKey,
+                        recordIDs: clearedOperationRecordIDs
+                    )
+                    appendUniqueSupersededAttemptReceipts([receipt], to: &supersededReceipts)
+                }
+                retainedEntries.append(try rebuildCompactedEntry(
+                    entry,
+                    operations: retainedOperations,
+                    supersededAttemptReceipts: supersededReceipts
+                ))
+            }
+        }
+        state.outbox = retainedEntries
+
+        let missingDeletionIDs = clearedIDs
+            .subtracting(retainedDeleteIDs)
+            .filter { state.remoteTombstones[$0] == nil }
+            .sorted { $0.uuidString.lowercased() < $1.uuidString.lowercased() }
+        guard !missingDeletionIDs.isEmpty else {
+            // A known remote tombstone needs no new delete operation. Keep a
+            // late receipt marker on any surviving entry when possible; the
+            // gateway cannot validly report a successful upsert over that
+            // tombstone, but retaining the marker is safer than accepting an
+            // unrelated response as the superseded attempt.
+            if !orphanedSupersededAttemptReceipts.isEmpty, !state.outbox.isEmpty {
+                var entry = state.outbox[0]
+                try entry.setSupersededAttemptReceipts(
+                    entry.supersededAttemptReceipts + orphanedSupersededAttemptReceipts
+                )
+                state.outbox[0] = entry
+            }
+            return
+        }
+
+        let deletions = missingDeletionIDs.map { id in
+            FinanceImportedSyncOperation.delete(
+                recordID: id,
+                expectedSourceRevision: state.remoteRecordRevisions[id] ?? 0,
+                deletedAt: deletedAt
+            )
+        }
+        try appendToOutbox(
+            deletions,
+            state: &state,
+            createdAt: deletedAt,
+            supersededAttemptReceipts: orphanedSupersededAttemptReceipts
+        )
+    }
+
+    /// Rebuilds a partially retained entry without carrying a stale attempted
+    /// body whose operations no longer match. If the entry had already been
+    /// attempted, preserve its base revision, ETag, attempt count, and last
+    /// attempt time while issuing a new exact receipt for only the unrelated
+    /// operations. This keeps retry accounting intact without retaining a
+    /// cleared merchant payload in the durable bytes.
+    private func rebuildCompactedEntry(
+        _ entry: FinanceImportedPendingSyncEntry,
+        operations: [FinanceImportedSyncOperation],
+        supersededAttemptReceipts: [FinanceImportedSupersededAttemptReceipt]
+    ) throws -> FinanceImportedPendingSyncEntry {
+        guard !operations.isEmpty else { throw FinanceImportedTransactionStoreError.invalidEnvelope }
+
+        if let attempted = entry.attemptedRequest {
+            let request = try FinanceImportedSyncRequest(
+                baseRevision: attempted.baseRevision,
+                operations: operations
+            )
+            let body = try request.canonicalData()
+            let idempotencyKey = "finance-import-\(UUID().uuidString)"
+            let receipt = try FinanceImportedAttemptedSyncRequest(
+                baseRevision: attempted.baseRevision,
+                ifMatch: attempted.ifMatch,
+                idempotencyKey: idempotencyKey,
+                body: body
+            )
+            return try FinanceImportedPendingSyncEntry(
+                idempotencyKey: idempotencyKey,
+                operations: operations,
+                createdAt: entry.createdAt,
+                attemptCount: entry.attemptCount,
+                lastAttemptAt: entry.lastAttemptAt,
+                state: entry.state,
+                blockedReason: entry.blockedReason,
+                attemptedRequest: receipt,
+                supersededAttemptReceipts: supersededAttemptReceipts
+            )
+        }
+
+        return try FinanceImportedPendingSyncEntry(
+            idempotencyKey: entry.idempotencyKey,
+            operations: operations,
+            createdAt: entry.createdAt,
+            attemptCount: entry.attemptCount,
+            lastAttemptAt: entry.lastAttemptAt,
+            state: entry.state,
+            blockedReason: entry.blockedReason,
+            supersededAttemptReceipts: supersededAttemptReceipts
+        )
     }
 
     private func canonicalOperationByteCount(_ operation: FinanceImportedSyncOperation) throws -> Int {
@@ -909,7 +1381,12 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
         }
     }
 
-    private func appendToOutbox(_ operations: [FinanceImportedSyncOperation], state: inout State, createdAt: Date = .now) throws {
+    private func appendToOutbox(
+        _ operations: [FinanceImportedSyncOperation],
+        state: inout State,
+        createdAt: Date = .now,
+        supersededAttemptReceipts: [FinanceImportedSupersededAttemptReceipt] = []
+    ) throws {
         guard operations.count <= Self.maximumPendingOperations else { throw FinanceImportedTransactionStoreError.syncOutboxFull }
         let existingOperationCount = state.outbox.reduce(into: 0) { count, entry in
             count += entry.operations.count
@@ -917,12 +1394,17 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
         guard existingOperationCount <= Self.maximumPendingOperations - operations.count else {
             throw FinanceImportedTransactionStoreError.syncOutboxFull
         }
-        let additions = try partitionOperations(
+        var additions = try partitionOperations(
             operations,
             baseRevision: state.remoteRevision,
             createdAt: createdAt
         )
         guard state.outbox.count + additions.count <= Self.maximumOutboxEntries else { throw FinanceImportedTransactionStoreError.syncOutboxFull }
+        if !supersededAttemptReceipts.isEmpty {
+            var first = additions[0]
+            try first.setSupersededAttemptReceipts(supersededAttemptReceipts)
+            additions[0] = first
+        }
         state.outbox.append(contentsOf: additions)
     }
 
@@ -983,7 +1465,8 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
                 let migratedEntry = try FinanceImportedPendingSyncEntry(
                     idempotencyKey: entry.idempotencyKey, operations: operations, createdAt: entry.createdAt,
                     attemptCount: entry.attemptCount, lastAttemptAt: entry.lastAttemptAt, state: entry.state,
-                    blockedReason: entry.blockedReason, attemptedRequest: entry.attemptedRequest
+                    blockedReason: entry.blockedReason, attemptedRequest: entry.attemptedRequest,
+                    supersededAttemptReceipts: entry.supersededAttemptReceipts
                 )
                 if operations != entry.operations { changed = true }
                 if migratedEntry.attemptedRequest == nil && migratedEntry.state == .pending {
@@ -1055,7 +1538,7 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
         // Leave it intact so it can be surfaced as blocked rather than split
         // into a different set of writes.
         guard entry.attemptedRequest == nil, entry.attemptCount == 0, entry.state == .pending else { return [entry] }
-        return try partitionOperations(
+        var split = try partitionOperations(
             entry.operations,
             baseRevision: state.remoteRevision,
             createdAt: entry.createdAt,
@@ -1063,26 +1546,36 @@ public final class FinanceImportedTransactionStore: @unchecked Sendable {
             lastAttemptAt: entry.lastAttemptAt,
             preferredFinalKey: entry.idempotencyKey
         )
+        guard !entry.supersededAttemptReceipts.isEmpty else { return split }
+        guard var first = split.first else {
+            throw FinanceImportedTransactionStoreError.invalidEnvelope
+        }
+        try first.setSupersededAttemptReceipts(entry.supersededAttemptReceipts)
+        split[0] = first
+        return split
     }
 
     private func markIneligibleEntries(_ state: inout State) -> Bool {
         var changed = false
         for index in state.outbox.indices where state.outbox[index].state == .pending {
-            if state.outbox[index].attemptCount > 0 && state.outbox[index].attemptedRequest == nil {
-                // A pre-v3 entry reports that transmission began but has no
-                // immutable bytes to replay. Do not invent a new request
-                // body during migration; preserve the work as recoverable
-                // blocked state instead.
-                state.outbox[index].state = .blocked
-                state.outbox[index].blockedReason = .invalidEnvelope
-                changed = true
-            } else if Date().timeIntervalSince(state.outbox[index].createdAt) > Self.maximumRetryAge {
+            // Apply the same policy order as prepareHeadUnlocked. Age and
+            // attempt exhaustion are durable status, not decode failures;
+            // classify them before the pre-v3 missing-receipt fallback.
+            if Date().timeIntervalSince(state.outbox[index].createdAt) > Self.maximumRetryAge {
                 state.outbox[index].state = .blocked
                 state.outbox[index].blockedReason = .retryExpired
                 changed = true
             } else if state.outbox[index].attemptCount >= FinanceImportedPendingSyncEntry.maximumAttempts {
                 state.outbox[index].state = .blocked
                 state.outbox[index].blockedReason = .attemptsExhausted
+                changed = true
+            } else if state.outbox[index].attemptCount > 0 && state.outbox[index].attemptedRequest == nil {
+                // A pre-v3 entry reports that transmission began but has no
+                // immutable bytes to replay. Do not invent a new request
+                // body during migration; preserve the work as recoverable
+                // blocked state instead.
+                state.outbox[index].state = .blocked
+                state.outbox[index].blockedReason = .invalidEnvelope
                 changed = true
             }
         }

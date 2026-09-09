@@ -91,7 +91,7 @@ public struct FitnessTrainingView: View {
         }
         .sheet(item: $selectedTemplate) { template in
             FitnessTrainingStartSheet(template: template) { title in
-                start(template: template, title: title)
+                await start(template: template, title: title)
             }
             #if os(macOS)
             .frame(minWidth: 420, minHeight: 340)

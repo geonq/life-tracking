@@ -427,6 +427,50 @@ final class FitnessTrainingDomainTests: XCTestCase {
         ))
     }
 
+    func testEveryValidatedNonStrengthSessionCanFinishWithoutSyntheticSetMetrics() throws {
+        let start = now.addingTimeInterval(-120)
+        let end = now.addingTimeInterval(-30)
+
+        for activityKind in TrainingActivityKind.allCases where activityKind != .strength {
+            let session = try TrainingSession(
+                activityKind: activityKind,
+                title: "Timed \(activityKind.rawValue)",
+                createdAt: start,
+                updatedAt: end,
+                startedAt: start,
+                endedAt: end,
+                status: .completed,
+                exercises: [],
+                now: now
+            )
+
+            XCTAssertEqual(session.status, .completed)
+            XCTAssertTrue(session.completedSets.isEmpty)
+            XCTAssertNil(session.recordedExternalVolumeKilograms)
+            XCTAssertEqual(session.recordedDuration, 90)
+        }
+
+        let repetitionsOnly = try TrainingSetLog(
+            actualRepetitions: 8,
+            actualLoadKilograms: nil,
+            isCompleted: true,
+            completedAt: start.addingTimeInterval(30),
+            now: now
+        )
+        let strength = try TrainingSession(
+            title: "Load not recorded",
+            createdAt: start,
+            updatedAt: end,
+            startedAt: start,
+            endedAt: end,
+            status: .completed,
+            exercises: [try TrainingExerciseLog(name: "Bench", sets: [repetitionsOnly])],
+            now: now
+        )
+        XCTAssertEqual(strength.completedSets.count, 1)
+        XCTAssertNil(strength.recordedExternalVolumeKilograms)
+    }
+
     func testDSTSessionKeepsWallClockZoneAndInstantDuration() throws {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "Europe/Berlin")!
@@ -680,6 +724,57 @@ final class FitnessTrainingDomainTests: XCTestCase {
         XCTAssertTrue(TrainingImportedWorkoutIdentity.isValidStableKey("sync_identifier:provider,workout"))
         XCTAssertFalse(TrainingImportedWorkoutIdentity.isValidStableKey("uuid:00000000-0000-0000-0000-000000000002,00000000-0000-0000-0000-000000000001"))
         XCTAssertFalse(TrainingImportedWorkoutIdentity.isValidStableKey("uuid:00000000-0000-0000-0000-000000000001,00000000-0000-0000-0000-000000000001"))
+    }
+
+    func testCanonicalStableKeyUnionEnforcesTheCompleteAliasBound() throws {
+        let tokens = (0...(TrainingDomainLimits.maximumImportedAliases + 1)).map { index in
+            "uuid:\(makeID(200 + index).rawValue)"
+        }
+
+        XCTAssertThrowsError(try TrainingImportedWorkoutIdentity.canonicalStableKey(from: tokens)) { error in
+            XCTAssertEqual(error as? TrainingValidationError, .invalidImportedIdentity)
+        }
+
+        let identity = try TrainingImportedWorkoutIdentity(
+            uuid: makeID(300).uuid,
+            syncIdentifier: "canonical-source",
+            aliases: [makeID(301).uuid],
+            revision: .syncVersion(4)
+        )
+        XCTAssertEqual(
+            try TrainingImportedWorkoutIdentity.validateStableKey(identity.stableKey),
+            identity.stableKey
+        )
+    }
+
+    func testCleanImportedQueryCannotContainPartialRecordEvidence() throws {
+        let start = now.addingTimeInterval(-120)
+        let end = now.addingTimeInterval(-60)
+        let identity = try TrainingImportedWorkoutIdentity(uuid: makeID(302).uuid)
+        let partial = try TrainingImportedHistoryRecord(
+            identity: identity,
+            activityTypeRawValue: 20,
+            startedAt: start,
+            endedAt: end,
+            durationSeconds: 60,
+            sourceState: .partial,
+            now: now
+        )
+        let completeWindow = try TrainingCoverage(
+            kind: .complete,
+            lowerBound: now.addingTimeInterval(-300),
+            upperBound: now,
+            now: now
+        )
+
+        XCTAssertThrowsError(try TrainingImportedHistorySnapshot(
+            records: [partial],
+            queryState: .imported,
+            queryCoverage: completeWindow,
+            now: now
+        )) { error in
+            XCTAssertEqual(error as? TrainingValidationError, .invalidCoverage)
+        }
     }
 
     func testCoverageRequiresCompleteBoundsAndRecordCoverageMatchesItsInterval() throws {

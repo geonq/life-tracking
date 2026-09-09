@@ -1,8 +1,102 @@
 import XCTest
 @testable import LifeOS
 
+private actor BarcodeTransportCallCounter {
+    private(set) var count = 0
+
+    func recordCall() {
+        count += 1
+    }
+}
+
+private enum HostileBarcodeTransportError: Error {
+    case called
+}
+
 final class NutritionBarcodeTests: XCTestCase {
     private let fetchedAt = "2026-08-12T00:00:00Z"
+
+    func testVisualFixtureBarcodeActionFailsClosedBeforeHostileTransport() async {
+        let counter = BarcodeTransportCallCounter()
+        let client = FitnessNutritionBarcodeLookupClient(usesVisualFixtures: true) { _ in
+            await counter.recordCall()
+            throw HostileBarcodeTransportError.called
+        }
+
+        do {
+            _ = try await client.fetchNutritionBarcode("3017620422003")
+            XCTFail("A visual fixture barcode action must fail closed.")
+        } catch let error as FitnessNutritionBarcodeLookupClientError {
+            XCTAssertEqual(error, .visualFixtureDisabled)
+        } catch {
+            XCTFail("Unexpected visual fixture barcode error: \(error)")
+        }
+
+        let callCount = await counter.count
+        XCTAssertEqual(callCount, 0, "A visual fixture must never invoke the barcode transport.")
+    }
+
+    func testVisualFixtureNutritionPersistenceUsesIsolatedTemporaryStores() async throws {
+        let fileManager = FileManager.default
+        let configuration = FitnessNutritionPersistenceConfiguration.make(
+            usesVisualFixtures: true,
+            fileManager: fileManager
+        )
+        defer {
+            if let directoryURL = configuration.directoryURL {
+                try? fileManager.removeItem(at: directoryURL)
+            }
+        }
+
+        let productionMealURL = try NutritionMealStore.defaultURL(fileManager: fileManager)
+        let productionGoalURL = try NutritionGoalStore.defaultURL(fileManager: fileManager)
+        let productionBarcodeURL = NutritionRecordStore.defaultPersistenceURL
+        let barcodeStoreURL = await configuration.barcodeStore.url
+        let productionMealBefore = fileManager.fileExists(atPath: productionMealURL.path)
+            ? try Data(contentsOf: productionMealURL)
+            : nil
+        let productionGoalBefore = fileManager.fileExists(atPath: productionGoalURL.path)
+            ? try Data(contentsOf: productionGoalURL)
+            : nil
+        let productionBarcodeBefore = fileManager.fileExists(atPath: productionBarcodeURL.path)
+            ? try Data(contentsOf: productionBarcodeURL)
+            : nil
+        XCTAssertTrue(configuration.mealStore?.fileURL.path.hasPrefix(fileManager.temporaryDirectory.path) == true)
+        XCTAssertTrue(configuration.goalStore?.fileURL.path.hasPrefix(fileManager.temporaryDirectory.path) == true)
+        XCTAssertTrue(barcodeStoreURL.path.hasPrefix(fileManager.temporaryDirectory.path))
+        XCTAssertNotEqual(configuration.mealStore?.fileURL, productionMealURL)
+        XCTAssertNotEqual(configuration.goalStore?.fileURL, productionGoalURL)
+        XCTAssertNotEqual(barcodeStoreURL, productionBarcodeURL)
+
+        let meal = NutritionMeal(
+            loggedAt: Date(timeIntervalSince1970: 1_800_300_000),
+            timeZoneIdentifier: "Europe/Berlin",
+            name: "Fixture meal",
+            kcal: 400,
+            proteinGrams: 30,
+            carbGrams: 40,
+            fatGrams: 10,
+            provenance: .manual,
+            createdAt: Date(timeIntervalSince1970: 1_800_300_000)
+        )
+        try configuration.mealStore?.addConfirmed(meal)
+        XCTAssertTrue(fileManager.fileExists(atPath: configuration.mealStore?.fileURL.path ?? ""))
+        XCTAssertEqual(
+            productionMealBefore,
+            fileManager.fileExists(atPath: productionMealURL.path) ? try Data(contentsOf: productionMealURL) : nil,
+            "visual fixture meal writes must leave the production meal store unchanged"
+        )
+        XCTAssertEqual(
+            productionGoalBefore,
+            fileManager.fileExists(atPath: productionGoalURL.path) ? try Data(contentsOf: productionGoalURL) : nil,
+            "visual fixture nutrition writes must leave the production goal store unchanged"
+        )
+        XCTAssertEqual(
+            productionBarcodeBefore,
+            fileManager.fileExists(atPath: productionBarcodeURL.path) ? try Data(contentsOf: productionBarcodeURL) : nil,
+            "visual fixture nutrition writes must leave the production barcode store unchanged"
+        )
+    }
 
     func testBarcodeRequestGateRejectsStaleCompletionFromOlderGenerationForDisplayAndConfirm() throws {
         var gate = NutritionBarcodeRequestGate()
@@ -24,6 +118,100 @@ final class NutritionBarcodeTests: XCTestCase {
         gate.invalidate() // The review sheet disappeared.
 
         XCTAssertFalse(gate.accepts(request, visibleInput: request.barcode))
+    }
+
+    func testBarcodeDraftRevisionIncludesEveryEditableBarcodeField() throws {
+        let loggedAt = try XCTUnwrap(ISO8601DateFormatter().date(from: fetchedAt))
+        let base = FitnessNutritionDraft(
+            loggedAt: loggedAt,
+            barcodeInput: "3017620422003",
+            barcodeProductName: "Example",
+            barcodeCalories: "500",
+            barcodeProtein: "6",
+            barcodeCarbohydrates: "50",
+            barcodeFat: "25",
+            barcodeGrams: "100",
+            barcodeValuesEdited: false,
+            barcodeBasis: .perServing,
+            barcodeMealAt: fetchedAt
+        )
+        let mutations: [(String, (inout FitnessNutritionDraft) -> Void)] = [
+            ("barcode input", { $0.barcodeInput = "96385074" }),
+            ("product name", { $0.barcodeProductName = "Edited" }),
+            ("calories", { $0.barcodeCalories = "501" }),
+            ("protein", { $0.barcodeProtein = "7" }),
+            ("carbohydrates", { $0.barcodeCarbohydrates = "51" }),
+            ("fat", { $0.barcodeFat = "26" }),
+            ("grams", { $0.barcodeGrams = "101" }),
+            ("edit intent", { $0.barcodeValuesEdited = true }),
+            ("basis", { $0.barcodeBasis = .per100g }),
+            ("meal timestamp", { $0.barcodeMealAt = "2026-08-12T01:00:00Z" })
+        ]
+
+        for (label, mutate) in mutations {
+            var candidate = base
+            mutate(&candidate)
+            XCTAssertNotEqual(
+                base.barcodeDraftRevision,
+                candidate.barcodeDraftRevision,
+                "The barcode revision must include \(label)."
+            )
+            XCTAssertNotEqual(
+                base.fingerprint,
+                candidate.fingerprint,
+                "The watched draft fingerprint must include \(label)."
+            )
+        }
+    }
+
+    func testBarcodeSaveStateRejectsDoubleActivationAndStaleCompletionWhileRetainingExactRetry() throws {
+        let lookup = try decode(baseFound(
+            nutritionState: "complete",
+            metrics: #"{"kcal": 500, "proteinGrams": 6, "carbsGrams": 50, "fatGrams": 25}"#,
+            basis: "perServing"
+        ))
+        let proposal = try NutritionBarcodeProposal(proposalID: "proposal-save-state", lookup: lookup)
+        let confirmation = NutritionBarcodeConfirmation(
+            proposalID: proposal.proposalID,
+            barcode: proposal.barcode,
+            basis: .perServing,
+            mealAt: fetchedAt,
+            productName: "Example",
+            grams: 100,
+            kcal: 500,
+            proteinGrams: 6,
+            carbsGrams: 50,
+            fatGrams: 25,
+            confirmedAt: fetchedAt
+        )
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: fetchedAt))
+        let record = try NutritionBarcodeFlow.confirm(confirmation, for: proposal, now: now)
+
+        var state = FitnessNutritionBarcodeSaveState()
+        let first = try XCTUnwrap(state.begin(draftRevision: "revision-1", record: record))
+        XCTAssertTrue(state.isSaving)
+        XCTAssertNil(state.begin(draftRevision: "revision-1", record: record), "A second activation must not start another write.")
+        XCTAssertFalse(state.accepts(first, currentDraftRevision: "revision-2"), "A completion for an older revision must not be accepted for a newer edit.")
+
+        state.invalidateActiveAttempt()
+        let second = try XCTUnwrap(state.begin(draftRevision: "revision-2", record: record))
+        XCTAssertFalse(state.accepts(first, currentDraftRevision: "revision-1"), "An older completion must lose ownership.")
+        XCTAssertFalse(state.finish(first), "An older completion must not finish the newer write.")
+        XCTAssertTrue(state.accepts(second, currentDraftRevision: "revision-2"))
+
+        XCTAssertTrue(state.finish(second, retryable: true))
+        let retry = try XCTUnwrap(state.retryableAttempt(for: "revision-2"))
+        XCTAssertEqual(
+            retry.record,
+            record,
+            "A failed attempt must retain the exact immutable payload for retry."
+        )
+        XCTAssertNil(state.retryableAttempt(for: "revision-1"), "An edited draft must not reuse the failed payload.")
+
+        var successfulState = FitnessNutritionBarcodeSaveState()
+        let successfulAttempt = try XCTUnwrap(successfulState.begin(draftRevision: "revision-success", record: record))
+        XCTAssertTrue(successfulState.finish(successfulAttempt))
+        XCTAssertNil(successfulState.retryableAttempt(for: "revision-success"), "A successful write must not expose a retry-only payload.")
     }
 
     func testEANNormalizationAcceptsGermanEANAndUPCButRejectsMalformedInput() {
@@ -200,7 +388,7 @@ final class NutritionBarcodeTests: XCTestCase {
     }
 
     func testRetryWithFreshRecordForSameProposalAndMealReplacesInsteadOfDuplicating() async throws {
-        let lookup = try decode(baseFound(nutritionState: "complete", metrics: #"{"kcal": 539, "proteinGrams": 6.3, "carbsGrams": 57.5, "fatGrams": 30.9}"#))
+        let lookup = try decode(baseFoundWithBothBases())
         let proposal = try NutritionBarcodeProposal(proposalID: "proposal-retry", lookup: lookup)
         let confirmation = NutritionBarcodeConfirmation(
             proposalID: proposal.proposalID, barcode: proposal.barcode, basis: .per100g,
@@ -208,11 +396,16 @@ final class NutritionBarcodeTests: XCTestCase {
             proteinGrams: 6, carbsGrams: 50, fatGrams: 25, confirmedAt: fetchedAt
         )
         let now = try XCTUnwrap(ISO8601DateFormatter().date(from: fetchedAt))
-        let first = try NutritionBarcodeFlow.confirm(confirmation, for: proposal, now: now)
+        let first = try NutritionBarcodeFlow.confirm(
+            confirmation,
+            for: proposal,
+            now: now,
+            recordID: UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")
+        )
         let revised = NutritionBarcodeConfirmation(
-            proposalID: proposal.proposalID, barcode: proposal.barcode, basis: .per100g,
-            mealAt: fetchedAt, productName: "Revised label", grams: 100, kcal: 480,
-            proteinGrams: 7, carbsGrams: 45, fatGrams: 22, confirmedAt: fetchedAt
+            proposalID: proposal.proposalID, barcode: proposal.barcode, basis: .perServing,
+            mealAt: fetchedAt, productName: "Revised label", grams: 15, kcal: 81,
+            proteinGrams: 0.95, carbsGrams: 8.63, fatGrams: 4.64, confirmedAt: fetchedAt
         )
         let second = try NutritionBarcodeFlow.confirm(revised, for: proposal, now: now)
         XCTAssertNotEqual(first.id, second.id, "The store must prove logical idempotency, not rely on UUID reuse.")
@@ -224,6 +417,205 @@ final class NutritionBarcodeTests: XCTestCase {
         let records = try await store.load()
         XCTAssertEqual(records.count, 1)
         XCTAssertEqual(records.first, second)
+    }
+
+    func testBarcodeDraftCorrectionKeepsOneRecordAndClearsDirtyStateForSavedRevision() async throws {
+        let lookup = try decode(baseFoundWithBothBases())
+        let proposal = try NutritionBarcodeProposal(proposalID: "proposal-draft-correction", lookup: lookup)
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: fetchedAt))
+        var draft = FitnessNutritionDraft(
+            loggedAt: now,
+            barcodeInput: proposal.barcode,
+            barcodeProductName: "Example",
+            barcodeCalories: "81",
+            barcodeProtein: "0.95",
+            barcodeCarbohydrates: "8.63",
+            barcodeFat: "4.64",
+            barcodeGrams: "15",
+            barcodeValuesEdited: true,
+            barcodeBasis: .perServing,
+            barcodeMealAt: fetchedAt
+        )
+        let first = try NutritionBarcodeFlow.confirm(
+            NutritionBarcodeConfirmation(
+                proposalID: proposal.proposalID,
+                barcode: proposal.barcode,
+                basis: .perServing,
+                mealAt: fetchedAt,
+                productName: "Example",
+                grams: 15,
+                kcal: 81,
+                proteinGrams: 0.95,
+                carbsGrams: 8.63,
+                fatGrams: 4.64,
+                confirmedAt: fetchedAt
+            ),
+            for: proposal,
+            now: now,
+            recordID: UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")
+        )
+        let firstRevision = draft.barcodeDraftRevision
+        draft.markBarcodeDurablySaved(first, draftRevision: firstRevision)
+        XCTAssertTrue(draft.isBarcodeDurablyCurrent)
+        XCTAssertFalse(draft.isDirty, "A successful barcode save must make the parent draft clean.")
+
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = NutritionRecordStore(url: directory.appendingPathComponent("nutrition.json"))
+        try await store.save(first)
+
+        draft.barcodeBasis = .per100g
+        draft.barcodeGrams = "100"
+        draft.barcodeCalories = "500"
+        draft.barcodeProtein = "6"
+        draft.barcodeCarbohydrates = "50"
+        draft.barcodeFat = "25"
+        XCTAssertTrue(draft.isDirty, "Changing the basis or values must invalidate the saved revision.")
+
+        let second = try NutritionBarcodeFlow.confirm(
+            NutritionBarcodeConfirmation(
+                proposalID: proposal.proposalID,
+                barcode: proposal.barcode,
+                basis: .per100g,
+                mealAt: fetchedAt,
+                productName: "Example",
+                grams: 100,
+                kcal: 500,
+                proteinGrams: 6,
+                carbsGrams: 50,
+                fatGrams: 25,
+                confirmedAt: fetchedAt
+            ),
+            for: proposal,
+            now: now,
+            recordID: try XCTUnwrap(draft.barcodeRecordID)
+        )
+        XCTAssertEqual(second.id, first.id, "A correction must retain the parent-owned record identity.")
+        try await store.save(second)
+        draft.markBarcodeDurablySaved(second, draftRevision: draft.barcodeDraftRevision)
+
+        XCTAssertTrue(draft.isBarcodeDurablyCurrent)
+        XCTAssertFalse(draft.isDirty, "The draft must be clean for the exact saved correction revision.")
+        let records = try await store.load()
+        XCTAssertEqual(records.count, 1)
+        XCTAssertEqual(records.first?.id, first.id)
+        XCTAssertEqual(records.first?.basis, .per100g)
+        XCTAssertEqual(records.first?.kcal, 500)
+
+        let reopened = FitnessNutritionDraftFlow.reopenOrStart(
+            current: draft,
+            selectedDate: now.addingTimeInterval(86_400)
+        )
+        XCTAssertNotEqual(reopened.draftID, draft.draftID, "A clean saved draft should not reopen as an unsaved meal.")
+
+        draft.barcodeCalories = "501"
+        XCTAssertTrue(draft.isDirty)
+        XCTAssertEqual(
+            FitnessNutritionDraftFlow.reopenOrStart(current: draft, selectedDate: now),
+            draft,
+            "A changed saved draft must remain available when the sheet is reopened."
+        )
+
+        var freshLookup = draft
+        freshLookup.beginNewBarcodeLookup()
+        XCTAssertNil(freshLookup.barcodeRecordID)
+        XCTAssertNil(freshLookup.barcodeDurableReceipt)
+    }
+
+    func testNewBarcodeLookupKeepsExplicitMealsSeparateWithoutDeletingUnrelatedRecords() async throws {
+        let lookup = try decode(baseFoundWithBothBases())
+        let firstProposal = try NutritionBarcodeProposal(proposalID: "proposal-first-lookup", lookup: lookup)
+        let secondProposal = try NutritionBarcodeProposal(proposalID: "proposal-second-lookup", lookup: lookup)
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: fetchedAt))
+        let confirmation = { (proposal: NutritionBarcodeProposal, name: String) in
+            NutritionBarcodeConfirmation(
+                proposalID: proposal.proposalID,
+                barcode: proposal.barcode,
+                basis: .perServing,
+                mealAt: self.fetchedAt,
+                productName: name,
+                grams: 15,
+                kcal: 81,
+                proteinGrams: 0.95,
+                carbsGrams: 8.63,
+                fatGrams: 4.64,
+                confirmedAt: self.fetchedAt
+            )
+        }
+        let first = try NutritionBarcodeFlow.confirm(confirmation(firstProposal, "First"), for: firstProposal, now: now)
+        let corrected = try NutritionBarcodeFlow.confirm(confirmation(firstProposal, "Corrected"), for: firstProposal, now: now)
+        let newLookup = try NutritionBarcodeFlow.confirm(confirmation(secondProposal, "Separate"), for: secondProposal, now: now)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("nutrition.json")
+        let store = NutritionRecordStore(url: url)
+
+        try await store.save(first)
+        try await store.save(corrected)
+        try await store.save(newLookup)
+
+        let records = try await store.load()
+        XCTAssertEqual(records.count, 2)
+        XCTAssertEqual(Set(records.map(\.proposalID)), Set([firstProposal.proposalID, secondProposal.proposalID]))
+        XCTAssertTrue(records.contains(where: { $0.productName == "Corrected" }))
+        XCTAssertTrue(records.contains(where: { $0.productName == "Separate" }))
+    }
+
+    func testFreshBarcodeRequestGatesCreateDistinctProposalsAndPersistBothMeals() async throws {
+        let lookup = try decode(baseFoundWithBothBases())
+        let barcode = "3017620422003"
+
+        // Model two independent review sheets.  Both gates begin at the same
+        // local generation, so a proposal ID derived from either gate would
+        // collide.  The production proposal initializer must provide the
+        // cross-sheet/process identity instead.
+        var firstGate = NutritionBarcodeRequestGate()
+        let firstRequest = try XCTUnwrap(firstGate.begin(rawInput: barcode))
+        var secondGate = NutritionBarcodeRequestGate()
+        let secondRequest = try XCTUnwrap(secondGate.begin(rawInput: barcode))
+        XCTAssertTrue(firstGate.accepts(firstRequest, visibleInput: barcode))
+        XCTAssertTrue(secondGate.accepts(secondRequest, visibleInput: barcode))
+
+        let firstProposal = try NutritionBarcodeProposal(lookup: lookup)
+        let secondProposal = try NutritionBarcodeProposal(lookup: lookup)
+        XCTAssertNotEqual(firstProposal.proposalID, secondProposal.proposalID)
+
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: fetchedAt))
+        let confirmation: (NutritionBarcodeProposal, String) -> NutritionBarcodeConfirmation = { proposal, name in
+            NutritionBarcodeConfirmation(
+                proposalID: proposal.proposalID,
+                barcode: proposal.barcode,
+                basis: .perServing,
+                mealAt: self.fetchedAt,
+                productName: name,
+                grams: 15,
+                kcal: 81,
+                proteinGrams: 0.95,
+                carbsGrams: 8.63,
+                fatGrams: 4.64,
+                confirmedAt: self.fetchedAt
+            )
+        }
+        let first = try NutritionBarcodeFlow.confirm(
+            confirmation(firstProposal, "First sheet"),
+            for: firstProposal,
+            now: now
+        )
+        let second = try NutritionBarcodeFlow.confirm(
+            confirmation(secondProposal, "Second sheet"),
+            for: secondProposal,
+            now: now
+        )
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent("nutrition.json")
+        let store = NutritionRecordStore(url: url)
+
+        try await store.save(first)
+        try await store.save(second)
+
+        let records = try await store.load()
+        XCTAssertEqual(records.count, 2)
+        XCTAssertEqual(Set(records.map(\.proposalID)), Set([firstProposal.proposalID, secondProposal.proposalID]))
+        XCTAssertEqual(Set(records.map(\.id)).count, 2)
+        XCTAssertEqual(Set(records.compactMap(\.productName)), Set(["First sheet", "Second sheet"]))
     }
 
     func testMalformedUnknownPersistedFieldFailsClosed() async throws {
@@ -347,6 +739,12 @@ final class NutritionBarcodeTests: XCTestCase {
         let flags = qualityFlags.map { ", \"qualityFlags\":\($0)" } ?? ""
         return """
         {"schemaVersion":1,"state":"found","barcode":"3017620422003","product":{"name":"Example"},"nutritionState":"\(nutritionState)",\(second)\(flags),"provenance":{"source":"openfoodfacts","apiVersion":"v3.6","apiURL":"https://world.openfoodfacts.org/api/v3.6/product/3017620422003.json","fetchedAt":"\(fetchedAt)","databaseLicense":"ODbL-1.0","contentLicense":"DbCL-1.0","attribution":"Product data from Open Food Facts.","dataQualityWarning":"Open Food Facts data is volunteer-sourced; accuracy, completeness, and reliability are not guaranteed."}}
+        """
+    }
+
+    private func baseFoundWithBothBases() -> String {
+        """
+        {"schemaVersion":1,"state":"found","barcode":"3017620422003","product":{"name":"Example"},"nutritionState":"complete","per100g":{"kcal":539,"proteinGrams":6.3,"carbsGrams":57.5,"fatGrams":30.9},"perServing":{"kcal":81,"proteinGrams":0.95,"carbsGrams":8.63,"fatGrams":4.64},"provenance":{"source":"openfoodfacts","apiVersion":"v3.6","apiURL":"https://world.openfoodfacts.org/api/v3.6/product/3017620422003.json","fetchedAt":"\(fetchedAt)","databaseLicense":"ODbL-1.0","contentLicense":"DbCL-1.0","attribution":"Product data from Open Food Facts.","dataQualityWarning":"Open Food Facts data is volunteer-sourced; accuracy, completeness, and reliability are not guaranteed."}}
         """
     }
 }

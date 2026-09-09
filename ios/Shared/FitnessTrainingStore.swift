@@ -1088,9 +1088,19 @@ public actor FitnessTrainingStore {
                 )
             }
 
-            let reconciledKey = try TrainingImportedWorkoutIdentity.canonicalStableKey(
-                from: [currentImportedRecordKey, normalizedImportedRecordKey]
-            )
+            let reconciledKey: String
+            do {
+                reconciledKey = try TrainingImportedWorkoutIdentity.canonicalStableKey(
+                    from: [currentImportedRecordKey, normalizedImportedRecordKey]
+                )
+            } catch {
+                return try persistConflict(
+                    mutation: mutation,
+                    fingerprint: fingerprint,
+                    current: current,
+                    message: "The imported identity aliases conflict and cannot be merged safely."
+                )
+            }
             if reconciledKey == currentImportedRecordKey {
                 let receipt = try TrainingCommitReceipt(
                     mutationID: mutation.mutationID,
@@ -1127,10 +1137,12 @@ public actor FitnessTrainingStore {
                 receipt: receipt
             )
         }
-        if let owner = sessionsByID.values.first(where: {
-            guard $0.id != current.id, let ownerKey = $0.importedRecordKey else { return false }
-            return TrainingImportedWorkoutIdentity.stableKeysRepresentSameIdentity(ownerKey, normalizedImportedRecordKey)
-        }) {
+        if let owner = sessionsByID.values
+            .filter({
+                guard $0.id != current.id, let ownerKey = $0.importedRecordKey else { return false }
+                return TrainingImportedWorkoutIdentity.stableKeysRepresentSameIdentity(ownerKey, normalizedImportedRecordKey)
+            })
+            .min(by: { $0.id.rawValue < $1.id.rawValue }) {
             return try persistConflict(
                 mutation: mutation,
                 fingerprint: fingerprint,
@@ -1417,7 +1429,7 @@ public actor FitnessTrainingStore {
     }
 
     /// Actor isolation protects one instance only. The process lock and the
-    /// sidecar advisory lock cover the complete durable read/modify/replace
+    /// sidecar file lock covers the complete durable read/modify/replace
     /// transaction for all instances and cooperating processes.
     private func withPersistenceTransaction<T>(_ work: () throws -> T) throws -> T {
         Self.processTransactionLock.lock()

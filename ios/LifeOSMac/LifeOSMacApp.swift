@@ -1,5 +1,55 @@
 import SwiftUI
 
+@MainActor
+final class FitnessObservationCoordinator: ObservableObject {
+    @Published private(set) var observation: FitnessObservationEnvelope?
+
+    private let usesVisualFixtures: Bool
+    private let client: TailscaleSyncClient?
+    private let fetchObservation: (@Sendable () async throws -> FitnessObservationEnvelope)?
+    private var refreshGeneration: UInt64 = 0
+    private var refreshTask: Task<FitnessObservationEnvelope?, Never>?
+
+    init(
+        usesVisualFixtures: Bool,
+        fetchObservation: (@Sendable () async throws -> FitnessObservationEnvelope)? = nil
+    ) {
+        self.usesVisualFixtures = usesVisualFixtures
+        self.fetchObservation = fetchObservation
+        self.client = FitnessObservationSyncPolicy.allowsNetwork(usesVisualFixtures: usesVisualFixtures)
+            ? TailscaleSyncClient()
+            : nil
+    }
+
+    func refresh() async {
+        guard FitnessObservationSyncPolicy.allowsNetwork(usesVisualFixtures: usesVisualFixtures),
+              let client else {
+            observation = nil
+            return
+        }
+
+        if let refreshTask {
+            // Launch, activation, and the menu refresh can arrive together.
+            // They must observe one fetch so an older response or failure can
+            // never replace a newer result.
+            _ = await refreshTask.value
+            return
+        }
+
+        refreshGeneration &+= 1
+        let generation = refreshGeneration
+        let fetch = fetchObservation ?? { try await client.fetchFitnessObservation() }
+        let task = Task<FitnessObservationEnvelope?, Never> {
+            try? await fetch()
+        }
+        refreshTask = task
+        let nextObservation = await task.value
+        guard generation == refreshGeneration else { return }
+        refreshTask = nil
+        observation = nextObservation
+    }
+}
+
 @main
 struct LifeOSMacApp: App {
     @StateObject private var calendarCoordinator: CalendarCoordinator
@@ -7,7 +57,7 @@ struct LifeOSMacApp: App {
     @StateObject private var financeCoordinator: FinanceCoordinator
     @StateObject private var clipperCoordinator: ClipperCoordinator
     @StateObject private var fitnessTrainingCoordinator: FitnessTrainingCoordinator
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @StateObject private var fitnessObservationCoordinator: FitnessObservationCoordinator
     private let usesVisualFixtures: Bool
     /// Coalescing state for the future-module widget snapshot publisher.
     /// Mac has no HealthKit, so only Finance/Nutrition are mapped; Fitness
@@ -16,15 +66,20 @@ struct LifeOSMacApp: App {
     /// a plain `let` keeps one durable instance alive across the call sites
     /// below — its own mailbox serializes concurrent `publish` calls.
     private let widgetSnapshotPublisher = WidgetSnapshotPublisher()
+    @Environment(\.scenePhase) private var scenePhase
 
     init() {
         let enabled = Self.visualFixturesEnabled
         usesVisualFixtures = enabled
-        let cachedUsage = enabled ? nil : SharedSnapshotStore.read()
-        _usageCoordinator = StateObject(wrappedValue: UsageCoordinator(
-            initialProviders: cachedUsage?.providers ?? [],
-            initialUpdatedAt: cachedUsage?.updatedAt
-        ))
+        let cachedUsage = enabled ? nil : SharedSnapshotStore.readLive()
+        _usageCoordinator = StateObject(
+            wrappedValue: enabled
+                ? UsageCoordinator.visualFixture()
+                : UsageCoordinator(
+                    initialProviders: cachedUsage?.providers ?? [],
+                    initialUpdatedAt: cachedUsage?.updatedAt
+                )
+        )
         _financeCoordinator = StateObject(wrappedValue: FinanceCoordinator(
             initialState: enabled ? .demo : .unavailable
         ))
@@ -34,10 +89,18 @@ struct LifeOSMacApp: App {
         _calendarCoordinator = StateObject(
             wrappedValue: CalendarCoordinator(
                 initialSnapshot: enabled ? CalendarVisualFixtures.snapshot() : CalendarSnapshot(),
-                usesVisualFixtures: enabled
+                usesVisualFixtures: enabled,
+                defaults: enabled ? CalendarCoordinator.makeVisualFixtureDefaults() : nil
             )
         )
-        _fitnessTrainingCoordinator = StateObject(wrappedValue: FitnessTrainingCoordinator())
+        _fitnessTrainingCoordinator = StateObject(
+            wrappedValue: enabled
+                ? FitnessTrainingCoordinator(usesVisualFixtures: true)
+                : FitnessTrainingCoordinator()
+        )
+        _fitnessObservationCoordinator = StateObject(
+            wrappedValue: FitnessObservationCoordinator(usesVisualFixtures: enabled)
+        )
     }
 
     /// TestAction supplies the environment flag before the hosted app is
@@ -57,12 +120,14 @@ struct LifeOSMacApp: App {
                 usageCoordinator: usageCoordinator,
                 financeCoordinator: financeCoordinator,
                 clipperCoordinator: clipperCoordinator,
-                fitnessTrainingCoordinator: fitnessTrainingCoordinator
+                fitnessTrainingCoordinator: fitnessTrainingCoordinator,
+                fitnessObservation: fitnessObservationCoordinator.observation
             )
-                .frame(minWidth: 900, minHeight: 640)
+                // Keep the narrow acceptance viewport reachable. The root
+                // layout collapses its sidebar below 900pt, so the window
+                // must be allowed to reach the documented 800pt state.
+                .frame(minWidth: 800, minHeight: 600)
                 .tint(LifeOSTokens.accent)
-                .animation(reduceMotion ? nil : LifeOSMotion.ease,
-                           value: calendarCoordinator.snapshot.items.count)
                 .task {
                     if !usesVisualFixtures {
                         await calendarCoordinator.load()
@@ -70,6 +135,7 @@ struct LifeOSMacApp: App {
                         await usageCoordinator.refresh()
                         await financeCoordinator.refresh()
                         await clipperCoordinator.refresh()
+                        await fitnessObservationCoordinator.refresh()
                         publishWidgetSnapshots()
                     }
                 }
@@ -79,17 +145,25 @@ struct LifeOSMacApp: App {
                 .onChange(of: financeCoordinator.state) { _, _ in
                     publishWidgetSnapshots()
                 }
+                .onChange(of: scenePhase) { _, phase in
+                    guard phase == .active, !usesVisualFixtures else { return }
+                    Task { @MainActor in
+                        await fitnessObservationCoordinator.refresh()
+                    }
+                }
         }
         .handlesExternalEvents(matching: ["*"])
         .defaultSize(width: 1512, height: 982)
         .commands {
             CommandGroup(after: .toolbar) {
                 Button("Refresh") {
+                    guard !usesVisualFixtures else { return }
                     Task {
                         await calendarCoordinator.manualRefresh()
                         await usageCoordinator.refresh()
                         await financeCoordinator.refresh()
                         await clipperCoordinator.refresh()
+                        await fitnessObservationCoordinator.refresh()
                         publishWidgetSnapshots()
                     }
                 }
@@ -101,7 +175,8 @@ struct LifeOSMacApp: App {
             SettingsView(
                 usageCoordinator: usageCoordinator,
                 financeCoordinator: financeCoordinator,
-                clipperCoordinator: clipperCoordinator
+                clipperCoordinator: clipperCoordinator,
+                usesVisualFixtures: usesVisualFixtures
             )
                 .frame(minWidth: 520, minHeight: 360)
                 .tint(LifeOSTokens.accent)
@@ -159,6 +234,7 @@ struct LifeOSMacRootView: View {
     @ObservedObject private var clipperCoordinator: ClipperCoordinator
     @ObservedObject private var fitnessTrainingCoordinator: FitnessTrainingCoordinator
     private let usesVisualFixtures: Bool
+    private let fitnessObservation: FitnessObservationEnvelope?
     @State private var selection: LifeOSModule
     @State private var selectedRoute: LifeOSDeepLink?
     @State private var showingUsage: Bool
@@ -176,6 +252,7 @@ struct LifeOSMacRootView: View {
         financeCoordinator: FinanceCoordinator? = nil,
         clipperCoordinator: ClipperCoordinator? = nil,
         fitnessTrainingCoordinator: FitnessTrainingCoordinator? = nil,
+        fitnessObservation: FitnessObservationEnvelope? = nil,
         initialModule: LifeOSModule = .home,
         initialRoute: LifeOSDeepLink? = nil,
         initiallyShowingUsage: Bool = false
@@ -183,9 +260,11 @@ struct LifeOSMacRootView: View {
         self.calendarCoordinator = calendarCoordinator
         self.usesVisualFixtures = usesVisualFixtures
         self.usageCoordinator = usageCoordinator
-        self.financeCoordinator = financeCoordinator ?? FinanceCoordinator(initialState: .demo)
+        self.financeCoordinator = financeCoordinator ?? FinanceCoordinator(initialState: usesVisualFixtures ? .demo : .unavailable)
         self.clipperCoordinator = clipperCoordinator ?? ClipperCoordinator(initialState: usesVisualFixtures ? .demo : .unavailable)
-        self.fitnessTrainingCoordinator = fitnessTrainingCoordinator ?? FitnessTrainingCoordinator()
+        self.fitnessTrainingCoordinator = fitnessTrainingCoordinator
+            ?? FitnessTrainingCoordinator(usesVisualFixtures: usesVisualFixtures)
+        self.fitnessObservation = fitnessObservation
         _selection = State(initialValue: initialModule)
         _selectedRoute = State(initialValue: initialRoute)
         _showingUsage = State(initialValue: initiallyShowingUsage || initialRoute == .usage)
@@ -198,7 +277,7 @@ struct LifeOSMacRootView: View {
                 .fill(LifeOSTokens.hairlineBorder)
                 .frame(width: 1)
             VStack(spacing: 0) {
-                topBar
+                topBar(isCompact: isCompact)
                 Rectangle()
                     .fill(LifeOSTokens.hairlineBorder)
                     .frame(height: 1)
@@ -232,7 +311,6 @@ struct LifeOSMacRootView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(LifeOSTokens.screenCanvas)
-        .animation(reduceMotion ? nil : LifeOSMotion.easeNavigate, value: selection)
         .sheet(isPresented: $showingCommandPalette) {
             LifeOSMacCommandPalette(selection: $selection, selectedRoute: $selectedRoute)
                 .frame(width: 560, height: 420)
@@ -297,30 +375,49 @@ struct LifeOSMacRootView: View {
         .accessibilityIdentifier("mac-persistent-sidebar")
     }
 
-    private var topBar: some View {
+    private var moduleOwnsPageIdentity: Bool {
+        switch selection {
+        case .home, .finance, .fitness, .tax:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func topBar(isCompact: Bool) -> some View {
         HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(selection.title)
-                    .lifeOSTypography(.sectionTitle, weight: .bold)
-                if let section = selectedRoute?.sectionTitle ?? (selectedRoute == .usage ? "Usage" : nil) {
-                    Text(section)
-                        .lifeOSTypography(.body)
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
+            if !moduleOwnsPageIdentity {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(selection.title)
+                        .lifeOSTypography(.sectionTitle, weight: .bold)
+                    if let section = selectedRoute?.sectionTitle ?? (selectedRoute == .usage ? "Usage" : nil) {
+                        Text(section)
+                            .lifeOSTypography(.body)
+                            .foregroundStyle(LifeOSTokens.tertiaryText)
+                    }
                 }
+                .accessibilityElement(children: .combine)
             }
-            .accessibilityElement(children: .combine)
             Spacer(minLength: 16)
 
             Button { showingCommandPalette = true } label: {
-                HStack(spacing: 8) {
-                    LifeOSIcon(.search).frame(width: 15, height: 15)
-                    Text("Search or jump").lifeOSTypography(.body)
-                    Text("⌘K").lifeOSTypography(.body, weight: .semibold)
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                Group {
+                    if isCompact {
+                        LifeOSIcon(.search)
+                            .frame(width: 16, height: 16)
+                            .frame(width: 32, height: 32)
+                    } else {
+                        HStack(spacing: 8) {
+                            LifeOSIcon(.search).frame(width: 15, height: 15)
+                            Text("Search or jump").lifeOSTypography(.body)
+                            Text("⌘K").lifeOSTypography(.body, weight: .semibold)
+                                .foregroundStyle(LifeOSTokens.tertiaryText)
+                        }
+                    }
                 }
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .padding(.horizontal, 11)
-                .frame(height: 30)
+                .frame(minHeight: 32)
                 .background(LifeOSTokens.surface, in: Capsule())
                 .overlay(Capsule().stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
             }
@@ -329,8 +426,8 @@ struct LifeOSMacRootView: View {
             .accessibilityLabel("Open command palette")
             .accessibilityIdentifier("mac-command-palette-trigger")
         }
-        .padding(.horizontal, 18)
-        .frame(height: 56)
+        .padding(.horizontal, isCompact ? 12 : 18)
+        .frame(height: isCompact ? 48 : 56)
         .background(LifeOSTokens.canvas)
         .accessibilityIdentifier("mac-global-top-bar")
     }
@@ -383,6 +480,9 @@ struct LifeOSMacRootView: View {
         case .fitness:
             FitnessView(
                 snapshot: usesVisualFixtures ? .demo : .unavailable,
+                snapshotProvider: usesVisualFixtures ? nil : { date in
+                    fitnessObservation?.snapshot(for: date) ?? .unavailable
+                },
                 initialSection: selectedRoute?.fitnessSection ?? .today,
                 initialNutritionEntryPoint: selectedRoute?.nutritionEntryPoint,
                 initialFitnessEntryPoint: selectedRoute?.fitnessEntryPoint,
@@ -470,27 +570,39 @@ struct LifeOSMacRootView: View {
     }
 
     private func select(_ module: LifeOSModule) {
-        selectedRoute = nil
-        showingUsage = false
-        requestingNewCalendarEvent = false
-        selection = module
+        performNavigationChange {
+            selectedRoute = nil
+            showingUsage = false
+            requestingNewCalendarEvent = false
+            selection = module
+        }
     }
 
     private func navigate(to destination: LifeOSDeepLink) {
-        selectedRoute = destination
-        switch destination {
-        case .usage:
-            selection = .home
-            showingUsage = true
-            requestingNewCalendarEvent = false
-        case .newCalendarEvent:
-            selection = .calendar
-            showingUsage = false
-            requestingNewCalendarEvent = true
-        default:
-            selection = destination.module
-            showingUsage = false
-            requestingNewCalendarEvent = false
+        performNavigationChange {
+            selectedRoute = destination
+            switch destination {
+            case .usage:
+                selection = .home
+                showingUsage = true
+                requestingNewCalendarEvent = false
+            case .newCalendarEvent:
+                selection = .calendar
+                showingUsage = false
+                requestingNewCalendarEvent = true
+            default:
+                selection = destination.module
+                showingUsage = false
+                requestingNewCalendarEvent = false
+            }
+        }
+    }
+
+    private func performNavigationChange(_ update: () -> Void) {
+        if reduceMotion {
+            LifeOSMotion.withoutAnimation(update)
+        } else {
+            withAnimation(LifeOSMotion.easeNavigate, update)
         }
     }
 }

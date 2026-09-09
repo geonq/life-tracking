@@ -204,12 +204,22 @@ def test_gateway_launcher_token_fixture_is_present_missing_and_redacted() -> Non
         captured.clear()
         rejected = launcher.TrustedEdgeHeaderAdapter(app, token, peer_verifier=lambda _scope: False, expected_identity=("fixture.ts.net", "operator@example.com"))
         rejected._snapshot_valid = lambda: True
+        rejected_messages: list[dict] = []
+
+        async def rejected_send(message: dict) -> None:
+            rejected_messages.append(message)
+
         asyncio.run(rejected({"type": "http", "headers": [
             (b"Tailscale-User-Login", b"operator@example.com"),
             (b"Tailscale-App-Capabilities", header),
             (b"X-LifeOS-Trusted-Edge", b"attacker-value"),
-        ]}, None, None))
-        assert all(name.lower() != launcher.TRUSTED_EDGE_HEADER for name, _ in captured["headers"])
+        ]}, None, rejected_send))
+        assert rejected_messages == [
+            {"type": "http.response.start", "status": 503,
+             "headers": [(b"cache-control", b"no-store")]},
+            {"type": "http.response.body", "body": b"Edge unavailable"},
+        ]
+        assert captured == {}
         rejected._reader.shutdown(wait=True)
 
 

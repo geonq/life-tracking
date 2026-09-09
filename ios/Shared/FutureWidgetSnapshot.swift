@@ -41,6 +41,14 @@ private let widgetSafeMaximumCents = 9_007_199_254_740_991
 /// not re-evaluate a persisted entry merely because wall-clock time advanced.
 public let futureWidgetFreshnessWindow: TimeInterval = 15 * 60
 private let futureWidgetMaximumClockSkew: TimeInterval = 5
+private let futureWidgetDemoProvenancePrefix = "DEMO · NOT LIVE"
+private let futureWidgetDemoQualityLabel = "Fixture score · not live"
+
+private func isFutureWidgetDemoProvenance(_ label: String?) -> Bool {
+    guard let label else { return false }
+    return label == futureWidgetDemoProvenancePrefix
+        || label.hasPrefix(futureWidgetDemoProvenancePrefix + " ·")
+}
 
 private func rejectUnknownWidgetKeys(_ decoder: Decoder, allowed: Set<String>) throws {
     let container = try decoder.container(keyedBy: LifeOSAnyCodingKey.self)
@@ -900,10 +908,17 @@ public struct WidgetSafeFitnessWidgetsSummary: Codable, Equatable, Sendable {
     }
 
     public var isDemoFixture: Bool {
-        let demoLabel = "DEMO · NOT LIVE"
-        return provenanceLabel == demoLabel
-            || stressTrend.sourceLabel == demoLabel
-            || metrics.contains { $0.sourceLabel == demoLabel }
+        let metricLabels = metrics.map(\.sourceLabel)
+        let energyReserveLabels = [
+            energyReserve.level.sourceLabel,
+            energyReserve.startingLevel.sourceLabel,
+            energyReserve.chargedPercent.sourceLabel,
+            energyReserve.dischargedPercent.sourceLabel
+        ]
+        return isFutureWidgetDemoProvenance(provenanceLabel)
+            || isFutureWidgetDemoProvenance(stressTrend.sourceLabel)
+            || metricLabels.contains(where: isFutureWidgetDemoProvenance)
+            || energyReserveLabels.contains(where: isFutureWidgetDemoProvenance)
     }
 
     public func displayState(at now: Date) -> WidgetAggregateAvailability {
@@ -1221,7 +1236,7 @@ public struct WidgetSafeNutritionSummary: Codable, Equatable, Sendable {
             proteinGoalGrams: metric(160),
             caloriesBurned: metric(2_340),
             qualityScore: metric(93),
-            qualityLabel: "Fixture score · not live",
+            qualityLabel: futureWidgetDemoQualityLabel,
             provenanceLabel: "DEMO · NOT LIVE"
         )
     }
@@ -1238,6 +1253,12 @@ public struct WidgetSafeNutritionSummary: Codable, Equatable, Sendable {
     }
 
     public var hasAggregateValue: Bool { metrics.contains { $0.value != nil } }
+
+    public var isDemoFixture: Bool {
+        metrics.contains { isFutureWidgetDemoProvenance($0.sourceLabel) }
+            || isFutureWidgetDemoProvenance(provenanceLabel)
+            || qualityLabel == futureWidgetDemoQualityLabel
+    }
 
     public func displayState(at now: Date) -> WidgetAggregateAvailability {
         let states = metrics.map { $0.state(at: now) }
@@ -1443,6 +1464,13 @@ public struct FutureWidgetSnapshot: Codable, Equatable, Sendable {
         privacyMode == .redacted ? .redacted : nutrition.displayState(at: now)
     }
 
+    /// Demo values are valid for explicitly opted-in visual fixture hosts, but
+    /// must never be accepted by a normal widget timeline. Keep the check on
+    /// the snapshot so every nested fixture marker is handled at one boundary.
+    public var isDemoFixture: Bool {
+        fitnessWidgets.isDemoFixture || nutrition.isDemoFixture
+    }
+
     private static func validatedGeneratedAt(_ value: Date, now: Date) -> Date? {
         guard value.timeIntervalSince1970.isFinite,
               value <= now.addingTimeInterval(futureWidgetMaximumClockSkew) else { return nil }
@@ -1519,6 +1547,32 @@ public struct FutureWidgetSnapshot: Codable, Equatable, Sendable {
 public enum FutureWidgetSnapshotStore {
     public static let snapshotFilename = "future-widget-snapshot.v1.json"
 
+    public enum ReadPolicy: Equatable, Sendable {
+        case live
+        case visualFixture
+
+        fileprivate func accepts(_ snapshot: FutureWidgetSnapshot) -> Bool {
+            switch self {
+            case .live:
+                return !snapshot.isDemoFixture
+            case .visualFixture:
+                return true
+            }
+        }
+    }
+
+    /// Resolve the only process-level opt-in that permits fixture reads. A
+    /// normal widget process therefore defaults to the strict live policy even
+    /// when an old demo file is still present in the App Group.
+    public static func readPolicy(
+        arguments: [String] = ProcessInfo.processInfo.arguments,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> ReadPolicy {
+        arguments.contains("-LifeOSVisualFixtures") || environment["LIFEOS_VISUAL_FIXTURES"] == "1"
+            ? .visualFixture
+            : .live
+    }
+
     public static func url(
         fileManager: FileManager = .default,
         appGroupIdentifier: String? = AppGroupConfiguration.identifier()
@@ -1542,10 +1596,16 @@ public enum FutureWidgetSnapshotStore {
         return try JSONEncoder.lifeOS.encode(snapshot)
     }
 
-    public static func decode(_ data: Data, now: Date = .now) -> FutureWidgetSnapshot? {
+    public static func decode(
+        _ data: Data,
+        now: Date = .now,
+        policy: ReadPolicy = .live
+    ) -> FutureWidgetSnapshot? {
         let decoder = JSONDecoder.lifeOS
         decoder.userInfo[.lifeOSNow] = now
-        return try? decoder.decode(FutureWidgetSnapshot.self, from: data)
+        guard let snapshot = try? decoder.decode(FutureWidgetSnapshot.self, from: data),
+              policy.accepts(snapshot) else { return nil }
+        return snapshot
     }
 
     public static func write(_ snapshot: FutureWidgetSnapshot, to target: URL) throws {
@@ -1565,18 +1625,23 @@ public enum FutureWidgetSnapshotStore {
         try write(snapshot, to: target)
     }
 
-    public static func read(from target: URL, now: Date = .now) -> FutureWidgetSnapshot? {
+    public static func read(
+        from target: URL,
+        now: Date = .now,
+        policy: ReadPolicy = .live
+    ) -> FutureWidgetSnapshot? {
         guard let data = try? Data(contentsOf: target) else { return nil }
-        return decode(data, now: now)
+        return decode(data, now: now, policy: policy)
     }
 
     public static func read(
         fileManager: FileManager = .default,
         appGroupIdentifier: String? = AppGroupConfiguration.identifier(),
-        now: Date = .now
+        now: Date = .now,
+        policy: ReadPolicy = .live
     ) -> FutureWidgetSnapshot? {
         guard let target = url(fileManager: fileManager, appGroupIdentifier: appGroupIdentifier) else { return nil }
-        return read(from: target, now: now)
+        return read(from: target, now: now, policy: policy)
     }
 
     public enum StoreError: Error, Equatable, Sendable {

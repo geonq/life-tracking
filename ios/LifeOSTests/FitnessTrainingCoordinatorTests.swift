@@ -17,6 +17,61 @@ final class FitnessTrainingCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.state.templates.first(where: { $0.id == "starter-cardio" })?.activityKind, .cardio)
     }
 
+    func testVisualFixtureCoordinatorUsesTemporaryFilesForBothStores() async throws {
+        let systemFileManager = FileManager.default
+        let personalRoot = systemFileManager.temporaryDirectory
+            .appendingPathComponent("lifeos-personal-sentinel-\(UUID().uuidString)", isDirectory: true)
+        try systemFileManager.createDirectory(at: personalRoot, withIntermediateDirectories: true)
+        defer { try? systemFileManager.removeItem(at: personalRoot) }
+
+        let personalLedgerURL = personalRoot.appendingPathComponent("fitness-training-ledger.json")
+        let personalTemplateURL = personalRoot.appendingPathComponent("fitness-strength-templates.json")
+        let personalSentinel = Data("personal-sentinel".utf8)
+        try personalSentinel.write(to: personalLedgerURL)
+        try personalSentinel.write(to: personalTemplateURL)
+
+        let fileManager = ApplicationSupportSentinelFileManager(sentinelURL: personalRoot)
+        let persistence = FitnessTrainingPersistenceConfiguration.visualFixture(fileManager: fileManager)
+        defer { try? fileManager.removeItem(at: persistence.directoryURL) }
+        XCTAssertTrue(persistence.trainingLedgerURL.path.hasPrefix(fileManager.temporaryDirectory.path))
+        XCTAssertTrue(persistence.strengthTemplateURL.path.hasPrefix(fileManager.temporaryDirectory.path))
+        XCTAssertNotEqual(persistence.trainingLedgerURL, personalLedgerURL)
+        XCTAssertNotEqual(persistence.strengthTemplateURL, personalTemplateURL)
+
+        let clock = FitnessTrainingTestClock(start: Date(timeIntervalSince1970: 1_800_300_000))
+        let coordinator = FitnessTrainingCoordinator(
+            clock: { clock.now() },
+            persistenceConfiguration: persistence
+        )
+        await coordinator.refresh()
+
+        let exercise = try FitnessStrengthExercise(
+            id: "fixture-row",
+            name: "Fixture row",
+            muscleGroup: .back,
+            sets: 3,
+            repetitions: 8,
+            loadKilograms: 40
+        )
+        let template = try FitnessStrengthTemplate(
+            id: "fixture-template",
+            name: "Fixture template",
+            exercises: [exercise],
+            createdAt: clock.now(),
+            updatedAt: clock.now()
+        )
+        XCTAssertTrue(coordinator.saveTemplate(template))
+        let option = try XCTUnwrap(coordinator.state.templates.first(where: { $0.id == template.id }))
+        let receipt = await coordinator.start(template: option)
+        XCTAssertEqual(receipt?.outcome, .saved)
+
+        XCTAssertTrue(fileManager.fileExists(atPath: persistence.trainingLedgerURL.path))
+        XCTAssertTrue(fileManager.fileExists(atPath: persistence.strengthTemplateURL.path))
+        XCTAssertEqual(fileManager.applicationSupportLookupCount, 0)
+        XCTAssertEqual(try Data(contentsOf: personalLedgerURL), personalSentinel)
+        XCTAssertEqual(try Data(contentsOf: personalTemplateURL), personalSentinel)
+    }
+
     func testConcurrentStartRequestsAllowOnlyOneDurableMutation() async {
         let coordinator = makeCoordinator()
         await coordinator.refresh()
@@ -471,5 +526,26 @@ private final class FitnessTrainingPersistenceFaults: @unchecked Sendable {
 
     init(failBeforeReplace: Bool) {
         self.failBeforeReplace = failBeforeReplace
+    }
+}
+
+private final class ApplicationSupportSentinelFileManager: FileManager {
+    private let sentinelURL: URL
+    private(set) var applicationSupportLookupCount = 0
+
+    init(sentinelURL: URL) {
+        self.sentinelURL = sentinelURL
+        super.init()
+    }
+
+    override func urls(
+        for directory: SearchPathDirectory,
+        in domainMask: SearchPathDomainMask
+    ) -> [URL] {
+        guard directory == .applicationSupportDirectory else {
+            return super.urls(for: directory, in: domainMask)
+        }
+        applicationSupportLookupCount += 1
+        return [sentinelURL]
     }
 }

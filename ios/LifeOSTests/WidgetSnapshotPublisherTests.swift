@@ -515,6 +515,117 @@ final class WidgetSnapshotPublisherTests: XCTestCase {
         XCTAssertEqual(readBack?.finance.spendCents, 9_900)
     }
 
+    func testFutureWidgetStoreLivePolicyReadsObservedStaleAndUnavailableSnapshots() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lifeos-future-widget-policy-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let observedAt = now.addingTimeInterval(-60)
+        let observed = FutureWidgetSnapshot(
+            generatedAt: now,
+            privacyMode: .summaryAllowed,
+            finance: WidgetSafeFinanceSummary(
+                connector: .connected,
+                consent: .granted,
+                freshness: .fresh,
+                observedAt: observedAt,
+                spendCents: 4_200
+            )
+        )
+        let stale = FutureWidgetSnapshot(
+            generatedAt: now,
+            privacyMode: .summaryAllowed,
+            finance: WidgetSafeFinanceSummary(
+                connector: .connected,
+                consent: .granted,
+                freshness: .stale,
+                observedAt: now.addingTimeInterval(-(futureWidgetFreshnessWindow + 1)),
+                spendCents: 4_300
+            )
+        )
+        let unavailable = FutureWidgetSnapshot.unavailable(at: now)
+        let summaryUnavailable = FutureWidgetSnapshot(generatedAt: now, privacyMode: .summaryAllowed)
+
+        for (name, snapshot) in [
+            ("observed", observed),
+            ("stale", stale),
+            ("redacted", unavailable),
+            ("unavailable", summaryUnavailable)
+        ] {
+            let target = directory.appendingPathComponent("\(name).json")
+            try FutureWidgetSnapshotStore.write(snapshot, to: target)
+            let loaded = try XCTUnwrap(FutureWidgetSnapshotStore.read(
+                from: target,
+                now: now,
+                policy: .live
+            ))
+            XCTAssertEqual(loaded, snapshot, "live policy must preserve the \(name) state")
+        }
+
+        let loadedStale = try XCTUnwrap(FutureWidgetSnapshotStore.read(
+            from: directory.appendingPathComponent("stale.json"),
+            now: now,
+            policy: .live
+        ))
+        XCTAssertEqual(loadedStale.financeDisplayState(at: now), .stale)
+        XCTAssertEqual(loadedStale.finance.spendCents, 4_300)
+        XCTAssertNil(unavailable.finance.spendCents, "unavailable snapshots must not invent a zero value")
+        XCTAssertEqual(unavailable.privacyMode, .redacted)
+    }
+
+    func testFutureWidgetStoreRejectsPersistedDemoForLiveWidgetsAndAllowsExplicitFixtureRead() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lifeos-future-widget-demo-policy-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let demos = [
+            FutureWidgetSnapshot(
+                generatedAt: now,
+                privacyMode: .summaryAllowed,
+                fitnessWidgets: .demo(at: now)
+            ),
+            FutureWidgetSnapshot(
+                generatedAt: now,
+                privacyMode: .summaryAllowed,
+                nutrition: .demo(at: now)
+            )
+        ]
+        for (index, demo) in demos.enumerated() {
+            XCTAssertTrue(demo.isDemoFixture)
+            let target = directory.appendingPathComponent("demo-\(index).json")
+            try FutureWidgetSnapshotStore.write(demo, to: target)
+            let bytesBeforeRead = try Data(contentsOf: target)
+
+            XCTAssertNil(FutureWidgetSnapshotStore.read(from: target, now: now, policy: .live))
+            XCTAssertNil(FutureWidgetSnapshotStore.read(from: target, now: now))
+            XCTAssertNil(FutureWidgetSnapshotStore.decode(bytesBeforeRead, now: now, policy: .live))
+            XCTAssertEqual(
+                FutureWidgetSnapshotStore.read(from: target, now: now, policy: .visualFixture),
+                demo
+            )
+            XCTAssertEqual(
+                FutureWidgetSnapshotStore.decode(bytesBeforeRead, now: now, policy: .visualFixture),
+                demo
+            )
+            let bytesAfterRead = try Data(contentsOf: target)
+            XCTAssertEqual(bytesAfterRead, bytesBeforeRead, "a rejected read must not rewrite the snapshot")
+        }
+        XCTAssertEqual(
+            FutureWidgetSnapshotStore.readPolicy(arguments: ["widget", "-LifeOSVisualFixtures"], environment: [:]),
+            .visualFixture
+        )
+        XCTAssertEqual(
+            FutureWidgetSnapshotStore.readPolicy(arguments: ["widget"], environment: ["LIFEOS_VISUAL_FIXTURES": "1"]),
+            .visualFixture
+        )
+        XCTAssertEqual(
+            FutureWidgetSnapshotStore.readPolicy(arguments: ["widget"], environment: [:]),
+            .live
+        )
+    }
+
     // MARK: - Reload coalescing
 
     /// Thread-safe counter/recorder used by the coalescing tests below.

@@ -143,8 +143,15 @@ final class HealthKitFitnessRepositoryTests: XCTestCase {
 
         let canceled = Task { @MainActor in await repository.refresh() }
         await waitUntil { await gate.count == 1 }
-        let survivor = Task { @MainActor in await repository.refresh() }
-        for _ in 0..<20 { await Task.yield() }
+        var survivorEnteredMainActor = false
+        let survivor = Task { @MainActor in
+            survivorEnteredMainActor = true
+            return await repository.refresh()
+        }
+        // The flag is set in the same MainActor turn that enters refresh().
+        // Observing it therefore proves that the survivor has installed its
+        // waiter before cancellation is allowed to retire the shared task.
+        await waitUntil { survivorEnteredMainActor }
 
         canceled.cancel()
         for _ in 0..<20 { await Task.yield() }
@@ -155,7 +162,7 @@ final class HealthKitFitnessRepositoryTests: XCTestCase {
 
         await gate.resume(
             position: 0,
-            states: [storedState(metric: .bodyMass, syncState: .synced)]
+            states: [observedState(metric: .bodyMass)]
         )
         let survivorProjection = await survivor.value
         XCTAssertEqual(survivorProjection?.metric(.bodyMass).state, .observed)
@@ -189,6 +196,35 @@ final class HealthKitFitnessRepositoryTests: XCTestCase {
             metric: metric,
             lastCommittedAt: now,
             syncState: syncState
+        )
+        return HealthKitStoredMetricState(projection: projection)
+    }
+
+    private func observedState(metric: HealthKitMetricID) -> HealthKitStoredMetricState {
+        let source = try! HealthKitSourceMetadata(bundleIdentifier: "com.example.health", name: "Health")
+        let provenance = try! HealthKitProvenance.from(
+            source: source,
+            device: try! HealthKitDeviceMetadata(),
+            registry: .canonical
+        )
+        let observation = try! HealthKitObservation(
+            metric: metric,
+            identity: HealthKitSampleIdentity(uuid: UUID()),
+            value: .quantity(try! HealthKitQuantityValue(
+                metric: metric,
+                value: 72,
+                unit: metric.canonicalUnit!
+            )),
+            startDate: now,
+            endDate: now,
+            provenance: provenance,
+            now: now
+        )
+        let projection = try! HealthKitMetricProjection(
+            metric: metric,
+            observations: [observation],
+            lastCommittedAt: now,
+            syncState: .synced
         )
         return HealthKitStoredMetricState(projection: projection)
     }

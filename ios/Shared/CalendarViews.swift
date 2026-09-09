@@ -172,8 +172,12 @@ private struct CalendarTimelineHourLabels: View {
                         ))
                         .lifeOSTypography(.metadata).monospacedDigit()
                         .foregroundStyle(.secondary)
+#if os(macOS)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+#endif
                         .frame(maxWidth: .infinity, alignment: .topTrailing)
-                        .padding(.trailing, 8)
+                        .padding(.trailing, CGFloat(CalendarInteractionLayout.timelineTimeLabelTrailingInset))
                         .offset(y: y)
                         .id(minute / 60)
                         .accessibilityIdentifier(minute == dayMinutes ? "calendar-timeline-end" : "")
@@ -672,7 +676,11 @@ public struct CalendarTimelineView: View {
     @GestureState private var macMagnifyGestureActive = false
 #endif
 
+#if os(macOS)
+    private let timeGutter: CGFloat = CGFloat(CalendarInteractionLayout.macTimelineTimeGutter)
+#else
     private let timeGutter: CGFloat = CGFloat(CalendarInteractionLayout.timelineTimeGutter)
+#endif
 #if os(macOS)
     private let minimumDayWidth: CGFloat = 112
 #else

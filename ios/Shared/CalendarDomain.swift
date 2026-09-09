@@ -66,6 +66,7 @@ public enum CalendarItemKind: String, Codable, CaseIterable, Sendable {
 
 public enum CalendarValidationError: Error, Equatable, Sendable {
     case blankTitle
+    case titleTooLong
     case invalidInterval
     case invalidIconAsset
 }
@@ -374,6 +375,7 @@ public enum CalendarSystemIconSupport {
 }
 
 public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
+    public static let maximumTitleUTF8Bytes = 240
     public let id: UUID
     public var title: String
     public var kind: CalendarItemKind
@@ -404,9 +406,11 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
                 systemIconName: String? = nil, status: CalendarProgress = .planned,
                 start: Date, end: Date, createdAt: Date = .now, updatedAt: Date? = nil, deletedAt: Date? = nil,
                 timeZoneIdentifier: String? = nil, recurrence: CalendarRecurrenceRule? = nil) throws {
-        guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw CalendarValidationError.blankTitle }
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty else { throw CalendarValidationError.blankTitle }
+        guard trimmedTitle.utf8.count <= Self.maximumTitleUTF8Bytes else { throw CalendarValidationError.titleTooLong }
         guard end > start else { throw CalendarValidationError.invalidInterval }
-        self.id = id; self.title = title.trimmingCharacters(in: .whitespacesAndNewlines); self.kind = kind
+        self.id = id; self.title = trimmedTitle; self.kind = kind
         let validatedSystemIconName = CalendarSystemIconSupport.validatedName(systemIconName)
         self.systemIconName = validatedSystemIconName
         // A payload can come from a newer peer with more than one source. Keep
@@ -680,5 +684,151 @@ public struct CalendarSnapshot: Codable, Equatable, Sendable {
             if Self.prefers(candidate, over: current) { byID[candidate.id] = candidate }
         }
         return CalendarSnapshot(items: Array(byID.values))
+    }
+}
+
+/// The result of validating an untrusted snapshot before it enters the local
+/// store or is published to another peer. Invalid records are quarantined from
+/// this merge; valid independent records can still make progress.
+public struct CalendarRemoteMergeReport: Equatable, Sendable {
+    public let snapshot: CalendarSnapshot
+    public let rejectedItemCount: Int
+    public let acceptedDeletionCount: Int
+    public let rejectedDeletionCount: Int
+    public let rejectedEnvelope: Bool
+
+    public var warning: String? {
+        var parts: [String] = []
+        if rejectedEnvelope {
+            parts.append("rejected a remote calendar payload with an invalid timestamp")
+        }
+        if rejectedDeletionCount > 0 {
+            parts.append("rejected \(rejectedDeletionCount) remote deletion(s) and preserved local records")
+        }
+        let rejectedNonDeletionCount = rejectedItemCount - rejectedDeletionCount
+        if rejectedNonDeletionCount > 0 {
+            parts.append("ignored \(rejectedNonDeletionCount) remote change(s) with invalid timestamps or identity")
+        }
+        if acceptedDeletionCount > 0 {
+            parts.append("accepted \(acceptedDeletionCount) remote deletion(s)")
+        }
+        guard !parts.isEmpty else { return nil }
+        return "Calendar sync \(parts.joined(separator: "; "))."
+    }
+}
+
+/// The calendar store's ISO-8601 encoder emits dates at whole-second
+/// precision. Remote identity checks must use the same boundary so a
+/// legitimate edit written by a peer is not rejected solely because the
+/// in-memory local item still carries sub-second precision.
+public enum CalendarTransportDate {
+    public static func canonicalized(_ date: Date) -> Date {
+        let seconds = date.timeIntervalSince1970
+        guard seconds.isFinite else { return date }
+        return Date(timeIntervalSince1970: seconds.rounded(.down))
+    }
+}
+
+/// Trust policy for snapshots arriving from the server or a paired device.
+/// CalendarItem's normal LWW merge remains useful for local data; remote data
+/// must pass this boundary first because its clocks and tombstones are not
+/// authoritative merely because the transport was authenticated.
+public enum CalendarRemoteMergePolicy {
+    public static let maximumClockSkew: TimeInterval = 5 * 60
+
+    public static func sanitize(
+        _ remote: CalendarSnapshot,
+        against local: CalendarSnapshot,
+        now: Date = .now,
+        sentAt: Date? = nil
+    ) -> CalendarRemoteMergeReport {
+        guard acceptableTimestamp(now, now: now),
+              sentAt.map({ acceptableTimestamp($0, now: now) }) ?? true else {
+            return CalendarRemoteMergeReport(
+                snapshot: CalendarSnapshot(),
+                rejectedItemCount: remote.items.count,
+                acceptedDeletionCount: 0,
+                rejectedDeletionCount: remote.items.reduce(into: 0) { count, item in
+                    if item.deletedAt != nil { count += 1 }
+                },
+                rejectedEnvelope: true
+            )
+        }
+
+        var localByID: [UUID: CalendarItem] = [:]
+        localByID.reserveCapacity(local.items.count)
+        for item in local.items {
+            localByID[item.id] = item
+        }
+
+        var accepted: [CalendarItem] = []
+        accepted.reserveCapacity(remote.items.count)
+        var rejectedItemCount = 0
+        var acceptedDeletionCount = 0
+        var rejectedDeletionCount = 0
+
+        for candidate in remote.items {
+            let isDeletion = candidate.deletedAt != nil
+            guard validTimestampedItem(candidate, now: now) else {
+                rejectedItemCount += 1
+                if isDeletion { rejectedDeletionCount += 1 }
+                continue
+            }
+
+            if let current = localByID[candidate.id],
+               CalendarTransportDate.canonicalized(candidate.createdAt)
+                != CalendarTransportDate.canonicalized(current.createdAt) {
+                rejectedItemCount += 1
+                if isDeletion { rejectedDeletionCount += 1 }
+                continue
+            }
+
+            if let deletedAt = candidate.deletedAt,
+               let current = localByID[candidate.id] {
+                // An identical tombstone is an idempotent replay. A different
+                // same-generation tombstone must be strictly newer than the
+                // local version and its deletion event must follow that version.
+                if candidate == current { continue }
+                guard candidate.updatedAt > current.updatedAt,
+                      deletedAt >= current.updatedAt else {
+                    rejectedItemCount += 1
+                    rejectedDeletionCount += 1
+                    continue
+                }
+                acceptedDeletionCount += 1
+            } else if isDeletion {
+                // Keep an unseen tombstone so a device that missed the create
+                // event does not resurrect it later. It cannot erase anything
+                // locally because there is no matching local identity.
+                acceptedDeletionCount += 1
+            }
+
+            accepted.append(candidate)
+        }
+
+        return CalendarRemoteMergeReport(
+            snapshot: CalendarSnapshot(items: accepted),
+            rejectedItemCount: rejectedItemCount,
+            acceptedDeletionCount: acceptedDeletionCount,
+            rejectedDeletionCount: rejectedDeletionCount,
+            rejectedEnvelope: false
+        )
+    }
+
+    private static func validTimestampedItem(_ item: CalendarItem, now: Date) -> Bool {
+        acceptableTimestamp(item.createdAt, now: now)
+            && acceptableTimestamp(item.updatedAt, now: now)
+            && item.createdAt <= item.updatedAt
+            && (item.deletedAt.map {
+                acceptableTimestamp($0, now: now)
+                    && $0 >= item.createdAt
+                    && $0 <= item.updatedAt
+            } ?? true)
+    }
+
+    private static func acceptableTimestamp(_ date: Date, now: Date) -> Bool {
+        guard date.timeIntervalSinceReferenceDate.isFinite,
+              now.timeIntervalSinceReferenceDate.isFinite else { return false }
+        return date <= now.addingTimeInterval(Self.maximumClockSkew)
     }
 }

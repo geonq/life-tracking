@@ -228,6 +228,7 @@ public actor TailscaleSyncClient {
     static let approvedHostsInfoPlistKey = "LIFEOS_SYNC_APPROVED_HOSTS"
 
     private let session: URLSession
+    private let financeSession: URLSession
     private let defaults: UserDefaults
     private let approvedHosts: Set<String>
     private var webSocketTask: URLSessionWebSocketTask?
@@ -237,6 +238,8 @@ public actor TailscaleSyncClient {
 
     private static let backoffSteps: [UInt64] = [2, 5, 15, 30] // seconds, capped
     private static let maximumReadOnlyResponseBytes = 1_048_576
+    static let maximumFitnessObservationRequestBytes = FitnessObservationEnvelope.maximumEncodedBytes
+    static let maximumFitnessObservationResponseBytes = FitnessObservationEnvelope.maximumEncodedBytes
     static let maximumCalendarResourceBytes = 256 * 1024
     static let maximumFinanceImportedRequestBytes = 512 * 1024
     static let maximumFinanceImportedResponseBytes = 4 * 1024 * 1024
@@ -244,6 +247,10 @@ public actor TailscaleSyncClient {
     static let maximumNutritionPhotoRequestBytes = 30 * 1024 * 1024
     static let maximumNutritionPhotoResponseBytes = 1 * 1024 * 1024
     static let calendarTimeout: TimeInterval = 8
+    /// The Python gateway shields one Enable Banking refresh for up to 60
+    /// seconds. Keep the general UI transport responsive while giving this
+    /// one live finance route a small, explicit completion margin.
+    static let financeSummaryTimeout: TimeInterval = 70
 
     private static func recordNetworkTaskCreated() {
 #if DEBUG
@@ -251,20 +258,25 @@ public actor TailscaleSyncClient {
 #endif
     }
 
-    public init(
-        defaults: UserDefaults = .standard
-    ) {
+    private static func makeSession(timeout: TimeInterval) -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.urlCache = nil
         configuration.httpCookieStorage = nil
         configuration.httpShouldSetCookies = false
-        configuration.timeoutIntervalForRequest = Self.calendarTimeout
-        configuration.timeoutIntervalForResource = Self.calendarTimeout
+        configuration.timeoutIntervalForRequest = timeout
+        configuration.timeoutIntervalForResource = timeout
         configuration.waitsForConnectivity = false
-        self.session = URLSession(configuration: configuration,
-                                  delegate: StrictSyncSessionDelegate(),
-                                  delegateQueue: nil)
+        return URLSession(configuration: configuration,
+                          delegate: StrictSyncSessionDelegate(),
+                          delegateQueue: nil)
+    }
+
+    public init(
+        defaults: UserDefaults = .standard
+    ) {
+        self.session = Self.makeSession(timeout: Self.calendarTimeout)
+        self.financeSession = Self.makeSession(timeout: Self.financeSummaryTimeout)
         self.defaults = defaults
         self.approvedHosts = Self.configuredApprovedHosts()
     }
@@ -275,6 +287,7 @@ public actor TailscaleSyncClient {
     /// Tailscale transport or widen the approved-host boundary.
     init(session: URLSession, defaults: UserDefaults = .standard, approvedHosts: Set<String>) {
         self.session = session
+        self.financeSession = session
         self.defaults = defaults
         self.approvedHosts = Set(approvedHosts.map { $0.lowercased() })
     }
@@ -517,6 +530,15 @@ public actor TailscaleSyncClient {
         return request
     }
 
+    nonisolated static func fitnessObservationRequest(url: URL, body: Data) -> URLRequest? {
+        guard body.count <= maximumFitnessObservationRequestBytes else { return nil }
+        var request = Self.gatewayRequest(url: url)
+        request.httpMethod = "POST"
+        request.httpBody = body
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        return request
+    }
+
     nonisolated static func contentLengthIsAllowed(_ rawValue: String?, maximumBytes: Int) -> Bool {
         guard let rawValue else { return true }
         guard let count = Int(rawValue), count >= 0 else { return false }
@@ -573,6 +595,9 @@ public actor TailscaleSyncClient {
         guard let etag = validatedCalendarETag(response.value(forHTTPHeaderField: "ETag")) else {
             throw response.value(forHTTPHeaderField: "ETag") == nil ? CalendarSyncError.missingETag : CalendarSyncError.malformedETag
         }
+        guard isJSONContentType(response.value(forHTTPHeaderField: "Content-Type")) else {
+            throw TailscaleSyncError.invalidResponse
+        }
         guard isCalendarJSON(data) else { throw TailscaleSyncError.invalidResponse }
         return CalendarRemoteResource(data: data, etag: etag)
     }
@@ -587,6 +612,9 @@ public actor TailscaleSyncClient {
             guard let etag = validatedCalendarETag(rawETag) else {
                 throw rawETag == nil ? CalendarSyncError.missingETag : CalendarSyncError.malformedETag
             }
+            guard isJSONContentType(response.value(forHTTPHeaderField: "Content-Type")) else {
+                throw TailscaleSyncError.invalidResponse
+            }
             guard isCalendarJSON(data) else { throw TailscaleSyncError.invalidResponse }
             throw CalendarSyncError.calendarConflict(data: data, etag: etag)
         }
@@ -596,6 +624,9 @@ public actor TailscaleSyncClient {
         let rawETag = response.value(forHTTPHeaderField: "ETag")
         guard let etag = validatedCalendarETag(rawETag) else {
             throw rawETag == nil ? CalendarSyncError.missingETag : CalendarSyncError.malformedETag
+        }
+        guard isJSONContentType(response.value(forHTTPHeaderField: "Content-Type")) else {
+            throw TailscaleSyncError.invalidResponse
         }
         guard isCalendarJSON(data) else { throw TailscaleSyncError.invalidResponse }
         return CalendarRemoteResource(data: data, etag: etag)
@@ -625,17 +656,51 @@ public actor TailscaleSyncClient {
     // MARK: - Tax documents (bonus; mechanical GET/POST parity with calendar)
 
     public func fetchDocuments() async throws -> Data {
-        let url = try baseURL().appendingPathComponent("documents")
-        Self.recordNetworkTaskCreated()
-        let (data, response) = try await session.data(for: request(url: url))
-        try Self.checkHTTPStatus(response)
-        return data
+        try await fetchBoundedReadOnly(pathComponents: ["documents"])
     }
 
     // MARK: - Read-only provider usage
 
     public func fetchUsage() async throws -> Data {
         try await fetchBoundedReadOnly(pathComponents: ["usage"])
+    }
+
+    /// Reads the latest source-backed iPhone HealthKit summary. A missing or
+    /// rejected route is intentionally surfaced as an error so the macOS
+    /// caller can render its truthful unavailable state.
+    public func fetchFitnessObservation() async throws -> FitnessObservationEnvelope {
+        let data = try await fetchBoundedReadOnly(
+            pathComponents: ["fitness", "observation"],
+            maximumBytes: Self.maximumFitnessObservationResponseBytes
+        )
+        do {
+            return try FitnessObservationEnvelope.decode(data)
+        } catch {
+            throw TailscaleSyncError.invalidResponse
+        }
+    }
+
+    /// Publishes only a validated HealthKit summary. The gateway remains the
+    /// authenticated durable authority; this client sends no identity header.
+    public func publishFitnessObservation(_ observation: FitnessObservationEnvelope) async throws {
+        let body: Data
+        do {
+            body = try observation.encoded()
+        } catch FitnessObservationContractError.oversized {
+            throw TailscaleSyncError.requestTooLarge
+        } catch {
+            throw TailscaleSyncError.invalidResponse
+        }
+        let url = try baseURL().appendingPathComponent("fitness").appendingPathComponent("observation")
+        guard let request = Self.fitnessObservationRequest(url: url, body: body) else {
+            throw TailscaleSyncError.requestTooLarge
+        }
+        let (_, response) = try await Self.performBoundedMutating(
+            session: session,
+            request: request,
+            maximumBytes: Self.maximumFitnessObservationResponseBytes
+        )
+        try Self.checkHTTPStatus(response)
     }
 
     /// Performs one bounded, read-only request through the same
@@ -777,7 +842,12 @@ public actor TailscaleSyncClient {
     /// directly owns `/finance/summary` and normalizes the provider response;
     /// the phone never talks to the provider or receives bank credentials.
     public func fetchFinanceSummary() async throws -> FinanceSummary {
-        let data = try await fetchBoundedReadOnly(pathComponents: ["finance", "summary"])
+        let url = try baseURL().appendingPathComponent("finance").appendingPathComponent("summary")
+        let data = try await Self.performBoundedReadOnly(
+            session: financeSession,
+            request: request(url: url),
+            maximumBytes: Self.maximumReadOnlyResponseBytes
+        )
         return try FinanceSummary.decode(data)
     }
 
@@ -791,6 +861,22 @@ public actor TailscaleSyncClient {
         let url = try baseURL().appendingPathComponent("finance").appendingPathComponent("imported")
         let (data, response) = try await financeImportedRequest(request(url: url))
         return try Self.parseFinanceImportedResponse(data: data, response: response)
+    }
+
+    /// Resolves whether the gateway durably committed one exact imported-ledger
+    /// idempotency key. This endpoint is used after a timeout or relaunch,
+    /// before a local delete is allowed to advance its source precondition.
+    public func fetchFinanceImportedReceipt(_ idempotencyKey: String) async throws -> FinanceImportedCommitReceipt {
+        guard Self.validatedFinanceImportedIdempotencyKey(idempotencyKey) != nil else {
+            throw FinanceImportedSyncError.invalidIdempotencyKey
+        }
+        let url = try baseURL()
+            .appendingPathComponent("finance")
+            .appendingPathComponent("imported")
+            .appendingPathComponent("receipt")
+            .appendingPathComponent(idempotencyKey)
+        let (data, response) = try await financeImportedRequest(request(url: url))
+        return try Self.parseFinanceImportedReceiptResponse(data: data, response: response)
     }
 
     /// Conditionally applies one bounded local outbox entry. The gateway
@@ -908,6 +994,28 @@ public actor TailscaleSyncClient {
         )
     }
 
+    nonisolated static func parseFinanceImportedReceiptResponse(
+        data: Data,
+        response: HTTPURLResponse
+    ) throws -> FinanceImportedCommitReceipt {
+        guard data.count <= maximumReadOnlyResponseBytes else {
+            throw FinanceImportedSyncError.responseTooLarge
+        }
+        guard response.value(forHTTPHeaderField: "Content-Type")?.lowercased() == "application/json" else {
+            throw FinanceImportedSyncError.invalidContentType
+        }
+        guard (200...299).contains(response.statusCode) else {
+            throw FinanceImportedSyncError.httpError(response.statusCode)
+        }
+        do {
+            return try JSONDecoder.lifeOS.decode(FinanceImportedCommitReceipt.self, from: data)
+        } catch let error as FinanceImportedSyncError {
+            throw error
+        } catch {
+            throw FinanceImportedSyncError.invalidResponse
+        }
+    }
+
     private static func financeImportedETagDigest(_ rawValue: String) -> String? {
         guard let rawValue = validatedFinanceImportedETag(rawValue) else { return nil }
         let inner = String(rawValue.dropFirst().dropLast())
@@ -919,7 +1027,7 @@ public actor TailscaleSyncClient {
 
     private func financeImportedRequest(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         try await Self.performBoundedMutating(
-            session: session,
+            session: financeSession,
             request: request,
             maximumBytes: Self.maximumFinanceImportedResponseBytes
         )
@@ -1047,16 +1155,22 @@ public actor TailscaleSyncClient {
         return try ClipperSnapshot.decode(data)
     }
 
-    private func fetchBoundedReadOnly(pathComponents: [String]) async throws -> Data {
+    private func fetchBoundedReadOnly(
+        pathComponents: [String],
+        maximumBytes: Int = TailscaleSyncClient.maximumReadOnlyResponseBytes
+    ) async throws -> Data {
         let url = try pathComponents.reduce(baseURL()) { partial, component in
             partial.appendingPathComponent(component)
         }
-        return try await fetchBoundedReadOnly(url: url)
+        return try await fetchBoundedReadOnly(url: url, maximumBytes: maximumBytes)
     }
 
-    private func fetchBoundedReadOnly(url: URL) async throws -> Data {
+    private func fetchBoundedReadOnly(
+        url: URL,
+        maximumBytes: Int = TailscaleSyncClient.maximumReadOnlyResponseBytes
+    ) async throws -> Data {
         return try await Self.performBoundedReadOnly(session: session, request: request(url: url),
-                                                     maximumBytes: Self.maximumReadOnlyResponseBytes)
+                                                     maximumBytes: maximumBytes)
     }
 
     nonisolated private static func performBoundedReadOnly(
@@ -1073,6 +1187,9 @@ public actor TailscaleSyncClient {
         }
         guard let http = response as? HTTPURLResponse else { throw TailscaleSyncError.invalidResponse }
         try Self.checkHTTPStatus(http)
+        guard Self.isJSONContentType(http.value(forHTTPHeaderField: "Content-Type")) else {
+            throw TailscaleSyncError.invalidResponse
+        }
         let declaredLength = http.value(forHTTPHeaderField: "Content-Length")
         guard Self.contentLengthIsAllowed(declaredLength, maximumBytes: maximumBytes) else {
             throw TailscaleSyncError.responseTooLarge
@@ -1091,6 +1208,13 @@ public actor TailscaleSyncClient {
             data.append(byte)
         }
         return data
+    }
+
+    nonisolated static func isJSONContentType(_ rawValue: String?) -> Bool {
+        guard let rawValue,
+              let mediaType = rawValue.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false).first
+        else { return false }
+        return String(mediaType).trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "application/json"
     }
 
     // MARK: - Change stream

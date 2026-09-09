@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 @testable import LifeOS
 
@@ -457,6 +458,73 @@ final class UsageHistoryTests: XCTestCase {
         XCTAssertEqual(second.1, 1)
     }
 
+    @available(iOS 17.0, macOS 14.0, *)
+    func testVisualFixtureUsageIsOfflineAndLeavesProductionStoresUntouched() async throws {
+        let suiteName = "UsageFixtureIsolationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let productionHistory = UserDefaultsUsageHistoryPersistence(defaults: defaults)
+        let historySentinel = Data("production-usage-history-sentinel".utf8)
+        try productionHistory.save(historySentinel)
+
+        let widgetURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LifeOS", isDirectory: true)
+            .appendingPathComponent("UsageFixtureWidgetSentinels", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            .appendingPathComponent("widget-snapshot.json")
+        try FileManager.default.createDirectory(
+            at: widgetURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let widgetSentinel = Data("production-widget-snapshot-sentinel".utf8)
+        try widgetSentinel.write(to: widgetURL, options: .atomic)
+
+        let recorder = UsageFixtureDependencyRecorder()
+        let snapshotPersistence = UsageFixtureSnapshotPersistence(
+            fileURL: widgetURL,
+            recorder: recorder
+        )
+
+        // Both app hosts use this same fixture factory. The injected transport
+        // is intentionally hostile: any call would prove that a fixture
+        // refresh escaped its offline gate.
+        for host in ["iOS", "macOS"] {
+            let coordinator = await MainActor.run {
+                UsageCoordinator.visualFixture(
+                    fetch: {
+                        recorder.recordFetch()
+                        throw UsageFixtureTestError.unexpectedNetwork
+                    },
+                    snapshotPersistence: snapshotPersistence,
+                    reloadWidgets: { recorder.recordReload() }
+                )
+            }
+
+            let initial = await MainActor.run {
+                (coordinator.historyStatus, coordinator.historyErrorMessage)
+            }
+            XCTAssertEqual(initial.0, .empty, "\(host) fixture must not load the production history key")
+            XCTAssertNil(initial.1, "\(host) fixture must start with an empty isolated history")
+
+            await coordinator.refresh()
+
+            let afterRefresh = await MainActor.run {
+                (coordinator.state, coordinator.historyStatus, coordinator.historyErrorMessage)
+            }
+            XCTAssertEqual(afterRefresh.0, .unavailable)
+            XCTAssertEqual(afterRefresh.1, .empty)
+            XCTAssertNil(afterRefresh.2)
+        }
+
+        XCTAssertEqual(try productionHistory.load(), historySentinel)
+        XCTAssertEqual(try Data(contentsOf: widgetURL), widgetSentinel)
+        XCTAssertEqual(recorder.fetchCalls, 0, "fixture refresh must never create a live network call")
+        XCTAssertEqual(recorder.snapshotReads, 0, "fixture initialization must not read the App Group snapshot")
+        XCTAssertEqual(recorder.snapshotWrites, 0, "fixture refresh must never publish a widget snapshot")
+        XCTAssertEqual(recorder.reloadCalls, 0, "fixture refresh must never request widget reload")
+    }
+
     private func entry(at date: Date, usedPercent: Double) -> UsageHistoryEntry {
         UsageHistoryEntry(
             provider: .codex,
@@ -476,4 +544,60 @@ private final class InMemoryUsageHistoryPersistence: UsageHistoryPersistence {
 
     func load() throws -> Data? { data }
     func save(_ data: Data) throws { self.data = data }
+}
+
+private enum UsageFixtureTestError: Error {
+    case unexpectedNetwork
+}
+
+private final class UsageFixtureDependencyRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private(set) var fetchCalls = 0
+    private(set) var snapshotReads = 0
+    private(set) var snapshotWrites = 0
+    private(set) var reloadCalls = 0
+
+    func recordFetch() {
+        lock.lock()
+        fetchCalls += 1
+        lock.unlock()
+    }
+
+    func recordSnapshotRead() {
+        lock.lock()
+        snapshotReads += 1
+        lock.unlock()
+    }
+
+    func recordSnapshotWrite() {
+        lock.lock()
+        snapshotWrites += 1
+        lock.unlock()
+    }
+
+    func recordReload() {
+        lock.lock()
+        reloadCalls += 1
+        lock.unlock()
+    }
+}
+
+private final class UsageFixtureSnapshotPersistence: UsageWidgetSnapshotPersistence, @unchecked Sendable {
+    private let fileURL: URL
+    private let recorder: UsageFixtureDependencyRecorder
+
+    init(fileURL: URL, recorder: UsageFixtureDependencyRecorder) {
+        self.fileURL = fileURL
+        self.recorder = recorder
+    }
+
+    func readLive() -> WidgetSnapshot? {
+        recorder.recordSnapshotRead()
+        return nil
+    }
+
+    func write(_ snapshot: WidgetSnapshot) throws {
+        recorder.recordSnapshotWrite()
+        try Data("unexpected-widget-publication".utf8).write(to: fileURL, options: .atomic)
+    }
 }

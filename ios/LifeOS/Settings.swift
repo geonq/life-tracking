@@ -1015,6 +1015,45 @@ enum SettingsFixturePolicy {
     }
 }
 
+typealias SyncStorageConnectionChecker = @MainActor () async -> TailscaleConnectionPreflightState?
+
+/// Dependencies for the Sync & Storage route are selected before its content
+/// is built. Fixture mode owns no production client or defaults-backed state,
+/// and the guard remains inside the async boundary for programmatic callers.
+struct SyncStorageSettingsConfiguration {
+    let usesVisualFixtures: Bool
+    let approvedHosts: Set<String>
+    let connectionChecker: SyncStorageConnectionChecker?
+
+    var allowsConnectionPreflight: Bool {
+        !usesVisualFixtures && connectionChecker != nil
+    }
+
+    @MainActor
+    func checkConnection() async -> TailscaleConnectionPreflightState? {
+        guard !usesVisualFixtures, let connectionChecker else { return nil }
+        return await connectionChecker()
+    }
+
+    static func production(client: TailscaleSyncClient) -> Self {
+        Self(
+            usesVisualFixtures: false,
+            approvedHosts: TailscaleSyncClient.configuredApprovedHosts(),
+            connectionChecker: { await client.checkConnection() }
+        )
+    }
+
+    static func visualFixture(
+        connectionChecker: SyncStorageConnectionChecker? = nil
+    ) -> Self {
+        Self(
+            usesVisualFixtures: true,
+            approvedHosts: [],
+            connectionChecker: connectionChecker
+        )
+    }
+}
+
 /// A configured route is not the same thing as a verified runtime path. Keep
 /// the status copy tied to the latest read-only preflight, if one exists.
 enum SyncGatewayRuntimePresentation {
@@ -1279,7 +1318,7 @@ struct SettingsView: View {
                         .accessibilityIdentifier("settings-category-health")
 
                         NavigationLink {
-                            SyncStorageSettingsView()
+                            SyncStorageSettingsView(usesVisualFixtures: usesVisualFixtures)
                         } label: {
                             SettingsHubCard(category: categories[4])
                         }
@@ -2421,7 +2460,7 @@ private struct FinanceConnectionsSettingsView: View {
                 )
 
                 NavigationLink {
-                    SyncStorageSettingsView()
+                    SyncStorageSettingsView(usesVisualFixtures: usesVisualFixtures)
                 } label: {
                     HStack(spacing: 8) {
                         LifeOSIcon(.security).frame(width: 16, height: 16)
@@ -2946,20 +2985,84 @@ private struct HealthDevicesSettingsView: View {
     }
 }
 
-private struct SyncStorageSettingsView: View {
+struct SyncStorageSettingsView: View {
+    private let usesVisualFixtures: Bool
+
+    init(usesVisualFixtures: Bool = false) {
+        self.usesVisualFixtures = usesVisualFixtures
+    }
+
+    var body: some View {
+        if usesVisualFixtures {
+            SyncStorageSettingsFixtureView()
+        } else {
+            SyncStorageSettingsProductionView()
+        }
+    }
+}
+
+private struct SyncStorageSettingsFixtureView: View {
+    var body: some View {
+        SyncStorageSettingsContent(
+            syncServerURL: .constant(""),
+            lastSyncTimestamp: 0,
+            configuration: .visualFixture(),
+            nearbyDiscoveryEnabled: .constant(false)
+        )
+    }
+}
+
+private struct SyncStorageSettingsProductionView: View {
     private let syncClient = TailscaleSyncClient()
     @AppStorage(TailscaleSyncClient.serverURLDefaultsKey)
     private var syncServerURL = TailscaleSyncClient.configuredDefaultServerURL()
     @AppStorage("LifeOS.Sync.LastSuccess") private var lastSyncTimestamp: Double = 0
+    @AppStorage(CalendarNearbyDiscoveryPolicy.defaultsKey)
+    private var nearbyDiscoveryEnabled = false
+
+    var body: some View {
+        SyncStorageSettingsContent(
+            syncServerURL: $syncServerURL,
+            lastSyncTimestamp: lastSyncTimestamp,
+            configuration: .production(client: syncClient),
+            nearbyDiscoveryEnabled: $nearbyDiscoveryEnabled
+        )
+        .onAppear {
+            let fallback = TailscaleSyncClient.configuredDefaultServerURL()
+            if syncServerURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               !fallback.isEmpty {
+                syncServerURL = fallback
+            }
+        }
+    }
+}
+
+private struct SyncStorageSettingsContent: View {
+    @Binding private var syncServerURL: String
+    @Binding private var nearbyDiscoveryEnabled: Bool
+    private let lastSyncTimestamp: Double
+    private let configuration: SyncStorageSettingsConfiguration
     @State private var connectionPreflight: TailscaleConnectionPreflightState?
     @State private var isCheckingConnection = false
     @State private var connectionPreflightTask: Task<Void, Never>?
     @State private var connectionPreflightGeneration = 0
 
+    init(
+        syncServerURL: Binding<String>,
+        lastSyncTimestamp: Double,
+        configuration: SyncStorageSettingsConfiguration,
+        nearbyDiscoveryEnabled: Binding<Bool>
+    ) {
+        self._syncServerURL = syncServerURL
+        self._nearbyDiscoveryEnabled = nearbyDiscoveryEnabled
+        self.lastSyncTimestamp = lastSyncTimestamp
+        self.configuration = configuration
+    }
+
     private var localReadiness: SyncSettingsReadiness {
         SyncSettingsReadiness.resolve(
             serverURL: syncServerURL,
-            approvedHosts: TailscaleSyncClient.configuredApprovedHosts()
+            approvedHosts: configuration.approvedHosts
         )
     }
 
@@ -2973,20 +3076,31 @@ private struct SyncStorageSettingsView: View {
 
                 SettingsSection(title: "Tailscale sync", icon: .security) {
                     VStack(alignment: .leading, spacing: 8) {
-                        SecureField("Replace saved server URL", text: $syncServerURL)
-                            .textFieldStyle(.roundedBorder)
+                        if configuration.usesVisualFixtures {
+                            Text("Fixture preview")
+                                .lifeOSTypography(.body, weight: .semibold)
+                                .foregroundStyle(LifeOSTokens.accent)
+                                .accessibilityIdentifier("settings-sync-fixture-preview")
+                            Text("Saved server settings are not loaded or edited here. Secure connection checks are disabled for this preview.")
+                                .lifeOSTypography(.body)
+                                .foregroundStyle(LifeOSTokens.tertiaryText)
+                                .fixedSize(horizontal: false, vertical: true)
+                        } else {
+                            SecureField("Replace saved server URL", text: $syncServerURL)
+                                .textFieldStyle(.roundedBorder)
 #if os(iOS)
-                            .textInputAutocapitalization(.never)
-                            .keyboardType(.URL)
+                                .textInputAutocapitalization(.never)
+                                .keyboardType(.URL)
 #endif
-                            .autocorrectionDisabled()
-                            .privacySensitive()
-                            .accessibilityLabel("Saved server URL replacement")
-                            .accessibilityValue(localReadiness.urlState.title)
-                        Text("The saved URL stays hidden. Enter a replacement here; only its approved or rejected state is shown.")
-                            .lifeOSTypography(.body)
-                            .foregroundStyle(LifeOSTokens.tertiaryText)
-                            .fixedSize(horizontal: false, vertical: true)
+                                .autocorrectionDisabled()
+                                .privacySensitive()
+                                .accessibilityLabel("Saved server URL replacement")
+                                .accessibilityValue(localReadiness.urlState.title)
+                            Text("The saved URL stays hidden. Enter a replacement here; only its approved or rejected state is shown.")
+                                .lifeOSTypography(.body)
+                                .foregroundStyle(LifeOSTokens.tertiaryText)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                         Text("Tailscale Serve supplies the device identity to the loopback-only gateway. LifeOS never stores or edits a bearer or token.")
                             .lifeOSTypography(.body)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
@@ -2994,23 +3108,30 @@ private struct SyncStorageSettingsView: View {
                         Text(syncStatusLabel)
                             .lifeOSTypography(.body, weight: .semibold)
                             .foregroundStyle(localReadiness.canAttemptConnection ? LifeOSTokens.successText : LifeOSTokens.warningText)
-                        Button {
-                            runConnectionPreflight()
-                        } label: {
-                            HStack(spacing: 7) {
-                                if isCheckingConnection {
-                                    ProgressView()
-                                        .controlSize(.small)
-                                } else {
-                                    LifeOSIcon(.refresh)
-                                        .frame(width: 15, height: 15)
+                        if configuration.usesVisualFixtures {
+                            Text("Connection checks are disabled in fixture preview.")
+                                .lifeOSTypography(.body, weight: .semibold)
+                                .foregroundStyle(LifeOSTokens.warningText)
+                                .accessibilityIdentifier("settings-sync-connection-disabled")
+                        } else {
+                            Button {
+                                runConnectionPreflight()
+                            } label: {
+                                HStack(spacing: 7) {
+                                    if isCheckingConnection {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                    } else {
+                                        LifeOSIcon(.refresh)
+                                            .frame(width: 15, height: 15)
+                                    }
+                                    Text(isCheckingConnection ? "Checking secure connection…" : "Check secure connection")
                                 }
-                                Text(isCheckingConnection ? "Checking secure connection…" : "Check secure connection")
                             }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(isCheckingConnection || !localReadiness.canAttemptConnection)
+                            .accessibilityIdentifier("settings-sync-check-connection")
                         }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(isCheckingConnection || !localReadiness.canAttemptConnection)
-                        .accessibilityIdentifier("settings-sync-check-connection")
 
                         if let connectionPreflight {
                             HStack(alignment: .top, spacing: 8) {
@@ -3031,7 +3152,35 @@ private struct SyncStorageSettingsView: View {
                             .accessibilityIdentifier("settings-sync-connection-result")
                         }
 
-                        Text("This sends one read-only request to the approved Windows gateway. The loopback-only gateway verifies Tailscale device identity; LifeOS sends no bearer or Tailscale identity headers.")
+                        Text(configuration.usesVisualFixtures
+                             ? "Fixture mode remains offline and does not load, write, or publish gateway state."
+                             : "This sends one read-only request to the approved Windows gateway. The loopback-only gateway verifies Tailscale device identity; LifeOS sends no bearer or Tailscale identity headers.")
+                            .lifeOSTypography(.body)
+                            .foregroundStyle(LifeOSTokens.tertiaryText)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                if !configuration.usesVisualFixtures {
+                    SettingsSection(title: "Nearby calendar sync", icon: .calendar) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Toggle("Allow nearby calendar discovery", isOn: $nearbyDiscoveryEnabled)
+                                .onChange(of: nearbyDiscoveryEnabled) { _, _ in
+                                    NotificationCenter.default.post(
+                                        name: CalendarNearbyDiscoveryPolicy.didChangeNotification,
+                                        object: nil
+                                    )
+                                }
+                                .accessibilityIdentifier("settings-calendar-nearby-discovery")
+                            Text("When enabled, LifeOS starts Multipeer Connectivity advertising and browsing so you can pair the other device. Discovery is off by default; the existing private handoff and pinned peer authentication are still required before any calendar data is exchanged.")
+                                .lifeOSTypography(.body)
+                                .foregroundStyle(LifeOSTokens.tertiaryText)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                } else {
+                    SettingsSection(title: "Nearby calendar sync", icon: .calendar) {
+                        Text("Nearby calendar discovery is unavailable in fixture mode and remains offline.")
                             .lifeOSTypography(.body)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                             .fixedSize(horizontal: false, vertical: true)
@@ -3114,13 +3263,6 @@ private struct SyncStorageSettingsView: View {
         }
         .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
         .navigationTitle("Sync & Storage")
-        .onAppear {
-            let fallback = TailscaleSyncClient.configuredDefaultServerURL()
-            if syncServerURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-               !fallback.isEmpty {
-                syncServerURL = fallback
-            }
-        }
         .task(id: syncServerURL) {
             cancelConnectionPreflight()
             connectionPreflight = nil
@@ -3131,12 +3273,14 @@ private struct SyncStorageSettingsView: View {
     }
 
     private func runConnectionPreflight() {
-        guard !isCheckingConnection, localReadiness.canAttemptConnection else { return }
+        guard configuration.allowsConnectionPreflight,
+              !isCheckingConnection,
+              localReadiness.canAttemptConnection else { return }
         connectionPreflightTask?.cancel()
         connectionPreflightGeneration &+= 1
         let generation = connectionPreflightGeneration
         let requestedServerURL = syncServerURL
-        let client = syncClient
+        let configuration = configuration
         isCheckingConnection = true
         connectionPreflight = nil
         connectionPreflightTask = Task { @MainActor in
@@ -3146,7 +3290,7 @@ private struct SyncStorageSettingsView: View {
                 }
             }
 
-            let result = await client.checkConnection()
+            let result = await configuration.checkConnection()
             guard !Task.isCancelled,
                   connectionPreflightGeneration == generation,
                   syncServerURL == requestedServerURL,
@@ -3203,6 +3347,9 @@ private struct SyncStorageSettingsView: View {
     }
 
     private var syncStatusLabel: String {
+        if configuration.usesVisualFixtures {
+            return "Fixture preview · no sync has been attempted"
+        }
         guard lastSyncTimestamp > 0 else { return localReadiness.title }
         let date = Date(timeIntervalSince1970: lastSyncTimestamp)
         return "Last successful local sync \(date.formatted(date: .abbreviated, time: .shortened)) · \(localReadiness.title)"

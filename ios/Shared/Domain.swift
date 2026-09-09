@@ -498,6 +498,28 @@ public enum SharedSnapshotStore {
         return decode(data)
     }
 
+    /// Reads a snapshot that is safe for a normal app/widget data path.
+    ///
+    /// Demo provenance anywhere in the provider-shaped payload invalidates
+    /// the complete cache. Observed, estimated, stale, and unavailable
+    /// snapshots are returned unchanged so their source timestamps and
+    /// truthful state survive a relaunch.
+    public static func readLive(fileManager: FileManager = .default,
+                                appGroupIdentifier: String? = AppGroupConfiguration.identifier()) -> WidgetSnapshot? {
+        guard let snapshot = read(fileManager: fileManager, appGroupIdentifier: appGroupIdentifier),
+              !containsDemoData(snapshot) else { return nil }
+        return snapshot
+    }
+
+    private static func containsDemoData(_ snapshot: WidgetSnapshot) -> Bool {
+        guard snapshot.provenance.quality != .demo else { return true }
+        return snapshot.providers.contains { provider in
+            provider.provenance.quality == .demo
+                || provider.windows.contains { $0.provenance?.quality == .demo }
+                || provider.metrics.contains { $0.provenance.quality == .demo }
+        }
+    }
+
     public enum StoreError: Error, Equatable, Sendable { case invalidAppGroup, unavailableContainer }
 }
 

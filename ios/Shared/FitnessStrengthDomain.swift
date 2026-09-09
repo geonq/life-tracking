@@ -525,17 +525,23 @@ public final class FitnessStrengthTemplateStore: ObservableObject {
     @Published public private(set) var integrityWarning: String?
 
     private let persistenceURL: URL?
+    private let fileManager: FileManager
     private static let maximumPersistenceBytes = 2 * 1_024 * 1_024
 
-    public init(initialTemplates: [FitnessStrengthTemplate] = [], persistenceURL: URL? = FitnessStrengthTemplateStore.defaultPersistenceURL) {
+    public init(
+        initialTemplates: [FitnessStrengthTemplate] = [],
+        persistenceURL: URL? = FitnessStrengthTemplateStore.defaultPersistenceURL,
+        fileManager: FileManager = .default
+    ) {
         self.persistenceURL = persistenceURL
+        self.fileManager = fileManager
         self.templates = []
         self.lastSaveError = nil
         self.integrityWarning = nil
 
         var source = initialTemplates
-        if let persistenceURL, FileManager.default.fileExists(atPath: persistenceURL.path) {
-            let size = (try? FileManager.default.attributesOfItem(atPath: persistenceURL.path)[.size] as? NSNumber)?.intValue ?? 0
+        if let persistenceURL, fileManager.fileExists(atPath: persistenceURL.path) {
+            let size = (try? fileManager.attributesOfItem(atPath: persistenceURL.path)[.size] as? NSNumber)?.intValue ?? 0
             if size > Self.maximumPersistenceBytes {
                 self.integrityWarning = "Training templates could not be read; showing valid local templates only."
             } else {
@@ -600,7 +606,7 @@ public final class FitnessStrengthTemplateStore: ObservableObject {
     private func persist(_ value: [FitnessStrengthTemplate]) throws {
         guard let persistenceURL else { throw FitnessStrengthTemplateValidationError.persistenceFailed }
         let directory = persistenceURL.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         let data = try encoder.encode(value)

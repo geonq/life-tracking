@@ -84,7 +84,7 @@ public enum LifeOSIconName: Sendable {
         case .revenue: "banknote"
         case .heartRate: "waveform.path.ecg"
         case .sleep: "moon.zzz"
-        case .savings: "piggybank"
+        case .savings: "dollarsign.circle"
         case .budget: "wallet.pass"
         case .cashFlow: "arrow.left.arrow.right"
         case .income: "arrow.up"

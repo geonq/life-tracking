@@ -22,12 +22,7 @@ struct LifeOSTimelineProvider: TimelineProvider {
     }
 
     private func liveSnapshot(at date: Date = .now) -> WidgetSnapshot {
-        guard let snapshot = SharedSnapshotStore.read(),
-              snapshot.provenance.quality != .demo,
-              !snapshot.providers.contains(where: { $0.provenance.quality == .demo }) else {
-            return WidgetSnapshot.unavailable(at: date)
-        }
-        return snapshot
+        SharedSnapshotStore.readLive() ?? WidgetSnapshot.unavailable(at: date)
     }
 
     private func nextRefreshDate(for snapshot: WidgetSnapshot, now: Date) -> Date {

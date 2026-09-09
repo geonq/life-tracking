@@ -49,6 +49,57 @@ public protocol UsagePayloadFetching: Sendable {
 
 extension TailscaleSyncClient: UsagePayloadFetching {}
 
+/// The Usage coordinator owns the legacy Usage widget snapshot path. Keep the
+/// store behind a small instance seam so visual-fixture hosts can use a
+/// no-op sink without ever resolving the personal App Group container.
+protocol UsageWidgetSnapshotPersistence {
+    func readLive() -> WidgetSnapshot?
+    func write(_ snapshot: WidgetSnapshot) throws
+}
+
+struct SharedUsageWidgetSnapshotPersistence: UsageWidgetSnapshotPersistence {
+    func readLive() -> WidgetSnapshot? { SharedSnapshotStore.readLive() }
+
+    func write(_ snapshot: WidgetSnapshot) throws {
+        try SharedSnapshotStore.write(snapshot)
+    }
+}
+
+struct NoopUsageWidgetSnapshotPersistence: UsageWidgetSnapshotPersistence {
+    func readLive() -> WidgetSnapshot? { nil }
+    func write(_ snapshot: WidgetSnapshot) throws {}
+}
+
+/// File-backed only for visual-fixture runs. The caller supplies a unique
+/// temporary URL; the file is never the production UserDefaults key or App
+/// Group snapshot. It keeps fixture reloads deterministic while exercising
+/// the same bounded archive validation as the live store.
+final class TemporaryUsageHistoryPersistence: UsageHistoryPersistence {
+    let fileURL: URL
+    private let fileManager: FileManager
+
+    init(fileURL: URL, fileManager: FileManager = .default) {
+        self.fileURL = fileURL
+        self.fileManager = fileManager
+    }
+
+    func load() throws -> Data? {
+        guard fileManager.fileExists(atPath: fileURL.path) else { return nil }
+        return try Data(contentsOf: fileURL)
+    }
+
+    func save(_ data: Data) throws {
+        guard data.count <= UsageHistoryLedger.maximumArchiveBytes else {
+            throw UsageHistoryError.archiveTooLarge
+        }
+        try fileManager.createDirectory(
+            at: fileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try data.write(to: fileURL, options: .atomic)
+    }
+}
+
 @available(iOS 17.0, macOS 14.0, *)
 @MainActor
 public final class UsageCoordinator: ObservableObject {
@@ -67,6 +118,9 @@ public final class UsageCoordinator: ObservableObject {
     private var refreshGeneration = 0
     private let staleAfter: TimeInterval
     private let historyPersistence: UsageHistoryPersistence
+    private let snapshotPersistence: UsageWidgetSnapshotPersistence
+    private let reloadWidgets: () -> Void
+    private let allowsRefresh: Bool
     private var historyLedger: UsageHistoryLedger
 
     public init(client: UsagePayloadFetching = TailscaleSyncClient(),
@@ -80,6 +134,9 @@ public final class UsageCoordinator: ObservableObject {
         }
         self.staleAfter = staleAfter
         self.historyPersistence = historyPersistence
+        self.snapshotPersistence = SharedUsageWidgetSnapshotPersistence()
+        self.reloadWidgets = UsageWidgetTimelineReloader.reload
+        self.allowsRefresh = true
         let loadedHistory = Self.loadHistory(from: historyPersistence)
         self.historyLedger = loadedHistory.ledger
         self.historyStatus = loadedHistory.ledger.isEmpty ? .empty : .available
@@ -107,6 +164,78 @@ public final class UsageCoordinator: ObservableObject {
         self.fetchPayload = fetch
         self.staleAfter = staleAfter
         self.historyPersistence = historyPersistence
+        self.snapshotPersistence = SharedUsageWidgetSnapshotPersistence()
+        self.reloadWidgets = UsageWidgetTimelineReloader.reload
+        self.allowsRefresh = true
+        let loadedHistory = Self.loadHistory(from: historyPersistence)
+        self.historyLedger = loadedHistory.ledger
+        self.historyStatus = loadedHistory.ledger.isEmpty ? .empty : .available
+        self.historyErrorMessage = loadedHistory.errorMessage
+        self.failure = loadedHistory.errorMessage == nil ? .none : .historyStorage
+        self.providers = initialProviders
+        self.analytics = UsageAnalyticsHistoryBuilder.snapshots(
+            from: loadedHistory.ledger, providers: initialProviders
+        )
+        self.lastUpdated = initialUpdatedAt
+        if initialProviders.contains(where: { $0.provenance.quality == .observed }) {
+            let timestampIsStale = initialUpdatedAt.map { Date.now.timeIntervalSince($0) >= staleAfter } ?? true
+            state = timestampIsStale || initialProviders.contains {
+                let freshness = $0.provenance.freshness(now: .now, staleAfter: staleAfter)
+                return freshness == .stale || freshness == .unavailable
+            } ? .stale : .observed
+        }
+    }
+
+    /// Creates the dependency graph used by screenshot and visual-fixture
+    /// hosts. The fixture coordinator cannot refresh, has no live transport,
+    /// reads only a unique temporary history file, and cannot publish to the
+    /// user's App Group. The injectable fetch is internal so regression tests
+    /// can prove that the hard gate prevents even an instrumented transport
+    /// from being called.
+    static func visualFixture(
+        fetch: @escaping @Sendable () async throws -> APIUsagePayload = {
+            throw UsageFixtureError.refreshDisabled
+        },
+        fileManager: FileManager = .default,
+        snapshotPersistence: UsageWidgetSnapshotPersistence = NoopUsageWidgetSnapshotPersistence(),
+        reloadWidgets: @escaping () -> Void = {}
+    ) -> UsageCoordinator {
+        let directory = fileManager.temporaryDirectory
+            .appendingPathComponent("LifeOS", isDirectory: true)
+            .appendingPathComponent("UsageFixtures", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let historyPersistence = TemporaryUsageHistoryPersistence(
+            fileURL: directory.appendingPathComponent("usage-history.json"),
+            fileManager: fileManager
+        )
+        return UsageCoordinator(
+            fetchPayload: fetch,
+            staleAfter: 15 * 60,
+            initialProviders: [],
+            initialUpdatedAt: nil,
+            historyPersistence: historyPersistence,
+            snapshotPersistence: snapshotPersistence,
+            reloadWidgets: reloadWidgets,
+            allowsRefresh: false
+        )
+    }
+
+    private init(
+        fetchPayload: @escaping @Sendable () async throws -> APIUsagePayload,
+        staleAfter: TimeInterval,
+        initialProviders: [ProviderSnapshot],
+        initialUpdatedAt: Date?,
+        historyPersistence: UsageHistoryPersistence,
+        snapshotPersistence: UsageWidgetSnapshotPersistence,
+        reloadWidgets: @escaping () -> Void,
+        allowsRefresh: Bool
+    ) {
+        self.fetchPayload = fetchPayload
+        self.staleAfter = staleAfter
+        self.historyPersistence = historyPersistence
+        self.snapshotPersistence = snapshotPersistence
+        self.reloadWidgets = reloadWidgets
+        self.allowsRefresh = allowsRefresh
         let loadedHistory = Self.loadHistory(from: historyPersistence)
         self.historyLedger = loadedHistory.ledger
         self.historyStatus = loadedHistory.ledger.isEmpty ? .empty : .available
@@ -127,6 +256,7 @@ public final class UsageCoordinator: ObservableObject {
     }
 
     public func refresh() async {
+        guard allowsRefresh else { return }
         refreshGeneration &+= 1
         let generation = refreshGeneration
         if let previous = refreshTask {
@@ -285,7 +415,7 @@ public final class UsageCoordinator: ObservableObject {
     }
 
     private func publishSnapshot(_ providers: [ProviderSnapshot], generatedAt: Date) {
-        let prior = SharedSnapshotStore.read()
+        let prior = snapshotPersistence.readLive()
         let observed = providers.filter { $0.provenance.quality == .observed }
         let observedAt = observed.map(\.provenance.observedAt).max() ?? generatedAt
         let aggregateProvenance = Provenance(
@@ -315,8 +445,8 @@ public final class UsageCoordinator: ObservableObject {
             provenance: aggregateProvenance
         )
         do {
-            try SharedSnapshotStore.write(snapshot)
-            UsageWidgetTimelineReloader.reload()
+            try snapshotPersistence.write(snapshot)
+            reloadWidgets()
         } catch {
             // The last good App Group snapshot remains the honest widget
             // fallback. A later foreground/background refresh can retry it.
@@ -332,6 +462,10 @@ public final class UsageCoordinator: ObservableObject {
         case .revoked, .disabled, .unavailable, .error: return "Unavailable"
         }
     }
+}
+
+private enum UsageFixtureError: Error {
+    case refreshDisabled
 }
 
 private extension UsageLoadState {

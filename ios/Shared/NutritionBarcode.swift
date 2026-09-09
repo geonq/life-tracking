@@ -323,6 +323,14 @@ public struct NutritionBarcodeProposal: Codable, Equatable, Sendable {
     public let qualityFlags: [NutritionBarcodeQualityFlag]?
     public let provenance: NutritionBarcodeProvenance
 
+    /// Creates the proposal for one explicit lookup.  A UUID is the lineage
+    /// identity for the lookup itself; it is intentionally independent of the
+    /// sheet, request gate, barcode, and meal timestamp so two simultaneous
+    /// sheets can never address the same logical record by accident.
+    public init(lookup: NutritionBarcodeLookup) throws {
+        try self.init(proposalID: "barcode-\(UUID().uuidString)", lookup: lookup)
+    }
+
     public init(proposalID: String, lookup: NutritionBarcodeLookup) throws {
         guard Self.validID(proposalID) else { throw NutritionBarcodeInputError.invalidProposal }
         guard case .found(let value) = lookup else { throw NutritionBarcodeInputError.invalidProposal }
@@ -453,7 +461,15 @@ public struct NutritionRecord: Codable, Equatable, Identifiable, Sendable {
 
     public var mealDate: Date? { NutritionBarcodeISO8601.date(mealAt) }
 
+    /// The original persisted retry key includes the selected basis. Keep it
+    /// stable for validating existing files; corrections use `logicalIdentity`
+    /// below so editable values can change without changing the meal.
     fileprivate var retryIdentity: String { "\(proposalID)|\(basis.rawValue)|\(mealAt)" }
+
+    /// Identity of one explicit barcode lookup and meal timestamp. The basis,
+    /// portion, label, nutrition values, and confirmation time are editable
+    /// attributes and therefore must not create another record.
+    fileprivate var logicalIdentity: String { "\(proposalID)|\(barcode)|\(mealAt)" }
 
     fileprivate func validateForPersistence() throws {
         guard NutritionBarcodeProposal.validID(proposalID),
@@ -499,7 +515,12 @@ public enum NutritionBarcodeFlow {
         }
     }
 
-    public static func confirm(_ confirmation: NutritionBarcodeConfirmation, for proposal: NutritionBarcodeProposal, now: Date = .now) throws -> NutritionRecord {
+    public static func confirm(
+        _ confirmation: NutritionBarcodeConfirmation,
+        for proposal: NutritionBarcodeProposal,
+        now: Date = .now,
+        recordID: UUID? = nil
+    ) throws -> NutritionRecord {
         guard confirmation.proposalID == proposal.proposalID,
               confirmation.barcode == proposal.barcode,
               NutritionBarcodeNormalizer.normalize(confirmation.barcode) == confirmation.barcode else { throw NutritionBarcodeInputError.invalidProposal }
@@ -539,7 +560,11 @@ public enum NutritionBarcodeFlow {
                 valuesAreEdited: false
             )
         }
-        let record = NutritionRecord(confirmation: canonicalized, source: proposal.provenance)
+        let record = NutritionRecord(
+            id: recordID ?? UUID(),
+            confirmation: canonicalized,
+            source: proposal.provenance
+        )
         try record.validateForPersistence()
         return record
     }
@@ -577,10 +602,20 @@ public actor NutritionRecordStore {
     public func save(_ record: NutritionRecord) throws {
         try record.validateForPersistence()
         var records = try load()
-        if let index = records.firstIndex(where: { $0.id == record.id || $0.retryIdentity == record.retryIdentity }) {
+        if let index = records.firstIndex(where: { $0.id == record.id }) {
             records[index] = record
         } else {
-            records.append(record)
+            let logicalMatches = records.indices.filter { records[$0].logicalIdentity == record.logicalIdentity }
+            guard logicalMatches.count <= 1 else {
+                // A previous version may already have produced ambiguous
+                // basis-specific duplicates. Refuse to guess or delete one.
+                throw NutritionBarcodeInputError.invalidResponse
+            }
+            if let index = logicalMatches.first {
+                records[index] = record
+            } else {
+                records.append(record)
+            }
         }
         let directory = url.deletingLastPathComponent()
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)

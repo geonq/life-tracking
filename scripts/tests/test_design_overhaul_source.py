@@ -458,7 +458,7 @@ def test_app_typography_uses_exact_system_role_contract() -> None:
     assert typography.count("systemFont(size:") == len(ROLE_STYLES)
     assert ".system(size: size, weight: weight, design: .default)" in typography
     assert ".system(textStyle" not in typography
-    assert "relativeTo:" not in typography
+    assert "relativeTo: role.dynamicTypeAnchor" in typography
     assert "Font.custom" not in typography
     for role, contract in ROLE_STYLES.items():
         signature = (
@@ -541,9 +541,9 @@ def test_shared_component_and_icon_contracts_are_explicit() -> None:
     assert components.count("ViewThatFits(in: .horizontal)") >= 2
     assert components.count("dynamicTypeSize.isAccessibilitySize") >= 2
     assert "compact: Bool = false" in components
-    assert "LifeOSTypography.metricCompact()" in components
+    assert "lifeOSTypography(compact ? .metricCompact : .metric)" in components
     assert "Text(unit)" in components
-    assert ".font(LifeOSTypography.metadata())" in components
+    assert "lifeOSTypography(.metadata)" in components
 
     assert ".font(.system(size: 17, weight: .medium, design: .default))" in icon
     assert ".resizable()" not in icon

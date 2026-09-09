@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -26,6 +27,12 @@ enum FinanceImportConfirmationResult: Equatable {
     case failed(message: String)
 }
 
+enum FinanceImportCopy {
+    static let clearAllPropagation = "Deletion of imported records propagates on the next sync; connected bank accounts are unaffected."
+    static let clearAllConfirmation = "This removes imported records on this device. " + clearAllPropagation
+    static let clearAllSuccess = "Imported records removed on this device. " + clearAllPropagation
+}
+
 // MARK: - Manual bank-statement CSV import
 
 /// Drives the CSV file picker, parse preview, and persistence for manually
@@ -37,6 +44,7 @@ enum FinanceImportConfirmationResult: Equatable {
 @MainActor
 final class FinanceImportViewModel: ObservableObject {
     typealias SyncOperation = (FinanceImportedTransactionStore) async throws -> FinanceImportedSyncResult
+    typealias ImportOperation = ([FinanceImportedTransaction]) async throws -> FinanceImportSaveResult
 
     @Published var isImporterPresented = false
     @Published var pendingResult: FinanceImportResult?
@@ -48,16 +56,20 @@ final class FinanceImportViewModel: ObservableObject {
     @Published private(set) var syncMessage: String?
     @Published private(set) var lastConfirmedRemoteRevision: Int?
     @Published private(set) var isSynchronizing = false
+    @Published private(set) var isImporting = false
 
     private let store: FinanceImportedTransactionStore?
     private let syncOperation: SyncOperation
+    private let importOperation: ImportOperation
     private var syncGeneration = 0
+    private var importGeneration = 0
 
     init(
         store: FinanceImportedTransactionStore? = nil,
         syncOperation: @escaping SyncOperation = { store in
             try await store.synchronize(using: TailscaleSyncClient())
-        }
+        },
+        importOperation: ImportOperation? = nil
     ) {
         let resolvedStore: FinanceImportedTransactionStore?
         let initialTransactions: [FinanceImportedTransaction]
@@ -108,6 +120,12 @@ final class FinanceImportViewModel: ObservableObject {
         }
         self.store = resolvedStore
         self.syncOperation = syncOperation
+        self.importOperation = importOperation ?? { transactions in
+            guard let resolvedStore else {
+                throw FinanceImportedTransactionStoreError.applicationSupportUnavailable
+            }
+            return try resolvedStore.add(transactions)
+        }
         self.savedTransactions = initialTransactions
         self.currentSyncStatus = initialSyncStatus
         self.syncState = if resolvedStore == nil {
@@ -128,6 +146,7 @@ final class FinanceImportViewModel: ObservableObject {
     }
 
     var hasStore: Bool { store != nil }
+    var canImport: Bool { store != nil && !isImporting }
     var canSynchronize: Bool { store != nil && !isSynchronizing }
     var syncActionTitle: String {
         if isSynchronizing { return "Syncing…" }
@@ -136,6 +155,11 @@ final class FinanceImportViewModel: ObservableObject {
     }
 
     func handlePickedFile(_ result: Result<[URL], Error>) {
+        guard !isImporting else {
+            errorMessage = "An import is already being saved. Keep the current preview open and wait for it to finish."
+            return
+        }
+        importGeneration &+= 1
         errorMessage = nil
         statusMessage = nil
         pendingResult = nil
@@ -174,8 +198,8 @@ final class FinanceImportViewModel: ObservableObject {
     }
 
     @discardableResult
-    func confirmImport(_ transactions: [FinanceImportedTransaction]) -> FinanceImportConfirmationResult {
-        guard let store else {
+    func confirmImport(_ transactions: [FinanceImportedTransaction]) async -> FinanceImportConfirmationResult {
+        guard store != nil else {
             syncState = .unavailable
             syncMessage = "Imported Finance storage is unavailable. Local rows could not be changed."
             return .failed(message: syncMessage ?? "Imported Finance storage is unavailable.")
@@ -184,8 +208,28 @@ final class FinanceImportViewModel: ObservableObject {
             errorMessage = "There are no valid transactions to import."
             return .failed(message: errorMessage ?? "There are no valid transactions to import.")
         }
+        guard !isImporting else {
+            return .failed(message: "An import is already being saved. Keep this preview open and wait for it to finish.")
+        }
+
+        importGeneration &+= 1
+        let generation = importGeneration
+        isImporting = true
+        defer {
+            if generation == importGeneration { isImporting = false }
+        }
+
         do {
-            let result = try store.add(transactions)
+            try Task.checkCancellation()
+            let result = try await importOperation(transactions)
+            guard generation == importGeneration else {
+                return .failed(message: "This import result is stale. The editable preview remains available; retry it.")
+            }
+
+            // Once the store operation returns, its atomic write is durable.
+            // Do not turn a cancellation arriving after that point into a
+            // false failure or clear the user's successful import.
+            errorMessage = nil
             self.pendingResult = nil
             refreshAfterLocalMutation()
             var parts: [String] = []
@@ -194,13 +238,23 @@ final class FinanceImportViewModel: ObservableObject {
             if result.duplicateCount > 0 { parts.append("skipped \(result.duplicateCount) unchanged duplicates") }
             statusMessage = parts.isEmpty ? "No source changes were found." : parts.joined(separator: "; ") + "."
             return .saved
+        } catch is CancellationError {
+            guard generation == importGeneration else {
+                return .failed(message: "This import result is stale. The editable preview remains available; retry it.")
+            }
+            return .failed(message: "Import cancelled. The editable preview remains available; retry when ready.")
         } catch {
+            guard generation == importGeneration else {
+                return .failed(message: "This import result is stale. The editable preview remains available; retry it.")
+            }
             handleLocalError(error)
             return .failed(message: Self.localErrorMessage(for: error))
         }
     }
 
     func discardPending() {
+        guard !isImporting else { return }
+        importGeneration &+= 1
         pendingResult = nil
         statusMessage = nil
     }
@@ -234,7 +288,7 @@ final class FinanceImportViewModel: ObservableObject {
         do {
             try store.clearAll()
             refreshAfterLocalMutation()
-            statusMessage = "Imported transactions cleared on this device. Queued deletions will propagate on the next sync; connected bank accounts are unaffected."
+            statusMessage = FinanceImportCopy.clearAllSuccess
         } catch {
             handleLocalError(error)
         }
@@ -359,6 +413,9 @@ final class FinanceImportViewModel: ObservableObject {
         if error is CancellationError {
             return "Sync cancelled. Local rows were kept."
         }
+        if error is FinanceImportFixtureSyncError {
+            return "Private sync is disabled in visual fixtures. Local rows were kept."
+        }
         if let error = error as? TailscaleSyncError {
             switch error {
             case .notConfigured, .invalidServerURL, .gatewayNotConfigured:
@@ -407,13 +464,96 @@ final class FinanceImportViewModel: ObservableObject {
     }
 }
 
+/// A fixture-only persistence boundary for the Finance import card. The
+/// configuration owns one unique temporary directory and both stores for the
+/// lifetime of the card state. Production never constructs this value, so its
+/// existing Application Support defaults remain unchanged.
+struct FinanceImportPersistenceConfiguration {
+    let importedTransactionStore: FinanceImportedTransactionStore?
+    let budgetStore: FinanceBudgetStore?
+    let directoryURL: URL?
+    let syncOperation: FinanceImportViewModel.SyncOperation
+
+    static func makeVisualFixtures(fileManager: FileManager = .default) -> Self {
+        let directory = fileManager.temporaryDirectory
+            .appendingPathComponent("LifeOS", isDirectory: true)
+            .appendingPathComponent("FinanceFixtures", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let importedURL = directory.appendingPathComponent(
+            FinanceImportedTransactionStore.fileName,
+            isDirectory: false
+        )
+        let budgetURL = directory.appendingPathComponent(
+            FinanceBudgetStore.fileName,
+            isDirectory: false
+        )
+        let importedStore = try? FinanceImportedTransactionStore(url: importedURL, fileManager: fileManager)
+        let budgetStore = try? FinanceBudgetStore(url: budgetURL, fileManager: fileManager)
+
+        return Self(
+            importedTransactionStore: importedStore,
+            budgetStore: budgetStore,
+            directoryURL: directory,
+            syncOperation: { _ in
+                // A visual fixture can exercise the sync button's failure
+                // state, but it must never construct a client or transmit a
+                // request to the user's gateway.
+                throw FinanceImportFixtureSyncError.disabled
+            }
+        )
+    }
+}
+
+private enum FinanceImportFixtureSyncError: Error {
+    case disabled
+}
+
+/// Owns the Finance import card's long-lived dependencies. Keeping this
+/// object behind `@StateObject` makes the fixture directory and its stores
+/// stable across SwiftUI body reconstruction.
+@MainActor
+final class FinanceImportCardState: ObservableObject {
+    let usesVisualFixtures: Bool
+    let persistence: FinanceImportPersistenceConfiguration?
+    let model: FinanceImportViewModel
+    private var modelObservation: AnyCancellable?
+
+    init(usesVisualFixtures: Bool) {
+        self.usesVisualFixtures = usesVisualFixtures
+        if usesVisualFixtures {
+            let configuration = FinanceImportPersistenceConfiguration.makeVisualFixtures()
+            persistence = configuration
+            model = FinanceImportViewModel(
+                store: configuration.importedTransactionStore,
+                syncOperation: configuration.syncOperation
+            )
+        } else {
+            persistence = nil
+            // Preserve the existing production defaults exactly: the model
+            // resolves the Application Support store and live sync operation
+            // through its zero-argument initializer.
+            model = FinanceImportViewModel()
+        }
+
+        modelObservation = model.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+    }
+}
+
 /// A small card on the Finance screen offering CSV import. Self-contained:
 /// it owns its own view model and store and never reads or mutates anything
 /// from `FinanceCoordinator` or `FinanceView`'s scroll/route/accounts state.
 struct FinanceImportCard: View {
-    @StateObject private var model = FinanceImportViewModel()
+    @StateObject private var state: FinanceImportCardState
     @State private var isShowingImportedList = false
     @State private var isShowingImportedDetails = false
+
+    init(usesVisualFixtures: Bool = false) {
+        _state = StateObject(wrappedValue: FinanceImportCardState(usesVisualFixtures: usesVisualFixtures))
+    }
+
+    private var model: FinanceImportViewModel { state.model }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -435,7 +575,7 @@ struct FinanceImportCard: View {
                     Label("Import CSV", systemImage: "plus")
                 }
                 .buttonStyle(LifeOSButtonStyle(.secondary))
-                .disabled(!model.hasStore)
+                .disabled(!model.canImport)
                 .accessibilityIdentifier("finance-import-csv-button")
             }
 
@@ -476,7 +616,11 @@ struct FinanceImportCard: View {
                     VStack(alignment: .leading, spacing: 12) {
                         FinanceSpendingByCategorySection(transactions: model.savedTransactions)
                         Divider().overlay(LifeOSTokens.hairlineBorder)
-                        FinanceBudgetsSection(transactions: model.savedTransactions)
+                        FinanceBudgetsSection(
+                            transactions: model.savedTransactions,
+                            store: state.persistence?.budgetStore,
+                            usesVisualFixtures: state.usesVisualFixtures
+                        )
                         if model.savedTransactions.contains(where: { $0.isInvestmentOrder }) {
                             Divider().overlay(LifeOSTokens.hairlineBorder)
                             FinanceImportedInvestmentsSection(transactions: model.savedTransactions)
@@ -502,7 +646,10 @@ struct FinanceImportCard: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("finance-import-card")
         .fileImporter(
-            isPresented: $model.isImporterPresented,
+            isPresented: Binding(
+                get: { model.isImporterPresented },
+                set: { model.isImporterPresented = $0 }
+            ),
             allowedContentTypes: [.commaSeparatedText, .plainText],
             allowsMultipleSelection: false
         ) { result in
@@ -514,7 +661,7 @@ struct FinanceImportCard: View {
         )) { item in
             FinanceImportPreviewView(
                 result: item.result,
-                onConfirm: { transactions in model.confirmImport(transactions) },
+                onConfirm: { transactions in await model.confirmImport(transactions) },
                 onCancel: model.discardPending
             )
         }
@@ -695,15 +842,18 @@ private struct FinanceImportPreviewSheetItem: Identifiable {
 /// until the user explicitly taps Import.
 private struct FinanceImportPreviewView: View {
     let result: FinanceImportResult
-    let onConfirm: ([FinanceImportedTransaction]) -> FinanceImportConfirmationResult
+    let onConfirm: ([FinanceImportedTransaction]) async -> FinanceImportConfirmationResult
     let onCancel: () -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var workingTransactions: [FinanceImportedTransaction]
     @State private var confirmationError: String?
+    @State private var isSaving = false
+    @State private var draftRevision = 0
+    @State private var activeSaveToken: UUID?
 
     init(
         result: FinanceImportResult,
-        onConfirm: @escaping ([FinanceImportedTransaction]) -> FinanceImportConfirmationResult,
+        onConfirm: @escaping ([FinanceImportedTransaction]) async -> FinanceImportConfirmationResult,
         onCancel: @escaping () -> Void
     ) {
         self.result = result
@@ -805,9 +955,12 @@ private struct FinanceImportPreviewView: View {
                         ForEach(previewRows) { transaction in
                             FinanceImportPreviewRow(
                                 transaction: transaction,
+                                isDisabled: isSaving,
                                 onCategoryChange: { category in
+                                    guard !isSaving else { return }
                                     guard let index = workingTransactions.firstIndex(where: { $0.id == transaction.id }) else { return }
                                     workingTransactions[index].category = category?.rawValue
+                                    draftRevision &+= 1
                                     confirmationError = nil
                                 }
                             )
@@ -822,22 +975,58 @@ private struct FinanceImportPreviewView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") {
+                        guard !isSaving else { return }
                         onCancel()
                         dismiss()
                     }
+                    .disabled(isSaving)
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Import") {
-                        switch onConfirm(workingTransactions) {
-                        case .saved:
-                            confirmationError = nil
-                            dismiss()
-                        case .failed(let message):
-                            confirmationError = message
+                        savePreview()
+                    }
+                    .disabled(workingTransactions.isEmpty || isSaving)
+                    .overlay {
+                        if isSaving {
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(LifeOSTokens.accent)
                         }
                     }
-                    .disabled(workingTransactions.isEmpty)
                 }
+            }
+            .interactiveDismissDisabled(isSaving)
+        }
+    }
+
+    private func savePreview() {
+        guard !isSaving, !workingTransactions.isEmpty else { return }
+
+        let token = UUID()
+        let revision = draftRevision
+        let payload = workingTransactions
+        activeSaveToken = token
+        isSaving = true
+        confirmationError = nil
+
+        Task { @MainActor in
+            let outcome = await onConfirm(payload)
+            guard activeSaveToken == token else { return }
+            isSaving = false
+            activeSaveToken = nil
+
+            guard draftRevision == revision else {
+                confirmationError = "The preview changed while it was being saved. Review it and retry."
+                return
+            }
+            switch outcome {
+            case .saved:
+                confirmationError = nil
+                dismiss()
+            case .failed(let message):
+                // Keep `workingTransactions` intact so the user can correct
+                // or retry the exact editable payload after a failed write.
+                confirmationError = message
             }
         }
     }
@@ -845,6 +1034,7 @@ private struct FinanceImportPreviewView: View {
 
 private struct FinanceImportPreviewRow: View {
     let transaction: FinanceImportedTransaction
+    var isDisabled = false
     var onCategoryChange: ((FinanceTransactionCategory?) -> Void)? = nil
 
     private var effectiveCategory: FinanceTransactionCategory {
@@ -902,6 +1092,7 @@ private struct FinanceImportPreviewRow: View {
                 .accessibilityLabel("Category")
                 .accessibilityValue("\(effectiveCategory.displayName), \(categoryOrigin)")
                 .accessibilityIdentifier("finance-import-category-\(transaction.id.uuidString)")
+                .disabled(isDisabled)
             }
         }
         .accessibilityElement(children: .combine)
@@ -992,7 +1183,7 @@ private struct FinanceImportedTransactionsListView: View {
                 Button("Clear all", role: .destructive) { model.clearAll() }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("This removes manually imported rows on this device and queues their deletions for the next sync. Connected bank accounts and their live data are unaffected.")
+                Text(FinanceImportCopy.clearAllConfirmation)
             }
         }
     }
@@ -1126,7 +1317,7 @@ private struct FinanceSpendTotalsRow: View {
             FinanceSpendTotalItem(label: "Income", cents: totals.inflowCents, color: LifeOSTokens.success)
             FinanceSpendTotalItem(
                 label: "Net",
-                cents: abs(totals.netCents),
+                cents: totals.netCents,
                 color: totals.netCents < 0 ? LifeOSTokens.danger : LifeOSTokens.success,
                 isSigned: true,
                 signedValue: totals.netCents
@@ -1286,8 +1477,11 @@ final class FinanceBudgetViewModel: ObservableObject {
 
     private let store: FinanceBudgetStore?
 
-    init() {
-        let resolvedStore = try? FinanceBudgetStore()
+    init(store: FinanceBudgetStore? = nil, usesVisualFixtures: Bool = false) {
+        // An explicit fixture mode is fail-closed: a missing injected store
+        // must remain unavailable rather than falling back to the personal
+        // Application Support budget file.
+        let resolvedStore = usesVisualFixtures ? store : (store ?? (try? FinanceBudgetStore()))
         self.store = resolvedStore
         reload(on: .now)
     }
@@ -1348,8 +1542,22 @@ final class FinanceBudgetViewModel: ObservableObject {
 /// "Spending by category" so both sections agree on month boundaries.
 private struct FinanceBudgetsSection: View {
     let transactions: [FinanceImportedTransaction]
-    @StateObject private var model = FinanceBudgetViewModel()
+    @StateObject private var model: FinanceBudgetViewModel
     @State private var selectedMonth: Date?
+
+    init(
+        transactions: [FinanceImportedTransaction],
+        store: FinanceBudgetStore? = nil,
+        usesVisualFixtures: Bool = false
+    ) {
+        self.transactions = transactions
+        _model = StateObject(
+            wrappedValue: FinanceBudgetViewModel(
+                store: store,
+                usesVisualFixtures: usesVisualFixtures
+            )
+        )
+    }
 
     private var monthGroups: [(key: Date, transactions: [FinanceImportedTransaction])] {
         financeImportGroupedByMonth(transactions)
@@ -1399,19 +1607,16 @@ private struct FinanceBudgetsSection: View {
                 }
             }
         }
-        .onAppear { model.reload(on: currentMonth) }
-        .onChange(of: selectedMonth) { _, newValue in
-            model.reload(on: newValue ?? currentMonth)
+        .onAppear { reloadBudgetsForDisplayedMonth() }
+        .onChange(of: selectedMonth) { _, _ in
+            reloadBudgetsForDisplayedMonth()
         }
-        .onChange(of: monthGroups.map(\.key)) { _, newKeys in
-            let effectiveMonth: Date
-            if let selectedMonth, newKeys.contains(selectedMonth) {
-                effectiveMonth = selectedMonth
-            } else {
-                if selectedMonth != nil { self.selectedMonth = nil }
-                effectiveMonth = newKeys.first ?? fallbackMonth
-            }
-            model.reload(on: effectiveMonth)
+        .onChange(of: transactions) { _, _ in
+            // Imported rows can change without changing the set of month
+            // keys (for example, a corrected amount in the selected month).
+            // Reload against the month the section actually displays, then
+            // reconcile a selection whose month disappeared.
+            reloadBudgetsForDisplayedMonth()
         }
         .alert("Budgets", isPresented: Binding(
             get: { model.errorMessage != nil },
@@ -1423,6 +1628,18 @@ private struct FinanceBudgetsSection: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("finance-budgets-section")
+    }
+
+    private func reloadBudgetsForDisplayedMonth() {
+        let availableMonths = monthGroups.map(\.key)
+        let displayedMonth: Date
+        if let selectedMonth, availableMonths.contains(selectedMonth) {
+            displayedMonth = selectedMonth
+        } else {
+            if selectedMonth != nil { self.selectedMonth = nil }
+            displayedMonth = availableMonths.first ?? fallbackMonth
+        }
+        model.reload(on: displayedMonth)
     }
 
     private var monthPicker: some View {
@@ -1585,11 +1802,11 @@ private struct FinanceCategoryBudgetRow: View {
             }
         }
         .onAppear {
-            limitText = limitCents.map(FinanceBudgetAmountParser.inputText(for:)) ?? ""
+            limitText = limitCents.map(FinanceImportCurrencyFormatter.editableEuro(cents:)) ?? ""
         }
         .onChange(of: limitCents) { _, newValue in
             if !isFieldFocused {
-                limitText = newValue.map(FinanceBudgetAmountParser.inputText(for:)) ?? ""
+                limitText = newValue.map(FinanceImportCurrencyFormatter.editableEuro(cents:)) ?? ""
             }
         }
     }
@@ -1598,7 +1815,7 @@ private struct FinanceCategoryBudgetRow: View {
         guard let cents = FinanceBudgetAmountParser.cents(from: limitText) else {
             // Invalid or empty entry: revert the field rather than silently
             // writing a fabricated limit.
-            limitText = limitCents.map(FinanceBudgetAmountParser.inputText(for:)) ?? ""
+            limitText = limitCents.map(FinanceImportCurrencyFormatter.editableEuro(cents:)) ?? ""
             return
         }
         onSetLimit(cents)
@@ -1608,7 +1825,7 @@ private struct FinanceCategoryBudgetRow: View {
 // MARK: - Formatting helpers (kept local to this file; Finance's private
 // formatters in FinanceView.swift are not exposed outside that file)
 
-private enum FinanceImportCurrencyFormatter {
+enum FinanceImportCurrencyFormatter {
     static func signedEuro(cents: Int) -> String {
         let magnitude = magnitudeEuro(cents: cents)
         return cents < 0 ? "-\(magnitude)" : "+\(magnitude)"
@@ -1623,7 +1840,52 @@ private enum FinanceImportCurrencyFormatter {
         formatter.locale = Locale.current
         formatter.minimumFractionDigits = 2
         formatter.maximumFractionDigits = 2
-        return formatter.string(from: NSNumber(value: Double(abs(cents)) / 100)) ?? String(format: "€%.2f", Double(abs(cents)) / 100)
+
+        let exactValue = exactDecimal(cents: cents)
+        let magnitude = cents < 0
+            ? exactValue.multiplying(by: NSDecimalNumber(value: Int64(-1)))
+            : exactValue
+        return formatter.string(from: magnitude) ?? fallbackMagnitudeEuro(cents: cents)
+    }
+
+    /// Stable editor text for a positive cent amount. It deliberately uses
+    /// integer arithmetic so a budget is never rendered through a binary
+    /// floating-point approximation, including at the payload's upper bound.
+    static func editableEuro(cents: Int) -> String {
+        guard cents > 0 else { return "" }
+        let parts = exactMagnitudeParts(cents: cents)
+        return "\(parts.whole).\(parts.fraction)"
+    }
+
+    private static func exactDecimal(cents: Int) -> NSDecimalNumber {
+        NSDecimalNumber(
+            string: exactSignedIntegerText(cents: cents),
+            locale: Locale(identifier: "en_US_POSIX")
+        ).dividing(by: NSDecimalNumber(value: Int64(100)))
+    }
+
+    private static func fallbackMagnitudeEuro(cents: Int) -> String {
+        let parts = exactMagnitudeParts(cents: cents)
+        return "€\(parts.whole).\(parts.fraction)"
+    }
+
+    private static func exactSignedIntegerText(cents: Int) -> String {
+        if cents == Int.min {
+            return "-\(UInt64(Int.max) + 1)"
+        }
+        return String(cents)
+    }
+
+    private static func exactMagnitudeParts(cents: Int) -> (whole: String, fraction: String) {
+        let magnitude: UInt64
+        if cents == Int.min {
+            magnitude = UInt64(Int.max) + 1
+        } else {
+            magnitude = UInt64(cents < 0 ? -cents : cents)
+        }
+        let whole = magnitude / 100
+        let remainder = magnitude % 100
+        return (String(whole), remainder < 10 ? "0\(remainder)" : String(remainder))
     }
 }
 

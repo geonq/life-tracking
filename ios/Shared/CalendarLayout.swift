@@ -1095,7 +1095,14 @@ public enum CalendarInteractionLayout {
     /// either control from creating a scale the timeline cannot render.
     public static let minimumHourHeight: Double = 38
     public static let maximumHourHeight: Double = 110
+    /// The iPhone gutter remains 40 pt so its established paging and day
+    /// column geometry do not change.
     public static let timelineTimeGutter: Double = 40
+    /// macOS clock labels use the same trailing inset as the shared renderer,
+    /// with enough dedicated content width for a single-line `HH:MM` label in
+    /// the configured SF Pro metadata role.
+    public static let macTimelineTimeGutter: Double = 48
+    public static let timelineTimeLabelTrailingInset: Double = 8
     public static let timelineOuterInset: Double = 8
     /// Clearance after the final 24:00 mark. Bottom controls are reserved by
     /// the owning page's safe-area inset, so this is the only display space

@@ -56,20 +56,177 @@ private struct CalendarEditorPresentation: Identifiable {
 }
 
 #if os(macOS)
-/// A concrete AppKit source view for the contextual editor popover.
+/// A full-size AppKit source view for the contextual editor popover.
 ///
-/// Keeping a real NSView at the named-space source frame makes AppKit's source
-/// geometry unambiguous while leaving presentation and dismissal owned by
-/// SwiftUI. The source view has no implicit hosting-origin fallback.
+/// SwiftUI's `.popover` modifier owns an internal source view and resolves its
+/// attachment rect in that view's local coordinate system. That is not safe for
+/// a source rect produced by a scrolled/named SwiftUI coordinate space: the
+/// source view can be laid out at the hosting origin even though the rect came
+/// from a day column. Keeping one flipped AppKit view over the whole calendar
+/// lets us pass the named-space rect directly to `NSPopover` without another
+/// hosting-view conversion.
 private struct CalendarPopoverAnchor: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView(frame: .zero)
-        view.wantsLayer = true
-        view.layer?.backgroundColor = NSColor.clear.cgColor
-        return view
+    let sourceFrame: CGRect
+    let presentation: CalendarEditorPresentation?
+    let reduceMotion: Bool
+    let onDismiss: (UUID) -> Void
+    let content: (CalendarEditorPresentation) -> AnyView
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
     }
 
-    func updateNSView(_ nsView: NSView, context: Context) {}
+    func makeNSView(context: Context) -> CalendarPopoverAnchorView {
+        CalendarPopoverAnchorView()
+    }
+
+    func updateNSView(_ nsView: CalendarPopoverAnchorView, context: Context) {
+        context.coordinator.update(
+            sourceFrame: sourceFrame,
+            presentation: presentation,
+            reduceMotion: reduceMotion,
+            onDismiss: onDismiss,
+            content: content,
+            in: nsView
+        )
+    }
+
+    static func dismantleNSView(_ nsView: CalendarPopoverAnchorView, coordinator: Coordinator) {
+        coordinator.dismiss()
+    }
+
+    final class Coordinator: NSObject, NSPopoverDelegate {
+        private var popover: NSPopover?
+        private var hostingController: NSHostingController<AnyView>?
+        private var presentedPresentationID: UUID?
+        private var presentedSourceFrame: CGRect?
+        private var latestSourceFrame: CGRect = .zero
+        private var latestPresentation: CalendarEditorPresentation?
+        private var latestReduceMotion = false
+        private var latestOnDismiss: ((UUID) -> Void)?
+        private var latestContent: ((CalendarEditorPresentation) -> AnyView)?
+        private var updateScheduled = false
+
+        func update(
+            sourceFrame: CGRect,
+            presentation: CalendarEditorPresentation?,
+            reduceMotion: Bool,
+            onDismiss: @escaping (UUID) -> Void,
+            content: @escaping (CalendarEditorPresentation) -> AnyView,
+            in view: CalendarPopoverAnchorView
+        ) {
+            latestSourceFrame = sourceFrame
+            latestPresentation = presentation
+            latestReduceMotion = reduceMotion
+            latestOnDismiss = onDismiss
+            latestContent = content
+            synchronize(in: view)
+        }
+
+        func dismiss() {
+            popover?.delegate = nil
+            popover?.performClose(nil)
+            popover = nil
+            hostingController = nil
+            presentedPresentationID = nil
+            presentedSourceFrame = nil
+            updateScheduled = false
+        }
+
+        func popoverDidClose(_ notification: Notification) {
+            guard let presentationID = presentedPresentationID else { return }
+            popover = nil
+            hostingController = nil
+            presentedPresentationID = nil
+            presentedSourceFrame = nil
+            latestOnDismiss?(presentationID)
+        }
+
+        private func synchronize(in view: CalendarPopoverAnchorView) {
+            guard let presentation = latestPresentation else {
+                dismiss()
+                return
+            }
+            guard isUsable(sourceFrame: latestSourceFrame) else {
+                dismiss()
+                return
+            }
+            guard view.window != nil else {
+                scheduleSynchronization(in: view)
+                return
+            }
+
+            if let popover,
+               popover.isShown,
+               presentedPresentationID == presentation.id,
+               let latestContent {
+                popover.animates = !latestReduceMotion
+                hostingController?.rootView = latestContent(presentation)
+                if presentedSourceFrame != latestSourceFrame {
+                    popover.show(
+                        relativeTo: latestSourceFrame,
+                        of: view,
+                        preferredEdge: .maxX
+                    )
+                    presentedSourceFrame = latestSourceFrame
+                }
+                return
+            }
+
+            // Replacement is serialized through this one coordinator. Closing
+            // the old popover before creating the new one prevents an AppKit
+            // dismissal callback from clearing the replacement's anchor.
+            if popover != nil {
+                dismiss()
+            }
+
+            guard let latestContent else { return }
+            let newPopover = NSPopover()
+            newPopover.behavior = .transient
+            newPopover.animates = !latestReduceMotion
+            newPopover.contentSize = CGSize(width: 540, height: 600)
+            newPopover.delegate = self
+
+            let host = NSHostingController(rootView: latestContent(presentation))
+            newPopover.contentViewController = host
+            popover = newPopover
+            hostingController = host
+            presentedPresentationID = presentation.id
+            presentedSourceFrame = latestSourceFrame
+            newPopover.show(
+                relativeTo: latestSourceFrame,
+                of: view,
+                preferredEdge: .maxX
+            )
+        }
+
+        private func scheduleSynchronization(in view: CalendarPopoverAnchorView) {
+            guard !updateScheduled else { return }
+            updateScheduled = true
+            DispatchQueue.main.async { [weak self, weak view] in
+                guard let self else { return }
+                self.updateScheduled = false
+                guard let view else { return }
+                self.synchronize(in: view)
+            }
+        }
+
+        private func isUsable(sourceFrame: CGRect) -> Bool {
+            sourceFrame.minX.isFinite &&
+                sourceFrame.minY.isFinite &&
+                sourceFrame.width.isFinite &&
+                sourceFrame.height.isFinite &&
+                sourceFrame.width > 0 &&
+                sourceFrame.height > 0
+        }
+    }
+}
+
+private final class CalendarPopoverAnchorView: NSView {
+    // SwiftUI's named coordinate spaces use a top-leading origin. Matching
+    // that orientation keeps the source rect's y coordinate correct when it is
+    // handed directly to AppKit.
+    override var isFlipped: Bool { true }
 }
 #endif
 
@@ -526,19 +683,13 @@ public struct CalendarView: View {
 #if os(macOS)
         .overlay(alignment: .topLeading) {
             if let sourceFrame = editorAnchorFrame {
-                CalendarPopoverAnchor()
-                    .frame(width: sourceFrame.width, height: sourceFrame.height)
-                    // The source frame is already in the enclosing named
-                    // space. Alignment guides perform actual SwiftUI layout,
-                    // so AppKit receives the same frame rather than a render
-                    // offset or an old pointer position.
-                    .alignmentGuide(.leading) { _ in -sourceFrame.minX }
-                    .alignmentGuide(.top) { _ in -sourceFrame.minY }
-                    .popover(
-                        item: $anchoredEditorPresentation,
-                        attachmentAnchor: .rect(.bounds),
-                        arrowEdge: .leading
-                    ) { presentation in
+                CalendarPopoverAnchor(
+                    sourceFrame: sourceFrame,
+                    presentation: anchoredEditorPresentation,
+                    reduceMotion: reduceMotion,
+                    onDismiss: handleMacPopoverDismissal
+                ) { presentation in
+                    AnyView(
                         CalendarEditor(
                             item: presentation.item,
                             date: presentation.date,
@@ -550,7 +701,14 @@ public struct CalendarView: View {
                             onCancel: cancelMacEditor
                         )
                         .frame(width: 540, height: 600)
-                    }
+                    )
+                }
+                // The representable fills the same named-space container that
+                // produced sourceFrame. AppKit receives sourceFrame directly
+                // in this flipped view's local coordinates.
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
             }
         }
 #endif
@@ -558,43 +716,11 @@ public struct CalendarView: View {
 
     @ViewBuilder
     private var timedGridContent: some View {
-        VStack(spacing: 0) {
-            CalendarExpandedMonthGrid(
-                month: headerDate,
-                selectedDate: headerDate,
-                selectedRange: CalendarDateRange.days(
-                    containing: headerDate,
-                    count: timelineDays.count,
-                    calendar: calendar
-                ),
-                calendar: calendar,
-                namespace: reduceMotion ? nil : calendarMonthNamespace,
-                isSource: monthExpanded,
-                reduceMotion: reduceMotion,
-                onSelectDate: selectExpandedDate
-            )
-            // Notion grows the month panel in place below the
-            // header. Keeping its layout alive at zero height lets
-            // the selected cell's matched geometry morph while
-            // the day grid below follows the same height change.
-            .frame(maxWidth: .infinity)
-            .frame(
-                height: monthExpanded ? CalendarExpandedMonthGrid.preferredHeight : 0,
-                alignment: .top
-            )
-            .clipped()
-            .opacity(monthExpanded ? 1 : 0)
-            // Reduced motion keeps the matched-geometry namespace
-            // disabled, but still gives the month panel a short,
-            // opacity-led cross-fade instead of an abrupt reveal.
-            .animation(
-                reduceMotion
-                    ? .easeInOut(duration: CalendarInteractionLayout.reducedMotionMonthCrossfadeDuration)
-                    : LifeOSMotion.heroMorph,
-                value: monthExpanded
-            )
-            .allowsHitTesting(monthExpanded)
-            .accessibilityHidden(!monthExpanded)
+        ZStack(alignment: .top) {
+            // Keep the timeline as the stable layout owner. Month expansion
+            // overlays its pinned header rather than reducing the measured
+            // viewport, so the vertical scroll offset and late-day reachability
+            // survive an expand/collapse cycle.
             CalendarTimelineView(
                 days: timelineDays,
                 items: displayItems,
@@ -619,175 +745,94 @@ public struct CalendarView: View {
                 monthSelectedDate: headerDate,
                 reduceMotion: reduceMotion
             )
+
+            CalendarExpandedMonthGrid(
+                month: headerDate,
+                selectedDate: headerDate,
+                selectedRange: CalendarDateRange.days(
+                    containing: headerDate,
+                    count: timelineDays.count,
+                    calendar: calendar
+                ),
+                calendar: calendar,
+                namespace: reduceMotion ? nil : calendarMonthNamespace,
+                isSource: monthExpanded,
+                reduceMotion: reduceMotion,
+                onSelectDate: selectExpandedDate
+            )
+            // Keep the panel mounted at zero height while collapsed so the
+            // selected cell's matched geometry morph has a stable source.
+            // When open it overlays the timeline's pinned header, matching the
+            // Notion interaction without consuming timed viewport height.
+            .frame(maxWidth: .infinity)
+            .frame(
+                height: monthExpanded ? CalendarExpandedMonthGrid.preferredHeight : 0,
+                alignment: .top
+            )
+            .clipped()
+            .opacity(monthExpanded ? 1 : 0)
+            // Reduced motion keeps the matched-geometry namespace
+            // disabled, but still gives the month panel a short,
+            // opacity-led cross-fade instead of an abrupt reveal.
+            .animation(
+                reduceMotion
+                    ? .easeInOut(duration: CalendarInteractionLayout.reducedMotionMonthCrossfadeDuration)
+                    : LifeOSMotion.heroMorph,
+                value: monthExpanded
+            )
+            .allowsHitTesting(monthExpanded)
+            .accessibilityHidden(!monthExpanded)
+            .zIndex(monthExpanded ? 1 : -1)
         }
     }
 
     private var calendarHeader: some View {
         Group {
 #if os(iOS)
-            HStack(spacing: 12) {
+            HStack(alignment: .center, spacing: 8) {
                 Button(action: toggleMonthExpansion) {
-                    HStack(spacing: 5) {
-                        Text(headerDate, format: .dateTime.month(.wide))
-                            .lifeOSTypography(.sectionTitle)
-                            .tracking(-0.2)
-                            .lineLimit(1)
+                    HStack(alignment: .center, spacing: 8) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(headerDate, format: .dateTime.month(.wide).year())
+                                .lifeOSTypography(.sectionTitle)
+                                .tracking(-0.2)
+                                // The month control owns the flexible width;
+                                // wrapping is preferable to truncating a long
+                                // localized month name beside fixed actions.
+                                .lineLimit(2)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .layoutPriority(1)
+                            Text("Week \(calendar.component(.weekOfYear, from: headerDate))")
+                                .lifeOSTypography(.metadata, weight: .medium)
+                                .foregroundStyle(LifeOSTokens.secondaryText)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         LifeOSIcon(.chevronRight)
                             .rotationEffect(.degrees(monthExpanded ? -90 : 90))
-                            .frame(width: 12, height: 12)
+                            .frame(width: 20, height: 20)
                     }
                     .foregroundStyle(LifeOSTokens.Module.calendar)
-                    .padding(.horizontal, monthExpanded ? 10 : 0)
-                    .frame(height: 38)
+                    .padding(.horizontal, 12)
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                     .background(
-                        monthExpanded ? Color.primary.opacity(0.08) : .clear,
+                        monthExpanded ? LifeOSTokens.Module.surface(LifeOSTokens.Module.calendar, opacity: 0.12) : .clear,
                         in: RoundedRectangle(cornerRadius: 10, style: .continuous)
                     )
+                    .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
                 .buttonStyle(.plain)
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                 .accessibilityLabel(monthExpanded ? "Collapse month" : "Expand month")
                 .accessibilityIdentifier("calendar-month-toggle")
                 .accessibilityValue(calendarISODate(headerDate))
 
-                Text("Week \(calendar.component(.weekOfYear, from: headerDate))")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
-
-                Spacer(minLength: 4)
-
-                Button {
-                    isSearchPresented = true
-                } label: {
-                    LifeOSIcon(.search)
-                        .frame(width: 15, height: 15)
-                        .foregroundStyle(.secondary)
-                        .frame(width: 32, height: 32)
-                        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Search events")
-                .accessibilityIdentifier("calendar-search")
-
-                Button {
-                    Task { _ = await coordinator.undo() }
-                } label: {
-                    LifeOSIcon(.undo)
-                        .frame(width: 15, height: 15)
-                        .foregroundStyle(coordinator.canUndo ? Color.primary : Color.secondary)
-                        .frame(width: 32, height: 32)
-                        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                }
-                .buttonStyle(.plain)
-                .disabled(!coordinator.canUndo)
-                .accessibilityLabel("Undo last calendar change")
-                .accessibilityHint("Restores the calendar before the most recent saved change")
-                .accessibilityIdentifier("calendar-undo")
-
-                Menu {
-                    Button("Timeline") { setDisplayMode(.timeline) }
-                    #if os(iOS)
-                    Button("Week") { setDisplayMode(.week) }
-                    #endif
-                    Button("Month view") { setDisplayMode(.month) }
-                    Divider()
-                    Button("Pair nearby device…") { isPairingPresented = true }
-                } label: {
-                    LifeOSIcon(.calendar)
-                        .frame(width: 17, height: 17)
-                        .foregroundStyle(LifeOSTokens.Module.calendar)
-                        .frame(width: 32, height: 32)
-                }
-                // Menus re-tint their label with the system accent; pin the
-                // neutral chrome color so the view-picker stays gray (§1).
-                .tint(LifeOSTokens.secondaryText)
-                .accessibilityLabel("Calendar view")
-                .accessibilityIdentifier("calendar-view-picker")
-
-                Button(action: goToToday) {
-                    Text(Date.now, format: todayDayStyle)
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(LifeOSTokens.canvas)
-                        .frame(width: 34, height: 34)
-                        .background(LifeOSTokens.primaryText, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Today")
-                .accessibilityIdentifier("calendar-today")
-
-                Button(action: create) {
-                    LifeOSIcon(.calendarPlus)
-                        .frame(width: 17, height: 17)
-                        .foregroundStyle(LifeOSTokens.Module.calendar)
-                        .frame(width: 32, height: 32)
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("calendar-add")
-                .accessibilityLabel("New event")
+                calendarTodayButton
+                calendarNewButton
+                calendarOverflowMenu
             }
 #else
             VStack(spacing: 12) {
-                HStack(spacing: 10) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(selectedDate, format: .dateTime.month(.wide).year())
-                            .lifeOSTypography(.pageTitle)
-                            .accessibilityIdentifier("calendar-header-date")
-                            .accessibilityValue(calendarISODate(selectedDate))
-                        Text(displayMode == .month ? "Month" : timelineSubtitle)
-                            .lifeOSTypography(.metadata)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button {
-                        isSearchPresented = true
-                    } label: {
-                        LifeOSIcon(.search).frame(width: 15, height: 15)
-                    }
-                    .buttonStyle(.bordered)
-                    .accessibilityLabel("Search events")
-                    .accessibilityIdentifier("calendar-search")
-                    Button {
-                        Task { _ = await coordinator.undo() }
-                    } label: {
-                        HStack(spacing: 6) {
-                            LifeOSIcon(.undo).frame(width: 15, height: 15)
-                            Text("Undo")
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(!coordinator.canUndo)
-                    .keyboardShortcut("z", modifiers: .command)
-                    .accessibilityLabel("Undo last calendar change")
-                    .accessibilityHint("Restores the calendar before the most recent saved change")
-                    .accessibilityIdentifier("calendar-undo")
-                    Button("Pair nearby device…") { isPairingPresented = true }
-                        .accessibilityIdentifier("calendar-pair-device")
-                    Button("Today", action: goToToday)
-                        .buttonStyle(.bordered)
-                    Button { move(by: -1) } label: {
-                        LifeOSIcon(.chevronLeft).frame(width: 16, height: 16)
-                    }
-                    .buttonStyle(.bordered)
-                    .accessibilityLabel("Previous \(displayMode == .month ? "month" : timelinePeriodName)")
-                    .accessibilityIdentifier("calendar-previous-period")
-                    .keyboardShortcut("[", modifiers: .command)
-                    Button { move(by: 1) } label: {
-                        LifeOSIcon(.chevronRight).frame(width: 16, height: 16)
-                    }
-                    .buttonStyle(.bordered)
-                    .accessibilityLabel("Next \(displayMode == .month ? "month" : timelinePeriodName)")
-                    .accessibilityIdentifier("calendar-next-period")
-                    .keyboardShortcut("]", modifiers: .command)
-                    Button { create() } label: {
-                        HStack(spacing: 6) {
-                            LifeOSIcon(.calendarPlus).frame(width: 15, height: 15)
-                            Text("New")
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .accessibilityIdentifier("calendar-add")
-                    .accessibilityLabel("New event")
-                    .accessibilityHint("Create a calendar event")
-                }
+                calendarMacPrimaryHeader
 
                 HStack {
                     Picker("Calendar view", selection: $displayMode) {
@@ -811,11 +856,198 @@ public struct CalendarView: View {
         .overlay(alignment: .bottom) { Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 1) }
     }
 
+#if os(iOS)
+    private var calendarTodayButton: some View {
+        Button(action: goToToday) {
+            Text(Date.now, format: todayDayStyle)
+                .font(.system(size: 15, weight: .bold))
+                .monospacedDigit()
+                .foregroundStyle(LifeOSTokens.canvas)
+                .frame(width: 44, height: 44)
+                .background(LifeOSTokens.primaryText, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Today")
+        .accessibilityIdentifier("calendar-today")
+    }
+
+    private var calendarNewButton: some View {
+        Button(action: create) {
+            Label("New", systemImage: "calendar.badge.plus")
+                .labelStyle(.titleAndIcon)
+        }
+        .buttonStyle(LifeOSButtonStyle(.primary))
+        .accessibilityIdentifier("calendar-add")
+        .accessibilityLabel("New event")
+        .accessibilityHint("Create a calendar event")
+    }
+
+    private var calendarOverflowMenu: some View {
+        Menu {
+            Button {
+                isSearchPresented = true
+            } label: {
+                Label("Search events", systemImage: "magnifyingglass")
+            }
+            .accessibilityLabel("Search events")
+            .accessibilityIdentifier("calendar-search")
+
+            Button {
+                Task { _ = await coordinator.undo() }
+            } label: {
+                Label("Undo", systemImage: "arrow.uturn.backward")
+            }
+            .disabled(!coordinator.canUndo)
+            .accessibilityLabel("Undo last calendar change")
+            .accessibilityHint("Restores the calendar before the most recent saved change")
+            .accessibilityIdentifier("calendar-undo")
+
+            Divider()
+
+            Section("View") {
+                Button("Timeline") { setDisplayMode(.timeline) }
+                Button("Week") { setDisplayMode(.week) }
+                Button("Month view") { setDisplayMode(.month) }
+            }
+
+            Divider()
+
+            Button("Pair nearby device…") { isPairingPresented = true }
+                .accessibilityIdentifier("calendar-pair-device")
+        } label: {
+            LifeOSIcon(.more)
+                .foregroundStyle(LifeOSTokens.secondaryText)
+                .frame(width: 20, height: 20)
+                .frame(width: 44, height: 44)
+                .background(
+                    Color.primary.opacity(0.045),
+                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        // Menus re-tint their label with the system accent; pin the neutral
+        // chrome color while keeping the existing accessibility contract.
+        .tint(LifeOSTokens.secondaryText)
+        .accessibilityLabel("Calendar view")
+        .accessibilityHint("Search, undo, view, and pairing options")
+        .accessibilityIdentifier("calendar-view-picker")
+    }
+#endif
+
     private var calendarHourHeightChangeHandler: ((CGFloat) -> Void)? {
         { hourHeight = $0 }
     }
 
 #if os(macOS)
+    private var calendarMacPrimaryHeader: some View {
+        GeometryReader { proxy in
+            let compact = proxy.size.width < 760
+            HStack(alignment: .center, spacing: compact ? 6 : 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(selectedDate, format: .dateTime.month(.wide).year())
+                        .lifeOSTypography(.pageTitle)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.82)
+                        .accessibilityIdentifier("calendar-header-date")
+                        .accessibilityValue(calendarISODate(selectedDate))
+                    Text(displayMode == .month ? "Month" : timelineSubtitle)
+                        .lifeOSTypography(.metadata)
+                        .foregroundStyle(LifeOSTokens.secondaryText)
+                }
+                .layoutPriority(1)
+
+                Spacer(minLength: compact ? 4 : 10)
+                calendarMacPeriodButton(direction: -1)
+                calendarMacPeriodButton(direction: 1)
+                Button("Today", action: goToToday)
+                    .buttonStyle(.bordered)
+                    .frame(minWidth: 48, minHeight: 32)
+                    .accessibilityIdentifier("calendar-today")
+                Button { create() } label: {
+                    if compact {
+                        Image(systemName: "calendar.badge.plus")
+                    } else {
+                        Label("New", systemImage: "calendar.badge.plus")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .frame(minWidth: compact ? 32 : 62, minHeight: 32)
+                .accessibilityIdentifier("calendar-add")
+                .accessibilityLabel("New event")
+                .accessibilityHint("Create a calendar event")
+                calendarMacOverflowMenu
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        }
+        .frame(minHeight: 44, maxHeight: 48)
+    }
+
+    @ViewBuilder
+    private func calendarMacPeriodButton(direction: Int) -> some View {
+        if direction < 0 {
+            Button { move(by: direction) } label: {
+                LifeOSIcon(.chevronLeft)
+                    .frame(width: 15, height: 15)
+                    .frame(width: 32, height: 32)
+            }
+            .buttonStyle(.bordered)
+            .accessibilityLabel("Previous \(displayMode == .month ? "month" : timelinePeriodName)")
+            .accessibilityIdentifier("calendar-previous-period")
+            .keyboardShortcut("[", modifiers: .command)
+        } else {
+            Button { move(by: direction) } label: {
+                LifeOSIcon(.chevronRight)
+                    .frame(width: 15, height: 15)
+                    .frame(width: 32, height: 32)
+            }
+            .buttonStyle(.bordered)
+            .accessibilityLabel("Next \(displayMode == .month ? "month" : timelinePeriodName)")
+            .accessibilityIdentifier("calendar-next-period")
+            .keyboardShortcut("]", modifiers: .command)
+        }
+    }
+
+    private var calendarMacOverflowMenu: some View {
+        Menu {
+            Button {
+                isSearchPresented = true
+            } label: {
+                Label("Search events", systemImage: "magnifyingglass")
+            }
+            .accessibilityLabel("Search events")
+            .accessibilityIdentifier("calendar-search")
+
+            Button {
+                Task { _ = await coordinator.undo() }
+            } label: {
+                Label("Undo", systemImage: "arrow.uturn.backward")
+            }
+            .disabled(!coordinator.canUndo)
+            .keyboardShortcut("z", modifiers: .command)
+            .accessibilityLabel("Undo last calendar change")
+            .accessibilityHint("Restores the calendar before the most recent saved change")
+            .accessibilityIdentifier("calendar-undo")
+
+            Divider()
+            Section("View") {
+                Button(timelinePickerLabel) { setDisplayMode(.timeline) }
+                Button("Month view") { setDisplayMode(.month) }
+            }
+            Divider()
+            Button("Pair nearby device…") { isPairingPresented = true }
+                .accessibilityIdentifier("calendar-pair-device")
+        } label: {
+            LifeOSIcon(.more)
+                .frame(width: 16, height: 16)
+                .frame(width: 32, height: 32)
+        }
+        .buttonStyle(.bordered)
+        .tint(LifeOSTokens.secondaryText)
+        .accessibilityLabel("More calendar actions")
+        .accessibilityIdentifier("calendar-overflow")
+    }
+
     private var macDensityControls: some View {
         HStack(spacing: 4) {
             Text("Density")
@@ -866,38 +1098,6 @@ public struct CalendarView: View {
                 max(CGFloat(CalendarInteractionLayout.minimumHourHeight), hourHeight + delta)
             )
         }
-    }
-#endif
-
-#if os(iOS)
-    private func calendarModeButton(_ mode: CalendarDisplayMode, label: String) -> some View {
-        Button {
-            withAnimation(reduceMotion ? nil : LifeOSMotion.easeNavigate) { displayMode = mode }
-        } label: {
-            Text(label)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(displayMode == mode ? Color.primary : Color.secondary)
-                .frame(maxWidth: .infinity)
-                .frame(height: 28)
-                .background(
-                    displayMode == mode ? Color.primary.opacity(0.09) : .clear,
-                    in: RoundedRectangle(cornerRadius: 6, style: .continuous)
-                )
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(label)
-        .accessibilityAddTraits(displayMode == mode ? .isSelected : [])
-    }
-
-    private func navigationButton(direction: Int, icon: LifeOSIconName) -> some View {
-        Button { move(by: direction) } label: {
-            LifeOSIcon(icon).frame(width: 14, height: 14)
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(LifeOSTokens.accent)
-        .frame(width: 32, height: 30)
-        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .accessibilityLabel("\(direction < 0 ? "Previous" : "Next") \(displayMode == .month ? "month" : timelinePeriodName)")
     }
 #endif
 
@@ -1230,6 +1430,14 @@ public struct CalendarView: View {
         anchoredEditorPresentation = nil
         editorAnchorFrame = nil
         timedCreationPreview = nil
+    }
+
+    private func handleMacPopoverDismissal(_ presentationID: UUID) {
+        // An old NSPopover can finish closing after a replacement has already
+        // been requested. Only its own presentation may clear the current
+        // anchor, so a stale callback cannot dismiss the replacement.
+        guard anchoredEditorPresentation?.id == presentationID else { return }
+        cancelMacEditor()
     }
 #endif
 

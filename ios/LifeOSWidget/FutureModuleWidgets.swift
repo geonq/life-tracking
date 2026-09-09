@@ -336,7 +336,10 @@ struct FutureModuleTimelineProvider: TimelineProvider {
     }
 
     private func loadEntry(at date: Date = .now) async -> FutureModuleWidgetEntry {
-        guard let snapshot = FutureWidgetSnapshotStore.read(now: date) else {
+        guard let snapshot = FutureWidgetSnapshotStore.read(
+            now: date,
+            policy: FutureWidgetSnapshotStore.readPolicy()
+        ) else {
             return FutureModuleWidgetEntry(date: date)
         }
         // TimelineEntry.date is the load time, never an old observation time.

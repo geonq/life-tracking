@@ -332,6 +332,16 @@ final class CalendarLayoutTests: XCTestCase {
         XCTAssertLessThan(created, calendar.date(byAdding: .day, value: 1, to: day)!)
     }
 
+    func testMacTimelineGutterProtectsSingleLineClockLabelsWithoutChangingIPhoneGeometry() {
+        XCTAssertEqual(CalendarInteractionLayout.timelineTimeGutter, 40)
+        XCTAssertEqual(CalendarInteractionLayout.timelineTimeLabelTrailingInset, 8)
+        XCTAssertGreaterThanOrEqual(
+            CalendarInteractionLayout.macTimelineTimeGutter - CalendarInteractionLayout.timelineTimeLabelTrailingInset,
+            40,
+            "The Mac label content area must remain wide enough for the SF Pro HH:MM clock label."
+        )
+    }
+
     func testTimelineContentHeightKeepsLateDayContentReachableAtEveryDensity() {
         let day = dayStart
         // Bottom controls are reserved before the timed viewport is measured.

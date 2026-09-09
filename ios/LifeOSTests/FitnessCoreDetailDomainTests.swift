@@ -499,6 +499,49 @@ final class FitnessCoreDetailDomainTests: XCTestCase {
         XCTAssertEqual(trend.availableRanges, [.seven])
     }
 
+    func testTodayMetricPresentationKeepsVisibleProvenanceAndSuppressesCommonAbsence() throws {
+        let provenance = try XCTUnwrap(FitnessMetric.Provenance(
+            source: "HealthKit",
+            device: "Helio Strap",
+            window: "Rolling 7 days",
+            freshness: "2 hours ago",
+            observationID: "hrv-1",
+            revision: "sync:12"
+        ))
+        let expected = "HealthKit · Helio Strap · Rolling 7 days · 2 hours ago"
+
+        for (sourceState, quality) in [
+            (FitnessMetric.SourceState.observed, FitnessMetric.Quality.observed),
+            (.partial, .observed),
+            (.stale, .observed),
+            (.derived, .derived)
+        ] {
+            let metric = FitnessMetric(
+                title: "Recovery",
+                value: "78",
+                unit: "/100",
+                detail: "Source-backed recovery value",
+                quality: quality,
+                sourceState: sourceState,
+                provenance: provenance
+            )
+
+            XCTAssertTrue(metric.isValueAvailable)
+            XCTAssertTrue(FitnessCoreMetricPresentationPolicy.showsProvenance(for: metric))
+            XCTAssertEqual(FitnessCoreMetricPresentationPolicy.provenanceText(for: metric), expected)
+        }
+
+        let unavailable = FitnessMetric.unavailable(
+            "Recovery",
+            reason: "Connect a reviewed source to see this metric."
+        )
+        XCTAssertFalse(FitnessCoreMetricPresentationPolicy.showsProvenance(for: unavailable))
+        XCTAssertEqual(
+            FitnessCoreMetricPresentationPolicy.provenanceText(for: unavailable),
+            unavailable.detail
+        )
+    }
+
     func testSleepEvidencePreservesPermissionStaleAndConflictStates() {
         let permission = FitnessSleepObservationEvidence(state: .permissionRequired(
             reason: "HealthKit sleep read permission is required."

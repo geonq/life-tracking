@@ -7,6 +7,8 @@ private final class PreflightURLProtocol: URLProtocol {
     enum ResponseMode {
         case success
         case oversized
+        case missingContentType
+        case wrongContentType
         case redirect
         case hanging
         /// Declares a small, allowed Content-Length but then streams a body
@@ -27,14 +29,20 @@ private final class PreflightURLProtocol: URLProtocol {
     private static var bodyWasDelivered = false
     private static var requestWasStopped = false
     private static var onRequest: (() -> Void)?
+    private static var onStop: (() -> Void)?
 
-    static func configure(_ mode: ResponseMode, onRequest: (() -> Void)? = nil) {
+    static func configure(
+        _ mode: ResponseMode,
+        onRequest: (() -> Void)? = nil,
+        onStop: (() -> Void)? = nil
+    ) {
         lock.lock()
         responseMode = mode
         requests = []
         bodyWasDelivered = false
         requestWasStopped = false
         self.onRequest = onRequest
+        self.onStop = onStop
         lock.unlock()
     }
 
@@ -69,7 +77,10 @@ private final class PreflightURLProtocol: URLProtocol {
     private static func markStopped() {
         lock.lock()
         requestWasStopped = true
+        let callback = onStop
+        onStop = nil
         lock.unlock()
+        callback?()
     }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -102,9 +113,39 @@ private final class PreflightURLProtocol: URLProtocol {
                 url: url,
                 statusCode: 200,
                 httpVersion: nil,
-                headerFields: ["Content-Length": "1048577"]
+                headerFields: [
+                    "Content-Type": "application/json",
+                    "Content-Length": "1048577",
+                ]
             )!
             client.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client.urlProtocolDidFinishLoading(self)
+        case .missingContentType:
+            let body = Data("ok".utf8)
+            let response = HTTPURLResponse(
+                url: url,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Length": String(body.count)]
+            )!
+            client.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            Self.markBodyDelivered()
+            client.urlProtocol(self, didLoad: body)
+            client.urlProtocolDidFinishLoading(self)
+        case .wrongContentType:
+            let body = Data("ok".utf8)
+            let response = HTTPURLResponse(
+                url: url,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: [
+                    "Content-Type": "text/plain; charset=utf-8",
+                    "Content-Length": String(body.count),
+                ]
+            )!
+            client.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            Self.markBodyDelivered()
+            client.urlProtocol(self, didLoad: body)
             client.urlProtocolDidFinishLoading(self)
         case .success:
             let body = Data("ok".utf8)
@@ -112,7 +153,10 @@ private final class PreflightURLProtocol: URLProtocol {
                 url: url,
                 statusCode: 200,
                 httpVersion: nil,
-                headerFields: ["Content-Length": String(body.count)]
+                headerFields: [
+                    "Content-Type": "application/json; charset=utf-8",
+                    "Content-Length": String(body.count),
+                ]
             )!
             client.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             Self.markBodyDelivered()
@@ -126,7 +170,10 @@ private final class PreflightURLProtocol: URLProtocol {
                 url: url,
                 statusCode: 200,
                 httpVersion: nil,
-                headerFields: ["Content-Length": "2"]
+                headerFields: [
+                    "Content-Type": "application/json",
+                    "Content-Length": "2",
+                ]
             )!
             client.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             Self.markBodyDelivered()
@@ -222,6 +269,17 @@ final class TailscaleSyncClientSecurityTests: XCTestCase {
         )
     }
 
+    private func injectedClient(session: URLSession) -> TailscaleSyncClient {
+        let suiteName = "LifeOS.TailscaleSyncClientSecurityTests.reader." + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.set("https://lifeos.example-tailnet.ts.net:8420", forKey: TailscaleSyncClient.serverURLDefaultsKey)
+        return TailscaleSyncClient(
+            session: session,
+            defaults: defaults,
+            approvedHosts: ["lifeos.example-tailnet.ts.net"]
+        )
+    }
+
     func testServerURLAcceptsOnlyCanonicalPrivateHTTPSOrigin() {
         let approved: Set<String> = ["lifeos.example-tailnet.ts.net"]
         XCTAssertNotNil(TailscaleSyncClient.validatedServerURL("https://lifeos.example-tailnet.ts.net", approvedHosts: approved))
@@ -264,6 +322,45 @@ final class TailscaleSyncClientSecurityTests: XCTestCase {
         )
         XCTAssertEqual(invalid.urlState, .invalid)
         XCTAssertFalse(invalid.canAttemptConnection)
+    }
+
+    @MainActor
+    func testVisualFixtureSyncStorageViewLeavesProductionDefaultsUntouched() {
+        let defaults = UserDefaults.standard
+        let serverURLBefore = defaults.object(forKey: TailscaleSyncClient.serverURLDefaultsKey) as? String
+        let lastSuccessBefore = defaults.object(forKey: "LifeOS.Sync.LastSuccess") as? Double
+
+        let view = SyncStorageSettingsView(usesVisualFixtures: true)
+        _ = view.body
+
+        XCTAssertEqual(
+            defaults.object(forKey: TailscaleSyncClient.serverURLDefaultsKey) as? String,
+            serverURLBefore
+        )
+        XCTAssertEqual(
+            defaults.object(forKey: "LifeOS.Sync.LastSuccess") as? Double,
+            lastSuccessBefore
+        )
+    }
+
+    @MainActor
+    func testVisualFixtureSyncStoragePreflightRejectsHostileCheckerWithoutCallingIt() async {
+        var checkerCalls = 0
+        let configuration = SyncStorageSettingsConfiguration.visualFixture(
+            connectionChecker: {
+                checkerCalls += 1
+                return .reachable
+            }
+        )
+
+        XCTAssertTrue(configuration.usesVisualFixtures)
+        XCTAssertFalse(configuration.allowsConnectionPreflight)
+        XCTAssertTrue(configuration.approvedHosts.isEmpty)
+
+        let result = await configuration.checkConnection()
+
+        XCTAssertNil(result)
+        XCTAssertEqual(checkerCalls, 0)
     }
 
     func testEveryGatewayRESTAndWebSocketRequestSendsNoCredentialHeaders() throws {
@@ -325,6 +422,16 @@ final class TailscaleSyncClientSecurityTests: XCTestCase {
         XCTAssertFalse(TailscaleSyncClient.contentLengthIsAllowed("invalid", maximumBytes: 4))
     }
 
+    func testJSONContentTypeRequiresApplicationJSONAndAllowsParameters() {
+        XCTAssertTrue(TailscaleSyncClient.isJSONContentType("application/json"))
+        XCTAssertTrue(TailscaleSyncClient.isJSONContentType("Application/JSON; charset=utf-8"))
+        XCTAssertTrue(TailscaleSyncClient.isJSONContentType(" application/json ; charset=UTF-8 "))
+        XCTAssertFalse(TailscaleSyncClient.isJSONContentType(nil))
+        XCTAssertFalse(TailscaleSyncClient.isJSONContentType(""))
+        XCTAssertFalse(TailscaleSyncClient.isJSONContentType("text/plain"))
+        XCTAssertFalse(TailscaleSyncClient.isJSONContentType("application/json, text/plain"))
+    }
+
     func testConnectionPreflightTransportMakesOneBoundedAuthenticatedGETWithoutMutation() async throws {
         let defaults = UserDefaults(suiteName: "LifeOS.TailscaleSyncClientSecurityTests.transport.\(UUID().uuidString)")!
         defaults.set("unchanged", forKey: "sentinel")
@@ -375,11 +482,48 @@ final class TailscaleSyncClientSecurityTests: XCTestCase {
         XCTAssertFalse(redirectedSnapshot.bodyWasDelivered)
     }
 
+    func testReadOnlyDocumentsReaderRejectsOversizedAndNonJSONResponses() async throws {
+        let session = preflightSession()
+        defer { session.invalidateAndCancel() }
+        let client = injectedClient(session: session)
+
+        PreflightURLProtocol.configure(.success)
+        let success = try await client.fetchDocuments()
+        XCTAssertEqual(success, Data("ok".utf8))
+        XCTAssertEqual(PreflightURLProtocol.snapshot().requests.first?.url?.path, "/documents")
+
+        PreflightURLProtocol.configure(.oversized)
+        do {
+            _ = try await client.fetchDocuments()
+            XCTFail("an oversized documents response must fail closed")
+        } catch let error as TailscaleSyncError {
+            XCTAssertEqual(error, .responseTooLarge)
+        } catch {
+            XCTFail("unexpected oversized-response error: \(error)")
+        }
+
+        for mode in [PreflightURLProtocol.ResponseMode.missingContentType,
+                     .wrongContentType] {
+            PreflightURLProtocol.configure(mode)
+            do {
+                _ = try await client.fetchDocuments()
+                XCTFail("a non-JSON documents response must fail closed")
+            } catch let error as TailscaleSyncError {
+                XCTAssertEqual(error, .invalidResponse)
+            } catch {
+                XCTFail("unexpected content-type error: \(error)")
+            }
+        }
+    }
+
     func testConnectionPreflightCancellationStopsURLSessionWithoutRenderingFailure() async throws {
         let requestStarted = expectation(description: "preflight request started")
-        PreflightURLProtocol.configure(.hanging) {
-            requestStarted.fulfill()
-        }
+        let requestStopped = expectation(description: "preflight request stopped")
+        PreflightURLProtocol.configure(
+            .hanging,
+            onRequest: { requestStarted.fulfill() },
+            onStop: { requestStopped.fulfill() }
+        )
         let session = preflightSession()
         defer { session.invalidateAndCancel() }
         let request = try preflightRequest()
@@ -393,6 +537,7 @@ final class TailscaleSyncClientSecurityTests: XCTestCase {
         await fulfillment(of: [requestStarted], timeout: 1)
         operation.cancel()
         let result = await operation.value
+        await fulfillment(of: [requestStopped], timeout: 1)
 
         XCTAssertNil(result)
         let snapshot = PreflightURLProtocol.snapshot()
@@ -498,6 +643,41 @@ final class TailscaleSyncClientSecurityTests: XCTestCase {
         } catch {
             XCTFail("unexpected error: \(error)")
         }
+
+        let validETag = #""calendar-v1-r0-valid""#
+        let validResponse = HTTPURLResponse(
+            url: url,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: [
+                "Content-Type": "application/json; charset=utf-8",
+                "ETag": validETag,
+            ]
+        )!
+        let resource = try TailscaleSyncClient.parseCalendarFetchResponse(
+            data: calendarJSON,
+            response: validResponse
+        )
+        XCTAssertEqual(resource.data, calendarJSON)
+        XCTAssertEqual(resource.etag, validETag)
+
+        for headers in [
+            ["ETag": validETag],
+            ["Content-Type": "text/plain", "ETag": validETag],
+        ] {
+            let response = HTTPURLResponse(
+                url: url,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: headers
+            )!
+            XCTAssertThrowsError(try TailscaleSyncClient.parseCalendarFetchResponse(
+                data: calendarJSON,
+                response: response
+            )) { error in
+                XCTAssertEqual(error as? TailscaleSyncError, .invalidResponse)
+            }
+        }
     }
 
     func testConditionalCalendarPushCarriesETagAndIdempotencyAndReturnsAuthoritativeConflict() throws {
@@ -519,7 +699,7 @@ final class TailscaleSyncClientSecurityTests: XCTestCase {
         do {
             _ = try TailscaleSyncClient.parseCalendarPushResponse(
                 data: calendarJSON,
-                response: HTTPURLResponse(url: url, statusCode: 412, httpVersion: nil, headerFields: ["ETag": conflictETag])!
+                response: HTTPURLResponse(url: url, statusCode: 412, httpVersion: nil, headerFields: ["ETag": conflictETag, "Content-Type": "application/json"])!
             )
             XCTFail("stale Calendar PUT must return a conflict")
         } catch let error as CalendarSyncError {
@@ -550,7 +730,7 @@ final class TailscaleSyncClientSecurityTests: XCTestCase {
         let validETag = #""calendar-v1-r3-authoritative""#
 
         for status in [412, 428] {
-            let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: ["ETag": validETag])!
+            let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: ["ETag": validETag, "Content-Type": "application/json"])!
             XCTAssertThrowsError(try TailscaleSyncClient.parseCalendarPushResponse(data: calendarJSON, response: response)) { error in
                 guard let calendarError = error as? CalendarSyncError,
                       case .calendarConflict(let data, let etag) = calendarError else {
@@ -561,7 +741,7 @@ final class TailscaleSyncClientSecurityTests: XCTestCase {
             }
         }
 
-        let success = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["ETag": validETag])!
+        let success = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["ETag": validETag, "Content-Type": "application/json"])!
         let resource = try TailscaleSyncClient.parseCalendarPushResponse(data: calendarJSON, response: success)
         XCTAssertEqual(resource.data, calendarJSON)
         XCTAssertEqual(resource.etag, validETag)
@@ -571,8 +751,13 @@ final class TailscaleSyncClientSecurityTests: XCTestCase {
             XCTAssertEqual(error as? CalendarSyncError, .missingETag)
         }
 
-        let invalidConflict = HTTPURLResponse(url: url, statusCode: 412, httpVersion: nil, headerFields: ["ETag": validETag])!
+        let invalidConflict = HTTPURLResponse(url: url, statusCode: 412, httpVersion: nil, headerFields: ["ETag": validETag, "Content-Type": "application/json"])!
         XCTAssertThrowsError(try TailscaleSyncClient.parseCalendarPushResponse(data: Data(#"{"schemaVersion":2,"items":[]}"#.utf8), response: invalidConflict)) { error in
+            XCTAssertEqual(error as? TailscaleSyncError, .invalidResponse)
+        }
+
+        let wrongConflictContentType = HTTPURLResponse(url: url, statusCode: 412, httpVersion: nil, headerFields: ["ETag": validETag, "Content-Type": "text/plain"])!
+        XCTAssertThrowsError(try TailscaleSyncClient.parseCalendarPushResponse(data: calendarJSON, response: wrongConflictContentType)) { error in
             XCTAssertEqual(error as? TailscaleSyncError, .invalidResponse)
         }
     }
@@ -698,6 +883,49 @@ final class TailscaleSyncClientSecurityTests: XCTestCase {
         }
     }
 
+    func testFinanceImportedReceiptResponseAcceptsCommittedAndUnknownStates() throws {
+        let url = URL(string: "https://lifeos.example-tailnet.ts.net:8420/finance/imported/receipt/key")!
+        let committedBody = try JSONEncoder.lifeOS.encode(
+            FinanceImportedCommitReceipt(state: .committed, revision: 4)
+        )
+        let committedResponse = HTTPURLResponse(
+            url: url,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        let committed = try TailscaleSyncClient.parseFinanceImportedReceiptResponse(
+            data: committedBody,
+            response: committedResponse
+        )
+        XCTAssertEqual(committed, try FinanceImportedCommitReceipt(state: .committed, revision: 4))
+
+        let unknownBody = try JSONEncoder.lifeOS.encode(
+            FinanceImportedCommitReceipt(state: .unknown, revision: nil)
+        )
+        let unknown = try TailscaleSyncClient.parseFinanceImportedReceiptResponse(
+            data: unknownBody,
+            response: committedResponse
+        )
+        XCTAssertEqual(unknown, try FinanceImportedCommitReceipt(state: .unknown, revision: nil))
+
+        let extraField = Data(#"{"revision":4,"state":"committed","fingerprint":"private"}"#.utf8)
+        XCTAssertThrowsError(try TailscaleSyncClient.parseFinanceImportedReceiptResponse(
+            data: extraField,
+            response: committedResponse
+        )) { error in
+            XCTAssertEqual(error as? FinanceImportedSyncError, .invalidResponse)
+        }
+
+        let invalidRevision = Data(#"{"revision":null,"state":"committed"}"#.utf8)
+        XCTAssertThrowsError(try TailscaleSyncClient.parseFinanceImportedReceiptResponse(
+            data: invalidRevision,
+            response: committedResponse
+        )) { error in
+            XCTAssertEqual(error as? FinanceImportedSyncError, .invalidResponse)
+        }
+    }
+
     // MARK: - Additional negatives for SY-02
 
     /// A non-approved host, a host that merely *contains* the approved
@@ -794,5 +1022,159 @@ final class TailscaleSyncClientSecurityTests: XCTestCase {
         XCTAssertEqual(result, .invalidResponse)
         let snapshot = PreflightURLProtocol.snapshot()
         XCTAssertEqual(snapshot.requests.count, 1)
+    }
+
+    private func fitnessEnvelope(at now: Date) throws -> FitnessObservationEnvelope {
+        let observedAt = now.addingTimeInterval(-20)
+        let heartRate = try FitnessObservationValue(
+            metric: .heartRate,
+            value: 61.5,
+            unit: .beatsPerMinute,
+            observedAt: observedAt
+        )
+        let hrv = try FitnessObservationValue(
+            metric: .heartRateVariability,
+            value: 48,
+            unit: .milliseconds,
+            observedAt: observedAt
+        )
+        let sleep = try FitnessObservationValue(
+            metric: .sleepDuration,
+            value: 7_200,
+            unit: .seconds,
+            observedAt: observedAt
+        )
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let day = FitnessObservationDay(
+            date: calendar.startOfDay(for: now),
+            values: [sleep]
+        )
+        let workout = FitnessObservationWorkout(
+            activityTypeRawValue: 37,
+            startAt: now.addingTimeInterval(-1_800),
+            endAt: now.addingTimeInterval(-1_200),
+            durationSeconds: 600,
+            activeEnergyKilocalories: 120
+        )
+        return try FitnessObservationEnvelope(
+            state: .observed,
+            generatedAt: now,
+            observedAt: observedAt,
+            metrics: [heartRate, hrv],
+            days: [day],
+            workouts: [workout]
+        )
+    }
+
+    func testFitnessObservationContractRoundTripsBoundedSourceBackedValues() throws {
+        let now = Date(timeIntervalSince1970: 1_900_000_000)
+        let envelope = try fitnessEnvelope(at: now)
+        let data = try envelope.encoded(now: now)
+        let decoded = try FitnessObservationEnvelope.decode(data, now: now)
+
+        XCTAssertEqual(decoded, envelope)
+        XCTAssertLessThanOrEqual(data.count, FitnessObservationEnvelope.maximumEncodedBytes)
+        let body = try XCTUnwrap(String(data: data, encoding: .utf8))
+        XCTAssertFalse(body.localizedCaseInsensitiveContains("deviceidentifier"))
+        XCTAssertFalse(body.localizedCaseInsensitiveContains("authorization"))
+        XCTAssertFalse(body.localizedCaseInsensitiveContains("score"))
+    }
+
+    func testFitnessObservationContractRejectsUnknownFutureWrongUnitAndOversizedPayloads() throws {
+        let now = Date(timeIntervalSince1970: 1_900_000_000)
+        let envelope = try fitnessEnvelope(at: now)
+        let encoded = try envelope.encoded(now: now)
+
+        var unknown = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        unknown["unexpected"] = true
+        let unknownData = try JSONSerialization.data(withJSONObject: unknown, options: [.sortedKeys])
+        XCTAssertThrowsError(try FitnessObservationEnvelope.decode(unknownData, now: now)) { error in
+            XCTAssertEqual(error as? FitnessObservationContractError, .malformed)
+        }
+
+        var future = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        future["generatedAt"] = ISO8601DateFormatter().string(from: now.addingTimeInterval(60))
+        let futureData = try JSONSerialization.data(withJSONObject: future, options: [.sortedKeys])
+        XCTAssertThrowsError(try FitnessObservationEnvelope.decode(futureData, now: now)) { error in
+            XCTAssertEqual(error as? FitnessObservationContractError, .futureTimestamp)
+        }
+
+        var wrongUnit = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        var values = try XCTUnwrap(wrongUnit["metrics"] as? [[String: Any]])
+        values[0]["unit"] = "seconds"
+        wrongUnit["metrics"] = values
+        let wrongUnitData = try JSONSerialization.data(withJSONObject: wrongUnit, options: [.sortedKeys])
+        XCTAssertThrowsError(try FitnessObservationEnvelope.decode(wrongUnitData, now: now)) { error in
+            XCTAssertEqual(error as? FitnessObservationContractError, .invalidValue)
+        }
+
+        let oversized = Data(repeating: 0x20, count: FitnessObservationEnvelope.maximumEncodedBytes + 1)
+        XCTAssertThrowsError(try FitnessObservationEnvelope.decode(oversized, now: now)) { error in
+            XCTAssertEqual(error as? FitnessObservationContractError, .oversized)
+        }
+    }
+
+    func testFitnessObservationClientRequestIsBoundedPOSTAndCarriesNoCredentialHeaders() {
+        let url = URL(string: "https://lifeos.example-tailnet.ts.net:8420/fitness/observation")!
+        let body = Data(#"{"state":"observed"}"#.utf8)
+        let request = TailscaleSyncClient.fitnessObservationRequest(url: url, body: body)
+
+        XCTAssertEqual(request?.httpMethod, "POST")
+        XCTAssertEqual(request?.url, url)
+        XCTAssertEqual(request?.httpBody, body)
+        XCTAssertEqual(request?.value(forHTTPHeaderField: "Content-Type"), "application/json")
+        if let request {
+            assertNoCredentialHeaders(request)
+        }
+        XCTAssertNil(TailscaleSyncClient.fitnessObservationRequest(
+            url: url,
+            body: Data(repeating: 0x20, count: FitnessObservationEnvelope.maximumEncodedBytes + 1)
+        ))
+    }
+
+    func testFitnessObservationMappingIsDateAwareAndLeavesUnsupportedScoresUnavailable() throws {
+        let now = Date(timeIntervalSince1970: 1_900_000_000)
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let envelope = try fitnessEnvelope(at: now)
+        let snapshot = envelope.snapshot(for: now, now: now, calendar: calendar)
+
+        XCTAssertEqual(snapshot.source.status, .connected)
+        XCTAssertTrue(snapshot.healthMonitor[0].isValueAvailable)
+        XCTAssertFalse(snapshot.healthMonitor[1].isValueAvailable)
+        XCTAssertTrue(snapshot.healthMonitor[2].isValueAvailable)
+        XCTAssertTrue(snapshot.sleep.isValueAvailable)
+        XCTAssertEqual(snapshot.workouts.count, 1)
+        XCTAssertFalse(snapshot.readiness.isValueAvailable)
+        XCTAssertFalse(snapshot.strain.isValueAvailable)
+        XCTAssertFalse(snapshot.stress.isValueAvailable)
+        XCTAssertFalse(snapshot.energyReserve.isValueAvailable)
+
+        let otherDay = calendar.date(byAdding: .day, value: -1, to: now)!
+        let otherDaySnapshot = envelope.snapshot(for: otherDay, now: now, calendar: calendar)
+        XCTAssertEqual(otherDaySnapshot.source.status, .connected)
+        XCTAssertFalse(otherDaySnapshot.sleep.isValueAvailable)
+        XCTAssertTrue(otherDaySnapshot.healthMonitor.allSatisfy { !$0.isValueAvailable })
+        XCTAssertTrue(otherDaySnapshot.workouts.isEmpty)
+    }
+
+    func testFitnessObservationMappingPreservesStaleUnavailableAndFixtureStates() throws {
+        let now = Date(timeIntervalSince1970: 1_900_000_000)
+        let stale = try FitnessObservationEnvelope(
+            state: .stale,
+            generatedAt: now.addingTimeInterval(-16 * 60),
+            observedAt: now.addingTimeInterval(-16 * 60)
+        )
+        let unavailable = try FitnessObservationEnvelope(
+            state: .unavailable,
+            generatedAt: now,
+            observedAt: now
+        )
+
+        XCTAssertEqual(stale.snapshot(for: now, now: now).source.status, .stale)
+        XCTAssertEqual(unavailable.snapshot(for: now, now: now).source.status, .unavailable)
+        XCTAssertFalse(FitnessObservationSyncPolicy.allowsNetwork(usesVisualFixtures: true))
+        XCTAssertTrue(FitnessObservationSyncPolicy.allowsNetwork(usesVisualFixtures: false))
     }
 }

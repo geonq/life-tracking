@@ -307,12 +307,22 @@ public struct FitnessBiologyDetailSurface: View {
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
 
+            if let sharedUnavailableReason {
+                FitnessBiologyAvailabilityNotice(reason: sharedUnavailableReason)
+            }
+
             FitnessBiologyMetricColumns(
                 spacing: 12,
                 forceSingleColumn: dynamicTypeSize.isAccessibilitySize
             ) {
                 ForEach(visibleMetrics) { metric in
-                    FitnessBiologyMetricCard(metric: metric, date: selectedDate, range: selectedRange, isFixture: usesVisualFixtures) {
+                    FitnessBiologyMetricCard(
+                        metric: metric,
+                        date: selectedDate,
+                        range: selectedRange,
+                        isFixture: usesVisualFixtures,
+                        sharedUnavailableReason: sharedUnavailableReason
+                    ) {
                         selectedMetric = metric.id
                     }
                 }
@@ -322,6 +332,15 @@ public struct FitnessBiologyDetailSurface: View {
 
     private var visibleMetrics: [FitnessBiologyMetric] {
         Array(snapshot.metrics.prefix(6))
+    }
+
+    private var sharedUnavailableReason: String? {
+        let unavailableMetrics = visibleMetrics.filter { $0.currentValue == nil }
+        guard !unavailableMetrics.isEmpty,
+              unavailableMetrics.count == visibleMetrics.count else { return nil }
+        let reasons = Set(unavailableMetrics.map(\.stateDetail))
+        guard reasons.count == 1 else { return nil }
+        return reasons.first
     }
 
     private func shiftDate(by days: Int) {
@@ -422,7 +441,7 @@ private struct FitnessBiologicalAgeCard: View {
             case .observed(let value, _, let model, let reviewedAt, let window, let provenance):
                 HStack(alignment: .lastTextBaseline, spacing: 8) {
                     Text(value, format: .number.precision(.fractionLength(1)))
-                        .lifeOSTypography(.metric)
+                        .lifeOSTypography(.metricCompact)
                         .monospacedDigit()
                     Text("years")
                         .lifeOSTypography(.body)
@@ -436,13 +455,16 @@ private struct FitnessBiologicalAgeCard: View {
                 .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
             case .unavailable(let reason), .calibrating(let reason), .gated(let reason):
-                Text(reason)
-                    .lifeOSTypography(.body)
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text("Only a reviewed model with explicit source metadata can show a value.")
-                    .lifeOSTypography(.metadata)
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("—")
+                        .lifeOSTypography(.metricCompact)
+                        .monospacedDigit()
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                    Text(reason)
+                        .lifeOSTypography(.metadata)
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             if isFixture {
@@ -467,6 +489,7 @@ private struct FitnessBiologyMetricCard: View {
     let date: Date
     let range: FitnessBiologyRange
     let isFixture: Bool
+    let sharedUnavailableReason: String?
     let onTap: () -> Void
     @State private var hovering = false
     @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
@@ -494,12 +517,14 @@ private struct FitnessBiologyMetricCard: View {
                     Spacer(minLength: 0)
                 }
                 metricValue
-                Text(metadataLine)
-                    .lifeOSTypography(.metadata)
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
-                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .multilineTextAlignment(.leading)
+                if let metadataLine {
+                    Text(metadataLine)
+                        .lifeOSTypography(.metadata)
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .multilineTextAlignment(.leading)
+                }
                 if visiblePoints.count > 1 {
                     FitnessBiologyMiniChart(points: visiblePoints, hue: metric.id.hue)
                         .frame(maxWidth: .infinity, minHeight: 36, maxHeight: 36)
@@ -569,14 +594,42 @@ private struct FitnessBiologyMetricCard: View {
             .foregroundStyle(LifeOSTokens.tertiaryText)
     }
 
-    private var metadataLine: String {
-        guard metric.currentValue != nil else { return metric.stateDetail }
+    private var metadataLine: String? {
+        guard metric.currentValue != nil else {
+            return metric.stateDetail == sharedUnavailableReason ? nil : metric.stateDetail
+        }
         switch metric.state {
         case .observed(_, _, let device, _, let freshness, let window, _, _), .demo(_, _, let device, _, let freshness, let window, _, _):
             return "\(metric.sourceState.label) · \(device) · \(freshness) · \(window)"
         case .unavailable, .calibrating:
             return metric.stateDetail
         }
+    }
+}
+
+private struct FitnessBiologyAvailabilityNotice: View {
+    let reason: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            LifeOSIcon(.warning)
+                .foregroundStyle(LifeOSTokens.tertiaryText)
+                .frame(width: 16, height: 16)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Body metrics unavailable")
+                    .lifeOSTypography(.metadata, weight: .semibold)
+                Text(reason)
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(LifeOSTokens.surface.opacity(0.58), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("fitness-biology-unavailable-notice")
     }
 }
 

@@ -14,6 +14,41 @@ public typealias CalendarUpdateCompletion = (CalendarLocalSaveResult) -> Void
 // asynchronous local save, so the handler contract must permit that escape.
 public typealias CalendarUpdateHandler = (CalendarItem, Date, Date, @escaping CalendarUpdateCompletion) -> Void
 
+/// The small defaults boundary used by calendar persistence metadata. Production
+/// uses `UserDefaults.standard`; fixture hosts receive an isolated instance.
+public protocol CalendarDefaultsStore: AnyObject {
+    func string(forKey defaultName: String) -> String?
+    func integer(forKey defaultName: String) -> Int
+    func bool(forKey defaultName: String) -> Bool
+    func set(_ value: Any?, forKey defaultName: String)
+}
+
+extension UserDefaults: CalendarDefaultsStore {}
+
+private final class CalendarFixtureDefaults: CalendarDefaultsStore {
+    private var values: [String: Any] = [:]
+
+    func string(forKey defaultName: String) -> String? {
+        values[defaultName] as? String
+    }
+
+    func integer(forKey defaultName: String) -> Int {
+        if let value = values[defaultName] as? Int { return value }
+        if let value = values[defaultName] as? NSNumber { return value.intValue }
+        return 0
+    }
+
+    func bool(forKey defaultName: String) -> Bool {
+        if let value = values[defaultName] as? Bool { return value }
+        if let value = values[defaultName] as? NSNumber { return value.boolValue }
+        return false
+    }
+
+    func set(_ value: Any?, forKey defaultName: String) {
+        values[defaultName] = value
+    }
+}
+
 private enum CalendarRemoteMutationError: Error {
     case attemptsExhausted
     case adoptionFailed
@@ -107,6 +142,12 @@ public final class CalendarCoordinator: ObservableObject {
     private typealias CalendarRemotePush = @Sendable (Data, String, String) async throws -> CalendarRemoteResource
     private static let maximumRemoteMutationAttempts = 3
 
+    /// Returns a fresh metadata store for a visual-fixture coordinator. The
+    /// instance has no persistent or standard-defaults domain.
+    public static func makeVisualFixtureDefaults() -> any CalendarDefaultsStore {
+        CalendarFixtureDefaults()
+    }
+
     @Published public private(set) var snapshot = CalendarSnapshot()
     @Published public private(set) var storageDescription = ""
     @Published public private(set) var syncStatus: CalendarPeerConnectionStatus = .stopped
@@ -121,7 +162,9 @@ public final class CalendarCoordinator: ObservableObject {
     public let store: CalendarStore
     public let senderID: String
     private var revision: Int
-    private let peerSync: CalendarPeerTransport
+    private var peerSync: CalendarPeerTransport
+    private var livePeerSync: LiveCalendarPeerTransport?
+    private let allowsLivePeerTransport: Bool
     private let tailscaleClient: TailscaleSyncClient?
     private let remoteFetch: CalendarRemoteFetch?
     private let remotePush: CalendarRemotePush?
@@ -132,6 +175,8 @@ public final class CalendarCoordinator: ObservableObject {
     /// Fixture launches intentionally start from their injected snapshot and
     /// must not let a reused app container replace it on the first mutation.
     private let usesVisualFixtures: Bool
+    private let defaults: any CalendarDefaultsStore
+    private var nearbyDiscoveryObserver: NSObjectProtocol?
     private struct FailedMutation: Sendable {
         let id: UUID
         let mutation: CalendarMutation
@@ -141,6 +186,7 @@ public final class CalendarCoordinator: ObservableObject {
     private var pendingFailedUndo = false
     private var peerSyncWarning: String?
     private var remoteSyncWarning: String?
+    private var remoteMutationWarning: String?
     private var remoteSyncInFlight = false
     private struct UndoToken: Sendable {
         let id: UUID
@@ -196,40 +242,64 @@ public final class CalendarCoordinator: ObservableObject {
         calendarRemotePush: (@Sendable (Data, String, String) async throws -> CalendarRemoteResource)? = nil,
         /// Test-only replacement for WidgetCenter; also permits an injected
         /// local store to exercise invalidation without an App Group entitlement.
-        widgetTimelineReload: (([String]) -> Void)? = nil
+        widgetTimelineReload: (([String]) -> Void)? = nil,
+        defaults: (any CalendarDefaultsStore)? = nil
     ) {
         snapshot = initialSnapshot
         self.usesVisualFixtures = usesVisualFixtures
+        let resolvedDefaults: any CalendarDefaultsStore = defaults
+            ?? (usesVisualFixtures ? Self.makeVisualFixtureDefaults() : UserDefaults.standard)
+        self.defaults = resolvedDefaults
         self.remoteSyncInjected = !usesVisualFixtures && (calendarRemoteFetch != nil && calendarRemotePush != nil)
+        let usesInjectedTransport = usesVisualFixtures || storeURL != nil || peerSend != nil
+            || storeMutationHook != nil || calendarRemoteFetch != nil || calendarRemotePush != nil
+            || widgetTimelineReload != nil
+        self.allowsLivePeerTransport = !usesInjectedTransport
         let selected: (URL, String, Bool) = {
             if let storeURL {
                 return (storeURL, "Injected local store", false)
+            }
+            if usesVisualFixtures {
+                // Fixture hosts must never resolve the personal App Group or
+                // the normal Application Support calendar. Keep the store
+                // file-backed so mutation tests still exercise the real
+                // atomic CalendarStore path, but isolate every coordinator
+                // instance under a unique temporary directory.
+                let fixtureDirectory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+                    .appendingPathComponent("LifeOS", isDirectory: true)
+                    .appendingPathComponent("CalendarFixtures", isDirectory: true)
+                    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+                let url = CalendarStoreURL.localURL(baseDirectory: fixtureDirectory, fileManager: fileManager)
+                return (url, "Isolated fixture store", false)
             }
             if let group = AppGroupConfiguration.identifier(bundle: bundle),
                let url = try? CalendarStoreURL.appGroupURL(identifier: group, fileManager: fileManager) {
                 return (url, "App Group", true)
             }
-            let url = storeURL ?? CalendarStoreURL.localURL(fileManager: fileManager)
+            let url = CalendarStoreURL.localURL(fileManager: fileManager)
             return (url, "Local Application Support (this app only)", false)
         }()
         store = CalendarStore(url: selected.0, fileManager: fileManager, beforeMutation: storeMutationHook)
         storageDescription = selected.1
         sharedStorageAvailable = selected.2
-        let defaults = UserDefaults.standard
         let key = "LifeOS.Calendar.senderID"
-        if let existing = defaults.string(forKey: key), !existing.isEmpty { senderID = existing }
-        else { let value = UUID().uuidString; defaults.set(value, forKey: key); senderID = value }
-        revision = defaults.integer(forKey: "LifeOS.Calendar.revision")
+        if let existing = resolvedDefaults.string(forKey: key), !existing.isEmpty { senderID = existing }
+        else { let value = UUID().uuidString; resolvedDefaults.set(value, forKey: key); senderID = value }
+        revision = resolvedDefaults.integer(forKey: "LifeOS.Calendar.revision")
         if usesVisualFixtures {
             peerSync = FixtureCalendarPeerTransport()
+            livePeerSync = nil
             tailscaleClient = nil
             self.remoteFetch = nil
             self.remotePush = nil
         } else {
-            if storeURL != nil || peerSend != nil || storeMutationHook != nil || calendarRemoteFetch != nil || calendarRemotePush != nil || widgetTimelineReload != nil {
+            if !allowsLivePeerTransport || !resolvedDefaults.bool(forKey: CalendarNearbyDiscoveryPolicy.defaultsKey) {
                 peerSync = FixtureCalendarPeerTransport()
+                livePeerSync = nil
             } else {
-                peerSync = LiveCalendarPeerTransport(displayName: senderID)
+                let live = LiveCalendarPeerTransport(displayName: senderID)
+                peerSync = live
+                livePeerSync = live
             }
             let client = TailscaleSyncClient()
             tailscaleClient = client
@@ -240,23 +310,21 @@ public final class CalendarCoordinator: ObservableObject {
         }
         self.widgetTimelineReload = widgetTimelineReload
         self.peerSend = peerSend
-        peerSync.setPairingHandler { [weak self] state in
-            DispatchQueue.main.async { self?.pairingState = state }
-        }
-        peerSync.setStatusHandler { [weak self] status in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.syncStatus = status
-                if case .connected = status, self.isLoaded {
-                    self.sendPeer(snapshot: self.snapshot, revision: self.revision)
+        configurePeerTransport(peerSync)
+        if !usesVisualFixtures {
+            nearbyDiscoveryObserver = NotificationCenter.default.addObserver(
+                forName: CalendarNearbyDiscoveryPolicy.didChangeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.setNearbyDiscoveryEnabled(
+                        self.defaults.bool(forKey: CalendarNearbyDiscoveryPolicy.defaultsKey)
+                    )
                 }
             }
-        }
-        peerSync.setSnapshotHandler { [weak self] envelope in
-            Task { @MainActor in await self?.merge(envelope.snapshot, remoteRevision: envelope.revision) }
-        }
 
-        if !usesVisualFixtures {
             Task { [weak self] in
                 guard let self, let client = self.tailscaleClient else { return }
                 guard await client.isConfigured else { return }
@@ -266,6 +334,60 @@ public final class CalendarCoordinator: ObservableObject {
                 }
             }
         }
+    }
+
+    deinit {
+        if let nearbyDiscoveryObserver {
+            NotificationCenter.default.removeObserver(nearbyDiscoveryObserver)
+        }
+    }
+
+    private func configurePeerTransport(_ transport: CalendarPeerTransport) {
+        transport.setPairingHandler { [weak self] state in
+            DispatchQueue.main.async { self?.pairingState = state }
+        }
+        transport.setStatusHandler { [weak self] status in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.syncStatus = status
+                if case .connected = status, self.isLoaded {
+                    self.sendPeer(snapshot: self.snapshot, revision: self.revision)
+                }
+            }
+        }
+        transport.setSnapshotHandler { [weak self] envelope in
+            Task { @MainActor in
+                await self?.merge(
+                    envelope.snapshot,
+                    remoteRevision: envelope.revision,
+                    remoteSentAt: envelope.sentAt
+                )
+            }
+        }
+    }
+
+    private func ensureLivePeerTransport() {
+        guard allowsLivePeerTransport, livePeerSync == nil else { return }
+        let live = LiveCalendarPeerTransport(displayName: senderID)
+        peerSync = live
+        livePeerSync = live
+        configurePeerTransport(live)
+    }
+
+    private func deactivatePeerTransport() {
+        peerSync.stop()
+        livePeerSync = nil
+        peerSync = FixtureCalendarPeerTransport()
+        configurePeerTransport(peerSync)
+        publishDiscoveryDisabledState()
+    }
+
+    private func publishDiscoveryDisabledState() {
+        var state = CalendarPairingState()
+        state.message = "Nearby calendar discovery is disabled. Enable it in Sync & storage before pairing."
+        state.available = false
+        pairingState = state
+        syncStatus = .stopped
     }
 
     public func load() async {
@@ -293,9 +415,42 @@ public final class CalendarCoordinator: ObservableObject {
     public func importPairing(_ token: String) { pairingAction { try peerSync.importPairing(token) } }
     public func confirmPairing() { pairingAction { try peerSync.confirmPairing() } }
     public func cancelPairing() { pairingError = nil; peerSync.cancelPairing() }
-    public func retryPairingConnection() { peerSync.retryPairingConnection() }
-    public func startSync() { peerSync.start() }
-    public func stopSync() { peerSync.stop() }
+    public func retryPairingConnection() {
+        guard nearbyDiscoveryEnabled else { return }
+        peerSync.retryPairingConnection()
+    }
+
+    public var nearbyDiscoveryEnabled: Bool {
+        CalendarNearbyDiscoveryPolicy.allowsDiscovery(
+            usesVisualFixtures: usesVisualFixtures,
+            settingEnabled: defaults.bool(forKey: CalendarNearbyDiscoveryPolicy.defaultsKey)
+        )
+    }
+
+    public func setNearbyDiscoveryEnabled(_ enabled: Bool) {
+        guard !usesVisualFixtures else { return }
+        defaults.set(enabled, forKey: CalendarNearbyDiscoveryPolicy.defaultsKey)
+        if enabled {
+            startSync()
+        } else {
+            deactivatePeerTransport()
+        }
+    }
+
+    public func startSync() {
+        guard nearbyDiscoveryEnabled, allowsLivePeerTransport else {
+            if livePeerSync != nil { deactivatePeerTransport() }
+            else { publishDiscoveryDisabledState() }
+            return
+        }
+        ensureLivePeerTransport()
+        peerSync.start()
+    }
+
+    public func stopSync() {
+        peerSync.stop()
+        if !nearbyDiscoveryEnabled { publishDiscoveryDisabledState() }
+    }
 
     @discardableResult
     public func save(_ item: CalendarItem) async -> CalendarLocalSaveResult {
@@ -338,10 +493,20 @@ public final class CalendarCoordinator: ObservableObject {
     }
 
     @discardableResult
-    func merge(_ remote: CalendarSnapshot, remoteRevision: Int? = nil) async -> CalendarLocalSaveResult {
+    func merge(
+        _ remote: CalendarSnapshot,
+        remoteRevision: Int? = nil,
+        remoteSentAt: Date? = nil,
+        now: Date = .now
+    ) async -> CalendarLocalSaveResult {
         await enqueueDurableOperation { [weak self] in
             guard let self else { return .failure("Calendar coordinator is unavailable.") }
-            return await self.performRemoteMerge(remote, remoteRevision: remoteRevision)
+            return await self.performRemoteMerge(
+                remote,
+                remoteRevision: remoteRevision,
+                remoteSentAt: remoteSentAt,
+                now: now
+            )
         }
     }
 
@@ -401,7 +566,7 @@ public final class CalendarCoordinator: ObservableObject {
             }
             pendingFailedUndo = false
             revision += 1
-            UserDefaults.standard.set(revision, forKey: "LifeOS.Calendar.revision")
+            defaults.set(revision, forKey: "LifeOS.Calendar.revision")
             if pendingFailedMutation == nil { errorMessage = nil }
 
             // Every successful local mutation supersedes the previous one-shot
@@ -444,7 +609,7 @@ public final class CalendarCoordinator: ObservableObject {
             setUndoToken(nil)
             pendingFailedUndo = false
             revision += 1
-            UserDefaults.standard.set(revision, forKey: "LifeOS.Calendar.revision")
+            defaults.set(revision, forKey: "LifeOS.Calendar.revision")
             if pendingFailedMutation == nil { errorMessage = nil }
             requestWidgetTimelineReloadIfNeeded()
             return .success
@@ -458,11 +623,29 @@ public final class CalendarCoordinator: ObservableObject {
         }
     }
 
-    private func performRemoteMerge(_ remote: CalendarSnapshot, remoteRevision: Int?) async -> CalendarLocalSaveResult {
+    private func performRemoteMerge(
+        _ remote: CalendarSnapshot,
+        remoteRevision: Int?,
+        remoteSentAt: Date?,
+        now: Date
+    ) async -> CalendarLocalSaveResult {
         let generation = durableGeneration
         do {
             try remote.validatedForPersistence()
-            let merged = try await store.merge(remote)
+            let durable = try await store.load()
+            let local = !isLoaded && durable.items.isEmpty && !snapshot.items.isEmpty ? snapshot : durable
+            let report = CalendarRemoteMergePolicy.sanitize(
+                remote,
+                against: local,
+                now: now,
+                sentAt: remoteSentAt
+            )
+            if let warning = report.warning {
+                markRemoteMutationWarning(warning)
+            } else {
+                clearRemoteMutationWarning()
+            }
+            let merged = try await store.merge(report.snapshot)
             await publishRemoteMerge(merged, startedAt: generation, remoteRevision: remoteRevision)
             requestWidgetTimelineReloadIfNeeded()
             return .success
@@ -613,7 +796,15 @@ public final class CalendarCoordinator: ObservableObject {
 
             for attempt in 0..<Self.maximumRemoteMutationAttempts {
                 let remote = try decodeRemoteSnapshot(resource.data)
-                candidate = remote.merged(with: candidate)
+                let report = CalendarRemoteMergePolicy.sanitize(
+                    remote,
+                    against: candidate,
+                    now: .now
+                )
+                if let warning = report.warning {
+                    markRemoteMutationWarning(warning)
+                }
+                candidate = report.snapshot.merged(with: candidate)
                 let body = try encodeRemoteSnapshot(candidate)
 
                 do {
@@ -624,7 +815,7 @@ public final class CalendarCoordinator: ObservableObject {
                         sendPeer(snapshot: adopted, revision: revision)
                     }
                     clearRemoteSyncWarning()
-                    UserDefaults.standard.set(Date.now.timeIntervalSince1970, forKey: "LifeOS.Sync.LastSuccess")
+                    defaults.set(Date.now.timeIntervalSince1970, forKey: "LifeOS.Sync.LastSuccess")
                     return .success
                 } catch let syncError as CalendarSyncError {
                     guard case .calendarConflict(let data, let etag) = syncError else {
@@ -660,7 +851,16 @@ public final class CalendarCoordinator: ObservableObject {
         let result = await enqueueDurableOperation { [weak self] in
             guard let self else { return .failure("Calendar coordinator is unavailable.") }
             do {
-                let persisted = try await self.store.merge(authoritative)
+                let durable = try await self.store.load()
+                let report = CalendarRemoteMergePolicy.sanitize(
+                    authoritative,
+                    against: durable,
+                    now: .now
+                )
+                if let warning = report.warning {
+                    self.markRemoteMutationWarning(warning)
+                }
+                let persisted = try await self.store.merge(report.snapshot)
                 guard !self.isLoaded || persisted != self.snapshot else { return .success }
                 self.durableGeneration &+= 1
                 self.snapshot = persisted
@@ -668,7 +868,7 @@ public final class CalendarCoordinator: ObservableObject {
                 self.setUndoToken(nil)
                 self.pendingFailedUndo = false
                 self.revision += 1
-                UserDefaults.standard.set(self.revision, forKey: "LifeOS.Calendar.revision")
+                self.defaults.set(self.revision, forKey: "LifeOS.Calendar.revision")
                 if self.pendingFailedMutation == nil { self.errorMessage = nil }
                 self.requestWidgetTimelineReloadIfNeeded()
                 capture.value = persisted
@@ -686,13 +886,23 @@ public final class CalendarCoordinator: ObservableObject {
         refreshSyncWarning()
     }
 
+    private func markRemoteMutationWarning(_ message: String) {
+        remoteMutationWarning = message
+        refreshSyncWarning()
+    }
+
+    private func clearRemoteMutationWarning() {
+        remoteMutationWarning = nil
+        refreshSyncWarning()
+    }
+
     private func clearRemoteSyncWarning() {
         remoteSyncWarning = nil
         refreshSyncWarning()
     }
 
     private func refreshSyncWarning() {
-        let warnings = [peerSyncWarning, remoteSyncWarning].compactMap { $0 }
+        let warnings = [peerSyncWarning, remoteSyncWarning, remoteMutationWarning].compactMap { $0 }
         syncWarning = warnings.isEmpty ? nil : warnings.joined(separator: " ")
     }
 
@@ -707,7 +917,7 @@ public final class CalendarCoordinator: ObservableObject {
     ) async {
         if let remoteRevision {
             revision = max(revision, remoteRevision)
-            UserDefaults.standard.set(revision, forKey: "LifeOS.Calendar.revision")
+            defaults.set(revision, forKey: "LifeOS.Calendar.revision")
         }
 
         guard generation == durableGeneration else {
@@ -717,7 +927,7 @@ public final class CalendarCoordinator: ObservableObject {
                 guard reloadGeneration == durableGeneration else { return }
                 snapshot = latest
                 isLoaded = true
-                UserDefaults.standard.set(Date.now.timeIntervalSince1970, forKey: "LifeOS.Sync.LastSuccess")
+                defaults.set(Date.now.timeIntervalSince1970, forKey: "LifeOS.Sync.LastSuccess")
                 if pendingFailedMutation == nil { errorMessage = nil }
             } catch {
                 // The newer local operation already owns publication/error
@@ -735,7 +945,7 @@ public final class CalendarCoordinator: ObservableObject {
         snapshot = merged
         setUndoToken(nil)
         pendingFailedUndo = false
-        UserDefaults.standard.set(Date.now.timeIntervalSince1970, forKey: "LifeOS.Sync.LastSuccess")
+        defaults.set(Date.now.timeIntervalSince1970, forKey: "LifeOS.Sync.LastSuccess")
         if pendingFailedMutation == nil { errorMessage = nil }
     }
 }

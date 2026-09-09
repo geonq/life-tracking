@@ -269,6 +269,66 @@ final class FitnessTrainingProjectionTests: XCTestCase {
         XCTAssertTrue(ownership.duplicateCandidates.isEmpty)
     }
 
+    func testEquivalentIdentitySerializationsKeepAllAliasesAndChooseOneDeterministicOwner() throws {
+        let uuidA = UUID(uuidString: "35000000-0000-0000-0000-000000000001")!
+        let uuidB = UUID(uuidString: "35000000-0000-0000-0000-000000000002")!
+        let start = now.addingTimeInterval(-2_000)
+        let identityA = try TrainingImportedWorkoutIdentity(
+            uuid: uuidA,
+            syncIdentifier: "equivalent-identity",
+            aliases: [uuidB],
+            revision: .syncVersion(5)
+        )
+        let identityB = try TrainingImportedWorkoutIdentity(
+            uuid: uuidB,
+            syncIdentifier: "equivalent-identity",
+            aliases: [uuidA],
+            revision: .syncVersion(5)
+        )
+        XCTAssertEqual(identityA.stableKey, identityB.stableKey)
+
+        let first = TrainingImportedWorkoutInput(
+            identity: identityA,
+            activityTypeRawValue: 20,
+            startedAt: start,
+            endedAt: start.addingTimeInterval(600),
+            durationSeconds: 600,
+            activeEnergyKilocalories: 50
+        )
+        let second = TrainingImportedWorkoutInput(
+            identity: identityB,
+            activityTypeRawValue: 20,
+            startedAt: start,
+            endedAt: start.addingTimeInterval(600),
+            durationSeconds: 600,
+            activeEnergyKilocalories: 50
+        )
+
+        let forward = try makeImportedSnapshotResult([first, second], queryState: .imported)
+        let reverse = try makeImportedSnapshotResult([second, first], queryState: .imported)
+        XCTAssertEqual(forward.snapshot, reverse.snapshot)
+
+        let forwardProjection = TrainingHistoryProjection(
+            localSnapshot: makeStoreSnapshot([]),
+            importedSnapshot: forward.snapshot,
+            now: now
+        )
+        let reverseProjection = TrainingHistoryProjection(
+            localSnapshot: makeStoreSnapshot([]),
+            importedSnapshot: reverse.snapshot,
+            now: now
+        )
+        XCTAssertEqual(forwardProjection, reverseProjection)
+
+        let imported = try XCTUnwrap(forwardProjection.importedEntries.first)
+        XCTAssertEqual(imported.record.identity.uuid, uuidA)
+        XCTAssertEqual(imported.record.identity.aliases, [uuidB])
+        XCTAssertEqual(Set(imported.identityKeys), Set(imported.record.identity.aliasKeys))
+        XCTAssertTrue(imported.identityKeys.contains("uuid:\(uuidA.uuidString.lowercased())"))
+        XCTAssertTrue(imported.identityKeys.contains("uuid:\(uuidB.uuidString.lowercased())"))
+        XCTAssertTrue(imported.identityKeys.contains("sync_identifier:equivalent-identity"))
+    }
+
     func testSameRevisionPayloadConflictsArePermutationInvariant() throws {
         let uuid = UUID(uuidString: "40000000-0000-0000-0000-000000000001")!
         let identity = try TrainingImportedWorkoutIdentity(
@@ -380,6 +440,96 @@ final class FitnessTrainingProjectionTests: XCTestCase {
         XCTAssertEqual(projection.importedConflictEvidence.first?.conflictingRecordCount, 2)
         XCTAssertEqual(projection.importedConflictEvidence.first?.payloadFingerprints.count, 2)
         XCTAssertEqual(result.snapshot.queryCoverage.kind, .partial)
+    }
+
+    func testProjectionDowngradesDetectedConflictsAndOnlyClaimsMissingForCoveredCompletedSessions() throws {
+        let uuid = UUID(uuidString: "42000000-0000-0000-0000-000000000001")!
+        let identity = try TrainingImportedWorkoutIdentity(
+            uuid: uuid,
+            syncIdentifier: "coverage-conflict",
+            revision: .syncVersion(2)
+        )
+        let start = now.addingTimeInterval(-180)
+        let first = try TrainingImportedHistoryRecord(
+            identity: identity,
+            activityTypeRawValue: 20,
+            startedAt: start,
+            endedAt: start.addingTimeInterval(60),
+            durationSeconds: 60,
+            activeEnergyKilocalories: 40,
+            now: now
+        )
+        let second = try TrainingImportedHistoryRecord(
+            identity: identity,
+            activityTypeRawValue: 20,
+            startedAt: start,
+            endedAt: start.addingTimeInterval(60),
+            durationSeconds: 60,
+            activeEnergyKilocalories: 41,
+            now: now
+        )
+        let completeWindow = try TrainingCoverage(
+            kind: .complete,
+            lowerBound: now.addingTimeInterval(-300),
+            upperBound: now,
+            now: now
+        )
+        let conflictingSnapshot = try TrainingImportedHistorySnapshot(
+            records: [first, second],
+            queryState: .imported,
+            queryCoverage: completeWindow,
+            now: now
+        )
+        let conflictProjection = TrainingHistoryProjection(
+            localSnapshot: makeStoreSnapshot([]),
+            importedSnapshot: conflictingSnapshot,
+            now: now
+        )
+        XCTAssertEqual(conflictProjection.importedQueryState, .conflict)
+        XCTAssertEqual(conflictProjection.importedQueryCoverage?.kind, .partial)
+        XCTAssertEqual(conflictProjection.importedEntries.count, 1)
+        XCTAssertEqual(conflictProjection.importedEntries.first?.healthState, .conflict)
+        XCTAssertEqual(conflictProjection.importedConflictEvidence.count, 1)
+
+        let emptyCompleteSnapshot = try TrainingImportedHistorySnapshot(
+            records: [],
+            queryState: .imported,
+            queryCoverage: completeWindow,
+            now: now
+        )
+        let coveredCompleted = try makeLocalSession(
+            start: now.addingTimeInterval(-120),
+            duration: 60,
+            importedRecordKey: identity.stableKey
+        )
+        let outsideCompleted = try makeLocalSession(
+            id: id(15),
+            start: now.addingTimeInterval(-1_000),
+            duration: 60,
+            importedRecordKey: identity.stableKey
+        )
+        let active = try TrainingSession(
+            id: id(16),
+            activityKind: .cardio,
+            title: "Still running",
+            createdAt: now.addingTimeInterval(-120),
+            updatedAt: now.addingTimeInterval(-1),
+            startedAt: now.addingTimeInterval(-60),
+            status: .active,
+            importedRecordKey: identity.stableKey,
+            now: now
+        )
+        let missingProjection = TrainingHistoryProjection(
+            localSnapshot: makeStoreSnapshot([coveredCompleted, outsideCompleted, active]),
+            importedSnapshot: emptyCompleteSnapshot,
+            now: now
+        )
+        let states = Dictionary(
+            uniqueKeysWithValues: missingProjection.linkStates.map { ($0.localID, $0.status) }
+        )
+        XCTAssertEqual(states[coveredCompleted.id], .missingImported)
+        XCTAssertEqual(states[outsideCompleted.id], .unavailable)
+        XCTAssertEqual(states[active.id], .unavailable)
     }
 
     func testUnavailableImportedQueryRetainsImportedAndLocalHistory() throws {

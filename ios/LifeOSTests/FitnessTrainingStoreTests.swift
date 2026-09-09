@@ -127,6 +127,55 @@ final class FitnessTrainingStoreTests: XCTestCase {
         XCTAssertEqual(history.first?.duration, 60)
     }
 
+    func testTimedNonStrengthFinishPersistsWithoutSyntheticSetMetrics() async throws {
+        let fixture = try makeFixture(name: "timed-finish")
+        defer { fixture.cleanup() }
+        let clock = TestClock(base)
+        let store = makeStore(fixture, clock: clock)
+        let begin = try await store.begin(
+            title: "Timed cardio",
+            activityKind: .cardio,
+            mutationID: UUID(uuidString: "20500000-0000-0000-0000-000000000001")!
+        )
+        let recordID = try XCTUnwrap(begin.recordID)
+        let optionalActive = try await store.session(id: recordID)
+        let active = try XCTUnwrap(optionalActive)
+
+        clock.now = base.addingTimeInterval(90)
+        let completed = try TrainingSession(
+            id: active.id,
+            revision: active.revision,
+            activityKind: active.activityKind,
+            title: active.title,
+            createdAt: active.createdAt,
+            updatedAt: clock.now,
+            startedAt: active.startedAt,
+            endedAt: clock.now,
+            timeZoneIdentifier: active.timeZoneIdentifier,
+            templateID: active.templateID,
+            templateSnapshot: active.templateSnapshot,
+            pauses: active.pauses,
+            status: .completed,
+            exercises: [],
+            notes: active.notes,
+            importedRecordKey: active.importedRecordKey,
+            now: clock.now
+        )
+        let receipt = try await store.finish(
+            completed,
+            expectedRevision: active.revision,
+            mutationID: UUID(uuidString: "20500000-0000-0000-0000-000000000002")!
+        )
+
+        XCTAssertEqual(receipt.outcome, .saved)
+        let optionalSaved = try await store.session(id: recordID)
+        let saved = try XCTUnwrap(optionalSaved)
+        XCTAssertEqual(saved.status, .completed)
+        XCTAssertTrue(saved.completedSets.isEmpty)
+        XCTAssertNil(saved.recordedExternalVolumeKilograms)
+        XCTAssertEqual(saved.recordedDuration, 90)
+    }
+
     func testOrdinaryUpdateCannotReopenCompletedOrDiscardedCurrentRevision() async throws {
         let fixture = try makeFixture(name: "terminal-update")
         defer { fixture.cleanup() }
@@ -1185,6 +1234,53 @@ final class FitnessTrainingStoreTests: XCTestCase {
             mutationID: UUID(uuidString: "8e000000-0000-0000-0000-000000000006")!
         )
         XCTAssertEqual(collision.outcome, .conflict)
+    }
+
+    func testConflictingSyncAliasesProduceAConflictWithoutDroppingTheExistingLink() async throws {
+        let fixture = try makeFixture(name: "conflicting-sync-aliases")
+        defer { fixture.cleanup() }
+        let clock = TestClock(base)
+        let store = makeStore(fixture, clock: clock)
+        let uuid = UUID(uuidString: "00000000-0000-0000-0000-000000000301")!
+        let firstIdentity = try TrainingImportedWorkoutIdentity(
+            uuid: uuid,
+            syncIdentifier: "provider-revision-a",
+            revision: .syncVersion(1)
+        )
+        let conflictingIdentity = try TrainingImportedWorkoutIdentity(
+            uuid: uuid,
+            syncIdentifier: "provider-revision-b",
+            revision: .syncVersion(2)
+        )
+        let begin = try await store.begin(
+            title: "Conflict target",
+            mutationID: UUID(uuidString: "8f000000-0000-0000-0000-000000000001")!
+        )
+        let recordID = try XCTUnwrap(begin.recordID)
+        let optionalActive = try await store.session(id: recordID)
+        let active = try XCTUnwrap(optionalActive)
+        let firstLink = try await store.link(
+            sessionID: active.id,
+            importedRecordKey: firstIdentity.stableKey,
+            expectedRevision: active.revision,
+            mutationID: UUID(uuidString: "8f000000-0000-0000-0000-000000000002")!
+        )
+        XCTAssertEqual(firstLink.outcome, .saved)
+
+        let optionalLinked = try await store.session(id: recordID)
+        let linked = try XCTUnwrap(optionalLinked)
+        let conflict = try await store.link(
+            sessionID: linked.id,
+            importedRecordKey: conflictingIdentity.stableKey,
+            expectedRevision: linked.revision,
+            mutationID: UUID(uuidString: "8f000000-0000-0000-0000-000000000003")!
+        )
+
+        XCTAssertEqual(conflict.outcome, .conflict)
+        let optionalPreserved = try await store.session(id: recordID)
+        let preserved = try XCTUnwrap(optionalPreserved)
+        XCTAssertEqual(preserved.importedRecordKey, firstIdentity.stableKey)
+        XCTAssertEqual(preserved.revision, linked.revision)
     }
 
     func testFailedAtomicWriteDoesNotPublishNewSession() async throws {

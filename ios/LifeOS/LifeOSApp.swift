@@ -44,6 +44,7 @@ struct LifeOSApp: App {
 #if os(iOS)
     @StateObject private var healthKitFitnessRepository: HealthKitFitnessRepository
     @State private var homeFitnessSnapshot: FitnessSnapshot
+    private let fitnessObservationSyncClient: TailscaleSyncClient?
 #endif
     @State private var selection: LifeOSAppTab = .home
     @State private var showingUsage = false
@@ -71,11 +72,15 @@ struct LifeOSApp: App {
             SupplementNotificationDelegate.install()
         }
 #endif
-        let cachedUsage = enabled ? nil : SharedSnapshotStore.read()
-        _usageCoordinator = StateObject(wrappedValue: UsageCoordinator(
-            initialProviders: cachedUsage?.providers ?? [],
-            initialUpdatedAt: cachedUsage?.updatedAt
-        ))
+        let cachedUsage = enabled ? nil : SharedSnapshotStore.readLive()
+        _usageCoordinator = StateObject(
+            wrappedValue: enabled
+                ? UsageCoordinator.visualFixture()
+                : UsageCoordinator(
+                    initialProviders: cachedUsage?.providers ?? [],
+                    initialUpdatedAt: cachedUsage?.updatedAt
+                )
+        )
         _financeCoordinator = StateObject(wrappedValue: FinanceCoordinator(
             initialState: enabled ? .demo : .unavailable
         ))
@@ -85,12 +90,20 @@ struct LifeOSApp: App {
         _calendarCoordinator = StateObject(
             wrappedValue: CalendarCoordinator(
                 initialSnapshot: enabled ? CalendarVisualFixtures.snapshot() : CalendarSnapshot(),
-                usesVisualFixtures: enabled
+                usesVisualFixtures: enabled,
+                defaults: enabled ? CalendarCoordinator.makeVisualFixtureDefaults() : nil
             )
         )
-        _fitnessTrainingCoordinator = StateObject(wrappedValue: FitnessTrainingCoordinator())
+        _fitnessTrainingCoordinator = StateObject(
+            wrappedValue: enabled
+                ? FitnessTrainingCoordinator(usesVisualFixtures: true)
+                : FitnessTrainingCoordinator()
+        )
         let promptCompleted = !enabled && UserDefaults.standard.bool(forKey: Self.healthReadPromptCompletedKey)
 #if os(iOS)
+        self.fitnessObservationSyncClient = FitnessObservationSyncPolicy.allowsNetwork(usesVisualFixtures: enabled)
+            ? TailscaleSyncClient()
+            : nil
         let healthKitClient: HealthKitProductionClient? = enabled ? nil : HealthKitProductionClient()
         let healthKitController = HealthKitIntegrationController(
             client: healthKitClient,
@@ -248,6 +261,7 @@ struct LifeOSApp: App {
                     await financeCoordinator.refresh()
                     await clipperCoordinator.refresh()
                     await healthKitFitnessRepository.refresh()
+                    await publishFitnessObservation()
                     await publishWidgetSnapshots()
 #if os(iOS)
                     initialLiveLoadFinished = true
@@ -286,16 +300,23 @@ struct LifeOSApp: App {
 #if os(iOS)
             .onChange(of: healthKitFitnessRepository.projection, initial: true) { _, projection in
                 updateHomeFitnessSnapshot(from: projection)
-                Task { @MainActor in await publishWidgetSnapshots() }
+                Task { @MainActor in
+                    await publishFitnessObservation()
+                    await publishWidgetSnapshots()
+                }
             }
             .onChange(of: healthKitController.snapshot) { _, _ in
                 updateHomeFitnessSnapshot(from: healthKitFitnessRepository.projection)
-                Task { @MainActor in await publishWidgetSnapshots() }
+                Task { @MainActor in
+                    await publishFitnessObservation()
+                    await publishWidgetSnapshots()
+                }
             }
             .onChange(of: healthKitController.snapshot.observerCompletionSequence) { _, _ in
                 guard !usesVisualFixtures else { return }
                 Task { @MainActor in
                     await healthKitFitnessRepository.refresh()
+                    await publishFitnessObservation()
                     await publishWidgetSnapshots()
                 }
             }
@@ -332,6 +353,7 @@ struct LifeOSApp: App {
         async let clipper: Void = clipperCoordinator.refresh()
         async let fitness = healthKitFitnessRepository.refresh()
         _ = await (calendar, usage, finance, clipper, fitness)
+        await publishFitnessObservation()
         await publishWidgetSnapshots()
     }
 
@@ -349,6 +371,7 @@ struct LifeOSApp: App {
         async let clipper: Void = clipperCoordinator.refresh()
         async let fitness = healthKitFitnessRepository.refresh()
         _ = await (calendar, usage, finance, clipper, fitness)
+        await publishFitnessObservation()
         await publishWidgetSnapshots()
     }
 #endif
@@ -425,6 +448,130 @@ struct LifeOSApp: App {
             guard let projection = repository.projection else { return .unavailable }
             return HealthKitFitnessComposition.snapshot(from: projection, integration: controller.snapshot, selectedDate: date)
         }
+    }
+
+    /// Publishes only a successful, source-backed projection. The awaited
+    /// request runs from an existing lifecycle task, so it never gates the
+    /// HealthKit projection or the Fitness view's first render.
+    private func publishFitnessObservation() async {
+        guard FitnessObservationSyncPolicy.allowsNetwork(usesVisualFixtures: usesVisualFixtures),
+              let client = fitnessObservationSyncClient,
+              let projection = healthKitFitnessRepository.projection,
+              projection.isValid,
+              healthKitController.snapshot.permitsCurrentFitnessRendering,
+              let observation = makeFitnessObservation(from: projection, now: .now) else { return }
+
+        try? await client.publishFitnessObservation(observation)
+    }
+
+    /// Reduces the iPhone projection to the intentionally small cross-device
+    /// contract. Every value below is copied from an observed HealthKit
+    /// quantity or from the existing source-gated sleep duration helper;
+    /// unsupported scores remain unavailable.
+    private func makeFitnessObservation(
+        from projection: HealthKitFitnessProjection,
+        now: Date
+    ) -> FitnessObservationEnvelope? {
+        guard now.timeIntervalSinceReferenceDate.isFinite else { return nil }
+
+        func isCurrent(_ date: Date) -> Bool {
+            let age = now.timeIntervalSince(date)
+            return date.timeIntervalSinceReferenceDate.isFinite
+                && age >= 0
+                && age <= FitnessObservationEnvelope.maximumCurrentMetricAge
+        }
+
+        func isHistorical(_ date: Date) -> Bool {
+            let age = now.timeIntervalSince(date)
+            return date.timeIntervalSinceReferenceDate.isFinite
+                && age >= 0
+                && age <= FitnessObservationEnvelope.maximumHistoryAge
+        }
+
+        let metricMappings: [(HealthKitMetricID, FitnessObservationMetricID)] = [
+            (.heartRate, .heartRate),
+            (.restingHeartRate, .restingHeartRate),
+            (.heartRateVariabilitySDNN, .heartRateVariability),
+            (.respiratoryRate, .respiratoryRate),
+            (.oxygenSaturation, .oxygenSaturation)
+        ]
+        var metrics: [FitnessObservationValue] = []
+        metrics.reserveCapacity(metricMappings.count)
+        for (sourceMetric, targetMetric) in metricMappings {
+            let projectionMetric = projection.metric(sourceMetric)
+            guard projectionMetric.state == .observed,
+                  let sample = projectionMetric.latest,
+                  sample.state == .observed,
+                  sample.quantity.metric == sourceMetric,
+                  isCurrent(sample.endDate),
+                  let value = try? FitnessObservationValue(
+                      metric: targetMetric,
+                      value: sample.quantity.value,
+                      unit: targetMetric.unit,
+                      observedAt: sample.endDate
+                  ) else { continue }
+            metrics.append(value)
+        }
+
+        var calendar = Calendar(identifier: projection.bucketCalendarIdentifier)
+        calendar.timeZone = TimeZone(identifier: projection.bucketTimeZoneIdentifier) ?? .current
+        var days: [FitnessObservationDay] = []
+        if let sleep = HealthKitFitnessComposition.sourceDerivedSleepDurationHours(
+            from: projection,
+            selectedDate: now
+        ), sleep.hours.isFinite, sleep.hours > 0,
+           isHistorical(sleep.observedAt),
+           let value = try? FitnessObservationValue(
+               metric: .sleepDuration,
+               value: sleep.hours * 3_600,
+               unit: .seconds,
+               observedAt: sleep.observedAt
+           ) {
+            days = [FitnessObservationDay(
+                date: calendar.startOfDay(for: now),
+                values: [value]
+            )]
+        }
+
+        let workoutCandidates = projection.workouts.suffix(FitnessObservationEnvelope.maximumWorkouts)
+        var workouts: [FitnessObservationWorkout] = []
+        workouts.reserveCapacity(workoutCandidates.count)
+        for workout in workoutCandidates {
+            guard workout.state == .observed,
+                  isHistorical(workout.startDate),
+                  isHistorical(workout.endDate),
+                  workout.endDate > workout.startDate,
+                  workout.durationSeconds.isFinite,
+                  workout.durationSeconds > 0,
+                  workout.durationSeconds <= workout.endDate.timeIntervalSince(workout.startDate)
+                    + FitnessObservationEnvelope.workoutDurationRoundingTolerance,
+                  workout.activityTypeRawValue >= 0,
+                  workout.activityTypeRawValue <= 1_000_000,
+                  workout.activeEnergyKilocalories.map({ $0.isFinite && $0 >= 0 && $0 <= 1_000_000 }) ?? true else { continue }
+            let mapped = FitnessObservationWorkout(
+                activityTypeRawValue: workout.activityTypeRawValue,
+                startAt: workout.startDate,
+                endAt: workout.endDate,
+                durationSeconds: workout.durationSeconds,
+                activeEnergyKilocalories: workout.activeEnergyKilocalories
+            )
+            workouts.append(mapped)
+        }
+
+        let evidenceDates = metrics.map(\.observedAt)
+            + days.flatMap { $0.values.map(\.observedAt) }
+            + workouts.map(\.endAt)
+        guard let observedAt = evidenceDates.max(),
+              evidenceDates.contains(where: isCurrent) else { return nil }
+
+        return try? FitnessObservationEnvelope(
+            state: .observed,
+            generatedAt: now,
+            observedAt: observedAt,
+            metrics: metrics,
+            days: days,
+            workouts: workouts
+        )
     }
 
     private var retainedHealthDataSettings: RetainedHealthDataSettings {

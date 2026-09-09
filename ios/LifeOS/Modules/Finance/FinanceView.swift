@@ -58,8 +58,8 @@ enum FinanceResponsiveLayoutContract {
 /// The four detail labels are comfortable as pills once the selector has a
 /// little more than a phone's content width. Below this boundary, a labeled
 /// menu keeps every action name visible instead of asking the pills to shrink
-/// or clip. The layout still measures the pill candidate so larger text can
-/// move to the menu at wider widths when its intrinsic content needs it.
+/// or clip. The page passes its measured content width to the selector so the
+/// presentation decision happens before either interactive control is built.
 enum FinanceDetailSelectorLayoutContract {
     static let regularMinimumWidth: CGFloat = 360
 
@@ -74,69 +74,54 @@ enum FinanceDetailSelectorLayoutContract {
     }
 }
 
-private struct FinanceDetailSelectorLayout: Layout {
-    let forceMenu: Bool
+private struct FinanceDetailSelectorWidthPreferenceKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
 
-    private func selectedIndex(
-        proposal: ProposedViewSize,
-        subviews: Subviews
-    ) -> Int {
-        guard subviews.count > 1, !forceMenu,
-              let width = proposal.width,
-              width.isFinite
-        else { return 1 }
-
-        let intrinsicPillWidth = subviews[0].sizeThatFits(.unspecified).width
-        return FinanceDetailSelectorLayoutContract.usesMenu(
-            availableWidth: width,
-            accessibilitySize: false,
-            pillIntrinsicWidth: intrinsicPillWidth
-        ) ? 1 : 0
-    }
-
-    func sizeThatFits(
-        proposal: ProposedViewSize,
-        subviews: Subviews,
-        cache: inout ()
-    ) -> CGSize {
-        guard !subviews.isEmpty else { return .zero }
-        let index = selectedIndex(proposal: proposal, subviews: subviews)
-        let childSize = subviews[index].sizeThatFits(proposal)
-        return CGSize(
-            width: proposal.width ?? childSize.width,
-            height: childSize.height
-        )
-    }
-
-    func placeSubviews(
-        in bounds: CGRect,
-        proposal: ProposedViewSize,
-        subviews: Subviews,
-        cache: inout ()
-    ) {
-        guard !subviews.isEmpty else { return }
-        let index = selectedIndex(
-            proposal: ProposedViewSize(width: bounds.width, height: bounds.height),
-            subviews: subviews
-        )
-        subviews[index].place(
-            at: bounds.origin,
-            anchor: .topLeading,
-            proposal: ProposedViewSize(width: bounds.width, height: nil)
-        )
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
     }
 }
 
 private struct FinanceDetailSelector: View {
     @Binding var selection: FinanceDetail
+    let availableWidth: CGFloat
+    @State private var measuredSelectorWidth: CGFloat = 0
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
+    private var measuredWidth: CGFloat {
+        measuredSelectorWidth > 0 ? measuredSelectorWidth : availableWidth
+    }
+
+    private var usesMenu: Bool {
+        FinanceDetailSelectorLayoutContract.usesMenu(
+            availableWidth: measuredWidth,
+            accessibilitySize: dynamicTypeSize.isAccessibilitySize
+        )
+    }
+
+    @ViewBuilder
     var body: some View {
-        FinanceDetailSelectorLayout(forceMenu: dynamicTypeSize.isAccessibilitySize) {
-            pills
-            menu
+        Group {
+            if usesMenu {
+                menu
+            } else {
+                pills
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: FinanceDetailSelectorWidthPreferenceKey.self,
+                    value: proxy.size.width
+                )
+            }
+        }
+        .onPreferenceChange(FinanceDetailSelectorWidthPreferenceKey.self) { width in
+            guard width.isFinite, width > 0,
+                  abs(width - measuredSelectorWidth) > 0.5 else { return }
+            measuredSelectorWidth = width
+        }
     }
 
     private var pills: some View {
@@ -365,14 +350,14 @@ public struct FinanceView: View {
                         FinanceWealthCard(snapshot: snapshot, onOpenConnections: onOpenConnections)
                         FinanceAccountsCard(snapshot: snapshot, onOpenConnections: onOpenConnections)
                         financeAnalyticsEntryCard
-                        FinanceImportCard()
+                        FinanceImportCard(usesVisualFixtures: usesVisualFixtures)
                     } else {
                         FinanceConnectionState(
                             snapshot: snapshot,
                             onOpenConnections: onOpenConnections,
                             onRefresh: onRefresh
                         )
-                        FinanceImportCard()
+                        FinanceImportCard(usesVisualFixtures: usesVisualFixtures)
                     }
                 }
                 .background {
@@ -557,7 +542,10 @@ public struct FinanceView: View {
     private func financeDetailPanel(snapshot: FinanceDisplaySnapshot) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             FinanceSectionHeader(title: "Details", subtitle: "Trend context for this period", icon: .views, accent: LifeOSTokens.Module.finance)
-            FinanceDetailSelector(selection: $selectedDetail)
+            FinanceDetailSelector(
+                selection: $selectedDetail,
+                availableWidth: financeContentWidth
+            )
 
             FinanceRangePills(
                 selection: $selectedRange,

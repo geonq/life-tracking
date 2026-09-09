@@ -898,18 +898,14 @@ public struct TrainingSession: Codable, Equatable, Sendable, Identifiable {
         case .completed:
             guard let endedAt,
                   endedAt > startedAt,
-                  endedAt.timeIntervalSince(startedAt) <= TrainingDomainLimits.maximumCompletedDuration,
-                  pauses.allSatisfy({ $0.endedAt != nil }),
-                  activityKind != .strength || exercises.contains(where: { $0.completedSets.isEmpty == false }) else {
-                if let endedAt,
-                   endedAt > startedAt,
-                   endedAt.timeIntervalSince(startedAt) <= TrainingDomainLimits.maximumCompletedDuration {
-                    if activityKind == .strength {
-                        throw TrainingValidationError.completedSessionRequiresSet
-                    }
-                    throw TrainingValidationError.invalidSessionStatus
-                }
+                  endedAt.timeIntervalSince(startedAt) <= TrainingDomainLimits.maximumCompletedDuration else {
                 throw TrainingValidationError.invalidCompletedDuration
+            }
+            guard pauses.allSatisfy({ $0.endedAt != nil }) else {
+                throw TrainingValidationError.invalidSessionStatus
+            }
+            if activityKind == .strength, completedSets.isEmpty {
+                throw TrainingValidationError.completedSessionRequiresSet
             }
         case .discarded:
             guard pauses.allSatisfy({ $0.endedAt != nil }) else { throw TrainingValidationError.invalidSessionStatus }
@@ -1386,6 +1382,7 @@ public struct TrainingImportedWorkoutIdentity: Codable, Equatable, Hashable, Sen
         let uuidTokens = tokens.filter { $0.hasPrefix("uuid:") }.sorted()
         let syncTokens = tokens.filter { $0.hasPrefix("sync_identifier:") }.sorted()
         guard !uuidTokens.isEmpty || !syncTokens.isEmpty,
+              uuidTokens.count <= TrainingDomainLimits.maximumImportedAliases + 1,
               syncTokens.count <= 1 else {
             throw TrainingValidationError.invalidImportedIdentity
         }
@@ -1404,7 +1401,12 @@ public struct TrainingImportedWorkoutIdentity: Codable, Equatable, Hashable, Sen
             }
             return key
         }
-        return "uuid:" + uuidTokens.map { String($0.dropFirst("uuid:".count)) }.joined(separator: ",")
+        let key = "uuid:" + uuidTokens.map { String($0.dropFirst("uuid:".count)) }.joined(separator: ",")
+        guard key.utf8.count <= TrainingDomainLimits.maximumImportedIdentityUTF8Bytes,
+              (try? Self.stableKeyTokens(key)) != nil else {
+            throw TrainingValidationError.invalidImportedIdentity
+        }
+        return key
     }
 
     private static func isValidStableKeyWithoutRecursion(_ value: String) -> Bool {
@@ -1455,8 +1457,7 @@ public struct TrainingImportedWorkoutIdentity: Codable, Equatable, Hashable, Sen
     }
 
     public static func validateStableKey(_ value: String) throws -> String {
-        guard isValidStableKey(value) else { throw TrainingValidationError.invalidImportedIdentity }
-        return value
+        try canonicalStableKey(from: [value])
     }
 
     private enum CodingKeys: String, CodingKey { case uuid, syncIdentifier, aliases, revision }
@@ -1767,7 +1768,7 @@ public struct TrainingImportedConflictEvidence: Equatable, Hashable, Sendable {
 
     public init(stableKey: String, payloadFingerprints: [String], conflictingRecordCount: Int) {
         self.stableKey = stableKey
-        self.payloadFingerprints = Array(payloadFingerprints.prefix(TrainingDomainLimits.maximumConflictFingerprints))
+        self.payloadFingerprints = Array(Set(payloadFingerprints).sorted().prefix(TrainingDomainLimits.maximumConflictFingerprints))
         self.conflictingRecordCount = max(0, conflictingRecordCount)
     }
 }
@@ -1827,7 +1828,10 @@ public struct TrainingImportedHistorySnapshot: Equatable, Sendable {
             guard queryCoverage.kind == .complete,
                   rejectedRowCount == 0,
                   truncatedRowCount == 0,
-                  conflictEvidence.isEmpty else { throw TrainingValidationError.invalidCoverage }
+                  conflictEvidence.isEmpty,
+                  records.allSatisfy({ $0.sourceState == .imported && $0.coverage.kind == .complete }) else {
+                throw TrainingValidationError.invalidCoverage
+            }
         case .partial, .stale, .conflict:
             guard queryCoverage.kind == .partial else { throw TrainingValidationError.invalidCoverage }
         case .unavailable, .readIndeterminate, .error:

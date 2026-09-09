@@ -68,6 +68,7 @@ class NativeCalendarSourceParserTests(unittest.TestCase):
                 "LifeOS/Usage",
                 "LifeOS/Settings.swift",
                 "LifeOS/CalendarView.swift",
+                "LifeOS/FitnessTrainingCoordinator.swift",
                 "LifeOS/Modules",
                 "LifeOS/TaxDocumentsView.swift",
                 "LifeOS/WidgetSnapshotPublisher.swift",

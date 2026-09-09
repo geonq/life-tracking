@@ -327,6 +327,27 @@ final class LifeOSDesignSystemTests: XCTestCase {
         )
     }
 
+    func testFinanceDetailSelectorMeasuredPresentationHasOneBranchAtATime() {
+        XCTAssertTrue(
+            FinanceDetailSelectorLayoutContract.usesMenu(
+                availableWidth: 359,
+                accessibilitySize: false
+            )
+        )
+        XCTAssertFalse(
+            FinanceDetailSelectorLayoutContract.usesMenu(
+                availableWidth: 1_120,
+                accessibilitySize: false
+            )
+        )
+        XCTAssertTrue(
+            FinanceDetailSelectorLayoutContract.usesMenu(
+                availableWidth: 1_120,
+                accessibilitySize: true
+            )
+        )
+    }
+
     func testRecoveryHeroStacksAtInsufficientWidthAndAccessibilitySizes() {
         XCTAssertTrue(
             FitnessReadinessHeroLayoutPolicy.usesStackedLayout(

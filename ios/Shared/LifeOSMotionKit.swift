@@ -94,6 +94,43 @@ public struct LifeOSMotionLifecycle: Equatable, Sendable {
     }
 }
 
+/// Keeps an interaction transition local to its explicit owner. The transaction
+/// reset also takes effect when Reduce Motion changes while a transition is in
+/// flight, so the expanded/collapsed state settles without inheriting a stale
+/// animation from an ancestor.
+private struct LifeOSInteractionAnimationModifier<Value: Equatable>: ViewModifier {
+    let animation: Animation
+    let value: Value
+    let reduceMotion: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .animation(reduceMotion ? nil : animation, value: value)
+            .transaction { transaction in
+                guard reduceMotion else { return }
+                transaction.animation = nil
+                transaction.disablesAnimations = true
+            }
+    }
+}
+
+extension View {
+    /// Applies an animation only to a user-owned value transition. Use this
+    /// for disclosure/selection state; refreshes and source updates remain
+    /// visually direct.
+    public func lifeOSInteractionAnimation<Value: Equatable>(
+        _ animation: Animation,
+        value: Value,
+        reduceMotion: Bool
+    ) -> some View {
+        modifier(LifeOSInteractionAnimationModifier(
+            animation: animation,
+            value: value,
+            reduceMotion: reduceMotion
+        ))
+    }
+}
+
 public enum LifeOSChartMotionPolicy {
     /// Reveal only a newly mounted plot. Refresh/range changes keep existing data visible;
     /// never replay a hidden mask while the user is inspecting it.

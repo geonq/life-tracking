@@ -107,6 +107,23 @@ public enum CalendarPeerSyncPolicy {
     }
 }
 
+/// Nearby discovery is an explicit, durable opt-in. Pairing still requires
+/// the existing private handoff and pinned peer authentication after discovery.
+public enum CalendarNearbyDiscoveryPolicy {
+    public static let defaultsKey = "LifeOS.Calendar.NearbyDiscoveryEnabled.v1"
+    public static let didChangeNotification = Notification.Name(
+        "LifeOS.Calendar.NearbyDiscoveryPolicy.didChange"
+    )
+
+    public static func isEnabled(in defaults: UserDefaults = .standard) -> Bool {
+        defaults.bool(forKey: defaultsKey)
+    }
+
+    public static func allowsDiscovery(usesVisualFixtures: Bool, settingEnabled: Bool) -> Bool {
+        !usesVisualFixtures && settingEnabled
+    }
+}
+
 /// Memory-only trust: the caller must transfer a fresh random 32-byte key through
 /// an authenticated out-of-band channel and explicitly pin both peer and sender ID.
 /// Nothing learned through discovery is trusted. Restart requires pairing again.

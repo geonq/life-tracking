@@ -159,7 +159,10 @@ final class ProductionConfigSecurityTests: XCTestCase {
                 url: url,
                 statusCode: 200,
                 httpVersion: nil,
-                headerFields: ["Content-Length": String(Self.responseBody.count)]
+                headerFields: [
+                    "Content-Length": String(Self.responseBody.count),
+                    "Content-Type": "application/json"
+                ]
             )!
             client.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client.urlProtocol(self, didLoad: Self.responseBody)

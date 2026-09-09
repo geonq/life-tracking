@@ -843,6 +843,46 @@ public struct FinanceImportedSyncResult: Equatable, Sendable {
     }
 }
 
+public enum FinanceImportedReceiptState: String, Codable, Equatable, Sendable {
+    case committed
+    case unknown
+}
+
+/// Proof that the gateway has seen one exact idempotency key. The receipt
+/// intentionally carries only state and the gateway's global revision; it
+/// never echoes the original request, fingerprint, or imported transaction.
+public struct FinanceImportedCommitReceipt: Codable, Equatable, Sendable {
+    public let state: FinanceImportedReceiptState
+    public let revision: Int?
+
+    private enum CodingKeys: String, CodingKey, CaseIterable { case state, revision }
+
+    public init(state: FinanceImportedReceiptState, revision: Int?) throws {
+        guard (state == .committed && revision != nil) || (state == .unknown && revision == nil),
+              revision.map({ (0...FinanceImportedSyncRecord.maximumSafeCents).contains($0) }) ?? true else {
+            throw FinanceImportedSyncError.invalidResponse
+        }
+        self.state = state
+        self.revision = revision
+    }
+
+    public init(from decoder: Decoder) throws {
+        try rejectUnknownLifeOSKeys(decoder, allowed: Set(CodingKeys.allCases.map(\.stringValue)))
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        guard Set(container.allKeys) == Set(CodingKeys.allCases),
+              let state = try? container.decode(FinanceImportedReceiptState.self, forKey: .state) else {
+            throw FinanceImportedSyncError.invalidResponse
+        }
+        try self.init(state: state, revision: container.decodeIfPresent(Int.self, forKey: .revision))
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(state, forKey: .state)
+        try container.encode(revision, forKey: .revision)
+    }
+}
+
 public enum FinanceImportedSyncError: Error, Equatable, Sendable {
     case invalidRequest
     case invalidResponse

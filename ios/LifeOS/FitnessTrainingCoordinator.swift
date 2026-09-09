@@ -186,6 +186,43 @@ public struct FitnessTrainingState: Equatable, Sendable {
     }
 }
 
+/// Explicit persistence paths for a coordinator that must not use the normal
+/// user ledger. The visual-fixture factory places both files below a unique
+/// temporary directory; the production initializer does not use this type and
+/// therefore keeps its existing Application Support defaults.
+public struct FitnessTrainingPersistenceConfiguration {
+    public let trainingLedgerURL: URL
+    public let strengthTemplateURL: URL
+    public let directoryURL: URL
+    public let fileManager: FileManager
+
+    public init(
+        trainingLedgerURL: URL,
+        strengthTemplateURL: URL,
+        fileManager: FileManager = .default
+    ) {
+        self.trainingLedgerURL = trainingLedgerURL
+        self.strengthTemplateURL = strengthTemplateURL
+        self.directoryURL = trainingLedgerURL.deletingLastPathComponent()
+        self.fileManager = fileManager
+    }
+
+    public static func visualFixture(fileManager: FileManager = .default) -> Self {
+        let directory = fileManager.temporaryDirectory
+            .appendingPathComponent("LifeOS", isDirectory: true)
+            .appendingPathComponent("FitnessTrainingFixtures", isDirectory: true)
+            .appendingPathComponent(
+                "\(ProcessInfo.processInfo.processIdentifier)-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        return Self(
+            trainingLedgerURL: directory.appendingPathComponent("fitness-training-ledger.json"),
+            strengthTemplateURL: directory.appendingPathComponent("fitness-strength-templates.json"),
+            fileManager: fileManager
+        )
+    }
+}
+
 /// Main-actor coordinator for the local-first workout experience.
 ///
 /// There is one durable `FitnessTrainingStore` actor per coordinator.  User
@@ -208,11 +245,24 @@ public final class FitnessTrainingCoordinator: ObservableObject {
     public init(
         trainingStore: FitnessTrainingStore? = nil,
         templateStore: FitnessStrengthTemplateStore? = nil,
-        clock: @escaping @Sendable () -> Date = { Date() }
+        clock: @escaping @Sendable () -> Date = { Date() },
+        persistenceConfiguration: FitnessTrainingPersistenceConfiguration? = nil
     ) {
         self.clock = clock
-        self.trainingStore = trainingStore ?? FitnessTrainingStore(clock: clock)
-        self.templateStore = templateStore ?? FitnessStrengthTemplateStore()
+        if let persistenceConfiguration {
+            self.trainingStore = trainingStore ?? FitnessTrainingStore(
+                persistenceURL: persistenceConfiguration.trainingLedgerURL,
+                fileManager: persistenceConfiguration.fileManager,
+                clock: clock
+            )
+            self.templateStore = templateStore ?? FitnessStrengthTemplateStore(
+                persistenceURL: persistenceConfiguration.strengthTemplateURL,
+                fileManager: persistenceConfiguration.fileManager
+            )
+        } else {
+            self.trainingStore = trainingStore ?? FitnessTrainingStore(clock: clock)
+            self.templateStore = templateStore ?? FitnessStrengthTemplateStore()
+        }
         let options = Self.makeTemplateOptions(from: self.templateStore.templates)
         let initialNow = clock()
         self.localHistorySnapshot = TrainingStoreSnapshot(
@@ -229,6 +279,22 @@ public final class FitnessTrainingCoordinator: ObservableObject {
         self.state = FitnessTrainingState(
             templates: options,
             templateWarning: self.templateStore.integrityWarning
+        )
+    }
+
+    /// Creates a coordinator whose default stores are both backed by a fresh
+    /// temporary directory. Passing `false` preserves the normal durable store
+    /// selection for callers that share the launch flag with the app.
+    public convenience init(
+        usesVisualFixtures: Bool,
+        fileManager: FileManager = .default,
+        clock: @escaping @Sendable () -> Date = { Date() }
+    ) {
+        self.init(
+            clock: clock,
+            persistenceConfiguration: usesVisualFixtures
+                ? FitnessTrainingPersistenceConfiguration.visualFixture(fileManager: fileManager)
+                : nil
         )
     }
 

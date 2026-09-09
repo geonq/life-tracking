@@ -315,4 +315,22 @@ final class FinanceTradeRepublicImportIntegrationTests: XCTestCase {
         XCTAssertEqual(try relaunched.pendingSyncEntryCount(), 1)
         XCTAssertNil(try relaunched.pendingSyncRequest(), "a push must wait until a gateway ETag has been fetched")
     }
+
+    func testDisplayedEURAmountsKeepCentsWithoutBinaryFloatingPointRounding() {
+        let maximumSafeCents = 9_007_199_254_740_991
+        XCTAssertEqual(
+            FinanceImportCurrencyFormatter.editableEuro(cents: maximumSafeCents),
+            "90071992547409.91"
+        )
+
+        let decimalSeparator = Locale.current.decimalSeparator ?? "."
+        XCTAssertTrue(
+            FinanceImportCurrencyFormatter.magnitudeEuro(cents: 1_234)
+                .contains("12\(decimalSeparator)34")
+        )
+        XCTAssertTrue(
+            FinanceImportCurrencyFormatter.signedEuro(cents: -1_234)
+                .contains("12\(decimalSeparator)34")
+        )
+    }
 }

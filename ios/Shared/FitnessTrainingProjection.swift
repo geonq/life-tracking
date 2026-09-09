@@ -104,7 +104,7 @@ public struct TrainingImportedWorkoutProjection: Equatable, Hashable, Identifiab
     fileprivate init(record: TrainingImportedHistoryRecord, healthState: TrainingImportedHealthState) {
         self.record = record
         self.healthState = healthState
-        self.identityKeys = Array(Set([record.identity.stableKey] + Array(record.identity.aliasKeys))).sorted()
+        self.identityKeys = record.identity.aliasKeys.sorted()
         self.activityKind = Self.activityKind(for: record.activityTypeRawValue)
     }
 
@@ -290,7 +290,11 @@ public struct TrainingHistoryProjection: Equatable, Sendable {
         self.importedQueryState = importedBuild.conflictEvidence.isEmpty
             ? sourceQueryState
             : .conflict
-        self.importedQueryCoverage = importedSnapshot?.queryCoverage
+        self.importedQueryCoverage = Self.effectiveImportedCoverage(
+            importedSnapshot?.queryCoverage,
+            hasConflict: !importedBuild.conflictEvidence.isEmpty,
+            now: now
+        )
         self.rejectedImportedRowCount = importedBuild.rejectedRowCount
         self.truncatedImportedRowCount = importedBuild.truncatedRowCount
         self.importedConflictEvidence = importedBuild.conflictEvidence
@@ -420,6 +424,12 @@ public struct TrainingHistoryProjection: Equatable, Sendable {
             }
         }
 
+        let orderedRecords = records.sorted(by: importedRecordOrder)
+        let orderedProjections = projections.sorted {
+            importedRecordOrder($0.record, $1.record)
+        }
+        let orderedRejectedRows = rejected.sorted(by: rejectionOrder)
+
         let mustDowngradeCompleteQuery = queryState == .imported &&
             (queryCoverage.kind != .complete || rejectedRowCount > 0 || inputEvidenceIsIncomplete)
         let effectiveQueryState: TrainingSourceState
@@ -441,18 +451,18 @@ public struct TrainingHistoryProjection: Equatable, Sendable {
         }
 
         let snapshot = try TrainingImportedHistorySnapshot(
-            records: records,
+            records: orderedRecords,
             queryState: effectiveQueryState,
             queryCoverage: effectiveQueryCoverage,
             rejectedRowCount: rejectedRowCount,
             truncatedRowCount: truncatedRowCount,
-            rejectedRows: rejected,
+            rejectedRows: orderedRejectedRows,
             now: now
         )
         return TrainingImportedProjectionResult(
             snapshot: snapshot,
-            records: projections,
-            rejectedRows: rejected
+            records: orderedProjections,
+            rejectedRows: orderedRejectedRows
         )
     }
 
@@ -538,10 +548,10 @@ public struct TrainingHistoryProjection: Equatable, Sendable {
         }
 
         var records: [TrainingImportedWorkoutProjection] = []
-        let rejected: [TrainingImportedRecordRejection] = snapshot.rejectedRows
+        let rejected = snapshot.rejectedRows.sorted(by: rejectionOrder)
         let rejectedRowCount = snapshot.rejectedRowCount
         let truncatedRowCount = snapshot.truncatedRowCount
-        var conflictEvidence = snapshot.conflictEvidence
+        var conflictEvidence = snapshot.conflictEvidence.sorted(by: conflictEvidenceOrder)
         records.reserveCapacity(resolvedGroups.count)
         for (_, group) in resolvedGroups.sorted(by: { $0.key < $1.key }) {
             let ordered = group.sorted(by: importedRecordOrder)
@@ -594,6 +604,7 @@ public struct TrainingHistoryProjection: Equatable, Sendable {
             ))
         }
         records.sort(by: importedProjectionOrder)
+        conflictEvidence.sort(by: conflictEvidenceOrder)
         return ImportedBuild(
             records: records,
             rejectedRows: rejected,
@@ -616,6 +627,53 @@ public struct TrainingHistoryProjection: Equatable, Sendable {
         }
     }
 
+    private static func rejectionOrder(
+        _ lhs: TrainingImportedRecordRejection,
+        _ rhs: TrainingImportedRecordRejection
+    ) -> Bool {
+        let leftKey = lhs.stableKey ?? ""
+        let rightKey = rhs.stableKey ?? ""
+        if leftKey != rightKey { return leftKey < rightKey }
+        let leftReason = lhs.reason.errorDescription ?? ""
+        let rightReason = rhs.reason.errorDescription ?? ""
+        return leftReason < rightReason
+    }
+
+    private static func conflictEvidenceOrder(
+        _ lhs: TrainingImportedConflictEvidence,
+        _ rhs: TrainingImportedConflictEvidence
+    ) -> Bool {
+        if lhs.stableKey != rhs.stableKey { return lhs.stableKey < rhs.stableKey }
+        if lhs.payloadFingerprints != rhs.payloadFingerprints {
+            return lhs.payloadFingerprints.lexicographicallyPrecedes(rhs.payloadFingerprints)
+        }
+        return lhs.conflictingRecordCount < rhs.conflictingRecordCount
+    }
+
+    private static func effectiveImportedCoverage(
+        _ coverage: TrainingCoverage?,
+        hasConflict: Bool,
+        now: Date
+    ) -> TrainingCoverage? {
+        guard hasConflict, let coverage, coverage.kind == .complete else { return coverage }
+        return (try? TrainingCoverage(
+            kind: .partial,
+            lowerBound: coverage.lowerBound,
+            upperBound: coverage.upperBound,
+            now: now
+        )) ?? coverage
+    }
+
+    private static func identityOrderKey(_ identity: TrainingImportedWorkoutIdentity) -> String {
+        let aliases = identity.aliases.map { $0.uuidString.lowercased() }.joined(separator: ",")
+        return [
+            identity.uuid.uuidString.lowercased(),
+            aliases,
+            identity.syncIdentifier ?? "",
+            identity.revision.rawValue
+        ].joined(separator: "|")
+    }
+
     private static func importedRecordOrder(_ lhs: TrainingImportedHistoryRecord, _ rhs: TrainingImportedHistoryRecord) -> Bool {
         switch (lhs.identity.revision.numericValue, rhs.identity.revision.numericValue) {
         case let (.some(left), .some(right)) where left != right:
@@ -633,6 +691,9 @@ public struct TrainingHistoryProjection: Equatable, Sendable {
         let leftPayload = recordPayloadFingerprint(lhs)
         let rightPayload = recordPayloadFingerprint(rhs)
         if leftPayload != rightPayload { return leftPayload < rightPayload }
+        let leftIdentity = identityOrderKey(lhs.identity)
+        let rightIdentity = identityOrderKey(rhs.identity)
+        if leftIdentity != rightIdentity { return leftIdentity < rightIdentity }
         return lhs.id < rhs.id
     }
 
@@ -854,12 +915,18 @@ public struct TrainingHistoryProjection: Equatable, Sendable {
                     status: .ambiguousImported
                 ))
             } else {
-                let isCoveredCompleteQuery = queryState == .imported &&
-                    queryCoverage?.kind == .complete &&
-                    queryCoverage?.contains(
-                        startedAt: session.startedAt,
-                        endedAt: session.endedAt ?? session.startedAt
-                    ) == true
+                let isCoveredCompleteQuery: Bool
+                if queryState == .imported,
+                   session.status == .completed,
+                   let endedAt = session.endedAt {
+                    isCoveredCompleteQuery = queryCoverage?.kind == .complete &&
+                        queryCoverage?.contains(
+                            startedAt: session.startedAt,
+                            endedAt: endedAt
+                        ) == true
+                } else {
+                    isCoveredCompleteQuery = false
+                }
                 states.append(TrainingLinkState(
                     localID: session.id,
                     localIdentityKey: localKey,

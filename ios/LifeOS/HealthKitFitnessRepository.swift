@@ -24,6 +24,10 @@ public final class HealthKitFitnessRepository: ObservableObject {
     private var refreshOperationID: UInt64 = 0
     private var activeRefreshOperationID: UInt64?
     private var refreshTask: Task<HealthKitFitnessProjection?, Never>?
+    private struct RefreshReservation {
+        let operationID: UInt64
+        let generation: UInt64
+    }
     private struct RefreshWaiter {
         let operationID: UInt64
         let continuation: CheckedContinuation<HealthKitFitnessProjection?, Never>
@@ -72,44 +76,63 @@ public final class HealthKitFitnessRepository: ObservableObject {
     public func refresh() async -> HealthKitFitnessProjection? {
         guard !Task.isCancelled else { return nil }
 
-        let operationID: UInt64
-        if refreshTask != nil, let activeRefreshOperationID {
-            operationID = activeRefreshOperationID
-        } else {
-            refreshOperationID &+= 1
-            operationID = refreshOperationID
-            activeRefreshOperationID = operationID
-            generation &+= 1
-            let refreshGeneration = generation
-            let newTask: Task<HealthKitFitnessProjection?, Never> = Task { @MainActor [weak self] in
-                guard let self else { return nil }
-                return await self.performRefresh(generation: refreshGeneration)
-            }
-            refreshTask = newTask
-            Task { @MainActor [weak self] in
-                let result = await newTask.value
-                self?.finishRefresh(operationID: operationID, result: result)
-            }
-        }
-
         let waiterID = UUID()
         return await withTaskCancellationHandler(operation: {
             await withCheckedContinuation { continuation in
                 guard !Task.isCancelled else {
                     continuation.resume(returning: nil)
-                    cancelRefreshIfUnobserved(operationID: operationID)
+                    if let activeRefreshOperationID {
+                        cancelRefreshIfUnobserved(operationID: activeRefreshOperationID)
+                    }
                     return
                 }
+                let reservation = reserveRefreshOperation()
                 refreshWaiters[waiterID] = RefreshWaiter(
-                    operationID: operationID,
+                    operationID: reservation.operationID,
                     continuation: continuation
                 )
+                // Keep waiter registration and task publication in one
+                // MainActor turn. A cancellation callback or another caller
+                // can only observe a shared operation after this waiter is
+                // accounted for, so an observed waiter cannot be lost between
+                // starting the read and installing its continuation.
+                startRefreshIfNeeded(reservation)
             }
         }, onCancel: {
             Task { @MainActor [weak self] in
-                self?.cancelRefreshWaiter(waiterID, operationID: operationID)
+                self?.cancelRefreshWaiter(waiterID)
             }
         })
+    }
+
+    private func reserveRefreshOperation() -> RefreshReservation {
+        if let activeRefreshOperationID {
+            return RefreshReservation(
+                operationID: activeRefreshOperationID,
+                generation: generation
+            )
+        }
+
+        refreshOperationID &+= 1
+        let operationID = refreshOperationID
+        activeRefreshOperationID = operationID
+        generation &+= 1
+        return RefreshReservation(operationID: operationID, generation: generation)
+    }
+
+    private func startRefreshIfNeeded(_ reservation: RefreshReservation) {
+        guard activeRefreshOperationID == reservation.operationID,
+              refreshTask == nil else { return }
+
+        let newTask: Task<HealthKitFitnessProjection?, Never> = Task { @MainActor [weak self] in
+            guard let self else { return nil }
+            return await self.performRefresh(generation: reservation.generation)
+        }
+        refreshTask = newTask
+        Task { @MainActor [weak self] in
+            let result = await newTask.value
+            self?.finishRefresh(operationID: reservation.operationID, result: result)
+        }
     }
 
     private func performRefresh(generation refreshGeneration: UInt64) async -> HealthKitFitnessProjection? {
@@ -159,11 +182,11 @@ public final class HealthKitFitnessRepository: ObservableObject {
         return nextProjection
     }
 
-    private func cancelRefreshWaiter(_ waiterID: UUID, operationID: UInt64) {
-        guard let waiter = refreshWaiters.removeValue(forKey: waiterID),
-              waiter.operationID == operationID else { return }
+    private func cancelRefreshWaiter(_ waiterID: UUID) {
+        guard let waiter = refreshWaiters.removeValue(forKey: waiterID) else { return }
         waiter.continuation.resume(returning: nil)
-        cancelRefreshIfUnobserved(operationID: operationID)
+        guard activeRefreshOperationID == waiter.operationID else { return }
+        cancelRefreshIfUnobserved(operationID: waiter.operationID)
     }
 
     private func cancelRefreshIfUnobserved(operationID: UInt64) {

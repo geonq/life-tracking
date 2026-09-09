@@ -113,6 +113,9 @@ public struct FitnessTrainingSessionView: View {
             .onChange(of: incomingSession) { _, newSession in
                 handleIncomingSession(newSession)
             }
+            .onChange(of: draftIdentitySignature) { _, _ in
+                reconcileFocusedNumericField()
+            }
             .confirmationDialog(
                 "Finish this session?",
                 isPresented: $showFinishConfirmation,
@@ -280,6 +283,30 @@ public struct FitnessTrainingSessionView: View {
               let index = numericFieldOrder.firstIndex(of: focusedNumericField),
               index + 1 < numericFieldOrder.count else { return nil }
         return numericFieldOrder[index + 1]
+    }
+
+    /// Focus is keyed by the durable exercise and set records. Clear it when
+    /// an edit removes the record that owned the field instead of allowing a
+    /// stale focus token to be reused by a later row.
+    private func reconcileFocusedNumericField() {
+        guard let focusedNumericField,
+              numericFieldOrder.contains(focusedNumericField) else {
+            if self.focusedNumericField != nil {
+                self.focusedNumericField = nil
+            }
+            return
+        }
+    }
+
+    /// This tracks only identity and ordering. Draft value edits do not cause
+    /// focus reconciliation, while inserting, deleting, or reordering an
+    /// exercise or set does.
+    private var draftIdentitySignature: [String] {
+        exerciseDrafts.flatMap { exercise in
+            ["exercise:\(exercise.id.rawValue)"] + exercise.sets.map {
+                "set:\($0.id.rawValue)"
+            }
+        }
     }
 
     private func moveFocus(previous: Bool) {
@@ -522,10 +549,10 @@ public struct FitnessTrainingSessionView: View {
                 subtitle: "Targets are your plan. Actual values are the local record."
             )
 
-            ForEach(exerciseDrafts.indices, id: \.self) { index in
-                let exerciseID = exerciseDrafts[index].id
+            ForEach($exerciseDrafts) { $exercise in
+                let exerciseID = $exercise.wrappedValue.id
                 FitnessTrainingExerciseEditorCard(
-                    exercise: $exerciseDrafts[index],
+                    exercise: $exercise,
                     focusedField: $focusedNumericField,
                     repetitionLabel: session.activityKind == .cardio ? "Intervals" : "Repetitions",
                     onAddSet: { addSet(to: exerciseID) },
@@ -995,6 +1022,10 @@ private struct FitnessTrainingExerciseEditorCard: View {
     let onChange: () -> Void
     let onSubmit: (FitnessTrainingNumericField) -> Void
     @State private var isExpanded = true
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    @Environment(\.lifeOSReduceMotion) private var requestedReduceMotion
+
+    private var reduceMotion: Bool { systemReduceMotion || requestedReduceMotion }
 
     var body: some View {
         LifeOSCard(level: .surface) {
@@ -1008,8 +1039,12 @@ private struct FitnessTrainingExerciseEditorCard: View {
                         .onChange(of: exercise.name) { _, _ in onChange() }
                     Spacer(minLength: 0)
                     Button {
-                        withAnimation(LifeOSMotion.decorative(LifeOSMotion.snappy)) {
-                            isExpanded.toggle()
+                        if reduceMotion {
+                            LifeOSMotion.withoutAnimation { isExpanded.toggle() }
+                        } else {
+                            withAnimation(LifeOSMotion.snappy) {
+                                isExpanded.toggle()
+                            }
                         }
                     } label: {
                         Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
@@ -1026,16 +1061,22 @@ private struct FitnessTrainingExerciseEditorCard: View {
                 }
 
                 if isExpanded {
+                    let displayNumberBySetID = exercise.sets.enumerated().reduce(into: [TrainingRecordID: Int]()) { result, item in
+                        if result[item.element.id] == nil {
+                            result[item.element.id] = item.offset + 1
+                        }
+                    }
+
                     VStack(alignment: .leading, spacing: LifeOSTokens.Space.sm) {
                         Text("Target and actual \(repetitionLabel.lowercased()) / load")
                             .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.secondaryText)
 
-                        ForEach(exercise.sets.indices, id: \.self) { index in
+                        ForEach($exercise.sets) { $set in
                             FitnessTrainingSetEditorRow(
-                                index: index,
+                                setNumber: displayNumberBySetID[$set.wrappedValue.id] ?? 1,
                                 exerciseID: exercise.id,
-                                set: $exercise.sets[index],
+                                set: $set,
                                 repetitionLabel: repetitionLabel,
                                 focusedField: focusedField,
                                 onChange: onChange,
@@ -1053,16 +1094,20 @@ private struct FitnessTrainingExerciseEditorCard: View {
                         }
                         .buttonStyle(LifeOSButtonStyle(.secondary))
                     }
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .transition(reduceMotion ? .identity : .opacity.combined(with: .move(edge: .top)))
                 }
             }
         }
-        .animation(LifeOSMotion.decorative(LifeOSMotion.snappy), value: isExpanded)
+        .lifeOSInteractionAnimation(
+            LifeOSMotion.snappy,
+            value: isExpanded,
+            reduceMotion: reduceMotion
+        )
     }
 }
 
 private struct FitnessTrainingSetEditorRow: View {
-    let index: Int
+    let setNumber: Int
     let exerciseID: TrainingRecordID
     @Binding var set: TrainingSetDraft
     let repetitionLabel: String
@@ -1078,14 +1123,14 @@ private struct FitnessTrainingSetEditorRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: LifeOSTokens.Space.sm) {
             HStack(alignment: .firstTextBaseline) {
-                Text("Set \(index + 1)")
+                Text("Set \(setNumber)")
                     .lifeOSTypography(.label)
                     .foregroundStyle(LifeOSTokens.primaryText)
                 Spacer()
                 Toggle("Completed", isOn: $set.isCompleted)
                     .toggleStyle(.switch)
                     .labelsHidden()
-                    .accessibilityLabel("Set \(index + 1) completed")
+                    .accessibilityLabel("Set \(setNumber) completed")
                     .onChange(of: set.isCompleted) { _, _ in onChange() }
             }
 

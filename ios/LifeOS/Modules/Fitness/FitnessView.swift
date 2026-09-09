@@ -1,4 +1,5 @@
 import SwiftUI
+import Foundation
 
 #if os(iOS)
 import UIKit
@@ -481,6 +482,198 @@ public struct FitnessWorkout: Identifiable {
     }
 }
 
+/// Maps the bounded remote observation into the existing date-aware Fitness
+/// snapshot seam. Unsupported scores remain unavailable.
+public extension FitnessObservationEnvelope {
+    func snapshot(
+        for selectedDate: Date,
+        now: Date = .now,
+        calendar: Calendar = .current
+    ) -> FitnessSnapshot {
+        let effectiveState: FitnessObservationState
+        if state == .observed,
+           now.timeIntervalSince(generatedAt) > Self.staleAfter {
+            effectiveState = .stale
+        } else {
+            effectiveState = state
+        }
+
+        guard effectiveState == .observed else {
+            return FitnessSnapshot(source: sourceState(for: effectiveState))
+        }
+
+        let selectedMetrics = Dictionary(
+            uniqueKeysWithValues: metrics.filter {
+                calendar.isDate($0.observedAt, inSameDayAs: selectedDate)
+            }.map { ($0.metric, $0) }
+        )
+        let selectedDayValues = Dictionary(
+            uniqueKeysWithValues: days.first {
+                calendar.isDate($0.date, inSameDayAs: selectedDate)
+            }?.values.map { ($0.metric, $0) } ?? []
+        )
+
+        let hrv = metric(
+            selectedMetrics[.heartRateVariability],
+            title: "HRV",
+            unit: "ms",
+            hue: .teal
+        )
+        let restingHeartRate = metric(
+            selectedMetrics[.restingHeartRate],
+            title: "Resting heart rate",
+            unit: "bpm",
+            hue: .pink
+        )
+        let heartRate = metric(
+            selectedMetrics[.heartRate],
+            title: "Heart rate",
+            unit: "bpm",
+            hue: .red
+        )
+        let respiration = metric(
+            selectedMetrics[.respiratoryRate],
+            title: "Respiration",
+            unit: "/min",
+            hue: .blue
+        )
+        let oxygen = metric(
+            selectedMetrics[.oxygenSaturation],
+            title: "Blood oxygen",
+            unit: "%",
+            hue: .green
+        )
+        let sleep = sleepMetric(selectedDayValues[.sleepDuration])
+
+        return FitnessSnapshot(
+            source: sourceState(for: .observed),
+            readiness: .unavailable("Readiness", reason: "No source-backed readiness score is available."),
+            strain: .unavailable("Strain / load", reason: "No source-backed strain score is available."),
+            sleep: sleep,
+            stress: .unavailable("Stress", reason: "No source-backed stress score is available."),
+            energyReserve: .unavailable("Energy reserve", reason: "No source-backed energy reserve score is available."),
+            healthMonitor: [
+                hrv,
+                restingHeartRate,
+                heartRate,
+                respiration,
+                oxygen,
+                .unavailable("Skin temperature", reason: "This observation contract does not include skin temperature."),
+                sleep
+            ],
+            bodyMetrics: FitnessMetric.defaultBodyMetrics,
+            workouts: workouts(on: selectedDate, calendar: calendar)
+        )
+    }
+}
+
+private extension FitnessObservationEnvelope {
+    func sourceState(for state: FitnessObservationState) -> FitnessSourceState {
+        switch state {
+        case .observed:
+            return FitnessSourceState(
+                status: .connected,
+                title: "HealthKit fitness source",
+                detail: "iPhone projection · bounded cross-device summary",
+                freshness: "Observed " + observedAt.formatted(date: .abbreviated, time: .shortened)
+            )
+        case .stale:
+            return FitnessSourceState(
+                status: .stale,
+                title: "HealthKit fitness source is stale",
+                detail: "The last iPhone projection is older than the live freshness window. No stale value is rendered as current.",
+                freshness: "Stale · last observed " + observedAt.formatted(date: .abbreviated, time: .shortened)
+            )
+        case .permissionRequired:
+            return FitnessSourceState(
+                status: .permissionRequired,
+                title: "HealthKit permission is required",
+                detail: "Allow Fitness reads on the iPhone before LifeOS can receive a source-backed observation.",
+                freshness: "Unavailable · permission required"
+            )
+        case .unavailable:
+            return FitnessSourceState(
+                status: .unavailable,
+                title: "HealthKit fitness data is unavailable",
+                detail: "The iPhone has not published an accepted source-backed observation.",
+                freshness: "Unavailable · no accepted observation"
+            )
+        }
+    }
+
+    func provenance(_ observedAt: Date) -> FitnessMetric.Provenance? {
+        FitnessMetric.Provenance(
+            source: "HealthKit",
+            device: "iPhone projection",
+            window: "Bounded source-backed observation",
+            freshness: "Observed " + observedAt.formatted(date: .abbreviated, time: .shortened)
+        )
+    }
+
+    func metric(
+        _ observation: FitnessObservationValue?,
+        title: String,
+        unit: String,
+        hue: LifeOSTokens.Hue
+    ) -> FitnessMetric {
+        guard let observation else {
+            return .unavailable(title, reason: "No source-backed observation for the selected day.")
+        }
+        return FitnessMetric(
+            id: observation.metric.rawValue,
+            title: title,
+            value: observation.value.formatted(.number.precision(.fractionLength(0...1))),
+            unit: unit,
+            detail: "Observed HealthKit quantity · bounded iPhone projection",
+            quality: .observed,
+            hue: hue,
+            sourceState: .observed,
+            provenance: provenance(observation.observedAt)
+        )
+    }
+
+    func sleepMetric(_ observation: FitnessObservationValue?) -> FitnessMetric {
+        guard let observation else {
+            return .unavailable("Sleep", reason: "No source-backed sleep duration for the selected day.")
+        }
+        let seconds = Int(observation.value.rounded())
+        let hours = seconds / 3_600
+        let minutes = (seconds % 3_600) / 60
+        let value = hours > 0 ? "\(hours)h \(minutes)m" : "\(minutes)m"
+        return FitnessMetric(
+            id: observation.metric.rawValue,
+            title: "Sleep",
+            value: value,
+            unit: "",
+            detail: "Source-gated asleep duration · bounded iPhone projection",
+            quality: .observed,
+            hue: .violet,
+            sourceState: .observed,
+            provenance: provenance(observation.observedAt)
+        )
+    }
+
+    func workouts(on selectedDate: Date, calendar: Calendar) -> [FitnessWorkout] {
+        guard let day = calendar.dateInterval(of: .day, for: selectedDate) else { return [] }
+        return self.workouts.enumerated().compactMap { index, workout in
+            guard workout.startAt < day.end, workout.endAt > day.start else { return nil }
+            let minutes = max(1, Int((workout.durationSeconds / 60).rounded()))
+            let energy = workout.activeEnergyKilocalories.map {
+                " · " + String(Int($0.rounded())) + " kcal"
+            } ?? ""
+            return FitnessWorkout(
+                id: "healthkit-workout-" + String(index) + "-" + String(Int(workout.startAt.timeIntervalSinceReferenceDate)),
+                name: "HealthKit workout",
+                kind: "Source-backed activity",
+                time: workout.startAt,
+                duration: String(minutes) + " min",
+                detail: "Observed HealthKit workout" + energy,
+                hue: .orange
+            )
+        }
+    }
+}
+
 public struct FitnessJournalEntry: Identifiable {
     public enum Source: String { case manual = "Manual", healthKit = "HealthKit", derived = "Derived", inferred = "Inferred" }
     public enum Icon { case sun, water, supplement, mood, tag }
@@ -866,11 +1059,6 @@ private struct FitnessHeader: View {
                 .accessibilityLabel("Health source status")
                 .accessibilityValue("\(source.title). \(source.freshness)")
             }
-
-            Text("\(source.title) · \(source.freshness)")
-                .lifeOSTypography(.metadata)
-                .foregroundStyle(LifeOSTokens.secondaryText)
-                .fixedSize(horizontal: false, vertical: true)
 
             HStack(spacing: 8) {
                 LifeOSIcon(.calendar)
@@ -1276,7 +1464,12 @@ private struct FitnessSectionContent: View {
                 )
             }
         case .nutrition:
-            FitnessNutritionView(snapshot: snapshot, selectedDate: selectedDate, initialEntryPoint: nutritionEntryPoint)
+            FitnessNutritionView(
+                snapshot: snapshot,
+                selectedDate: selectedDate,
+                initialEntryPoint: nutritionEntryPoint,
+                usesVisualFixtures: usesVisualFixtures
+            )
         case .supplements:
             FitnessSupplementsView(supplements: snapshot.supplements, selectedDate: selectedDate)
         case .settings:
@@ -1355,21 +1548,42 @@ private struct FitnessCoreTodayComposition: View {
                 FitnessSourceGateCard(source: snapshot.source, onSourceTap: onSourceTap)
             }
 
-            FitnessCoreReadinessHero(metric: snapshot.readiness)
+            FitnessCoreReadinessHero(
+                metric: snapshot.readiness,
+                showsUnavailableReason: showsMetricSpecificReason(snapshot.readiness)
+            )
 
-            FitnessCoreSectionLabel(title: "Load & sleep", detail: "The two signals that frame today")
+            FitnessCoreSectionLabel(title: "Load & sleep")
             FitnessCoreColumns(minColumnWidth: 300) {
-                FitnessCoreMetricCard(route: .load, metric: snapshot.strain, emphasis: true)
-                FitnessCoreMetricCard(route: .sleep, metric: snapshot.sleep, emphasis: true)
+                FitnessCoreMetricCard(
+                    route: .load,
+                    metric: snapshot.strain,
+                    emphasis: true,
+                    showsUnavailableReason: showsMetricSpecificReason(snapshot.strain)
+                )
+                FitnessCoreMetricCard(
+                    route: .sleep,
+                    metric: snapshot.sleep,
+                    emphasis: true,
+                    showsUnavailableReason: showsMetricSpecificReason(snapshot.sleep)
+                )
             }
 
-            FitnessCoreSectionLabel(title: "Daily balance", detail: "Stress and reserve are separate signals")
+            FitnessCoreSectionLabel(title: "Daily balance")
             FitnessCoreColumns(minColumnWidth: 300) {
-                FitnessCoreMetricCard(route: .stress, metric: snapshot.stress)
-                FitnessCoreMetricCard(route: .energyReserve, metric: snapshot.energyReserve)
+                FitnessCoreMetricCard(
+                    route: .stress,
+                    metric: snapshot.stress,
+                    showsUnavailableReason: showsMetricSpecificReason(snapshot.stress)
+                )
+                FitnessCoreMetricCard(
+                    route: .energyReserve,
+                    metric: snapshot.energyReserve,
+                    showsUnavailableReason: showsMetricSpecificReason(snapshot.energyReserve)
+                )
             }
 
-            FitnessCoreSectionLabel(title: "Nutrition", detail: "Food records and energy calculations")
+            FitnessCoreSectionLabel(title: "Nutrition")
             FitnessNutritionSummaryCard(nutrition: snapshot.nutrition)
 
             FitnessCoreHealthMonitorCard(metrics: snapshot.healthMonitor)
@@ -1390,19 +1604,39 @@ private struct FitnessCoreTodayComposition: View {
         }
         .accessibilityIdentifier("fitness-today-composition")
     }
+
+    private func showsMetricSpecificReason(_ metric: FitnessMetric) -> Bool {
+        guard !metric.isValueAvailable else { return false }
+        guard snapshot.source.status.needsReview else { return true }
+
+        let detail = metric.detail.trimmingCharacters(in: .whitespacesAndNewlines)
+        let genericReasons = [
+            "Connect a reviewed source to see this metric.",
+            "No source observation is available.",
+            snapshot.source.detail
+        ]
+        return !detail.isEmpty && !genericReasons.contains(detail)
+    }
 }
 
 private struct FitnessCoreSectionLabel: View {
     let title: String
-    let detail: String
+    let detail: String?
+
+    init(title: String, detail: String? = nil) {
+        self.title = title
+        self.detail = detail
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title)
                 .lifeOSTypography(.cardTitle)
-            Text(detail)
-                .lifeOSTypography(.metadata)
-                .foregroundStyle(LifeOSTokens.secondaryText)
+            if let detail {
+                Text(detail)
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.secondaryText)
+            }
         }
         .accessibilityElement(children: .combine)
     }
@@ -1588,7 +1822,16 @@ private struct FitnessCoreColumnsLayout: Layout {
 
 private struct FitnessCoreReadinessHero: View {
     let metric: FitnessMetric
+    let showsUnavailableReason: Bool
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    init(
+        metric: FitnessMetric,
+        showsUnavailableReason: Bool = true
+    ) {
+        self.metric = metric
+        self.showsUnavailableReason = showsUnavailableReason
+    }
 
     var body: some View {
         FitnessCoreNavigationCard(route: .readiness) {
@@ -1597,12 +1840,14 @@ private struct FitnessCoreReadinessHero: View {
                     regularReadinessLayout
                     stackedReadinessLayout
                 }
-                Text(readinessContext)
-                    .lifeOSTypography(.metadata)
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
-                    .fixedSize(horizontal: false, vertical: true)
             } else {
-                FitnessCoreUnavailableMetricState(title: "Recovery", subtitle: "Readiness score", metric: metric)
+                FitnessCoreUnavailableMetricState(
+                    title: "Recovery",
+                    subtitle: "Readiness score",
+                    metric: metric,
+                    showsProvenance: false,
+                    showsMetricReason: showsUnavailableReason
+                )
             }
         }
         .accessibilityIdentifier("fitness-core-recovery-card")
@@ -1627,7 +1872,9 @@ private struct FitnessCoreReadinessHero: View {
                         .fixedSize(horizontal: true, vertical: false)
                 }
             }
-            FitnessCoreProvenance(metric: metric)
+            if FitnessCoreMetricPresentationPolicy.showsProvenance(for: metric) {
+                FitnessCoreProvenance(metric: metric)
+            }
         }
     }
 
@@ -1661,25 +1908,13 @@ private struct FitnessCoreReadinessHero: View {
         }
     }
 
-    private var readinessContext: String {
-        switch metric.sourceState {
-        case .unavailable, .permissionRequired, .deviceUnavailable,
-             .readIndeterminate, .calibrating, .conflict, .error:
-            "\(metric.sourceState.label) · \(metric.detail)"
-        case .demo:
-            "Live wake-time timing requires a connected source"
-        case .partial, .stale:
-            "\(metric.sourceState.label) · Open for source-backed interpretation"
-        default:
-            "Open for source-backed interpretation"
-        }
-    }
 }
 
 private struct FitnessCoreMetricCard: View {
     let route: FitnessCoreRoute
     let metric: FitnessMetric
     var emphasis = false
+    var showsUnavailableReason = true
 
     var body: some View {
         FitnessCoreNavigationCard(route: route) {
@@ -1700,7 +1935,7 @@ private struct FitnessCoreMetricCard: View {
                         }
                     }
                     Spacer(minLength: 4)
-                    if let progress = metric.progress {
+                    if metric.trend.isEmpty, let progress = metric.progress {
                         FitnessRing(progress: progress, hue: metric.hue, size: emphasis ? 58 : 48, color: FitnessRingPalette.color(route: route, progress: progress))
                             .accessibilityHidden(true)
                     }
@@ -1709,12 +1944,36 @@ private struct FitnessCoreMetricCard: View {
                     FitnessCoreSparkline(values: metric.trend, role: metric.fitnessTrendSemanticRole)
                     FitnessTrendSemanticLabel(role: metric.fitnessTrendSemanticRole)
                 }
-                FitnessCoreProvenance(metric: metric)
+                if FitnessCoreMetricPresentationPolicy.showsProvenance(for: metric) {
+                    FitnessCoreProvenance(metric: metric)
+                }
             } else {
-                FitnessCoreUnavailableMetricState(title: route.title, metric: metric)
+                FitnessCoreUnavailableMetricState(
+                    title: route.title,
+                    metric: metric,
+                    showsProvenance: false,
+                    showsMetricReason: showsUnavailableReason
+                )
             }
         }
         .accessibilityIdentifier("fitness-core-\(route.title.lowercased().replacingOccurrences(of: " ", with: "-"))-card")
+    }
+}
+
+/// The Today cards display trust metadata only alongside an actual value.
+/// Common source absence belongs to the single source gate above the cards;
+/// metric-specific reasons remain in an unavailable card when they differ.
+enum FitnessCoreMetricPresentationPolicy {
+    static func showsProvenance(for metric: FitnessMetric) -> Bool {
+        metric.isValueAvailable
+    }
+
+    /// Keep source, device, coverage window, and freshness visible while
+    /// excluding opaque record identifiers from the compact card row.
+    static func provenanceText(for metric: FitnessMetric) -> String {
+        guard let provenance = metric.provenance else { return metric.detail }
+        return [provenance.source, provenance.device, provenance.window, provenance.freshness]
+            .joined(separator: " · ")
     }
 }
 
@@ -1774,7 +2033,7 @@ private struct FitnessCoreProvenance: View {
     }
 
     private var compactDetail: String {
-        metric.provenanceSummary
+        FitnessCoreMetricPresentationPolicy.provenanceText(for: metric)
             .replacingOccurrences(of: " · demo fixture", with: "")
             .replacingOccurrences(of: "demo fixture", with: "fixture")
     }
@@ -1861,6 +2120,8 @@ private struct FitnessCoreUnavailableMetricState: View {
     let title: String
     var subtitle: String? = nil
     let metric: FitnessMetric
+    var showsProvenance = true
+    var showsMetricReason = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -1882,7 +2143,14 @@ private struct FitnessCoreUnavailableMetricState: View {
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
             }
-            FitnessCoreProvenance(metric: metric)
+            if showsProvenance {
+                FitnessCoreProvenance(metric: metric)
+            } else if showsMetricReason {
+                Text(metric.detail)
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 }
@@ -2530,19 +2798,59 @@ private struct FitnessCoreRecoveryDetail: View {
                 FitnessCoreMeasurementCard(title: "Resting HRV", metric: detail.hrv, evidence: FitnessSourceEvidence.from(metric: detail.hrv))
                 FitnessCoreMeasurementCard(title: "Resting heart rate", metric: detail.restingHeartRate, evidence: FitnessSourceEvidence.from(metric: detail.restingHeartRate))
             }
-            FitnessCoreSourceCopyCard(title: "Why this recovery state?", copy: detail.explanation)
-            FitnessCoreSourceCopyCard(
-                title: "Insights",
-                copy: detail.insights.first ?? .unavailable("Insights require observed recovery inputs; no conclusion is drawn from missing data.")
+            FitnessCoreRecoveryContextCard(
+                explanation: detail.explanation,
+                insight: detail.insights.first
             )
-            FitnessCoreRecoveryTrends(trends: detail.trends, selectedDate: selectedDate)
+            FitnessCoreRecoveryTrends(trends: detail.trends)
+        }
+    }
+}
+
+private struct FitnessCoreRecoveryContextCard: View {
+    let explanation: FitnessSourceCopy
+    let insight: FitnessSourceCopy?
+
+    var body: some View {
+        FitnessCard {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Recovery context")
+                    .lifeOSTypography(.sectionTitle)
+                recoveryCopy(title: "State", copy: explanation)
+                if let insight {
+                    Divider().opacity(0.55)
+                    recoveryCopy(title: "Insight", copy: insight)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func recoveryCopy(title: String, copy: FitnessSourceCopy) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .lifeOSTypography(.metadata, weight: .semibold)
+                .foregroundStyle(LifeOSTokens.tertiaryText)
+            switch copy.state {
+            case .unavailable(let reason):
+                Text(reason)
+                    .lifeOSTypography(.body)
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            case .observed(let text, let window, let provenance), .demo(let text, let window, let provenance):
+                Text(text)
+                    .lifeOSTypography(.body)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("\(window) · \(provenance)")
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+            }
         }
     }
 }
 
 private struct FitnessCoreRecoveryTrends: View {
     let trends: [FitnessRecoveryTrendCard]
-    let selectedDate: Date
     @State private var selectedTrend: FitnessRecoveryTrendID?
     @State private var requestedRange: FitnessTrendRange = .seven
 
@@ -2561,7 +2869,7 @@ private struct FitnessCoreRecoveryTrends: View {
                 HStack {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Recovery trends").lifeOSTypography(.sectionTitle)
-                        Text("\(selectedDate.fitnessDayLabel) · each metric keeps its own source evidence").lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
+                        Text("Select a signal for source detail").lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
                     }
                     Spacer()
                     Menu {
@@ -3361,7 +3669,11 @@ private struct FitnessCoreDetailHero: View {
                     }
                 }
             } else {
-                FitnessCoreUnavailableMetricState(title: route.title, metric: metric)
+                FitnessCoreUnavailableMetricState(
+                    title: route.title,
+                    metric: metric,
+                    showsMetricReason: false
+                )
             }
         }
     }
@@ -3373,22 +3685,53 @@ private struct FitnessCoreAvailabilityNote: View {
     let onSourceTap: () -> Void
 
     var body: some View {
-        FitnessCard {
-            VStack(alignment: .leading, spacing: 7) {
-                Text(metric.isValueAvailable ? "Source and freshness" : "Why this is unavailable")
-                    .lifeOSTypography(.sectionTitle)
-                Text(!metric.isValueAvailable
-                     ? "LifeOS does not substitute zero or a guessed score. Connect the reviewed sensor chain and grant only the HealthKit categories you want to use."
-                     : "\(metric.sourceState.label) · \(source.title) · \(source.freshness)")
-                    .lifeOSTypography(.body)
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
-                    .fixedSize(horizontal: false, vertical: true)
-                Button("Review source and permissions", action: onSourceTap)
-                    .lifeOSTypography(.body, weight: .semibold)
-                    .buttonStyle(.bordered)
-                    .tint(LifeOSTokens.accent)
+        Group {
+            if metric.isValueAvailable {
+                HStack(spacing: 7) {
+                    LifeOSIcon(.verified)
+                        .frame(width: 14, height: 14)
+                    Text("\(metric.sourceState.label) · \(source.title) · \(source.freshness)")
+                        .lifeOSTypography(.metadata)
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityElement(children: .combine)
+            } else {
+                FitnessCard {
+                    VStack(alignment: .leading, spacing: 9) {
+                        HStack(alignment: .top, spacing: 9) {
+                            LifeOSIcon(.health)
+                                .foregroundStyle(LifeOSTokens.warning)
+                                .frame(width: 18, height: 18)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Source required")
+                                    .lifeOSTypography(.sectionTitle)
+                                Text(unavailableSummary)
+                                    .lifeOSTypography(.body)
+                                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        Button("Review source and permissions", action: onSourceTap)
+                            .lifeOSTypography(.body, weight: .semibold)
+                            .buttonStyle(.bordered)
+                            .tint(LifeOSTokens.accent)
+                    }
+                }
             }
         }
+        .accessibilityIdentifier("fitness-core-availability-note")
+    }
+
+    private var unavailableSummary: String {
+        let metricReason = metric.detail.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !metricReason.isEmpty,
+              metricReason != "Connect a reviewed source to see this metric.",
+              metricReason != source.detail else {
+            return source.detail
+        }
+        return "\(metricReason) · \(source.detail)"
     }
 }
 

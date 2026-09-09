@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 import PhotosUI
 #if os(iOS)
@@ -404,6 +405,103 @@ private extension FitnessNutritionCaptureAction {
     }
 }
 
+/// The Nutrition surface has three independent local stores. Keep their
+/// paths together so an explicit visual-fixture host can exercise persistence
+/// without ever resolving the user's Application Support directory.
+struct FitnessNutritionPersistenceConfiguration {
+    let directoryURL: URL?
+    let barcodeStore: NutritionRecordStore
+    let mealStore: NutritionMealStore?
+    let goalStore: NutritionGoalStore?
+
+    static func make(usesVisualFixtures: Bool, fileManager: FileManager = .default) -> Self {
+        if usesVisualFixtures {
+            let directory = fileManager.temporaryDirectory
+                .appendingPathComponent("LifeOS", isDirectory: true)
+                .appendingPathComponent("NutritionFixtures", isDirectory: true)
+                .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            return Self(
+                directoryURL: directory,
+                barcodeStore: NutritionRecordStore(
+                    url: directory.appendingPathComponent("nutrition-barcode-records.json"),
+                    fileManager: fileManager
+                ),
+                mealStore: try? NutritionMealStore(
+                    url: directory.appendingPathComponent(NutritionMealStore.fileName),
+                    fileManager: fileManager
+                ),
+                goalStore: try? NutritionGoalStore(
+                    url: directory.appendingPathComponent(NutritionGoalStore.fileName),
+                    fileManager: fileManager
+                )
+            )
+        }
+
+        return Self(
+            directoryURL: nil,
+            barcodeStore: NutritionRecordStore(url: NutritionRecordStore.defaultPersistenceURL),
+            mealStore: try? NutritionMealStore(url: NutritionMealStore.defaultURL(fileManager: fileManager), fileManager: fileManager),
+            goalStore: try? NutritionGoalStore(url: NutritionGoalStore.defaultURL(fileManager: fileManager), fileManager: fileManager)
+        )
+    }
+}
+
+/// Owns the Nutrition stores for the lifetime of the surface. In particular,
+/// a fixture directory must not be regenerated when SwiftUI reconstructs the
+/// view value during navigation or state updates.
+@MainActor
+final class FitnessNutritionPersistenceState: ObservableObject {
+    let persistence: FitnessNutritionPersistenceConfiguration
+
+    init(usesVisualFixtures: Bool) {
+        persistence = FitnessNutritionPersistenceConfiguration.make(
+            usesVisualFixtures: usesVisualFixtures
+        )
+    }
+}
+
+enum FitnessNutritionBarcodeLookupClientError: Error, Equatable, Sendable {
+    case visualFixtureDisabled
+}
+
+/// The barcode transport is injected so a visual fixture cannot accidentally
+/// construct or call the live Tailscale gateway. The client repeats the
+/// fixture guard at the transport boundary for programmatic invocations.
+struct FitnessNutritionBarcodeLookupClient: Sendable {
+    typealias Transport = @Sendable (String) async throws -> NutritionBarcodeLookup
+
+    private let usesVisualFixtures: Bool
+    private let transport: Transport
+
+    init(
+        usesVisualFixtures: Bool,
+        transport: @escaping Transport
+    ) {
+        self.usesVisualFixtures = usesVisualFixtures
+        self.transport = transport
+    }
+
+    static var live: Self {
+        let client = TailscaleSyncClient()
+        return Self(usesVisualFixtures: false) { input in
+            try await client.fetchNutritionBarcode(input)
+        }
+    }
+
+    static var visualFixture: Self {
+        Self(usesVisualFixtures: true) { _ in
+            throw FitnessNutritionBarcodeLookupClientError.visualFixtureDisabled
+        }
+    }
+
+    func fetchNutritionBarcode(_ input: String) async throws -> NutritionBarcodeLookup {
+        guard !usesVisualFixtures else {
+            throw FitnessNutritionBarcodeLookupClientError.visualFixtureDisabled
+        }
+        return try await transport(input)
+    }
+}
+
 struct FitnessNutritionView: View {
     let snapshot: FitnessSnapshot
     let selectedDate: Date
@@ -423,18 +521,37 @@ struct FitnessNutritionView: View {
     @State private var goalPersistenceError: String?
     @State private var captureDraft: FitnessNutritionDraft
     @State private var mealPendingDeletion: NutritionMeal?
-    private let nutritionRecordStore = NutritionRecordStore(url: NutritionRecordStore.defaultPersistenceURL)
-    private let nutritionMealStore: NutritionMealStore?
+    @StateObject private var persistenceState: FitnessNutritionPersistenceState
+    private let usesVisualFixtures: Bool
+
+    private var nutritionRecordStore: NutritionRecordStore {
+        persistenceState.persistence.barcodeStore
+    }
+
+    private var nutritionMealStore: NutritionMealStore? {
+        persistenceState.persistence.mealStore
+    }
+
+    private var nutritionGoalStore: NutritionGoalStore? {
+        persistenceState.persistence.goalStore
+    }
 
     init(
         snapshot: FitnessSnapshot,
         selectedDate: Date,
-        initialEntryPoint: FitnessNutritionEntryPoint? = nil
+        initialEntryPoint: FitnessNutritionEntryPoint? = nil,
+        usesVisualFixtures: Bool = false
     ) {
         self.snapshot = snapshot
         self.selectedDate = selectedDate
         self.initialEntryPoint = initialEntryPoint
-        self.nutritionMealStore = try? NutritionMealStore(url: NutritionMealStore.defaultURL())
+        let resolvedUsesVisualFixtures = usesVisualFixtures || snapshot.source.status == .demo
+        self.usesVisualFixtures = resolvedUsesVisualFixtures
+        _persistenceState = StateObject(
+            wrappedValue: FitnessNutritionPersistenceState(
+                usesVisualFixtures: resolvedUsesVisualFixtures
+            )
+        )
         _captureAction = State(initialValue: nil)
         _captureDraft = State(initialValue: FitnessNutritionDraft.new(selectedDate: selectedDate))
     }
@@ -448,6 +565,8 @@ struct FitnessNutritionView: View {
             localBarcodeRecordCount: effectiveBarcodeRecords.count,
             barcodePersistenceError: barcodePersistenceError,
             mealPersistenceError: mealPersistenceError ?? goalPersistenceError,
+            goalStore: nutritionGoalStore,
+            mealStore: nutritionMealStore,
             onCapture: { method in
                 let hasPendingDraft = captureDraft.isDirty || captureDraft.previewMeal != nil
                 captureDraft = FitnessNutritionDraftFlow.reopenOrStart(
@@ -479,7 +598,7 @@ struct FitnessNutritionView: View {
                 method: captureMethod,
                 action: captureAction,
                 stage: $photoStage,
-                isDemo: snapshot.source.status == .demo,
+                isDemo: usesVisualFixtures,
                 nutritionRecordStore: nutritionRecordStore,
                 nutritionMealStore: nutritionMealStore,
                 draft: $captureDraft,
@@ -497,7 +616,13 @@ struct FitnessNutritionView: View {
 #endif
         }
         .navigationDestination(isPresented: $showingGoals) {
-            NutritionGoalsView(nutrition: effectiveNutrition, selectedDate: selectedDate, isDemo: snapshot.source.status == .demo)
+            NutritionGoalsView(
+                nutrition: effectiveNutrition,
+                selectedDate: selectedDate,
+                isDemo: usesVisualFixtures,
+                goalStore: nutritionGoalStore,
+                mealStore: nutritionMealStore
+            )
         }
         .navigationDestination(isPresented: $showingNetEnergy) {
             NutritionNetEnergyView(nutrition: effectiveNutrition)
@@ -575,7 +700,7 @@ struct FitnessNutritionView: View {
     }
 
     private var effectiveBarcodeRecords: [NutritionRecord] {
-        guard snapshot.source.status != .demo else { return [] }
+        guard !usesVisualFixtures else { return [] }
         return localBarcodeRecords.filter { record in
             guard let mealDate = record.mealDate else { return false }
             return Calendar.current.isDate(mealDate, inSameDayAs: selectedDate)
@@ -583,7 +708,7 @@ struct FitnessNutritionView: View {
     }
 
     private var effectiveNutrition: FitnessNutritionSnapshot {
-        guard snapshot.source.status != .demo else { return snapshot.nutrition }
+        guard !usesVisualFixtures else { return snapshot.nutrition }
         return snapshot.nutrition
             .includingLocalBarcodeRecords(localBarcodeRecords, for: selectedDate)
             .includingLocalMeals(localMeals, for: selectedDate)
@@ -615,10 +740,9 @@ struct FitnessNutritionView: View {
     }
 
     private func loadGoal() {
-        guard snapshot.source.status != .demo else { return }
+        guard !usesVisualFixtures else { return }
         do {
-            let store = try NutritionGoalStore(url: NutritionGoalStore.defaultURL())
-            localGoal = try store.currentGoal(on: selectedDate)
+            localGoal = try nutritionGoalStore?.currentGoal(on: selectedDate)
             goalPersistenceError = nil
         } catch {
             localGoal = nil
@@ -690,6 +814,8 @@ private struct FitnessNutritionSurface: View {
     let localBarcodeRecordCount: Int
     let barcodePersistenceError: String?
     let mealPersistenceError: String?
+    let goalStore: NutritionGoalStore?
+    let mealStore: NutritionMealStore?
     let onCapture: (FitnessFoodCaptureMethod) -> Void
     let onEditMeal: (FitnessMeal) -> Void
     let onDeleteMeal: (FitnessMeal) -> Void
@@ -720,7 +846,13 @@ private struct FitnessNutritionSurface: View {
                     .accessibilityIdentifier("nutrition-meal-persistence-error")
             }
             if hasObservedNutrition {
-                FitnessNutritionHeroCard(nutrition: nutrition, isDemo: sourceStatus == .demo, selectedDate: selectedDate)
+                FitnessNutritionHeroCard(
+                    nutrition: nutrition,
+                    isDemo: sourceStatus == .demo,
+                    selectedDate: selectedDate,
+                    goalStore: goalStore,
+                    mealStore: mealStore
+                )
                 FitnessNutritionMacroCard(macros: nutrition.macroValues, display: $macroDisplay)
                 FitnessNutritionMealTimelineCard(
                     meals: nutrition.meals,
@@ -827,6 +959,8 @@ private struct FitnessNutritionHeroCard: View {
     let nutrition: FitnessNutritionSnapshot
     let isDemo: Bool
     let selectedDate: Date
+    let goalStore: NutritionGoalStore?
+    let mealStore: NutritionMealStore?
 
     var body: some View {
         NutritionSurfaceCard(accent: .orange) {
@@ -865,7 +999,13 @@ private struct FitnessNutritionHeroCard: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityHint("Opens food library")
-                NavigationLink(destination: NutritionGoalsView(nutrition: nutrition, selectedDate: selectedDate, isDemo: isDemo)) {
+                NavigationLink(destination: NutritionGoalsView(
+                    nutrition: nutrition,
+                    selectedDate: selectedDate,
+                    isDemo: isDemo,
+                    goalStore: goalStore,
+                    mealStore: mealStore
+                )) {
                     NutritionActionLabel(title: "Goals", icon: .budget)
                 }
                 .buttonStyle(.plain)
@@ -1683,12 +1823,18 @@ private struct NutritionGoalsView: View {
     @State private var savedConfirmation: String?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    init(nutrition: FitnessNutritionSnapshot, selectedDate: Date, isDemo: Bool) {
+    init(
+        nutrition: FitnessNutritionSnapshot,
+        selectedDate: Date,
+        isDemo: Bool,
+        goalStore: NutritionGoalStore?,
+        mealStore: NutritionMealStore?
+    ) {
         self.nutrition = nutrition
         self.selectedDate = selectedDate
         self.isDemo = isDemo
-        self.goalStore = try? NutritionGoalStore(url: NutritionGoalStore.defaultURL())
-        self.mealStore = try? NutritionMealStore(url: NutritionMealStore.defaultURL())
+        self.goalStore = goalStore
+        self.mealStore = mealStore
     }
 
     var body: some View {
@@ -2131,6 +2277,11 @@ struct FitnessNutritionSaveReceipt: Equatable, Sendable {
     let fingerprint: String
 }
 
+struct FitnessNutritionBarcodeSaveReceipt: Equatable, Sendable {
+    let recordID: UUID
+    let draftRevision: String
+}
+
 struct FitnessNutritionDraft: Equatable, Sendable {
     let draftID: UUID
     var loggedAt: Date
@@ -2151,9 +2302,13 @@ struct FitnessNutritionDraft: Equatable, Sendable {
     var barcodeValuesEdited: Bool
     var barcodeBasis: NutritionBarcodeBasis
     var barcodeMealAt: String
+    /// Stable for one lookup/edit session. A failed write keeps this ID so a
+    /// later retry or correction can replace an uncertain prior write.
+    var barcodeRecordID: UUID?
     var activeMeal: NutritionMeal?
     var previewMeal: NutritionMeal?
     var durableReceipt: FitnessNutritionSaveReceipt?
+    var barcodeDurableReceipt: FitnessNutritionBarcodeSaveReceipt?
 
     init(
         draftID: UUID = UUID(),
@@ -2175,9 +2330,11 @@ struct FitnessNutritionDraft: Equatable, Sendable {
         barcodeValuesEdited: Bool = false,
         barcodeBasis: NutritionBarcodeBasis = .perServing,
         barcodeMealAt: String = "",
+        barcodeRecordID: UUID? = nil,
         activeMeal: NutritionMeal? = nil,
         previewMeal: NutritionMeal? = nil,
-        durableReceipt: FitnessNutritionSaveReceipt? = nil
+        durableReceipt: FitnessNutritionSaveReceipt? = nil,
+        barcodeDurableReceipt: FitnessNutritionBarcodeSaveReceipt? = nil
     ) {
         self.draftID = draftID
         self.loggedAt = loggedAt
@@ -2198,9 +2355,11 @@ struct FitnessNutritionDraft: Equatable, Sendable {
         self.barcodeValuesEdited = barcodeValuesEdited
         self.barcodeBasis = barcodeBasis
         self.barcodeMealAt = barcodeMealAt
+        self.barcodeRecordID = barcodeRecordID
         self.activeMeal = activeMeal
         self.previewMeal = previewMeal
         self.durableReceipt = durableReceipt
+        self.barcodeDurableReceipt = barcodeDurableReceipt
     }
 
     static func new(selectedDate: Date, calendar: Calendar = .current) -> FitnessNutritionDraft {
@@ -2238,6 +2397,25 @@ struct FitnessNutritionDraft: Equatable, Sendable {
             carbohydrates: carbohydrates,
             fat: fat,
             portionGrams: portionGrams
+        ) + "\u{1F}" + barcodeDraftRevision
+    }
+
+    /// Revision of every value that can be sent by the barcode confirmation
+    /// flow.  The revision is intentionally derived from the editable draft,
+    /// rather than from the provider proposal or a saved-record UUID, so a
+    /// correction always invalidates an earlier save receipt.
+    var barcodeDraftRevision: String {
+        Self.barcodeFingerprint(
+            barcodeInput: barcodeInput,
+            productName: barcodeProductName,
+            calories: barcodeCalories,
+            protein: barcodeProtein,
+            carbohydrates: barcodeCarbohydrates,
+            fat: barcodeFat,
+            grams: barcodeGrams,
+            valuesEdited: barcodeValuesEdited,
+            basis: barcodeBasis,
+            mealAt: barcodeMealAt
         )
     }
 
@@ -2245,19 +2423,35 @@ struct FitnessNutritionDraft: Equatable, Sendable {
         guard let durableReceipt, let activeMeal else { return false }
         return durableReceipt.mealID == activeMeal.id
             && durableReceipt.revision == activeMeal.revision
-            && durableReceipt.fingerprint == fingerprint
+            && durableReceipt.fingerprint == Self.fingerprint(for: activeMeal)
+            && durableReceipt.fingerprint == manualFingerprint
+    }
+
+    var isBarcodeDurablyCurrent: Bool {
+        guard let barcodeDurableReceipt, let barcodeRecordID else { return false }
+        return barcodeDurableReceipt.recordID == barcodeRecordID
+            && barcodeDurableReceipt.draftRevision == barcodeDraftRevision
     }
 
     var isDirty: Bool {
+        let manualIsDirty: Bool
         if let activeMeal {
-            return fingerprint != Self.fingerprint(for: activeMeal)
+            manualIsDirty = manualFingerprint != Self.fingerprint(for: activeMeal)
+        } else {
+            manualIsDirty = mealName != "Meal"
+                || !calories.isEmpty
+                || !protein.isEmpty
+                || !carbohydrates.isEmpty
+                || !fat.isEmpty
+                || !portionGrams.isEmpty
         }
-        return mealName != "Meal"
-            || !calories.isEmpty
-            || !protein.isEmpty
-            || !carbohydrates.isEmpty
-            || !fat.isEmpty
-            || !portionGrams.isEmpty
+
+        let barcodeIsDirty = hasBarcodeDraftContent && !isBarcodeDurablyCurrent
+        return manualIsDirty || barcodeIsDirty
+    }
+
+    private var hasBarcodeDraftContent: Bool {
+        barcodeDurableReceipt != nil
             || !barcodeInput.isEmpty
             || !barcodeProductName.isEmpty
             || !barcodeCalories.isEmpty
@@ -2265,6 +2459,8 @@ struct FitnessNutritionDraft: Equatable, Sendable {
             || !barcodeCarbohydrates.isEmpty
             || !barcodeFat.isEmpty
             || !barcodeGrams.isEmpty
+            || barcodeValuesEdited
+            || barcodeBasis != .perServing
     }
 
     mutating func applyLocalPreview() throws -> NutritionMeal {
@@ -2324,6 +2520,19 @@ struct FitnessNutritionDraft: Equatable, Sendable {
         )
     }
 
+    mutating func beginNewBarcodeLookup() {
+        barcodeRecordID = nil
+        barcodeDurableReceipt = nil
+    }
+
+    mutating func markBarcodeDurablySaved(_ record: NutritionRecord, draftRevision: String) {
+        barcodeRecordID = record.id
+        barcodeDurableReceipt = FitnessNutritionBarcodeSaveReceipt(
+            recordID: record.id,
+            draftRevision: draftRevision
+        )
+    }
+
     static func fingerprint(for meal: NutritionMeal) -> String {
         fingerprint(
             loggedAt: meal.loggedAt,
@@ -2335,6 +2544,45 @@ struct FitnessNutritionDraft: Equatable, Sendable {
             fat: meal.fatGrams.map(String.init) ?? "",
             portionGrams: meal.portionGrams.map { String($0) } ?? ""
         )
+    }
+
+    private var manualFingerprint: String {
+        Self.fingerprint(
+            loggedAt: loggedAt,
+            timeZoneIdentifier: timeZoneIdentifier,
+            name: mealName,
+            calories: calories,
+            protein: protein,
+            carbohydrates: carbohydrates,
+            fat: fat,
+            portionGrams: portionGrams
+        )
+    }
+
+    private static func barcodeFingerprint(
+        barcodeInput: String,
+        productName: String,
+        calories: String,
+        protein: String,
+        carbohydrates: String,
+        fat: String,
+        grams: String,
+        valuesEdited: Bool,
+        basis: NutritionBarcodeBasis,
+        mealAt: String
+    ) -> String {
+        [
+            barcodeInput.trimmingCharacters(in: .whitespacesAndNewlines),
+            productName.trimmingCharacters(in: .whitespacesAndNewlines),
+            canonicalNumber(calories, integer: false),
+            canonicalNumber(protein, integer: false),
+            canonicalNumber(carbohydrates, integer: false),
+            canonicalNumber(fat, integer: false),
+            canonicalNumber(grams, integer: false),
+            valuesEdited ? "edited" : "provider",
+            basis.rawValue,
+            mealAt.trimmingCharacters(in: .whitespacesAndNewlines)
+        ].joined(separator: "\u{1F}")
     }
 
     private static func fingerprint(
@@ -2388,9 +2636,11 @@ struct FitnessNutritionDraft: Equatable, Sendable {
             && lhs.barcodeValuesEdited == rhs.barcodeValuesEdited
             && lhs.barcodeBasis.rawValue == rhs.barcodeBasis.rawValue
             && lhs.barcodeMealAt == rhs.barcodeMealAt
+            && lhs.barcodeRecordID == rhs.barcodeRecordID
             && lhs.activeMeal == rhs.activeMeal
             && lhs.previewMeal == rhs.previewMeal
             && lhs.durableReceipt == rhs.durableReceipt
+            && lhs.barcodeDurableReceipt == rhs.barcodeDurableReceipt
     }
 }
 
@@ -2535,6 +2785,92 @@ struct NutritionBarcodeRequestGate: Sendable {
     }
 }
 
+/// Captures the exact payload and editable-draft revision for one local
+/// barcode write.  A retry may reuse the captured payload only while the
+/// current draft still has the same revision.
+struct FitnessNutritionBarcodeSaveAttempt: Equatable, Sendable {
+    let id: UUID
+    let draftRevision: String
+    let record: NutritionRecord
+
+    init(id: UUID = UUID(), draftRevision: String, record: NutritionRecord) {
+        self.id = id
+        self.draftRevision = draftRevision
+        self.record = record
+    }
+}
+
+/// Main-actor-owned state seam for the asynchronous barcode save flow.  The
+/// state keeps the last immutable payload for an exact retry, while only one
+/// attempt can be active at a time.  Completion handlers must prove both
+/// attempt ownership and draft identity before changing review state.
+struct FitnessNutritionBarcodeSaveState: Equatable, Sendable {
+    private(set) var activeAttempt: FitnessNutritionBarcodeSaveAttempt? = nil
+    private(set) var retryAttempt: FitnessNutritionBarcodeSaveAttempt? = nil
+
+    var isSaving: Bool { activeAttempt != nil }
+
+    mutating func begin(
+        draftRevision: String,
+        record: NutritionRecord
+    ) -> FitnessNutritionBarcodeSaveAttempt? {
+        guard activeAttempt == nil else { return nil }
+        let attempt = FitnessNutritionBarcodeSaveAttempt(
+            draftRevision: draftRevision,
+            record: record
+        )
+        activeAttempt = attempt
+        retryAttempt = nil
+        return attempt
+    }
+
+    func retryableAttempt(for draftRevision: String) -> FitnessNutritionBarcodeSaveAttempt? {
+        guard activeAttempt == nil,
+              let retryAttempt,
+              retryAttempt.draftRevision == draftRevision else { return nil }
+        return retryAttempt
+    }
+
+    func owns(_ attempt: FitnessNutritionBarcodeSaveAttempt) -> Bool {
+        activeAttempt == attempt
+    }
+
+    func accepts(
+        _ attempt: FitnessNutritionBarcodeSaveAttempt,
+        currentDraftRevision: String
+    ) -> Bool {
+        owns(attempt) && attempt.draftRevision == currentDraftRevision
+    }
+
+    @discardableResult
+    mutating func finish(
+        _ attempt: FitnessNutritionBarcodeSaveAttempt,
+        retryable: Bool = false
+    ) -> Bool {
+        guard activeAttempt == attempt else { return false }
+        activeAttempt = nil
+        retryAttempt = retryable ? attempt : nil
+        return true
+    }
+
+    /// Used only when the sheet disappears.  The durable draft remains in the
+    /// parent, and a later presentation may retry the retained payload.  A
+    /// late completion cannot mutate this sheet after ownership is cleared.
+    mutating func invalidateActiveAttempt() {
+        if let activeAttempt {
+            retryAttempt = activeAttempt
+        }
+        activeAttempt = nil
+    }
+
+    /// A fresh lookup must not reuse a payload produced for the previous
+    /// proposal, even when the visible barcode happens to be the same.
+    mutating func invalidateRetryPayload() {
+        guard activeAttempt == nil else { return }
+        retryAttempt = nil
+    }
+}
+
 /// Identifies one photo-analysis request across selection, transport, and
 /// editable draft changes. Cancellation is only an optimization: a response
 /// must still match all captured identity fields before it can touch review
@@ -2667,15 +3003,44 @@ private struct FitnessFoodReviewSheet: View {
     @State private var barcodeProposal: NutritionBarcodeProposal?
     @State private var barcodeLoading = false
     @State private var barcodeError: String?
-    @State private var confirmedBarcodeRecord: NutritionRecord?
-    @State private var barcodeSaving = false
+    @State private var barcodeSaveState = FitnessNutritionBarcodeSaveState()
     @State private var barcodeLookupTask: Task<Void, Never>?
     @State private var barcodeRequestGate = NutritionBarcodeRequestGate()
     @State private var barcodeProposalToken: NutritionBarcodeRequestToken?
 #if os(iOS)
     @StateObject private var barcodeScanner = NutritionBarcodeScannerCoordinator()
 #endif
-    private let barcodeClient = TailscaleSyncClient()
+    private let barcodeLookupClient: FitnessNutritionBarcodeLookupClient
+    private let liveClient: TailscaleSyncClient?
+
+    init(
+        method: FitnessFoodCaptureMethod,
+        action: FitnessNutritionCaptureAction?,
+        stage: Binding<FitnessPhotoStage>,
+        isDemo: Bool,
+        nutritionRecordStore: NutritionRecordStore,
+        nutritionMealStore: NutritionMealStore?,
+        draft: Binding<FitnessNutritionDraft>,
+        onDiscardDraft: @escaping () -> Void,
+        onKeepManualOnly: @escaping () -> Void,
+        onBarcodeSaved: @escaping () -> Void,
+        onMealSaved: @escaping () -> Void,
+        barcodeLookupClient: FitnessNutritionBarcodeLookupClient? = nil
+    ) {
+        self.method = method
+        self.action = action
+        self._stage = stage
+        self.isDemo = isDemo
+        self.nutritionRecordStore = nutritionRecordStore
+        self.nutritionMealStore = nutritionMealStore
+        self._draft = draft
+        self.onDiscardDraft = onDiscardDraft
+        self.onKeepManualOnly = onKeepManualOnly
+        self.onBarcodeSaved = onBarcodeSaved
+        self.onMealSaved = onMealSaved
+        self.barcodeLookupClient = barcodeLookupClient ?? (isDemo ? .visualFixture : .live)
+        self.liveClient = isDemo ? nil : TailscaleSyncClient()
+    }
 
     private var reviewTitle: String {
         switch method {
@@ -2740,6 +3105,7 @@ private struct FitnessFoodReviewSheet: View {
                             }
                         } else if method == .barcode {
                             barcodeReviewFields
+                                .disabled(barcodeSaveState.isSaving)
                         } else {
                             manualPreviewFields
                         }
@@ -2767,11 +3133,12 @@ private struct FitnessFoodReviewSheet: View {
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
                         Button("Close") { requestDismissal() }
+                            .disabled(barcodeSaveState.isSaving)
                     }
                 }
             }
         }
-        .interactiveDismissDisabled(draft.isDirty)
+        .interactiveDismissDisabled(draft.isDirty || barcodeSaveState.isSaving)
 #if os(iOS)
         .background(
             FitnessNutritionDismissBridge(
@@ -2783,7 +3150,9 @@ private struct FitnessFoodReviewSheet: View {
 #endif
         .confirmationDialog("Unsaved meal draft", isPresented: $showingDismissPrompt) {
             Button("Discard changes", role: .destructive) { onDiscardDraft() }
+                .disabled(barcodeSaveState.isSaving)
             Button("Keep editing", role: .cancel) { }
+                .disabled(barcodeSaveState.isSaving)
         } message: {
             Text("Your edits are still in this draft. Keep editing to stay here, or discard them explicitly.")
         }
@@ -2795,6 +3164,7 @@ private struct FitnessFoodReviewSheet: View {
 #if os(iOS)
             barcodeScanner.stop()
 #endif
+            barcodeSaveState.invalidateActiveAttempt()
             cancelBarcodeLookup()
             invalidatePhotoAnalysis(forSelectionChange: true)
             photoLoadTask?.cancel()
@@ -2810,7 +3180,6 @@ private struct FitnessFoodReviewSheet: View {
             barcodeLookup = nil
             barcodeProposal = nil
             barcodeProposalToken = nil
-            confirmedBarcodeRecord = nil
             barcodeError = nil
             draft.barcodeValuesEdited = false
         }
@@ -2821,6 +3190,12 @@ private struct FitnessFoodReviewSheet: View {
                     invalidatePhotoAnalysis()
                 }
                 return
+            }
+            if method == .barcode,
+               let activeAttempt = barcodeSaveState.activeAttempt,
+               activeAttempt.draftRevision != draft.barcodeDraftRevision {
+                barcodeError = "The draft changed while a local save was in progress. Review and retry after it finishes."
+                stage = .manualEntry
             }
             draft.previewMeal = nil
             savedMessage = nil
@@ -3036,37 +3411,25 @@ private struct FitnessFoodReviewSheet: View {
                     .accessibilityIdentifier("nutrition-meal-save-error")
             }
             if method == .photo {
-                Text(photoSaveExplanation)
-                    .lifeOSTypography(.metadata)
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
-                    .fixedSize(horizontal: false, vertical: true)
                 photoFooterActions
             } else if method == .barcode {
                 barcodeFooterActions
             } else {
                 ViewThatFits(in: .horizontal) {
                     HStack(spacing: 10) {
-                        draftDiscardButton
+                        closeDraftButton
                         Spacer(minLength: 0)
-                        applyPreviewButton
                         saveMealButton
                     }
                     VStack(alignment: .leading, spacing: 8) {
                         HStack(spacing: 10) {
-                            draftDiscardButton
+                            closeDraftButton
                             Spacer(minLength: 0)
-                            applyPreviewButton
                         }
                         saveMealButton
                             .frame(maxWidth: .infinity)
                     }
                 }
-                Text(nutritionMealStore == nil
-                    ? "Local meal storage is unavailable. Nothing can be saved."
-                    : "Save meal stores the edited values and local timestamp on this device.")
-                    .lifeOSTypography(.metadata)
-                    .foregroundStyle(nutritionMealStore == nil ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)
-                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(.horizontal, 16)
@@ -3087,9 +3450,6 @@ private struct FitnessFoodReviewSheet: View {
                 Button("Close") { requestDismissal() }
                     .buttonStyle(.plain)
                     .foregroundStyle(LifeOSTokens.accent)
-                Button("Keep manual only") { keepManualOnly() }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(LifeOSTokens.accent)
                 Spacer(minLength: 0)
                 if photoProposalIsCurrent {
                     photoConfirmButton
@@ -3098,9 +3458,6 @@ private struct FitnessFoodReviewSheet: View {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 10) {
                     Button("Close") { requestDismissal() }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(LifeOSTokens.accent)
-                    Button("Keep manual only") { keepManualOnly() }
                         .buttonStyle(.plain)
                         .foregroundStyle(LifeOSTokens.accent)
                 }
@@ -3115,15 +3472,13 @@ private struct FitnessFoodReviewSheet: View {
     private var barcodeFooterActions: some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 10) {
-                barcodeDiscardButton
-                barcodeKeepEditingButton
+                closeDraftButton
                 Spacer(minLength: 0)
                 barcodeSaveButton
             }
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 10) {
-                    barcodeDiscardButton
-                    barcodeKeepEditingButton
+                    closeDraftButton
                 }
                 barcodeSaveButton
                     .frame(maxWidth: .infinity)
@@ -3131,36 +3486,25 @@ private struct FitnessFoodReviewSheet: View {
         }
     }
 
-    private var barcodeDiscardButton: some View {
-        Button("Discard", role: .destructive) { onDiscardDraft() }
-            .buttonStyle(.plain)
-            .foregroundStyle(LifeOSTokens.danger)
-    }
-
-    private var barcodeKeepEditingButton: some View {
-        Button("Keep editing") { showingDismissPrompt = false }
+    private var closeDraftButton: some View {
+        Button("Close") { requestDismissal() }
             .buttonStyle(.plain)
             .foregroundStyle(LifeOSTokens.accent)
+            .disabled(barcodeSaveState.isSaving)
     }
 
     private var barcodeSaveButton: some View {
         Button(
             savedMessage == nil
-                ? ((confirmedBarcodeRecord == nil && barcodeError == nil) ? "Confirm and save locally" : "Retry local save")
+                ? (barcodeSaveState.retryableAttempt(for: draft.barcodeDraftRevision) == nil
+                    ? "Confirm and save locally"
+                    : "Retry local save")
                 : "Saved locally"
         ) {
             confirmBarcodeProposal()
         }
         .buttonStyle(LifeOSButtonStyle(.primary))
-        .disabled((barcodeProposal == nil && confirmedBarcodeRecord == nil) || !barcodeConfirmationIsCurrent || barcodeLoading || barcodeSaving || savedMessage != nil)
-    }
-
-    private var draftDiscardButton: some View {
-        Button("Discard", role: .destructive) {
-            onDiscardDraft()
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(LifeOSTokens.danger)
+        .disabled(barcodeProposal == nil || !barcodeConfirmationIsCurrent || barcodeLoading || barcodeSaveState.isSaving || savedMessage != nil)
     }
 
     private var applyPreviewButton: some View {
@@ -3213,6 +3557,7 @@ private struct FitnessFoodReviewSheet: View {
     }
 
     private func requestDismissal() {
+        guard !barcodeSaveState.isSaving else { return }
         invalidatePhotoAnalysis(forSelectionChange: true)
         if draft.isDirty {
             showingDismissPrompt = true
@@ -3399,6 +3744,15 @@ private struct FitnessFoodReviewSheet: View {
     }
 
     private func startBarcodeLookup() {
+        guard !isDemo else {
+            cancelBarcodeLookup()
+            barcodeLookup = nil
+            barcodeProposal = nil
+            barcodeProposalToken = nil
+            barcodeError = "Barcode lookup is disabled in visual fixtures. No request was sent."
+            return
+        }
+        guard !barcodeSaveState.isSaving else { return }
         guard let normalized = NutritionBarcodeNormalizer.normalize(draft.barcodeInput) else {
             cancelBarcodeLookup()
             barcodeError = "Enter a checksum-valid EAN-8, EAN-13, or UPC-A barcode."
@@ -3415,16 +3769,25 @@ private struct FitnessFoodReviewSheet: View {
         barcodeLookup = nil
         barcodeProposal = nil
         barcodeProposalToken = nil
-        confirmedBarcodeRecord = nil
+        barcodeSaveState.invalidateRetryPayload()
+        draft.beginNewBarcodeLookup()
+        savedMessage = nil
+        stage = .manualEntry
         barcodeLoading = true
         barcodeLookupTask = Task { @MainActor in
             do {
-                let lookup = try await barcodeClient.fetchNutritionBarcode(normalized)
+                let lookup = try await barcodeLookupClient.fetchNutritionBarcode(normalized)
                 guard !Task.isCancelled,
                       barcodeRequestGate.accepts(request, visibleInput: draft.barcodeInput) else { return }
                 barcodeLoading = false
                 barcodeLookupTask = nil
                 applyBarcodeLookup(lookup, token: request)
+            } catch FitnessNutritionBarcodeLookupClientError.visualFixtureDisabled {
+                guard !Task.isCancelled,
+                      barcodeRequestGate.accepts(request, visibleInput: draft.barcodeInput) else { return }
+                barcodeLoading = false
+                barcodeLookupTask = nil
+                barcodeError = "Barcode lookup is disabled in visual fixtures. No request was sent."
             } catch let error as TailscaleSyncError {
                 guard !Task.isCancelled,
                       barcodeRequestGate.accepts(request, visibleInput: draft.barcodeInput) else { return }
@@ -3478,7 +3841,7 @@ private struct FitnessFoodReviewSheet: View {
             return
         }
         do {
-            let proposal = try NutritionBarcodeProposal(proposalID: "barcode-\(found.barcode)", lookup: lookup)
+            let proposal = try NutritionBarcodeProposal(lookup: lookup)
             barcodeProposal = proposal
             barcodeProposalToken = token
             draft.barcodeProductName = found.product.name ?? ""
@@ -3537,6 +3900,7 @@ private struct FitnessFoodReviewSheet: View {
     }
 
     private func confirmBarcodeProposal() {
+        guard !barcodeSaveState.isSaving, savedMessage == nil else { return }
         guard let barcodeProposal,
               let barcodeProposalToken,
               barcodeRequestGate.accepts(barcodeProposalToken, visibleInput: draft.barcodeInput),
@@ -3544,8 +3908,11 @@ private struct FitnessFoodReviewSheet: View {
             barcodeError = "The barcode input changed. Look up the current barcode before confirming."
             return
         }
-        if let confirmedBarcodeRecord {
-            saveBarcodeRecord(confirmedBarcodeRecord)
+        let draftRevision = draft.barcodeDraftRevision
+        if let retry = barcodeSaveState.retryableAttempt(for: draftRevision),
+           let attempt = barcodeSaveState.begin(draftRevision: draftRevision, record: retry.record) {
+            draft.barcodeRecordID = retry.record.id
+            saveBarcodeRecord(attempt)
             return
         }
         let kcal = NutritionBarcodeValueParser.parse(draft.barcodeCalories, maximum: 5_000)
@@ -3585,12 +3952,21 @@ private struct FitnessFoodReviewSheet: View {
             valuesAreEdited: draft.barcodeValuesEdited
         )
         do {
-            let record = try NutritionBarcodeFlow.confirm(confirmation, for: barcodeProposal)
-            // Retain the validated record before the write so a failed write
-            // exposes a deterministic Retry action without rebuilding or
-            // changing the user's editable values.
-            confirmedBarcodeRecord = record
-            saveBarcodeRecord(record)
+            let record = try NutritionBarcodeFlow.confirm(
+                confirmation,
+                for: barcodeProposal,
+                recordID: draft.barcodeRecordID ?? UUID()
+            )
+            // Capture both the exact editable revision and immutable payload
+            // before crossing the async store boundary. A failed write keeps
+            // this attempt available for an exact retry while edits produce a
+            // new revision and therefore a new payload.
+            guard let attempt = barcodeSaveState.begin(
+                draftRevision: draftRevision,
+                record: record
+            ) else { return }
+            draft.barcodeRecordID = record.id
+            saveBarcodeRecord(attempt)
         } catch {
             barcodeError = "Review the barcode, timestamp, and nutrition values before confirming. Nothing was persisted."
         }
@@ -3603,25 +3979,45 @@ private struct FitnessFoodReviewSheet: View {
             && barcodeRequestGate.accepts(barcodeProposalToken, visibleInput: draft.barcodeInput)
     }
 
-    private func saveBarcodeRecord(_ record: NutritionRecord) {
-        barcodeSaving = true
+    private func saveBarcodeRecord(_ attempt: FitnessNutritionBarcodeSaveAttempt) {
+        guard barcodeSaveState.owns(attempt) else { return }
         barcodeError = nil
         savedMessage = nil
-        Task {
+        Task { @MainActor in
             do {
-                try await nutritionRecordStore.save(record)
-                await MainActor.run {
-                    barcodeSaving = false
-                    stage = .confirmed
-                    savedMessage = "Saved locally"
-                    onBarcodeSaved()
-                }
-            } catch {
-                await MainActor.run {
-                    barcodeSaving = false
+                try await nutritionRecordStore.save(attempt.record)
+                guard barcodeSaveState.owns(attempt) else { return }
+                let draftIsCurrent = barcodeSaveState.accepts(
+                    attempt,
+                    currentDraftRevision: draft.barcodeDraftRevision
+                )
+                barcodeSaveState.finish(attempt)
+                guard draftIsCurrent else {
                     stage = .manualEntry
-                    barcodeError = "Local save failed. Nothing was replaced; try again with Retry local save."
+                    barcodeError = "The draft changed while a local save was in progress. Review and retry."
+                    return
                 }
+                draft.markBarcodeDurablySaved(
+                    attempt.record,
+                    draftRevision: attempt.draftRevision
+                )
+                stage = .confirmed
+                savedMessage = "Saved locally"
+                onBarcodeSaved()
+            } catch {
+                guard barcodeSaveState.owns(attempt) else { return }
+                let draftIsCurrent = barcodeSaveState.accepts(
+                    attempt,
+                    currentDraftRevision: draft.barcodeDraftRevision
+                )
+                barcodeSaveState.finish(attempt, retryable: draftIsCurrent)
+                guard draftIsCurrent else {
+                    stage = .manualEntry
+                    barcodeError = "The draft changed while a local save was in progress. Review and retry."
+                    return
+                }
+                stage = .manualEntry
+                barcodeError = "Local save failed. Nothing was replaced; try again with Retry local save."
             }
         }
     }
@@ -3769,8 +4165,26 @@ private struct FitnessFoodReviewSheet: View {
                 )
                 .id(FitnessNutritionReviewField.fat.id)
             }
-            if let previewMeal = draft.previewMeal {
-                previewSummary(previewMeal)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Local preview")
+                            .lifeOSTypography(.label, weight: .semibold)
+                        Text("Check the reviewed values before saving.")
+                            .lifeOSTypography(.metadata)
+                            .foregroundStyle(LifeOSTokens.tertiaryText)
+                    }
+                    Spacer(minLength: 8)
+                    applyPreviewButton
+                }
+                if let previewMeal = draft.previewMeal {
+                    previewSummary(previewMeal)
+                } else {
+                    Text("Applying a preview updates this draft in memory only.")
+                        .lifeOSTypography(.metadata)
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
     }
@@ -3868,12 +4282,16 @@ private struct FitnessFoodReviewSheet: View {
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                Button(photoProposalLoading ? "Analyzing photos…" : (photoProposal == nil ? "Analyze sanitized photos" : "Analyze again")) {
-                    sendPhotosForAnalysis()
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 10) {
+                        analyzePhotosButton
+                        keepManualOnlyButton
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        analyzePhotosButton
+                        keepManualOnlyButton
+                    }
                 }
-                .buttonStyle(LifeOSButtonStyle(.secondary))
-                .disabled(isDemo || photoPreparation.state != .ready || !photoPreparation.explicitConsent || photoProposalLoading)
-                .accessibilityIdentifier("food-photo-send")
                 if let photoProposalError {
                     Text(photoProposalError)
                         .lifeOSTypography(.metadata)
@@ -3883,6 +4301,23 @@ private struct FitnessFoodReviewSheet: View {
                 }
             }
         }
+    }
+
+    private var analyzePhotosButton: some View {
+        Button(photoProposalLoading ? "Analyzing photos…" : (photoProposal == nil ? "Analyze sanitized photos" : "Analyze again")) {
+            sendPhotosForAnalysis()
+        }
+        .buttonStyle(LifeOSButtonStyle(.secondary))
+        .disabled(isDemo || photoPreparation.state != .ready || !photoPreparation.explicitConsent || photoProposalLoading)
+        .accessibilityIdentifier("food-photo-send")
+    }
+
+    private var keepManualOnlyButton: some View {
+        Button("Keep manual only") { keepManualOnly() }
+            .buttonStyle(.plain)
+            .foregroundStyle(LifeOSTokens.accent)
+            .disabled(photoProposalLoading)
+            .accessibilityIdentifier("food-photo-keep-manual")
     }
 
     @ViewBuilder
@@ -3904,6 +4339,10 @@ private struct FitnessFoodReviewSheet: View {
                     Text("Google AI Studio · \(photoProposal.provenance.modelIdentifier) · proposal only")
                         .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
+                    Text(photoSaveExplanation)
+                        .lifeOSTypography(.metadata)
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .fixedSize(horizontal: false, vertical: true)
                     ForEach(photoProposal.items, id: \.itemID) { item in
                         VStack(alignment: .leading, spacing: 3) {
                             Text("Estimated · \(item.estimatedLabel)")
@@ -3987,7 +4426,11 @@ private struct FitnessFoodReviewSheet: View {
                 }
             }
             do {
-                let proposal = try await barcodeClient.fetchFoodPhotoProposal(manifest)
+                guard let liveClient else {
+                    photoProposalError = "Photo analysis is disabled in visual fixtures. No photo was sent."
+                    return
+                }
+                let proposal = try await liveClient.fetchFoodPhotoProposal(manifest)
                 let validatedProposal = try validateFoodEstimateProposalAgainstManifest(
                     proposal,
                     manifest,

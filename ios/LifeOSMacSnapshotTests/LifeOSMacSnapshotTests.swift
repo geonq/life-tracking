@@ -39,6 +39,43 @@ final class LifeOSMacSnapshotTests: XCTestCase {
         )
     }
 
+    func testFitnessRefreshCoalescesConcurrentCallersBeforePublishingOneResult() async throws {
+        let gate = MacObservationGate()
+        let now = Date()
+        let metric = try FitnessObservationValue(
+            metric: .heartRate,
+            value: 62,
+            unit: .beatsPerMinute,
+            observedAt: now
+        )
+        let expected = try FitnessObservationEnvelope(
+            state: .observed,
+            generatedAt: now,
+            observedAt: now,
+            metrics: [metric]
+        )
+        let coordinator = FitnessObservationCoordinator(
+            usesVisualFixtures: false,
+            fetchObservation: {
+                await gate.block()
+                return expected
+            }
+        )
+
+        let first = Task { @MainActor in await coordinator.refresh() }
+        await gate.waitUntilStarted()
+        let second = Task { @MainActor in await coordinator.refresh() }
+        await Task.yield()
+        let callsWhileBlocked = await gate.count()
+        XCTAssertEqual(callsWhileBlocked, 1)
+
+        await gate.release()
+        await first.value
+        await second.value
+
+        XCTAssertEqual(coordinator.observation, expected)
+    }
+
     func testOverviewSnapshot() {
         let coordinator = CalendarCoordinator(
             initialSnapshot: CalendarVisualFixtures.snapshot(),
@@ -965,5 +1002,36 @@ final class LifeOSMacSnapshotTests: XCTestCase {
         let attachment = XCTAttachment(uniformTypeIdentifier: "public.png", name: "\(name).png", payload: data)
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+}
+
+private actor MacObservationGate {
+    private var calls = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var startedWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func block() async {
+        calls += 1
+        let pending = startedWaiters
+        startedWaiters.removeAll()
+        pending.forEach { $0.resume() }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func waitUntilStarted() async {
+        guard calls == 0 else { return }
+        await withCheckedContinuation { continuation in
+            startedWaiters.append(continuation)
+        }
+    }
+
+    func count() -> Int { calls }
+
+    func release() {
+        let pending = waiters
+        waiters.removeAll()
+        pending.forEach { $0.resume() }
     }
 }

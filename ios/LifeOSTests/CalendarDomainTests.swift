@@ -102,6 +102,7 @@ private actor CalendarRemoteScript {
 
 private final class AppGroupTestFileManager: FileManager {
     let groupURL: URL
+    private(set) var appGroupLookupCount = 0
 
     init(groupURL: URL) {
         self.groupURL = groupURL
@@ -109,7 +110,8 @@ private final class AppGroupTestFileManager: FileManager {
     }
 
     override func containerURL(forSecurityApplicationGroupIdentifier groupIdentifier: String) -> URL? {
-        groupURL
+        appGroupLookupCount += 1
+        return groupURL
     }
 }
 
@@ -123,6 +125,9 @@ final class CalendarDomainTests: XCTestCase {
     func testValidationAndExplicitNoIconSemantics() throws {
         XCTAssertThrowsError(try CalendarItem(title: "   ", icon: "📅", status: .planned, start: base, end: base.addingTimeInterval(60), createdAt: base, updatedAt: base))
         XCTAssertThrowsError(try CalendarItem(title: "x", icon: "📅", status: .planned, start: base, end: base, createdAt: base, updatedAt: base))
+        XCTAssertThrowsError(try CalendarItem(title: String(repeating: "x", count: CalendarItem.maximumTitleUTF8Bytes + 1), start: base, end: base.addingTimeInterval(60), createdAt: base, updatedAt: base)) { error in
+            XCTAssertEqual(error as? CalendarValidationError, .titleTooLong)
+        }
         let item = try CalendarItem(title: "x", icon: "not-an-emoji", status: .planned, start: base, end: base.addingTimeInterval(60), createdAt: base, updatedAt: base)
         XCTAssertNil(item.icon)
         XCTAssertFalse(item.hasIcon)
@@ -655,6 +660,264 @@ final class CalendarDomainTests: XCTestCase {
         XCTAssertTrue(CalendarSnapshot(items: [newer]).merged(with: CalendarSnapshot(items: [deleted])).items.first?.isDeleted == true)
     }
 
+    func testRemoteMergeRejectsFutureUpdatedAndDeletedAtValues() throws {
+        let now = base.addingTimeInterval(1_000)
+        let future = now.addingTimeInterval(CalendarRemoteMergePolicy.maximumClockSkew + 1)
+        let futureUpdate = try CalendarItem(
+            title: "future update",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: future
+        )
+        let futureDeletion = try CalendarItem(
+            title: "future deletion",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: future,
+            deletedAt: future
+        )
+
+        let report = CalendarRemoteMergePolicy.sanitize(
+            CalendarSnapshot(items: [futureUpdate, futureDeletion]),
+            against: CalendarSnapshot(),
+            now: now
+        )
+
+        XCTAssertTrue(report.snapshot.items.isEmpty)
+        XCTAssertEqual(report.rejectedItemCount, 2)
+        XCTAssertEqual(report.rejectedDeletionCount, 1)
+    }
+
+    func testRemoteMergeAcceptsValidMatchingTombstone() throws {
+        let current = try CalendarItem(
+            title: "meeting",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: base.addingTimeInterval(10)
+        )
+        let tombstone = current.deleting(at: base.addingTimeInterval(20))
+
+        let report = CalendarRemoteMergePolicy.sanitize(
+            CalendarSnapshot(items: [tombstone]),
+            against: CalendarSnapshot(items: [current]),
+            now: base.addingTimeInterval(30)
+        )
+
+        XCTAssertEqual(report.snapshot.items, [tombstone])
+        XCTAssertEqual(report.acceptedDeletionCount, 1)
+        XCTAssertEqual(report.rejectedDeletionCount, 0)
+    }
+
+    func testRemoteMergeUsesTransportPrecisionForIdentityAfterRoundTrip() throws {
+        let id = UUID()
+        let createdAt = base.addingTimeInterval(0.75)
+        let local = try CalendarItem(
+            id: id,
+            title: "local title",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: createdAt,
+            updatedAt: base.addingTimeInterval(1.75)
+        )
+        let remote = try CalendarItem(
+            id: id,
+            title: "remote edit",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: createdAt,
+            updatedAt: base.addingTimeInterval(3.75)
+        )
+
+        let wireData = try JSONEncoder.calendar.encode(CalendarSnapshot(items: [remote]))
+        let received = try JSONDecoder.calendar.decode(CalendarSnapshot.self, from: wireData)
+        let receivedItem = try XCTUnwrap(received.items.first)
+
+        XCTAssertEqual(
+            receivedItem.createdAt.timeIntervalSince1970,
+            local.createdAt.timeIntervalSince1970,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(
+            CalendarTransportDate.canonicalized(receivedItem.createdAt),
+            CalendarTransportDate.canonicalized(local.createdAt)
+        )
+
+        let report = CalendarRemoteMergePolicy.sanitize(
+            received,
+            against: CalendarSnapshot(items: [local]),
+            now: base.addingTimeInterval(30)
+        )
+
+        XCTAssertEqual(report.snapshot.items.first?.title, "remote edit")
+        XCTAssertEqual(report.rejectedItemCount, 0)
+    }
+
+    func testRemoteDeletionKeepsSubsecondMutationOrderingAfterRoundTrip() throws {
+        let id = UUID()
+        let original = try CalendarItem(
+            id: id,
+            title: "meeting",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: base
+        )
+        let edited = try original.updating(title: "edited", at: base.addingTimeInterval(0.25))
+        let deleted = edited.deleting(at: base.addingTimeInterval(0.75))
+        let wireData = try JSONEncoder.calendar.encode(CalendarSnapshot(items: [deleted]))
+        let received = try JSONDecoder.calendar.decode(CalendarSnapshot.self, from: wireData)
+        let receivedDeletion = try XCTUnwrap(received.items.first)
+        let receivedDeletedAt = try XCTUnwrap(receivedDeletion.deletedAt)
+        let deletedAt = try XCTUnwrap(deleted.deletedAt)
+
+        XCTAssertEqual(receivedDeletion.updatedAt.timeIntervalSince1970, deleted.updatedAt.timeIntervalSince1970, accuracy: 0.000_001)
+        XCTAssertEqual(receivedDeletedAt.timeIntervalSince1970, deletedAt.timeIntervalSince1970, accuracy: 0.000_001)
+        let report = CalendarRemoteMergePolicy.sanitize(
+            CalendarSnapshot(items: [receivedDeletion]),
+            against: CalendarSnapshot(items: [edited]),
+            now: base.addingTimeInterval(2)
+        )
+
+        XCTAssertEqual(report.snapshot.items, [receivedDeletion])
+        XCTAssertEqual(report.acceptedDeletionCount, 1)
+        XCTAssertEqual(report.rejectedDeletionCount, 0)
+    }
+
+    func testRemoteMergeRejectsMismatchedIdentityAndInvalidDeletionCausalityButRetainsUnseenTombstone() throws {
+        let id = UUID()
+        let current = try CalendarItem(
+            id: id,
+            title: "meeting",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: base.addingTimeInterval(10)
+        )
+        let causalID = UUID()
+        let causalCurrent = try CalendarItem(
+            id: causalID,
+            title: "causal meeting",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: base.addingTimeInterval(10)
+        )
+        let mismatchedIdentity = try CalendarItem(
+            id: id,
+            title: "meeting",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base.addingTimeInterval(1),
+            updatedAt: base.addingTimeInterval(20),
+            deletedAt: base.addingTimeInterval(20)
+        )
+        let causallyInvalid = try CalendarItem(
+            id: causalID,
+            title: "another meeting",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: base.addingTimeInterval(20),
+            deletedAt: base.addingTimeInterval(5)
+        )
+        let unseenTombstone = try CalendarItem(
+            id: UUID(),
+            title: "unseen meeting",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: base.addingTimeInterval(20),
+            deletedAt: base.addingTimeInterval(20)
+        )
+
+        let report = CalendarRemoteMergePolicy.sanitize(
+            CalendarSnapshot(items: [mismatchedIdentity, causallyInvalid, unseenTombstone]),
+            against: CalendarSnapshot(items: [current, causalCurrent]),
+            now: base.addingTimeInterval(30)
+        )
+
+        XCTAssertEqual(report.snapshot.items, [unseenTombstone])
+        XCTAssertEqual(report.rejectedItemCount, 2)
+        XCTAssertEqual(report.rejectedDeletionCount, 2)
+        XCTAssertEqual(report.acceptedDeletionCount, 1)
+        XCTAssertEqual(
+            report.warning,
+            "Calendar sync rejected 2 remote deletion(s) and preserved local records; accepted 1 remote deletion(s)."
+        )
+    }
+
+    func testRemoteMergeWarningReportsActualAcceptedAndRejectedCounts() throws {
+        let current = try CalendarItem(
+            title: "meeting",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: base.addingTimeInterval(10)
+        )
+        let acceptedTombstone = current.deleting(at: base.addingTimeInterval(20))
+        let acceptedUnseenTombstone = try CalendarItem(
+            id: UUID(),
+            title: "unseen meeting",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: base.addingTimeInterval(30),
+            deletedAt: base.addingTimeInterval(30)
+        )
+        let future = base.addingTimeInterval(1_000)
+        let rejectedUpdate = try CalendarItem(
+            title: "future update",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: future
+        )
+        let rejectedDeletion = try CalendarItem(
+            title: "future deletion",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: future,
+            deletedAt: future
+        )
+        let report = CalendarRemoteMergePolicy.sanitize(
+            CalendarSnapshot(items: [acceptedTombstone, acceptedUnseenTombstone, rejectedUpdate, rejectedDeletion]),
+            against: CalendarSnapshot(items: [current]),
+            now: base.addingTimeInterval(100)
+        )
+
+        XCTAssertEqual(report.rejectedItemCount, 2)
+        XCTAssertEqual(report.rejectedDeletionCount, 1)
+        XCTAssertEqual(report.acceptedDeletionCount, 2)
+        XCTAssertEqual(
+            report.warning,
+            "Calendar sync rejected 1 remote deletion(s) and preserved local records; ignored 1 remote change(s) with invalid timestamps or identity; accepted 2 remote deletion(s)."
+        )
+    }
+
+    func testNearbyDiscoveryPolicyDefaultsToOffAndFixturesAlwaysDenyIt() {
+        let suiteName = "LifeOS.CalendarDomainTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertFalse(CalendarNearbyDiscoveryPolicy.isEnabled(in: defaults))
+        XCTAssertFalse(CalendarNearbyDiscoveryPolicy.allowsDiscovery(
+            usesVisualFixtures: false,
+            settingEnabled: CalendarNearbyDiscoveryPolicy.isEnabled(in: defaults)
+        ))
+
+        defaults.set(true, forKey: CalendarNearbyDiscoveryPolicy.defaultsKey)
+        XCTAssertTrue(CalendarNearbyDiscoveryPolicy.isEnabled(in: defaults))
+        XCTAssertTrue(CalendarNearbyDiscoveryPolicy.allowsDiscovery(
+            usesVisualFixtures: false,
+            settingEnabled: CalendarNearbyDiscoveryPolicy.isEnabled(in: defaults)
+        ))
+        XCTAssertFalse(CalendarNearbyDiscoveryPolicy.allowsDiscovery(usesVisualFixtures: true, settingEnabled: true))
+    }
+
     func testSnapshotRoundTrip() throws {
         let item = try CalendarItem(title: "round trip", start: base, end: base.addingTimeInterval(60), createdAt: base, updatedAt: base)
         let data = try JSONEncoder().encode(CalendarSnapshot(items: [item]))
@@ -988,6 +1251,99 @@ final class CalendarDomainTests: XCTestCase {
         XCTAssertEqual(loaded, expected)
         XCTAssertFalse(coordinator.snapshot.items.contains { $0.id == stale.id })
         try? FileManager.default.removeItem(at: directory)
+    }
+
+    @MainActor
+    func testFixtureCoordinatorWithoutInjectedStoreUsesNoAppGroupAndPersistsOnlyInIsolation() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let groupURL = directory.appendingPathComponent("personal-app-group", isDirectory: true)
+        try FileManager.default.createDirectory(at: groupURL, withIntermediateDirectories: true)
+        let fileManager = AppGroupTestFileManager(groupURL: groupURL)
+        let identifier = "group.com.hermes.lifeos.test"
+        let bundleURL = directory.appendingPathComponent("FixtureHost.bundle", isDirectory: true)
+        try FileManager.default.createDirectory(at: bundleURL, withIntermediateDirectories: true)
+        let info = [
+            "CFBundleIdentifier": "com.hermes.lifeos.fixture-host",
+            "CFBundlePackageType": "BNDL",
+            "CFBundleShortVersionString": "1.0",
+            "CFBundleVersion": "1",
+            AppGroupConfiguration.infoPlistKey: identifier
+        ]
+        let infoData = try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
+        try infoData.write(to: bundleURL.appendingPathComponent("Info.plist"))
+        let bundle = try XCTUnwrap(Bundle(url: bundleURL))
+
+        let fixture = try CalendarItem(title: "Fixture event", start: base, end: base.addingTimeInterval(60), createdAt: base, updatedAt: base)
+        let inserted = try CalendarItem(title: "Fixture mutation", start: base.addingTimeInterval(120), end: base.addingTimeInterval(180), createdAt: base, updatedAt: base.addingTimeInterval(1))
+        let coordinator = CalendarCoordinator(
+            bundle: bundle,
+            fileManager: fileManager,
+            initialSnapshot: CalendarSnapshot(items: [fixture]),
+            usesVisualFixtures: true
+        )
+
+        XCTAssertEqual(fileManager.appGroupLookupCount, 0, "fixture construction must not resolve the personal App Group")
+        XCTAssertFalse(coordinator.sharedStorageAvailable)
+        XCTAssertEqual(coordinator.storageDescription, "Isolated fixture store")
+
+        let saveResult = await coordinator.save(inserted)
+        XCTAssertEqual(saveResult, .success)
+        XCTAssertEqual(fileManager.appGroupLookupCount, 0, "fixture mutation must not look up the personal App Group")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: groupURL.appendingPathComponent("calendar.json").path))
+        let loaded = try await coordinator.store.load()
+        XCTAssertEqual(loaded.items, [fixture, inserted])
+        let storeURL = await coordinator.store.url
+        XCTAssertFalse(storeURL.path.hasPrefix(groupURL.path))
+        try? FileManager.default.removeItem(at: storeURL.deletingLastPathComponent())
+    }
+
+    @MainActor
+    func testFixtureCalendarDefaultsStayOutOfStandardRevisionKeysAcrossSaveAndUndo() async throws {
+        let standard = UserDefaults.standard
+        let senderKey = "LifeOS.Calendar.senderID"
+        let revisionKey = "LifeOS.Calendar.revision"
+        let previousSender = standard.object(forKey: senderKey)
+        let previousRevision = standard.object(forKey: revisionKey)
+        let personalSender = "personal-calendar-sentinel"
+        let personalRevision = 71_003
+        standard.set(personalSender, forKey: senderKey)
+        standard.set(personalRevision, forKey: revisionKey)
+        defer {
+            if let previousSender { standard.set(previousSender, forKey: senderKey) }
+            else { standard.removeObject(forKey: senderKey) }
+            if let previousRevision { standard.set(previousRevision, forKey: revisionKey) }
+            else { standard.removeObject(forKey: revisionKey) }
+        }
+
+        let original = try CalendarItem(
+            title: "Fixture original",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: base
+        )
+        let inserted = try original.updating(title: "Fixture saved", at: base.addingTimeInterval(1))
+        let coordinator = CalendarCoordinator(
+            initialSnapshot: CalendarSnapshot(items: [original]),
+            usesVisualFixtures: true
+        )
+        let storeURL = await coordinator.store.url
+        defer { try? FileManager.default.removeItem(at: storeURL.deletingLastPathComponent()) }
+
+        XCTAssertNotEqual(coordinator.senderID, personalSender)
+        XCTAssertEqual(standard.integer(forKey: revisionKey), personalRevision)
+
+        let saveResult = await coordinator.save(inserted)
+        XCTAssertEqual(saveResult, .success)
+        XCTAssertEqual(standard.integer(forKey: revisionKey), personalRevision)
+
+        let undoResult = await coordinator.undoLastMutation()
+        XCTAssertEqual(undoResult, .success)
+        XCTAssertEqual(standard.integer(forKey: revisionKey), personalRevision)
+        XCTAssertEqual(standard.string(forKey: senderKey), personalSender)
     }
 
     @MainActor

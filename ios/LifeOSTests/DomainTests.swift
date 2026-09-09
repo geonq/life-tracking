@@ -1,6 +1,19 @@
 import XCTest
 @testable import LifeOS
 
+private final class SharedSnapshotTestFileManager: FileManager {
+    let groupURL: URL
+
+    init(groupURL: URL) {
+        self.groupURL = groupURL
+        super.init()
+    }
+
+    override func containerURL(forSecurityApplicationGroupIdentifier groupIdentifier: String) -> URL? {
+        groupURL
+    }
+}
+
 final class DomainTests: XCTestCase {
     func testDecodesRepresentativeUsagePayloadWithOptionalFields() throws {
         let formatter = ISO8601DateFormatter()
@@ -67,6 +80,65 @@ final class DomainTests: XCTestCase {
         XCTAssertEqual(snapshot.provenance.quality, .unavailable)
         XCTAssertEqual(snapshot.provenance.connector, .unavailable)
         XCTAssertEqual(snapshot.warning, "Usage data unavailable")
+    }
+
+    func testSharedSnapshotStoreRejectsDemoCacheButPreservesObservedCacheAndTimestamp() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fileManager = SharedSnapshotTestFileManager(groupURL: directory)
+        let identifier = "group.com.hermes.lifeos.test"
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+        try SharedSnapshotStore.write(DemoDataProvider.widget(now: now), fileManager: fileManager, appGroupIdentifier: identifier)
+        XCTAssertNil(SharedSnapshotStore.readLive(fileManager: fileManager, appGroupIdentifier: identifier))
+
+        let liveProvenance = Provenance(source: "live-usage", observedAt: now.addingTimeInterval(-60), quality: .observed, connector: .healthy)
+        let liveProvider = ProviderSnapshot(
+            provider: .codex,
+            accountLabel: "Codex",
+            windows: [UsageWindow(id: "five_hour", label: "5-hour", limit: 1, used: 0.2, durationMinutes: 300, provenance: liveProvenance)],
+            provenance: liveProvenance
+        )
+        let liveSnapshot = WidgetSnapshot(
+            providers: [liveProvider],
+            codexStatus: "Connected",
+            clipperSignal: "Unavailable",
+            healthSignal: "Unavailable",
+            financeSignal: "Unavailable",
+            updatedAt: now.addingTimeInterval(-30),
+            freshness: .fresh,
+            warning: nil,
+            provenance: liveProvenance
+        )
+        try SharedSnapshotStore.write(liveSnapshot, fileManager: fileManager, appGroupIdentifier: identifier)
+
+        let readBack = try XCTUnwrap(SharedSnapshotStore.readLive(fileManager: fileManager, appGroupIdentifier: identifier))
+        XCTAssertEqual(readBack, liveSnapshot)
+        XCTAssertEqual(readBack.updatedAt, liveSnapshot.updatedAt, "live cache timestamps must survive startup filtering")
+    }
+
+    func testSharedSnapshotStoreRejectsDemoProviderInsideObservedEnvelope() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fileManager = SharedSnapshotTestFileManager(groupURL: directory)
+        let identifier = "group.com.hermes.lifeos.test"
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let observedEnvelope = WidgetSnapshot(
+            providers: [DemoDataProvider.codex],
+            codexStatus: "Connected",
+            clipperSignal: "Unavailable",
+            healthSignal: "Unavailable",
+            financeSignal: "Unavailable",
+            updatedAt: now,
+            freshness: .fresh,
+            warning: nil,
+            provenance: Provenance(source: "live-envelope", observedAt: now, quality: .observed, connector: .healthy)
+        )
+
+        try SharedSnapshotStore.write(observedEnvelope, fileManager: fileManager, appGroupIdentifier: identifier)
+        XCTAssertNil(SharedSnapshotStore.readLive(fileManager: fileManager, appGroupIdentifier: identifier))
     }
 
     func testDemoFixturesUseAStableReferenceDate() {
