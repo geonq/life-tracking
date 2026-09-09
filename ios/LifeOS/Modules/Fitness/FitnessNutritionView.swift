@@ -1,5 +1,8 @@
 import SwiftUI
 import PhotosUI
+#if os(iOS)
+import UIKit
+#endif
 
 // MARK: - Nutrition data contracts
 
@@ -14,8 +17,8 @@ public struct FitnessMacroValue: Identifiable {
     public init(name: String, value: Double?, target: Double?, unit: String = "g", hue: LifeOSTokens.Hue) {
         self.id = name
         self.name = name
-        self.value = value
-        self.target = target
+        self.value = value.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }
+        self.target = target.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }
         self.unit = unit
         self.hue = hue
     }
@@ -100,18 +103,45 @@ public struct FitnessNutritionSnapshot {
         qualityDetail: String? = nil,
         qualityContributions: [FitnessNutritionQualityContribution] = []
     ) {
-        self.calorieTarget = calorieTarget
-        self.caloriesConsumed = caloriesConsumed
-        self.sourceSupportedExpenditure = sourceSupportedExpenditure
+        self.calorieTarget = calorieTarget.flatMap { $0 >= 0 ? $0 : nil }
+        self.caloriesConsumed = caloriesConsumed.flatMap { $0 >= 0 ? $0 : nil }
+        self.sourceSupportedExpenditure = sourceSupportedExpenditure.flatMap { $0 >= 0 ? $0 : nil }
         self.macroValues = macroValues
         self.meals = meals
         self.hydrationMilliliters = hydrationMilliliters
-        self.hydrationTargetMilliliters = hydrationTargetMilliliters
+        self.hydrationTargetMilliliters = hydrationTargetMilliliters.flatMap { $0 >= 0 ? $0 : nil }
         self.caffeineMilligrams = caffeineMilligrams
         self.alcoholUnits = alcoholUnits
-        self.qualityScore = qualityScore
+        self.qualityScore = qualityScore.flatMap { (0...100).contains($0) ? $0 : nil }
         self.qualityDetail = qualityDetail
         self.qualityContributions = qualityContributions
+    }
+
+    /// Local goals supply targets only; they cannot create observed nutrition.
+    func applyingGoal(_ goal: NutritionGoal?) -> FitnessNutritionSnapshot {
+        FitnessNutritionSnapshot(
+            calorieTarget: goal?.calorieTarget,
+            caloriesConsumed: caloriesConsumed,
+            sourceSupportedExpenditure: sourceSupportedExpenditure,
+            macroValues: macroValues.map { macro in
+                let target: Int?
+                switch macro.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+                case "protein": target = goal?.proteinGramsTarget
+                case "carbs", "carbohydrates": target = goal?.carbGramsTarget
+                case "fat": target = goal?.fatGramsTarget
+                default: target = nil
+                }
+                return FitnessMacroValue(name: macro.name, value: macro.value, target: target.map(Double.init), unit: macro.unit, hue: macro.hue)
+            },
+            meals: meals,
+            hydrationMilliliters: hydrationMilliliters,
+            hydrationTargetMilliliters: hydrationTargetMilliliters,
+            caffeineMilligrams: caffeineMilligrams,
+            alcoholUnits: alcoholUnits,
+            qualityScore: qualityScore,
+            qualityDetail: qualityDetail,
+            qualityContributions: qualityContributions
+        )
     }
 
     /// Adds only confirmed, local barcode records for the selected calendar
@@ -163,7 +193,7 @@ public struct FitnessNutritionSnapshot {
                 protein: record.proteinGrams,
                 carbohydrates: record.carbsGrams,
                 fat: record.fatGrams,
-                detail: "Open Food Facts · confirmed locally · sync pending",
+                detail: "Open Food Facts · confirmed locally",
                 source: .package,
                 confidence: "Provider data · review source"
             )
@@ -247,7 +277,7 @@ public struct FitnessNutritionSnapshot {
                 protein: local.proteinGrams.map(Double.init),
                 carbohydrates: local.carbGrams.map(Double.init),
                 fat: local.fatGrams.map(Double.init),
-                detail: "Confirmed locally · sync pending",
+                detail: "Confirmed locally · device only",
                 source: source
             )
         }
@@ -389,7 +419,9 @@ struct FitnessNutritionView: View {
     @State private var barcodePersistenceError: String?
     @State private var localMeals: [NutritionMeal] = []
     @State private var mealPersistenceError: String?
-    @State private var editingMeal: NutritionMeal?
+    @State private var localGoal: NutritionGoal?
+    @State private var goalPersistenceError: String?
+    @State private var captureDraft: FitnessNutritionDraft
     @State private var mealPendingDeletion: NutritionMeal?
     private let nutritionRecordStore = NutritionRecordStore(url: NutritionRecordStore.defaultPersistenceURL)
     private let nutritionMealStore: NutritionMealStore?
@@ -404,6 +436,7 @@ struct FitnessNutritionView: View {
         self.initialEntryPoint = initialEntryPoint
         self.nutritionMealStore = try? NutritionMealStore(url: NutritionMealStore.defaultURL())
         _captureAction = State(initialValue: nil)
+        _captureDraft = State(initialValue: FitnessNutritionDraft.new(selectedDate: selectedDate))
     }
 
     var body: some View {
@@ -414,17 +447,23 @@ struct FitnessNutritionView: View {
             photoStage: $photoStage,
             localBarcodeRecordCount: effectiveBarcodeRecords.count,
             barcodePersistenceError: barcodePersistenceError,
-            mealPersistenceError: mealPersistenceError,
+            mealPersistenceError: mealPersistenceError ?? goalPersistenceError,
             onCapture: { method in
-                captureMethod = method
-                captureAction = nil
-                editingMeal = nil
-                photoStage = method == .photo ? .idle : .manualEntry
+                let hasPendingDraft = captureDraft.isDirty || captureDraft.previewMeal != nil
+                captureDraft = FitnessNutritionDraftFlow.reopenOrStart(
+                    current: captureDraft,
+                    selectedDate: selectedDate
+                )
+                if !hasPendingDraft {
+                    captureMethod = method
+                    captureAction = nil
+                    photoStage = method == .photo ? .idle : .manualEntry
+                }
                 showingCapture = true
             },
             onEditMeal: { fitnessMeal in
                 guard let match = localMeal(for: fitnessMeal) else { return }
-                editingMeal = match
+                captureDraft = FitnessNutritionDraft.editing(match)
                 captureMethod = .manual
                 captureAction = nil
                 photoStage = .manualEntry
@@ -443,11 +482,19 @@ struct FitnessNutritionView: View {
                 isDemo: snapshot.source.status == .demo,
                 nutritionRecordStore: nutritionRecordStore,
                 nutritionMealStore: nutritionMealStore,
-                editingMeal: editingMeal,
+                draft: $captureDraft,
+                onDiscardDraft: discardCaptureDraft,
+                onKeepManualOnly: keepCaptureManualOnly,
                 onBarcodeSaved: reloadBarcodeRecords,
                 onMealSaved: reloadMeals
             )
-                .presentationDetents([.medium, .large])
+                .presentationDetents([.large])
+#if os(iOS)
+                .presentationDragIndicator(.visible)
+#endif
+#if os(macOS)
+                .frame(minWidth: 420, idealWidth: 560, maxWidth: 640, minHeight: 420, idealHeight: 560, maxHeight: 760)
+#endif
         }
         .navigationDestination(isPresented: $showingGoals) {
             NutritionGoalsView(nutrition: effectiveNutrition, selectedDate: selectedDate, isDemo: snapshot.source.status == .demo)
@@ -468,13 +515,13 @@ struct FitnessNutritionView: View {
         } message: { meal in
             Text("\(meal.name) will be removed from the meal timeline and daily totals.")
         }
-        .onAppear { handleInitialEntryPointIfNeeded() }
+        .onAppear {
+            loadGoal()
+            handleInitialEntryPointIfNeeded()
+        }
+        .onChange(of: selectedDate) { _, _ in loadGoal() }
         .task { await loadBarcodeRecords() }
         .task { await loadMeals() }
-        .onChange(of: selectedDate) { _, _ in
-            Task { await loadBarcodeRecords() }
-            Task { await loadMeals() }
-        }
         .onChange(of: initialEntryPoint) { _, _ in
             handledEntryPoint = false
             handleInitialEntryPointIfNeeded()
@@ -492,12 +539,31 @@ struct FitnessNutritionView: View {
         case .netEnergy:
             showingNetEnergy = true
         case .capture(let action):
-            captureAction = action
-            captureMethod = method(for: action)
-            editingMeal = nil
-            photoStage = captureMethod == .photo ? .idle : .manualEntry
+            let selectedMethod = method(for: action)
+            let hasPendingDraft = captureDraft.isDirty || captureDraft.previewMeal != nil
+            captureDraft = FitnessNutritionDraftFlow.reopenOrStart(
+                current: captureDraft,
+                selectedDate: selectedDate
+            )
+            if !hasPendingDraft {
+                captureAction = action
+                captureMethod = selectedMethod
+                photoStage = selectedMethod == .photo ? .idle : .manualEntry
+            }
             showingCapture = true
         }
+    }
+
+    private func discardCaptureDraft() {
+        captureDraft = FitnessNutritionDraftFlow.discard(selectedDate: selectedDate)
+        photoStage = .idle
+        showingCapture = false
+    }
+
+    private func keepCaptureManualOnly() {
+        captureAction = nil
+        captureMethod = .manual
+        photoStage = .manualEntry
     }
 
     private func method(for action: FitnessNutritionCaptureAction) -> FitnessFoodCaptureMethod {
@@ -521,6 +587,7 @@ struct FitnessNutritionView: View {
         return snapshot.nutrition
             .includingLocalBarcodeRecords(localBarcodeRecords, for: selectedDate)
             .includingLocalMeals(localMeals, for: selectedDate)
+            .applyingGoal(localGoal)
     }
 
     /// Resolves a displayed `FitnessMeal` row back to the durable
@@ -547,6 +614,18 @@ struct FitnessNutritionView: View {
         }
     }
 
+    private func loadGoal() {
+        guard snapshot.source.status != .demo else { return }
+        do {
+            let store = try NutritionGoalStore(url: NutritionGoalStore.defaultURL())
+            localGoal = try store.currentGoal(on: selectedDate)
+            goalPersistenceError = nil
+        } catch {
+            localGoal = nil
+            goalPersistenceError = "Local nutrition targets could not be read. Targets are unavailable."
+        }
+    }
+
     private func reloadBarcodeRecords() {
         Task { await loadBarcodeRecords() }
     }
@@ -559,11 +638,13 @@ struct FitnessNutritionView: View {
         guard snapshot.source.status != .demo else { return }
         do {
             let loaded = try await nutritionRecordStore.load()
+            guard !Task.isCancelled else { return }
             await MainActor.run {
                 localBarcodeRecords = loaded
                 barcodePersistenceError = nil
             }
         } catch {
+            guard !Task.isCancelled else { return }
             await MainActor.run {
                 localBarcodeRecords = []
                 barcodePersistenceError = "Local barcode food log could not be read. No totals were added."
@@ -618,75 +699,127 @@ private struct FitnessNutritionSurface: View {
         VStack(alignment: .leading, spacing: 16) {
             nutritionHeader
             if localBarcodeRecordCount > 0 {
-                Label("\(localBarcodeRecordCount) barcode meal\(localBarcodeRecordCount == 1 ? "" : "s") · saved locally · sync pending", systemImage: "externaldrive.badge.checkmark")
-                    .font(LifeOSFont.caption(10))
+                Label("\(localBarcodeRecordCount) barcode meal\(localBarcodeRecordCount == 1 ? "" : "s") · saved locally", systemImage: "externaldrive.badge.checkmark")
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.accent)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("nutrition-barcode-local-status")
             }
             if let barcodePersistenceError {
                 Text(barcodePersistenceError)
-                    .font(LifeOSFont.caption(10))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.warning)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("nutrition-barcode-persistence-error")
             }
             if let mealPersistenceError {
                 Text(mealPersistenceError)
-                    .font(LifeOSFont.caption(10))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.warning)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("nutrition-meal-persistence-error")
             }
-            FitnessNutritionHeroCard(nutrition: nutrition, isDemo: sourceStatus == .demo, selectedDate: selectedDate)
-            FitnessNutritionSummaryRail(nutrition: nutrition)
-            FitnessNutritionMacroCard(macros: nutrition.macroValues, display: $macroDisplay)
-            FitnessNutritionNetEnergyCard(nutrition: nutrition)
-            FitnessNutritionQualityCard(
-                contributions: nutrition.qualityContributions,
-                score: nutrition.qualityScore,
-                detail: nutrition.qualityDetail
-            )
-            FitnessFoodCaptureCard(
-                isDemo: sourceStatus == .demo,
-                photoStage: photoStage,
-                onCapture: onCapture
-            )
-            FitnessNutritionMealTimelineCard(
-                meals: nutrition.meals,
-                onAdd: { onCapture(.manual) },
-                onEdit: onEditMeal,
-                onDelete: onDeleteMeal,
-                onReview: { _ in photoStage = .needsConfirmation }
-            )
-            FitnessNutritionTrendsCard(nutrition: nutrition)
-            FitnessHydrationLifestyleCard(
-                nutrition: nutrition,
-                selectedDate: selectedDate,
-                isFixture: sourceStatus == .demo
-            )
+            if hasObservedNutrition {
+                FitnessNutritionHeroCard(nutrition: nutrition, isDemo: sourceStatus == .demo, selectedDate: selectedDate)
+                FitnessNutritionMacroCard(macros: nutrition.macroValues, display: $macroDisplay)
+                FitnessNutritionMealTimelineCard(
+                    meals: nutrition.meals,
+                    onAdd: { onCapture(.manual) },
+                    onEdit: onEditMeal,
+                    onDelete: onDeleteMeal,
+                    onReview: { _ in photoStage = .needsConfirmation }
+                )
+                FitnessNutritionNetEnergyCard(nutrition: nutrition)
+                FitnessNutritionQualityCard(
+                    contributions: nutrition.qualityContributions,
+                    score: nutrition.qualityScore,
+                    detail: nutrition.qualityDetail
+                )
+                FitnessNutritionTrendsCard(nutrition: nutrition)
+                FitnessHydrationLifestyleCard(
+                    nutrition: nutrition,
+                    selectedDate: selectedDate,
+                    isFixture: sourceStatus == .demo
+                )
+            } else {
+                FitnessNutritionEmptyState(onAddMeal: { onCapture(.manual) })
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityIdentifier("fitness-nutrition-surface")
+    }
+
+    private var hasObservedNutrition: Bool {
+        nutrition.caloriesConsumed != nil
+            || nutrition.sourceSupportedExpenditure != nil
+            || !nutrition.meals.isEmpty
+            || nutrition.macroValues.contains { $0.value != nil }
+            || nutrition.hydrationMilliliters != nil
+            || nutrition.caffeineMilligrams != nil
+            || nutrition.alcoholUnits != nil
+            || nutrition.qualityScore != nil
     }
 
     private var nutritionHeader: some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Nutrition")
-                    .font(LifeOSFont.headerLarge(25))
+                    .lifeOSTypography(.pageTitle)
                 Text("Meals, macros, quality, and energy for \(selectedDate.fitnessDayLabel)")
-                    .font(LifeOSFont.caption(11))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 8)
-            Text(sourceStatus == .demo ? "Fixture values" : sourceStatus.label)
-                .font(LifeOSFont.caption(10))
-                .foregroundStyle(LifeOSTokens.tertiaryText)
-                .accessibilityLabel("Nutrition data status")
-                .accessibilityValue(sourceStatus == .demo ? "Demo, not live" : sourceStatus.label)
+            VStack(alignment: .trailing, spacing: 6) {
+                Text(sourceStatus == .demo ? "Fixture values" : sourceStatus.label)
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .accessibilityLabel("Nutrition data status")
+                    .accessibilityValue(sourceStatus == .demo ? "Demo, not live" : sourceStatus.label)
+                Menu {
+                    ForEach(FitnessFoodCaptureMethod.allCases) { method in
+                        Button {
+                            onCapture(method)
+                        } label: {
+                            Label(method.rawValue, systemImage: method.systemImage)
+                        }
+                    }
+                } label: {
+                    Label("Add meal", systemImage: "plus")
+                        .lifeOSTypography(.button)
+                }
+                .buttonStyle(LifeOSButtonStyle(.primary))
+                .accessibilityIdentifier("nutrition-add-meal-header")
+            }
         }
+    }
+}
+
+private struct FitnessNutritionEmptyState: View {
+    let onAddMeal: () -> Void
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            LifeOSIcon(.grocery)
+                .foregroundStyle(LifeOSTokens.tertiaryText)
+                .frame(width: 24, height: 24)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("No meals logged")
+                    .lifeOSTypography(.cardTitle)
+                Text("Add a confirmed meal to start the selected day. No intake or energy value is inferred from the empty log.")
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            Button("Add meal", action: onAddMeal)
+                .buttonStyle(LifeOSButtonStyle(.secondary))
+        }
+        .padding(14)
+        .flatCard()
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("fitness-nutrition-empty-state")
     }
 }
 
@@ -696,36 +829,36 @@ private struct FitnessNutritionHeroCard: View {
     let selectedDate: Date
 
     var body: some View {
-        NutritionSurfaceCard(accent: .green) {
-            HStack(alignment: .center, spacing: 18) {
+        NutritionSurfaceCard(accent: .orange) {
+            VStack(alignment: .leading, spacing: 12) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Today")
-                        .font(LifeOSFont.caption(11))
+                    Text(Calendar.current.isDateInToday(selectedDate) ? "Today" : selectedDate.fitnessDayLabel)
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Text(nutrition.caloriesConsumed.map(String.init) ?? "—")
-                            .font(LifeOSFont.spaceGrotesk(36, weight: .bold))
+                            .lifeOSTypography(.metric)
                             .monospacedDigit()
                             .lineLimit(1)
-                            .minimumScaleFactor(0.45)
+                            .foregroundStyle(Color.lifeOSTasksOrange)
                             .allowsTightening(true)
                             .layoutPriority(2)
                         Text("kcal eaten")
-                            .font(LifeOSFont.caption(12))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                     }
                     Text(protocolCaloriesLabel)
-                        .font(LifeOSFont.inter(12, weight: .medium))
+                        .lifeOSTypography(.body, weight: .medium)
                         .foregroundStyle(Color.primary.opacity(0.82))
                         .fixedSize(horizontal: false, vertical: true)
                     Text(isDemo ? "Fixture values · not live" : provenanceLabel)
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                Spacer(minLength: 8)
-                NutritionQualityGauge(score: nutrition.qualityScore, detail: nutrition.qualityDetail)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
+            FitnessNutritionSummaryRail(nutrition: nutrition)
             HStack(spacing: 8) {
                 NavigationLink(destination: NutritionFoodLibraryView(meals: nutrition.meals)) {
                     NutritionActionLabel(title: "Food library", icon: .grocery)
@@ -754,53 +887,6 @@ private struct FitnessNutritionHeroCard: View {
     }
 }
 
-private struct NutritionQualityGauge: View {
-    let score: Int?
-    let detail: String?
-
-    var body: some View {
-        VStack(spacing: 7) {
-            ZStack {
-                Circle()
-                    .stroke(LifeOSTokens.quietBorder.opacity(0.75), lineWidth: 9)
-                if let score {
-                    Circle()
-                        .trim(from: 0, to: CGFloat(min(max(score, 0), 100)) / 100)
-                        .stroke(
-                            AngularGradient(colors: [LifeOSTokens.success, LifeOSTokens.accent], center: .center),
-                            style: StrokeStyle(lineWidth: 9, lineCap: .round)
-                        )
-                        .rotationEffect(.degrees(-90))
-                    VStack(spacing: 1) {
-                        Text("\(score)")
-                            .font(LifeOSFont.spaceGrotesk(24, weight: .bold))
-                            .monospacedDigit()
-                        Text("quality")
-                            .font(LifeOSFont.caption(9))
-                            .foregroundStyle(LifeOSTokens.tertiaryText)
-                    }
-                } else {
-                    LifeOSIcon(.security)
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
-                        .frame(width: 22, height: 22)
-                }
-            }
-            .frame(width: 82, height: 82)
-            Text(score == nil ? "Quality unavailable" : "Quality")
-                .font(LifeOSFont.inter(11, weight: .semiBold))
-            Text(score == nil ? "Needs recorded inputs" : (detail ?? "Recorded inputs"))
-                .font(LifeOSFont.caption(9))
-                .foregroundStyle(score == nil ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)
-                .multilineTextAlignment(.center)
-                .lineLimit(3)
-                .frame(maxWidth: 150)
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Food quality")
-        .accessibilityValue(score.map { "\($0) out of 100" } ?? "Unavailable; recorded quality inputs are required")
-    }
-}
-
 private struct NutritionActionLabel: View {
     let title: String
     let icon: LifeOSIconName
@@ -808,7 +894,7 @@ private struct NutritionActionLabel: View {
     var body: some View {
         HStack(spacing: 6) {
             LifeOSIcon(icon).frame(width: 14, height: 14)
-            Text(title).font(LifeOSFont.inter(11, weight: .semiBold))
+            Text(title).lifeOSTypography(.body, weight: .semibold)
             LifeOSIcon(.chevronRight).frame(width: 10, height: 10)
         }
         .foregroundStyle(LifeOSTokens.accent)
@@ -823,11 +909,23 @@ private struct FitnessNutritionSummaryRail: View {
     let nutrition: FitnessNutritionSnapshot
 
     var body: some View {
-        HStack(spacing: 8) {
-            NutritionSummaryValue(title: "Protocol", value: nutrition.calorieTarget.map { "\($0)" } ?? "—", detail: "kcal goal", hue: .blue)
-            NutritionSummaryValue(title: "Remaining", value: remainingValue, detail: "kcal", hue: .green)
-            NutritionSummaryValue(title: "Burned", value: nutrition.sourceSupportedExpenditure.map(String.init) ?? "—", detail: "source kcal", hue: .orange)
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 0) {
+                NutritionSummaryValue(title: "Protocol", value: nutrition.calorieTarget.map { "\($0)" } ?? "—", detail: "kcal goal", hue: .blue)
+                Divider().frame(height: 42)
+                NutritionSummaryValue(title: "Remaining", value: remainingValue, detail: "kcal", hue: .green)
+                Divider().frame(height: 42)
+                NutritionSummaryValue(title: "Burned", value: nutrition.sourceSupportedExpenditure.map(String.init) ?? "—", detail: "source kcal", hue: .orange)
+            }
+            VStack(alignment: .leading, spacing: 0) {
+                NutritionSummaryValue(title: "Protocol", value: nutrition.calorieTarget.map { "\($0)" } ?? "—", detail: "kcal goal", hue: .blue)
+                Divider()
+                NutritionSummaryValue(title: "Remaining", value: remainingValue, detail: "kcal", hue: .green)
+                Divider()
+                NutritionSummaryValue(title: "Burned", value: nutrition.sourceSupportedExpenditure.map(String.init) ?? "—", detail: "source kcal", hue: .orange)
+            }
         }
+        .padding(.vertical, 2)
     }
 
     private var remainingValue: String {
@@ -845,16 +943,40 @@ private struct NutritionSummaryValue: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 5) {
-                Circle().fill(LifeOSTokens.tertiaryText).frame(width: 6, height: 6)
-                Text(title).font(LifeOSFont.caption(9)).foregroundStyle(LifeOSTokens.tertiaryText).lineLimit(1)
+                Circle().fill(hue.base).frame(width: 6, height: 6)
+                Text(title).lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText).lineLimit(1)
             }
-            Text(value).font(LifeOSFont.inter(13, weight: .semiBold)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.65)
-            Text(detail).font(LifeOSFont.caption(8)).foregroundStyle(LifeOSTokens.tertiaryText).lineLimit(1)
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    valueText
+                    detailText
+                }
+                VStack(alignment: .leading, spacing: 1) {
+                    valueText
+                    detailText
+                }
+            }
         }
         .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
         .padding(.horizontal, 9)
         .padding(.vertical, 8)
-        .flatCard()
+    }
+
+    private var valueText: some View {
+        Text(value)
+            .lifeOSTypography(.body, weight: .semibold)
+            .monospacedDigit()
+            .lineLimit(2)
+            .fixedSize(horizontal: false, vertical: true)
+            .layoutPriority(1)
+    }
+
+    private var detailText: some View {
+        Text(detail)
+            .lifeOSTypography(.metadata)
+            .foregroundStyle(LifeOSTokens.tertiaryText)
+            .lineLimit(2)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -871,18 +993,16 @@ private struct FitnessNutritionMacroCard: View {
     var body: some View {
         NutritionSurfaceCard(accent: .blue) {
             VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .firstTextBaseline) {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Calories & macros")
-                            .font(LifeOSFont.header(16))
-                        Text("Goals are user preferences; missing inputs stay unavailable")
-                            .font(LifeOSFont.caption(10))
-                            .foregroundStyle(LifeOSTokens.tertiaryText)
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .firstTextBaseline, spacing: 12) {
+                        macroHeading
+                        Spacer(minLength: 8)
+                        macroDisplayToggle
                     }
-                    Spacer(minLength: 8)
-                    NutritionMacroDisplayToggle(display: $display)
-                    .frame(width: 140)
-                    .accessibilityIdentifier("nutrition-macro-display")
+                    VStack(alignment: .leading, spacing: 9) {
+                        macroHeading
+                        macroDisplayToggle
+                    }
                 }
                 NutritionAdaptiveGrid {
                     ForEach(orderedMacros) { macro in
@@ -895,10 +1015,30 @@ private struct FitnessNutritionMacroCard: View {
     }
 
     private var orderedMacros: [FitnessMacroValue] {
-        let order = ["Fat", "Carbs", "Carbohydrates", "Protein"]
-        return macros.sorted { lhs, rhs in
-            (order.firstIndex(of: lhs.name) ?? order.count) < (order.firstIndex(of: rhs.name) ?? order.count)
+        let order = ["Protein", "Carbs", "Carbohydrates", "Fat"]
+        var ordered: [FitnessMacroValue] = []
+        ordered.reserveCapacity(macros.count)
+        for name in order {
+            ordered.append(contentsOf: macros.filter { $0.name == name })
         }
+        ordered.append(contentsOf: macros.filter { !order.contains($0.name) })
+        return ordered
+    }
+
+    private var macroHeading: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("Calories & macros")
+                .lifeOSTypography(.sectionTitle)
+            Text("Goals are user preferences; missing inputs stay unavailable")
+                .lifeOSTypography(.metadata)
+                .foregroundStyle(LifeOSTokens.tertiaryText)
+        }
+    }
+
+    private var macroDisplayToggle: some View {
+        NutritionMacroDisplayToggle(display: $display)
+            .frame(width: 140)
+            .accessibilityIdentifier("nutrition-macro-display")
     }
 }
 
@@ -912,7 +1052,7 @@ private struct NutritionMacroDisplayToggle: View {
                     display = item
                 } label: {
                     Text(item.rawValue)
-                        .font(LifeOSFont.inter(11, weight: .semiBold))
+                        .lifeOSTypography(.body, weight: .semibold)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 6)
                         .foregroundStyle(display == item ? Color.primary : LifeOSTokens.tertiaryText)
@@ -936,9 +1076,9 @@ private struct NutritionMacroDisplayToggle: View {
 /// carbs success, fat warning. The legacy per-metric hue ramp is not used.
 private func nutritionMacroColor(name: String) -> Color {
     switch name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-    case "protein": LifeOSTokens.accent
-    case "carbs", "carbohydrates": LifeOSTokens.success
-    case "fat": LifeOSTokens.warning
+    case "protein": LifeOSTokens.Module.business
+    case "carbs", "carbohydrates": LifeOSTokens.Module.fitness
+    case "fat": LifeOSTokens.secondaryText
     default: LifeOSTokens.secondaryText
     }
 }
@@ -950,25 +1090,30 @@ private struct NutritionMacroDotRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .firstTextBaseline) {
-                Text(macro.name).font(LifeOSFont.inter(12, weight: .semiBold))
+                Text(macro.name).lifeOSTypography(.body, weight: .semibold)
                 Spacer(minLength: 6)
-                Text(displayValue).font(LifeOSFont.inter(12, weight: .semiBold)).monospacedDigit()
+                Text(displayValue).lifeOSTypography(.body, weight: .semibold).monospacedDigit()
                 if let target = macro.target {
-                    Text("/ \(target.formatted(.number.precision(.fractionLength(0)))) g")
-                        .font(LifeOSFont.caption(10))
+                    Text("Target \(target.formatted(.number.precision(.fractionLength(0)))) \(macro.unit)")
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
             }
-            HStack(spacing: 4) {
-                ForEach(0..<10, id: \.self) { index in
-                    Circle()
-                        .fill(index < filledDots ? nutritionMacroColor(name: macro.name) : LifeOSTokens.quietBorder.opacity(0.75))
-                        .frame(width: 8, height: 8)
+            if ratio != nil {
+                HStack(spacing: 4) {
+                    ForEach(0..<10, id: \.self) { index in
+                        Circle()
+                            .fill(index < filledDots ? nutritionMacroColor(name: macro.name) : LifeOSTokens.quietBorder.opacity(0.75))
+                            .frame(width: 8, height: 8)
+                    }
                 }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("\(macro.name) progress")
+                .accessibilityValue(displayValue)
             }
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("\(macro.name) progress")
-            .accessibilityValue(displayValue)
+            Text(macro.value == nil ? "Observation unavailable" : (macro.target == nil ? "Recorded · target unavailable" : "Recorded · compared with target"))
+                .lifeOSTypography(.metadata)
+                .foregroundStyle(LifeOSTokens.secondaryText)
         }
         .padding(10)
         .background(LifeOSTokens.screenCanvas.opacity(0.32), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
@@ -977,17 +1122,18 @@ private struct NutritionMacroDotRow: View {
 
     private var ratio: Double? {
         guard let value = macro.value, let target = macro.target, target > 0 else { return nil }
-        return min(max(value / target, 0), 1)
+        let ratio = value / target
+        return ratio.isFinite && (ratio * 100).isFinite ? ratio : nil
     }
 
-    private var filledDots: Int { Int(((ratio ?? 0) * 10).rounded(.down)) }
+    private var filledDots: Int { Int((min(ratio ?? 0, 1) * 10).rounded(.down)) }
 
     private var displayValue: String {
         guard let value = macro.value else { return "Unavailable" }
         switch display {
-        case .grams: return "\(value.formatted(.number.precision(.fractionLength(0)))) g"
+        case .grams: return "\(value.formatted(.number.precision(.fractionLength(0)))) \(macro.unit)"
         case .percent:
-            guard let ratio else { return "Unavailable" }
+            guard let ratio else { return "\(value.formatted(.number.precision(.fractionLength(0)))) \(macro.unit)" }
             return "\((ratio * 100).formatted(.number.precision(.fractionLength(0))))%"
         }
     }
@@ -1003,9 +1149,9 @@ private struct FitnessNutritionNetEnergyCard: View {
                     HStack(alignment: .firstTextBaseline) {
                         VStack(alignment: .leading, spacing: 3) {
                             Text("Net energy")
-                                .font(LifeOSFont.header(16))
+                                .lifeOSTypography(.sectionTitle)
                             Text("Eaten minus burned · a calculation, not a direct measurement")
-                                .font(LifeOSFont.caption(10))
+                                .lifeOSTypography(.metadata)
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
@@ -1014,10 +1160,10 @@ private struct FitnessNutritionNetEnergyCard: View {
                     }
                     HStack(alignment: .firstTextBaseline, spacing: 5) {
                         Text(balanceLabel)
-                            .font(LifeOSFont.spaceGrotesk(27, weight: .bold))
+                            .lifeOSTypography(.sectionTitle, weight: .bold)
                             .monospacedDigit()
                         Text("kcal balance")
-                            .font(LifeOSFont.caption(10))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                     }
                     NutritionEnergyScale(eaten: nutrition.caloriesConsumed, burned: nutrition.sourceSupportedExpenditure)
@@ -1027,7 +1173,7 @@ private struct FitnessNutritionNetEnergyCard: View {
                         Spacer()
                     }
                     Text(provenance)
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(nutrition.caloriesConsumed != nil && nutrition.sourceSupportedExpenditure != nil ? LifeOSTokens.tertiaryText : LifeOSTokens.warning)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -1060,7 +1206,7 @@ private struct NutritionEnergyFact: View {
         HStack(spacing: 5) {
             Circle().fill(LifeOSTokens.tertiaryText).frame(width: 6, height: 6)
             Text("\(title) \(value.map(String.init) ?? "—")")
-                .font(LifeOSFont.caption(10))
+                .lifeOSTypography(.metadata)
                 .monospacedDigit()
         }
     }
@@ -1108,25 +1254,25 @@ private struct FitnessNutritionQualityCard: View {
                     HStack(alignment: .firstTextBaseline) {
                         VStack(alignment: .leading, spacing: 3) {
                             Text("Food quality")
-                                .font(LifeOSFont.header(16))
+                                .lifeOSTypography(.sectionTitle)
                             Text("Transparent inputs only · no proprietary formula is reproduced")
-                                .font(LifeOSFont.caption(10))
+                                .lifeOSTypography(.metadata)
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                         }
                         Spacer()
                         Text(score.map { "\($0)/100" } ?? "Locked")
-                            .font(LifeOSFont.inter(12, weight: .semiBold))
+                            .lifeOSTypography(.body, weight: .semibold)
                             .foregroundStyle(score == nil ? LifeOSTokens.warning : LifeOSTokens.success)
                         LifeOSIcon(.chevronRight).frame(width: 13, height: 13)
                     }
                     NutritionAdaptiveGrid {
                         ForEach(categories, id: \.0) { category, hue in
-                            let contribution = contributions.first(where: { $0.title.caseInsensitiveCompare(category) == .orderedSame })
+                            let contribution = contributionByTitle[category.lowercased()]
                             NutritionContributionCell(category: category, hue: contribution?.hue ?? hue, value: contribution?.value, detail: contribution?.detail)
                         }
                     }
                     Text(score == nil ? "Quality is unavailable until user-recorded food-quality inputs exist." : (detail ?? "User-recorded inputs"))
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(score == nil ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                     NutritionGlucoseUnavailableRow()
@@ -1136,6 +1282,10 @@ private struct FitnessNutritionQualityCard: View {
         .buttonStyle(.plain)
         .accessibilityHint("Opens food quality details")
         .accessibilityIdentifier("fitness-nutrition-quality")
+    }
+
+    private var contributionByTitle: [String: FitnessNutritionQualityContribution] {
+        Dictionary(uniqueKeysWithValues: contributions.map { ($0.title.lowercased(), $0) })
     }
 }
 
@@ -1148,21 +1298,21 @@ private struct NutritionContributionCell: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                Circle().fill(value == nil ? LifeOSTokens.tertiaryText : LifeOSTokens.secondaryText).frame(width: 6, height: 6)
-                Text(category).font(LifeOSFont.caption(10)).lineLimit(1)
+                Circle().fill(value == nil ? LifeOSTokens.tertiaryText : hue.base).frame(width: 6, height: 6)
+                Text(category).lifeOSTypography(.metadata).lineLimit(1)
             }
             if let value {
                 ProgressView(value: value)
-                    .tint(LifeOSTokens.accent)
+                    .tint(hue.base)
                 Text("\((value * 100).formatted(.number.precision(.fractionLength(0))))%")
-                    .font(LifeOSFont.inter(12, weight: .semiBold)).monospacedDigit()
+                    .lifeOSTypography(.body, weight: .semibold).monospacedDigit()
                 Text(detail ?? "Recorded input")
-                    .font(LifeOSFont.caption(9)).foregroundStyle(LifeOSTokens.tertiaryText)
+                    .lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
             } else {
                 Text("Unavailable")
-                    .font(LifeOSFont.inter(12, weight: .semiBold))
+                    .lifeOSTypography(.body, weight: .semibold)
                 Text("No recorded input")
-                    .font(LifeOSFont.caption(9)).foregroundStyle(LifeOSTokens.tertiaryText)
+                    .lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1178,9 +1328,9 @@ private struct NutritionGlucoseUnavailableRow: View {
             LifeOSIcon(.heartRate).foregroundStyle(LifeOSTokens.tertiaryText).frame(width: 16, height: 16)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Glucose")
-                    .font(LifeOSFont.inter(11, weight: .semiBold))
+                    .lifeOSTypography(.body, weight: .semibold)
                 Text("Unavailable · no validated glucose source connected")
-                    .font(LifeOSFont.caption(9))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.warning)
             }
             Spacer(minLength: 4)
@@ -1200,6 +1350,7 @@ private struct FitnessNutritionMealTimelineCard: View {
     let onEdit: (FitnessMeal) -> Void
     let onDelete: (FitnessMeal) -> Void
     let onReview: (FitnessMeal) -> Void
+    @State private var visibleMealCount = 100
 
     /// A durable meal is editable/deletable through this card only when it
     /// was built from `NutritionMealStore` (manual entry or a future photo
@@ -1216,37 +1367,53 @@ private struct FitnessNutritionMealTimelineCard: View {
                 HStack(alignment: .firstTextBaseline) {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Meal timeline")
-                            .font(LifeOSFont.header(16))
+                            .lifeOSTypography(.sectionTitle)
                         Text("Empty, proposed, and confirmed records remain distinct")
-                            .font(LifeOSFont.caption(10))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                     }
                     Spacer()
                     Button(action: onAdd) {
                         Label("Add meal", systemImage: "plus")
-                            .font(LifeOSFont.inter(11, weight: .semiBold))
+                            .lifeOSTypography(.body, weight: .semibold)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(LifeOSTokens.accent)
+                    .buttonStyle(LifeOSButtonStyle(.secondary))
                     .accessibilityIdentifier("nutrition-add-meal")
                 }
                 if meals.isEmpty {
                     FitnessEmptyRow(title: "No meals recorded", detail: "No entry is different from zero consumption.", icon: .grocery)
                 } else {
-                    ForEach(meals) { meal in
-                        FitnessNutritionMealRow(
-                            meal: meal,
-                            isDurable: isDurable(meal),
-                            onEdit: { onEdit(meal) },
-                            onDelete: { onDelete(meal) },
-                            onReview: { onReview(meal) }
-                        )
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        ForEach(visibleMeals) { meal in
+                            FitnessNutritionMealRow(
+                                meal: meal,
+                                isDurable: isDurable(meal),
+                                onEdit: { onEdit(meal) },
+                                onDelete: { onDelete(meal) },
+                                onReview: { onReview(meal) }
+                            )
+                        }
+                    }
+                    if meals.count > visibleMeals.count {
+                        Button("Show all \(meals.count) meals") {
+                            visibleMealCount = meals.count
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(LifeOSTokens.accent)
+                        .lifeOSTypography(.body, weight: .semibold)
                     }
                     FitnessNutritionMealDailyTotalsRow(meals: meals)
                 }
             }
         }
         .accessibilityIdentifier("fitness-nutrition-meal-timeline")
+        .onChange(of: meals.map(\.id)) { _, _ in
+            visibleMealCount = min(100, meals.count)
+        }
+    }
+
+    private var visibleMeals: [FitnessMeal] {
+        Array(meals.prefix(visibleMealCount))
     }
 }
 
@@ -1288,10 +1455,10 @@ private struct FitnessNutritionMealDailyTotalsRow: View {
     private func totalItem(label: String, value: String?) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(value ?? "—")
-                .font(LifeOSFont.inter(13, weight: .semiBold))
+                .lifeOSTypography(.body, weight: .semibold)
                 .monospacedDigit()
             Text(label)
-                .font(LifeOSFont.caption(9))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1314,11 +1481,11 @@ private struct FitnessNutritionMealRow: View {
                     .foregroundStyle(meal.source == .proposal ? LifeOSTokens.warning : LifeOSTokens.accent)
                     .frame(width: 17, height: 17))
             VStack(alignment: .leading, spacing: 3) {
-                Text(meal.name).font(LifeOSFont.inter(13, weight: .semiBold)).lineLimit(2)
+                Text(meal.name).lifeOSTypography(.body, weight: .semibold).lineLimit(2)
                 Text("\(meal.source.rawValue) · \(meal.time.fitnessTimeLabel)")
-                    .font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
+                    .lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
                 Text(meal.detail)
-                    .font(LifeOSFont.caption(10))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(meal.source == .proposal ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)
                     .lineLimit(2)
             }
@@ -1326,16 +1493,16 @@ private struct FitnessNutritionMealRow: View {
             Spacer(minLength: 5)
             VStack(alignment: .trailing, spacing: 4) {
                 Text(meal.calories.map { "\($0) kcal" } ?? "—")
-                    .font(LifeOSFont.inter(12, weight: .semiBold)).monospacedDigit()
+                    .lifeOSTypography(.body, weight: .semibold).monospacedDigit()
                 if meal.source == .proposal {
                     Button("Review", action: onReview)
-                        .font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.accent).buttonStyle(.plain)
+                        .lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.accent).buttonStyle(.plain)
                 } else if isDurable {
                     HStack(spacing: 10) {
                         Button("Edit", action: onEdit)
-                            .font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.accent).buttonStyle(.plain)
+                            .lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.accent).buttonStyle(.plain)
                         Button("Delete", role: .destructive, action: onDelete)
-                            .font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.warning).buttonStyle(.plain)
+                            .lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.warning).buttonStyle(.plain)
                     }
                 }
             }
@@ -1356,9 +1523,9 @@ private struct FitnessNutritionTrendsCard: View {
                 HStack {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Trends")
-                            .font(LifeOSFont.header(16))
+                            .lifeOSTypography(.sectionTitle)
                         Text("Each metric keeps its own source and availability")
-                            .font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
+                            .lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
                     }
                     Spacer()
                 }
@@ -1392,10 +1559,10 @@ private struct NutritionTrendCell: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(kind.rawValue).font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText).lineLimit(2)
-            Text(value).font(LifeOSFont.inter(14, weight: .semiBold)).monospacedDigit()
+            Text(kind.rawValue).lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText).lineLimit(2)
+            Text(value).lifeOSTypography(.body, weight: .semibold).monospacedDigit()
             Text(available ? "Selected-day input" : "Unavailable · source required")
-                .font(LifeOSFont.caption(9))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(available ? LifeOSTokens.success : LifeOSTokens.warning)
                 .lineLimit(2)
         }
@@ -1431,7 +1598,10 @@ private struct NutritionSurfaceCard<Content: View>: View {
     let accent: LifeOSTokens.Hue
     @ViewBuilder let content: Content
     @State private var hovering = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    @Environment(\.lifeOSReduceMotion) private var requestedReduceMotion
+
+    private var reduceMotion: Bool { systemReduceMotion || requestedReduceMotion }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -1440,11 +1610,11 @@ private struct NutritionSurfaceCard<Content: View>: View {
         .padding(15)
         .frame(maxWidth: .infinity, alignment: .leading)
         .flatCard()
-        .overlay(LifeOSTokens.cardShape.stroke(hovering ? LifeOSTokens.strongBorder : Color.clear, lineWidth: 1))
+        .overlay(LifeOSTokens.cardShape.stroke(hovering ? accent.base.opacity(0.38) : Color.clear, lineWidth: 1))
 #if os(macOS)
         .onHover { hovering = $0 }
 #endif
-        .animation(reduceMotion ? nil : LifeOSMotion.springSnappy, value: hovering)
+        .animation(LifeOSMotion.curve(for: .hover, reduceMotion: reduceMotion)?.animation, value: hovering)
     }
 }
 
@@ -1474,17 +1644,17 @@ private struct NutritionFoodLibraryView: View {
                         ForEach(meals) { meal in
                             HStack {
                                 VStack(alignment: .leading, spacing: 3) {
-                                    Text(meal.name).font(LifeOSFont.inter(13, weight: .semiBold))
-                                    Text(meal.source.rawValue).font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
+                                    Text(meal.name).lifeOSTypography(.body, weight: .semibold)
+                                    Text(meal.source.rawValue).lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
                                 }
                                 Spacer()
-                                Text(meal.calories.map { "\($0) kcal" } ?? "—").font(LifeOSFont.caption(11)).monospacedDigit()
+                                Text(meal.calories.map { "\($0) kcal" } ?? "—").lifeOSTypography(.metadata).monospacedDigit()
                             }
                             .padding(.vertical, 5)
                         }
                     }
                     Text("Persistence and server sync are not connected in this build; this route does not imply a saved library.")
-                        .font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.warning)
+                        .lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.warning)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -1528,19 +1698,19 @@ private struct NutritionGoalsView: View {
                 NutritionSurfaceCard(accent: .green) {
                     progressSummary
                     Divider().padding(.vertical, 6)
-                    Text("Edit targets").font(LifeOSFont.header(15))
+                    Text("Edit targets").lifeOSTypography(.sectionTitle)
                     FitnessEditableField(title: "Calories (kcal)", text: $calorieText, numeric: true)
                     FitnessEditableField(title: "Protein (g)", text: $proteinText, numeric: true)
                     FitnessEditableField(title: "Carbs (g)", text: $carbText, numeric: true)
                     FitnessEditableField(title: "Fat (g)", text: $fatText, numeric: true)
                     if let saveError {
                         Text(saveError)
-                            .font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.warning)
+                            .lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.warning)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     if let savedConfirmation {
                         Text(savedConfirmation)
-                            .font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.success)
+                            .lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.success)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     HStack {
@@ -1553,15 +1723,15 @@ private struct NutritionGoalsView: View {
                     }
                     if goalStore == nil {
                         Text("Local goal storage is unavailable. Nothing can be saved right now.")
-                            .font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.warning)
+                            .lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.warning)
                             .fixedSize(horizontal: false, vertical: true)
                     } else if isDemo {
                         Text("Fixture values · goal editing is disabled in demo mode.")
-                            .font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
+                            .lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
                             .fixedSize(horizontal: false, vertical: true)
                     } else {
                         Text("Saving records a new dated goal; it takes effect today and applies until you set another.")
-                            .font(LifeOSFont.caption(9)).foregroundStyle(LifeOSTokens.tertiaryText)
+                            .lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -1580,7 +1750,7 @@ private struct NutritionGoalsView: View {
         NutritionGoalLine(title: "Carbs", value: currentGoal?.carbGramsTarget.map { "\($0) g" })
         NutritionGoalLine(title: "Fat", value: currentGoal?.fatGramsTarget.map { "\($0) g" })
         Text(progressLabel)
-            .font(LifeOSFont.inter(12, weight: .medium))
+            .lifeOSTypography(.body, weight: .medium)
             .foregroundStyle(progressAvailable ? Color.primary.opacity(0.82) : LifeOSTokens.warning)
             .fixedSize(horizontal: false, vertical: true)
             .padding(.top, 4)
@@ -1621,6 +1791,17 @@ private struct NutritionGoalsView: View {
         proteinText = currentGoal?.proteinGramsTarget.map(String.init) ?? ""
         carbText = currentGoal?.carbGramsTarget.map(String.init) ?? ""
         fatText = currentGoal?.fatGramsTarget.map(String.init) ?? ""
+        if var goal = currentGoal {
+            goal.calorieTarget = goal.calorieTarget.flatMap { $0 >= 0 ? $0 : nil }
+            goal.proteinGramsTarget = goal.proteinGramsTarget.flatMap { $0 >= 0 ? $0 : nil }
+            goal.carbGramsTarget = goal.carbGramsTarget.flatMap { $0 >= 0 ? $0 : nil }
+            goal.fatGramsTarget = goal.fatGramsTarget.flatMap { $0 >= 0 ? $0 : nil }
+            if goal != currentGoal {
+                saveError = "Stored targets contain invalid values. Review and correct them before saving."
+            }
+            currentGoal = goal
+        }
+
     }
 
     private func saveGoal() {
@@ -1630,12 +1811,23 @@ private struct NutritionGoalsView: View {
             saveError = "Local goal storage is unavailable. Nothing was saved."
             return
         }
+        guard !isDemo else { return }
+        let inputs = [calorieText, proteinText, carbText, fatText].map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let targets = inputs.map(Int.init)
+        guard zip(inputs, targets).allSatisfy({ text, target in
+            text.isEmpty || (target.map { $0 >= 0 } ?? false)
+        }) else {
+            saveError = "Enter non-negative whole numbers, or leave a target blank. Nothing was saved."
+            return
+        }
         let goal = NutritionGoal(
             effectiveFrom: .now,
-            calorieTarget: Int(calorieText.trimmingCharacters(in: .whitespaces)),
-            proteinGramsTarget: Int(proteinText.trimmingCharacters(in: .whitespaces)),
-            carbGramsTarget: Int(carbText.trimmingCharacters(in: .whitespaces)),
-            fatGramsTarget: Int(fatText.trimmingCharacters(in: .whitespaces))
+            calorieTarget: targets[0],
+            proteinGramsTarget: targets[1],
+            carbGramsTarget: targets[2],
+            fatGramsTarget: targets[3]
         )
         do {
             try goalStore.setGoal(goal)
@@ -1653,9 +1845,9 @@ private struct NutritionGoalLine: View {
 
     var body: some View {
         HStack {
-            Text(title).font(LifeOSFont.inter(12, weight: .medium))
+            Text(title).lifeOSTypography(.body, weight: .medium)
             Spacer()
-            Text(value ?? "Unavailable").font(LifeOSFont.inter(12, weight: .semiBold)).monospacedDigit()
+            Text(value ?? "Unavailable").lifeOSTypography(.body, weight: .semibold).monospacedDigit()
                 .foregroundStyle(value == nil ? LifeOSTokens.warning : .primary)
         }
         .padding(.vertical, 7)
@@ -1673,9 +1865,9 @@ private struct NutritionNetEnergyView: View {
                     NutritionEnergyFact(title: "Eaten", value: nutrition.caloriesConsumed, hue: .green)
                     NutritionEnergyFact(title: "Burned", value: nutrition.sourceSupportedExpenditure, hue: .orange)
                     Divider().padding(.vertical, 3)
-                    Text(balanceDetail).font(LifeOSFont.header(22)).monospacedDigit()
+                    Text(balanceDetail).lifeOSTypography(.sectionTitle).monospacedDigit()
                     Text("Sign convention: eaten minus source-supported expenditure. The data remains unavailable until both observations exist.")
-                        .font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
+                        .lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -1703,9 +1895,9 @@ private struct NutritionQualityView: View {
                 FitnessSectionHeading(title: "Food quality", subtitle: "Recorded contributions, not an inferred formula")
                 NutritionSurfaceCard(accent: .green) {
                     Text(score.map { "Recorded quality input: \($0)/100" } ?? "Quality is locked")
-                        .font(LifeOSFont.header(18))
+                        .lifeOSTypography(.sectionTitle)
                     Text(detail ?? "Add transparent, user-recorded food-quality inputs to review this surface. No proprietary score is recreated.")
-                        .font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
+                        .lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                     NutritionAdaptiveGrid {
                         ForEach(contributions) { contribution in
@@ -1733,10 +1925,10 @@ private struct NutritionTrendDetailView: View {
                 NutritionSurfaceCard(accent: .violet) {
                     NutritionTrendCell(kind: kind, nutrition: nutrition)
                     Text(detail)
-                        .font(LifeOSFont.caption(11)).foregroundStyle(available ? LifeOSTokens.tertiaryText : LifeOSTokens.warning)
+                        .lifeOSTypography(.metadata).foregroundStyle(available ? LifeOSTokens.tertiaryText : LifeOSTokens.warning)
                         .fixedSize(horizontal: false, vertical: true)
                     Text("Long-range charts appear only after a validated history exists. Missing days are not silently converted to zero.")
-                        .font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
+                        .lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -1781,21 +1973,21 @@ public struct FitnessNutritionSummaryCard: View {
                 HStack(alignment: .firstTextBaseline) {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Calories & energy balance")
-                            .font(LifeOSFont.header(15))
+                            .lifeOSTypography(.sectionTitle)
                             .fixedSize(horizontal: false, vertical: true)
                         Text("Food records are separate from supplement records")
-                            .font(LifeOSFont.caption(10))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     .layoutPriority(1)
                     Spacer()
                     Text(nutrition.caloriesConsumed.map(String.init) ?? "—")
-                        .font(LifeOSFont.spaceGrotesk(29, weight: .bold))
+                        .lifeOSTypography(.sectionTitle, weight: .bold)
                         .monospacedDigit()
                         .fixedSize(horizontal: true, vertical: false)
                     Text(nutrition.caloriesConsumed == nil ? "" : " kcal")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: true, vertical: false)
                 }
@@ -1806,12 +1998,12 @@ public struct FitnessNutritionSummaryCard: View {
                 }
                 if nutrition.sourceSupportedExpenditure == nil {
                     Text("Net energy needs a source-supported expenditure observation; it is not inferred from a generic default.")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.warning)
                         .fixedSize(horizontal: false, vertical: true)
                 } else {
                     Text("Net energy = eaten minus source-supported expenditure. This is a calculation, not a direct measurement.")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
             }
@@ -1845,57 +2037,14 @@ private struct NutritionEnergyColumn: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Circle().fill(LifeOSTokens.tertiaryText).frame(width: 6, height: 6)
-            Text(title).font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
+            Circle().fill(hue.base).frame(width: 6, height: 6)
+            Text(title).lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
             Text(value)
-                .font(LifeOSFont.inter(12, weight: .semiBold))
+                .lifeOSTypography(.body, weight: .semibold)
                 .monospacedDigit()
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-private struct FitnessMacroCard: View {
-    let macros: [FitnessMacroValue]
-
-    var body: some View {
-        FitnessCard {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text("Macros")
-                        .font(LifeOSFont.header(15))
-                    Spacer()
-                    Text("Daily targets are user preferences")
-                        .font(LifeOSFont.caption(10))
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
-                        .multilineTextAlignment(.trailing)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                ForEach(macros) { macro in
-                    VStack(alignment: .leading, spacing: 5) {
-                        HStack {
-                            Text(macro.name).font(LifeOSFont.caption(11))
-                            Spacer()
-                            Text(macro.value.map { "\($0.formatted(.number.precision(.fractionLength(0)))) \(macro.unit)" } ?? "Not available")
-                                .font(LifeOSFont.inter(11, weight: .semiBold)).monospacedDigit()
-                            if let target = macro.target {
-                                Text("/ \(target.formatted(.number.precision(.fractionLength(0))))")
-                                    .font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
-                            }
-                        }
-                        GeometryReader { proxy in
-                            let progress = macro.target.flatMap { target in macro.value.map { min(1, $0 / max(target, 1)) } } ?? 0
-                            ZStack(alignment: .leading) {
-                                Capsule().fill(LifeOSTokens.quietBorder.opacity(0.65))
-                                Capsule().fill(nutritionMacroColor(name: macro.name)).frame(width: proxy.size.width * progress)
-                            }
-                        }
-                        .frame(height: 7)
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -1906,6 +2055,16 @@ private enum FitnessFoodCaptureMethod: String, CaseIterable, Identifiable {
     case recipe = "Recipe"
     case recent = "Recent / favorite"
     var id: String { rawValue }
+
+    var systemImage: String {
+        switch self {
+        case .photo: "photo"
+        case .manual: "square.and.pencil"
+        case .barcode: "barcode.viewfinder"
+        case .recipe: "book"
+        case .recent: "clock.arrow.circlepath"
+        }
+    }
 }
 
 private enum FitnessPhotoStage: String {
@@ -1914,6 +2073,415 @@ private enum FitnessPhotoStage: String {
     case needsConfirmation = "Needs confirmation"
     case edited = "Edited manual preview"
     case confirmed = "User confirmed"
+}
+
+/// The presenting nutrition flow owns one focus model for every editable meal
+/// review.  The order is deliberately a data contract: it is also used when
+/// validation returns focus to the first invalid field.
+private enum FitnessNutritionReviewField: String, CaseIterable, Hashable, Identifiable {
+    case mealName
+    case loggedAt
+    case calories
+    case protein
+    case carbohydrates
+    case fat
+
+    var id: String { "nutrition-review-field-\(rawValue)" }
+
+    var label: String {
+        switch self {
+        case .mealName: return "Meal name"
+        case .loggedAt: return "Logged at"
+        case .calories: return "Calories"
+        case .protein: return "Protein"
+        case .carbohydrates: return "Carbohydrates"
+        case .fat: return "Fat"
+        }
+    }
+
+    var unit: String? {
+        switch self {
+        case .mealName, .loggedAt: return nil
+        case .calories: return "kcal"
+        case .protein, .carbohydrates, .fat: return "g"
+        }
+    }
+
+    var isNumeric: Bool {
+        switch self {
+        case .mealName, .loggedAt: return false
+        case .calories, .protein, .carbohydrates, .fat: return true
+        }
+    }
+
+    var next: FitnessNutritionReviewField? {
+        guard let index = Self.allCases.firstIndex(of: self) else { return nil }
+        let nextIndex = Self.allCases.index(after: index)
+        return nextIndex < Self.allCases.endIndex ? Self.allCases[nextIndex] : nil
+    }
+}
+
+/// The presenter owns this session so a dismissed review sheet does not own
+/// the only copy of the user's edits.  `activeMeal` is the latest durable
+/// revision; `previewMeal` is deliberately separate and never implies that a
+/// write happened.
+struct FitnessNutritionSaveReceipt: Equatable, Sendable {
+    let mealID: UUID
+    let revision: Int
+    let fingerprint: String
+}
+
+struct FitnessNutritionDraft: Equatable, Sendable {
+    let draftID: UUID
+    var loggedAt: Date
+    var timeZoneIdentifier: String
+    var mealName: String
+    var calories: String
+    var protein: String
+    var carbohydrates: String
+    var fat: String
+    var portionGrams: String
+    var barcodeInput: String
+    var barcodeProductName: String
+    var barcodeCalories: String
+    var barcodeProtein: String
+    var barcodeCarbohydrates: String
+    var barcodeFat: String
+    var barcodeGrams: String
+    var barcodeValuesEdited: Bool
+    var barcodeBasis: NutritionBarcodeBasis
+    var barcodeMealAt: String
+    var activeMeal: NutritionMeal?
+    var previewMeal: NutritionMeal?
+    var durableReceipt: FitnessNutritionSaveReceipt?
+
+    init(
+        draftID: UUID = UUID(),
+        loggedAt: Date,
+        timeZoneIdentifier: String = TimeZone.current.identifier,
+        mealName: String = "Meal",
+        calories: String = "",
+        protein: String = "",
+        carbohydrates: String = "",
+        fat: String = "",
+        portionGrams: String = "",
+        barcodeInput: String = "",
+        barcodeProductName: String = "",
+        barcodeCalories: String = "",
+        barcodeProtein: String = "",
+        barcodeCarbohydrates: String = "",
+        barcodeFat: String = "",
+        barcodeGrams: String = "",
+        barcodeValuesEdited: Bool = false,
+        barcodeBasis: NutritionBarcodeBasis = .perServing,
+        barcodeMealAt: String = "",
+        activeMeal: NutritionMeal? = nil,
+        previewMeal: NutritionMeal? = nil,
+        durableReceipt: FitnessNutritionSaveReceipt? = nil
+    ) {
+        self.draftID = draftID
+        self.loggedAt = loggedAt
+        self.timeZoneIdentifier = timeZoneIdentifier
+        self.mealName = mealName
+        self.calories = calories
+        self.protein = protein
+        self.carbohydrates = carbohydrates
+        self.fat = fat
+        self.portionGrams = portionGrams
+        self.barcodeInput = barcodeInput
+        self.barcodeProductName = barcodeProductName
+        self.barcodeCalories = barcodeCalories
+        self.barcodeProtein = barcodeProtein
+        self.barcodeCarbohydrates = barcodeCarbohydrates
+        self.barcodeFat = barcodeFat
+        self.barcodeGrams = barcodeGrams
+        self.barcodeValuesEdited = barcodeValuesEdited
+        self.barcodeBasis = barcodeBasis
+        self.barcodeMealAt = barcodeMealAt
+        self.activeMeal = activeMeal
+        self.previewMeal = previewMeal
+        self.durableReceipt = durableReceipt
+    }
+
+    static func new(selectedDate: Date, calendar: Calendar = .current) -> FitnessNutritionDraft {
+        let day = calendar.startOfDay(for: selectedDate)
+        let loggedAt = calendar.date(bySettingHour: 12, minute: 0, second: 0, of: day) ?? selectedDate
+        return FitnessNutritionDraft(
+            loggedAt: loggedAt,
+            timeZoneIdentifier: TimeZone.current.identifier,
+            barcodeMealAt: ISO8601DateFormatter().string(from: loggedAt)
+        )
+    }
+
+    static func editing(_ meal: NutritionMeal) -> FitnessNutritionDraft {
+        FitnessNutritionDraft(
+            draftID: meal.id,
+            loggedAt: meal.loggedAt,
+            timeZoneIdentifier: meal.timeZoneIdentifier ?? TimeZone.current.identifier,
+            mealName: meal.name,
+            calories: meal.kcal.map(String.init) ?? "",
+            protein: meal.proteinGrams.map(String.init) ?? "",
+            carbohydrates: meal.carbGrams.map(String.init) ?? "",
+            fat: meal.fatGrams.map(String.init) ?? "",
+            portionGrams: meal.portionGrams.map { String($0) } ?? "",
+            activeMeal: meal
+        )
+    }
+
+    var fingerprint: String {
+        Self.fingerprint(
+            loggedAt: loggedAt,
+            timeZoneIdentifier: timeZoneIdentifier,
+            name: mealName,
+            calories: calories,
+            protein: protein,
+            carbohydrates: carbohydrates,
+            fat: fat,
+            portionGrams: portionGrams
+        )
+    }
+
+    var isDurablyCurrent: Bool {
+        guard let durableReceipt, let activeMeal else { return false }
+        return durableReceipt.mealID == activeMeal.id
+            && durableReceipt.revision == activeMeal.revision
+            && durableReceipt.fingerprint == fingerprint
+    }
+
+    var isDirty: Bool {
+        if let activeMeal {
+            return fingerprint != Self.fingerprint(for: activeMeal)
+        }
+        return mealName != "Meal"
+            || !calories.isEmpty
+            || !protein.isEmpty
+            || !carbohydrates.isEmpty
+            || !fat.isEmpty
+            || !portionGrams.isEmpty
+            || !barcodeInput.isEmpty
+            || !barcodeProductName.isEmpty
+            || !barcodeCalories.isEmpty
+            || !barcodeProtein.isEmpty
+            || !barcodeCarbohydrates.isEmpty
+            || !barcodeFat.isEmpty
+            || !barcodeGrams.isEmpty
+    }
+
+    mutating func applyLocalPreview() throws -> NutritionMeal {
+        let meal = try validatedMeal(createdAt: activeMeal?.createdAt ?? .now)
+        try meal.validateForPersistence()
+        previewMeal = meal
+        return meal
+    }
+
+    func validatedMeal(createdAt: Date = .now) throws -> NutritionMeal {
+        let trimmedName = mealName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else { throw NutritionValidationError.invalidText("mealName") }
+
+        let kcal = NutritionBarcodeValueParser.parse(calories, maximum: 5_000)
+        let proteinGrams = NutritionBarcodeValueParser.parse(protein, maximum: 2_000)
+        let carbGrams = NutritionBarcodeValueParser.parse(carbohydrates, maximum: 2_000)
+        let fatGrams = NutritionBarcodeValueParser.parse(fat, maximum: 2_000)
+        let portion = NutritionBarcodeValueParser.parse(portionGrams, maximum: 1_000_000)
+        let rawInputs = [calories, protein, carbohydrates, fat, portionGrams]
+        let parsedValues: [Double?] = [kcal, proteinGrams, carbGrams, fatGrams, portion]
+        guard zip(rawInputs, parsedValues).allSatisfy({ raw, value in
+            raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || value != nil
+        }) else {
+            throw NutritionValidationError.invalidBounds("nutrition values")
+        }
+
+        let original = activeMeal
+        let hasPortion = !portionGrams.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let resolvedPortion = hasPortion ? portion : nil
+        return NutritionMeal(
+            id: original?.id ?? draftID,
+            loggedAt: loggedAt,
+            timeZoneIdentifier: timeZoneIdentifier,
+            name: trimmedName,
+            kcal: kcal.map { Int($0.rounded()) },
+            proteinGrams: proteinGrams.map { Int($0.rounded()) },
+            carbGrams: carbGrams.map { Int($0.rounded()) },
+            fatGrams: fatGrams.map { Int($0.rounded()) },
+            portionGrams: resolvedPortion,
+            portionUnit: resolvedPortion == nil ? nil : (original?.portionUnit ?? .g),
+            journalNote: original?.journalNote,
+            provenance: original?.provenance ?? .manual,
+            createdAt: createdAt,
+            revision: original?.revision ?? 1,
+            supersedesID: original?.supersedesID,
+            photoLineage: original?.photoLineage
+        )
+    }
+
+    mutating func markDurablySaved(_ meal: NutritionMeal) {
+        activeMeal = meal
+        previewMeal = nil
+        durableReceipt = FitnessNutritionSaveReceipt(
+            mealID: meal.id,
+            revision: meal.revision,
+            fingerprint: Self.fingerprint(for: meal)
+        )
+    }
+
+    static func fingerprint(for meal: NutritionMeal) -> String {
+        fingerprint(
+            loggedAt: meal.loggedAt,
+            timeZoneIdentifier: meal.timeZoneIdentifier ?? "",
+            name: meal.name,
+            calories: meal.kcal.map(String.init) ?? "",
+            protein: meal.proteinGrams.map(String.init) ?? "",
+            carbohydrates: meal.carbGrams.map(String.init) ?? "",
+            fat: meal.fatGrams.map(String.init) ?? "",
+            portionGrams: meal.portionGrams.map { String($0) } ?? ""
+        )
+    }
+
+    private static func fingerprint(
+        loggedAt: Date,
+        timeZoneIdentifier: String,
+        name: String,
+        calories: String,
+        protein: String,
+        carbohydrates: String,
+        fat: String,
+        portionGrams: String
+    ) -> String {
+        [
+            String(loggedAt.timeIntervalSinceReferenceDate),
+            timeZoneIdentifier,
+            name.trimmingCharacters(in: .whitespacesAndNewlines),
+            canonicalNumber(calories, integer: true),
+            canonicalNumber(protein, integer: true),
+            canonicalNumber(carbohydrates, integer: true),
+            canonicalNumber(fat, integer: true),
+            canonicalNumber(portionGrams, integer: false)
+        ].joined(separator: "\u{1F}")
+    }
+
+    private static func canonicalNumber(_ raw: String, integer: Bool) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let value = NutritionBarcodeValueParser.parse(trimmed, maximum: 1_000_000) else {
+            return trimmed
+        }
+        return integer ? String(Int(value.rounded())) : String(value)
+    }
+
+    static func == (lhs: FitnessNutritionDraft, rhs: FitnessNutritionDraft) -> Bool {
+        lhs.draftID == rhs.draftID
+            && lhs.loggedAt == rhs.loggedAt
+            && lhs.timeZoneIdentifier == rhs.timeZoneIdentifier
+            && lhs.mealName == rhs.mealName
+            && lhs.calories == rhs.calories
+            && lhs.protein == rhs.protein
+            && lhs.carbohydrates == rhs.carbohydrates
+            && lhs.fat == rhs.fat
+            && lhs.portionGrams == rhs.portionGrams
+            && lhs.barcodeInput == rhs.barcodeInput
+            && lhs.barcodeProductName == rhs.barcodeProductName
+            && lhs.barcodeCalories == rhs.barcodeCalories
+            && lhs.barcodeProtein == rhs.barcodeProtein
+            && lhs.barcodeCarbohydrates == rhs.barcodeCarbohydrates
+            && lhs.barcodeFat == rhs.barcodeFat
+            && lhs.barcodeGrams == rhs.barcodeGrams
+            && lhs.barcodeValuesEdited == rhs.barcodeValuesEdited
+            && lhs.barcodeBasis.rawValue == rhs.barcodeBasis.rawValue
+            && lhs.barcodeMealAt == rhs.barcodeMealAt
+            && lhs.activeMeal == rhs.activeMeal
+            && lhs.previewMeal == rhs.previewMeal
+            && lhs.durableReceipt == rhs.durableReceipt
+    }
+}
+
+/// Pure presentation-flow rules shared by the presenter and its focused tests.
+/// A dirty draft or an in-memory preview survives a sheet dismissal and the
+/// next presentation. Starting over is an explicit discard action.
+enum FitnessNutritionDraftFlow {
+    static func startNew(selectedDate: Date, calendar: Calendar = .current) -> FitnessNutritionDraft {
+        FitnessNutritionDraft.new(selectedDate: selectedDate, calendar: calendar)
+    }
+
+    static func reopenOrStart(
+        current: FitnessNutritionDraft,
+        selectedDate: Date,
+        calendar: Calendar = .current
+    ) -> FitnessNutritionDraft {
+        current.isDirty || current.previewMeal != nil
+            ? current
+            : startNew(selectedDate: selectedDate, calendar: calendar)
+    }
+
+    static func discard(selectedDate: Date, calendar: Calendar = .current) -> FitnessNutritionDraft {
+        startNew(selectedDate: selectedDate, calendar: calendar)
+    }
+}
+
+/// Store boundary for a manual draft. It is idempotent for a repeated tap,
+/// keeps the returned correction revision active, and reconciles a write whose
+/// result was uncertain by looking for the exact durable candidate.
+enum FitnessNutritionDurableSave {
+    @discardableResult
+    static func save(
+        draft: inout FitnessNutritionDraft,
+        to store: NutritionMealStore,
+        now: Date = .now
+    ) throws -> NutritionMeal {
+        let candidate = try draft.validatedMeal(createdAt: now)
+        if draft.isDurablyCurrent, let activeMeal = draft.activeMeal {
+            return activeMeal
+        }
+
+        do {
+            let saved: NutritionMeal
+            if let activeMeal = draft.activeMeal {
+                saved = try store.correct(id: activeMeal.id, now: now) { meal in
+                    meal.loggedAt = candidate.loggedAt
+                    meal.timeZoneIdentifier = candidate.timeZoneIdentifier
+                    meal.name = candidate.name
+                    meal.kcal = candidate.kcal
+                    meal.proteinGrams = candidate.proteinGrams
+                    meal.carbGrams = candidate.carbGrams
+                    meal.fatGrams = candidate.fatGrams
+                    meal.portionGrams = candidate.portionGrams
+                    meal.portionUnit = candidate.portionUnit
+                    meal.journalNote = candidate.journalNote
+                }
+            } else {
+                try store.addConfirmed(candidate)
+                saved = candidate
+            }
+            draft.markDurablySaved(saved)
+            return saved
+        } catch {
+            if let reconciled = try reconcile(draft: draft, candidate: candidate, store: store) {
+                draft.markDurablySaved(reconciled)
+                return reconciled
+            }
+            throw error
+        }
+    }
+
+    static func reconcile(
+        draft: FitnessNutritionDraft,
+        candidate: NutritionMeal,
+        store: NutritionMealStore
+    ) throws -> NutritionMeal? {
+        let meals = try store.load()
+        let candidateFingerprint = FitnessNutritionDraft.fingerprint(for: candidate)
+        if let activeMeal = draft.activeMeal {
+            return meals.first {
+                !$0.isDeleted
+                    && $0.supersedesID == activeMeal.id
+                    && FitnessNutritionDraft.fingerprint(for: $0) == candidateFingerprint
+            }
+        }
+        return meals.first {
+            !$0.isDeleted
+                && $0.id == draft.draftID
+                && FitnessNutritionDraft.fingerprint(for: $0) == candidateFingerprint
+        }
+    }
 }
 
 /// Identifies one normalized barcode lookup.  The visible input remains
@@ -1967,58 +2535,97 @@ struct NutritionBarcodeRequestGate: Sendable {
     }
 }
 
-private struct FitnessFoodCaptureCard: View {
-    let isDemo: Bool
-    let photoStage: FitnessPhotoStage
-    let onCapture: (FitnessFoodCaptureMethod) -> Void
+/// Identifies one photo-analysis request across selection, transport, and
+/// editable draft changes. Cancellation is only an optimization: a response
+/// must still match all captured identity fields before it can touch review
+/// state.
+struct FitnessFoodPhotoAnalysisRequest: Equatable, Sendable {
+    let selectionGeneration: Int
+    let requestID: String
+    let draftRevision: String
 
-    var body: some View {
-        FitnessCard {
-            VStack(alignment: .leading, spacing: 11) {
-                HStack {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Add food")
-                            .font(LifeOSFont.header(15))
-                        Text("Manual logging always stays available")
-                            .font(LifeOSFont.caption(10))
-                            .foregroundStyle(LifeOSTokens.tertiaryText)
-                    }
-                    Spacer()
-                    Text(photoStage.rawValue)
-                        .font(LifeOSFont.inter(10, weight: .semiBold))
-                        .foregroundStyle(photoStage == .confirmed ? LifeOSTokens.success : LifeOSTokens.warning)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
-                        .background((photoStage == .confirmed ? LifeOSTokens.success : LifeOSTokens.warning).opacity(0.12), in: Capsule())
-                }
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 118), spacing: 8)], spacing: 8) {
-                    ForEach(FitnessFoodCaptureMethod.allCases) { method in
-                        Button {
-                            onCapture(method)
-                        } label: {
-                            VStack(spacing: 6) {
-                                LifeOSIcon(method == .photo ? .image : method == .manual ? .add : .grocery).frame(width: 17, height: 17)
-                                Text(method == .barcode ? "Package" : method.rawValue.replacingOccurrences(of: " meal", with: ""))
-                                    .font(LifeOSFont.caption(10))
-                                    .multilineTextAlignment(.center)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                            .frame(maxWidth: .infinity, minHeight: 56)
-                            .foregroundStyle(method == .photo ? LifeOSTokens.accent : .primary)
-                            .background(LifeOSTokens.screenCanvas.opacity(0.66), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                            .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(method == .photo ? LifeOSTokens.accent.opacity(0.34) : LifeOSTokens.quietBorder, lineWidth: 0.75))
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                if photoStage == .needsConfirmation {
-                    Text(isDemo ? "Demo proposal shown below; it is not a measured result." : "Photo assistant is not connected. No image has left this device.")
-                        .font(LifeOSFont.caption(10))
-                        .foregroundStyle(LifeOSTokens.warning)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-        }
+    func matchesSelection(generation: Int, requestID: String) -> Bool {
+        selectionGeneration == generation && self.requestID == requestID
+    }
+
+    func canAdopt(
+        generation: Int,
+        requestID: String,
+        draftRevision: String
+    ) -> Bool {
+        matchesSelection(generation: generation, requestID: requestID)
+            && self.draftRevision == draftRevision
+    }
+}
+
+/// Small deterministic state seam for the photo proposal race. Replacing an
+/// active request invalidates its cleanup as well as its result, so a late
+/// completion cannot clear a newer request's loading state.
+struct FitnessFoodPhotoAnalysisCoordinator: Equatable, Sendable {
+    private(set) var selectionGeneration = 0
+    private(set) var activeRequest: FitnessFoodPhotoAnalysisRequest?
+
+    mutating func selectionChanged() {
+        selectionGeneration &+= 1
+        activeRequest = nil
+    }
+
+    mutating func invalidateAnalysis() {
+        activeRequest = nil
+    }
+
+    mutating func beginAnalysis(
+        requestID: String,
+        draftRevision: String
+    ) -> FitnessFoodPhotoAnalysisRequest {
+        let request = FitnessFoodPhotoAnalysisRequest(
+            selectionGeneration: selectionGeneration,
+            requestID: requestID,
+            draftRevision: draftRevision
+        )
+        activeRequest = request
+        return request
+    }
+
+    func canAdopt(
+        _ request: FitnessFoodPhotoAnalysisRequest,
+        currentRequestID: String,
+        currentDraftRevision: String
+    ) -> Bool {
+        activeRequest == request
+            && request.canAdopt(
+                generation: selectionGeneration,
+                requestID: currentRequestID,
+                draftRevision: currentDraftRevision
+            )
+    }
+
+    func ownsCleanup(
+        _ request: FitnessFoodPhotoAnalysisRequest,
+        currentRequestID: String,
+        currentDraftRevision: String
+    ) -> Bool {
+        activeRequest == request
+            && request.canAdopt(
+                generation: selectionGeneration,
+                requestID: currentRequestID,
+                draftRevision: currentDraftRevision
+            )
+    }
+
+    @discardableResult
+    mutating func finish(
+        _ request: FitnessFoodPhotoAnalysisRequest,
+        currentRequestID: String,
+        currentDraftRevision: String
+    ) -> Bool {
+        guard ownsCleanup(
+            request,
+            currentRequestID: currentRequestID,
+            currentDraftRevision: currentDraftRevision
+        ) else { return false }
+        activeRequest = nil
+        return true
     }
 }
 
@@ -2029,50 +2636,38 @@ private struct FitnessFoodReviewSheet: View {
     let isDemo: Bool
     let nutritionRecordStore: NutritionRecordStore
     let nutritionMealStore: NutritionMealStore?
-    /// When set, the manual entry form is pre-filled from this durable meal
-    /// and "Save meal" calls `NutritionMealStore.correct` instead of
-    /// `addConfirmed`.
-    let editingMeal: NutritionMeal?
+    @Binding var draft: FitnessNutritionDraft
+    let onDiscardDraft: () -> Void
+    let onKeepManualOnly: () -> Void
     let onBarcodeSaved: () -> Void
     let onMealSaved: () -> Void
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @FocusState private var focusedField: FitnessNutritionReviewField?
+    @State private var showingDismissPrompt = false
+    @State private var validationErrors: [FitnessNutritionReviewField: String] = [:]
+    @State private var pendingScrollField: FitnessNutritionReviewField?
     @StateObject private var photoPreparation = FoodPhotoPreparationCoordinator()
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
-    @State private var photoSelectionGeneration = 0
+    @State private var photoAnalysisCoordinator = FitnessFoodPhotoAnalysisCoordinator()
     @State private var photoLoadTask: Task<Void, Never>?
     @State private var photoProposalTask: Task<Void, Never>?
     @State private var photoProposal: FoodEstimateProposal?
+    @State private var photoProposalRequest: FitnessFoodPhotoAnalysisRequest?
     @State private var photoProposalLoading = false
     @State private var photoProposalError: String?
     @State private var photoConfirmationAcknowledged = false
     @State private var photoMealSaved = false
     @State private var photoMealID = "photo-meal-\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())"
     @State private var photoRequestID = "photo-request-\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())"
-    @State private var mealName = "Meal"
-    @State private var photoGrams = ""
-    @State private var calories = ""
-    @State private var protein = ""
-    @State private var carbohydrates = ""
-    @State private var fat = ""
     @State private var savedMessage: String?
     @State private var mealSaveError: String?
     @State private var mealSaving = false
-    @State private var mealSavedDurably = false
-    @State private var barcodeInput = ""
     @State private var barcodeLookup: NutritionBarcodeLookup?
     @State private var barcodeProposal: NutritionBarcodeProposal?
-    @State private var barcodeProductName = ""
-    @State private var barcodeCalories = ""
-    @State private var barcodeProtein = ""
-    @State private var barcodeCarbohydrates = ""
-    @State private var barcodeFat = ""
-    @State private var barcodeGrams = ""
-    @State private var barcodeValuesEdited = false
-    @State private var barcodeBasis: NutritionBarcodeBasis = .perServing
     @State private var barcodeLoading = false
     @State private var barcodeError: String?
     @State private var confirmedBarcodeRecord: NutritionRecord?
-    @State private var barcodeMealAt = ""
     @State private var barcodeSaving = false
     @State private var barcodeLookupTask: Task<Void, Never>?
     @State private var barcodeRequestGate = NutritionBarcodeRequestGate()
@@ -2082,148 +2677,132 @@ private struct FitnessFoodReviewSheet: View {
 #endif
     private let barcodeClient = TailscaleSyncClient()
 
+    private var reviewTitle: String {
+        switch method {
+        case .photo:
+            return isDemo ? "Photo proposal" : "Photo meal"
+        case .manual:
+            return draft.activeMeal == nil ? "New meal" : "Edit meal"
+        case .barcode:
+            return "Package meal"
+        case .recipe:
+            return "Recipe meal"
+        case .recent:
+            return "Recent meal"
+        }
+    }
+
+    private var reviewSubtitle: String {
+        switch method {
+        case .photo:
+            return isDemo ? "Fixture values for visual review" : "Review an estimate before saving it locally"
+        case .manual:
+            return "Record the meal and when it was logged"
+        case .barcode:
+            return "Review provider values before saving locally"
+        case .recipe, .recent:
+            return "Review the meal details before saving locally"
+        }
+    }
+
+    private var draftCalendar: Calendar {
+        var calendar = Calendar.autoupdatingCurrent
+        if let timeZone = TimeZone(identifier: draft.timeZoneIdentifier) {
+            calendar.timeZone = timeZone
+        }
+        return calendar
+    }
+
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    Text(method == .photo ? (isDemo ? "Demo photo proposal" : "Photo meal review") : method.rawValue)
-                        .font(LifeOSFont.headerLarge(22))
-                    if let action {
-                        disconnectedActionNotice(action)
-                    }
-                    if method == .photo {
-                        VStack(alignment: .leading, spacing: 7) {
-                            Text("Privacy and accuracy boundary")
-                                .font(LifeOSFont.header(14))
-                            Text(photoProposal == nil
-                                ? "Sanitized photos go device → private Windows LifeOS gateway → Google only after you consent and tap Analyze. Nothing has left this device yet."
-                                : "The gateway returned an assistive proposal. Review every item and portion before anything is saved locally.")
-                                .font(LifeOSFont.body(12))
+            ScrollViewReader { scrollProxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(reviewTitle)
+                                .lifeOSTypography(.sectionTitle)
+                            Text(reviewSubtitle)
+                                .lifeOSTypography(.metadata)
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
-                            Text(isDemo ? "DEMO PROPOSAL · fixture-only; no photo was uploaded" : (photoProposal == nil ? "READY FOR REVIEW · no photo has left this device" : "PROPOSAL ONLY · not a confirmed meal"))
-                                .font(LifeOSFont.caption(10))
-                                .foregroundStyle(LifeOSTokens.warning)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
-                        .padding(13)
-                        .background(LifeOSTokens.warning.opacity(0.08), in: LifeOSTokens.cardShape)
-                    }
-                    if method == .photo {
-                        photoPreparationCard
-                        photoProposalCard
-                        if isDemo {
-                            demoProposalFields
+                        if let action, method != .photo {
+                            disconnectedActionNotice(action)
                         }
-                    } else if method == .barcode {
-                        barcodeReviewFields
-                    } else {
-                        manualPreviewFields
-                    }
-                    if let savedMessage {
-                        Text(savedMessage).font(LifeOSFont.caption(11)).foregroundStyle(LifeOSTokens.success)
-                    }
-                    if let mealSaveError {
-                        Text(mealSaveError)
-                            .font(LifeOSFont.caption(11))
-                            .foregroundStyle(LifeOSTokens.warning)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .accessibilityIdentifier("nutrition-meal-save-error")
-                    }
-                    if method == .photo {
-                        Button("Close") { dismiss() }
-                            .buttonStyle(.bordered)
-                    } else if method == .barcode {
-                        HStack {
-                            Button("Cancel") { dismiss() }
-                                .buttonStyle(.bordered)
-                            Spacer()
-                            Button(savedMessage == nil ? ((confirmedBarcodeRecord == nil && barcodeError == nil) ? "Confirm and save locally" : "Retry local save") : "Saved locally") { confirmBarcodeProposal() }
-                                .buttonStyle(.borderedProminent)
-                                .tint(LifeOSTokens.accent)
-                                .disabled((barcodeProposal == nil && confirmedBarcodeRecord == nil) || !barcodeConfirmationIsCurrent || barcodeLoading || barcodeSaving || savedMessage != nil)
+                        if method == .photo {
+                            photoPrivacyStatus
                         }
-                    } else {
-                        VStack(spacing: 8) {
-                            HStack {
-                                Button("Keep manual only") {
-                                    stage = .manualEntry
-                                    dismiss()
-                                }
-                                .buttonStyle(.bordered)
-                                Spacer()
-                                Button("Apply local preview") {
-                                    stage = .edited
-                                    savedMessage = "Manual preview updated locally. Nothing was written to persistent storage."
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .tint(LifeOSTokens.accent)
+                        if method == .photo {
+                            photoPreparationCard
+                            photoProposalCard
+                            if isDemo {
+                                demoProposalFields
                             }
-                            HStack {
-                                Spacer()
-                                Button(mealSaving ? "Saving…" : (mealSavedDurably ? "Saved" : (editingMeal == nil ? "Save meal" : "Confirm changes"))) {
-                                    saveMealDurably()
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .tint(LifeOSTokens.success)
-                                .disabled(mealSaving || mealSavedDurably || nutritionMealStore == nil)
-                                .accessibilityIdentifier("nutrition-meal-save")
-                            }
-                            if nutritionMealStore == nil {
-                                Text("Local meal storage is unavailable. Nothing can be saved right now.")
-                                    .font(LifeOSFont.caption(10))
-                                    .foregroundStyle(LifeOSTokens.warning)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            } else {
-                                Text("\"Save meal\" writes this entry to durable local storage; the other buttons above remain in-memory only.")
-                                    .font(LifeOSFont.caption(9))
-                                    .foregroundStyle(LifeOSTokens.tertiaryText)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
+                        } else if method == .barcode {
+                            barcodeReviewFields
+                        } else {
+                            manualPreviewFields
                         }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 20)
+                    .padding(.bottom, 16)
+                }
+                .scrollIndicators(.hidden)
+#if os(iOS)
+                .scrollDismissesKeyboard(.interactively)
+#endif
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    sheetFooter
+                }
+                .onChange(of: pendingScrollField) { _, field in
+                    guard let field else { return }
+                    scrollProxy.scrollTo(field.id, anchor: .center)
+                    pendingScrollField = nil
+                }
+                .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
+#if os(iOS)
+                .navigationBarTitleDisplayMode(.inline)
+#endif
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Close") { requestDismissal() }
                     }
                 }
-                .padding(16)
             }
-            .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
-            .navigationTitle("Review")
+        }
+        .interactiveDismissDisabled(draft.isDirty)
 #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
+        .background(
+            FitnessNutritionDismissBridge(
+                isDirty: draft.isDirty,
+                onAttempt: requestDismissal
+            )
+            .frame(width: 0, height: 0)
+        )
 #endif
+        .confirmationDialog("Unsaved meal draft", isPresented: $showingDismissPrompt) {
+            Button("Discard changes", role: .destructive) { onDiscardDraft() }
+            Button("Keep editing", role: .cancel) { }
+        } message: {
+            Text("Your edits are still in this draft. Keep editing to stay here, or discard them explicitly.")
         }
-        .onAppear {
-            if isDemo && method == .photo {
-                mealName = "Photo proposal · needs review"
-                calories = "760"
-                protein = "51"
-                carbohydrates = "74"
-                fat = "30"
-            }
-            if let editingMeal {
-                mealName = editingMeal.name
-                calories = editingMeal.kcal.map(String.init) ?? ""
-                protein = editingMeal.proteinGrams.map(String.init) ?? ""
-                carbohydrates = editingMeal.carbGrams.map(String.init) ?? ""
-                fat = editingMeal.fatGrams.map(String.init) ?? ""
-            }
-            if method == .barcode, barcodeMealAt.isEmpty { barcodeMealAt = ISO8601DateFormatter().string(from: .now) }
-        }
+        .onAppear { prepareDraftForPresentation() }
+#if os(macOS)
+        .onExitCommand { requestDismissal() }
+#endif
         .onDisappear {
 #if os(iOS)
             barcodeScanner.stop()
 #endif
             cancelBarcodeLookup()
-            photoSelectionGeneration &+= 1
+            invalidatePhotoAnalysis(forSelectionChange: true)
             photoLoadTask?.cancel()
             photoLoadTask = nil
-            photoProposalTask?.cancel()
-            photoProposalTask = nil
-            photoProposal = nil
-            photoProposalError = nil
-            photoProposalLoading = false
-            photoConfirmationAcknowledged = false
             photoPreparation.clear()
             selectedPhotoItems.removeAll()
         }
-        .onChange(of: barcodeInput) { _, newValue in
+        .onChange(of: draft.barcodeInput) { _, newValue in
             guard barcodeRequestGate.invalidateIfVisibleInputChanged(newValue) else { return }
             barcodeLookupTask?.cancel()
             barcodeLookupTask = nil
@@ -2233,16 +2812,430 @@ private struct FitnessFoodReviewSheet: View {
             barcodeProposalToken = nil
             confirmedBarcodeRecord = nil
             barcodeError = nil
-            barcodeValuesEdited = false
+            draft.barcodeValuesEdited = false
         }
+        .onChange(of: draft.fingerprint) { _, newRevision in
+            if method == .photo {
+                if let request = photoAnalysisCoordinator.activeRequest,
+                   request.draftRevision != newRevision {
+                    invalidatePhotoAnalysis()
+                }
+                return
+            }
+            draft.previewMeal = nil
+            savedMessage = nil
+            mealSaveError = nil
+            if stage == .confirmed { stage = .edited }
+        }
+    }
+
+    private var mealSavedDurably: Bool {
+        draft.isDurablyCurrent
+    }
+
+    private var photoProposalIsCurrent: Bool {
+        guard let request = photoProposalRequest else { return false }
+        return request.matchesSelection(
+            generation: photoAnalysisCoordinator.selectionGeneration,
+            requestID: photoRequestID
+        )
+    }
+
+    private func makePhotoRequestID() -> String {
+        "photo-request-\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())"
+    }
+
+    private func invalidatePhotoAnalysis(forSelectionChange: Bool = false) {
+        if forSelectionChange {
+            photoAnalysisCoordinator.selectionChanged()
+            photoRequestID = makePhotoRequestID()
+        } else {
+            photoAnalysisCoordinator.invalidateAnalysis()
+        }
+        photoProposalTask?.cancel()
+        photoProposalTask = nil
+        photoProposal = nil
+        photoProposalRequest = nil
+        photoProposalError = nil
+        photoProposalLoading = false
+        photoConfirmationAcknowledged = false
+    }
+
+    private func reviewTextBinding(for field: FitnessNutritionReviewField) -> Binding<String> {
+        Binding(
+            get: {
+                switch field {
+                case .mealName: return draft.mealName
+                case .loggedAt: return ""
+                case .calories: return draft.calories
+                case .protein: return draft.protein
+                case .carbohydrates: return draft.carbohydrates
+                case .fat: return draft.fat
+                }
+            },
+            set: { value in
+                switch field {
+                case .mealName: draft.mealName = value
+                case .loggedAt: break
+                case .calories: draft.calories = value
+                case .protein: draft.protein = value
+                case .carbohydrates: draft.carbohydrates = value
+                case .fat: draft.fat = value
+                }
+                clearReviewFeedback(for: field)
+            }
+        )
+    }
+
+    private func clearReviewFeedback(for field: FitnessNutritionReviewField) {
+        validationErrors[field] = nil
+        savedMessage = nil
+        mealSaveError = nil
+    }
+
+    private func reviewValidationErrors() -> [FitnessNutritionReviewField: String] {
+        var errors: [FitnessNutritionReviewField: String] = [:]
+        let trimmedName = draft.mealName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedName.isEmpty {
+            errors[.mealName] = "Enter a meal name."
+        } else if trimmedName.utf16.count > 200 {
+            errors[.mealName] = "Use 200 characters or fewer."
+        }
+
+        if !draft.loggedAt.timeIntervalSinceReferenceDate.isFinite {
+            errors[.loggedAt] = "Choose a valid date and time."
+        }
+
+        let numericFields: [(FitnessNutritionReviewField, String, Double)] = [
+            (.calories, draft.calories, 5_000),
+            (.protein, draft.protein, 2_000),
+            (.carbohydrates, draft.carbohydrates, 2_000),
+            (.fat, draft.fat, 2_000)
+        ]
+        for (field, rawValue, maximum) in numericFields {
+            let trimmedValue = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedValue.isEmpty,
+                  NutritionBarcodeValueParser.parse(trimmedValue, maximum: maximum) == nil else { continue }
+            errors[field] = "Enter 0–\(maximum.formatted(.number)); commas and dots are supported."
+        }
+
+        return errors
+    }
+
+    private var hasUnmappedReviewValidationError: Bool {
+        let portion = draft.portionGrams.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !portion.isEmpty
+            && NutritionBarcodeValueParser.parse(portion, maximum: 1_000_000) == nil
+    }
+
+    @discardableResult
+    private func validateManualReview() -> Bool {
+        let errors = reviewValidationErrors()
+        validationErrors = errors
+        guard errors.isEmpty, !hasUnmappedReviewValidationError else {
+            savedMessage = nil
+            mealSaveError = "Review the highlighted fields before saving."
+            if let firstInvalid = FitnessNutritionReviewField.allCases.first(where: { errors[$0] != nil }) {
+                focusedField = firstInvalid
+                pendingScrollField = firstInvalid
+            }
+            return false
+        }
+        return true
+    }
+
+    private func advanceFocus(after field: FitnessNutritionReviewField) {
+        if let next = field.next {
+            focusedField = next
+            pendingScrollField = next
+        } else {
+            focusedField = nil
+        }
+    }
+
+    private func keepManualOnly() {
+        invalidatePhotoAnalysis(forSelectionChange: true)
+        photoLoadTask?.cancel()
+        photoLoadTask = nil
+        photoPreparation.clear()
+        selectedPhotoItems.removeAll()
+        stage = .manualEntry
+        onKeepManualOnly()
+    }
+
+    private var photoPrivacyStatus: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: photoProposal == nil ? "lock.shield" : "checkmark.shield")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(photoProposal == nil ? LifeOSTokens.accent : LifeOSTokens.success)
+                .frame(width: 20, height: 20)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(photoPrivacyStatusTitle)
+                    .lifeOSTypography(.label)
+                Text(photoPrivacyStatusDetail)
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(LifeOSTokens.raised, in: LifeOSTokens.cardShape)
+        .overlay(LifeOSTokens.cardShape.stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("food-photo-privacy-status")
+    }
+
+    private var photoPrivacyStatusTitle: String {
+        if isDemo { return "Demo proposal · no photo was uploaded" }
+        if photoProposal != nil { return "Proposal ready · review before saving" }
+        if action == .camera { return "Camera capture is unavailable" }
+        return "Photos stay private until you analyze them"
+    }
+
+    private var photoPrivacyStatusDetail: String {
+        if isDemo {
+            return "The fixture is editable for review; it is not a photo result."
+        }
+        if photoProposal != nil {
+            return "The estimate is assistive. Edit the values and confirm them explicitly before a local meal is written."
+        }
+        if action == .camera {
+            return "Camera capture is not connected in this build. Choose photos below instead."
+        }
+        return "Nothing leaves this device until you consent below and tap Analyze. Analysis returns a proposal, never a confirmed meal."
+    }
+
+    private func prepareDraftForPresentation() {
+        if isDemo && method == .photo && draft.mealName == "Meal" {
+            draft.mealName = "Photo proposal · needs review"
+            draft.calories = "760"
+            draft.protein = "51"
+            draft.carbohydrates = "74"
+            draft.fat = "30"
+        }
+        if method == .barcode, draft.barcodeMealAt.isEmpty {
+            draft.barcodeMealAt = ISO8601DateFormatter().string(from: draft.loggedAt)
+        }
+    }
+
+    @ViewBuilder
+    private var sheetFooter: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let savedMessage {
+                Text(savedMessage)
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.success)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let mealSaveError {
+                Text(mealSaveError)
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.warning)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("nutrition-meal-save-error")
+            }
+            if method == .photo {
+                Text(photoSaveExplanation)
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                photoFooterActions
+            } else if method == .barcode {
+                barcodeFooterActions
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 10) {
+                        draftDiscardButton
+                        Spacer(minLength: 0)
+                        applyPreviewButton
+                        saveMealButton
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 10) {
+                            draftDiscardButton
+                            Spacer(minLength: 0)
+                            applyPreviewButton
+                        }
+                        saveMealButton
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                Text(nutritionMealStore == nil
+                    ? "Local meal storage is unavailable. Nothing can be saved."
+                    : "Save meal stores the edited values and local timestamp on this device.")
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(nutritionMealStore == nil ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 10)
+        .padding(.bottom, 12)
+        .background(LifeOSTokens.surface.opacity(0.98))
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(LifeOSTokens.quietBorder)
+                .frame(height: 0.75)
+        }
+    }
+
+    @ViewBuilder
+    private var photoFooterActions: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) {
+                Button("Close") { requestDismissal() }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(LifeOSTokens.accent)
+                Button("Keep manual only") { keepManualOnly() }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(LifeOSTokens.accent)
+                Spacer(minLength: 0)
+                if photoProposalIsCurrent {
+                    photoConfirmButton
+                }
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 10) {
+                    Button("Close") { requestDismissal() }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(LifeOSTokens.accent)
+                    Button("Keep manual only") { keepManualOnly() }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(LifeOSTokens.accent)
+                }
+                if photoProposalIsCurrent {
+                    photoConfirmButton
+                        .frame(maxWidth: .infinity)
+                }
+            }
+        }
+    }
+
+    private var barcodeFooterActions: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) {
+                barcodeDiscardButton
+                barcodeKeepEditingButton
+                Spacer(minLength: 0)
+                barcodeSaveButton
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 10) {
+                    barcodeDiscardButton
+                    barcodeKeepEditingButton
+                }
+                barcodeSaveButton
+                    .frame(maxWidth: .infinity)
+            }
+        }
+    }
+
+    private var barcodeDiscardButton: some View {
+        Button("Discard", role: .destructive) { onDiscardDraft() }
+            .buttonStyle(.plain)
+            .foregroundStyle(LifeOSTokens.danger)
+    }
+
+    private var barcodeKeepEditingButton: some View {
+        Button("Keep editing") { showingDismissPrompt = false }
+            .buttonStyle(.plain)
+            .foregroundStyle(LifeOSTokens.accent)
+    }
+
+    private var barcodeSaveButton: some View {
+        Button(
+            savedMessage == nil
+                ? ((confirmedBarcodeRecord == nil && barcodeError == nil) ? "Confirm and save locally" : "Retry local save")
+                : "Saved locally"
+        ) {
+            confirmBarcodeProposal()
+        }
+        .buttonStyle(LifeOSButtonStyle(.primary))
+        .disabled((barcodeProposal == nil && confirmedBarcodeRecord == nil) || !barcodeConfirmationIsCurrent || barcodeLoading || barcodeSaving || savedMessage != nil)
+    }
+
+    private var draftDiscardButton: some View {
+        Button("Discard", role: .destructive) {
+            onDiscardDraft()
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(LifeOSTokens.danger)
+    }
+
+    private var applyPreviewButton: some View {
+        Button("Apply local preview") {
+            guard validateManualReview() else { return }
+            do {
+                _ = try draft.applyLocalPreview()
+                stage = .edited
+                savedMessage = "Preview updated. Not saved."
+                mealSaveError = nil
+            } catch {
+                mealSaveError = nutritionDraftErrorMessage(error)
+            }
+        }
+        .buttonStyle(LifeOSButtonStyle(.secondary))
+    }
+
+    private var saveMealButton: some View {
+        Button(mealSaving ? "Saving…" : (mealSavedDurably ? "Saved locally" : "Save meal")) {
+            saveMealDurably()
+        }
+        .buttonStyle(LifeOSButtonStyle(.primary))
+        .disabled(mealSaving || mealSavedDurably || nutritionMealStore == nil)
+        .accessibilityIdentifier("nutrition-meal-save")
+    }
+
+    private var photoSaveExplanation: String {
+        guard photoProposal != nil else {
+            return "Analyze a photo before confirming a meal."
+        }
+        return "Confirming stores only the reviewed values and source lineage locally; sanitized photo bytes are cleared after save."
+    }
+
+    private func previewSummary(_ meal: NutritionMeal) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Preview applied · not saved")
+                .lifeOSTypography(.label, weight: .semibold)
+                .foregroundStyle(LifeOSTokens.Series.estimate)
+            Text("\(meal.name) · \(meal.kcal.map(String.init) ?? "—") kcal · \(meal.loggedAt.fitnessDayLabel)")
+                .lifeOSTypography(.metadata)
+                .foregroundStyle(LifeOSTokens.tertiaryText)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(LifeOSTokens.Series.estimate.opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("In-memory preview applied")
+        .accessibilityValue("\(meal.name), \(meal.kcal.map(String.init) ?? "calories unavailable") kilocalories, \(meal.loggedAt.fitnessDayLabel)")
+    }
+
+    private func requestDismissal() {
+        invalidatePhotoAnalysis(forSelectionChange: true)
+        if draft.isDirty {
+            showingDismissPrompt = true
+        } else {
+            dismiss()
+        }
+    }
+
+    private var photoConfirmButton: some View {
+        Button(photoMealSaved ? "Saved locally" : "Review & confirm meal locally") {
+            confirmPhotoProposal()
+        }
+        .buttonStyle(LifeOSButtonStyle(.primary))
+        .disabled(photoMealSaved || nutritionMealStore == nil || photoProposalLoading || !photoProposalIsCurrent || !photoConfirmationAcknowledged)
+        .accessibilityIdentifier("food-photo-confirm")
     }
 
     private func disconnectedActionNotice(_ action: FitnessNutritionCaptureAction) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(action.title)
-                .font(LifeOSFont.header(13))
+                .lifeOSTypography(.sectionTitle)
             Text(action.detail)
-                .font(LifeOSFont.caption(10))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.warning)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -2259,16 +3252,16 @@ private struct FitnessFoodReviewSheet: View {
         FitnessCard {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Open Food Facts proposal")
-                    .font(LifeOSFont.header(14))
+                    .lifeOSTypography(.sectionTitle)
                 Text("Manual entry is always available. On iPhone, the permission-gated camera scanner captures one checksum-validated code; the Windows LifeOS gateway then performs the bounded read-only lookup.")
-                    .font(LifeOSFont.caption(10))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                     .fixedSize(horizontal: false, vertical: true)
 #if os(iOS)
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         Text("Camera scanner")
-                            .font(LifeOSFont.header(12))
+                            .lifeOSTypography(.sectionTitle)
                         Spacer()
                         Button(barcodeScanner.state == .scanning ? "Stop camera" : "Scan barcode") {
                             if barcodeScanner.state == .scanning { barcodeScanner.stop() }
@@ -2278,7 +3271,7 @@ private struct FitnessFoodReviewSheet: View {
                         .disabled(barcodeScanner.state == .denied || barcodeScanner.state == .unavailable)
                     }
                     Text(barcodeScannerStatus)
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(barcodeScanner.state == .denied || barcodeScanner.state == .unavailable ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)
                     if barcodeScanner.state == .scanning {
                         NutritionBarcodeCameraPreview(coordinator: barcodeScanner)
@@ -2291,7 +3284,7 @@ private struct FitnessFoodReviewSheet: View {
                 .background(LifeOSTokens.screenCanvas, in: LifeOSTokens.cardShape)
 #endif
                 HStack(spacing: 8) {
-                    TextField("EAN-8, EAN-13, or UPC-A", text: $barcodeInput)
+                    TextField("EAN-8, EAN-13, or UPC-A", text: $draft.barcodeInput)
                         .textFieldStyle(.roundedBorder)
 #if os(iOS)
                         .keyboardType(.numberPad)
@@ -2300,21 +3293,20 @@ private struct FitnessFoodReviewSheet: View {
                     Button(barcodeLoading ? "Looking up…" : "Look up") {
                         startBarcodeLookup()
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(LifeOSTokens.accent)
-                    .disabled(barcodeLoading || NutritionBarcodeNormalizer.normalize(barcodeInput) == nil)
+                    .buttonStyle(LifeOSButtonStyle(.secondary))
+                    .disabled(barcodeLoading || NutritionBarcodeNormalizer.normalize(draft.barcodeInput) == nil)
                     .accessibilityIdentifier("nutrition-barcode-lookup")
                 }
                 if let barcodeError {
                     Text(barcodeError)
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.warning)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityIdentifier("nutrition-barcode-error")
                 }
                 if barcodeLoading {
                     ProgressView("Loading product proposal…")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .accessibilityIdentifier("nutrition-barcode-loading")
                 }
                 if let barcodeLookup {
@@ -2329,74 +3321,76 @@ private struct FitnessFoodReviewSheet: View {
         switch lookup {
         case .notFound(let barcode, _):
             Text("No product was found for \(barcode). Nothing was inferred or saved.")
-                .font(LifeOSFont.caption(10))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.warning)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("nutrition-barcode-not-found")
         case .unavailable(_, let reason, let retryAfterSeconds, _):
             let retryText = retryAfterSeconds.map { " Retry in \($0)s." } ?? ""
             Text("Lookup unavailable (\(reason.rawValue)).\(retryText) No product values are available.")
-                .font(LifeOSFont.caption(10))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.warning)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("nutrition-barcode-unavailable")
         case .found(let found):
             VStack(alignment: .leading, spacing: 8) {
                 Text(found.nutritionState == .unreliable ? "Proposal · provider quality warning" : "Editable proposal")
-                    .font(LifeOSFont.header(13))
+                    .lifeOSTypography(.sectionTitle)
                     .foregroundStyle(found.nutritionState == .unreliable ? LifeOSTokens.warning : .primary)
                 if found.nutritionState == .unreliable {
                     Text("Open Food Facts marked this product data as unreliable. Review every field before confirming.")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.warning)
                         .fixedSize(horizontal: false, vertical: true)
                 } else if found.nutritionState == .partial {
                     Text("Some provider nutrients are missing. Missing values remain blank; LifeOS does not infer them.")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.warning)
                         .fixedSize(horizontal: false, vertical: true)
                 } else if found.nutritionState == .unavailable {
                     Text("The product was found, but no valid kcal/macronutrient values were supplied.")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.warning)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                Picker("Provider basis", selection: $barcodeBasis) {
+                Picker("Provider basis", selection: $draft.barcodeBasis) {
                     if found.per100g != nil { Text("Per 100 g").tag(NutritionBarcodeBasis.per100g) }
                     if found.perServing != nil { Text("Per serving").tag(NutritionBarcodeBasis.perServing) }
                 }
                 .pickerStyle(.segmented)
-                .onChange(of: barcodeBasis) { _, basis in applyBarcodeBasis(basis, found: found) }
+                .onChange(of: draft.barcodeBasis) { _, basis in applyBarcodeBasis(basis, found: found) }
                 .accessibilityIdentifier("nutrition-barcode-basis")
-                FitnessEditableField(title: "Product name", text: $barcodeProductName)
+                FitnessEditableField(title: "Product name", text: $draft.barcodeProductName)
                 FitnessEditableField(
-                    title: barcodeBasis == .per100g ? "Grams eaten (required)" : "Grams (optional)",
-                    text: $barcodeGrams,
+                    title: draft.barcodeBasis == .per100g ? "Grams eaten (required)" : "Grams (optional)",
+                    text: $draft.barcodeGrams,
                     numeric: true
                 )
-                    .onChange(of: barcodeGrams) { _, _ in
-                        applyBarcodeBasis(barcodeBasis, found: found)
+                    .onChange(of: draft.barcodeGrams) { _, _ in
+                        applyBarcodeBasis(draft.barcodeBasis, found: found)
                     }
-                Text(barcodeBasis == .per100g
+                Text(draft.barcodeBasis == .per100g
                     ? "Enter the grams you ate; the kcal and macros below scale from the provider's per-100-g values."
                     : "Grams are recorded as eaten amount. Per-serving values are not scaled unless the provider supplies a serving-weight conversion.")
-                    .font(LifeOSFont.caption(9))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("nutrition-barcode-grams-help")
-                FitnessEditableField(title: "Calories (kcal)", text: barcodeCaloriesBinding, numeric: true)
-                FitnessEditableField(title: "Protein (g)", text: barcodeProteinBinding, numeric: true)
-                FitnessEditableField(title: "Carbohydrates (g)", text: barcodeCarbohydratesBinding, numeric: true)
-                FitnessEditableField(title: "Fat (g)", text: barcodeFatBinding, numeric: true)
-                Text(barcodeValuesEdited
+                FitnessNutritionFormGrid(spacing: 16, forceSingleColumn: dynamicTypeSize.isAccessibilitySize) {
+                    FitnessEditableField(title: "Calories (kcal)", text: barcodeCaloriesBinding, numeric: true)
+                    FitnessEditableField(title: "Protein (g)", text: barcodeProteinBinding, numeric: true)
+                    FitnessEditableField(title: "Carbohydrates (g)", text: barcodeCarbohydratesBinding, numeric: true)
+                    FitnessEditableField(title: "Fat (g)", text: barcodeFatBinding, numeric: true)
+                }
+                Text(draft.barcodeValuesEdited
                     ? "Edited values will be saved exactly as entered after validation."
                     : "Provider values are scaled from the selected basis and grams when you confirm.")
-                    .font(LifeOSFont.caption(9))
-                    .foregroundStyle(barcodeValuesEdited ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(draft.barcodeValuesEdited ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("nutrition-barcode-edit-state")
                 Text("Source: Open Food Facts · ODbL-1.0 database / DbCL-1.0 contents. Volunteer-sourced data is not guaranteed accurate, complete, or reliable.")
-                    .font(LifeOSFont.caption(9))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("nutrition-barcode-provenance")
@@ -2405,7 +3399,7 @@ private struct FitnessFoodReviewSheet: View {
     }
 
     private func startBarcodeLookup() {
-        guard let normalized = NutritionBarcodeNormalizer.normalize(barcodeInput) else {
+        guard let normalized = NutritionBarcodeNormalizer.normalize(draft.barcodeInput) else {
             cancelBarcodeLookup()
             barcodeError = "Enter a checksum-valid EAN-8, EAN-13, or UPC-A barcode."
             barcodeLookup = nil
@@ -2416,7 +3410,7 @@ private struct FitnessFoodReviewSheet: View {
         barcodeLookupTask?.cancel()
         barcodeLookupTask = nil
         guard let request = barcodeRequestGate.begin(rawInput: normalized) else { return }
-        barcodeInput = normalized
+        draft.barcodeInput = normalized
         barcodeError = nil
         barcodeLookup = nil
         barcodeProposal = nil
@@ -2427,19 +3421,19 @@ private struct FitnessFoodReviewSheet: View {
             do {
                 let lookup = try await barcodeClient.fetchNutritionBarcode(normalized)
                 guard !Task.isCancelled,
-                      barcodeRequestGate.accepts(request, visibleInput: barcodeInput) else { return }
+                      barcodeRequestGate.accepts(request, visibleInput: draft.barcodeInput) else { return }
                 barcodeLoading = false
                 barcodeLookupTask = nil
                 applyBarcodeLookup(lookup, token: request)
             } catch let error as TailscaleSyncError {
                 guard !Task.isCancelled,
-                      barcodeRequestGate.accepts(request, visibleInput: barcodeInput) else { return }
+                      barcodeRequestGate.accepts(request, visibleInput: draft.barcodeInput) else { return }
                 barcodeLoading = false
                 barcodeLookupTask = nil
                 barcodeError = barcodeErrorMessage(error)
             } catch {
                 guard !Task.isCancelled,
-                      barcodeRequestGate.accepts(request, visibleInput: barcodeInput) else { return }
+                      barcodeRequestGate.accepts(request, visibleInput: draft.barcodeInput) else { return }
                 barcodeLoading = false
                 barcodeLookupTask = nil
                 barcodeError = "Barcode lookup returned an invalid response. No values are available."
@@ -2470,7 +3464,7 @@ private struct FitnessFoodReviewSheet: View {
     private func startBarcodeCamera() {
         barcodeError = nil
         barcodeScanner.start { captured in
-            barcodeInput = captured
+            draft.barcodeInput = captured
             startBarcodeLookup()
         }
     }
@@ -2487,20 +3481,20 @@ private struct FitnessFoodReviewSheet: View {
             let proposal = try NutritionBarcodeProposal(proposalID: "barcode-\(found.barcode)", lookup: lookup)
             barcodeProposal = proposal
             barcodeProposalToken = token
-            barcodeProductName = found.product.name ?? ""
+            draft.barcodeProductName = found.product.name ?? ""
             if let values = found.perServing {
-                barcodeBasis = .perServing
+                draft.barcodeBasis = .perServing
                 applyBarcodeValues(values)
             } else if let values = found.per100g {
-                barcodeBasis = .per100g
+                draft.barcodeBasis = .per100g
                 applyBarcodeValues(values)
             } else {
-                barcodeBasis = .perServing
-                barcodeCalories = ""
-                barcodeProtein = ""
-                barcodeCarbohydrates = ""
-                barcodeFat = ""
-                barcodeValuesEdited = false
+                draft.barcodeBasis = .perServing
+                draft.barcodeCalories = ""
+                draft.barcodeProtein = ""
+                draft.barcodeCarbohydrates = ""
+                draft.barcodeFat = ""
+                draft.barcodeValuesEdited = false
             }
         } catch {
             barcodeProposal = nil
@@ -2512,25 +3506,25 @@ private struct FitnessFoodReviewSheet: View {
     private func applyBarcodeValues(_ values: NutritionBarcodeMacros) {
         let displayedValues: NutritionBarcodeMacros
         if let proposal = barcodeProposal,
-           let grams = NutritionBarcodeValueParser.parse(barcodeGrams, maximum: 5_000),
+           let grams = NutritionBarcodeValueParser.parse(draft.barcodeGrams, maximum: 5_000),
            let canonical = try? NutritionBarcodeFlow.canonicalValues(
                for: proposal,
-               basis: barcodeBasis,
+               basis: draft.barcodeBasis,
                grams: grams
            ) {
             displayedValues = canonical
-        } else if barcodeBasis == .per100g,
-                  let grams = NutritionBarcodeValueParser.parse(barcodeGrams, maximum: 5_000),
+        } else if draft.barcodeBasis == .per100g,
+                  let grams = NutritionBarcodeValueParser.parse(draft.barcodeGrams, maximum: 5_000),
                   let scaled = try? values.scaledFromPer100g(forGrams: grams) {
             displayedValues = scaled
         } else {
             displayedValues = values
         }
-        barcodeCalories = displayedValues.kcal.map(formatNutritionValue) ?? ""
-        barcodeProtein = displayedValues.proteinGrams.map(formatNutritionValue) ?? ""
-        barcodeCarbohydrates = displayedValues.carbsGrams.map(formatNutritionValue) ?? ""
-        barcodeFat = displayedValues.fatGrams.map(formatNutritionValue) ?? ""
-        barcodeValuesEdited = false
+        draft.barcodeCalories = displayedValues.kcal.map(formatNutritionValue) ?? ""
+        draft.barcodeProtein = displayedValues.proteinGrams.map(formatNutritionValue) ?? ""
+        draft.barcodeCarbohydrates = displayedValues.carbsGrams.map(formatNutritionValue) ?? ""
+        draft.barcodeFat = displayedValues.fatGrams.map(formatNutritionValue) ?? ""
+        draft.barcodeValuesEdited = false
     }
 
     private func applyBarcodeBasis(_ basis: NutritionBarcodeBasis, found: NutritionBarcodeFound) {
@@ -2545,7 +3539,7 @@ private struct FitnessFoodReviewSheet: View {
     private func confirmBarcodeProposal() {
         guard let barcodeProposal,
               let barcodeProposalToken,
-              barcodeRequestGate.accepts(barcodeProposalToken, visibleInput: barcodeInput),
+              barcodeRequestGate.accepts(barcodeProposalToken, visibleInput: draft.barcodeInput),
               barcodeProposal.barcode == barcodeProposalToken.barcode else {
             barcodeError = "The barcode input changed. Look up the current barcode before confirming."
             return
@@ -2554,11 +3548,11 @@ private struct FitnessFoodReviewSheet: View {
             saveBarcodeRecord(confirmedBarcodeRecord)
             return
         }
-        let kcal = NutritionBarcodeValueParser.parse(barcodeCalories, maximum: 5_000)
-        let proteinGrams = NutritionBarcodeValueParser.parse(barcodeProtein, maximum: 2_000)
-        let carbsGrams = NutritionBarcodeValueParser.parse(barcodeCarbohydrates, maximum: 2_000)
-        let fatGrams = NutritionBarcodeValueParser.parse(barcodeFat, maximum: 2_000)
-        let nutritionInputs = [barcodeCalories, barcodeProtein, barcodeCarbohydrates, barcodeFat]
+        let kcal = NutritionBarcodeValueParser.parse(draft.barcodeCalories, maximum: 5_000)
+        let proteinGrams = NutritionBarcodeValueParser.parse(draft.barcodeProtein, maximum: 2_000)
+        let carbsGrams = NutritionBarcodeValueParser.parse(draft.barcodeCarbohydrates, maximum: 2_000)
+        let fatGrams = NutritionBarcodeValueParser.parse(draft.barcodeFat, maximum: 2_000)
+        let nutritionInputs = [draft.barcodeCalories, draft.barcodeProtein, draft.barcodeCarbohydrates, draft.barcodeFat]
         let nutritionValues = [kcal, proteinGrams, carbsGrams, fatGrams]
         guard zip(nutritionInputs, nutritionValues).allSatisfy({ raw, value in
             raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || value != nil
@@ -2570,25 +3564,25 @@ private struct FitnessFoodReviewSheet: View {
             barcodeError = "Enter at least one kcal or macronutrient value before confirming."
             return
         }
-        let grams = NutritionBarcodeValueParser.parse(barcodeGrams, maximum: 5_000)
-        if !barcodeGrams.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && grams == nil {
+        let grams = NutritionBarcodeValueParser.parse(draft.barcodeGrams, maximum: 5_000)
+        if !draft.barcodeGrams.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && grams == nil {
             barcodeError = "Enter a valid non-negative grams value (comma or dot decimals; up to 3 decimal places)."
             return
         }
-        guard barcodeBasis != .per100g || grams != nil else {
+        guard draft.barcodeBasis != .per100g || grams != nil else {
             barcodeError = "Enter how many grams you ate before confirming per-100-g nutrition."
             return
         }
         let confirmation = NutritionBarcodeConfirmation(
             proposalID: barcodeProposal.proposalID,
             barcode: barcodeProposal.barcode,
-            basis: barcodeBasis,
-            mealAt: barcodeMealAt,
-            productName: barcodeProductName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : barcodeProductName,
+            basis: draft.barcodeBasis,
+            mealAt: draft.barcodeMealAt,
+            productName: draft.barcodeProductName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : draft.barcodeProductName,
             grams: grams, kcal: kcal, proteinGrams: proteinGrams,
             carbsGrams: carbsGrams, fatGrams: fatGrams,
             confirmedAt: ISO8601DateFormatter().string(from: .now),
-            valuesAreEdited: barcodeValuesEdited
+            valuesAreEdited: draft.barcodeValuesEdited
         )
         do {
             let record = try NutritionBarcodeFlow.confirm(confirmation, for: barcodeProposal)
@@ -2606,7 +3600,7 @@ private struct FitnessFoodReviewSheet: View {
         guard let barcodeProposal,
               let barcodeProposalToken else { return false }
         return barcodeProposal.barcode == barcodeProposalToken.barcode
-            && barcodeRequestGate.accepts(barcodeProposalToken, visibleInput: barcodeInput)
+            && barcodeRequestGate.accepts(barcodeProposalToken, visibleInput: draft.barcodeInput)
     }
 
     private func saveBarcodeRecord(_ record: NutritionRecord) {
@@ -2619,7 +3613,7 @@ private struct FitnessFoodReviewSheet: View {
                 await MainActor.run {
                     barcodeSaving = false
                     stage = .confirmed
-                    savedMessage = "Saved locally · Open Food Facts provenance retained · sync pending."
+                    savedMessage = "Saved locally"
                     onBarcodeSaved()
                 }
             } catch {
@@ -2641,40 +3635,40 @@ private struct FitnessFoodReviewSheet: View {
     // exact per-100-g scaling without discarding an intentional correction.
     private var barcodeCaloriesBinding: Binding<String> {
         Binding(
-            get: { barcodeCalories },
+            get: { draft.barcodeCalories },
             set: {
-                barcodeCalories = $0
-                barcodeValuesEdited = true
+                draft.barcodeCalories = $0
+                draft.barcodeValuesEdited = true
             }
         )
     }
 
     private var barcodeProteinBinding: Binding<String> {
         Binding(
-            get: { barcodeProtein },
+            get: { draft.barcodeProtein },
             set: {
-                barcodeProtein = $0
-                barcodeValuesEdited = true
+                draft.barcodeProtein = $0
+                draft.barcodeValuesEdited = true
             }
         )
     }
 
     private var barcodeCarbohydratesBinding: Binding<String> {
         Binding(
-            get: { barcodeCarbohydrates },
+            get: { draft.barcodeCarbohydrates },
             set: {
-                barcodeCarbohydrates = $0
-                barcodeValuesEdited = true
+                draft.barcodeCarbohydrates = $0
+                draft.barcodeValuesEdited = true
             }
         )
     }
 
     private var barcodeFatBinding: Binding<String> {
         Binding(
-            get: { barcodeFat },
+            get: { draft.barcodeFat },
             set: {
-                barcodeFat = $0
-                barcodeValuesEdited = true
+                draft.barcodeFat = $0
+                draft.barcodeValuesEdited = true
             }
         )
     }
@@ -2695,104 +3689,135 @@ private struct FitnessFoodReviewSheet: View {
     }
 
     private func saveMealDurably() {
+        guard !mealSaving, !mealSavedDurably else { return }
+        guard validateManualReview() else { return }
         guard let nutritionMealStore else {
             mealSaveError = "Local meal storage is unavailable. Nothing was saved."
             return
         }
-        let trimmedName = mealName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedName.isEmpty else {
-            mealSaveError = "Enter a meal name before saving."
-            return
-        }
-        let kcal = NutritionBarcodeValueParser.parse(calories, maximum: 5_000)
-        let proteinGrams = NutritionBarcodeValueParser.parse(protein, maximum: 2_000)
-        let carbGrams = NutritionBarcodeValueParser.parse(carbohydrates, maximum: 2_000)
-        let fatGrams = NutritionBarcodeValueParser.parse(fat, maximum: 2_000)
-        let rawInputs = [calories, protein, carbohydrates, fat]
-        let parsedValues = [kcal, proteinGrams, carbGrams, fatGrams]
-        guard zip(rawInputs, parsedValues).allSatisfy({ raw, value in
-            raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || value != nil
-        }) else {
-            mealSaveError = "Enter valid non-negative nutrition values (comma or dot decimals; up to 3 decimal places)."
-            return
-        }
-
         mealSaving = true
         mealSaveError = nil
         do {
-            if let editingMeal {
-                try nutritionMealStore.correct(id: editingMeal.id) { draft in
-                    draft.name = trimmedName
-                    draft.kcal = kcal.map { Int($0.rounded()) }
-                    draft.proteinGrams = proteinGrams.map { Int($0.rounded()) }
-                    draft.carbGrams = carbGrams.map { Int($0.rounded()) }
-                    draft.fatGrams = fatGrams.map { Int($0.rounded()) }
-                }
-            } else {
-                let meal = NutritionMeal(
-                    loggedAt: .now,
-                    timeZoneIdentifier: TimeZone.current.identifier,
-                    name: trimmedName,
-                    kcal: kcal.map { Int($0.rounded()) },
-                    proteinGrams: proteinGrams.map { Int($0.rounded()) },
-                    carbGrams: carbGrams.map { Int($0.rounded()) },
-                    fatGrams: fatGrams.map { Int($0.rounded()) },
-                    provenance: .manual
-                )
-                try nutritionMealStore.addConfirmed(meal)
-            }
+            _ = try FitnessNutritionDurableSave.save(draft: &draft, to: nutritionMealStore)
             mealSaving = false
-            mealSavedDurably = true
             stage = .confirmed
-            savedMessage = "Saved locally · durable · sync pending."
+            savedMessage = "Saved locally"
             onMealSaved()
         } catch {
             mealSaving = false
-            mealSaveError = "Local save failed. Nothing was replaced; try Save meal again."
+            mealSaveError = nutritionDraftErrorMessage(error)
         }
+    }
+
+    private func nutritionDraftErrorMessage(_ error: Error) -> String {
+        if let validationError = error as? NutritionValidationError {
+            switch validationError {
+            case .invalidText("mealName"):
+                return "Enter a meal name before saving or applying a preview."
+            case .invalidBounds:
+                return "Enter valid non-negative nutrition values (comma or dot decimals; up to 3 decimal places)."
+            default:
+                break
+            }
+        }
+        return "Local save failed or could not be reconciled. Nothing was replaced; try Save meal again."
     }
 
     @ViewBuilder
     private var manualPreviewFields: some View {
-        FitnessCard {
-            VStack(alignment: .leading, spacing: 10) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("Manual meal entry")
-                        .font(LifeOSFont.header(14))
-                    Text("\"Apply local preview\" stays in-memory only. \"Save meal\" below writes this entry to durable local storage.")
-                        .font(LifeOSFont.caption(10))
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                FitnessEditableField(title: "Meal name", text: $mealName)
-                FitnessEditableField(title: "Calories (kcal)", text: $calories, numeric: true)
-                FitnessEditableField(title: "Protein (g)", text: $protein, numeric: true)
-                FitnessEditableField(title: "Carbohydrates (g)", text: $carbohydrates, numeric: true)
-                FitnessEditableField(title: "Fat (g)", text: $fat, numeric: true)
+        VStack(alignment: .leading, spacing: 16) {
+            FitnessNutritionReviewFieldEditor(
+                field: .mealName,
+                text: reviewTextBinding(for: .mealName),
+                error: validationErrors[.mealName],
+                focusedField: $focusedField,
+                onSubmit: { advanceFocus(after: .mealName) }
+            )
+            .id(FitnessNutritionReviewField.mealName.id)
+            loggedAtField
+            FitnessNutritionFormGrid(spacing: 16, forceSingleColumn: dynamicTypeSize.isAccessibilitySize) {
+                FitnessNutritionReviewFieldEditor(
+                    field: .calories,
+                    text: reviewTextBinding(for: .calories),
+                    error: validationErrors[.calories],
+                    focusedField: $focusedField,
+                    onSubmit: { advanceFocus(after: .calories) }
+                )
+                .id(FitnessNutritionReviewField.calories.id)
+                FitnessNutritionReviewFieldEditor(
+                    field: .protein,
+                    text: reviewTextBinding(for: .protein),
+                    error: validationErrors[.protein],
+                    focusedField: $focusedField,
+                    onSubmit: { advanceFocus(after: .protein) }
+                )
+                .id(FitnessNutritionReviewField.protein.id)
+                FitnessNutritionReviewFieldEditor(
+                    field: .carbohydrates,
+                    text: reviewTextBinding(for: .carbohydrates),
+                    error: validationErrors[.carbohydrates],
+                    focusedField: $focusedField,
+                    onSubmit: { advanceFocus(after: .carbohydrates) }
+                )
+                .id(FitnessNutritionReviewField.carbohydrates.id)
+                FitnessNutritionReviewFieldEditor(
+                    field: .fat,
+                    text: reviewTextBinding(for: .fat),
+                    error: validationErrors[.fat],
+                    focusedField: $focusedField,
+                    onSubmit: { advanceFocus(after: .fat) }
+                )
+                .id(FitnessNutritionReviewField.fat.id)
+            }
+            if let previewMeal = draft.previewMeal {
+                previewSummary(previewMeal)
             }
         }
-        Text("Edit items, grams, calories, ranges, and confidence in this local preview. Nothing here claims medical or photo accuracy.")
-            .font(LifeOSFont.caption(10))
-            .foregroundStyle(LifeOSTokens.tertiaryText)
-            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var loggedAtField: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text("Logged at")
+                .lifeOSTypography(.label)
+                .foregroundStyle(LifeOSTokens.secondaryText)
+            DatePicker(
+                "Meal logged date and time",
+                selection: $draft.loggedAt,
+                displayedComponents: [.date, .hourAndMinute]
+            )
+            .labelsHidden()
+            .datePickerStyle(.compact)
+            .frame(minHeight: 44, alignment: .leading)
+            .padding(.horizontal, 12)
+            .background(LifeOSTokens.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+            .environment(\.calendar, draftCalendar)
+            .environment(\.timeZone, draftCalendar.timeZone)
+            .focused($focusedField, equals: .loggedAt)
+            .accessibilityIdentifier("nutrition-meal-logged-at")
+            .id(FitnessNutritionReviewField.loggedAt.id)
+            .onChange(of: draft.loggedAt) { _, _ in
+                clearReviewFeedback(for: .loggedAt)
+            }
+        }
     }
 
     @ViewBuilder
     private var demoProposalFields: some View {
-        FitnessCard {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("DEMO PROPOSAL · fixture-only")
-                    .font(LifeOSFont.header(14))
-                    .foregroundStyle(LifeOSTokens.warning)
-                FitnessEditableField(title: "Meal name", text: $mealName)
-                FitnessEditableField(title: "Calories (kcal)", text: $calories, numeric: true)
-                FitnessEditableField(title: "Protein (g)", text: $protein, numeric: true)
-                FitnessEditableField(title: "Carbohydrates (g)", text: $carbohydrates, numeric: true)
-                FitnessEditableField(title: "Fat (g)", text: $fat, numeric: true)
+        VStack(alignment: .leading, spacing: 16) {
+            Text("DEMO PROPOSAL · fixture-only")
+                .lifeOSTypography(.sectionTitle)
+                .foregroundStyle(LifeOSTokens.warning)
+            FitnessEditableField(title: "Meal name", text: $draft.mealName)
+            FitnessNutritionFormGrid(spacing: 16, forceSingleColumn: dynamicTypeSize.isAccessibilitySize) {
+                FitnessEditableField(title: "Calories (kcal)", text: $draft.calories, numeric: true)
+                FitnessEditableField(title: "Protein (g)", text: $draft.protein, numeric: true)
+                FitnessEditableField(title: "Carbohydrates (g)", text: $draft.carbohydrates, numeric: true)
+                FitnessEditableField(title: "Fat (g)", text: $draft.fat, numeric: true)
             }
         }
         Text("This deterministic demo proposal is not a photo result and is not written or sent anywhere.")
-            .font(LifeOSFont.caption(10))
+            .lifeOSTypography(.metadata)
             .foregroundStyle(LifeOSTokens.warning)
             .fixedSize(horizontal: false, vertical: true)
     }
@@ -2800,10 +3825,10 @@ private struct FitnessFoodReviewSheet: View {
     private var photoPreparationCard: some View {
         FitnessCard {
             VStack(alignment: .leading, spacing: 10) {
-                Text("Prepare photos locally")
-                    .font(LifeOSFont.header(14))
-                Text("Choose up to three images. LifeOS validates and sanitizes them on this device before any later send action.")
-                    .font(LifeOSFont.caption(10))
+                Text("Photos")
+                    .lifeOSTypography(.sectionTitle)
+                Text("Choose up to three images for the proposal.")
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                     .fixedSize(horizontal: false, vertical: true)
                 PhotosPicker(
@@ -2823,7 +3848,7 @@ private struct FitnessFoodReviewSheet: View {
                     loadSelectedPhotos(items)
                 }
                 Text(preparationStatus)
-                    .font(LifeOSFont.caption(10))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(photoPreparation.state == .error ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("food-photo-preparation-status")
@@ -2835,34 +3860,26 @@ private struct FitnessFoodReviewSheet: View {
                             set: { photoPreparation.setExplicitConsent($0) }
                         )
                     )
-                    .font(LifeOSFont.inter(12, weight: .medium))
+                    .lifeOSTypography(.body, weight: .medium)
                     .accessibilityIdentifier("food-photo-explicit-consent")
                     .accessibilityLabel("Consent: sanitized photos device to private Windows LifeOS gateway to Google")
-                    Text("Consent is required for a future send and resets whenever this selection changes, fails, or is cleared.")
-                        .font(LifeOSFont.caption(9))
+                    Text("Consent resets when this photo selection changes.")
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Button(photoProposalLoading ? "Analyzing photos…" : (photoProposal == nil ? "Analyze sanitized photos" : "Analyze again")) {
                     sendPhotosForAnalysis()
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(LifeOSTokens.accent)
+                .buttonStyle(LifeOSButtonStyle(.secondary))
                 .disabled(isDemo || photoPreparation.state != .ready || !photoPreparation.explicitConsent || photoProposalLoading)
                 .accessibilityIdentifier("food-photo-send")
                 if let photoProposalError {
                     Text(photoProposalError)
-                        .font(LifeOSFont.caption(9))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.warning)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityIdentifier("food-photo-send-error")
-                } else {
-                    Text(isDemo
-                        ? "Demo mode does not send photos."
-                        : "The gateway uses its server-side Google AI Studio key. No key is stored in the app, and the response remains a proposal until you confirm it.")
-                        .font(LifeOSFont.caption(9))
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
@@ -2870,61 +3887,55 @@ private struct FitnessFoodReviewSheet: View {
 
     @ViewBuilder
     private var photoProposalCard: some View {
-        if let photoProposal {
+        if let photoProposal, photoProposalIsCurrent {
             FitnessCard {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack(alignment: .firstTextBaseline) {
                         Text("Review proposal")
-                            .font(LifeOSFont.header(14))
+                            .lifeOSTypography(.sectionTitle)
                         Spacer()
-                        Text(photoProposal.flags.map(photoFlagLabel).joined(separator: " · "))
-                            .font(LifeOSFont.caption(9))
-                            .foregroundStyle(LifeOSTokens.warning)
-                            .multilineTextAlignment(.trailing)
+                        if !photoProposal.flags.isEmpty {
+                            Text(photoProposal.flags.map(photoFlagLabel).joined(separator: " · "))
+                                .lifeOSTypography(.metadata)
+                                .foregroundStyle(LifeOSTokens.warning)
+                                .multilineTextAlignment(.trailing)
+                        }
                     }
                     Text("Google AI Studio · \(photoProposal.provenance.modelIdentifier) · proposal only")
-                        .font(LifeOSFont.caption(9))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                     ForEach(photoProposal.items, id: \.itemID) { item in
                         VStack(alignment: .leading, spacing: 3) {
-                            Text(item.estimatedLabel)
-                                .font(LifeOSFont.control())
-                            Text("\(photoRange(item.grams, suffix: "g")) · \(photoRange(item.calories, suffix: "kcal"))")
-                                .font(LifeOSFont.caption(10))
-                                .foregroundStyle(LifeOSTokens.tertiaryText)
+                            Text("Estimated · \(item.estimatedLabel)")
+                                .lifeOSTypography(.button)
+                                .foregroundStyle(LifeOSTokens.Series.estimate)
+                            Text("Estimated portion: \(photoRange(item.grams, suffix: "g"))")
+                                .lifeOSTypography(.metadata)
+                                .foregroundStyle(LifeOSTokens.Series.estimate)
+                            Text("Estimated calories: \(photoRange(item.calories, suffix: "kcal"))")
+                                .lifeOSTypography(.metadata)
+                                .foregroundStyle(LifeOSTokens.Series.estimate)
                             Text("\(item.confidence.rawValue.capitalized) confidence · \(item.unit.rawValue)")
-                                .font(LifeOSFont.caption(9))
+                                .lifeOSTypography(.metadata)
                                 .foregroundStyle(item.confidence == .low ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)
                         }
                         .padding(.vertical, 3)
                     }
                     Divider().overlay(LifeOSTokens.hairlineBorder)
-                    Text("Total · \(photoRange(photoProposal.totals.grams, suffix: "g")) · \(photoRange(photoProposal.totals.calories, suffix: "kcal"))")
-                        .font(LifeOSFont.control())
-                    Text("Review the displayed totals in exact units. Nothing is saved until you explicitly confirm; provider estimates never enter totals or sync as a proposal.")
-                        .font(LifeOSFont.caption(9))
-                        .foregroundStyle(LifeOSTokens.warning)
-                        .fixedSize(horizontal: false, vertical: true)
-                    FitnessEditableField(title: "Meal name", text: $mealName)
+                    Text("Estimated total · \(photoRange(photoProposal.totals.grams, suffix: "g")) · \(photoRange(photoProposal.totals.calories, suffix: "kcal"))")
+                        .lifeOSTypography(.button)
+                        .foregroundStyle(LifeOSTokens.Series.estimate)
+                    FitnessEditableField(title: "Meal name", text: $draft.mealName)
                     FitnessEditableField(title: "Confirmed grams", text: photoGramsBinding, numeric: true)
-                    FitnessEditableField(title: "Confirmed calories (kcal)", text: photoCaloriesBinding, numeric: true)
-                    FitnessEditableField(title: "Confirmed protein (g)", text: photoProteinBinding, numeric: true)
-                    FitnessEditableField(title: "Confirmed carbohydrates (g)", text: photoCarbohydratesBinding, numeric: true)
-                    FitnessEditableField(title: "Confirmed fat (g)", text: photoFatBinding, numeric: true)
-                    Toggle("I reviewed these values and want to save this meal", isOn: $photoConfirmationAcknowledged)
-                        .font(LifeOSFont.inter(12, weight: .medium))
-                        .accessibilityIdentifier("food-photo-confirmation-acknowledgement")
-                    Text("Saving records the values above as a user-reviewed correction of this proposal. The sanitized image bytes are cleared after the save; only request/provider/hash lineage remains.")
-                        .font(LifeOSFont.caption(9))
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Button(photoMealSaved ? "Saved locally" : "Review & confirm meal locally") {
-                        confirmPhotoProposal()
+                    FitnessNutritionFormGrid(spacing: 16, forceSingleColumn: dynamicTypeSize.isAccessibilitySize) {
+                        FitnessEditableField(title: "Confirmed calories (kcal)", text: photoCaloriesBinding, numeric: true)
+                        FitnessEditableField(title: "Confirmed protein (g)", text: photoProteinBinding, numeric: true)
+                        FitnessEditableField(title: "Confirmed carbohydrates (g)", text: photoCarbohydratesBinding, numeric: true)
+                        FitnessEditableField(title: "Confirmed fat (g)", text: photoFatBinding, numeric: true)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(LifeOSTokens.success)
-                    .disabled(photoMealSaved || nutritionMealStore == nil || photoProposalLoading || !photoConfirmationAcknowledged)
-                    .accessibilityIdentifier("food-photo-confirm")
+                    Toggle("I reviewed these values and want to save this meal", isOn: $photoConfirmationAcknowledged)
+                        .lifeOSTypography(.body, weight: .medium)
+                        .accessibilityIdentifier("food-photo-confirmation-acknowledgement")
                 }
             }
         }
@@ -2932,11 +3943,12 @@ private struct FitnessFoodReviewSheet: View {
 
     private func sendPhotosForAnalysis() {
         guard !isDemo, photoPreparation.state == .ready, photoPreparation.explicitConsent, !photoProposalLoading else { return }
+        let requestID = makePhotoRequestID()
         let manifest: FoodPhotoManifest
         do {
             manifest = try photoPreparation.makeManifest(
                 mealID: photoMealID,
-                requestID: photoRequestID,
+                requestID: requestID,
                 capturedAt: ISO8601DateFormatter().string(from: .now),
                 clientTimeZone: TimeZone.current.identifier
             )
@@ -2945,15 +3957,34 @@ private struct FitnessFoodReviewSheet: View {
             return
         }
 
+        photoRequestID = requestID
         photoProposalTask?.cancel()
+        photoProposalTask = nil
+        photoAnalysisCoordinator.invalidateAnalysis()
         photoProposalError = nil
         photoProposal = nil
+        photoProposalRequest = nil
         photoConfirmationAcknowledged = false
+        let request = photoAnalysisCoordinator.beginAnalysis(
+            requestID: requestID,
+            draftRevision: draft.fingerprint
+        )
         photoProposalLoading = true
         photoProposalTask = Task { @MainActor in
             defer {
-                photoProposalLoading = false
-                photoProposalTask = nil
+                if photoAnalysisCoordinator.ownsCleanup(
+                    request,
+                    currentRequestID: photoRequestID,
+                    currentDraftRevision: draft.fingerprint
+                ) {
+                    photoAnalysisCoordinator.finish(
+                        request,
+                        currentRequestID: photoRequestID,
+                        currentDraftRevision: draft.fingerprint
+                    )
+                    photoProposalLoading = false
+                    photoProposalTask = nil
+                }
             }
             do {
                 let proposal = try await barcodeClient.fetchFoodPhotoProposal(manifest)
@@ -2962,42 +3993,79 @@ private struct FitnessFoodReviewSheet: View {
                     manifest,
                     now: .now
                 )
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled,
+                      photoAnalysisCoordinator.canAdopt(
+                          request,
+                          currentRequestID: photoRequestID,
+                          currentDraftRevision: draft.fingerprint
+                      ) else { return }
+                photoAnalysisCoordinator.finish(
+                    request,
+                    currentRequestID: photoRequestID,
+                    currentDraftRevision: draft.fingerprint
+                )
+                photoProposalLoading = false
+                photoProposalTask = nil
                 photoProposal = validatedProposal
-                mealName = "Photo meal"
-                photoGrams = formatNutritionValue(validatedProposal.totals.grams.estimate)
-                calories = formatNutritionValue(validatedProposal.totals.calories.estimate)
-                protein = formatNutritionValue(validatedProposal.totals.protein.estimate)
-                carbohydrates = formatNutritionValue(validatedProposal.totals.carbs.estimate)
-                fat = formatNutritionValue(validatedProposal.totals.fat.estimate)
+                photoProposalRequest = request
+                draft.mealName = "Photo meal"
+                draft.portionGrams = formatNutritionValue(validatedProposal.totals.grams.estimate)
+                draft.calories = formatNutritionValue(validatedProposal.totals.calories.estimate)
+                draft.protein = formatNutritionValue(validatedProposal.totals.protein.estimate)
+                draft.carbohydrates = formatNutritionValue(validatedProposal.totals.carbs.estimate)
+                draft.fat = formatNutritionValue(validatedProposal.totals.fat.estimate)
                 photoConfirmationAcknowledged = false
                 stage = .needsConfirmation
             } catch let error as TailscaleSyncError {
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled,
+                      photoAnalysisCoordinator.canAdopt(
+                          request,
+                          currentRequestID: photoRequestID,
+                          currentDraftRevision: draft.fingerprint
+                      ) else { return }
                 photoProposalError = photoProposalErrorMessage(error)
             } catch {
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled,
+                      photoAnalysisCoordinator.canAdopt(
+                          request,
+                          currentRequestID: photoRequestID,
+                          currentDraftRevision: draft.fingerprint
+                      ) else { return }
                 photoProposalError = "The gateway returned an invalid food proposal. Nothing was saved."
             }
         }
     }
 
     private func confirmPhotoProposal() {
-        guard let proposal = photoProposal, let nutritionMealStore, !photoMealSaved else { return }
+        guard let proposal = photoProposal,
+              let proposalRequest = photoProposalRequest,
+              proposalRequest.matchesSelection(
+                  generation: photoAnalysisCoordinator.selectionGeneration,
+                  requestID: photoRequestID
+              ),
+              let nutritionMealStore,
+              !photoMealSaved else {
+            if !photoProposalIsCurrent {
+                photoProposal = nil
+                photoProposalRequest = nil
+                photoConfirmationAcknowledged = false
+            }
+            return
+        }
         guard photoConfirmationAcknowledged else {
             photoProposalError = "Review the values and explicitly acknowledge the confirmation before saving. Nothing was saved."
             return
         }
         do {
-            let trimmedName = mealName.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmedName = draft.mealName.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmedName.isEmpty else {
                 throw NutritionValidationError.invalidText("mealName")
             }
-            guard let grams = NutritionBarcodeValueParser.parse(photoGrams, maximum: 1_000_000),
-                  let calories = NutritionBarcodeValueParser.parse(self.calories, maximum: 5_000),
-                  let protein = NutritionBarcodeValueParser.parse(self.protein, maximum: 2_000),
-                  let carbs = NutritionBarcodeValueParser.parse(carbohydrates, maximum: 2_000),
-                  let fat = NutritionBarcodeValueParser.parse(self.fat, maximum: 2_000) else {
+            guard let grams = NutritionBarcodeValueParser.parse(draft.portionGrams, maximum: 1_000_000),
+                  let calories = NutritionBarcodeValueParser.parse(draft.calories, maximum: 5_000),
+                  let protein = NutritionBarcodeValueParser.parse(draft.protein, maximum: 2_000),
+                  let carbs = NutritionBarcodeValueParser.parse(draft.carbohydrates, maximum: 2_000),
+                  let fat = NutritionBarcodeValueParser.parse(draft.fat, maximum: 2_000) else {
                 throw NutritionValidationError.invalidBounds("confirmed photo values")
             }
             // The durable meal store keeps meal-level totals. An aggregate
@@ -3025,7 +4093,7 @@ private struct FitnessFoodReviewSheet: View {
                 fiber: fiber
             )
             let now = Date.now
-            let timestamp = ISO8601DateFormatter().string(from: now)
+            let timestamp = ISO8601DateFormatter().string(from: draft.loggedAt)
             let confirmation = try FoodConfirmationRequest(
                 mealID: proposal.mealID,
                 requestID: proposal.requestID,
@@ -3035,14 +4103,14 @@ private struct FitnessFoodReviewSheet: View {
                 mealAt: timestamp,
                 items: items,
                 totals: totals,
-                confirmedAt: timestamp,
+                confirmedAt: ISO8601DateFormatter().string(from: now),
                 correctionNotes: "User reviewed and confirmed the displayed photo estimate values."
             )
             _ = try validateFoodConfirmationAgainstProposal(confirmation, proposal, now: now)
             let lineage = try NutritionMealPhotoLineage(proposal: proposal)
             let meal = NutritionMeal(
-                loggedAt: now,
-                timeZoneIdentifier: TimeZone.current.identifier,
+                loggedAt: draft.loggedAt,
+                timeZoneIdentifier: draft.timeZoneIdentifier,
                 name: trimmedName,
                 kcal: Int(calories.rounded()),
                 proteinGrams: Int(protein.rounded()),
@@ -3059,7 +4127,7 @@ private struct FitnessFoodReviewSheet: View {
             photoPreparation.clear()
             selectedPhotoItems.removeAll()
             stage = .confirmed
-            savedMessage = "Photo proposal reviewed and saved locally · lineage retained; image bytes cleared."
+            savedMessage = "Saved locally"
             onMealSaved()
         } catch {
             photoProposalError = "The proposal could not be confirmed safely. Nothing was saved."
@@ -3074,23 +4142,23 @@ private struct FitnessFoodReviewSheet: View {
     }
 
     private var photoGramsBinding: Binding<String> {
-        Binding(get: { photoGrams }, set: { photoGrams = $0 })
+        $draft.portionGrams
     }
 
     private var photoCaloriesBinding: Binding<String> {
-        Binding(get: { calories }, set: { calories = $0 })
+        $draft.calories
     }
 
     private var photoProteinBinding: Binding<String> {
-        Binding(get: { protein }, set: { protein = $0 })
+        $draft.protein
     }
 
     private var photoCarbohydratesBinding: Binding<String> {
-        Binding(get: { carbohydrates }, set: { carbohydrates = $0 })
+        $draft.carbohydrates
     }
 
     private var photoFatBinding: Binding<String> {
-        Binding(get: { fat }, set: { fat = $0 })
+        $draft.fat
     }
 
     private func photoFlagLabel(_ flag: FoodEstimateFlag) -> String {
@@ -3135,30 +4203,23 @@ private struct FitnessFoodReviewSheet: View {
     }
 
     private func loadSelectedPhotos(_ items: [PhotosPickerItem]) {
-        photoSelectionGeneration &+= 1
-        let generation = photoSelectionGeneration
+        invalidatePhotoAnalysis(forSelectionChange: true)
         photoLoadTask?.cancel()
         photoLoadTask = nil
+        let generation = photoAnalysisCoordinator.selectionGeneration
         guard !items.isEmpty else {
-            photoProposal = nil
-            photoConfirmationAcknowledged = false
             photoPreparation.clear()
             return
         }
         guard items.count <= FoodPhotoSanitizer.maximumImageCount else {
-            photoProposal = nil
-            photoConfirmationAcknowledged = false
             photoPreparation.failPreparation()
             return
         }
 
-        photoProposal = nil
-        photoProposalError = nil
-        photoConfirmationAcknowledged = false
         photoPreparation.beginSelection()
         photoLoadTask = Task { @MainActor in
             defer {
-                if generation == photoSelectionGeneration {
+                if generation == photoAnalysisCoordinator.selectionGeneration {
                     photoLoadTask = nil
                 }
             }
@@ -3167,7 +4228,7 @@ private struct FitnessFoodReviewSheet: View {
                 inputs.reserveCapacity(items.count)
                 var totalBytes = 0
                 for item in items {
-                    guard !Task.isCancelled, generation == photoSelectionGeneration else { return }
+                    guard !Task.isCancelled, generation == photoAnalysisCoordinator.selectionGeneration else { return }
                     guard let data = try await item.loadTransferable(type: Data.self) else {
                         throw FoodPhotoPreparationError.preparationFailed
                     }
@@ -3179,13 +4240,226 @@ private struct FitnessFoodReviewSheet: View {
                     let identifier = "photo-\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())"
                     inputs.append(try FoodPhotoSanitizerInput(imageID: identifier, data: data))
                 }
-                guard !Task.isCancelled, generation == photoSelectionGeneration else { return }
+                guard !Task.isCancelled, generation == photoAnalysisCoordinator.selectionGeneration else { return }
                 photoPreparation.prepare(inputs: inputs)
             } catch {
-                guard !Task.isCancelled, generation == photoSelectionGeneration else { return }
+                guard !Task.isCancelled, generation == photoAnalysisCoordinator.selectionGeneration else { return }
                 photoPreparation.failPreparation()
             }
         }
+    }
+}
+
+#if os(iOS)
+/// SwiftUI's interactive dismissal modifier blocks a dirty sheet, but does
+/// not itself expose the user's attempted swipe. This bridge lets the sheet
+/// show the same Discard/Keep editing decision for a swipe as it does for
+/// Close and Escape.
+private struct FitnessNutritionDismissBridge: UIViewControllerRepresentable {
+    let isDirty: Bool
+    let onAttempt: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(isDirty: isDirty, onAttempt: onAttempt)
+    }
+
+    func makeUIViewController(context: Context) -> UIViewController {
+        let controller = UIViewController()
+        controller.view.isHidden = true
+        return controller
+    }
+
+    func updateUIViewController(_ controller: UIViewController, context: Context) {
+        context.coordinator.isDirty = isDirty
+        context.coordinator.onAttempt = onAttempt
+        let coordinator = context.coordinator
+        DispatchQueue.main.async {
+            let presentationController = controller.parent?.presentationController
+                ?? controller.presentingViewController?.presentationController
+            presentationController?.delegate = coordinator
+        }
+    }
+
+    final class Coordinator: NSObject, UIAdaptivePresentationControllerDelegate {
+        var isDirty: Bool
+        var onAttempt: () -> Void
+
+        init(isDirty: Bool, onAttempt: @escaping () -> Void) {
+            self.isDirty = isDirty
+            self.onAttempt = onAttempt
+        }
+
+        func presentationControllerShouldDismiss(_ presentationController: UIPresentationController) -> Bool {
+            !isDirty
+        }
+
+        func presentationControllerDidAttemptToDismiss(_ presentationController: UIPresentationController) {
+            if isDirty {
+                onAttempt()
+            }
+        }
+    }
+}
+#endif
+
+private struct FitnessNutritionFormGrid: Layout {
+    let spacing: CGFloat
+    let forceSingleColumn: Bool
+
+    init(spacing: CGFloat = 12, forceSingleColumn: Bool = false) {
+        self.spacing = spacing
+        self.forceSingleColumn = forceSingleColumn
+    }
+
+    private func columnCount(for width: CGFloat) -> Int {
+        forceSingleColumn ? 1 : (width >= 480 ? 2 : 1)
+    }
+
+    func sizeThatFits(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) -> CGSize {
+        guard !subviews.isEmpty else { return .zero }
+        let width = proposal.width ?? 0
+        let count = min(columnCount(for: width), subviews.count)
+        let columnWidth = max(1, (width - spacing * CGFloat(count - 1)) / CGFloat(count))
+        var height: CGFloat = 0
+        var rowHeight: CGFloat = 0
+        for index in subviews.indices {
+            rowHeight = max(rowHeight, subviews[index].sizeThatFits(.init(width: columnWidth, height: nil)).height)
+            if index % count == count - 1 || index == subviews.count - 1 {
+                height += rowHeight
+                if index < subviews.count - 1 { height += spacing }
+                rowHeight = 0
+            }
+        }
+        return CGSize(width: proposal.width ?? width, height: height)
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
+        guard !subviews.isEmpty else { return }
+        let count = min(columnCount(for: bounds.width), subviews.count)
+        let columnWidth = max(1, (bounds.width - spacing * CGFloat(count - 1)) / CGFloat(count))
+        var y = bounds.minY
+        var rowHeight: CGFloat = 0
+        for index in subviews.indices {
+            let column = index % count
+            let size = subviews[index].sizeThatFits(.init(width: columnWidth, height: nil))
+            rowHeight = max(rowHeight, size.height)
+            subviews[index].place(
+                at: CGPoint(x: bounds.minX + CGFloat(column) * (columnWidth + spacing), y: y),
+                anchor: .topLeading,
+                proposal: .init(width: columnWidth, height: size.height)
+            )
+            if column == count - 1 || index == subviews.count - 1 {
+                y += rowHeight + spacing
+                rowHeight = 0
+            }
+        }
+    }
+}
+
+private struct FitnessNutritionReviewFieldEditor: View {
+    let field: FitnessNutritionReviewField
+    @Binding var text: String
+    let error: String?
+    @FocusState.Binding var focusedField: FitnessNutritionReviewField?
+    let onSubmit: () -> Void
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    init(
+        field: FitnessNutritionReviewField,
+        text: Binding<String>,
+        error: String?,
+        focusedField: FocusState<FitnessNutritionReviewField?>.Binding,
+        onSubmit: @escaping () -> Void
+    ) {
+        self.field = field
+        self._text = text
+        self.error = error
+        self._focusedField = focusedField
+        self.onSubmit = onSubmit
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(field.label)
+                    .lifeOSTypography(.label)
+                    .foregroundStyle(LifeOSTokens.secondaryText)
+                if let unit = field.unit {
+                    Text(unit)
+                        .lifeOSTypography(.metadata)
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                }
+            }
+            Group {
+                if dynamicTypeSize.isAccessibilitySize {
+                    VStack(alignment: .leading, spacing: 4) {
+                        input
+                        if let unit = field.unit {
+                            Text(unit)
+                                .lifeOSTypography(.metadata, weight: .semibold)
+                                .foregroundStyle(LifeOSTokens.tertiaryText)
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                } else {
+                    HStack(spacing: 0) {
+                        input
+                        if let unit = field.unit {
+                            Text(unit)
+                                .lifeOSTypography(.metadata, weight: .semibold)
+                                .foregroundStyle(LifeOSTokens.tertiaryText)
+                                .frame(minWidth: 32, alignment: .trailing)
+                                .padding(.trailing, 12)
+                        }
+                    }
+                }
+            }
+            .background(LifeOSTokens.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+            if let error {
+                Text(error)
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.danger)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("\(field.id)-error")
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(field.label)
+        .accessibilityValue(error.map { "\(text), error: \($0)" } ?? text)
+        .accessibilityIdentifier(field.id)
+    }
+
+    private var input: some View {
+        TextField(field.label, text: $text)
+            .textFieldStyle(.plain)
+            .multilineTextAlignment(.leading)
+            .lifeOSTypography(.body, weight: .medium)
+            .frame(minHeight: inputMinimumHeight)
+#if os(iOS)
+            .keyboardType(field.isNumeric ? .numbersAndPunctuation : .default)
+#endif
+            .focused($focusedField, equals: field)
+            .submitLabel(field == .fat ? .done : .next)
+            .onSubmit { onSubmit() }
+    }
+
+    private var inputMinimumHeight: CGFloat {
+#if os(iOS)
+        44
+#else
+        36
+#endif
     }
 }
 
@@ -3193,86 +4467,82 @@ private struct FitnessEditableField: View {
     let title: String
     @Binding var text: String
     var numeric = false
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
-        HStack {
-            Text(title).font(LifeOSFont.caption(11)).foregroundStyle(LifeOSTokens.tertiaryText)
-            Spacer()
-            TextField(title, text: $text)
-                .multilineTextAlignment(.trailing)
-                .font(LifeOSFont.inter(13, weight: .medium))
-#if os(iOS)
-                .keyboardType(numeric ? .numbersAndPunctuation : .default)
-#endif
-        }
-    }
-}
-
-private struct FitnessMealTimeline: View {
-    let meals: [FitnessMeal]
-    @Binding var photoStage: FitnessPhotoStage
-
-    var body: some View {
-        FitnessCard {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Meal timeline")
-                    .font(LifeOSFont.header(15))
-                if meals.isEmpty {
-                    FitnessEmptyRow(title: "No meals", detail: "No entries is distinct from zero consumption.", icon: .grocery)
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(fieldLabel)
+                    .lifeOSTypography(.label)
+                    .foregroundStyle(LifeOSTokens.secondaryText)
+                if let fieldUnit {
+                    Text(fieldUnit)
+                        .lifeOSTypography(.metadata)
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                }
+            }
+            Group {
+                if dynamicTypeSize.isAccessibilitySize {
+                    VStack(alignment: .leading, spacing: 4) {
+                        textField
+                        if let fieldUnit {
+                            Text(fieldUnit)
+                                .lifeOSTypography(.metadata, weight: .semibold)
+                                .foregroundStyle(LifeOSTokens.tertiaryText)
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
                 } else {
-                    ForEach(meals) { meal in
-                        FitnessMealRow(meal: meal, onReview: meal.source == .proposal ? { photoStage = .needsConfirmation } : nil)
+                    HStack(spacing: 0) {
+                        textField
+                        if let fieldUnit {
+                            Text(fieldUnit)
+                                .lifeOSTypography(.metadata, weight: .semibold)
+                                .foregroundStyle(LifeOSTokens.tertiaryText)
+                                .frame(minWidth: 32, alignment: .trailing)
+                                .padding(.trailing, 12)
+                        }
                     }
                 }
             }
+            .background(LifeOSTokens.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(fieldLabel)
     }
-}
 
-private struct FitnessMealRow: View {
-    let meal: FitnessMeal
-    let onReview: (() -> Void)?
+    private var textField: some View {
+        TextField(fieldLabel, text: $text)
+            .textFieldStyle(.plain)
+            .multilineTextAlignment(.leading)
+            .lifeOSTypography(.body, weight: .medium)
+            .frame(minHeight: 44)
+#if os(iOS)
+            .keyboardType(numeric ? .numbersAndPunctuation : .default)
+#endif
+    }
 
-    var body: some View {
-        HStack(spacing: 10) {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(meal.source == .proposal ? LifeOSTokens.warning.opacity(0.14) : LifeOSTokens.accent.opacity(0.12))
-                .frame(width: 36, height: 36)
-                .overlay(LifeOSIcon(meal.source == .proposal ? .image : .grocery).foregroundStyle(meal.source == .proposal ? LifeOSTokens.warning : LifeOSTokens.accent).frame(width: 17, height: 17))
-            VStack(alignment: .leading, spacing: 3) {
-                Text(meal.name)
-                    .font(LifeOSFont.inter(13, weight: .semiBold))
-                    .fixedSize(horizontal: false, vertical: true)
-                Text("\(meal.source.rawValue) · \(meal.time.fitnessTimeLabel)")
-                    .font(LifeOSFont.caption(10))
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text(meal.detail)
-                    .font(LifeOSFont.caption(10))
-                    .foregroundStyle(meal.source == .proposal ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .layoutPriority(1)
-            Spacer(minLength: 5)
-            VStack(alignment: .trailing, spacing: 2) {
-                Text(meal.calories.map { "\($0) kcal" } ?? "—")
-                    .font(LifeOSFont.inter(12, weight: .semiBold)).monospacedDigit()
-                if let confidence = meal.confidence {
-                    Text(confidence)
-                        .font(LifeOSFont.caption(9))
-                        .foregroundStyle(LifeOSTokens.warning)
-                        .multilineTextAlignment(.trailing)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                if let onReview {
-                    Button("Review", action: onReview)
-                        .font(LifeOSFont.caption(10))
-                        .foregroundStyle(LifeOSTokens.accent)
-                        .buttonStyle(.plain)
-                }
-            }
+    private var fieldLabel: String {
+        guard let open = title.lastIndex(of: "("), title.last == ")" else { return title }
+        let candidate = String(title[title.index(after: open)..<title.index(before: title.endIndex)])
+        return recognizedUnit(candidate) == nil ? title : String(title[..<open]).trimmingCharacters(in: .whitespaces)
+    }
+
+    private var fieldUnit: String? {
+        guard let open = title.lastIndex(of: "("), title.last == ")" else { return nil }
+        let candidate = String(title[title.index(after: open)..<title.index(before: title.endIndex)])
+        return recognizedUnit(candidate)
+    }
+
+    private func recognizedUnit(_ value: String) -> String? {
+        switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "g", "kcal", "mg", "ml", "%":
+            return value.trimmingCharacters(in: .whitespacesAndNewlines)
+        default:
+            return nil
         }
-        .padding(.vertical, 3)
     }
 }
 
@@ -3296,14 +4566,14 @@ private struct FitnessHydrationLifestyleCard: View {
                 HStack(alignment: .firstTextBaseline) {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Hydration, caffeine, alcohol")
-                            .font(LifeOSFont.header(15))
+                            .lifeOSTypography(.sectionTitle)
                         Text(isFixture ? "Fixture preview · not persisted" : "Durable local facts · exact timestamps")
-                            .font(LifeOSFont.caption(10))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(isFixture ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)
                     }
                     Spacer(minLength: 8)
                     Text("Open logs")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.accent)
                 }
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), spacing: 12)], spacing: 10) {
@@ -3314,12 +4584,12 @@ private struct FitnessHydrationLifestyleCard: View {
                 if !isFixture,
                    nutrition.hydrationMilliliters != nil || nutrition.caffeineMilligrams != nil {
                     Text(appleHealthDaySummary)
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Text("No health-risk conclusion is inferred from these logs. Empty entries remain empty rather than becoming zero.")
-                    .font(LifeOSFont.caption(10))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
         }
@@ -3461,13 +4731,13 @@ private struct LifestyleColumn: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Circle().fill(hue.base).frame(width: 6, height: 6)
-            Text(title).font(LifeOSFont.caption(10)).foregroundStyle(hue.base)
+            Text(title).lifeOSTypography(.metadata).foregroundStyle(hue.base)
             Text(value)
-                .font(LifeOSFont.inter(11, weight: .semiBold))
+                .lifeOSTypography(.body, weight: .semibold)
                 .monospacedDigit()
                 .fixedSize(horizontal: false, vertical: true)
             Text(detail)
-                .font(LifeOSFont.caption(9))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .fixedSize(horizontal: false, vertical: true)
         }

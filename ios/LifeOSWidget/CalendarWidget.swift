@@ -232,8 +232,12 @@ public struct CalendarWidgetView: View {
         self.entry = entry
     }
 
-    private let weekNumberWidth: CGFloat = 14
-    private let leftColumnWidth: CGFloat = 124
+    private let calendarDateColumnWidth: CGFloat = 18
+    private let calendarDateColumnMinimumWidth: CGFloat = 17
+    private let calendarGridSpacing: CGFloat = 12
+    private let agendaMinimumWidth: CGFloat = 120
+    private let plusTargetSize: CGFloat = 34
+    private let plusTargetSpacing: CGFloat = 8
     private let dayCellSize: CGFloat = 17
 
     private var calendar: Calendar {
@@ -249,11 +253,10 @@ public struct CalendarWidgetView: View {
         calendar.locale ?? .current
     }
 
-    private var isoCalendar: Calendar {
-        var calendar = Calendar(identifier: .iso8601)
-        calendar.locale = environmentLocale
-        calendar.timeZone = self.calendar.timeZone
-        return calendar
+    private var dateTimeStyle: Date.FormatStyle {
+        var style = Date.FormatStyle.dateTime.locale(formatLocale)
+        style.timeZone = calendar.timeZone
+        return style
     }
 
     private var usesTransparentTreatment: Bool {
@@ -300,15 +303,7 @@ public struct CalendarWidgetView: View {
     }
 
     private var monthTitle: String {
-        entry.date.formatted(.dateTime.locale(formatLocale).month(.wide))
-    }
-
-    private var weekLabel: String {
-        formatLocale.identifier.lowercased().hasPrefix("de") ? "Woche" : "Week"
-    }
-
-    private var isoWeek: Int {
-        isoCalendar.component(.weekOfYear, from: entry.date)
+        entry.date.formatted(dateTimeStyle.month(.wide))
     }
 
     private var weekdaySymbols: [String] {
@@ -323,15 +318,6 @@ public struct CalendarWidgetView: View {
         return String(lettersAndNumbers.prefix(2))
     }
 
-    private var agendaEvents: [CalendarItem] {
-        Array(snapshotItems(on: entry.date).prefix(3))
-    }
-
-    private var agendaOverflow: Int {
-        let total = snapshotItems(on: entry.date).count
-        return max(0, total - agendaEvents.count)
-    }
-
     private func snapshotItems(on day: Date) -> [CalendarItem] {
         CalendarWidgetData.items(on: day, in: entry.snapshot, calendar: calendar)
     }
@@ -342,12 +328,7 @@ public struct CalendarWidgetView: View {
     }
 
     private func timeString(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = formatLocale
-        formatter.calendar = calendar
-        formatter.timeZone = calendar.timeZone
-        formatter.dateFormat = "HH:mm"
-        return formatter.string(from: date)
+        date.formatted(dateTimeStyle.hour(.twoDigits(amPM: .omitted)).minute(.twoDigits))
     }
 
     private func timeRange(for item: CalendarItem) -> String {
@@ -362,6 +343,7 @@ public struct CalendarWidgetView: View {
                 widgetContent
             }
         }
+        .lifeOSWidgetReadableContent(widgetChrome)
         .containerBackground(for: .widget) {
             usesTransparentTreatment ? Color.clear : LifeOSTokens.surface
         }
@@ -369,35 +351,57 @@ public struct CalendarWidgetView: View {
     }
 
     private var widgetContent: some View {
-        ZStack(alignment: .bottomTrailing) {
-            Link(destination: URL(string: "lifeos://calendar")!) {
-                HStack(alignment: .top, spacing: 16) {
-                    monthGrid
-                        .frame(width: leftColumnWidth)
-                    agendaPane
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .contentShape(Rectangle())
-            }
-            .accessibilityLabel(accessibilitySummary)
+        let allEvents = snapshotItems(on: entry.date)
+        let events = Array(allEvents.prefix(3))
+        let overflow = max(0, allEvents.count - events.count)
+        return GeometryReader { proxy in
+            let linkWidth = max(0, proxy.size.width - plusTargetSize - plusTargetSpacing)
+            let gridWidth = calendarGridWidth(for: linkWidth)
+            let agendaWidth = max(0, linkWidth - gridWidth - calendarGridSpacing)
 
-            Link(destination: URL(string: "lifeos://calendar/new")!) {
-                plusButton
+            HStack(alignment: .top, spacing: plusTargetSpacing) {
+                Link(destination: URL(string: "lifeos://calendar")!) {
+                    HStack(alignment: .top, spacing: calendarGridSpacing) {
+                        monthGrid(width: gridWidth)
+                        agendaPane(events: events, overflow: overflow)
+                            .frame(width: agendaWidth, alignment: .topLeading)
+                    }
+                    .frame(width: linkWidth, height: proxy.size.height, alignment: .topLeading)
+                    .contentShape(Rectangle())
+                }
+                .frame(width: linkWidth, height: proxy.size.height, alignment: .topLeading)
+                .accessibilityLabel(accessibilitySummary(events: events))
+
+                Link(destination: URL(string: "lifeos://calendar/new")!) {
+                    plusButton
+                }
+                .frame(width: plusTargetSize, height: plusTargetSize)
+                .accessibilityLabel("Create calendar event")
             }
-            .accessibilityLabel("Create calendar event")
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+    }
+
+    /// Keeps the seven date columns at an intrinsic, readable width while using
+    /// the measured medium-widget width to give the agenda all remaining space.
+    /// At the supported 329-point medium size the minimum is seven 17-point
+    /// cells; the 18-point target is only a cap and cannot overflow the link
+    /// region if WidgetKit proposes a smaller width.
+    private func calendarGridWidth(for linkWidth: CGFloat) -> CGFloat {
+        let minimumGridWidth = calendarDateColumnMinimumWidth * 7
+        let targetGridWidth = calendarDateColumnWidth * 7
+        let availableGridBudget = max(0, linkWidth - calendarGridSpacing)
+        let minimumReadableGridWidth = min(minimumGridWidth, availableGridBudget)
+        let widthAfterAgenda = max(0, availableGridBudget - agendaMinimumWidth)
+        return min(targetGridWidth, max(minimumReadableGridWidth, widthAfterAgenda))
     }
 
     private var unavailableView: some View {
         VStack(alignment: .leading, spacing: 7) {
             Text(CalendarWidgetEntry.SharingCopy.title)
-                .font(.system(size: 16, weight: .bold))
+                .font(LifeOSWidgetTypography.title)
                 .foregroundStyle(primaryForeground)
             Text(CalendarWidgetEntry.SharingCopy.detail)
-                .font(.system(size: 11))
+                .font(LifeOSWidgetTypography.metadata)
                 .foregroundStyle(secondaryForeground)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -405,29 +409,24 @@ public struct CalendarWidgetView: View {
         .padding(16)
     }
 
-    private var monthGrid: some View {
+    private func monthGrid(width: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(alignment: .firstTextBaseline, spacing: 5) {
                 Text(monthTitle)
-                    .font(.system(size: 15, weight: .bold))
-                    .foregroundStyle(primaryForeground)
-                    .lineLimit(1)
-                Text("\(weekLabel) \(isoWeek)")
-                    .font(.system(size: 11))
-                    .foregroundStyle(secondaryForeground)
+                    .font(LifeOSWidgetTypography.title)
+                    .foregroundStyle(usesTransparentTreatment ? primaryForeground : LifeOSTokens.calendarRed)
                     .lineLimit(1)
                 Spacer(minLength: 0)
             }
             .frame(height: 18, alignment: .leading)
 
             HStack(spacing: 0) {
-                Color.clear.frame(width: weekNumberWidth)
                 ForEach(weekdaySymbols.indices, id: \.self) { index in
                     Text(weekdaySymbols[index])
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.system(size: 11, weight: .semibold, design: .default))
                         .foregroundStyle(secondaryForeground)
                         .lineLimit(1)
-                        .minimumScaleFactor(0.55)
+                        .fixedSize(horizontal: true, vertical: false)
                         .frame(maxWidth: .infinity)
                 }
             }
@@ -436,11 +435,6 @@ public struct CalendarWidgetView: View {
             VStack(spacing: 0) {
                 ForEach(0..<6, id: \.self) { row in
                     HStack(spacing: 0) {
-                        Text("\(isoCalendar.component(.weekOfYear, from: monthDays[row * 7]))")
-                            .font(.system(size: 9))
-                            .foregroundStyle(tertiaryForeground)
-                            .frame(width: weekNumberWidth, height: dayCellSize)
-
                         ForEach(0..<7, id: \.self) { column in
                             dayCell(monthDays[row * 7 + column])
                                 .frame(maxWidth: .infinity, maxHeight: dayCellSize)
@@ -450,6 +444,7 @@ public struct CalendarWidgetView: View {
                 }
             }
         }
+        .frame(width: width, alignment: .leading)
     }
 
     private func dayCell(_ day: Date) -> some View {
@@ -461,49 +456,49 @@ public struct CalendarWidgetView: View {
         // collapse both layers into one system accent color.
         let textColor: Color = isToday
             ? contrastForeground
-            : (isCurrentMonth ? primaryForeground : secondaryForeground.opacity(0.58))
+            : (isCurrentMonth ? primaryForeground : (widgetChrome.usesTransparentTreatment ? secondaryForeground : secondaryForeground.opacity(0.58)))
 
         return ZStack {
             if isToday {
                 Image(systemName: "square.fill")
                     .lifeOSCalendarContrastRendering()
-                    .font(.system(size: dayCellSize))
+                    .font(.system(size: dayCellSize, weight: .regular))
                     .foregroundStyle(contrastFill)
                     .frame(width: dayCellSize, height: dayCellSize)
             }
             Text(calendar.component(.day, from: day).description)
-                .font(.system(size: 10, weight: isToday ? .bold : .regular, design: .rounded))
+                .font(.system(size: 11, weight: isToday ? .bold : .medium, design: .default))
                 .foregroundStyle(textColor)
         }
         .frame(width: dayCellSize, height: dayCellSize)
-        .accessibilityLabel(day.formatted(.dateTime.locale(formatLocale).month().day()) + (isToday ? ", today" : ""))
+        .accessibilityLabel(day.formatted(dateTimeStyle.month().day()) + (isToday ? ", today" : ""))
     }
 
-    private var agendaPane: some View {
+    private func agendaPane(events: [CalendarItem], overflow: Int) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Text(compactWeekdaySymbol(entry.date.formatted(.dateTime.locale(formatLocale).weekday(.abbreviated))))
+                Text(compactWeekdaySymbol(entry.date.formatted(dateTimeStyle.weekday(.abbreviated))))
                     .foregroundStyle(primaryForeground)
-                Text(entry.date, format: .dateTime.locale(formatLocale).day())
+                Text(entry.date, format: dateTimeStyle.day())
                     .foregroundStyle(primaryForeground)
             }
-            .font(.system(size: 19, weight: .bold))
+            .font(LifeOSWidgetTypography.compactMetric)
             .lineLimit(1)
 
-            if agendaEvents.isEmpty {
+            if events.isEmpty {
                 Text("No events today")
-                    .font(.system(size: 12))
+                    .font(LifeOSWidgetTypography.metadata)
                     .foregroundStyle(secondaryForeground)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.top, 5)
             } else {
                 VStack(alignment: .leading, spacing: 5) {
-                    ForEach(agendaEvents) { item in
+                    ForEach(events) { item in
                         agendaRow(item)
                     }
-                    if agendaOverflow > 0 {
-                        Text("+\(agendaOverflow) more")
-                            .font(.system(size: 11))
+                    if overflow > 0 {
+                        Text("+\(overflow) more")
+                            .font(LifeOSWidgetTypography.metadata)
                             .foregroundStyle(tertiaryForeground)
                             .padding(.leading, 10)
                     }
@@ -521,11 +516,11 @@ public struct CalendarWidgetView: View {
                 .frame(width: 3, height: 28)
             VStack(alignment: .leading, spacing: 0) {
                 Text(item.title)
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(LifeOSWidgetTypography.title)
                     .foregroundStyle(primaryForeground)
                     .lineLimit(1)
                 Text(timeRange(for: item))
-                    .font(.system(size: 12))
+                    .font(LifeOSWidgetTypography.metadata)
                     .foregroundStyle(secondaryForeground)
                     .lineLimit(1)
             }
@@ -547,14 +542,14 @@ public struct CalendarWidgetView: View {
         .frame(width: 34, height: 34)
     }
 
-    private var accessibilitySummary: String {
+    private func accessibilitySummary(events: [CalendarItem]) -> String {
         if !entry.storageAvailable && !entry.isPreview {
             return CalendarWidgetEntry.SharingCopy.accessibility
         }
-        if agendaEvents.isEmpty {
+        if events.isEmpty {
             return "Calendar. No events today. Create event button available."
         }
-        let titles = agendaEvents.map(\.title).joined(separator: ", ")
+        let titles = events.map(\.title).joined(separator: ", ")
         return "Calendar for \(monthTitle). Today's events: \(titles). Create event button available."
     }
 }

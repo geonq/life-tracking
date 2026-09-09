@@ -3,11 +3,11 @@
 
 The checked-in XcodeGen spec is intentionally a development-safe source of
 truth: it has an exact private Tailscale sync allowlist, an unknown
-provisioning mode, and a team-owned App Group placeholder. The private host is
-safe to pin because the client still requires HTTPS, a `.ts.net` hostname, and
-the gateway's Tailscale identity enforcement. A release lane must inject real
-App Group and provisioning values from its signing environment and is rejected
-if any of those values remain unresolved.
+provisioning mode, and the stable LifeOS App Group identifier. The private host
+is safe to pin because the client still requires HTTPS, a `.ts.net` hostname,
+and the gateway's Tailscale identity enforcement. A release lane must still
+inject signed provisioning values and a team-provisioned App Group from its
+signing environment; it is rejected if those values remain unresolved.
 
 This module deliberately uses only the Python standard library so it can run
 on a clean GitHub-hosted macOS runner before any project build starts.
@@ -27,7 +27,7 @@ from typing import Iterable, Mapping
 ROOT = Path(__file__).resolve().parents[1]
 IOS = ROOT / "ios"
 
-EXPECTED_APP_GROUP_SOURCE = "group.com.hermes.lifeos.REPLACE_WITH_TEAM_CONFIGURED_ID"
+EXPECTED_APP_GROUP_SOURCE = "group.com.hermes.lifeos"
 EXPECTED_PROVISIONING_SOURCE = "unknown"
 EXPECTED_PROVISIONING_EXPIRATION_SOURCE = ""
 EXPECTED_SYNC_ALLOWLIST_SOURCE = "geonqserver.tail5f8789.ts.net"
@@ -189,8 +189,8 @@ def _reject_signed_source_values(project: str) -> None:
 
     if app_group != EXPECTED_APP_GROUP_SOURCE:
         _fail(
-            "source App Group must remain the explicit team-owned placeholder; "
-            "signed identifiers belong in release CI/local injection"
+            "source App Group must remain the stable LifeOS identifier; "
+            "signed provisioning still belongs in release CI/local injection"
         )
     if provisioning != EXPECTED_PROVISIONING_SOURCE:
         _fail("source PROVISIONING_MODE must remain unknown/fail-closed")
@@ -356,8 +356,7 @@ def settings_from_environment() -> dict[str, str]:
 
 def _merge_settings(settings_file: Path | None) -> dict[str, str]:
     settings = parse_build_settings(_read(settings_file)) if settings_file else {}
-    # CI values intentionally win over generated/showBuildSettings output,
-    # because target-level development defaults are allowed to be placeholders.
+    # CI values intentionally win over generated/showBuildSettings output.
     for key, value in settings_from_environment().items():
         if value:
             settings[key] = value

@@ -1208,9 +1208,9 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 20) {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Keep setup out of the daily workflow")
-                            .font(LifeOSFont.spaceGrotesk(20, weight: .bold))
+                            .lifeOSTypography(.sectionTitle, weight: .bold)
                         Text("Connections and security-sensitive configuration are managed here. LifeOS stays honest about what is and is not connected.")
-                            .font(LifeOSFont.inter(14))
+                            .lifeOSTypography(.body)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -1296,7 +1296,7 @@ struct SettingsView: View {
                     }
 
                     Text("Provider keys remain on the Windows Hermes server. This app does not accept or store raw provider secrets.")
-                        .font(LifeOSFont.inter(12))
+                        .lifeOSTypography(.body)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityIdentifier("settings-provider-keys-disclaimer")
@@ -1403,19 +1403,19 @@ private struct SettingsHubCard: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(category.title)
-                    .font(LifeOSFont.inter(14, weight: .semiBold))
+                    .lifeOSTypography(.body, weight: .semibold)
                     .foregroundStyle(.primary)
                     .multilineTextAlignment(.leading)
                     .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
                 Text(category.subtitle)
-                    .font(LifeOSFont.inter(12))
+                    .lifeOSTypography(.body)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                     .multilineTextAlignment(.leading)
                     .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
                 Text(category.readiness.title)
-                    .font(LifeOSFont.inter(11, weight: .semiBold))
+                    .lifeOSTypography(.body, weight: .semibold)
                     .foregroundStyle(category.readiness.color)
                     .multilineTextAlignment(.leading)
                     .lineLimit(2)
@@ -1655,7 +1655,7 @@ private struct SettingsProviderRecoveryRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             Text(provider.lifecycle.recoveryDetail)
-                .font(LifeOSFont.inter(11))
+                .lifeOSTypography(.body)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -1696,7 +1696,7 @@ private struct SettingsProviderRecoveryRow: View {
                             LifeOSIcon(.security).frame(width: 13, height: 13)
                             Text("Revoke in gateway")
                         }
-                            .font(LifeOSFont.inter(11, weight: .semiBold))
+                            .lifeOSTypography(.body, weight: .semibold)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                             .accessibilityLabel("Revoke is managed by the Windows gateway")
                     }
@@ -2112,7 +2112,7 @@ private struct BankConsentConnectRow: View {
                         LifeOSIcon(.security).frame(width: 14, height: 14)
                     }
                     Text(buttonLabel)
-                        .font(LifeOSFont.inter(12, weight: .semiBold))
+                        .lifeOSTypography(.body, weight: .semibold)
                 }
                 .frame(maxWidth: .infinity)
             }
@@ -2127,10 +2127,10 @@ private struct BankConsentConnectRow: View {
                     .foregroundStyle(statusColor)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(controller.state.lifecyclePhase.title)
-                        .font(LifeOSFont.inter(11, weight: .semiBold))
+                        .lifeOSTypography(.body, weight: .semibold)
                         .foregroundStyle(statusTextColor)
                     Text(statusDetail)
-                        .font(LifeOSFont.inter(11))
+                        .lifeOSTypography(.body)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -2142,7 +2142,7 @@ private struct BankConsentConnectRow: View {
                 Button("Re-check status") {
                     controller.refreshStatus()
                 }
-                .font(LifeOSFont.inter(11, weight: .semiBold))
+                .lifeOSTypography(.body, weight: .semibold)
                 .buttonStyle(.plain)
                 .foregroundStyle(LifeOSTokens.accent)
                 .disabled(isBusy)
@@ -2427,9 +2427,9 @@ private struct FinanceConnectionsSettingsView: View {
                         LifeOSIcon(.security).frame(width: 16, height: 16)
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Open secure Sync setup")
-                                .font(LifeOSFont.inter(13, weight: .semiBold))
+                                .lifeOSTypography(.body, weight: .semibold)
                             Text("Review the signed host, URL validation, and Tailscale device-identity gateway.")
-                                .font(LifeOSFont.inter(12))
+                                .lifeOSTypography(.body)
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
@@ -2635,10 +2635,10 @@ private struct HealthDevicesSettingsView: View {
                 SettingsSection(title: "Authority chain", icon: .health) {
                     VStack(alignment: .leading, spacing: 12) {
                         Text(snapshot.authorityChain.map(\.title).joined(separator: "  →  "))
-                            .font(LifeOSFont.inter(15, weight: .semiBold))
+                            .lifeOSTypography(.body, weight: .semibold)
                             .fixedSize(horizontal: false, vertical: true)
                         Text("Helio Strap measures. Zepp and Apple Health / HealthKit are transport and permission layers; neither is presented as the sensor.")
-                            .font(LifeOSFont.inter(13))
+                            .lifeOSTypography(.body)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -2773,7 +2773,7 @@ private struct HealthDevicesSettingsView: View {
                             if !capabilities.isEmpty {
                                 VStack(alignment: .leading, spacing: 0) {
                                     Text(group.title)
-                                        .font(LifeOSFont.inter(12, weight: .semiBold))
+                                        .lifeOSTypography(.body, weight: .semibold)
                                         .foregroundStyle(LifeOSTokens.tertiaryText)
                                         .padding(.bottom, 4)
                                     ForEach(capabilities) { capability in
@@ -2984,15 +2984,15 @@ private struct SyncStorageSettingsView: View {
                             .accessibilityLabel("Saved server URL replacement")
                             .accessibilityValue(localReadiness.urlState.title)
                         Text("The saved URL stays hidden. Enter a replacement here; only its approved or rejected state is shown.")
-                            .font(LifeOSFont.inter(12))
+                            .lifeOSTypography(.body)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                             .fixedSize(horizontal: false, vertical: true)
                         Text("Tailscale Serve supplies the device identity to the loopback-only gateway. LifeOS never stores or edits a bearer or token.")
-                            .font(LifeOSFont.inter(12))
+                            .lifeOSTypography(.body)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                             .fixedSize(horizontal: false, vertical: true)
                         Text(syncStatusLabel)
-                            .font(LifeOSFont.inter(12, weight: .semiBold))
+                            .lifeOSTypography(.body, weight: .semibold)
                             .foregroundStyle(localReadiness.canAttemptConnection ? LifeOSTokens.successText : LifeOSTokens.warningText)
                         Button {
                             runConnectionPreflight()
@@ -3019,10 +3019,10 @@ private struct SyncStorageSettingsView: View {
                                     .foregroundStyle(connectionPreflightColor(connectionPreflight))
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(connectionPreflightTitle(connectionPreflight))
-                                        .font(LifeOSFont.inter(12, weight: .semiBold))
+                                        .lifeOSTypography(.body, weight: .semibold)
                                         .foregroundStyle(connectionPreflightTextColor(connectionPreflight))
                                     Text(connectionPreflightDetail(connectionPreflight))
-                                        .font(LifeOSFont.inter(12))
+                                        .lifeOSTypography(.body)
                                         .foregroundStyle(LifeOSTokens.tertiaryText)
                                         .fixedSize(horizontal: false, vertical: true)
                                 }
@@ -3032,7 +3032,7 @@ private struct SyncStorageSettingsView: View {
                         }
 
                         Text("This sends one read-only request to the approved Windows gateway. The loopback-only gateway verifies Tailscale device identity; LifeOS sends no bearer or Tailscale identity headers.")
-                            .font(LifeOSFont.inter(11))
+                            .lifeOSTypography(.body)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -3100,7 +3100,7 @@ private struct SyncStorageSettingsView: View {
 
                 SettingsSection(title: "Local storage", icon: .documents) {
                     Text("Calendar, tax documents, and app preferences remain on this device unless an explicitly configured, Tailscale-identity-verified sync path is available.")
-                        .font(LifeOSFont.inter(13))
+                        .lifeOSTypography(.body)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -3263,14 +3263,14 @@ private struct PrivacySecuritySettingsView: View {
 
                 SettingsSection(title: "Calendar widget storage", icon: .calendar) {
                     Text(appGroup.widgetGateDetail)
-                        .font(LifeOSFont.inter(13))
+                        .lifeOSTypography(.body)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
                 SettingsSection(title: "Data boundary", icon: .documents) {
                     Text("Calendar items and local-first nutrition records stay on this device until an explicitly configured, Tailscale-identity-verified sync path succeeds. Finance, Fitness, and Usage remain unavailable when their reviewed sources are not connected.")
-                        .font(LifeOSFont.inter(13))
+                        .lifeOSTypography(.body)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -3291,7 +3291,7 @@ private struct PrivacySecuritySettingsView: View {
                         statusColor: signingColor
                     )
                     Text("Automatic self-signing is unavailable by Apple platform design. \(signing.evidenceBoundary)")
-                        .font(LifeOSFont.inter(12))
+                        .lifeOSTypography(.body)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -3325,10 +3325,10 @@ private struct SettingsIntro: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
-                .font(LifeOSFont.title())
+                .lifeOSTypography(.sectionTitle)
                 .tracking(-0.2)
             Text(message)
-                .font(LifeOSFont.bodyText())
+                .lifeOSTypography(.body)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -3374,9 +3374,9 @@ private struct SettingsStatusRow: View {
             .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(LifeOSFont.inter(14, weight: .semiBold))
+                    .lifeOSTypography(.body, weight: .semibold)
                 Text(detail)
-                    .font(LifeOSFont.inter(12))
+                    .lifeOSTypography(.body)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
             Spacer(minLength: 8)
@@ -3386,7 +3386,7 @@ private struct SettingsStatusRow: View {
                     .fill(statusColor)
                     .frame(width: 6, height: 6)
                 Text(status)
-                    .font(LifeOSFont.axis())
+                    .lifeOSTypography(.metadata)
                     .tracking(0.2)
                     // The dot carries the semantic color; the label uses the
                     // neutral text-safe role so status remains readable in
@@ -3419,14 +3419,14 @@ private struct SettingsDiagnosticsView: View {
         SettingsSection(title: "Safe diagnostics", icon: .documents) {
             VStack(alignment: .leading, spacing: 10) {
                 Text(diagnostics.summary)
-                    .font(LifeOSFont.inter(12, weight: .semiBold))
+                    .lifeOSTypography(.body, weight: .semibold)
                     .foregroundStyle(LifeOSTokens.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
                     .accessibilityIdentifier("settings-redacted-diagnostics-summary")
 
                 Text("Only lifecycle states and failure classes are included. URLs, endpoints, account data, balances, provider payloads, credentials, tokens, and raw error text are excluded.")
-                    .font(LifeOSFont.metadata())
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                     .fixedSize(horizontal: false, vertical: true)
 
@@ -3471,7 +3471,7 @@ private struct TruthfulSetupNote: View {
                 .frame(width: 6, height: 6)
                 .padding(.top, 5)
             Text(text)
-                .font(LifeOSFont.metadata())
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -3497,7 +3497,7 @@ private struct SettingsSection<Content: View>: View {
                 Text(title)
                     .foregroundStyle(LifeOSTokens.primaryText)
             }
-            .font(LifeOSFont.callout().weight(.semibold))
+            .lifeOSTypography(.body, weight: .semibold)
             content
         }
         .padding(16)

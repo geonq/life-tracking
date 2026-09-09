@@ -90,16 +90,19 @@ private struct LifeOSIconButtonStyle: ButtonStyle {
     let isFocused: Bool
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.lifeOSReduceMotion) private var requestedReduceMotion
 
     func makeBody(configuration: Configuration) -> some View {
         let pressed = configuration.isPressed
+        let reducedMotion = reduceMotion || requestedReduceMotion
         let state = LifeOSInteractionState.resolve(
             pressed: pressed,
             hovered: isHovered,
             focused: isFocused,
-            reduceMotion: reduceMotion
+            reduceMotion: reducedMotion
         )
         let appearance = LifeOSInteractionAppearance.resolve(for: state)
+        let shouldScale = !reducedMotion
 
         configuration.label
             .frame(width: targetSize, height: targetSize)
@@ -116,8 +119,12 @@ private struct LifeOSIconButtonStyle: ButtonStyle {
                     )
             }
             .opacity(appearance.contentOpacity)
+            .scaleEffect(shouldScale && pressed ? 0.98 : 1)
             .animation(
-                reduceMotion ? nil : LifeOSMotion.press,
+                LifeOSMotion.curve(
+                    for: pressed ? .press : .release,
+                    reduceMotion: reducedMotion
+                )?.animation,
                 value: pressed
             )
     }
@@ -179,6 +186,8 @@ public struct LifeOSSectionHeader: View {
     private let subtitle: String?
     private let trailing: AnyView
 
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
     public init(title: String, subtitle: String? = nil) {
         self.title = title
         self.subtitle = subtitle
@@ -195,24 +204,56 @@ public struct LifeOSSectionHeader: View {
         self.trailing = AnyView(trailing())
     }
 
-    public var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: LifeOSTokens.Space.md) {
-            VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
-                Text(title)
-                    .font(LifeOSFont.sectionTitle())
-                    .foregroundStyle(LifeOSTokens.primaryText)
+    private var titleBlock: some View {
+        VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
+            Text(title)
+                .lifeOSTypography(.sectionTitle)
+                .foregroundStyle(LifeOSTokens.primaryText)
+                .fixedSize(horizontal: false, vertical: true)
 
-                if let subtitle, !subtitle.isEmpty {
-                    Text(subtitle)
-                        .font(LifeOSFont.metadata())
-                        .foregroundStyle(LifeOSTokens.secondaryText)
-                }
+            if let subtitle, !subtitle.isEmpty {
+                Text(subtitle)
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+        }
+    }
+
+    private var horizontalLayout: some View {
+        HStack(alignment: .firstTextBaseline, spacing: LifeOSTokens.Space.md) {
+            titleBlock
+                .fixedSize(horizontal: true, vertical: false)
+                .layoutPriority(1)
 
             Spacer(minLength: LifeOSTokens.Space.sm)
             trailing
+                .fixedSize(horizontal: true, vertical: false)
         }
-        .accessibilityElement(children: .combine)
+    }
+
+    private var stackedLayout: some View {
+        VStack(alignment: .leading, spacing: LifeOSTokens.Space.xs) {
+            titleBlock
+            trailing
+        }
+    }
+
+    @ViewBuilder
+    private var responsiveLayout: some View {
+        if dynamicTypeSize.isAccessibilitySize {
+            stackedLayout
+        } else {
+            ViewThatFits(in: .horizontal) {
+                horizontalLayout
+                stackedLayout
+            }
+        }
+    }
+
+    public var body: some View {
+        responsiveLayout
+            .accessibilityElement(children: .contain)
     }
 }
 
@@ -221,41 +262,84 @@ public struct LifeOSMetricHeader: View {
     private let value: String?
     private let unit: String?
     private let detail: String?
+    private let compact: Bool
+
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     public init(
         label: String,
         value: String?,
         unit: String? = nil,
-        detail: String? = nil
+        detail: String? = nil,
+        compact: Bool = false
     ) {
         self.label = label
         self.value = value
         self.unit = unit
         self.detail = detail
+        self.compact = compact
+    }
+
+    private var valueText: some View {
+        Text(value ?? "—")
+            .lifeOSTypography(compact ? .metricCompact : .metric)
+            .foregroundStyle(LifeOSTokens.primaryText)
+            .layoutPriority(1)
+    }
+
+    @ViewBuilder
+    private var unitText: some View {
+        if let unit, !unit.isEmpty {
+            Text(unit)
+                .lifeOSTypography(.metadata)
+                .foregroundStyle(LifeOSTokens.secondaryText)
+        }
+    }
+
+    private var inlineMetric: some View {
+        HStack(alignment: .firstTextBaseline, spacing: LifeOSTokens.Space.xxs) {
+            valueText
+                .fixedSize(horizontal: true, vertical: false)
+            unitText
+                .fixedSize(horizontal: true, vertical: false)
+        }
+    }
+
+    private var stackedMetric: some View {
+        VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
+            valueText
+                .fixedSize(horizontal: false, vertical: true)
+            unitText
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    @ViewBuilder
+    private var responsiveMetric: some View {
+        if dynamicTypeSize.isAccessibilitySize {
+            stackedMetric
+        } else {
+            ViewThatFits(in: .horizontal) {
+                inlineMetric
+                stackedMetric
+            }
+        }
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
+        VStack(alignment: .leading, spacing: LifeOSTokens.Space.xs) {
             Text(label)
-                .font(LifeOSFont.metadata())
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
 
-            HStack(alignment: .firstTextBaseline, spacing: LifeOSTokens.Space.xxs) {
-                Text(value ?? "—")
-                    .font(LifeOSFont.kpi(32))
-                    .foregroundStyle(LifeOSTokens.primaryText)
-
-                if let unit, !unit.isEmpty {
-                    Text(unit)
-                        .font(LifeOSFont.control())
-                        .foregroundStyle(LifeOSTokens.secondaryText)
-                }
-            }
+            responsiveMetric
 
             if let detail, !detail.isEmpty {
                 Text(detail)
-                    .font(LifeOSFont.metadata())
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.metadataText)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .accessibilityElement(children: .combine)
@@ -312,7 +396,7 @@ public struct LifeOSStatusPill: View {
                     .font(.system(size: 10, weight: .semibold))
             }
             Text(label)
-                .font(LifeOSFont.overline())
+                .lifeOSTypography(.label)
                 .tracking(0.8)
                 .textCase(.uppercase)
         }
@@ -349,10 +433,10 @@ public struct LifeOSMetadataRow: View {
             ForEach(items) { item in
                 VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
                     Text(item.label)
-                        .font(LifeOSFont.metadata())
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.metadataText)
                     Text(item.value)
-                        .font(LifeOSFont.control())
+                        .lifeOSTypography(.button)
                         .foregroundStyle(LifeOSTokens.secondaryText)
                         .monospacedDigit()
                 }
@@ -419,24 +503,24 @@ public struct LifeOSProvenanceNotice: View {
 
             VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
                 Text(kind.label)
-                    .font(LifeOSFont.metadata())
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(kind.tone.foreground)
 
                 if let source, !source.isEmpty {
                     Text(source)
-                        .font(LifeOSFont.metadata())
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.secondaryText)
                 }
 
                 if let observedAt {
                     Text("Observed \(observedAt.formatted(date: .abbreviated, time: .shortened))")
-                        .font(LifeOSFont.metadata())
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.metadataText)
                 }
 
                 if let detail, !detail.isEmpty {
                     Text(detail)
-                        .font(LifeOSFont.bodyText(13))
+                        .lifeOSTypography(.body)
                         .foregroundStyle(LifeOSTokens.secondaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -502,12 +586,12 @@ public enum LifeOSContentState: Equatable, Sendable {
     }
 }
 
-/// A static, footprint-preserving state surface. Loading deliberately uses a
-/// non-animated skeleton; no shimmer or fake baseline is introduced.
+/// A compact, truthful state surface. Loading is represented by a native
+/// progress indicator rather than a delayed skeleton, so there is no timer,
+/// shimmer, or fake chart geometry to reconcile.
 public struct LifeOSStateView: View {
     private let state: LifeOSContentState
     private let retry: (() -> Void)?
-    @State private var showsLoadingSkeleton = false
 
     public init(state: LifeOSContentState, retry: (() -> Void)? = nil) {
         self.state = state
@@ -517,34 +601,27 @@ public struct LifeOSStateView: View {
     public var body: some View {
         Group {
             if case .loading = state {
-                if showsLoadingSkeleton {
-                    VStack(alignment: .leading, spacing: LifeOSTokens.Space.sm) {
-                        RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
-                            .fill(LifeOSTokens.raised)
-                            .frame(width: 132, height: 12)
-                        RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
-                            .fill(LifeOSTokens.raised)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 12)
-                        RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
-                            .fill(LifeOSTokens.raised)
-                            .frame(width: 184, height: 12)
-                    }
-                } else {
-                    Color.clear.frame(height: 44)
+                HStack(spacing: LifeOSTokens.Space.xs) {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(LifeOSTokens.accent)
+                    Text(state.title)
+                        .lifeOSTypography(.cardTitle)
+                        .foregroundStyle(LifeOSTokens.primaryText)
+                    Spacer(minLength: 0)
                 }
             } else {
-                VStack(alignment: .leading, spacing: LifeOSTokens.Space.sm) {
+                VStack(alignment: .leading, spacing: LifeOSTokens.Space.xs) {
                     HStack(spacing: LifeOSTokens.Space.xs) {
                         Image(systemName: state.iconName)
                             .foregroundStyle(state.tone.foreground)
                         Text(state.title)
-                            .font(LifeOSFont.cardTitle())
+                            .lifeOSTypography(.cardTitle)
                             .foregroundStyle(LifeOSTokens.primaryText)
                     }
 
                     Text(state.message)
-                        .font(LifeOSFont.bodyText(13))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.secondaryText)
                         .fixedSize(horizontal: false, vertical: true)
 
@@ -554,25 +631,15 @@ public struct LifeOSStateView: View {
 
                     if let retry {
                         Button("Try again", action: retry)
-                            .font(LifeOSFont.control())
+                            .lifeOSTypography(.button)
                             .foregroundStyle(LifeOSTokens.accent)
                             .frame(minHeight: LifeOSTokens.Control.minimumTarget)
                     }
                 }
             }
         }
-        .frame(maxWidth: .infinity, minHeight: 88, alignment: .leading)
+        .padding(.vertical, LifeOSTokens.Space.xs)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
-        .task(id: state) {
-            showsLoadingSkeleton = false
-            guard case .loading = state else { return }
-            do {
-                try await Task.sleep(nanoseconds: 150_000_000)
-            } catch {
-                return
-            }
-            guard !Task.isCancelled else { return }
-            showsLoadingSkeleton = true
-        }
     }
 }

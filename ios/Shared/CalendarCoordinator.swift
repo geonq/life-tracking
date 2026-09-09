@@ -27,6 +27,12 @@ private enum CalendarRemoteMutationError: Error {
 private protocol CalendarPeerTransport: AnyObject {
     func setStatusHandler(_ handler: @escaping (CalendarPeerConnectionStatus) -> Void)
     func setSnapshotHandler(_ handler: @escaping (CalendarPeerSyncEnvelope) -> Void)
+    func setPairingHandler(_ handler: @escaping (CalendarPairingState) -> Void)
+    func createPairing() throws
+    func importPairing(_ token: String) throws
+    func confirmPairing() throws
+    func cancelPairing()
+    func retryPairingConnection()
     func start()
     func stop()
     func send(snapshot: CalendarSnapshot, senderID: String, revision: Int) throws
@@ -48,6 +54,12 @@ private final class LiveCalendarPeerTransport: CalendarPeerTransport {
         service.onSnapshotReceived = { envelope, _ in handler(envelope) }
     }
 
+    func setPairingHandler(_ handler: @escaping (CalendarPairingState) -> Void) { service.onPairingChanged = handler }
+    func createPairing() throws { try service.createPairing() }
+    func importPairing(_ token: String) throws { try service.importPairing(token) }
+    func confirmPairing() throws { try service.confirmPairing() }
+    func cancelPairing() { service.cancelPairing() }
+    func retryPairingConnection() { service.retryPairingConnection() }
     func start() { service.start() }
     func stop() { service.stop() }
 
@@ -61,18 +73,29 @@ private final class LiveCalendarPeerTransport: CalendarPeerTransport {
 private final class FixtureCalendarPeerTransport: CalendarPeerTransport {
     func setStatusHandler(_ handler: @escaping (CalendarPeerConnectionStatus) -> Void) {}
     func setSnapshotHandler(_ handler: @escaping (CalendarPeerSyncEnvelope) -> Void) {}
+    func setPairingHandler(_ handler: @escaping (CalendarPairingState) -> Void) {
+        handler(CalendarPairingState(message: "Nearby pairing is unavailable in fixtures and tests.", available: false))
+    }
+    func createPairing() throws { throw CalendarPeerSyncError.invalidPairing }
+    func importPairing(_ token: String) throws { throw CalendarPeerSyncError.invalidPairing }
+    func confirmPairing() throws { throw CalendarPeerSyncError.invalidPairing }
+    func cancelPairing() {}
+    func retryPairingConnection() {}
     func start() {}
     func stop() {}
     func send(snapshot: CalendarSnapshot, senderID: String, revision: Int) throws {}
 }
 
 private enum CalendarWidgetTimelineReloader {
-    static func reload() {
+    static let kinds = ["LifeOSCalendarWidget", "LifeOSNextEventWidget", "TasksWidget"]
+
+    static func reload(_ kinds: [String]) {
 #if canImport(WidgetKit)
-        // Reload only the calendar kinds. This is a one-way app-to-widget
-        // notification; widget timeline reads never call back into this path.
-        WidgetCenter.shared.reloadTimelines(ofKind: "LifeOSCalendarWidget")
-        WidgetCenter.shared.reloadTimelines(ofKind: "LifeOSNextEventWidget")
+        // Reload only projections of the shared CalendarSnapshot. This is a
+        // one-way app-to-widget notification; widget timeline reads never call back into this path.
+        for kind in kinds {
+            WidgetCenter.shared.reloadTimelines(ofKind: kind)
+        }
 #endif
     }
 }
@@ -87,6 +110,8 @@ public final class CalendarCoordinator: ObservableObject {
     @Published public private(set) var snapshot = CalendarSnapshot()
     @Published public private(set) var storageDescription = ""
     @Published public private(set) var syncStatus: CalendarPeerConnectionStatus = .stopped
+    @Published public private(set) var pairingState = CalendarPairingState()
+    @Published public private(set) var pairingError: String?
     @Published public private(set) var syncWarning: String?
     @Published public private(set) var errorMessage: String?
     @Published public private(set) var isLoaded = false
@@ -101,6 +126,8 @@ public final class CalendarCoordinator: ObservableObject {
     private let remoteFetch: CalendarRemoteFetch?
     private let remotePush: CalendarRemotePush?
     private let remoteSyncInjected: Bool
+    private let widgetTimelineReload: (([String]) -> Void)?
+    private var lastWidgetReloadData: Data?
     private let peerSend: ((CalendarSnapshot, String, Int) throws -> Void)?
     /// Fixture launches intentionally start from their injected snapshot and
     /// must not let a reused app container replace it on the first mutation.
@@ -166,7 +193,10 @@ public final class CalendarCoordinator: ObservableObject {
         /// Test-only seams for proving the production conditional calendar
         /// mutation protocol without replacing TailscaleSyncClient itself.
         calendarRemoteFetch: (@Sendable () async throws -> CalendarRemoteResource)? = nil,
-        calendarRemotePush: (@Sendable (Data, String, String) async throws -> CalendarRemoteResource)? = nil
+        calendarRemotePush: (@Sendable (Data, String, String) async throws -> CalendarRemoteResource)? = nil,
+        /// Test-only replacement for WidgetCenter; also permits an injected
+        /// local store to exercise invalidation without an App Group entitlement.
+        widgetTimelineReload: (([String]) -> Void)? = nil
     ) {
         snapshot = initialSnapshot
         self.usesVisualFixtures = usesVisualFixtures
@@ -196,7 +226,11 @@ public final class CalendarCoordinator: ObservableObject {
             self.remoteFetch = nil
             self.remotePush = nil
         } else {
-            peerSync = LiveCalendarPeerTransport(displayName: senderID)
+            if storeURL != nil || peerSend != nil || storeMutationHook != nil || calendarRemoteFetch != nil || calendarRemotePush != nil || widgetTimelineReload != nil {
+                peerSync = FixtureCalendarPeerTransport()
+            } else {
+                peerSync = LiveCalendarPeerTransport(displayName: senderID)
+            }
             let client = TailscaleSyncClient()
             tailscaleClient = client
             self.remoteFetch = calendarRemoteFetch ?? { try await client.fetchCalendarResource() }
@@ -204,9 +238,19 @@ public final class CalendarCoordinator: ObservableObject {
                 try await client.pushCalendar(data, ifMatch: etag, idempotencyKey: idempotencyKey)
             }
         }
+        self.widgetTimelineReload = widgetTimelineReload
         self.peerSend = peerSend
+        peerSync.setPairingHandler { [weak self] state in
+            DispatchQueue.main.async { self?.pairingState = state }
+        }
         peerSync.setStatusHandler { [weak self] status in
-            Task { @MainActor in self?.syncStatus = status }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.syncStatus = status
+                if case .connected = status, self.isLoaded {
+                    self.sendPeer(snapshot: self.snapshot, revision: self.revision)
+                }
+            }
         }
         peerSync.setSnapshotHandler { [weak self] envelope in
             Task { @MainActor in await self?.merge(envelope.snapshot, remoteRevision: envelope.revision) }
@@ -240,6 +284,16 @@ public final class CalendarCoordinator: ObservableObject {
         catch { errorMessage = "Unable to load calendar: \(error.localizedDescription)"; isLoaded = true }
     }
 
+    private func pairingAction(_ action: () throws -> Void) {
+        pairingError = nil
+        do { try action() }
+        catch { pairingError = "Pairing rejected: invalid, expired, mismatched, or already used handoff. Cancel on both devices and create a new offer." }
+    }
+    public func createPairing() { pairingAction { try peerSync.createPairing() } }
+    public func importPairing(_ token: String) { pairingAction { try peerSync.importPairing(token) } }
+    public func confirmPairing() { pairingAction { try peerSync.confirmPairing() } }
+    public func cancelPairing() { pairingError = nil; peerSync.cancelPairing() }
+    public func retryPairingConnection() { peerSync.retryPairingConnection() }
     public func startSync() { peerSync.start() }
     public func stopSync() { peerSync.stop() }
 
@@ -419,8 +473,18 @@ public final class CalendarCoordinator: ObservableObject {
     }
 
     private func requestWidgetTimelineReloadIfNeeded() {
-        guard sharedStorageAvailable else { return }
-        CalendarWidgetTimelineReloader.reload()
+        guard sharedStorageAvailable || widgetTimelineReload != nil else { return }
+        // Loads, merges, and authoritative adoption can observe the same
+        // durable value. Compare the persisted representation so date precision
+        // lost in JSON round-trips cannot cause duplicate reloads.
+        guard let data = try? JSONEncoder.calendar.encode(snapshot),
+              lastWidgetReloadData != data else { return }
+        lastWidgetReloadData = data
+        if let widgetTimelineReload {
+            widgetTimelineReload(CalendarWidgetTimelineReloader.kinds)
+        } else {
+            CalendarWidgetTimelineReloader.reload(CalendarWidgetTimelineReloader.kinds)
+        }
     }
 
     private func sendPeer(snapshot: CalendarSnapshot, revision: Int) {

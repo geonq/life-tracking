@@ -6,6 +6,7 @@ struct LifeOSMacApp: App {
     @StateObject private var usageCoordinator: UsageCoordinator
     @StateObject private var financeCoordinator: FinanceCoordinator
     @StateObject private var clipperCoordinator: ClipperCoordinator
+    @StateObject private var fitnessTrainingCoordinator: FitnessTrainingCoordinator
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private let usesVisualFixtures: Bool
     /// Coalescing state for the future-module widget snapshot publisher.
@@ -18,7 +19,6 @@ struct LifeOSMacApp: App {
 
     init() {
         let enabled = Self.visualFixturesEnabled
-        LifeOSFontRegistrar.registerBundledFonts()
         usesVisualFixtures = enabled
         let cachedUsage = enabled ? nil : SharedSnapshotStore.read()
         _usageCoordinator = StateObject(wrappedValue: UsageCoordinator(
@@ -37,6 +37,7 @@ struct LifeOSMacApp: App {
                 usesVisualFixtures: enabled
             )
         )
+        _fitnessTrainingCoordinator = StateObject(wrappedValue: FitnessTrainingCoordinator())
     }
 
     /// TestAction supplies the environment flag before the hosted app is
@@ -55,7 +56,8 @@ struct LifeOSMacApp: App {
                 usesVisualFixtures: usesVisualFixtures,
                 usageCoordinator: usageCoordinator,
                 financeCoordinator: financeCoordinator,
-                clipperCoordinator: clipperCoordinator
+                clipperCoordinator: clipperCoordinator,
+                fitnessTrainingCoordinator: fitnessTrainingCoordinator
             )
                 .frame(minWidth: 900, minHeight: 640)
                 .tint(LifeOSTokens.accent)
@@ -78,6 +80,7 @@ struct LifeOSMacApp: App {
                     publishWidgetSnapshots()
                 }
         }
+        .handlesExternalEvents(matching: ["*"])
         .defaultSize(width: 1512, height: 982)
         .commands {
             CommandGroup(after: .toolbar) {
@@ -154,12 +157,14 @@ struct LifeOSMacRootView: View {
     @ObservedObject private var usageCoordinator: UsageCoordinator
     @ObservedObject private var financeCoordinator: FinanceCoordinator
     @ObservedObject private var clipperCoordinator: ClipperCoordinator
+    @ObservedObject private var fitnessTrainingCoordinator: FitnessTrainingCoordinator
     private let usesVisualFixtures: Bool
     @State private var selection: LifeOSModule
     @State private var selectedRoute: LifeOSDeepLink?
     @State private var showingUsage: Bool
     @State private var requestingNewCalendarEvent = false
     @State private var sidebarCollapsed = false
+    @State private var hoveredSidebarModule: LifeOSModule?
     @State private var showingCommandPalette = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -170,6 +175,7 @@ struct LifeOSMacRootView: View {
         usageCoordinator: UsageCoordinator,
         financeCoordinator: FinanceCoordinator? = nil,
         clipperCoordinator: ClipperCoordinator? = nil,
+        fitnessTrainingCoordinator: FitnessTrainingCoordinator? = nil,
         initialModule: LifeOSModule = .home,
         initialRoute: LifeOSDeepLink? = nil,
         initiallyShowingUsage: Bool = false
@@ -179,14 +185,15 @@ struct LifeOSMacRootView: View {
         self.usageCoordinator = usageCoordinator
         self.financeCoordinator = financeCoordinator ?? FinanceCoordinator(initialState: .demo)
         self.clipperCoordinator = clipperCoordinator ?? ClipperCoordinator(initialState: usesVisualFixtures ? .demo : .unavailable)
+        self.fitnessTrainingCoordinator = fitnessTrainingCoordinator ?? FitnessTrainingCoordinator()
         _selection = State(initialValue: initialModule)
         _selectedRoute = State(initialValue: initialRoute)
         _showingUsage = State(initialValue: initiallyShowingUsage || initialRoute == .usage)
     }
 
-    private var rootLayout: some View {
+    private func rootLayout(isCompact: Bool) -> some View {
         HStack(spacing: 0) {
-            sidebar
+            sidebar(isCompact: isCompact)
             Rectangle()
                 .fill(LifeOSTokens.hairlineBorder)
                 .frame(width: 1)
@@ -204,16 +211,22 @@ struct LifeOSMacRootView: View {
 
     var body: some View {
         Group {
-            if usesVisualFixtures {
+            if usesVisualFixtures && !ProcessInfo.processInfo.arguments.contains("-LifeOSExternalURLTests") {
                 // Snapshot hosts are AppKit views, not a SwiftUI Scene. Keep
                 // external-event registration out of that fixture path so
                 // tests stay offline and do not emit scene-lifecycle warnings.
-                rootLayout
+                layoutWithResponsiveSidebar
             } else {
-                rootLayout
+                layoutWithResponsiveSidebar
+                    .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
                     .onOpenURL { url in
-                        guard let destination = LifeOSDeepLink(url: url) else { return }
-                        navigate(to: destination)
+                        showingCommandPalette = false
+                        switch LifeOSNavigationRoute(url: url) {
+                        case .existing(let destination):
+                            navigate(to: destination)
+                        case .home:
+                            select(.home)
+                        }
                     }
             }
         }
@@ -226,47 +239,59 @@ struct LifeOSMacRootView: View {
         }
     }
 
-    private var sidebar: some View {
-        VStack(alignment: .leading, spacing: 4) {
+    private var layoutWithResponsiveSidebar: some View {
+        GeometryReader { proxy in
+            rootLayout(isCompact: proxy.size.width < 900)
+        }
+    }
+
+    private func sidebar(isCompact: Bool) -> some View {
+        let collapsed = sidebarCollapsed || isCompact
+        return VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
                 LifeOSIcon(.home)
                     .foregroundStyle(LifeOSTokens.accent)
                     .frame(width: 18, height: 18)
-                if !sidebarCollapsed {
+                if !collapsed {
                     Text("LIFE OS")
-                        .font(LifeOSFont.manrope(10, weight: .extraBold))
+                        .lifeOSTypography(.pageTitle, weight: .bold)
                         .tracking(0.8)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
                 Spacer(minLength: 0)
-                Button {
+                if !isCompact {
+                    Button {
                     withAnimation(reduceMotion ? nil : LifeOSMotion.snappy) {
                         sidebarCollapsed.toggle()
                     }
-                } label: {
-                    LifeOSIcon(sidebarCollapsed ? .chevronRight : .chevronLeft)
-                        .frame(width: 16, height: 16)
+                    } label: {
+                        LifeOSIcon(sidebarCollapsed ? .chevronRight : .chevronLeft)
+                            .frame(width: 16, height: 16)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .accessibilityLabel(sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar")
+                    .accessibilityIdentifier("mac-sidebar-collapse")
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(LifeOSTokens.tertiaryText)
-                .accessibilityLabel(sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar")
-                .accessibilityIdentifier("mac-sidebar-collapse")
             }
-            .padding(.horizontal, sidebarCollapsed ? 14 : 12)
+            .padding(.horizontal, collapsed ? 14 : 12)
             .padding(.top, 12)
             .padding(.bottom, 12)
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 3) {
-                    ForEach(LifeOSModule.macPrimaryModules) { module in
-                        sidebarButton(module)
+                    ForEach(LifeOSModule.macPrimaryModules.filter { $0 != .settings }) { module in
+                        sidebarButton(module, collapsed: collapsed)
                     }
                 }
                 .padding(.horizontal, 8)
             }
-            Spacer(minLength: 0)
+            Spacer(minLength: 12)
+            sidebarButton(.settings, collapsed: collapsed)
+                .padding(.horizontal, 8)
+                .padding(.bottom, 10)
         }
-        .frame(width: sidebarCollapsed ? 68 : 228)
+        .frame(width: collapsed ? 68 : 228)
         .frame(maxHeight: .infinity, alignment: .topLeading)
         .background(LifeOSTokens.canvas)
         .accessibilityIdentifier("mac-persistent-sidebar")
@@ -276,10 +301,10 @@ struct LifeOSMacRootView: View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(selection.title)
-                    .font(LifeOSFont.spaceGrotesk(16, weight: .bold))
+                    .lifeOSTypography(.sectionTitle, weight: .bold)
                 if let section = selectedRoute?.sectionTitle ?? (selectedRoute == .usage ? "Usage" : nil) {
                     Text(section)
-                        .font(LifeOSFont.inter(11))
+                        .lifeOSTypography(.body)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
             }
@@ -288,9 +313,9 @@ struct LifeOSMacRootView: View {
 
             Button { showingCommandPalette = true } label: {
                 HStack(spacing: 8) {
-                    LifeOSIcon(.views).frame(width: 15, height: 15)
-                    Text("Search or jump").font(LifeOSFont.inter(12))
-                    Text("⌘K").font(LifeOSFont.inter(10, weight: .semiBold))
+                    LifeOSIcon(.search).frame(width: 15, height: 15)
+                    Text("Search or jump").lifeOSTypography(.body)
+                    Text("⌘K").lifeOSTypography(.body, weight: .semibold)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
                 .foregroundStyle(LifeOSTokens.tertiaryText)
@@ -361,7 +386,8 @@ struct LifeOSMacRootView: View {
                 initialSection: selectedRoute?.fitnessSection ?? .today,
                 initialNutritionEntryPoint: selectedRoute?.nutritionEntryPoint,
                 initialFitnessEntryPoint: selectedRoute?.fitnessEntryPoint,
-                usesVisualFixtures: usesVisualFixtures
+                usesVisualFixtures: usesVisualFixtures,
+                trainingCoordinator: fitnessTrainingCoordinator
             )
             .transition(reduceMotion ? .identity : .opacity)
         case .tax:
@@ -395,38 +421,41 @@ struct LifeOSMacRootView: View {
         }
     }
 
-    private func sidebarButton(_ module: LifeOSModule) -> some View {
+    private func sidebarButton(_ module: LifeOSModule, collapsed: Bool) -> some View {
         let selected = selection == module
+        let hovered = hoveredSidebarModule == module
         return Button {
             select(module)
         } label: {
-            HStack(spacing: 9) {
-                LifeOSIcon(module.icon).frame(width: 16, height: 16)
-                if !sidebarCollapsed {
+            HStack(spacing: 12) {
+                Capsule(style: .continuous)
+                    .fill(selected ? LifeOSTokens.accent : .clear)
+                    .frame(width: 3, height: 20)
+                LifeOSIcon(module.icon).frame(width: 24, height: 24)
+                if !collapsed {
                     Text(module.title)
-                        .font(LifeOSFont.inter(13, weight: selected ? .semiBold : .regular))
+                        .lifeOSTypography(.body, weight: selected ? .semibold : .regular)
                     Spacer(minLength: 0)
                 }
             }
-            .foregroundStyle(selected ? Color.primary : LifeOSTokens.secondaryText)
-            .overlay(alignment: .leading) {
-                if selected {
-                    Capsule(style: .continuous)
-                        .fill(module.accent)
-                        .frame(width: 3, height: 18)
-                        .accessibilityHidden(true)
-                }
-            }
-            .padding(.horizontal, 10)
-            .frame(height: 34)
+            .foregroundStyle(selected ? LifeOSTokens.selectedNavigationText : LifeOSTokens.secondaryText)
+            .padding(.horizontal, 12)
+            .frame(height: 40)
             .background(
-                selected ? LifeOSTokens.Module.surface(module.accent, opacity: 0.12) : Color.clear,
-                in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                selected ? LifeOSTokens.selectedNavigationFill : (hovered ? LifeOSTokens.raised : .clear),
+                in: RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
             )
-            .frame(maxWidth: .infinity, alignment: sidebarCollapsed ? .center : .leading)
+            .frame(maxWidth: .infinity, alignment: collapsed ? .center : .leading)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .onHover { isHovered in
+            hoveredSidebarModule = isHovered ? module : (hoveredSidebarModule == module ? nil : hoveredSidebarModule)
+        }
+        .animation(
+            LifeOSMotion.curve(for: .hover, reduceMotion: reduceMotion)?.animation,
+            value: hovered
+        )
         .accessibilityLabel(module.title)
         .accessibilityAddTraits(selected ? .isSelected : [])
         .accessibilityIdentifier("mac-sidebar-\(module.rawValue)")
@@ -485,10 +514,10 @@ private struct LifeOSMacCommandPalette: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 Text("Command palette")
-                    .font(LifeOSFont.spaceGrotesk(18, weight: .bold))
+                    .lifeOSTypography(.sectionTitle, weight: .bold)
                 Spacer()
                 Text("ESC")
-                    .font(LifeOSFont.inter(10, weight: .semiBold))
+                    .lifeOSTypography(.body, weight: .semibold)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
             TextField("Jump to a module…", text: $query)
@@ -508,11 +537,11 @@ private struct LifeOSMacCommandPalette: View {
                                     .foregroundStyle(module.accent)
                                     .frame(width: 17, height: 17)
                                 Text(module.title)
-                                    .font(LifeOSFont.navigationLabel(13))
+                                    .lifeOSTypography(.label)
                                 Spacer()
                                 if !module.hasWorkingView {
                                     Text("Not connected")
-                                        .font(LifeOSFont.metadata())
+                                        .lifeOSTypography(.metadata)
                                         .foregroundStyle(LifeOSTokens.tertiaryText)
                                 }
                             }

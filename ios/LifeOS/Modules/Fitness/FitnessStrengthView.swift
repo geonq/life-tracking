@@ -35,13 +35,13 @@ public struct FitnessStrengthDetailView: View {
                     StrengthSurfaceCard {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Source boundary")
-                                .font(LifeOSFont.header(14))
+                                .lifeOSTypography(.sectionTitle)
                             Text("Values require a named window, provenance, and reviewed workout samples. Missing data remains unavailable; LifeOS does not substitute zero.")
-                                .font(LifeOSFont.body(12))
+                                .lifeOSTypography(.body)
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                                 .fixedSize(horizontal: false, vertical: true)
                             Button("Review source and permissions", action: onSourceTap)
-                                .font(LifeOSFont.inter(11, weight: .semiBold))
+                                .lifeOSTypography(.body, weight: .semibold)
                                 .buttonStyle(.bordered)
                                 .tint(LifeOSTokens.accent)
                         }
@@ -49,7 +49,7 @@ public struct FitnessStrengthDetailView: View {
                 }
                 if let notice {
                         Text(notice)
-                            .font(LifeOSFont.caption(11))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(noticeIsError ? LifeOSTokens.warning : LifeOSTokens.success)
                             .fixedSize(horizontal: false, vertical: true)
                             .accessibilityAddTraits(.isStaticText)
@@ -92,9 +92,9 @@ public struct FitnessStrengthDetailView: View {
         HStack(alignment: .bottom, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Strength")
-                    .font(LifeOSFont.headerLarge(28))
+                    .lifeOSTypography(.pageTitle)
                 Text(windowLabel)
-                    .font(LifeOSFont.caption(12))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
             Spacer(minLength: 12)
@@ -102,7 +102,7 @@ public struct FitnessStrengthDetailView: View {
                 editorPresentation = .add
             } label: {
                 Label("Add template", systemImage: "plus")
-                    .font(LifeOSFont.inter(12, weight: .semiBold))
+                    .lifeOSTypography(.body, weight: .semibold)
             }
             .buttonStyle(.borderedProminent)
             .tint(LifeOSTokens.accent)
@@ -120,7 +120,7 @@ public struct FitnessStrengthDetailView: View {
                     Image(systemName: "scalemass.fill")
                         .foregroundStyle(LifeOSTokens.accent)
                     Text("Total volume")
-                        .font(LifeOSFont.header(17))
+                        .lifeOSTypography(.sectionTitle)
                     Spacer()
                     StrengthStateBadge(sourceState: snapshot.totalVolume.sourceState)
                 }
@@ -155,11 +155,11 @@ public struct FitnessStrengthDetailView: View {
     private var totalVolumeSummary: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("All muscle groups")
-                .font(LifeOSFont.caption(11))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
             StrengthAggregateValue(aggregate: snapshot.totalVolume)
             Text("Logged volume in the selected window")
-                .font(LifeOSFont.caption(10))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -182,18 +182,18 @@ public struct FitnessStrengthDetailView: View {
     private var selectedGroupDetail: some View {
         VStack(alignment: .leading, spacing: 9) {
                         Text("Selected group")
-                            .font(LifeOSFont.caption(11))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                         Text(selectedMetric.group.title)
-                            .font(LifeOSFont.header(20))
+                            .lifeOSTypography(.sectionTitle)
                         StrengthMetricValue(metric: selectedMetric)
                         Text("Tap a group to inspect its source-backed volume. Unavailable is not zero.")
-                            .font(LifeOSFont.caption(11))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                             .fixedSize(horizontal: false, vertical: true)
                         if let detail = selectedMetric.sourceDetail {
                             Text(detail)
-                                .font(LifeOSFont.caption(10))
+                                .lifeOSTypography(.metadata)
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
@@ -224,11 +224,11 @@ public struct FitnessStrengthDetailView: View {
                     Image(systemName: "chart.line.uptrend.xyaxis")
                         .foregroundStyle(LifeOSTokens.info)
                     Text("Strength progress")
-                        .font(LifeOSFont.header(17))
+                        .lifeOSTypography(.sectionTitle)
                     Spacer()
                     if snapshot.progress.isDemo {
                         Text("DEMO · NOT LIVE")
-                            .font(LifeOSFont.inter(9, weight: .bold))
+                            .lifeOSTypography(.body, weight: .bold)
                             .foregroundStyle(LifeOSTokens.warning)
                     }
                 }
@@ -239,7 +239,7 @@ public struct FitnessStrengthDetailView: View {
                     StrengthProgressChart(points: points)
                         .frame(height: 180)
                     Text("\(window) · \(provenance)")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -252,22 +252,22 @@ public struct FitnessStrengthDetailView: View {
         VStack(alignment: .leading, spacing: 11) {
             HStack(alignment: .firstTextBaseline) {
                 Text("Training templates")
-                    .font(LifeOSFont.header(20))
+                    .lifeOSTypography(.sectionTitle)
                 Spacer()
                 Text("Local first")
-                    .font(LifeOSFont.caption(10))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
             if templateStore.templates.isEmpty {
                 StrengthSurfaceCard {
                     VStack(alignment: .leading, spacing: 8) {
                         Image(systemName: "plus.circle")
-                            .font(.system(size: 23, weight: .medium))
+                            .lifeOSTypography(.cardTitle)
                             .foregroundStyle(LifeOSTokens.accent)
                         Text("No training templates")
-                            .font(LifeOSFont.header(17))
+                            .lifeOSTypography(.sectionTitle)
                         Text("Create a reusable session with exercises, sets, repetitions, and optional load. LifeOS does not invent a workout when the list is empty.")
-                            .font(LifeOSFont.body(12))
+                            .lifeOSTypography(.body)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                             .fixedSize(horizontal: false, vertical: true)
                         Button("Add first template") { editorPresentation = .add }
@@ -356,7 +356,7 @@ private struct StrengthRadialDiagram: View {
                     .position(center)
                     .overlay {
                         Image(systemName: "figure.strengthtraining.traditional")
-                            .font(.system(size: diameter * 0.075, weight: .medium))
+                            .lifeOSTypography(.cardTitle)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                     }
                     .allowsHitTesting(false)
@@ -370,10 +370,10 @@ private struct StrengthRadialDiagram: View {
                     } label: {
                         VStack(spacing: 2) {
                             Text(metric.kilograms.map { $0.formatted(.number.precision(.fractionLength(0...1))) + " kg" } ?? "—")
-                                .font(LifeOSFont.inter(12, weight: .semiBold))
+                                .lifeOSTypography(.body, weight: .semibold)
                                 .foregroundStyle(metric.kilograms == nil ? LifeOSTokens.tertiaryText : color(for: metric.group))
                             Text(metric.group.shortTitle)
-                                .font(LifeOSFont.inter(11, weight: .medium))
+                                .lifeOSTypography(.body, weight: .medium)
                                 .foregroundStyle(metric.group == selectedGroup ? .primary : LifeOSTokens.tertiaryText)
                         }
                         .padding(.horizontal, 5)
@@ -500,20 +500,20 @@ private struct StrengthMetricValue: View {
         case .observed(let kilograms, _, _), .demo(let kilograms, _, _):
             HStack(alignment: .lastTextBaseline, spacing: 5) {
                 Text(kilograms.formatted(.number.precision(.fractionLength(0...1))))
-                    .font(LifeOSFont.spaceGrotesk(32, weight: .bold))
+                    .lifeOSTypography(.sectionTitle, weight: .bold)
                 Text("kg")
-                    .font(LifeOSFont.inter(13, weight: .semiBold))
+                    .lifeOSTypography(.body, weight: .semibold)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
         case .unavailable(let reason), .calibrating(let reason):
             VStack(alignment: .leading, spacing: 3) {
                 Text("—")
-                    .font(LifeOSFont.spaceGrotesk(32, weight: .bold))
+                    .lifeOSTypography(.sectionTitle, weight: .bold)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                 Text(metric.sourceState == .unavailable || metric.sourceState == .calibrating
                      ? reason
                      : "\(metric.sourceState.label) · \(reason)")
-                    .font(LifeOSFont.caption(10))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -529,20 +529,20 @@ private struct StrengthAggregateValue: View {
         case .observed(let kilograms, _, _), .demo(let kilograms, _, _):
             HStack(alignment: .lastTextBaseline, spacing: 4) {
                 Text(kilograms.formatted(.number.precision(.fractionLength(0...1))))
-                    .font(LifeOSFont.spaceGrotesk(28, weight: .bold))
+                    .lifeOSTypography(.sectionTitle, weight: .bold)
                     .monospacedDigit()
                 Text("kg")
-                    .font(LifeOSFont.inter(12, weight: .semiBold))
+                    .lifeOSTypography(.body, weight: .semibold)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
         case .unavailable, .calibrating:
             VStack(alignment: .leading, spacing: 2) {
                 Text("—")
-                    .font(LifeOSFont.spaceGrotesk(28, weight: .bold))
+                    .lifeOSTypography(.sectionTitle, weight: .bold)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                 if aggregate.sourceState != .unavailable && aggregate.sourceState != .calibrating {
                     Text(aggregate.sourceState.label)
-                        .font(LifeOSFont.caption(10).weight(.semibold))
+                        .lifeOSTypography(.metadata, weight: .semibold)
                         .foregroundStyle(LifeOSTokens.warning)
                 }
             }
@@ -555,7 +555,7 @@ private struct StrengthStateBadge: View {
 
     var body: some View {
         Text(label)
-            .font(LifeOSFont.inter(9, weight: .bold))
+            .lifeOSTypography(.body, weight: .bold)
             .foregroundStyle(color)
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
@@ -799,9 +799,9 @@ private struct StrengthEmptyProgress: View {
             }
             VStack(spacing: 6) {
                 Text("No progress data")
-                    .font(LifeOSFont.header(17))
+                    .lifeOSTypography(.sectionTitle)
                 Text(reason)
-                    .font(LifeOSFont.body(12))
+                    .lifeOSTypography(.body)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
@@ -830,7 +830,7 @@ private struct FitnessStrengthTemplateCard: View {
                     Image(systemName: "figure.strengthtraining.traditional")
                         .foregroundStyle(LifeOSTokens.accent)
                     Text(template.name)
-                        .font(LifeOSFont.header(15))
+                        .lifeOSTypography(.sectionTitle)
                         .lineLimit(2)
                     Spacer()
                     Menu {
@@ -845,31 +845,31 @@ private struct FitnessStrengthTemplateCard: View {
                 }
                 if template.exercises.isEmpty {
                     Text("No exercises yet")
-                        .font(LifeOSFont.caption(11))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 } else {
                     ForEach(template.exercises.prefix(3)) { exercise in
                         HStack(spacing: 7) {
                             Circle().fill(LifeOSTokens.accent.opacity(0.6)).frame(width: 5, height: 5)
                             Text(exercise.name)
-                                .font(LifeOSFont.caption(11))
+                                .lifeOSTypography(.metadata)
                                 .lineLimit(1)
                             Spacer()
                             Text("\(exercise.sets) × \(exercise.repetitions)")
-                                .font(LifeOSFont.inter(10, weight: .medium))
+                                .lifeOSTypography(.body, weight: .medium)
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                         }
                     }
                     if template.exercises.count > 3 {
                         Text("+\(template.exercises.count - 3) more")
-                            .font(LifeOSFont.caption(10))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                     }
                 }
                 Button("Edit template", action: onEdit)
                     .buttonStyle(.bordered)
                     .tint(LifeOSTokens.accent)
-                    .font(LifeOSFont.inter(11, weight: .semiBold))
+                    .lifeOSTypography(.body, weight: .semibold)
                     .accessibilityHint("Edit exercises, sets, repetitions, and optional load")
             }
         }
@@ -909,7 +909,7 @@ private struct FitnessStrengthTemplateEditor: View {
                 Section {
                     if exercises.isEmpty {
                         Text("Add exercises to make the session reusable. A template may remain empty while you draft it.")
-                            .font(LifeOSFont.caption(11))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                     }
                     ForEach($exercises) { $exercise in
@@ -929,7 +929,7 @@ private struct FitnessStrengthTemplateEditor: View {
                     Section {
                         Text(errorMessage)
                             .foregroundStyle(LifeOSTokens.warning)
-                            .font(LifeOSFont.caption(11))
+                            .lifeOSTypography(.metadata)
                     }
                 }
             }

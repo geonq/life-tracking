@@ -119,10 +119,10 @@ struct TaxDocumentsView: View {
                 HStack(alignment: .center, spacing: LifeOSTokens.spacing) {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Tax Documents")
-                            .font(LifeOSFont.display())
+                            .lifeOSTypography(.pageTitle)
                             .tracking(-0.5)
                         Text("Private, on-device review")
-                            .font(.subheadline)
+                            .lifeOSTypography(.label)
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -150,9 +150,9 @@ struct TaxDocumentsView: View {
                     }
                     ForEach(model.documents) { document in
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(document.title).font(.headline)
+                            Text(document.title).lifeOSTypography(.cardTitle)
                             Text("\(document.documentType) · \(document.taxYear.map(String.init) ?? "Year not found") · \(document.confidence.rawValue) confidence")
-                                .font(.subheadline).foregroundStyle(.secondary)
+                                .lifeOSTypography(.label).foregroundStyle(.secondary)
                         }
                     }
                     .onDelete(perform: model.delete)
@@ -185,15 +185,15 @@ struct TaxDocumentReviewView: View {
                 Section("Review before saving") {
                     TextField("Document name", text: $document.title)
                     TextField("Document type", text: $document.documentType)
-                    Text("Rule-based confidence: \(document.confidence.rawValue). Review all candidates and evidence.").font(.footnote)
-                    Text("No tax advice is provided and no filing occurs automatically.").font(.footnote).foregroundStyle(.secondary)
+                    Text("Rule-based confidence: \(document.confidence.rawValue). Review all candidates and evidence.").lifeOSTypography(.metadata)
+                    Text("No tax advice is provided and no filing occurs automatically.").lifeOSTypography(.metadata).foregroundStyle(.secondary)
                 }
                 if !document.warnings.isEmpty {
                     Section("Warnings") { ForEach(document.warnings, id: \.self) { Text($0).foregroundStyle(LifeOSTokens.warning) } }
                 }
                 Section("Detected amounts") {
                     ForEach(Array(document.amounts.enumerated()), id: \.offset) { _, amount in
-                        Text("Page \(amount.evidence.page): \(amount.label) = \(amount.value)\n\(amount.evidence.snippet)").font(.footnote)
+                        Text("Page \(amount.evidence.page): \(amount.label) = \(amount.value)\n\(amount.evidence.snippet)").lifeOSTypography(.metadata)
                     }
                 }
             }

@@ -48,7 +48,7 @@ final class LifeOSMacSnapshotTests: XCTestCase {
     }
 
     func testOverviewResponsiveLightDarkAndUnavailableEvidence() {
-        for width in [900.0, 1_200.0, 1_512.0] {
+        for width in [760.0, 800.0, 900.0, 1_200.0, 1_512.0] {
             for scheme in [ColorScheme.light, ColorScheme.dark] {
                 let appearance = scheme == .dark ? "dark" : "light"
                 render(
@@ -74,6 +74,36 @@ final class LifeOSMacSnapshotTests: XCTestCase {
             colorScheme: .dark,
             reduceMotion: true
         )
+    }
+
+    func testOverviewMeasuredWidthContractAtMacReviewWidths() {
+        let gutter = LifeOSTokens.overviewContentInset
+        let expectedContentWidths: [(outer: CGFloat, content: CGFloat, columns: Int)] = [
+            (800, 720, 2),
+            (900, 820, 2),
+            (1_200, 1_120, 2)
+        ]
+
+        for expected in expectedContentWidths {
+            let contentWidth = OverviewLayoutContract.contentWidth(
+                forOuterWidth: expected.outer,
+                horizontalPadding: gutter
+            )
+            XCTAssertEqual(contentWidth, expected.content, accuracy: 0.001)
+            XCTAssertEqual(OverviewLayoutContract.columnCount(for: contentWidth), expected.columns)
+            XCTAssertLessThanOrEqual(
+                OverviewLayoutContract.minimumRequiredWidth(for: contentWidth),
+                contentWidth,
+                "Two-column Home layout must fit inside the measured content width at \(expected.outer) pt."
+            )
+        }
+
+        // The breakpoint is measured after the parent has supplied its actual
+        // detail width. This catches the one-to-two-column transition without
+        // coupling the test to a particular sidebar implementation.
+        XCTAssertEqual(OverviewLayoutContract.columnCount(for: 719.99), 1)
+        XCTAssertEqual(OverviewLayoutContract.columnCount(for: 720), 2)
+        XCTAssertEqual(OverviewLayoutContract.maxContentWidth, 1_120)
     }
 
     /// RF-20: the Finance card's Wealth row shows the real observed wealth
@@ -798,9 +828,9 @@ final class LifeOSMacSnapshotTests: XCTestCase {
 
     func testGlowRingSettledNormalSnapshot() {
         render(
-            GlowRing(progress: 0.72, hue: .blue, diameter: 148, lineWidth: 8) {
+            GlowRing(progress: 0.72, diameter: 148, lineWidth: 8) {
                 Text("72%")
-                    .font(.system(size: 28, weight: .bold, design: .rounded))
+                    .lifeOSTypography(.pageTitle)
             }
             .frame(width: 220, height: 220)
             .background(LifeOSTokens.canvas),
@@ -812,9 +842,9 @@ final class LifeOSMacSnapshotTests: XCTestCase {
 
     func testGlowRingReduceMotionSnapshot() {
         render(
-            GlowRing(progress: 0.72, hue: .blue, diameter: 148, lineWidth: 8) {
+            GlowRing(progress: 0.72, diameter: 148, lineWidth: 8) {
                 Text("72%")
-                    .font(.system(size: 28, weight: .bold, design: .rounded))
+                    .lifeOSTypography(.pageTitle)
             }
             .frame(width: 220, height: 220)
             .background(LifeOSTokens.canvas),

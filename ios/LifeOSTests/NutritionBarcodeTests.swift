@@ -318,7 +318,7 @@ final class NutritionBarcodeTests: XCTestCase {
         XCTAssertEqual(merged.macroValues.first(where: { $0.name == "Fat" })?.value, 30)
         XCTAssertEqual(merged.meals.count, 1)
         XCTAssertEqual(merged.meals.first?.source, .package)
-        XCTAssertTrue(merged.meals.first?.detail.contains("sync pending") == true)
+        XCTAssertTrue(merged.meals.first?.detail.contains("confirmed locally") == true)
         XCTAssertTrue(merged.meals.first?.detail.contains("Open Food Facts") == true)
 
         let macroOnlyConfirmation = NutritionBarcodeConfirmation(

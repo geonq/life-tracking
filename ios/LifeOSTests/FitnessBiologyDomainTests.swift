@@ -234,4 +234,46 @@ final class FitnessBiologyDomainTests: XCTestCase {
         XCTAssertTrue(metric.isValueAvailable)
         XCTAssertEqual(FitnessSourceEvidence.from(metric: metric).summary, "HealthKit · Helio Strap · Selected day · Fresh")
     }
+
+    func testBiologyPresentationPolicyHasOneOwnerForEmbeddedAndStandaloneSurfaces() {
+        let embedded = FitnessBiologyPresentationPolicy(embeddedInParentScroll: true)
+        XCTAssertFalse(embedded.showsPageHeader)
+        XCTAssertFalse(embedded.ownsDateSelection)
+        XCTAssertFalse(embedded.ownsScrollView)
+        XCTAssertTrue(embedded.parentOwnsSourceNotice)
+
+        let standalone = FitnessBiologyPresentationPolicy(embeddedInParentScroll: false)
+        XCTAssertTrue(standalone.showsPageHeader)
+        XCTAssertTrue(standalone.ownsDateSelection)
+        XCTAssertTrue(standalone.ownsScrollView)
+        XCTAssertFalse(standalone.parentOwnsSourceNotice)
+    }
+
+    func testBiologySeriesIndexKeepsStableDateSelectionAndRevisionIdentity() throws {
+        let firstDate = anchor.addingTimeInterval(-2 * 86_400)
+        let middleDate = anchor.addingTimeInterval(-86_400)
+        let lastDate = anchor
+        let first = try XCTUnwrap(FitnessBiologySample(date: firstDate, value: 50))
+        let middle = try XCTUnwrap(FitnessBiologySample(date: middleDate, value: 52))
+        let last = try XCTUnwrap(FitnessBiologySample(date: lastDate, value: 54))
+
+        let index = FitnessBiologySeriesIndex(points: [last, first, middle])
+        XCTAssertEqual(index.points.map(\.date), [firstDate, middleDate, lastDate])
+        XCTAssertEqual(index.index(for: middleDate), 1)
+        XCTAssertEqual(index.point(for: middleDate)?.value, 52)
+        XCTAssertEqual(index.nearestIndex(forX: 100, width: 100), 2)
+
+        let refreshed = FitnessBiologySeriesIndex(points: [last, first, middle])
+        XCTAssertEqual(refreshed.index(for: middleDate), index.index(for: middleDate))
+        XCTAssertEqual(refreshed.revision, index.revision)
+
+        let changedMiddle = try XCTUnwrap(FitnessBiologySample(date: middleDate, value: 53))
+        let changed = FitnessBiologySeriesIndex(points: [last, first, changedMiddle])
+        XCTAssertEqual(changed.index(for: middleDate), 1)
+        XCTAssertEqual(changed.point(for: middleDate)?.value, 53)
+        XCTAssertNotEqual(changed.revision.sampleFingerprint, index.revision.sampleFingerprint)
+
+        let removed = FitnessBiologySeriesIndex(points: [last, first])
+        XCTAssertNil(removed.index(for: middleDate), "A refresh must clear a selected date whose source record disappeared")
+    }
 }

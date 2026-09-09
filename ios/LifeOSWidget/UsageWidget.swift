@@ -479,7 +479,7 @@ private struct UsageRingView: View {
             }
 
             Text(heroText)
-                .font(.system(size: heroFontSize, weight: .bold, design: .rounded))
+                .font(.system(size: heroFontSize, weight: .semibold, design: .default))
                 .monospacedDigit()
                 .foregroundStyle(progress == nil ? chrome.secondary : chrome.hero)
         }
@@ -526,15 +526,14 @@ struct LifeOSUsageSmallWidgetView: View {
                 progress: lead.map { $0.summary.remainingPercent },
                 diameter: 56,
                 lineWidth: 6,
-                heroFontSize: 15,
+                heroFontSize: 22,
                 disclosure: UsageWidgetData.connectorDisclosure(for: entry.snapshot, lead: lead, at: entry.date),
                 isPreview: UsageWidgetData.hasDemoSource(in: entry.snapshot)
             )
 
             Text(label)
-                .font(.system(size: 9, weight: .semibold))
+                .font(LifeOSWidgetTypography.metadata)
                 .lineLimit(1)
-                .minimumScaleFactor(0.8)
 
             HStack(spacing: 5) {
                 Text(UsageWidgetDate.updated(entry.snapshot.updatedAt))
@@ -542,12 +541,10 @@ struct LifeOSUsageSmallWidgetView: View {
                     Text("PREVIEW").fontWeight(.bold)
                 }
             }
-            .font(.system(size: 8, weight: .medium))
+            .font(LifeOSWidgetTypography.metadata)
             .foregroundStyle(chrome.tertiary)
             .lineLimit(1)
-            .minimumScaleFactor(0.7)
         }
-        .padding(10)
         .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(URL(string: "lifeos://usage"))
         .accessibilityElement(children: .combine)
@@ -620,15 +617,14 @@ struct LifeOSWidgetView: View {
                         progress: lead.map { $0.summary.remainingPercent },
                         diameter: 72,
                         lineWidth: 8,
-                        heroFontSize: 18,
+                        heroFontSize: 22,
                         disclosure: UsageWidgetData.connectorDisclosure(for: entry.snapshot, lead: lead, at: entry.date),
                         isPreview: UsageWidgetData.hasDemoSource(in: entry.snapshot)
                     )
 
                     Text(leadLabel)
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(LifeOSWidgetTypography.metadata)
                         .lineLimit(1)
-                        .minimumScaleFactor(0.72)
 
                     if let secondary {
                         HStack(spacing: 4) {
@@ -641,7 +637,7 @@ struct LifeOSWidgetView: View {
                                 .monospacedDigit()
                                 .foregroundStyle(chrome.tertiary)
                         }
-                        .font(.system(size: 8, weight: .semibold))
+                        .font(LifeOSWidgetTypography.metadata)
                         .lineLimit(1)
                     }
                 }
@@ -663,12 +659,10 @@ struct LifeOSWidgetView: View {
                     Text("PREVIEW").fontWeight(.bold)
                 }
             }
-            .font(.system(size: 8, weight: .medium))
+            .font(LifeOSWidgetTypography.metadata)
             .foregroundStyle(chrome.tertiary)
             .lineLimit(1)
-            .minimumScaleFactor(0.6)
         }
-        .padding(12)
         .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(URL(string: "lifeos://usage"))
         .accessibilityElement(children: .combine)
@@ -757,16 +751,14 @@ private struct SharedUsageGraph: View {
         } else {
             VStack(spacing: 3) {
                 Text(state.title)
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(LifeOSWidgetTypography.metadata)
                     .foregroundStyle(chrome.secondary)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.75)
                 if !state.detail.isEmpty {
                     Text(state.detail)
-                        .font(.system(size: 8, weight: .medium))
+                        .font(LifeOSWidgetTypography.metadata)
                         .foregroundStyle(chrome.tertiary)
                         .lineLimit(1)
-                        .minimumScaleFactor(0.65)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)

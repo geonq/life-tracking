@@ -48,23 +48,18 @@ public struct NextEventWidgetView: View {
         )
     }
 
-    private func dateFormatter(template: String) -> DateFormatter {
-        let formatter = DateFormatter()
-        formatter.calendar = environmentCalendar
-        formatter.locale = environmentLocale
-        formatter.timeZone = environmentCalendar.timeZone
-        formatter.setLocalizedDateFormatFromTemplate(template)
-        return formatter
+    private var dateTimeStyle: Date.FormatStyle {
+        var style = Date.FormatStyle.dateTime.locale(environmentLocale)
+        style.timeZone = environmentCalendar.timeZone
+        return style
     }
 
     private func timeString(_ date: Date) -> String {
-        let formatter = dateFormatter(template: "HHmm")
-        formatter.dateFormat = "HH:mm"
-        return formatter.string(from: date)
+        date.formatted(dateTimeStyle.hour(.twoDigits(amPM: .omitted)).minute(.twoDigits))
     }
 
     private func dateContext(for date: Date) -> String {
-        dateFormatter(template: "EEE MMM d yyyy").string(from: date)
+        date.formatted(dateTimeStyle.weekday(.abbreviated).month(.abbreviated).day().year())
     }
 
     private func timeRange(for item: CalendarItem) -> String {
@@ -84,21 +79,13 @@ public struct NextEventWidgetView: View {
 #endif
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-        .padding(contentPadding)
+        .lifeOSWidgetReadableContent(widgetChrome)
         .containerBackground(for: .widget) {
             usesTransparentTreatment ? Color.clear : LifeOSTokens.surface
         }
         .widgetURL(Self.calendarURL)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilitySummary)
-    }
-
-    private var contentPadding: CGFloat {
-#if os(iOS)
-        widgetFamily == .accessoryRectangular ? 4 : 14
-#else
-        14
-#endif
     }
 
     private var smallContent: some View {
@@ -134,40 +121,55 @@ public struct NextEventWidgetView: View {
                 .frame(width: 3, height: compact ? 40 : 74)
 
             VStack(alignment: .leading, spacing: compact ? 1 : 3) {
-                Text(timeString(item.start))
-                    .font(.system(
-                        size: compact ? 16 : 31,
-                        weight: .bold,
-                        design: .rounded
-                    ))
-                    .foregroundStyle(primaryForeground)
-                    .lineLimit(1)
-                    .minimumScaleFactor(compact ? 0.75 : 0.62)
+                eventTime(item.start, compact: compact)
 
                 Text(item.title)
-                    .font(.system(size: compact ? 12 : 15, weight: .semibold))
+                    .lifeOSWidgetTypography(.title)
                     .foregroundStyle(primaryForeground)
                     .lineLimit(compact ? 1 : 2)
-                    .minimumScaleFactor(0.72)
 
                 Text(dateContext(for: item.start))
-                    .font(.system(size: compact ? 9 : 10))
+                    .lifeOSWidgetTypography(.metadata)
                     .foregroundStyle(secondaryForeground)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.68)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
     }
 
+    @ViewBuilder
+    private func eventTime(_ date: Date, compact: Bool) -> some View {
+        if compact {
+            Text(timeString(date))
+                .lifeOSWidgetTypography(.compactMetric)
+                .monospacedDigit()
+                .foregroundStyle(primaryForeground)
+                .lineLimit(1)
+        } else {
+            ViewThatFits(in: .horizontal) {
+                Text(timeString(date))
+                    .lifeOSWidgetTypography(.hero)
+                    .monospacedDigit()
+                Text(timeString(date))
+                    .lifeOSWidgetTypography(.compactMetric)
+                    .monospacedDigit()
+                Text(timeString(date))
+                    .lifeOSWidgetTypography(.heroMinimum)
+                    .monospacedDigit()
+            }
+            .foregroundStyle(primaryForeground)
+            .lineLimit(1)
+        }
+    }
+
     private var unavailableContent: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(CalendarWidgetEntry.SharingCopy.title)
-                .font(.system(size: 15, weight: .bold))
+                .lifeOSWidgetTypography(.title)
                 .foregroundStyle(primaryForeground)
                 .lineLimit(2)
             Text(CalendarWidgetEntry.SharingCopy.detail)
-                .font(.system(size: 11))
+                .lifeOSWidgetTypography(.metadata)
                 .foregroundStyle(secondaryForeground)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -177,11 +179,11 @@ public struct NextEventWidgetView: View {
     private var emptyContent: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("No upcoming events")
-                .font(.system(size: 15, weight: .bold))
+                .lifeOSWidgetTypography(.title)
                 .foregroundStyle(primaryForeground)
                 .lineLimit(2)
             Text("Your calendar is clear.")
-                .font(.system(size: 11))
+                .lifeOSWidgetTypography(.metadata)
                 .foregroundStyle(secondaryForeground)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -193,11 +195,11 @@ public struct NextEventWidgetView: View {
         HStack(alignment: .top, spacing: 6) {
             VStack(alignment: .leading, spacing: 1) {
                 Text(CalendarWidgetEntry.SharingCopy.title)
-                    .font(.system(size: 12, weight: .semibold))
+                    .lifeOSWidgetTypography(.metadata)
                     .foregroundStyle(primaryForeground)
                     .lineLimit(1)
                 Text(CalendarWidgetEntry.SharingCopy.detail)
-                    .font(.system(size: 9))
+                    .lifeOSWidgetTypography(.metadata)
                     .foregroundStyle(secondaryForeground)
                     .lineLimit(1)
             }
@@ -209,11 +211,11 @@ public struct NextEventWidgetView: View {
         HStack(alignment: .top, spacing: 6) {
             VStack(alignment: .leading, spacing: 1) {
                 Text("No upcoming events")
-                    .font(.system(size: 12, weight: .semibold))
+                    .lifeOSWidgetTypography(.metadata)
                     .foregroundStyle(primaryForeground)
                     .lineLimit(1)
                 Text("Your calendar is clear")
-                    .font(.system(size: 9))
+                    .lifeOSWidgetTypography(.metadata)
                     .foregroundStyle(secondaryForeground)
                     .lineLimit(1)
             }

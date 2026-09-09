@@ -150,7 +150,7 @@ final class TailscaleSyncClientSecurityTests: XCTestCase {
         sourceRevision: Int = 0
     ) throws -> FinanceImportedSyncRecord {
         let now = Date(timeIntervalSince1970: 1_786_449_600)
-        try FinanceImportedSyncRecord(
+        return try FinanceImportedSyncRecord(
             recordID: id,
             sourceRevision: sourceRevision,
             bookedAt: now.addingTimeInterval(-120),

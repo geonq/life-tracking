@@ -749,6 +749,24 @@ final class CalendarDomainTests: XCTestCase {
         XCTAssertTrue(occurrences.allSatisfy { berlin.component(.hour, from: $0.start) == 9 })
     }
 
+    func testOriginalTimeZoneIsRetainedForExplicitEventDetailDisclosure() throws {
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let item = try CalendarItem(
+            title: "Travel event",
+            start: start,
+            end: start.addingTimeInterval(3_600),
+            createdAt: start,
+            updatedAt: start,
+            timeZoneIdentifier: "America/New_York"
+        )
+
+        XCTAssertEqual(item.timeZoneIdentifier, "America/New_York")
+        let updated = try item.updating(title: "Travel event · edited", at: start.addingTimeInterval(1))
+        XCTAssertEqual(updated.timeZoneIdentifier, "America/New_York")
+        let decoded = try JSONDecoder().decode(CalendarItem.self, from: JSONEncoder().encode(updated))
+        XCTAssertEqual(decoded.timeZoneIdentifier, "America/New_York")
+    }
+
     func testSystemIconCodableAndLegacyPayloadCompatibility() throws {
         let item = try CalendarItem(
             title: "Native symbol",
@@ -865,15 +883,68 @@ final class CalendarDomainTests: XCTestCase {
         let url = blockingFile.appendingPathComponent("calendar.json")
         let original = try CalendarItem(title: "original", start: base, end: base.addingTimeInterval(60), createdAt: base, updatedAt: base)
         let updated = try original.updating(title: "should fail", at: base.addingTimeInterval(1))
-        let coordinator = CalendarCoordinator(initialSnapshot: CalendarSnapshot(items: [original]), storeURL: url)
+        var reloads: [[String]] = []
+        let coordinator = CalendarCoordinator(
+            initialSnapshot: CalendarSnapshot(items: [original]), storeURL: url,
+            widgetTimelineReload: { reloads.append($0) }
+        )
 
         let result = await coordinator.save(updated)
 
         if case .failure = result {} else { XCTFail("A store failure must not acknowledge a local commit") }
         XCTAssertEqual(coordinator.snapshot.items, [original])
+        XCTAssertTrue(reloads.isEmpty, "A failed durable write must not reload widgets")
         XCTAssertFalse(coordinator.canUndo, "A failed local persistence must not create an undo token")
         XCTAssertNotNil(coordinator.errorMessage)
         try? FileManager.default.removeItem(at: blockingFile)
+    }
+
+    @MainActor
+    func testCoordinatorTaskCompletionAndDeletionReloadAllCalendarProjectionsOnce() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var reloads: [[String]] = []
+        let coordinator = CalendarCoordinator(
+            usesVisualFixtures: true,
+            storeURL: directory.appendingPathComponent("calendar.json"),
+            widgetTimelineReload: { reloads.append($0) }
+        )
+        let task = try CalendarItem(title: "Task", kind: .todo, start: base, end: base.addingTimeInterval(60), createdAt: base, updatedAt: base)
+        let saved = await coordinator.save(task)
+        XCTAssertEqual(saved, .success)
+        reloads.removeAll()
+
+        let completed = try task.updatingProgress(.done, at: base.addingTimeInterval(1))
+        let completion = await coordinator.save(completed)
+        XCTAssertEqual(completion, .success)
+        let durableCompleted = try await coordinator.store.load()
+        XCTAssertEqual(durableCompleted.items, [completed])
+        XCTAssertEqual(coordinator.snapshot, durableCompleted)
+        let kinds = ["LifeOSCalendarWidget", "LifeOSNextEventWidget", "TasksWidget"]
+        XCTAssertEqual(reloads, [kinds])
+
+        // Re-observing or saving the same durable snapshot must not duplicate
+        // the batch already requested by the successful completion.
+        await coordinator.load()
+        let unchanged = await coordinator.save(completed)
+        XCTAssertEqual(unchanged, .success)
+        let merged = await coordinator.merge(durableCompleted)
+        XCTAssertEqual(merged, .success)
+        XCTAssertEqual(reloads, [kinds])
+
+        let deletion = await coordinator.delete(completed)
+        XCTAssertEqual(deletion, .success)
+        let durableDeleted = try await coordinator.store.load()
+        XCTAssertTrue(try XCTUnwrap(durableDeleted.items.first).isDeleted)
+        XCTAssertEqual(try JSONEncoder.calendar.encode(coordinator.snapshot),
+                       try JSONEncoder.calendar.encode(durableDeleted))
+        await coordinator.load()
+        XCTAssertEqual(reloads, [kinds, kinds])
+
+        let undo = await coordinator.undo()
+        XCTAssertEqual(undo, .success)
+        XCTAssertEqual(coordinator.snapshot, durableCompleted)
+        XCTAssertEqual(reloads, [kinds, kinds, kinds])
     }
 
     @MainActor
@@ -1425,5 +1496,29 @@ enum CalendarLayoutDurationProbe {
 
     static func minuteUnit(localeIdentifier: String) -> String {
         CalendarEditorStrings.de("Min", "min", localeIdentifier: localeIdentifier)
+    }
+}
+
+@MainActor
+final class CalendarPairingFixtureTests: XCTestCase {
+    func testFixtureAndInjectedStoreRejectPairingWithoutDiscovery() async {
+        for fixture in [true, false] {
+            let coordinator = CalendarCoordinator(usesVisualFixtures: fixture,
+                storeURL: URL(fileURLWithPath: "/tmp/lifeos-pairing-fixture/calendar.json"))
+            // Transport publication is marshalled onto the main actor.
+            for _ in 0..<10 { await Task.yield() }
+            XCTAssertFalse(coordinator.pairingState.available)
+            coordinator.startSync()
+            coordinator.createPairing()
+            coordinator.importPairing("not-a-token")
+            coordinator.confirmPairing()
+            XCTAssertNotNil(coordinator.pairingError)
+            XCTAssertNil(coordinator.pairingState.outgoing)
+            XCTAssertEqual(coordinator.syncStatus, .stopped)
+            coordinator.cancelPairing()
+            coordinator.retryPairingConnection()
+            coordinator.stopSync()
+            XCTAssertNil(coordinator.pairingError)
+        }
     }
 }

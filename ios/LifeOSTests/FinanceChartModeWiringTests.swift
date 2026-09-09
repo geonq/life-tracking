@@ -70,6 +70,92 @@ final class FinanceChartModeWiringTests: XCTestCase {
         XCTAssertTrue(buckets.isEmpty, "No source points at all must yield no buckets, never a fabricated flat history.")
     }
 
+    // MARK: - Finance display state
+
+    func testFinanceChartStateUsesCompactNoSourceStateWithoutShowMax() {
+        let snapshot = FinanceDisplaySnapshot(
+            summary: nil,
+            transactions: nil,
+            usesVisualFixtures: false
+        )
+
+        XCTAssertEqual(snapshot.displayState, .noReviewedSource)
+        let state = snapshot.chartState(for: .spend, range: .month)
+        XCTAssertEqual(state.availability, .noReviewedSource)
+        XCTAssertFalse(state.rendersChartShell)
+        XCTAssertFalse(state.showsShowMax)
+    }
+
+    func testKnownSourceWithNoRowsHasNoShowMaxAction() {
+        let snapshot = FinanceDisplaySnapshot(
+            summary: nil,
+            transactions: [],
+            usesVisualFixtures: false
+        )
+
+        let state = snapshot.chartState(for: .spend, range: .month)
+        XCTAssertTrue(snapshot.hasReviewedSource)
+        XCTAssertEqual(state.availability, .sourceHasNoObservations)
+        XCTAssertFalse(state.rendersChartShell)
+        XCTAssertFalse(state.showsShowMax)
+    }
+
+    func testKnownSourceWithRangeFilteredEmptyKeepsPlotAndOffersShowMax() throws {
+        let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        let transactions = try (0..<2).map { offset in
+            try makeTransaction(cents: 5_000, daysBeforeNow: offset, now: now, isIncome: false)
+        }
+        let snapshot = FinanceDisplaySnapshot(
+            summary: nil,
+            transactions: transactions,
+            usesVisualFixtures: false
+        )
+
+        let filtered = snapshot.chartState(for: .spend, range: .month)
+        XCTAssertEqual(filtered.availability, .filteredEmpty)
+        XCTAssertTrue(filtered.rendersChartShell)
+        XCTAssertTrue(filtered.preservesPlotGeometry)
+        XCTAssertTrue(filtered.showsShowMax)
+
+        let max = snapshot.chartState(for: .spend, range: .max)
+        XCTAssertEqual(max.availability, .observed)
+        XCTAssertFalse(max.showsShowMax)
+    }
+
+    func testObservedStaleAndRefreshingStatesRetainTheirTruth() throws {
+        let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        let transactions = try (0...31).map { offset in
+            try makeTransaction(cents: 5_000, daysBeforeNow: offset, now: now, isIncome: true)
+        }
+
+        let observed = FinanceDisplaySnapshot(
+            summary: nil,
+            transactions: transactions,
+            usesVisualFixtures: false
+        )
+        XCTAssertEqual(observed.displayState, .observed)
+        XCTAssertEqual(observed.chartState(for: .income, range: .month).availability, .observed)
+
+        let stale = FinanceDisplaySnapshot(
+            summary: nil,
+            transactions: transactions,
+            usesVisualFixtures: false,
+            observationState: .stale
+        )
+        XCTAssertEqual(stale.displayState, .staleRetained)
+        XCTAssertEqual(stale.chartState(for: .income, range: .month).sourceState, .staleRetained)
+
+        let refreshing = FinanceDisplaySnapshot(
+            summary: nil,
+            transactions: transactions,
+            usesVisualFixtures: false,
+            observationState: .observed,
+            isRefreshing: true
+        )
+        XCTAssertEqual(refreshing.displayState, .refreshingRetained)
+        XCTAssertEqual(refreshing.chartState(for: .income, range: .month).sourceState, .refreshingRetained)
+    }
+
     // MARK: - RF-14: selection codec round-trips a date mode-agnostically
 
     func testSelectionCodecRoundTripsDate() {

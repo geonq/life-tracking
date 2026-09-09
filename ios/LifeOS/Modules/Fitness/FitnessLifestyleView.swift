@@ -359,14 +359,14 @@ public struct FitnessLifestyleView: View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(kind.displayName)
-                    .font(LifeOSFont.headerLarge(25))
+                    .lifeOSTypography(.pageTitle)
                 Text("Timestamped local facts · \(timeZoneIdentifier)")
-                    .font(LifeOSFont.caption(11))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
             Spacer(minLength: 8)
             Text(usesVisualFixtures ? "Fixture preview" : "Saved locally")
-                .font(LifeOSFont.caption(10))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(usesVisualFixtures ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)
         }
     }
@@ -375,7 +375,7 @@ public struct FitnessLifestyleView: View {
         HStack(alignment: .top, spacing: 8) {
             LifeOSIcon(.warning).frame(width: 15, height: 15)
             Text("DEMO FIXTURE · not live and not persisted. Logging controls are disabled in this preview.")
-                .font(LifeOSFont.caption(10))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.warning)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -388,7 +388,7 @@ public struct FitnessLifestyleView: View {
         HStack(alignment: .top, spacing: 8) {
             LifeOSIcon(.warning).frame(width: 15, height: 15)
             Text(text)
-                .font(LifeOSFont.caption(10))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.warning)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -411,9 +411,9 @@ public struct FitnessLifestyleView: View {
                 Spacer()
                 VStack(spacing: 2) {
                     Text(selectedDate.formatted(.dateTime.weekday(.wide).month(.wide).day().year()))
-                        .font(LifeOSFont.inter(14, weight: .semiBold))
+                        .lifeOSTypography(.body, weight: .semibold)
                     Text(localDay)
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
                 Spacer()
@@ -435,22 +435,22 @@ public struct FitnessLifestyleView: View {
             VStack(alignment: .leading, spacing: 9) {
                 HStack(alignment: .firstTextBaseline) {
                     Text("Day status")
-                        .font(LifeOSFont.header(16))
+                        .lifeOSTypography(.sectionTitle)
                     Spacer()
                     Text(statusTitle)
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(statusColor)
                 }
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(displayTotal)
-                        .font(LifeOSFont.spaceGrotesk(31, weight: .bold))
+                        .lifeOSTypography(.sectionTitle, weight: .bold)
                         .monospacedDigit()
                     Text(displayUnit)
-                        .font(LifeOSFont.caption(12))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
                 Text(statusDetail)
-                    .font(LifeOSFont.caption(10))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -508,35 +508,35 @@ public struct FitnessLifestyleView: View {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
                     Text("History")
-                        .font(LifeOSFont.header(16))
+                        .lifeOSTypography(.sectionTitle)
                     Spacer()
                     Text("\(events.count) active")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
                 if hasActiveHealthKitFacts {
                     Label("HealthKit source-managed facts are read-only; manual changes are disabled to avoid double-counting.", systemImage: "lock.shield")
-                        .font(LifeOSFont.caption(11))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.warning)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityIdentifier("fitness-lifestyle-source-managed")
                     activeEventRows
                 } else if isIntegrityUnavailable {
                     Label("History unavailable until the local ledger is repaired", systemImage: "exclamationmark.triangle")
-                        .font(LifeOSFont.caption(11))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.warning)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityIdentifier("fitness-lifestyle-integrity-unavailable")
                 } else if usesVisualFixtures {
                     Label("Fixture values are shown for visual review only", systemImage: "eye")
-                        .font(LifeOSFont.caption(11))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.warning)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityIdentifier("fitness-lifestyle-fixture-history")
                 } else if summary.explicitNone {
                     VStack(alignment: .leading, spacing: 7) {
                         Label("Explicit none recorded for this day", systemImage: "checkmark.circle")
-                            .font(LifeOSFont.caption(11))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.success)
                             .accessibilityIdentifier("fitness-lifestyle-explicit-none")
                         activeEventRows
@@ -544,14 +544,14 @@ public struct FitnessLifestyleView: View {
                 } else if summary.alcoholFree {
                     VStack(alignment: .leading, spacing: 7) {
                         Label("Alcohol-free recorded for this day", systemImage: "checkmark.seal")
-                            .font(LifeOSFont.caption(11))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.success)
                             .accessibilityIdentifier("fitness-lifestyle-alcohol-free-history")
                         activeEventRows
                     }
                 } else if events.isEmpty {
                     Text("No observation for this day. This is not the same as zero.")
-                        .font(LifeOSFont.caption(11))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityIdentifier("fitness-lifestyle-missing")
@@ -578,9 +578,9 @@ public struct FitnessLifestyleView: View {
                 HStack {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Tracking settings")
-                            .font(LifeOSFont.header(15))
+                            .lifeOSTypography(.sectionTitle)
                         Text(settingsDetail)
-                            .font(LifeOSFont.caption(10))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -595,7 +595,7 @@ public struct FitnessLifestyleView: View {
                 }
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(reminderStatusText)
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(reminderStatusColor)
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 4)
@@ -603,7 +603,7 @@ public struct FitnessLifestyleView: View {
                         Button("Allow") {
                             reconcileReminders(requestPermissionIfNeeded: true)
                         }
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                         .disabled(usesVisualFixtures || isIntegrityUnavailable)
@@ -858,23 +858,23 @@ private struct FitnessLifestyleEventRow: View {
                 .frame(width: 7, height: 7)
             VStack(alignment: .leading, spacing: 3) {
                 Text(event.state == .explicitNone ? "None recorded" : event.state == .alcoholFree ? "Alcohol-free" : "\(event.value?.formatted(.number.precision(.fractionLength(0...2))) ?? "—") \(event.unit?.label ?? "")")
-                    .font(LifeOSFont.inter(13, weight: .semiBold))
+                    .lifeOSTypography(.body, weight: .semibold)
                 Text("\(FitnessLifestyleTime.timeString(for: event.occurredAt, timeZoneIdentifier: event.timeZoneIdentifier)) · \(event.localTimeFoldPolicy == .earlierOffset ? "earlier occurrence" : "later occurrence") · \(event.provenance.label) · \(event.timeZoneIdentifier)")
-                    .font(LifeOSFont.caption(9))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                 if let note = event.journalNote {
                     Text("Note: \(note.text)")
-                        .font(LifeOSFont.caption(9))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                     Text(note.displayLinkage)
-                        .font(LifeOSFont.caption(8))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.warning)
                 }
             }
             Spacer(minLength: 5)
             if let onEdit, let onDelete {
                 Button("Edit", action: onEdit)
-                    .font(LifeOSFont.caption(10))
+                    .lifeOSTypography(.metadata)
                     .buttonStyle(.plain)
                     .foregroundStyle(LifeOSTokens.accent)
                     .accessibilityIdentifier("fitness-lifestyle-edit-\(event.id.uuidString)")
@@ -954,7 +954,7 @@ private struct FitnessLifestyleEntryEditor: View {
 #endif
                         Stepper(value: amountBinding, in: 0...maximumAmount, step: stepAmount) {
                             Text("Adjust by \(stepAmount.formatted(.number.precision(.fractionLength(0...2)))) \(unit.label)")
-                                .font(LifeOSFont.caption(10))
+                                .lifeOSTypography(.metadata)
                         }
                         if kind.allowedUnits.count > 1 {
                             Picker("Unit", selection: $unit) {
@@ -982,7 +982,7 @@ private struct FitnessLifestyleEntryEditor: View {
                 }
                 Section {
                     Text("The exact timestamp and local timezone are retained. Alcohol uses standard drinks only; no ml or BAC values are accepted.")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
             }
@@ -1207,7 +1207,7 @@ private struct FitnessLifestyleSettingsEditor: View {
                             LabeledContent("Reminder time", value: Self.clockLabel(minutes: resolvedCutoffMinutes))
                         } else {
                             Text("Set a bedtime to enable this reminder. The offset you choose is not a health recommendation — it only tells LifeOS when to remind you.")
-                                .font(LifeOSFont.caption(10))
+                                .lifeOSTypography(.metadata)
                                 .foregroundStyle(LifeOSTokens.warning)
                                 .fixedSize(horizontal: false, vertical: true)
                                 .accessibilityIdentifier("fitness-lifestyle-bedtime-unavailable")
@@ -1217,7 +1217,7 @@ private struct FitnessLifestyleSettingsEditor: View {
                             .disabled(!reminderEnabled)
                     }
                     Text("Local reminder is reconciled from this preference. Context is descriptive only; it is not medical advice or a causal recommendation.")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.warning)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityIdentifier("fitness-lifestyle-reminder-not-scheduled")

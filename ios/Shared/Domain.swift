@@ -39,6 +39,7 @@ public enum LifeOSDeepLink: Equatable, Sendable {
     case financeSpend
     case financeCashFlow
     case fitness
+    case fitnessTraining
     case fitnessDailyOverview
     case fitnessStrain
     case fitnessRecovery
@@ -78,6 +79,7 @@ public enum LifeOSDeepLink: Equatable, Sendable {
 
         if module == "fitness" {
             switch Array(segments.dropFirst()) {
+            case ["training"]: self = .fitnessTraining; return
             case ["daily-overview"], ["overview"]: self = .fitnessDailyOverview; return
             case ["strain"], ["load"]: self = .fitnessStrain; return
             case ["recovery"], ["readiness"]: self = .fitnessRecovery; return
@@ -108,6 +110,7 @@ public enum LifeOSDeepLink: Equatable, Sendable {
         case ("finance", "spend"), ("finance", "spending"): self = .financeSpend
         case ("finance", "cash-flow"), ("finance", "cashflow"): self = .financeCashFlow
         case ("fitness", nil): self = .fitness
+        case ("fitness", "training"): self = .fitnessTraining
         case ("fitness", "nutrition"): self = .fitnessNutrition
         case ("fitness", "health"): self = .fitnessHealthMonitor
         case ("fitness", "net-energy"), ("fitness", "netenergy"): self = .fitnessNetEnergy

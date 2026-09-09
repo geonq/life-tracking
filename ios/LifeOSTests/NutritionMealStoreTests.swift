@@ -267,7 +267,258 @@ final class NutritionMealStoreTests: XCTestCase {
         XCTAssertTrue(loaded.isEmpty)
     }
 
+    // MARK: 8. Presenter-owned draft and durable save flow
+
+    func testLocalPreviewIsInMemoryUntilDurableSave() throws {
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        let store = try NutritionMealStore(url: url)
+        var draft = manualDraft(name: "Oats", calories: "400", portionGrams: "250")
+
+        let preview = try draft.applyLocalPreview()
+        XCTAssertEqual(preview.id, draft.draftID)
+        XCTAssertEqual(preview.name, "Oats")
+        XCTAssertEqual(preview.kcal, 400)
+        XCTAssertEqual(preview.portionGrams, 250)
+        XCTAssertEqual(draft.previewMeal, preview)
+        XCTAssertNil(draft.activeMeal)
+        XCTAssertNil(draft.durableReceipt)
+        XCTAssertTrue(try store.load().isEmpty)
+
+        draft.calories = "450"
+        let saved = try FitnessNutritionDurableSave.save(
+            draft: &draft,
+            to: store,
+            now: now.addingTimeInterval(60)
+        )
+        XCTAssertEqual(saved.kcal, 450)
+        XCTAssertEqual(saved.portionGrams, 250)
+        XCTAssertNil(draft.previewMeal)
+        XCTAssertEqual(draft.activeMeal, saved)
+        XCTAssertTrue(draft.isDurablyCurrent)
+        XCTAssertEqual(try store.load(), [saved])
+    }
+
+    func testInvalidLocalPreviewDoesNotCreatePreviewOrDurableRecord() throws {
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        let store = try NutritionMealStore(url: url)
+        var draft = manualDraft(name: "Invalid")
+        draft.calories = "not-a-number"
+
+        XCTAssertThrowsError(try draft.applyLocalPreview())
+        XCTAssertNil(draft.previewMeal)
+        XCTAssertTrue(try store.load().isEmpty)
+    }
+
+    func testSaveEditSaveAdvancesRevisionAndKeepsOneActiveMeal() throws {
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        let store = try NutritionMealStore(url: url)
+        var draft = manualDraft(name: "Original", calories: "400")
+
+        let first = try FitnessNutritionDurableSave.save(draft: &draft, to: store, now: now)
+        XCTAssertEqual(first.revision, 1)
+        XCTAssertNil(first.supersedesID)
+
+        draft.mealName = "Edited once"
+        draft.calories = "450"
+        XCTAssertTrue(draft.isDirty)
+        XCTAssertFalse(draft.isDurablyCurrent)
+        let second = try FitnessNutritionDurableSave.save(
+            draft: &draft,
+            to: store,
+            now: now.addingTimeInterval(60)
+        )
+        XCTAssertNotEqual(second.id, first.id)
+        XCTAssertEqual(second.revision, 2)
+        XCTAssertEqual(second.supersedesID, first.id)
+        XCTAssertEqual(second.name, "Edited once")
+        XCTAssertEqual(second.kcal, 450)
+        XCTAssertTrue(draft.isDurablyCurrent)
+
+        draft.mealName = "Edited twice"
+        draft.protein = "35"
+        let third = try FitnessNutritionDurableSave.save(
+            draft: &draft,
+            to: store,
+            now: now.addingTimeInterval(120)
+        )
+        XCTAssertNotEqual(third.id, second.id)
+        XCTAssertEqual(third.revision, 3)
+        XCTAssertEqual(third.supersedesID, second.id)
+        XCTAssertEqual(third.name, "Edited twice")
+        XCTAssertEqual(third.proteinGrams, 35)
+
+        let raw = try store.load()
+        XCTAssertEqual(raw.count, 3)
+        XCTAssertEqual(raw.filter { !$0.isDeleted }.map(\.id), [third.id])
+    }
+
+    func testDuplicateSaveIsIdempotentAndReconcilesAnUncertainInitialWrite() throws {
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        let store = try NutritionMealStore(url: url)
+        var draft = manualDraft(name: "Retryable", calories: "300")
+
+        let first = try FitnessNutritionDurableSave.save(draft: &draft, to: store, now: now)
+        let duplicateTap = try FitnessNutritionDurableSave.save(
+            draft: &draft,
+            to: store,
+            now: now.addingTimeInterval(1)
+        )
+        XCTAssertEqual(duplicateTap, first)
+        XCTAssertEqual(try store.load().filter { !$0.isDeleted }.count, 1)
+
+        let uncertainID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
+        var retryDraft = manualDraft(
+            id: uncertainID,
+            name: "Receipt lost",
+            calories: "275"
+        )
+        let candidate = try retryDraft.validatedMeal(createdAt: now)
+        try store.addConfirmed(candidate)
+
+        let reconciled = try FitnessNutritionDurableSave.save(
+            draft: &retryDraft,
+            to: store,
+            now: now.addingTimeInterval(30)
+        )
+        XCTAssertEqual(reconciled, candidate)
+        XCTAssertEqual(retryDraft.activeMeal, candidate)
+        XCTAssertTrue(retryDraft.isDurablyCurrent)
+        XCTAssertEqual(try store.load().filter { !$0.isDeleted }.count, 2)
+    }
+
+    func testDirtyDraftIsRetainedAcrossReopenAndOnlyExplicitDiscardResetsIt() throws {
+        let selectedDate = now.addingTimeInterval(86_400)
+        let otherDate = now.addingTimeInterval(2 * 86_400)
+        var draft = FitnessNutritionDraftFlow.startNew(selectedDate: selectedDate)
+        draft.mealName = "Keep this edit"
+        draft.calories = "510"
+        _ = try draft.applyLocalPreview()
+
+        let reopened = FitnessNutritionDraftFlow.reopenOrStart(
+            current: draft,
+            selectedDate: otherDate
+        )
+        XCTAssertEqual(reopened, draft)
+        XCTAssertEqual(reopened.mealName, "Keep this edit")
+        XCTAssertNotNil(reopened.previewMeal)
+
+        let discarded = FitnessNutritionDraftFlow.discard(selectedDate: otherDate)
+        XCTAssertNotEqual(discarded.draftID, draft.draftID)
+        XCTAssertEqual(discarded.mealName, "Meal")
+        XCTAssertTrue(discarded.calories.isEmpty)
+        XCTAssertNil(discarded.previewMeal)
+        XCTAssertNil(discarded.activeMeal)
+        XCTAssertFalse(discarded.isDirty)
+        XCTAssertEqual(discarded.loggedAt, FitnessNutritionDraft.new(selectedDate: otherDate).loggedAt)
+    }
+
+    func testSelectedHistoricalDaySurvivesPreviewBarcodeTimestampAndSave() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Europe/Berlin")!
+        let selectedDate = try XCTUnwrap(calendar.date(from: DateComponents(
+            year: 2026, month: 9, day: 3, hour: 19, minute: 42
+        )))
+        let expectedLoggedAt = try XCTUnwrap(calendar.date(
+            bySettingHour: 12,
+            minute: 0,
+            second: 0,
+            of: calendar.startOfDay(for: selectedDate)
+        ))
+
+        var draft = FitnessNutritionDraftFlow.startNew(
+            selectedDate: selectedDate,
+            calendar: calendar
+        )
+        draft.mealName = "Historical lunch"
+        draft.calories = "625"
+        draft.barcodeProductName = "Historical package"
+
+        XCTAssertEqual(draft.loggedAt, expectedLoggedAt)
+        let barcodeDate = try XCTUnwrap(ISO8601DateFormatter().date(from: draft.barcodeMealAt))
+        XCTAssertEqual(barcodeDate, expectedLoggedAt)
+
+        let preview = try draft.applyLocalPreview()
+        XCTAssertEqual(preview.loggedAt, expectedLoggedAt)
+
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        let store = try NutritionMealStore(url: url)
+        let saved = try FitnessNutritionDurableSave.save(
+            draft: &draft,
+            to: store,
+            now: now.addingTimeInterval(86_400 * 30)
+        )
+        XCTAssertEqual(saved.loggedAt, expectedLoggedAt)
+        XCTAssertEqual(try store.meals(on: selectedDate, calendar: calendar), [saved])
+        XCTAssertTrue(try store.meals(on: now, calendar: calendar).isEmpty)
+    }
+
+    func testDraftValidationTrimsNamePreservesCommaDecimalsAndDistinguishesNilFromZero() throws {
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        let store = try NutritionMealStore(url: url)
+        var draft = FitnessNutritionDraft(
+            loggedAt: now,
+            timeZoneIdentifier: "Europe/Berlin",
+            mealName: "  Oats  ",
+            calories: "0",
+            protein: "",
+            carbohydrates: "1,25",
+            fat: "0.00"
+        )
+
+        let preview = try draft.applyLocalPreview()
+        XCTAssertEqual(preview.name, "Oats")
+        XCTAssertEqual(preview.kcal, 0)
+        XCTAssertNil(preview.proteinGrams)
+        XCTAssertEqual(preview.carbGrams, 1)
+        XCTAssertEqual(preview.fatGrams, 0)
+        XCTAssertNil(preview.portionGrams)
+
+        let saved = try FitnessNutritionDurableSave.save(draft: &draft, to: store, now: now)
+        XCTAssertEqual(saved.name, "Oats")
+        XCTAssertEqual(try store.load(), [saved])
+        XCTAssertEqual(try store.dailyTotals(on: now, calendar: bavarianCalendar).kcal, 0)
+        XCTAssertNil(try store.dailyTotals(on: now, calendar: bavarianCalendar).proteinGrams)
+    }
+
+    func testInvalidDraftSaveDoesNotWriteOrMutateTheDraft() throws {
+        let url = temporaryURL()
+        defer { removeStore(at: url) }
+        let store = try NutritionMealStore(url: url)
+        var draft = manualDraft(name: "Valid", calories: "400")
+        draft.calories = "-1"
+        let invalidDraft = draft
+
+        XCTAssertThrowsError(try FitnessNutritionDurableSave.save(draft: &draft, to: store, now: now))
+        XCTAssertEqual(draft, invalidDraft)
+        XCTAssertTrue(try store.load().isEmpty)
+    }
+
     // MARK: - Helpers
+
+    private func manualDraft(
+        id: UUID = UUID(),
+        name: String,
+        calories: String = "400",
+        portionGrams: String = ""
+    ) -> FitnessNutritionDraft {
+        FitnessNutritionDraft(
+            draftID: id,
+            loggedAt: now,
+            timeZoneIdentifier: "Europe/Berlin",
+            mealName: name,
+            calories: calories,
+            protein: "30",
+            carbohydrates: "40",
+            fat: "10",
+            portionGrams: portionGrams
+        )
+    }
 
     private var bavarianCalendar: Calendar {
         var calendar = Calendar(identifier: .gregorian)

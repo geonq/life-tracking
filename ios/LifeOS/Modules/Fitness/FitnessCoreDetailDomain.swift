@@ -1349,3 +1349,19 @@ public struct FitnessSleepDetail {
         )
     }
 }
+
+// Presentation reads the gated value, never the retained Biology payload.
+extension FitnessBiologyMetric {
+    var displayValue: String {
+        guard let currentValue else { return "—" }
+        return currentValue.formatted(.number.precision(.fractionLength(id == .hrvBaseline || id == .rhrBaseline ? 0 : 1)))
+    }
+}
+
+extension FitnessMetric {
+    /// Keep trust metadata legible without exposing record IDs in every card.
+    var compactProvenanceSummary: String {
+        guard let provenance else { return detail }
+        return "\(provenance.source) · \(provenance.device) · \(provenance.freshness)"
+    }
+}

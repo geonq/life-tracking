@@ -9,6 +9,7 @@ struct UsageTokenActivityView: View {
 
     @State private var selectedID: Date?
     @State private var revealedTokens: [Date: Double] = [:]
+    @State private var hasPresentedActivity = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(provider: Provider, activity: [UsageActivityPoint], initialSelectedDate: Date? = nil) {
@@ -76,7 +77,7 @@ struct UsageTokenActivityView: View {
     private func activityTimeAxisLabel(for date: Date) -> some View {
         if spansMultipleDays {
             Text(date, format: .dateTime.month(.abbreviated).day())
-                .font(LifeOSFont.axis(13))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.metadataText)
                 .lineLimit(1)
                 .minimumScaleFactor(0.75)
@@ -85,7 +86,7 @@ struct UsageTokenActivityView: View {
                 .frame(minWidth: 42)
         } else {
             Text(date, format: .dateTime.hour().minute())
-                .font(LifeOSFont.axis(13))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.metadataText)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
@@ -97,7 +98,9 @@ struct UsageTokenActivityView: View {
         AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { _ in
             AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5)).foregroundStyle(LifeOSTokens.chartGrid)
             AxisValueLabel()
-                .font(LifeOSFont.axis(12))
+                // AxisValueLabel is AxisMark content, not a View, so use the
+                // system-default metadata size at this chart-only boundary.
+                .font(.system(size: 13, weight: .regular, design: .default))
                 .foregroundStyle(LifeOSTokens.metadataText)
         }
     }
@@ -105,9 +108,9 @@ struct UsageTokenActivityView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Token activity").font(LifeOSFont.cardTitle())
+                Text("Token activity").lifeOSTypography(.cardTitle)
                 Text("Hourly token totals from your \(provider.displayName) account.")
-                    .font(LifeOSFont.supportingText(13))
+                    .lifeOSTypography(.body)
                     .foregroundStyle(LifeOSTokens.secondaryText)
             }
 
@@ -178,7 +181,7 @@ struct UsageTokenActivityView: View {
                                     VStack(alignment: .leading, spacing: 1) {
                                         Text(selectedPoint.tokens.formatted(.number.notation(.compactName)) + " tokens")
                                         Text(selectedPoint.date, format: .dateTime.weekday(.abbreviated).hour().minute())
-                                            .font(.caption2)
+                                            .lifeOSTypography(.metadata)
                                             .foregroundStyle(LifeOSTokens.tertiaryText)
                                     }
                                 }
@@ -197,6 +200,11 @@ struct UsageTokenActivityView: View {
                     }
                     await revealBars()
                 }
+                .onChange(of: reduceMotion) { _, _ in
+                    LifeOSMotion.withoutAnimation {
+                        revealedTokens = revealedValues
+                    }
+                }
 
                 keyboardStepper
                 footer
@@ -213,9 +221,9 @@ struct UsageTokenActivityView: View {
                 .frame(width: 20, height: 20)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
             Text("No token activity")
-                .font(LifeOSFont.cardTitle(16))
+                .lifeOSTypography(.cardTitle)
             Text("The gateway has not supplied token activity for this account, so no chart range is shown.")
-                .font(LifeOSFont.supportingText(13))
+                .lifeOSTypography(.body)
                 .foregroundStyle(LifeOSTokens.secondaryText)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -225,32 +233,49 @@ struct UsageTokenActivityView: View {
     }
 
     private var summaryCard: some View {
-        HStack(alignment: .top) {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top) {
+                summaryPrimary
+                Spacer(minLength: 12)
+                summaryStats
+            }
+            VStack(alignment: .leading, spacing: 12) {
+                summaryPrimary
+                Divider().opacity(0.3)
+                summaryStats
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .background(LifeOSTokens.primaryText.opacity(0.045), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private var summaryPrimary: some View {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 6) {
-                    LifeOSIcon(.assistant).frame(width: 14, height: 14).foregroundStyle(LifeOSTokens.Series.actual)
-            Text(provider.displayName).font(LifeOSFont.cardTitle(16))
+                    LifeOSIcon(.usage).frame(width: 14, height: 14).foregroundStyle(LifeOSTokens.Series.actual)
+                    Text(provider.displayName).lifeOSTypography(.cardTitle)
                 }
                 Text("Hourly token totals")
-                    .font(LifeOSFont.bodyText(13))
+                    .lifeOSTypography(.body)
                     .foregroundStyle(LifeOSTokens.secondaryText)
                 Text(totalTokens.formatted(.number.notation(.compactName)))
-                    .font(LifeOSFont.kpi(30))
+                    .lifeOSTypography(.metric)
                     .tracking(-0.3)
                     .monospacedDigit()
                 Text(activity.isEmpty ? "No hourly observations" : "\(activity.count) hourly observations")
-                    .font(LifeOSFont.metadata(12))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.secondaryText)
             }
-            Spacer(minLength: 12)
+    }
+
+    private var summaryStats: some View {
             VStack(alignment: .trailing, spacing: 6) {
                 statLine(label: "Daily coverage", value: dailyCoverageText)
                 statLine(label: "Peak complete day", value: peakDayText)
                 statLine(label: "Updated", value: updatedText)
             }
-        }
-        .padding(16)
-        .background(LifeOSTokens.primaryText.opacity(0.045), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .frame(maxWidth: .infinity, alignment: .trailing)
     }
 
     private var updatedText: String {
@@ -260,8 +285,8 @@ struct UsageTokenActivityView: View {
 
     private func statLine(label: String, value: String) -> some View {
         VStack(alignment: .trailing, spacing: 1) {
-            Text(label).font(LifeOSFont.metadata(12)).foregroundStyle(LifeOSTokens.secondaryText)
-            Text(value).font(LifeOSFont.control(13))
+            Text(label).lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.secondaryText)
+            Text(value).lifeOSTypography(.button)
         }
     }
 
@@ -288,7 +313,7 @@ struct UsageTokenActivityView: View {
             .accessibilityLabel("Previous token activity point")
 
             Text(selectedPoint.map { $0.date.formatted(.dateTime.month(.abbreviated).day().hour().minute()) } ?? "Select a point")
-                .font(LifeOSFont.control(13).monospacedDigit())
+                .lifeOSTypography(.button).monospacedDigit()
                 .foregroundStyle(LifeOSTokens.secondaryText)
                 .lineLimit(1)
                 .minimumScaleFactor(0.75)
@@ -318,7 +343,7 @@ struct UsageTokenActivityView: View {
     private var footer: some View {
         HStack {
             Text(footerHintText)
-                .font(LifeOSFont.metadata(12))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.secondaryText)
             Spacer()
         }
@@ -365,32 +390,25 @@ struct UsageTokenActivityView: View {
 
     @MainActor
     private func revealBars() async {
-        revealedTokens = [:]
-        guard !orderedActivity.isEmpty else { return }
-
-        if reduceMotion {
-            // Assignment is intentional: malformed/merged feeds with duplicate hour keys must
-            // remain renderable instead of trapping in Dictionary(uniqueKeysWithValues:).
-            revealedTokens = orderedActivity.reduce(into: [:]) { result, point in
-                result[point.date] = Double(point.tokens)
-            }
-            return
+        // One bounded reveal keeps a large activity feed from spawning a
+        // per-bar task chain. The source values are assigned in one pass, so
+        // the animation can never be mistaken for a changing token total.
+        let values = orderedActivity.reduce(into: [Date: Double]()) { result, point in
+            result[point.date] = Double(point.tokens)
         }
+        guard !Task.isCancelled else { return }
+        let shouldAnimate = !hasPresentedActivity && !reduceMotion
+        hasPresentedActivity = true
+        if shouldAnimate {
+            withAnimation(LifeOSMotion.chartDraw) { revealedTokens = values }
+        } else {
+            LifeOSMotion.withoutAnimation { revealedTokens = values }
+        }
+    }
 
-        // Each bar starts at index * 0.015s; its value then grows from the baseline with the
-        // shared one-shot chartDraw easing. This is presentation-only state; source tokens stay
-        // untouched in UsageActivityPoint.
-        var previousStartDelay: UInt64 = 0
-        for (index, point) in orderedActivity.enumerated() {
-            let startDelay = UInt64(Double(index) * 0.015 * 1_000_000_000)
-            if startDelay > previousStartDelay {
-                try? await Task.sleep(nanoseconds: startDelay - previousStartDelay)
-            }
-            previousStartDelay = startDelay
-            guard !Task.isCancelled else { return }
-            withAnimation(LifeOSMotion.chartDraw) {
-                revealedTokens[point.date] = Double(point.tokens)
-            }
+    private var revealedValues: [Date: Double] {
+        orderedActivity.reduce(into: [Date: Double]()) { result, point in
+            result[point.date] = Double(point.tokens)
         }
     }
 

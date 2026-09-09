@@ -296,31 +296,31 @@ struct UsageView: View {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     if let remainingPercent {
                         Text("\(Int(remainingPercent.rounded()))")
-                            .font(LifeOSFont.kpi())
+                            .lifeOSTypography(.metric)
                             .tracking(-0.3)
                             .monospacedDigit()
                             .foregroundStyle(.primary)
                             .numericTransition()
                     } else {
                         Text("—")
-                            .font(LifeOSFont.kpi())
+                            .lifeOSTypography(.metric)
                             .tracking(-0.3)
                             .foregroundStyle(.primary)
                     }
                     Text(remainingPercent == nil ? valueState.label : "% remaining")
-                        .font(LifeOSFont.callout(16))
+                        .lifeOSTypography(.body)
                         .fontWeight(.semibold)
                         .foregroundStyle(remainingPercent == nil ? LifeOSTokens.tertiaryText : LifeOSTokens.accent)
                     }
                 Text(window?.label ?? "Current window")
-                    .font(LifeOSFont.metadata())
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                 HStack(spacing: 5) {
                     Circle()
                         .fill(stateColor(valueState))
                         .frame(width: 6, height: 6)
                     Text(valueState.label)
-                        .font(LifeOSFont.metadata(12))
+                        .lifeOSTypography(.metadata)
                         .fontWeight(.semibold)
                         .foregroundStyle(stateColor(valueState))
                 }
@@ -387,12 +387,12 @@ struct UsageView: View {
         VStack(alignment: .leading, spacing: 3) {
             Text(label)
                 .foregroundStyle(LifeOSTokens.secondaryTextCompat)
-                .font(LifeOSFont.overline(11))
+                .lifeOSTypography(.label)
                 .textCase(.uppercase)
                 .tracking(0.6)
             Text(value)
                 .foregroundStyle(.primary)
-                .font(LifeOSFont.bodyText(15))
+                .lifeOSTypography(.body)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -441,11 +441,11 @@ struct UsageView: View {
                         .padding(.top, 1)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(notice.title)
-                            .font(LifeOSFont.callout(13))
+                            .lifeOSTypography(.body)
                             .fontWeight(.semibold)
                             .foregroundStyle(.primary)
                         Text(notice.detail)
-                            .font(LifeOSFont.metadata())
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -570,7 +570,7 @@ struct UsageView: View {
                     .frame(width: 12, height: 12)
                     .foregroundStyle(LifeOSTokens.accent)
                 Text("Provider · \(selectedProvider.displayName) · \(statusText(for: selectedProvider))")
-                    .font(LifeOSFont.control())
+                    .lifeOSTypography(.button)
                     .lineLimit(2)
                     .minimumScaleFactor(0.85)
             }
@@ -628,12 +628,12 @@ struct UsageView: View {
         } label: {
             HStack(spacing: 4) {
                 Text(label)
-                    .font(LifeOSFont.overline())
+                    .lifeOSTypography(.label)
                     .textCase(.uppercase)
                     .tracking(0.6)
                     .foregroundStyle(.secondary)
                 Text(valueText())
-                    .font(LifeOSFont.control())
+                    .lifeOSTypography(.button)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
                     .minimumScaleFactor(0.85)
@@ -660,9 +660,9 @@ private struct UsageInsightsView: View {
             VStack(alignment: .leading, spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Additional views")
-                        .font(.subheadline.weight(.semibold))
+                        .lifeOSTypography(.label, weight: .semibold)
                     Text("Optional model and activity detail; the primary reading path stays in Graphs and Facts.")
-                        .font(.caption)
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(.secondary)
                 }
                 if !analytics.modelBreakdowns.isEmpty {
@@ -720,18 +720,18 @@ struct UsageLimitsCard: View {
                 GlowRing(progress: percent, diameter: 148, lineWidth: 8) {
                     VStack(spacing: 3) {
                         Text("\(Int((percent * 100).rounded()))")
-                            .font(LifeOSFont.kpi(34))
+                            .lifeOSTypography(.metric)
                             .tracking(-0.3)
                             .monospacedDigit()
                             .numericTransition()
                         Text("% used")
-                            .font(.caption.weight(.semibold))
+                            .lifeOSTypography(.metadata, weight: .semibold)
                             .foregroundStyle(.secondary)
                         statusPill(percent: percent)
                     }
                 }
                 Text(ringWindow.label)
-                    .font(.caption2)
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             } else if let selectedWindow {
                 VStack(spacing: 5) {
@@ -739,10 +739,10 @@ struct UsageLimitsCard: View {
                         .frame(width: 18, height: 18)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                     Text("Not available")
-                        .font(.caption.weight(.semibold))
+                        .lifeOSTypography(.metadata, weight: .semibold)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                     Text(selectedWindow.label)
-                        .font(.caption2)
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
                 .frame(height: 148)
@@ -750,11 +750,11 @@ struct UsageLimitsCard: View {
                 .accessibilityLabel("\(selectedWindow.label) usage not available")
             } else if snapshot.windows.isEmpty {
                 Text("Not available")
-                    .font(.caption)
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             } else {
                 Text("Not available")
-                    .font(.caption)
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
 
@@ -763,12 +763,12 @@ struct UsageLimitsCard: View {
                     ForEach(barWindows) { window in
                         VStack(alignment: .leading, spacing: 5) {
                             HStack {
-                                Text(window.label).font(.caption.weight(.semibold))
+                                Text(window.label).lifeOSTypography(.metadata, weight: .semibold)
                                 Spacer()
                                 Text(window.usedPercent.map {
                                     "\($0.formatted(.percent.precision(.fractionLength(0)))) used"
                                 } ?? "Not available")
-                                    .font(.caption.monospacedDigit())
+                                    .lifeOSTypography(.metadata).monospacedDigit()
                                     .foregroundStyle(window.usedPercent == nil ? LifeOSTokens.tertiaryText : .primary)
                             }
                             if let percent = window.usedPercent {
@@ -796,7 +796,7 @@ struct UsageLimitsCard: View {
                 .fill(color)
                 .frame(width: 6, height: 6)
             Text(text)
-                .font(LifeOSFont.overline())
+                .lifeOSTypography(.label)
                 .tracking(0.8)
                 .textCase(.uppercase)
                 .foregroundStyle(color)
@@ -850,7 +850,7 @@ private struct UsageTabBar: View {
                     }
                 } label: {
             Text(tab.rawValue)
-                        .font(LifeOSFont.control(14))
+                        .lifeOSTypography(.button)
                         .foregroundStyle(isSelected ? Color.white : Color.secondary)
                         .padding(.horizontal, 14)
                         .padding(.vertical, 7)
@@ -880,9 +880,9 @@ struct UsageEmptyState: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(title).font(LifeOSFont.cardTitle(16))
+            Text(title).lifeOSTypography(.cardTitle)
             Text(detail)
-                .font(LifeOSFont.supportingText(13))
+                .lifeOSTypography(.body)
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -933,7 +933,7 @@ private struct ModelCompositionChart: View {
                             .fill(sampledColor(at: index))
                             .frame(width: 5, height: 5)
                         Text(category.label)
-                            .font(.caption2)
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                     }
                 }
@@ -942,7 +942,7 @@ private struct ModelCompositionChart: View {
 
             if models.isEmpty {
                 Text("No model breakdown supplied.")
-                    .font(.caption2)
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(.secondary)
             }
 
@@ -950,11 +950,11 @@ private struct ModelCompositionChart: View {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(alignment: .firstTextBaseline) {
                         Text(model.model)
-                            .font(.caption.weight(.semibold))
+                            .lifeOSTypography(.metadata, weight: .semibold)
                             .lineLimit(1)
                         Spacer(minLength: 8)
                         Text(model.totalTokens.formatted(.number.notation(.compactName)))
-                            .font(.caption.monospacedDigit())
+                            .lifeOSTypography(.metadata).monospacedDigit()
                             .foregroundStyle(.secondary)
                     }
 
@@ -977,7 +977,7 @@ private struct ModelCompositionChart: View {
                     HStack(spacing: 0) {
                         ForEach(model.categories, id: \.label) { category in
                             Text(category.value.formatted(.number.notation(.compactName)))
-                                .font(.caption2.monospacedDigit())
+                                .lifeOSTypography(.metadata).monospacedDigit()
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
@@ -1018,9 +1018,9 @@ struct UsageHeatmapCard: View {
                     case .corner:
                         Text("").frame(height: 12)
                     case .hourHeader(let hour):
-                        Text("\(hour)").font(LifeOSFont.axis()).foregroundStyle(.secondary)
+                        Text("\(hour)").lifeOSTypography(.metadata).foregroundStyle(.secondary)
                     case .dayHeader(let weekday):
-                        Text(shortDay(weekday)).font(LifeOSFont.axis()).foregroundStyle(.secondary)
+                        Text(shortDay(weekday)).lifeOSTypography(.metadata).foregroundStyle(.secondary)
                     case .cell(let cell):
                         heatmapCell(cell)
                     }
@@ -1037,12 +1037,12 @@ struct UsageHeatmapCard: View {
                 Spacer()
                 if let selectedCell {
                     Text("\(shortDay(selectedCell.weekday)) \(selectedCell.hour):00 · \(selectedCell.intensity.formatted(.percent.precision(.fractionLength(0))))")
-                        .font(.caption.monospacedDigit())
+                        .lifeOSTypography(.metadata).monospacedDigit()
                         .foregroundStyle(.primary)
                         .transition(.opacity)
                 }
             }
-            .font(.caption2)
+            .lifeOSTypography(.metadata)
             .foregroundStyle(.secondary)
         }
         .flatCard()
@@ -1113,9 +1113,9 @@ struct UsageCardHeader: View {
                 .frame(width: 16, height: 16)
                 .padding(.top, 2)
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(LifeOSFont.cardTitle(16))
+                Text(title).lifeOSTypography(.cardTitle)
                 Text(subtitle)
-                    .font(LifeOSFont.supportingText(13))
+                    .lifeOSTypography(.body)
                     .foregroundStyle(.secondary)
             }
             Spacer(minLength: 0)
@@ -1141,7 +1141,7 @@ struct UsageLegendKey: View {
                 Capsule().fill(color).frame(width: 14, height: 3)
             }
             Text(label)
-                .font(LifeOSFont.metadata(12))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }

@@ -264,27 +264,10 @@ final class CalendarLayoutTests: XCTestCase {
                 hourHeight: 54,
                 calendar: calendar
             ),
-            axisHeight + CalendarInteractionLayout.timelineBottomInset
+            axisHeight + CalendarInteractionLayout.timelineEndpointClearance
         )
-        // The iPhone timeline's trailing edge sits under a stack of floating
-        // chrome: home-indicator safe area (34) + compact tab bar (50) + the
-        // calendar's quick-action pill/FAB overlay (58). The buffer must
-        // exceed that stack plus the 24:00 label height, or maximum scroll
-        // leaves the endpoint hidden behind the chrome and the last reachable
-        // hour sticks around 13:00 at the viewport top — the reported
-        // "vertical scroll stops around 13:00" regression.
-        let occlusionStack = CalendarInteractionLayout.homeIndicatorSafeAreaHeight
-            + CalendarInteractionLayout.compactTabBarHeight
-            + CalendarInteractionLayout.quickActionsOverlayHeight
-        XCTAssertGreaterThanOrEqual(
-            CalendarInteractionLayout.timelineBottomInset,
-            occlusionStack + CalendarInteractionLayout.endpointLabelClearance,
-            "24:00 must clear every floating layer at maximum scroll"
-        )
-
-        // Full-day reachability on an iPhone 17 Pro-class layout: the maximum
-        // scroll offset must place the entire 00:00->24:00 axis above the
-        // occlusion stack inside the finite timed viewport.
+        // The quick actions are reserved by the page's safe-area inset, so
+        // the timed viewport needs only the endpoint clearance below 24:00.
         let deviceContainerHeight = 731.0
         let dayHeaderHeight = 58.0
         let allDayHeight = CalendarAllDayLayout.rowHeight
@@ -302,8 +285,8 @@ final class CalendarLayoutTests: XCTestCase {
         XCTAssertGreaterThan(maxOffset, 0, "The full-day content must be scrollable inside the finite viewport")
         XCTAssertGreaterThanOrEqual(
             maxOffset + viewport - axisHeight,
-            occlusionStack + CalendarInteractionLayout.endpointLabelClearance,
-            "At maximum scroll the 24:00 endpoint must sit fully above the floating chrome"
+            CalendarInteractionLayout.timelineEndpointClearance,
+            "At maximum scroll the 24:00 endpoint must remain visible"
         )
         XCTAssertEqual(
             CalendarInteractionLayout.timelineHourLabel(
@@ -324,6 +307,21 @@ final class CalendarLayoutTests: XCTestCase {
             ),
             "23:00"
         )
+        var berlin = Calendar(identifier: .gregorian)
+        berlin.timeZone = TimeZone(identifier: "Europe/Berlin")!
+        let normalizedSpringGap = berlin.date(
+            from: DateComponents(year: 2026, month: 3, day: 29, hour: 3, minute: 0)
+        )
+        XCTAssertEqual(
+            CalendarInteractionLayout.timelineHourLabel(
+                minute: 120,
+                dayMinutes: 1_440,
+                date: normalizedSpringGap,
+                calendar: berlin
+            ),
+            "02:00",
+            "Labels follow the wall-clock row even when Foundation normalizes a DST gap"
+        )
         // The trailing buffer is display-only: the creation axis stays 24h.
         let created = try XCTUnwrap(CalendarInteractionLayout.creationDate(
             day: day,
@@ -334,17 +332,11 @@ final class CalendarLayoutTests: XCTestCase {
         XCTAssertLessThan(created, calendar.date(byAdding: .day, value: 1, to: day)!)
     }
 
-    func testViewportAwareContentHeightLetsEveryHourReachTheViewportTop() {
+    func testTimelineContentHeightKeepsLateDayContentReachableAtEveryDensity() {
         let day = dayStart
-        // geonq's "vertical scroll stops around 13:00" was a max-offset
-        // clamp: with a fixed trailing buffer the deepest offset was
-        // axis + inset - viewport, so the topmost reachable hour sat at
-        // ~12:37 (38pt zoom) / ~15:59 (54pt default). Reserving at least one
-        // full viewport of trailing space must let the 24:00 endpoint itself
-        // travel to the top of the viewport at every hour height.
-        let occlusionStack = CalendarInteractionLayout.homeIndicatorSafeAreaHeight
-            + CalendarInteractionLayout.compactTabBarHeight
-            + CalendarInteractionLayout.quickActionsOverlayHeight
+        // Bottom controls are reserved before the timed viewport is measured.
+        // The content therefore ends at 24 hours plus the small endpoint
+        // clearance, without a blank viewport-sized tail.
         for hourHeight in [38.0, 54.0, 110.0] {
             for viewport in [597.0, 679.0, 731.0] {
                 let axis = CalendarInteractionLayout.timelineHeight(
@@ -353,12 +345,11 @@ final class CalendarLayoutTests: XCTestCase {
                 let content = CalendarInteractionLayout.timelineContentHeight(
                     days: [day],
                     hourHeight: hourHeight,
-                    calendar: calendar,
-                    viewportHeight: viewport
+                    calendar: calendar
                 )
                 XCTAssertEqual(
                     content,
-                    axis + max(CalendarInteractionLayout.timelineBottomInset, viewport),
+                    axis + CalendarInteractionLayout.timelineEndpointClearance,
                     accuracy: 0.0001
                 )
                 let maxOffset = CalendarInteractionLayout.timelineMaximumScrollOffset(
@@ -366,21 +357,21 @@ final class CalendarLayoutTests: XCTestCase {
                     viewportHeight: viewport
                 )
                 XCTAssertGreaterThanOrEqual(
-                    maxOffset,
+                    maxOffset + viewport,
                     axis,
-                    "24:00 must be able to reach the viewport top at hourHeight \(hourHeight)"
+                    "24:00 must be visible at hourHeight \(hourHeight)"
                 )
-                // Every wall-clock hour is scrollable into the viewport.
+                // Every late wall-clock hour is within the reachable viewport.
                 XCTAssertGreaterThanOrEqual(
-                    maxOffset,
+                    maxOffset + viewport,
                     23 * hourHeight,
-                    "23:00 must be reachable at the top at hourHeight \(hourHeight)"
+                    "23:00 must be reachable at hourHeight \(hourHeight)"
                 )
-                // At maximum scroll the endpoint clears every occluding layer.
-                XCTAssertGreaterThanOrEqual(
+                XCTAssertEqual(
                     maxOffset + viewport - axis,
-                    occlusionStack + CalendarInteractionLayout.endpointLabelClearance,
-                    "The 24:00 endpoint must sit above the floating chrome at hourHeight \(hourHeight)"
+                    CalendarInteractionLayout.timelineEndpointClearance,
+                    accuracy: 0.0001,
+                    "The timeline must not reserve an oversized trailing tail at hourHeight \(hourHeight)"
                 )
             }
         }
@@ -393,6 +384,425 @@ final class CalendarLayoutTests: XCTestCase {
             CalendarInteractionLayout.timelineMaximumScrollOffset(contentHeight: .nan, viewportHeight: 400),
             0
         )
+    }
+
+    func testTimelineZoomKeepsThePinchFocalMinuteStationary() {
+        let result = CalendarInteractionLayout.zoomedTimeline(
+            hourHeight: 54,
+            scrollOffset: 4 * 54,
+            focalViewportOffset: 200,
+            magnification: 1.5,
+            viewportHeight: 500
+        )
+
+        XCTAssertEqual(result.hourHeight, 81, accuracy: 0.0001)
+        XCTAssertEqual(result.focalMinute, 60.0 * (4.0 * 54 + 200) / 54, accuracy: 0.0001)
+        XCTAssertEqual(
+            60 * (result.scrollOffset + 200) / result.hourHeight,
+            result.focalMinute,
+            accuracy: 0.0001,
+            "The wall-clock minute under the pinch must stay under the same viewport point"
+        )
+    }
+
+    func testTimelineZoomClampsDensityAndScrollToFiniteContentBounds() {
+        let result = CalendarInteractionLayout.zoomedTimeline(
+            hourHeight: 54,
+            scrollOffset: .infinity,
+            focalViewportOffset: .infinity,
+            magnification: .infinity,
+            viewportHeight: 600
+        )
+
+        XCTAssertEqual(result.hourHeight, CalendarInteractionLayout.maximumHourHeight)
+        XCTAssertEqual(
+            result.scrollOffset,
+            CalendarInteractionLayout.timelineMaximumScrollOffset(
+                contentHeight: 24 * CalendarInteractionLayout.maximumHourHeight
+                    + CalendarInteractionLayout.timelineEndpointClearance,
+                viewportHeight: 600
+            ),
+            accuracy: 0.0001
+        )
+        XCTAssertTrue(result.scrollOffset.isFinite)
+        XCTAssertGreaterThanOrEqual(result.scrollOffset, 0)
+    }
+
+    func testTimelineZoomSessionRestoresInterruptedPinchAndCommitsOnlyOnEnd() {
+        var interrupted = CalendarTimelineZoomSession(
+            hourHeight: 54,
+            scrollOffset: 7 * 54,
+            focalViewportOffset: 180
+        )
+        let initial = interrupted.latest
+        let updated = interrupted.update(
+            magnification: 1.6,
+            viewportHeight: 520
+        )
+        XCTAssertNotNil(updated)
+        XCTAssertTrue(interrupted.isActive)
+        XCTAssertNotEqual(interrupted.latest.hourHeight, initial.hourHeight)
+
+        let restored = interrupted.cancel()
+        XCTAssertEqual(restored?.hourHeight, interrupted.startingHourHeight)
+        XCTAssertEqual(restored?.scrollOffset, interrupted.startingScrollOffset)
+        XCTAssertFalse(interrupted.isActive)
+        XCTAssertNil(interrupted.update(magnification: 0.8, viewportHeight: 520))
+
+        var completed = CalendarTimelineZoomSession(
+            hourHeight: 54,
+            scrollOffset: 7 * 54,
+            focalViewportOffset: 180
+        )
+        let committed = completed.update(magnification: 0.8, viewportHeight: 520)
+        XCTAssertEqual(completed.complete(), committed)
+        XCTAssertFalse(completed.isActive)
+        XCTAssertNil(completed.complete(), "A completed pinch must not persist a second terminal sample")
+    }
+
+    func testTimelineEditAndZoomOwnershipCannotOverlapInEitherDirection() {
+        XCTAssertTrue(CalendarGestureArbitration.timelineZoomEnabled(
+            eventMutationActive: false,
+            hasProvisionalPreview: false
+        ))
+        XCTAssertFalse(CalendarGestureArbitration.timelineZoomEnabled(
+            eventMutationActive: true,
+            hasProvisionalPreview: false
+        ), "An active event move or resize owns the timeline before zoom begins")
+        XCTAssertFalse(CalendarGestureArbitration.timelineZoomEnabled(
+            eventMutationActive: false,
+            hasProvisionalPreview: true
+        ), "A provisional edit remains the owner until local durability completes")
+
+        var zoom = CalendarTimelineZoomSession(
+            hourHeight: 54,
+            scrollOffset: 200,
+            focalViewportOffset: 160
+        )
+        XCTAssertNotNil(zoom.update(magnification: 1.3, viewportHeight: 500))
+        XCTAssertTrue(zoom.isActive)
+        XCTAssertFalse(
+            CalendarGestureArbitration.nativeVerticalTimelineScrollEnabled(
+                eventMutationActive: false,
+                hasProvisionalPreview: true
+            ),
+            "An edit preview must take the native scroll axis back from zoom")
+        let restored = zoom.cancel()
+        XCTAssertEqual(restored?.hourHeight ?? -1, 54, accuracy: 0.0001)
+        XCTAssertEqual(restored?.scrollOffset ?? -1, 200, accuracy: 0.0001)
+
+        for surface in ["empty grid", "event body", "resize handle"] {
+            XCTAssertTrue(
+                CalendarGestureArbitration.nativeVerticalTimelineScrollEnabled(
+                    eventMutationActive: false,
+                    hasProvisionalPreview: false
+                ),
+                "Native scrolling owns the \(surface) while idle"
+            )
+            XCTAssertFalse(
+                CalendarGestureArbitration.nativeVerticalTimelineScrollEnabled(
+                    eventMutationActive: true,
+                    hasProvisionalPreview: false
+                ),
+                "The editing gesture owns the \(surface) after acquisition"
+            )
+        }
+    }
+
+    func testIPhoneTimelineZoomIsAcceptedOnlyWhenIdle() {
+        XCTAssertTrue(CalendarGestureArbitration.timelineZoomEnabled(
+            eventMutationActive: false,
+            hasProvisionalPreview: false
+        ))
+
+        var session = CalendarTimelineZoomSession(
+            hourHeight: 54,
+            scrollOffset: 240,
+            focalViewportOffset: 220
+        )
+        let updated = session.update(magnification: 1.25, viewportHeight: 520)
+        XCTAssertNotNil(updated)
+        XCTAssertTrue(session.isActive)
+        XCTAssertEqual(session.startingHourHeight, 54, accuracy: 0.0001)
+    }
+
+    func testIPhoneTimelineZoomIsRejectedDuringEditOrProvisionalPreview() {
+        for state in [
+            (eventMoveActive: true, hasProvisionalPreview: false),
+            (eventMoveActive: false, hasProvisionalPreview: true),
+            (eventMoveActive: true, hasProvisionalPreview: true)
+        ] {
+            XCTAssertFalse(CalendarGestureArbitration.timelineZoomEnabled(
+                eventMutationActive: state.eventMoveActive,
+                hasProvisionalPreview: state.hasProvisionalPreview
+            ))
+        }
+
+        var session = CalendarTimelineZoomSession(
+            hourHeight: 54,
+            scrollOffset: 240,
+            focalViewportOffset: 220
+        )
+        let initial = session.latest
+        for state in [
+            (eventMoveActive: true, hasProvisionalPreview: false),
+            (eventMoveActive: false, hasProvisionalPreview: true)
+        ] where !CalendarGestureArbitration.timelineZoomEnabled(
+            eventMutationActive: state.eventMoveActive,
+            hasProvisionalPreview: state.hasProvisionalPreview
+        ) {
+            // The iPhone handler returns before it creates/updates a zoom
+            // session when either edit owner is present.
+            XCTAssertEqual(session.latest, initial)
+            XCTAssertTrue(session.isActive)
+        }
+        _ = session.cancel()
+    }
+
+    func testIPhoneTimelineZoomCancellationRestoresExactScaleWithoutCommit() {
+        var session = CalendarTimelineZoomSession(
+            hourHeight: 73.25,
+            scrollOffset: 417.5,
+            focalViewportOffset: 180
+        )
+        XCTAssertNotNil(session.update(magnification: 1.42, viewportHeight: 610))
+
+        let restored = session.cancel()
+        XCTAssertEqual(restored?.hourHeight ?? -1, 73.25, accuracy: 0.0001)
+        XCTAssertEqual(restored?.scrollOffset ?? -1, 417.5, accuracy: 0.0001)
+        XCTAssertFalse(session.isActive)
+        XCTAssertNil(session.complete(), "A cancelled pinch cannot commit a calendar mutation")
+    }
+
+    func testIPhoneZoomStartsOnFirstGestureAfterAnIdleEditRelease() throws {
+        var transaction = CalendarTimelineZoomTransaction()
+
+        XCTAssertFalse(CalendarGestureArbitration.timelineZoomEnabled(
+            eventMutationActive: true,
+            hasProvisionalPreview: false
+        ))
+        // Releasing the edit has no active zoom to reject. The next gesture
+        // must be able to acquire the transaction immediately.
+        XCTAssertNil(transaction.cancel())
+        XCTAssertTrue(CalendarGestureArbitration.timelineZoomEnabled(
+            eventMutationActive: false,
+            hasProvisionalPreview: false
+        ))
+
+        let token = try XCTUnwrap(transaction.begin(
+            hourHeight: 54,
+            scrollOffset: 12 * 54,
+            focalViewportOffset: 220
+        ))
+        XCTAssertNotNil(transaction.update(
+            token: token,
+            magnification: 1.18,
+            viewportHeight: 520
+        ))
+        XCTAssertTrue(transaction.isActive)
+    }
+
+    func testIPhoneZoomInterruptionAllowsNextPinchAndIgnoresOldCompletion() throws {
+        var transaction = CalendarTimelineZoomTransaction()
+        let first = try XCTUnwrap(transaction.begin(
+            hourHeight: 54,
+            scrollOffset: 12 * 54,
+            focalViewportOffset: 220
+        ))
+        XCTAssertNotNil(transaction.update(
+            token: first,
+            magnification: 1.35,
+            viewportHeight: 520
+        ))
+        XCTAssertNotNil(transaction.cancel(token: first))
+        XCTAssertFalse(transaction.isActive)
+
+        let second = try XCTUnwrap(transaction.begin(
+            hourHeight: 54,
+            scrollOffset: 12 * 54,
+            focalViewportOffset: 220
+        ))
+        XCTAssertNotEqual(first, second)
+        XCTAssertNotNil(transaction.update(
+            token: second,
+            magnification: 0.86,
+            viewportHeight: 520
+        ))
+        XCTAssertNil(transaction.finish(token: first), "A stale ended callback cannot finish the newer pinch")
+        XCTAssertTrue(transaction.isActive)
+        XCTAssertNotNil(transaction.finish(token: second))
+    }
+
+    func testEditingDuringIPhoneZoomCancelsOnlyCurrentSessionAndCannotCommitStaleState() throws {
+        var transaction = CalendarTimelineZoomTransaction()
+        let first = try XCTUnwrap(transaction.begin(
+            hourHeight: 73.25,
+            scrollOffset: 16 * 73.25,
+            focalViewportOffset: 180
+        ))
+        XCTAssertNotNil(transaction.update(
+            token: first,
+            magnification: 1.42,
+            viewportHeight: 610
+        ))
+
+        let restored = try XCTUnwrap(transaction.cancel(token: first))
+        XCTAssertEqual(restored.hourHeight, 73.25, accuracy: 0.0001)
+        XCTAssertEqual(restored.scrollOffset, 16 * 73.25, accuracy: 0.0001)
+        XCTAssertNil(transaction.finish(token: first))
+        XCTAssertNil(transaction.update(
+            token: first,
+            magnification: 0.8,
+            viewportHeight: 610
+        ))
+        XCTAssertFalse(transaction.isActive)
+    }
+
+    func testIPhoneZoomPreservesFocalTimeBelowMidnightDuringPreviewAndCommit() throws {
+        var transaction = CalendarTimelineZoomTransaction()
+        let baselineHourHeight = 54.0
+        let baselineOffset = 14 * baselineHourHeight
+        let focalViewportOffset = 236.0
+        let token = try XCTUnwrap(transaction.begin(
+            hourHeight: baselineHourHeight,
+            scrollOffset: baselineOffset,
+            focalViewportOffset: focalViewportOffset
+        ))
+
+        let preview = try XCTUnwrap(transaction.update(
+            token: token,
+            magnification: 1.4,
+            viewportHeight: 520
+        ))
+        XCTAssertGreaterThan(preview.focalMinute, 16 * 60, "The fixture must exercise a position well below midnight")
+        XCTAssertEqual(
+            60 * (preview.scrollOffset + focalViewportOffset) / preview.hourHeight,
+            preview.focalMinute,
+            accuracy: 0.0001
+        )
+
+        let committed = try XCTUnwrap(transaction.finish(token: token))
+        XCTAssertEqual(committed, preview, "Commit must settle the same offset used by the live preview")
+    }
+
+    func testIPhoneZoomCancelRestoresBaselineHourHeightAndContentOffsetExactly() throws {
+        var transaction = CalendarTimelineZoomTransaction()
+        let baselineHourHeight = 73.25
+        let baselineOffset = 17.125 * baselineHourHeight
+        let token = try XCTUnwrap(transaction.begin(
+            hourHeight: baselineHourHeight,
+            scrollOffset: baselineOffset,
+            focalViewportOffset: 180
+        ))
+        XCTAssertNotNil(transaction.update(
+            token: token,
+            magnification: 1.42,
+            viewportHeight: 610
+        ))
+
+        let restored = try XCTUnwrap(transaction.cancel(token: token))
+        XCTAssertEqual(restored.hourHeight, baselineHourHeight, accuracy: 0.0001)
+        XCTAssertEqual(restored.scrollOffset, baselineOffset, accuracy: 0.0001)
+        XCTAssertNil(transaction.cancel(token: token), "Repeated cancellation must be idempotent")
+    }
+
+    func testIPhoneZoomLifecycleCancellationClearsStateForEditViewAndScene() throws {
+        for interruption in ["edit acquisition", "view disappearance", "scene interruption"] {
+            var transaction = CalendarTimelineZoomTransaction()
+            let token = try XCTUnwrap(transaction.begin(
+                hourHeight: 54,
+                scrollOffset: 13 * 54,
+                focalViewportOffset: 200
+            ))
+            XCTAssertNotNil(transaction.update(
+                token: token,
+                magnification: 1.25,
+                viewportHeight: 520
+            ))
+            XCTAssertNotNil(transaction.cancel(token: token), "(interruption) must return the captured baseline")
+            XCTAssertFalse(transaction.isActive, "(interruption) must clear ownership")
+            XCTAssertNil(transaction.finish(token: token), "(interruption) must invalidate stale completion")
+            XCTAssertNil(transaction.cancel(token: token), "(interruption) cancellation must run only once")
+        }
+    }
+
+    func testTimelineScrollAnchorRetainsWallTimeAndInitializesTwoHoursBeforeNow() throws {
+        let now = try XCTUnwrap(calendar.date(from: DateComponents(
+            year: 2026,
+            month: 8,
+            day: 12,
+            hour: 15,
+            minute: 42
+        )))
+        let initial = CalendarTimelineScrollAnchor.todayMinusTwoHours(now: now, calendar: calendar)
+        XCTAssertEqual(initial.wallMinute, 13 * 60 + 42)
+        XCTAssertEqual(initial.hour, 13)
+
+        let retained = CalendarTimelineScrollAnchor.from(scrollOffset: 8.5 * 54, hourHeight: 54)
+        XCTAssertEqual(retained.wallMinute, 8 * 60 + 30)
+        XCTAssertEqual(retained.offset(hourHeight: 54), 8.5 * 54, accuracy: 0.0001)
+        XCTAssertEqual(CalendarTimelineScrollAnchor.id(for: retained.hour), "calendar-timeline-hour-8")
+    }
+
+    func testTodayVisibilityUsesTheSameDaySurfaceWindowAsHourSuppression() {
+        let common = (
+            dayCount: 7,
+            columnWidth: 100.0,
+            columnOriginX: 40.0,
+            timeGutter: 40.0,
+            contentWidth: 740.0,
+            viewportWidth: 300.0
+        )
+        XCTAssertTrue(CalendarInteractionLayout.isTimelineDayColumnVisible(
+            dayIndex: 0,
+            dayCount: common.dayCount,
+            columnWidth: common.columnWidth,
+            columnOriginX: common.columnOriginX,
+            timeGutter: common.timeGutter,
+            contentWidth: common.contentWidth,
+            viewportWidth: common.viewportWidth,
+            horizontalContentOffset: 0
+        ))
+        XCTAssertTrue(CalendarInteractionLayout.isTimelineDayColumnVisible(
+            dayIndex: 2,
+            dayCount: common.dayCount,
+            columnWidth: common.columnWidth,
+            columnOriginX: common.columnOriginX,
+            timeGutter: common.timeGutter,
+            contentWidth: common.contentWidth,
+            viewportWidth: common.viewportWidth,
+            horizontalContentOffset: 0
+        ), "A partially visible today column still owns the marker")
+        XCTAssertFalse(CalendarInteractionLayout.isTimelineDayColumnVisible(
+            dayIndex: 3,
+            dayCount: common.dayCount,
+            columnWidth: common.columnWidth,
+            columnOriginX: common.columnOriginX,
+            timeGutter: common.timeGutter,
+            contentWidth: common.contentWidth,
+            viewportWidth: common.viewportWidth,
+            horizontalContentOffset: 0
+        ))
+        XCTAssertTrue(CalendarInteractionLayout.isTimelineDayColumnVisible(
+            dayIndex: 2,
+            dayCount: common.dayCount,
+            columnWidth: common.columnWidth,
+            columnOriginX: common.columnOriginX,
+            timeGutter: common.timeGutter,
+            contentWidth: common.contentWidth,
+            viewportWidth: common.viewportWidth,
+            horizontalContentOffset: 300
+        ))
+        XCTAssertFalse(CalendarInteractionLayout.isTimelineDayColumnVisible(
+            dayIndex: 1,
+            dayCount: common.dayCount,
+            columnWidth: common.columnWidth,
+            columnOriginX: common.columnOriginX,
+            timeGutter: common.timeGutter,
+            contentWidth: common.contentWidth,
+            viewportWidth: common.viewportWidth,
+            horizontalContentOffset: 300
+        ))
     }
 
     func testPagerSettleDurationIsBoundedSpeedScaledAndBounceFree() {
@@ -537,8 +947,8 @@ final class CalendarLayoutTests: XCTestCase {
         let timed = try CalendarItem(title: "Timed", start: timedStart, end: timedEnd)
         let deleted = try CalendarItem(title: "Deleted", start: anchor, end: day1).deleting(at: anchor.addingTimeInterval(1))
 
-        // Three entries -> three cells PLUS one empty cell below them.
-        // Non-overlapping ranges must not collapse into a shared row.
+        // Three entries retain deterministic placement data. The view renders
+        // the first two and exposes the third through one bounded overflow row.
         let placements = CalendarAllDayLayout.placements(
             items: [first, adjacent, overlapping, timed, deleted],
             days: days,
@@ -561,7 +971,7 @@ final class CalendarLayoutTests: XCTestCase {
         XCTAssertEqual(
             CalendarAllDayLayout.rowCount(items: entries, days: days, calendar: calendar),
             4,
-            "n entries -> n cells plus one trailing empty cell"
+            "two visible rows + one overflow row + one trailing empty cell"
         )
         XCTAssertEqual(
             CalendarAllDayLayout.height(items: entries, days: days, calendar: calendar),
@@ -609,6 +1019,74 @@ final class CalendarLayoutTests: XCTestCase {
             ),
             "calendar-empty-all-day-2026-08-01"
         )
+    }
+
+    func testAllDayOverflowIsBoundedAndKeepsLateDayTimelineReachable() throws {
+        let anchor = try XCTUnwrap(DateComponents(
+            calendar: calendar,
+            year: 2026,
+            month: 7,
+            day: 31
+        ).date)
+        let nextDay = try XCTUnwrap(calendar.date(byAdding: .day, value: 1, to: anchor))
+        let days = [anchor]
+        let entries = try (0..<40).map { index in
+            try CalendarItem(
+                title: "All-day \(index)",
+                start: anchor,
+                end: nextDay,
+                createdAt: anchor,
+                updatedAt: anchor
+            )
+        }
+
+        let placements = CalendarAllDayLayout.placements(items: entries, days: days, calendar: calendar)
+        XCTAssertEqual(placements.count, entries.count)
+        XCTAssertEqual(CalendarAllDayLayout.maximumVisibleEventRows, 2)
+        XCTAssertEqual(
+            CalendarAllDayLayout.overflowCount(items: entries, days: days, calendar: calendar),
+            38
+        )
+        XCTAssertEqual(
+            CalendarAllDayLayout.overflowRowIndex(items: entries, days: days, calendar: calendar),
+            2
+        )
+        XCTAssertEqual(
+            CalendarAllDayLayout.rowCount(items: entries, days: days, calendar: calendar),
+            4,
+            "Dense all-day data must not allocate one row per event"
+        )
+        XCTAssertEqual(
+            CalendarAllDayLayout.trailingEmptyRowIndex(items: entries, days: days, calendar: calendar),
+            3
+        )
+
+        let allDayHeight = CalendarAllDayLayout.height(items: entries, days: days, calendar: calendar)
+        XCTAssertEqual(allDayHeight, 4 * CalendarAllDayLayout.rowHeight + 3 * CalendarAllDayLayout.rowSpacing)
+
+        let smallestTimedViewport = CalendarInteractionLayout.timedViewportHeight(
+            containerHeight: 58 + allDayHeight + 1,
+            dayHeaderHeight: 58,
+            allDayHeight: allDayHeight
+        )
+        XCTAssertEqual(smallestTimedViewport, 1)
+        let axisHeight = CalendarInteractionLayout.timelineHeight(
+            days: days,
+            hourHeight: CalendarInteractionLayout.minimumHourHeight,
+            calendar: calendar
+        )
+        let contentHeight = CalendarInteractionLayout.timelineContentHeight(
+            days: days,
+            hourHeight: CalendarInteractionLayout.minimumHourHeight,
+            calendar: calendar
+        )
+        let maximumOffset = CalendarInteractionLayout.timelineMaximumScrollOffset(
+            contentHeight: contentHeight,
+            viewportHeight: smallestTimedViewport
+        )
+        XCTAssertGreaterThan(maximumOffset, 0)
+        XCTAssertGreaterThanOrEqual(maximumOffset + smallestTimedViewport, axisHeight)
+        XCTAssertGreaterThanOrEqual(maximumOffset + smallestTimedViewport, 23 * CalendarInteractionLayout.minimumHourHeight)
     }
 
     func testAllDayRowsIgnoreOffWindowItemsAndRecurringRenderIDsStayUnique() throws {
@@ -699,11 +1177,11 @@ final class CalendarLayoutTests: XCTestCase {
         XCTAssertEqual(placements.first?.renderID, recurring.id.uuidString)
     }
 
-    func testPagerDaySurfaceStartsAtThe52PointGutterBoundary() {
-        XCTAssertFalse(CalendarInteractionLayout.isPagerStartInDaySurface(startX: 51.99, timeGutter: 52))
-        XCTAssertTrue(CalendarInteractionLayout.isPagerStartInDaySurface(startX: 52, timeGutter: 52))
-        XCTAssertTrue(CalendarInteractionLayout.isPagerStartInDaySurface(startX: 52.01, timeGutter: 52))
-        XCTAssertFalse(CalendarInteractionLayout.isPagerStartInDaySurface(startX: .nan, timeGutter: 52))
+    func testPagerDaySurfaceStartsAtThe40PointGutterBoundary() {
+        XCTAssertFalse(CalendarInteractionLayout.isPagerStartInDaySurface(startX: 39.99, timeGutter: 40))
+        XCTAssertTrue(CalendarInteractionLayout.isPagerStartInDaySurface(startX: 40, timeGutter: 40))
+        XCTAssertTrue(CalendarInteractionLayout.isPagerStartInDaySurface(startX: 40.01, timeGutter: 40))
+        XCTAssertFalse(CalendarInteractionLayout.isPagerStartInDaySurface(startX: .nan, timeGutter: 40))
     }
 
     func testCalendarEditorDoesNotInferTimedMidnightEndingEventAsAllDay() throws {
@@ -1910,6 +2388,101 @@ final class CalendarLayoutTests: XCTestCase {
             "1:00 PM"
         )
         XCTAssertEqual(CalendarTimelineScale.wallClockMinute(for: thirteen, calendar: calendar), 13 * 60, accuracy: 0.001)
+    }
+
+    func testDisplayCalendarDrivesSidebarTimelineAndOverlapForBerlinVsUTCFixture() throws {
+        var displayCalendar = Calendar(identifier: .gregorian)
+        let locale = Locale(identifier: "en_US_POSIX")
+        displayCalendar.locale = locale
+        displayCalendar.timeZone = try XCTUnwrap(TimeZone(identifier: "Europe/Berlin"))
+        var sourceCalendar = Calendar(identifier: .gregorian)
+        sourceCalendar.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
+
+        let start = try XCTUnwrap(DateComponents(
+            calendar: sourceCalendar,
+            timeZone: sourceCalendar.timeZone,
+            year: 2026,
+            month: 8,
+            day: 12,
+            hour: 9,
+            minute: 0
+        ).date)
+        let end = try XCTUnwrap(sourceCalendar.date(byAdding: .hour, value: 1, to: start))
+        let item = try CalendarItem(
+            title: "UTC meeting",
+            start: start,
+            end: end,
+            createdAt: start,
+            updatedAt: start,
+            timeZoneIdentifier: "UTC"
+        )
+        let displayDay = displayCalendar.startOfDay(for: start)
+        let displayInterval = try XCTUnwrap(displayCalendar.dateInterval(of: .day, for: displayDay))
+        let scale = CalendarTimelineScale(interval: displayInterval, hourHeight: 60)
+
+        var sidebarStyle = Date.FormatStyle.dateTime.hour().minute().locale(locale)
+        sidebarStyle.timeZone = displayCalendar.timeZone
+        let sidebarTime = item.start.formatted(sidebarStyle)
+        let timelineTime = CalendarTimelineScale.localizedTimeLabel(
+            for: item.start,
+            calendar: displayCalendar,
+            locale: locale
+        )
+        XCTAssertEqual(sidebarTime, timelineTime)
+        XCTAssertEqual(sidebarTime.replacingOccurrences(of: "\u{202F}", with: " "), "11:00 AM")
+        XCTAssertEqual(sourceCalendar.component(.hour, from: item.start), 9)
+        XCTAssertEqual(displayCalendar.component(.hour, from: item.start), 11)
+        XCTAssertEqual(CalendarTimelineScale.wallClockMinute(for: item.start, calendar: displayCalendar), 11 * 60, accuracy: 0.001)
+        XCTAssertEqual(scale.y(for: item.start, calendar: displayCalendar), 11 * 60, accuracy: 0.001)
+
+        let placements = CalendarOverlapLayout.layout(items: [item], interval: displayInterval)
+        let placement = try XCTUnwrap(placements.first)
+        XCTAssertEqual(placement.visibleStart, item.start)
+        XCTAssertEqual(placement.visibleEnd, item.end)
+        XCTAssertEqual(placement.yStart, 11.0 / 24.0, accuracy: 0.0001)
+        XCTAssertEqual(placement.yEnd, 12.0 / 24.0, accuracy: 0.0001)
+    }
+
+    func testDisplayCalendarOwnsCrossZoneDateBoundaryForTimelineAndAllDayClassification() throws {
+        var displayCalendar = Calendar(identifier: .gregorian)
+        displayCalendar.timeZone = try XCTUnwrap(TimeZone(identifier: "Europe/Berlin"))
+        var sourceCalendar = Calendar(identifier: .gregorian)
+        sourceCalendar.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
+
+        let start = try XCTUnwrap(DateComponents(
+            calendar: sourceCalendar,
+            timeZone: sourceCalendar.timeZone,
+            year: 2026,
+            month: 8,
+            day: 12,
+            hour: 22,
+            minute: 30
+        ).date)
+        let end = try XCTUnwrap(sourceCalendar.date(byAdding: .hour, value: 1, to: start))
+        let item = try CalendarItem(
+            title: "Boundary event",
+            start: start,
+            end: end,
+            createdAt: start,
+            updatedAt: start,
+            timeZoneIdentifier: "UTC"
+        )
+        let displayDay = try XCTUnwrap(DateComponents(
+            calendar: displayCalendar,
+            timeZone: displayCalendar.timeZone,
+            year: 2026,
+            month: 8,
+            day: 13
+        ).date)
+        let displayInterval = try XCTUnwrap(displayCalendar.dateInterval(of: .day, for: displayDay))
+        let previousDay = try XCTUnwrap(displayCalendar.date(byAdding: .day, value: -1, to: displayDay))
+        let previousInterval = try XCTUnwrap(displayCalendar.dateInterval(of: .day, for: previousDay))
+
+        XCTAssertEqual(displayCalendar.component(.day, from: start), 13)
+        XCTAssertEqual(CalendarTimelineScale.wallClockMinute(for: start, calendar: displayCalendar), 30, accuracy: 0.001)
+        XCTAssertFalse(CalendarAllDayLayout.isAllDay(item, calendar: displayCalendar))
+        XCTAssertEqual(CalendarOverlapLayout.layout(items: [item], interval: displayInterval).count, 1)
+        XCTAssertTrue(CalendarOverlapLayout.layout(items: [item], interval: previousInterval).isEmpty)
     }
 
     func testDSTMoveAndResizeUseTheSameWallClockCoordinate() throws {

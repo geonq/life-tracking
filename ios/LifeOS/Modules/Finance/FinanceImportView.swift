@@ -12,6 +12,20 @@ private extension FinanceImportSkipReason {
     }
 }
 
+enum FinanceImportSyncState: Equatable {
+    case idle
+    case pending(entryCount: Int, operationCount: Int)
+    case blocked(entryCount: Int, reasons: [FinanceImportedSyncBlockReason])
+    case syncing
+    case unavailable
+    case error
+}
+
+enum FinanceImportConfirmationResult: Equatable {
+    case saved
+    case failed(message: String)
+}
+
 // MARK: - Manual bank-statement CSV import
 
 /// Drives the CSV file picker, parse preview, and persistence for manually
@@ -22,39 +36,104 @@ private extension FinanceImportSkipReason {
 /// connector observation.
 @MainActor
 final class FinanceImportViewModel: ObservableObject {
+    typealias SyncOperation = (FinanceImportedTransactionStore) async throws -> FinanceImportedSyncResult
+
     @Published var isImporterPresented = false
     @Published var pendingResult: FinanceImportResult?
     @Published var errorMessage: String?
     @Published var statusMessage: String?
     @Published private(set) var savedTransactions: [FinanceImportedTransaction] = []
+    @Published private(set) var syncState: FinanceImportSyncState
+    @Published private(set) var currentSyncStatus: FinanceImportedSyncStatus?
+    @Published private(set) var syncMessage: String?
+    @Published private(set) var lastConfirmedRemoteRevision: Int?
+    @Published private(set) var isSynchronizing = false
 
     private let store: FinanceImportedTransactionStore?
+    private let syncOperation: SyncOperation
+    private var syncGeneration = 0
 
-    init() {
+    init(
+        store: FinanceImportedTransactionStore? = nil,
+        syncOperation: @escaping SyncOperation = { store in
+            try await store.synchronize(using: TailscaleSyncClient())
+        }
+    ) {
         let resolvedStore: FinanceImportedTransactionStore?
         let initialTransactions: [FinanceImportedTransaction]
+        let initialSyncStatus: FinanceImportedSyncStatus?
         let initialError: String?
-        do {
-            let candidate = try FinanceImportedTransactionStore()
-            resolvedStore = candidate
+        if let store {
+            resolvedStore = store
+            var loadedTransactions: [FinanceImportedTransaction] = []
+            var loadError: String?
             do {
-                initialTransactions = try candidate.all()
-                initialError = nil
+                loadedTransactions = try store.all()
             } catch {
-                initialTransactions = []
-                initialError = error.localizedDescription
+                loadError = Self.localErrorMessage(for: error)
             }
-        } catch {
-            resolvedStore = nil
-            initialTransactions = []
-            initialError = error.localizedDescription
+            initialTransactions = loadedTransactions
+            do {
+                initialSyncStatus = try store.syncStatus()
+            } catch {
+                initialSyncStatus = nil
+                if loadError == nil { loadError = Self.localErrorMessage(for: error) }
+            }
+            initialError = loadError
+        } else {
+            do {
+                let candidate = try FinanceImportedTransactionStore()
+                resolvedStore = candidate
+                var loadedTransactions: [FinanceImportedTransaction] = []
+                var loadError: String?
+                do {
+                    loadedTransactions = try candidate.all()
+                } catch {
+                    loadError = Self.localErrorMessage(for: error)
+                }
+                initialTransactions = loadedTransactions
+                do {
+                    initialSyncStatus = try candidate.syncStatus()
+                } catch {
+                    initialSyncStatus = nil
+                    if loadError == nil { loadError = Self.localErrorMessage(for: error) }
+                }
+                initialError = loadError
+            } catch {
+                resolvedStore = nil
+                initialTransactions = []
+                initialSyncStatus = nil
+                initialError = Self.localErrorMessage(for: error)
+            }
         }
         self.store = resolvedStore
+        self.syncOperation = syncOperation
         self.savedTransactions = initialTransactions
+        self.currentSyncStatus = initialSyncStatus
+        self.syncState = if resolvedStore == nil {
+            .unavailable
+        } else if let initialSyncStatus {
+            Self.presentationState(for: initialSyncStatus)
+        } else {
+            .error
+        }
         self.errorMessage = initialError
+        self.syncMessage = if resolvedStore == nil {
+            "Imported Finance storage is unavailable. Local rows cannot be loaded here."
+        } else if initialSyncStatus == nil {
+            "Imported Finance storage could not be refreshed. Local rows were kept where possible."
+        } else {
+            nil
+        }
     }
 
     var hasStore: Bool { store != nil }
+    var canSynchronize: Bool { store != nil && !isSynchronizing }
+    var syncActionTitle: String {
+        if isSynchronizing { return "Syncing…" }
+        if case .blocked = syncState { return "Retry sync" }
+        return "Sync to LifeOS"
+    }
 
     func handlePickedFile(_ result: Result<[URL], Error>) {
         errorMessage = nil
@@ -89,31 +168,35 @@ final class FinanceImportViewModel: ObservableObject {
             } catch FinanceStatementImporter.Error.unsupportedEncoding {
                 errorMessage = "The CSV encoding is not supported. Export it as UTF-8 or UTF-16 text."
             } catch {
-                errorMessage = "The file could not be read as text: \(error.localizedDescription)"
+                errorMessage = "The selected file could not be read as text."
             }
         }
     }
 
-    func confirmImport(_ transactions: [FinanceImportedTransaction]) {
+    @discardableResult
+    func confirmImport(_ transactions: [FinanceImportedTransaction]) -> FinanceImportConfirmationResult {
         guard let store else {
-            errorMessage = FinanceImportedTransactionStoreError.applicationSupportUnavailable.localizedDescription
-            return
+            syncState = .unavailable
+            syncMessage = "Imported Finance storage is unavailable. Local rows could not be changed."
+            return .failed(message: syncMessage ?? "Imported Finance storage is unavailable.")
         }
         guard !transactions.isEmpty else {
             errorMessage = "There are no valid transactions to import."
-            return
+            return .failed(message: errorMessage ?? "There are no valid transactions to import.")
         }
         do {
             let result = try store.add(transactions)
-            savedTransactions = try store.all()
             self.pendingResult = nil
+            refreshAfterLocalMutation()
             var parts: [String] = []
             if result.insertedCount > 0 { parts.append("imported \(result.insertedCount) new rows") }
             if result.updatedCount > 0 { parts.append("updated \(result.updatedCount) corrected rows") }
             if result.duplicateCount > 0 { parts.append("skipped \(result.duplicateCount) unchanged duplicates") }
             statusMessage = parts.isEmpty ? "No source changes were found." : parts.joined(separator: "; ") + "."
+            return .saved
         } catch {
-            errorMessage = error.localizedDescription
+            handleLocalError(error)
+            return .failed(message: Self.localErrorMessage(for: error))
         }
     }
 
@@ -126,9 +209,9 @@ final class FinanceImportViewModel: ObservableObject {
         guard let store else { return }
         do {
             try store.remove(id: id)
-            savedTransactions = try store.all()
+            refreshAfterLocalMutation()
         } catch {
-            errorMessage = error.localizedDescription
+            handleLocalError(error)
         }
     }
 
@@ -140,9 +223,9 @@ final class FinanceImportViewModel: ObservableObject {
             } else {
                 try store.setCategory(category, for: id)
             }
-            savedTransactions = try store.all()
+            refreshAfterLocalMutation()
         } catch {
-            errorMessage = error.localizedDescription
+            handleLocalError(error)
         }
     }
 
@@ -150,11 +233,177 @@ final class FinanceImportViewModel: ObservableObject {
         guard let store else { return }
         do {
             try store.clearAll()
-            savedTransactions = try store.all()
-            statusMessage = "Imported transactions cleared from this device."
+            refreshAfterLocalMutation()
+            statusMessage = "Imported transactions cleared on this device. Queued deletions will propagate on the next sync; connected bank accounts are unaffected."
         } catch {
-            errorMessage = error.localizedDescription
+            handleLocalError(error)
         }
+    }
+
+    func synchronize() async {
+        guard !isSynchronizing else { return }
+        guard let store else {
+            syncState = .unavailable
+            syncMessage = "Imported Finance storage is unavailable. Local rows remain separate on this device."
+            return
+        }
+
+        syncGeneration += 1
+        let generation = syncGeneration
+        isSynchronizing = true
+        syncState = .syncing
+        syncMessage = nil
+
+        do {
+            try Task.checkCancellation()
+            let result = try await syncOperation(store)
+            try Task.checkCancellation()
+            guard generation == syncGeneration else { return }
+
+            isSynchronizing = false
+            do {
+                let transactions = try store.all()
+                let status = try store.syncStatus()
+                savedTransactions = transactions
+                currentSyncStatus = status
+                lastConfirmedRemoteRevision = result.snapshot.revision
+                syncState = Self.presentationState(for: status)
+                if status.blockedEntryCount > 0 {
+                    syncMessage = "The gateway confirmed revision \(result.snapshot.revision), but blocked local changes remain."
+                } else {
+                    syncMessage = "The gateway confirmed revision \(result.snapshot.revision)."
+                }
+            } catch {
+                syncState = .error
+                syncMessage = "The gateway replied, but imported Finance data could not be refreshed."
+            }
+        } catch is CancellationError {
+            guard generation == syncGeneration else { return }
+            isSynchronizing = false
+            refreshLocalState()
+            syncMessage = "Sync cancelled. Local rows were kept."
+        } catch {
+            guard generation == syncGeneration else { return }
+            isSynchronizing = false
+            refreshLocalState()
+            if case .blocked = syncState {
+                // Preserve the actionable blocked state reported by the local
+                // store while exposing the transport failure in the message.
+            } else {
+                syncState = .error
+            }
+            syncMessage = Self.syncErrorMessage(for: error)
+        }
+    }
+
+    private func refreshAfterLocalMutation() {
+        syncMessage = nil
+        refreshLocalState()
+    }
+
+    private func refreshLocalState() {
+        guard let store else {
+            currentSyncStatus = nil
+            syncState = .unavailable
+            return
+        }
+        do {
+            let transactions = try store.all()
+            let status = try store.syncStatus()
+            savedTransactions = transactions
+            currentSyncStatus = status
+            syncState = isSynchronizing ? .syncing : Self.presentationState(for: status)
+        } catch {
+            currentSyncStatus = nil
+            syncState = .error
+            syncMessage = "Imported Finance data could not be refreshed."
+            errorMessage = Self.localErrorMessage(for: error)
+        }
+    }
+
+    private func handleLocalError(_ error: Error) {
+        syncState = .error
+        syncMessage = "Imported Finance changes could not be saved."
+        errorMessage = Self.localErrorMessage(for: error)
+    }
+
+    private static func presentationState(for status: FinanceImportedSyncStatus) -> FinanceImportSyncState {
+        if status.blockedEntryCount > 0 {
+            return .blocked(entryCount: status.blockedEntryCount, reasons: status.blockedReasons)
+        }
+        if status.pendingEntryCount > 0 {
+            return .pending(entryCount: status.pendingEntryCount, operationCount: status.pendingOperationCount)
+        }
+        return .idle
+    }
+
+    private static func localErrorMessage(for error: Error) -> String {
+        guard let error = error as? FinanceImportedTransactionStoreError else {
+            return "Imported Finance storage could not be read or saved."
+        }
+        switch error {
+        case .applicationSupportUnavailable, .readFailed, .invalidEnvelope:
+            return "Imported Finance storage is unavailable or invalid."
+        case .transactionNotFound:
+            return "That imported row is no longer available. Refresh the list and try again."
+        case .stateTooLarge:
+            return "The imported Finance ledger has reached its safe size limit."
+        case .syncOutboxFull:
+            return "Local changes could not be queued for private sync."
+        default:
+            return "Imported Finance changes could not be saved."
+        }
+    }
+
+    private static func syncErrorMessage(for error: Error) -> String {
+        if error is CancellationError {
+            return "Sync cancelled. Local rows were kept."
+        }
+        if let error = error as? TailscaleSyncError {
+            switch error {
+            case .notConfigured, .invalidServerURL, .gatewayNotConfigured:
+                return "Private sync is not configured. Check the approved LifeOS gateway, then retry."
+            case .invalidResponse:
+                return "The private sync gateway returned an unusable response. Local rows were kept."
+            case .httpError:
+                return "The private sync gateway is unavailable right now. Local rows were kept; retry later."
+            case .responseTooLarge, .requestTooLarge:
+                return "The private sync exchange exceeded its safety limit. Local rows were kept."
+            default:
+                return "The private sync gateway could not be reached. Local rows were kept; retry later."
+            }
+        }
+        if let error = error as? FinanceImportedSyncError {
+            switch error {
+            case .conflict:
+                return "Sync is blocked by a remote change. Your local rows are safe; review them and retry."
+            case .remoteSnapshotRewound, .remoteSnapshotETagMismatch, .invalidRevision, .malformedETag:
+                return "The gateway returned conflicting revision data. Local rows were kept; retry later."
+            case .requestTooLarge, .responseTooLarge:
+                return "The private sync exchange exceeded its safety limit. Local rows were kept."
+            case .httpError:
+                return "The private sync gateway is unavailable right now. Local rows were kept; retry later."
+            default:
+                return "The private sync gateway could not complete this exchange. Local rows were kept; retry later."
+            }
+        }
+        if let error = error as? FinanceImportedTransactionStoreError {
+            switch error {
+            case .syncRetryExpired, .syncAttemptsExhausted:
+                return "A local sync change needs review before it can be retried. Your rows were kept."
+            case .syncSnapshotRewound, .syncSnapshotETagMismatch:
+                return "The gateway returned conflicting revision data. Local rows were kept; retry later."
+            case .syncPayloadTooLarge, .syncOutboxFull:
+                return "Local changes could not fit in the bounded private sync queue. Your rows were kept."
+            default:
+                return "Private sync could not complete. Local rows were kept; retry later."
+            }
+        }
+        if let error = error as? URLError,
+           [.notConnectedToInternet, .networkConnectionLost, .cannotFindHost, .cannotConnectToHost, .timedOut].contains(error.code) {
+            return "The private sync gateway is unavailable right now. Check the network and retry."
+        }
+        return "Private sync could not complete. Local rows were kept; retry later."
     }
 }
 
@@ -164,76 +413,87 @@ final class FinanceImportViewModel: ObservableObject {
 struct FinanceImportCard: View {
     @StateObject private var model = FinanceImportViewModel()
     @State private var isShowingImportedList = false
+    @State private var isShowingImportedDetails = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 13) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Import statement")
-                    .font(LifeOSFont.cardTitle())
-                Text("Manually imported, on-device only")
-                    .font(LifeOSFont.axis())
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
-            }
-
-            HStack(spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .center, spacing: 10) {
+                LifeOSIcon(.importDocument)
+                    .foregroundStyle(LifeOSTokens.Module.finance)
+                    .frame(width: 18, height: 18)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Import statement")
+                        .lifeOSTypography(.cardTitle)
+                    Text("Manual CSV · stored on this device")
+                        .lifeOSTypography(.metadata)
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                }
+                Spacer(minLength: 8)
                 Button {
                     model.isImporterPresented = true
                 } label: {
-                    HStack(spacing: 6) {
-                        LifeOSIcon(.importDocument).frame(width: 15, height: 15)
-                        Text("Import statement (CSV)")
-                    }
-                    .font(LifeOSFont.control())
-                    .padding(.horizontal, 13)
-                    .padding(.vertical, 9)
-                    // §4.3 Primary button: accent fill, white label, no tinted capsule.
-                    .foregroundStyle(Color.white)
-                    .background(LifeOSTokens.accent, in: RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous))
+                    Label("Import CSV", systemImage: "plus")
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(LifeOSButtonStyle(.secondary))
                 .disabled(!model.hasStore)
                 .accessibilityIdentifier("finance-import-csv-button")
+            }
 
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(model.savedTransactions.isEmpty ? "No imported rows" : "\(model.savedTransactions.count) imported rows")
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
                 Button {
                     isShowingImportedList = true
                 } label: {
-                    Text(model.savedTransactions.isEmpty ? "No imported transactions" : "\(model.savedTransactions.count) imported")
-                        .font(LifeOSFont.metadata())
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                    Text("View rows")
+                        .lifeOSTypography(.metadata)
+                        .foregroundStyle(LifeOSTokens.accent)
                 }
                 .buttonStyle(.plain)
+                .disabled(model.savedTransactions.isEmpty)
                 .accessibilityIdentifier("finance-imported-transactions-button")
-
                 Spacer(minLength: 0)
             }
 
+            FinanceImportSyncSection(model: model)
+
             if let statusMessage = model.statusMessage {
                 Label(statusMessage, systemImage: "info.circle")
-                    .font(LifeOSFont.axis())
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("finance-import-status")
             }
 
-            Text("A CSV file you pick stays on this device. Imported rows are never sent anywhere and are kept separate from connected-account data.")
-                .font(LifeOSFont.axis())
+            Text("Local first: imported rows stay on this device. Optional private sync mirrors this ledger to your LifeOS gateway and remains separate from connected-account observations.")
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Divider()
-                .overlay(LifeOSTokens.hairlineBorder)
-
-            FinanceSpendingByCategorySection(transactions: model.savedTransactions)
-
-            Divider()
-                .overlay(LifeOSTokens.hairlineBorder)
-
-            FinanceBudgetsSection(transactions: model.savedTransactions)
-
-            if model.savedTransactions.contains(where: { $0.isInvestmentOrder }) {
-                Divider()
-                    .overlay(LifeOSTokens.hairlineBorder)
-                FinanceImportedInvestmentsSection(transactions: model.savedTransactions)
+            if !model.savedTransactions.isEmpty {
+                DisclosureGroup(isExpanded: $isShowingImportedDetails) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        FinanceSpendingByCategorySection(transactions: model.savedTransactions)
+                        Divider().overlay(LifeOSTokens.hairlineBorder)
+                        FinanceBudgetsSection(transactions: model.savedTransactions)
+                        if model.savedTransactions.contains(where: { $0.isInvestmentOrder }) {
+                            Divider().overlay(LifeOSTokens.hairlineBorder)
+                            FinanceImportedInvestmentsSection(transactions: model.savedTransactions)
+                        }
+                    }
+                    .padding(.top, 8)
+                } label: {
+                    HStack {
+                        Text("Imported analysis")
+                            .lifeOSTypography(.button)
+                        Spacer()
+                        Text(isShowingImportedDetails ? "Hide" : "Show")
+                            .lifeOSTypography(.metadata)
+                            .foregroundStyle(LifeOSTokens.accent)
+                    }
+                }
+                .tint(LifeOSTokens.accent)
             }
         }
         .padding(18)
@@ -272,6 +532,157 @@ struct FinanceImportCard: View {
     }
 }
 
+private struct FinanceImportSyncSection: View {
+    @ObservedObject var model: FinanceImportViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Divider().overlay(LifeOSTokens.hairlineBorder)
+
+            HStack(alignment: .top, spacing: 10) {
+                LifeOSIcon(statusIcon)
+                    .foregroundStyle(statusColor)
+                    .frame(width: 18, height: 18)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(statusTitle)
+                        .lifeOSTypography(.button)
+                    Text(statusDetail)
+                        .lifeOSTypography(.metadata)
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+                if model.isSynchronizing {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(LifeOSTokens.accent)
+                        .accessibilityLabel("Syncing")
+                }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Private Finance sync")
+            .accessibilityValue(statusDetail)
+
+            if let revision = model.lastConfirmedRemoteRevision {
+                Text("Last gateway confirmation · revision \(revision)")
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.secondaryText)
+                    .accessibilityIdentifier("finance-import-last-remote-revision")
+            }
+
+            if let syncMessage = model.syncMessage, !isBlocked {
+                Label(syncMessage, systemImage: messageIcon)
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(messageColor)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("finance-import-sync-message")
+            }
+
+            Button {
+                Task { await model.synchronize() }
+            } label: {
+                HStack(spacing: 8) {
+                    LifeOSIcon(.refresh)
+                        .frame(width: 16, height: 16)
+                    Text(model.syncActionTitle)
+                    Spacer(minLength: 0)
+                }
+            }
+            .buttonStyle(LifeOSButtonStyle(.primary))
+            .disabled(!model.canSynchronize)
+            .accessibilityIdentifier("finance-import-sync-button")
+            .accessibilityHint("Mirrors the local manual import ledger to the approved private LifeOS gateway.")
+        }
+        .animation(LifeOSMotion.reduceMotion ? nil : LifeOSMotion.snappy, value: model.syncState)
+        .accessibilityIdentifier("finance-import-sync-section")
+    }
+
+    private var isBlocked: Bool {
+        if case .blocked = model.syncState { return true }
+        return false
+    }
+
+    private var statusTitle: String {
+        switch model.syncState {
+        case .idle:
+            return model.lastConfirmedRemoteRevision == nil ? "Ready for private sync" : "Up to date"
+        case .pending:
+            return "Changes waiting"
+        case .blocked:
+            return "Sync blocked"
+        case .syncing:
+            return "Syncing to LifeOS"
+        case .unavailable:
+            return "Sync unavailable"
+        case .error:
+            return "Sync needs attention"
+        }
+    }
+
+    private var statusDetail: String {
+        switch model.syncState {
+        case .idle:
+            return model.lastConfirmedRemoteRevision == nil
+                ? "Rows are local until you choose to mirror them to the private gateway."
+                : "The private gateway confirmed the latest local ledger."
+        case .pending(let entries, let operations):
+            return "\(entries) pending change\(entries == 1 ? "" : "s") · \(operations) operation\(operations == 1 ? "" : "s") waiting to be mirrored."
+        case .blocked(let entries, let reasons):
+            return "\(entries) change\(entries == 1 ? "" : "s") need review. Your local rows are safe; review them and retry\(reasonSummary(reasons))"
+        case .syncing:
+            return "Sending the local import ledger through the approved private gateway."
+        case .unavailable:
+            return "The local ledger or approved private gateway is unavailable."
+        case .error:
+            return "The last exchange did not complete. Your local rows were kept; retry when ready."
+        }
+    }
+
+    private var statusIcon: LifeOSIconName {
+        switch model.syncState {
+        case .idle: model.lastConfirmedRemoteRevision == nil ? .refresh : .verified
+        case .pending, .syncing: .refresh
+        case .blocked, .error: .warning
+        case .unavailable: .security
+        }
+    }
+
+    private var statusColor: Color {
+        switch model.syncState {
+        case .idle:
+            model.lastConfirmedRemoteRevision == nil ? LifeOSTokens.secondaryText : LifeOSTokens.success
+        case .pending, .syncing: LifeOSTokens.accent
+        case .blocked, .error: LifeOSTokens.warning
+        case .unavailable: LifeOSTokens.tertiaryText
+        }
+    }
+
+    private var messageIcon: String {
+        isBlocked ? "exclamationmark.triangle" : "info.circle"
+    }
+
+    private var messageColor: Color {
+        switch model.syncState {
+        case .error, .blocked: LifeOSTokens.warning
+        default: LifeOSTokens.secondaryText
+        }
+    }
+
+    private func reasonSummary(_ reasons: [FinanceImportedSyncBlockReason]) -> String {
+        guard !reasons.isEmpty else { return "" }
+        let names = reasons.map { reason -> String in
+            switch reason {
+            case .conflict: "remote conflict"
+            case .retryExpired: "retry expired"
+            case .attemptsExhausted: "retry limit reached"
+            case .payloadTooLarge: "payload too large"
+            case .invalidEnvelope: "invalid local envelope"
+            }
+        }
+        return ". Reason: \(names.joined(separator: ", "))."
+    }
+}
+
 /// `Identifiable` wrapper so `FinanceImportResult` (a plain struct) can drive
 /// a `.sheet(item:)` presentation.
 private struct FinanceImportPreviewSheetItem: Identifiable {
@@ -284,20 +695,22 @@ private struct FinanceImportPreviewSheetItem: Identifiable {
 /// until the user explicitly taps Import.
 private struct FinanceImportPreviewView: View {
     let result: FinanceImportResult
-    let onConfirm: ([FinanceImportedTransaction]) -> Void
+    let onConfirm: ([FinanceImportedTransaction]) -> FinanceImportConfirmationResult
     let onCancel: () -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var workingTransactions: [FinanceImportedTransaction]
+    @State private var confirmationError: String?
 
     init(
         result: FinanceImportResult,
-        onConfirm: @escaping ([FinanceImportedTransaction]) -> Void,
+        onConfirm: @escaping ([FinanceImportedTransaction]) -> FinanceImportConfirmationResult,
         onCancel: @escaping () -> Void
     ) {
         self.result = result
         self.onConfirm = onConfirm
         self.onCancel = onCancel
         _workingTransactions = State(initialValue: result.transactions)
+        _confirmationError = State(initialValue: nil)
     }
 
     private var previewRows: [FinanceImportedTransaction] {
@@ -344,7 +757,7 @@ private struct FinanceImportPreviewView: View {
                     }
                     if !result.diagnostics.isEmpty {
                         Text("Diagnostics identify only affected rows and never include statement contents.")
-                            .font(LifeOSFont.axis())
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                     }
                 }
@@ -357,15 +770,26 @@ private struct FinanceImportPreviewView: View {
                                     .foregroundStyle(LifeOSTokens.warning)
                                     .frame(width: 14, height: 14)
                                 Text("Row \(diagnostic.rowNumber): \(diagnostic.reason.displayName)")
-                                    .font(LifeOSFont.axis())
+                                    .lifeOSTypography(.metadata)
                                     .foregroundStyle(LifeOSTokens.secondaryText)
                             }
                         }
                         if result.diagnostics.count > 8 {
                             Text("Showing the first 8 of \(result.diagnostics.count) skipped rows.")
-                                .font(LifeOSFont.axis())
+                                .lifeOSTypography(.metadata)
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                         }
+                    }
+                }
+
+                if let confirmationError {
+                    Section {
+                        Label("Import was not saved", systemImage: "exclamationmark.triangle")
+                            .foregroundStyle(LifeOSTokens.warning)
+                        Text(confirmationError)
+                            .lifeOSTypography(.metadata)
+                            .foregroundStyle(LifeOSTokens.secondaryText)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
 
@@ -384,6 +808,7 @@ private struct FinanceImportPreviewView: View {
                                 onCategoryChange: { category in
                                     guard let index = workingTransactions.firstIndex(where: { $0.id == transaction.id }) else { return }
                                     workingTransactions[index].category = category?.rawValue
+                                    confirmationError = nil
                                 }
                             )
                         }
@@ -403,8 +828,13 @@ private struct FinanceImportPreviewView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Import") {
-                        onConfirm(workingTransactions)
-                        dismiss()
+                        switch onConfirm(workingTransactions) {
+                        case .saved:
+                            confirmationError = nil
+                            dismiss()
+                        case .failed(let message):
+                            confirmationError = message
+                        }
                     }
                     .disabled(workingTransactions.isEmpty)
                 }
@@ -435,19 +865,19 @@ private struct FinanceImportPreviewRow: View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
                 Text(transaction.description)
-                    .font(LifeOSFont.metadata())
+                    .lifeOSTypography(.metadata)
                 if transaction.isInvestmentOrder {
                     Text(investmentSubtitle)
-                        .font(LifeOSFont.axis())
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.secondaryText)
                 }
                 Text(FinanceImportDateFormatter.timestamp(transaction.bookedAt))
-                    .font(LifeOSFont.axis())
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
             Spacer(minLength: 8)
             Text(FinanceImportCurrencyFormatter.signedEuro(cents: transaction.amountCents))
-                .font(LifeOSFont.control())
+                .lifeOSTypography(.button)
                 .foregroundStyle(transaction.isOutflow ? LifeOSTokens.danger : LifeOSTokens.success)
                 .monospacedDigit()
             if let onCategoryChange {
@@ -464,7 +894,7 @@ private struct FinanceImportPreviewRow: View {
                         LifeOSIcon(effectiveCategory.iconName)
                             .frame(width: 12, height: 12)
                         Text(effectiveCategory.displayName)
-                            .font(LifeOSFont.axis())
+                            .lifeOSTypography(.metadata)
                             .lineLimit(1)
                     }
                     .foregroundStyle(effectiveCategory.hue.base)
@@ -562,7 +992,7 @@ private struct FinanceImportedTransactionsListView: View {
                 Button("Clear all", role: .destructive) { model.clearAll() }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("This only removes manually imported rows stored on this device. It does not affect any connected account.")
+                Text("This removes manually imported rows on this device and queues their deletions for the next sync. Connected bank accounts and their live data are unaffected.")
             }
         }
     }
@@ -575,9 +1005,9 @@ private struct FinanceImportedEmptyState: View {
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .frame(width: 30, height: 30)
             Text("No imported transactions")
-                .font(LifeOSFont.control())
+                .lifeOSTypography(.button)
             Text("Import a CSV to see your transactions here.")
-                .font(LifeOSFont.callout())
+                .lifeOSTypography(.body)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -638,7 +1068,7 @@ private struct FinanceSpendingByCategorySection: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("Spending by category")
-                    .font(LifeOSFont.cardTitle())
+                    .lifeOSTypography(.cardTitle)
                 Spacer(minLength: 8)
                 if !monthGroups.isEmpty {
                     monthPicker
@@ -676,7 +1106,7 @@ private struct FinanceSpendingByCategorySection: View {
         } label: {
             HStack(spacing: 4) {
                 Text(currentMonth.map(FinanceImportDateFormatter.month) ?? "")
-                    .font(LifeOSFont.metadata())
+                    .lifeOSTypography(.metadata)
                 LifeOSIcon(.chevronRight)
                     .frame(width: 9, height: 9)
                     .rotationEffect(.degrees(90))
@@ -716,10 +1146,10 @@ private struct FinanceSpendTotalItem: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(label)
-                .font(LifeOSFont.axis())
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
             Text(isSigned ? FinanceImportCurrencyFormatter.signedEuro(cents: signedValue) : FinanceImportCurrencyFormatter.magnitudeEuro(cents: cents))
-                .font(LifeOSFont.control())
+                .lifeOSTypography(.button)
                 .foregroundStyle(color)
                 .monospacedDigit()
         }
@@ -749,15 +1179,15 @@ private struct FinanceCategorySpendRow: View {
                     .foregroundStyle(spend.category.hue.base)
                     .frame(width: 14, height: 14)
                 Text(spend.category.displayName)
-                    .font(LifeOSFont.metadata())
+                    .lifeOSTypography(.metadata)
                 Text("\(spend.count)")
-                    .font(LifeOSFont.axis())
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                 Spacer(minLength: 8)
                 Text(isPrimarilyIncome
                      ? FinanceImportCurrencyFormatter.signedEuro(cents: spend.inflowCents)
                      : FinanceImportCurrencyFormatter.signedEuro(cents: -spend.outflowCents))
-                    .font(LifeOSFont.control())
+                    .lifeOSTypography(.button)
                     .foregroundStyle(amountColor)
                     .monospacedDigit()
             }
@@ -796,7 +1226,7 @@ private struct FinanceSpendingByCategoryEmptyState: View {
         Text(hasAnyImports
              ? "No imported transactions in this month."
              : "Import a CSV to see spending by category here.")
-            .font(LifeOSFont.callout())
+            .lifeOSTypography(.body)
             .foregroundStyle(LifeOSTokens.tertiaryText)
             .accessibilityIdentifier("finance-spending-by-category-empty-state")
     }
@@ -823,10 +1253,10 @@ private struct FinanceImportedInvestmentsSection: View {
             } icon: {
                 LifeOSIcon(.investments)
             }
-                .font(LifeOSFont.cardTitle())
+                .lifeOSTypography(.cardTitle)
                 .foregroundStyle(LifeOSTokens.secondaryText)
             Text("\(investmentRows.count) investment order\(investmentRows.count == 1 ? "" : "s") imported as cash movements. Holdings value, allocation, and wealth performance are unavailable from this statement.")
-                .font(LifeOSFont.axis())
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .fixedSize(horizontal: false, vertical: true)
             ForEach(Array(investmentRows.prefix(5))) { transaction in
@@ -834,7 +1264,7 @@ private struct FinanceImportedInvestmentsSection: View {
             }
             if investmentRows.count > 5 {
                 Text("Showing the latest 5 orders")
-                    .font(LifeOSFont.axis())
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
         }
@@ -925,8 +1355,12 @@ private struct FinanceBudgetsSection: View {
         financeImportGroupedByMonth(transactions)
     }
 
+    private var fallbackMonth: Date {
+        Calendar.current.date(from: Calendar.current.dateComponents([.year, .month], from: .now)) ?? .now
+    }
+
     private var currentMonth: Date {
-        selectedMonth ?? monthGroups.first?.key ?? Calendar.current.date(from: Calendar.current.dateComponents([.year, .month], from: .now)) ?? .now
+        selectedMonth ?? monthGroups.first?.key ?? fallbackMonth
     }
 
     private var transactionsForMonth: [FinanceImportedTransaction] {
@@ -941,7 +1375,7 @@ private struct FinanceBudgetsSection: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("Budgets")
-                    .font(LifeOSFont.cardTitle())
+                    .lifeOSTypography(.cardTitle)
                 Spacer(minLength: 8)
                 if !monthGroups.isEmpty {
                     monthPicker
@@ -969,6 +1403,16 @@ private struct FinanceBudgetsSection: View {
         .onChange(of: selectedMonth) { _, newValue in
             model.reload(on: newValue ?? currentMonth)
         }
+        .onChange(of: monthGroups.map(\.key)) { _, newKeys in
+            let effectiveMonth: Date
+            if let selectedMonth, newKeys.contains(selectedMonth) {
+                effectiveMonth = selectedMonth
+            } else {
+                if selectedMonth != nil { self.selectedMonth = nil }
+                effectiveMonth = newKeys.first ?? fallbackMonth
+            }
+            model.reload(on: effectiveMonth)
+        }
         .alert("Budgets", isPresented: Binding(
             get: { model.errorMessage != nil },
             set: { if !$0 { model.errorMessage = nil } }
@@ -991,7 +1435,7 @@ private struct FinanceBudgetsSection: View {
         } label: {
             HStack(spacing: 4) {
                 Text(FinanceImportDateFormatter.month(currentMonth))
-                    .font(LifeOSFont.metadata())
+                    .lifeOSTypography(.metadata)
                 LifeOSIcon(.chevronRight)
                     .frame(width: 9, height: 9)
                     .rotationEffect(.degrees(90))
@@ -1043,18 +1487,18 @@ private struct FinanceCategoryBudgetRow: View {
                     .foregroundStyle(category.hue.base)
                     .frame(width: 14, height: 14)
                 Text(category.displayName)
-                    .font(LifeOSFont.metadata())
+                    .lifeOSTypography(.metadata)
                 Spacer(minLength: 8)
                 HStack(spacing: 3) {
                     Text("€")
-                        .font(LifeOSFont.callout())
+                        .lifeOSTypography(.body)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                     TextField("Limit", text: $limitText)
                         #if os(iOS)
                         .keyboardType(.decimalPad)
                         #endif
                         .multilineTextAlignment(.trailing)
-                        .font(LifeOSFont.control())
+                        .lifeOSTypography(.button)
                         .frame(width: 56)
                         .focused($isFieldFocused)
                         .onSubmit(commitLimit)
@@ -1088,17 +1532,17 @@ private struct FinanceCategoryBudgetRow: View {
                     HStack(spacing: 6) {
                         if let spentCents {
                             Text(FinanceImportCurrencyFormatter.magnitudeEuro(cents: spentCents) + " of " + FinanceImportCurrencyFormatter.magnitudeEuro(cents: limitCents))
-                                .font(LifeOSFont.axis())
+                                .lifeOSTypography(.metadata)
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                             Spacer(minLength: 8)
                             Text(isOverBudget
                                  ? "Over by \(FinanceImportCurrencyFormatter.magnitudeEuro(cents: spentCents - limitCents))"
                                  : "\(FinanceImportCurrencyFormatter.magnitudeEuro(cents: limitCents - spentCents)) remaining")
-                                .font(LifeOSFont.axis().weight(.semibold))
+                                .lifeOSTypography(.metadata, weight: .semibold)
                                 .foregroundStyle(isOverBudget ? LifeOSTokens.danger : LifeOSTokens.success)
                         }
                         Button("Remove", role: .destructive, action: onRemove)
-                            .font(LifeOSFont.axis())
+                            .lifeOSTypography(.metadata)
                             .buttonStyle(.plain)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                             .accessibilityIdentifier("finance-budget-remove-\(category.rawValue)")
@@ -1109,11 +1553,11 @@ private struct FinanceCategoryBudgetRow: View {
                             .foregroundStyle(LifeOSTokens.warning)
                             .frame(width: 13, height: 13)
                         Text("Actual spend unavailable until a statement is imported")
-                            .font(LifeOSFont.axis())
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.warning)
                         Spacer(minLength: 8)
                         Button("Remove", role: .destructive, action: onRemove)
-                            .font(LifeOSFont.axis())
+                            .lifeOSTypography(.metadata)
                             .buttonStyle(.plain)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                             .accessibilityIdentifier("finance-budget-remove-\(category.rawValue)")
@@ -1122,13 +1566,13 @@ private struct FinanceCategoryBudgetRow: View {
             } else {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("No budget set")
-                        .font(LifeOSFont.axis())
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .accessibilityIdentifier("finance-budget-unset-\(category.rawValue)")
                     Text(actualsAvailable
                          ? (spend.map { "Actual spend \(FinanceImportCurrencyFormatter.magnitudeEuro(cents: $0.outflowCents))" } ?? "No spend recorded")
                          : "Actual spend unavailable until a statement is imported")
-                        .font(LifeOSFont.axis())
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(actualsAvailable ? LifeOSTokens.secondaryText : LifeOSTokens.warning)
                 }
             }
@@ -1177,9 +1621,9 @@ private enum FinanceImportCurrencyFormatter {
         formatter.numberStyle = .currency
         formatter.currencyCode = "EUR"
         formatter.locale = Locale.current
-        formatter.minimumFractionDigits = 0
-        formatter.maximumFractionDigits = 0
-        return formatter.string(from: NSNumber(value: Double(abs(cents)) / 100)) ?? "€\(abs(cents) / 100)"
+        formatter.minimumFractionDigits = 2
+        formatter.maximumFractionDigits = 2
+        return formatter.string(from: NSNumber(value: Double(abs(cents)) / 100)) ?? String(format: "€%.2f", Double(abs(cents)) / 100)
     }
 }
 

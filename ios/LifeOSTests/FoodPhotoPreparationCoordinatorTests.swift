@@ -179,6 +179,76 @@ final class FoodPhotoPreparationCoordinatorTests: XCTestCase {
         XCTAssertEqual(try coordinator.makeManifestAfterConsent().images, [newer])
     }
 
+    func testStalePhotoAnalysisCannotAdoptOrClearNewRequest() {
+        var gate = FitnessFoodPhotoAnalysisCoordinator()
+        gate.selectionChanged()
+        let old = gate.beginAnalysis(requestID: "request-old", draftRevision: "draft-old")
+
+        gate.selectionChanged()
+        let current = gate.beginAnalysis(requestID: "request-current", draftRevision: "draft-current")
+
+        XCTAssertFalse(gate.canAdopt(
+            old,
+            currentRequestID: "request-current",
+            currentDraftRevision: "draft-current"
+        ))
+        XCTAssertFalse(
+            gate.ownsCleanup(
+                old,
+                currentRequestID: "request-current",
+                currentDraftRevision: "draft-current"
+            )
+        )
+        XCTAssertTrue(gate.canAdopt(
+            current,
+            currentRequestID: "request-current",
+            currentDraftRevision: "draft-current"
+        ))
+        XCTAssertFalse(gate.canAdopt(
+            current,
+            currentRequestID: "request-current",
+            currentDraftRevision: "draft-edited"
+        ))
+
+        XCTAssertFalse(
+            gate.finish(
+                old,
+                currentRequestID: "request-current",
+                currentDraftRevision: "draft-current"
+            )
+        )
+        XCTAssertTrue(
+            gate.ownsCleanup(
+                current,
+                currentRequestID: "request-current",
+                currentDraftRevision: "draft-current"
+            )
+        )
+
+        let retry = gate.beginAnalysis(requestID: "request-retry", draftRevision: "draft-current")
+        XCTAssertFalse(
+            gate.ownsCleanup(
+                current,
+                currentRequestID: "request-current",
+                currentDraftRevision: "draft-current"
+            )
+        )
+        XCTAssertTrue(
+            gate.ownsCleanup(
+                retry,
+                currentRequestID: "request-retry",
+                currentDraftRevision: "draft-current"
+            )
+        )
+        XCTAssertTrue(
+            gate.finish(
+                retry,
+                currentRequestID: "request-retry",
+                currentDraftRevision: "draft-current"
+            )
+        )
+    }
+
     func testClearCancelsReadinessAndConsent() async throws {
         let descriptor = try descriptor(id: "first")
         let coordinator = makeCoordinator(descriptors: [descriptor])

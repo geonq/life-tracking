@@ -3,13 +3,27 @@ import WidgetKit
 
 /// Text colors shared by every chrome-managed widget. Accented/vibrant homescreen
 /// rendering composites the widget over a system backdrop, where opaque token
-/// surfaces and dark text become illegible; those modes resolve to white/opacity
-/// pairs over a cleared container background instead.
+/// surfaces and dark text become illegible; those modes use opaque white text
+/// with typographic hierarchy over a cleared container background instead.
 struct LifeOSWidgetChrome {
     let hero: Color
     let secondary: Color
     let tertiary: Color
     let usesTransparentTreatment: Bool
+
+    // Clear/accented rendering relies on hierarchy through size and weight,
+    // not stacked alpha that disappears against a mid-grey wallpaper.
+    func panelFill(opacity: Double) -> Color {
+        usesTransparentTreatment ? .clear : LifeOSTokens.canvas.opacity(opacity)
+    }
+
+    var separator: Color {
+        usesTransparentTreatment ? .white.opacity(0.65) : LifeOSTokens.quietBorder
+    }
+
+    var supportingText: Color {
+        usesTransparentTreatment ? LifeOSTokens.widgetTransparentSupporting : secondary
+    }
 
     static func resolving(
         showsContainerBackground: Bool,
@@ -17,11 +31,129 @@ struct LifeOSWidgetChrome {
     ) -> Self {
         let usesTransparentTreatment = !showsContainerBackground || renderingMode != .fullColor
         return LifeOSWidgetChrome(
-            hero: usesTransparentTreatment ? .white : .primary,
-            secondary: usesTransparentTreatment ? .white.opacity(0.76) : .secondary,
-            tertiary: usesTransparentTreatment ? .white.opacity(0.53) : LifeOSTokens.tertiaryText,
+            hero: usesTransparentTreatment ? .white : LifeOSTokens.primaryText,
+            secondary: usesTransparentTreatment ? LifeOSTokens.widgetTransparentSupporting : LifeOSTokens.secondaryText,
+            tertiary: usesTransparentTreatment ? LifeOSTokens.widgetTransparentSupporting : LifeOSTokens.tertiaryText,
             usesTransparentTreatment: usesTransparentTreatment
         )
+    }
+}
+
+/// Widget roles keep essential values legible inside WidgetKit's finite
+/// families. They scale from the SF Pro facade, cap at a family-safe maximum,
+/// and keep the numeric fallback floor at 22pt. The surrounding container
+/// caps Dynamic Type at `.xxxLarge`; each view removes optional copy before it
+/// considers a smaller fallback role.
+enum LifeOSWidgetTypography {
+    enum Role: CaseIterable, Equatable {
+        case hero
+        case heroFallback
+        case heroMinimum
+        case compactMetric
+        case title
+        case metadata
+
+        var baseSize: CGFloat {
+            switch self {
+            case .hero: 28
+            case .heroFallback: 24
+            case .heroMinimum, .compactMetric: 22
+            case .title: 15
+            case .metadata: 12
+            }
+        }
+
+        var minimumSize: CGFloat {
+            switch self {
+            case .hero, .heroFallback, .heroMinimum, .compactMetric: 22
+            case .title: 13
+            case .metadata: 11
+            }
+        }
+
+        var maximumSize: CGFloat {
+            switch self {
+            case .hero: 34
+            case .heroFallback: 30
+            case .heroMinimum, .compactMetric: 27
+            case .title: 18
+            case .metadata: 14
+            }
+        }
+
+        var relativeTo: Font.TextStyle {
+            switch self {
+            case .hero: .largeTitle
+            case .heroFallback, .heroMinimum: .title
+            case .compactMetric: .title2
+            case .title: .headline
+            case .metadata: .footnote
+            }
+        }
+
+        var weight: Font.Weight {
+            switch self {
+            case .hero, .heroFallback, .heroMinimum, .compactMetric, .title: .semibold
+            case .metadata: .medium
+            }
+        }
+
+        static func numericFallback(for size: CGFloat) -> Self {
+            if size >= 28 { return .hero }
+            if size >= 24 { return .heroFallback }
+            return .heroMinimum
+        }
+
+        /// Older widget sources still ask for a role as a `Font`. Keep those
+        /// call sites dynamic by returning the system text style that matches
+        /// the role; new sources use the scaled modifier above for tighter
+        /// family-specific bounds.
+        var dynamicFont: Font {
+            switch self {
+            case .hero: .largeTitle
+            case .heroFallback: .title
+            case .heroMinimum, .compactMetric: .title2
+            case .title: .headline
+            case .metadata: .footnote
+            }
+        }
+    }
+
+    // Calendar, Usage, and older widget sources use these dynamic system-style
+    // aliases until their call sites can adopt the modifier directly. They do
+    // not embed a fixed point size or a custom font.
+    static var hero: Font { Role.hero.dynamicFont }
+    static var compactMetric: Font { Role.compactMetric.dynamicFont }
+    static var title: Font { Role.title.dynamicFont }
+    static var metadata: Font { Role.metadata.dynamicFont }
+
+    struct RoleModifier: ViewModifier {
+        let role: Role
+        @ScaledMetric private var scaledSize: CGFloat
+
+        init(role: Role) {
+            self.role = role
+            self._scaledSize = ScaledMetric(
+                wrappedValue: role.baseSize,
+                relativeTo: role.relativeTo
+            )
+        }
+
+        func body(content: Content) -> some View {
+            content.font(
+                .system(
+                    size: min(max(scaledSize, role.minimumSize), role.maximumSize),
+                    weight: role.weight,
+                    design: .default
+                )
+            )
+        }
+    }
+}
+
+extension View {
+    func lifeOSWidgetTypography(_ role: LifeOSWidgetTypography.Role) -> some View {
+        modifier(LifeOSWidgetTypography.RoleModifier(role: role))
     }
 }
 
@@ -51,6 +183,7 @@ private struct LifeOSWidgetContainerModifier<Background: View>: ViewModifier {
             renderingMode: widgetRenderingMode
         )
         return content
+            .lifeOSWidgetReadableContent(chrome)
             .containerBackground(for: .widget) {
                 chrome.usesTransparentTreatment ? AnyView(Color.clear) : AnyView(background)
             }
@@ -59,7 +192,21 @@ private struct LifeOSWidgetContainerModifier<Background: View>: ViewModifier {
             // vibrant, and clear widgets from falling back to system `.primary`
             // over an arbitrary wallpaper.
             .foregroundStyle(chrome.hero)
+            .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
             .environment(\.lifeOSWidgetChrome, chrome)
+    }
+}
+
+private struct LifeOSWidgetReadableContentModifier: ViewModifier {
+    let chrome: LifeOSWidgetChrome
+
+    func body(content: Content) -> some View {
+        content
+            .padding(chrome.usesTransparentTreatment ? 8 : 0)
+            .background(
+                chrome.usesTransparentTreatment ? LifeOSTokens.widgetTransparentBacking : .clear,
+                in: RoundedRectangle(cornerRadius: LifeOSTokens.Radius.widget, style: .continuous)
+            )
     }
 }
 
@@ -67,20 +214,92 @@ extension View {
     func lifeOSWidgetContainer(@ViewBuilder background: () -> some View) -> some View {
         modifier(LifeOSWidgetContainerModifier(background: background))
     }
+
+    /// Applies the approved inner backing used by clear/accented widgets. The
+    /// container remains clear so WidgetKit can composite it over the wallpaper;
+    /// the content still has a stable local contrast surface.
+    func lifeOSWidgetReadableContent(_ chrome: LifeOSWidgetChrome) -> some View {
+        modifier(LifeOSWidgetReadableContentModifier(chrome: chrome))
+    }
 }
 
-/// A single unavailable entry shared by every future-module widget.
-///
-/// These widgets are selectable before their modules have connectors. Keeping the entry free of
-/// module-specific fields makes it impossible for a preview or timeline to accidentally imply
-/// that an unavailable metric is zero.
+/// Bounded projection of the existing, persisted Calendar to-dos. Never treats
+/// missing storage as an observed empty day. Summary permission allows counts and
+/// generic status labels only; Calendar titles never enter widget rows.
+struct TasksWidgetData {
+    struct Row: Identifiable {
+        let id: UUID
+        let done: Bool
+
+        // Computed from status so neither visible nor accessibility text can
+        // accidentally retain a private Calendar title. Details stay in the app.
+        var title: String { done ? "Completed task" : "Pending task" }
+    }
+    let state: WidgetAggregateAvailability
+    let pendingCount: Int?
+    let rows: [Row]
+    var refreshAt: Date? = nil
+    static let destination = URL(string: "lifeos://calendar")!
+
+    static func readSnapshot(at url: URL) throws -> CalendarSnapshot {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let bytes = try handle.read(upToCount: CalendarSnapshot.maximumEncodedBytes + 1) ?? Data()
+        guard bytes.count <= CalendarSnapshot.maximumEncodedBytes else {
+            throw CalendarSnapshotError.payloadTooLarge
+        }
+        return try JSONDecoder.calendar.decode(CalendarSnapshot.self, from: bytes)
+    }
+
+    static func project(_ snapshot: CalendarSnapshot?, savedAt: Date?,
+                        privacy: WidgetPrivacyMode, at date: Date,
+                        calendar: Calendar = .current) -> Self {
+        guard privacy == .summaryAllowed else {
+            return Self(state: .redacted, pendingCount: nil, rows: [])
+        }
+        guard let snapshot, let savedAt, savedAt.timeIntervalSince1970.isFinite,
+              date.timeIntervalSince(savedAt) >= -5,
+              snapshot.items.count <= CalendarSnapshot.maximumItemCount else {
+            return Self(state: .unavailable, pendingCount: nil, rows: [])
+        }
+        let tasks = CalendarWidgetData.items(on: date, in: snapshot, calendar: calendar)
+            .filter { $0.kind == .todo && $0.status != .aborted }
+        let expiry = savedAt.addingTimeInterval(futureWidgetFreshnessWindow + 1)
+        let midnight = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: date)) ?? date.addingTimeInterval(900)
+        return Self(
+            state: date.timeIntervalSince(savedAt) > futureWidgetFreshnessWindow ? .stale : .fresh,
+            pendingCount: tasks.filter { $0.status != .done }.count,
+            rows: tasks.sorted {
+                if ($0.status == .done) != ($1.status == .done) { return $0.status != .done }
+                if $0.start != $1.start { return $0.start < $1.start }
+                return $0.id.uuidString < $1.id.uuidString
+            }.prefix(3).map { Row(id: $0.id, done: $0.status == .done) },
+            refreshAt: expiry > date ? min(expiry, midnight) : midnight
+        )
+    }
+
+    var detail: String {
+        switch state {
+        case .redacted: return "Summary hidden"
+        case .unavailable: return "No shared task snapshot"
+        case .stale: return "Saved tasks · stale"
+        case .fresh: return pendingCount == 0 ? "No pending tasks today" : "Pending today"
+        }
+    }
+}
+
 struct FutureModuleWidgetEntry: TimelineEntry {
     let date: Date
     let snapshot: FutureWidgetSnapshot
+    let tasks: TasksWidgetData
 
-    init(date: Date = .now, snapshot: FutureWidgetSnapshot? = nil) {
+    init(date: Date = .now, snapshot: FutureWidgetSnapshot? = nil,
+         tasks: TasksWidgetData? = nil) {
         self.date = date
         self.snapshot = snapshot ?? .unavailable(at: date)
+        self.tasks = self.snapshot.privacyMode == .redacted
+            ? .project(nil, savedAt: nil, privacy: .redacted, at: date)
+            : tasks ?? .project(nil, savedAt: nil, privacy: self.snapshot.privacyMode, at: date)
     }
 }
 
@@ -90,19 +309,22 @@ struct FutureModuleTimelineProvider: TimelineProvider {
     }
 
     func getSnapshot(in context: Context, completion: @escaping (FutureModuleWidgetEntry) -> Void) {
-        completion(loadEntry())
+        Task { completion(await loadEntry()) }
     }
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<FutureModuleWidgetEntry>) -> Void) {
-        let entry = loadEntry()
+        Task {
+        let entry = await loadEntry()
         // WidgetKit does not re-evaluate a persisted entry as it ages. Schedule
         // the next read at the bounded freshness boundary so the widget can
         // honestly transition from fresh to stale (or unavailable) without
         // requiring the app process to be running.
         completion(Timeline(
             entries: [entry],
-            policy: .after(nextRefreshDate(for: entry.snapshot, loadedAt: entry.date))
+            policy: .after(min(nextRefreshDate(for: entry.snapshot, loadedAt: entry.date),
+                               entry.tasks.refreshAt.flatMap { $0 > entry.date ? $0 : nil } ?? entry.date.addingTimeInterval(900)))
         ))
+        }
     }
 
     private func nextRefreshDate(for snapshot: FutureWidgetSnapshot, loadedAt: Date) -> Date {
@@ -113,12 +335,23 @@ struct FutureModuleTimelineProvider: TimelineProvider {
         return boundaries.min() ?? loadedAt.addingTimeInterval(futureWidgetFreshnessWindow)
     }
 
-    private func loadEntry(at date: Date = .now) -> FutureModuleWidgetEntry {
+    private func loadEntry(at date: Date = .now) async -> FutureModuleWidgetEntry {
         guard let snapshot = FutureWidgetSnapshotStore.read(now: date) else {
             return FutureModuleWidgetEntry(date: date)
         }
         // TimelineEntry.date is the load time, never an old observation time.
-        return FutureModuleWidgetEntry(date: date, snapshot: snapshot)
+        var tasks = TasksWidgetData.project(nil, savedAt: nil, privacy: snapshot.privacyMode, at: date)
+        if snapshot.privacyMode == .summaryAllowed,
+           let identifier = AppGroupConfiguration.identifier(bundle: .main),
+           let url = try? CalendarStoreURL.appGroupURL(identifier: identifier),
+           let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+           let savedAt = attributes[.modificationDate] as? Date,
+           let size = attributes[.size] as? NSNumber,
+           size.intValue <= CalendarSnapshot.maximumEncodedBytes,
+           let stored = try? TasksWidgetData.readSnapshot(at: url) {
+            tasks = .project(stored, savedAt: savedAt, privacy: snapshot.privacyMode, at: date)
+        }
+        return FutureModuleWidgetEntry(date: date, snapshot: snapshot, tasks: tasks)
     }
 }
 
@@ -135,11 +368,11 @@ private func futureModuleScore(_ score: Double) -> String {
     String(format: "%.0f", score)
 }
 
-private func futureModuleStateText(_ state: WidgetAggregateAvailability) -> String {
+func futureModuleStateText(_ state: WidgetAggregateAvailability) -> String {
     switch state {
     case .fresh: return "Aggregate"
     case .stale: return "Stale summary"
-    case .unavailable: return "Not connected"
+    case .unavailable: return "No data"
     case .redacted: return "Summary hidden"
     }
 }
@@ -148,7 +381,7 @@ private func futureModuleAccessibilityState(_ state: WidgetAggregateAvailability
     switch state {
     case .fresh: return "aggregate summary"
     case .stale: return "stale aggregate summary"
-    case .unavailable: return "not connected"
+    case .unavailable: return "no data"
     case .redacted: return "summary hidden"
 }
 }
@@ -173,7 +406,7 @@ private struct FutureModuleWidgetHeader: View {
                 .frame(width: 16, height: 16)
                 .foregroundStyle(iconColor)
             Text(title)
-                .font(LifeOSFont.widgetHeader())
+                .lifeOSWidgetTypography(.title)
                 .foregroundStyle(chrome.hero)
                 Spacer(minLength: 0)
         }
@@ -198,22 +431,33 @@ private func futureModuleAccessibilityLabel(
 
 private struct FutureModuleUnavailableHero: View {
     let state: WidgetAggregateAvailability
+    let unavailableText: String
 
-    init(state: WidgetAggregateAvailability = .unavailable) {
+    init(state: WidgetAggregateAvailability = .unavailable, unavailableText: String = "No data") {
         self.state = state
+        self.unavailableText = unavailableText
     }
 
     @Environment(\.lifeOSWidgetChrome) private var chrome
 
     var body: some View {
-        VStack(spacing: 2) {
-            Text(state == .redacted ? "Hidden" : "—")
-                .font(.system(size: 24, weight: .bold, design: .rounded))
-                .foregroundStyle(chrome.hero)
-            Text(state == .redacted ? "Summary hidden" : "Not connected")
-                .font(.system(size: 10, weight: .medium))
+        HStack(spacing: LifeOSTokens.Space.xs) {
+            Image(systemName: state == .redacted ? "lock.fill" : "minus")
+                .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(chrome.tertiary)
+                .frame(width: 18, height: 18)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(state == .redacted ? "Hidden" : "Unavailable")
+                    .lifeOSWidgetTypography(.title)
+                    .foregroundStyle(chrome.hero)
+                Text(state == .redacted ? "Summary hidden" : unavailableText)
+                    .lifeOSWidgetTypography(.metadata)
+                    .foregroundStyle(chrome.supportingText)
+                    .lineLimit(2)
+            }
+            Spacer(minLength: 0)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -253,64 +497,6 @@ private struct FutureModuleProgressRing: View {
     }
 }
 
-private struct FutureModuleFlatTrend: View {
-    var body: some View {
-        GeometryReader { proxy in
-            Path { path in
-                let baseline = proxy.size.height * 0.5
-                path.move(to: CGPoint(x: 0, y: baseline))
-                path.addLine(to: CGPoint(x: proxy.size.width, y: baseline))
-            }
-            .stroke(
-                LifeOSTokens.tertiaryText.opacity(0.42),
-                style: StrokeStyle(lineWidth: 2, lineCap: .round)
-            )
-        }
-        .frame(minHeight: 36)
-        .accessibilityHidden(true)
-    }
-}
-
-private struct FutureModuleEmptyHealthBars: View {
-    var body: some View {
-        HStack(alignment: .bottom, spacing: 8) {
-            ForEach(0..<6, id: \.self) { _ in
-                Capsule()
-                    .fill(LifeOSTokens.Ring.track)
-                    .frame(width: 8, height: 52)
-            }
-        }
-        .accessibilityHidden(true)
-    }
-}
-
-private struct FutureModuleEmptyCashFlowTracks: View {
-    var body: some View {
-        HStack(spacing: 10) {
-            FutureModuleCashFlowTrack(label: "In")
-            FutureModuleCashFlowTrack(label: "Out")
-        }
-        .accessibilityHidden(true)
-    }
-}
-
-private struct FutureModuleCashFlowTrack: View {
-    let label: String
-
-    @Environment(\.lifeOSWidgetChrome) private var chrome
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(label)
-                .font(.system(size: 9, weight: .medium))
-                .foregroundStyle(chrome.tertiary)
-            Capsule()
-                .fill(LifeOSTokens.Ring.track)
-                .frame(height: 5)
-        }
-    }
-}
-
 struct NetWorthWidgetView: View {
     let entry: FutureModuleWidgetEntry
 
@@ -331,25 +517,22 @@ struct NetWorthWidgetView: View {
             if let netWorth = entry.snapshot.finance.netWorthCents,
                entry.snapshot.financeDisplayState(at: entry.date) == .fresh || entry.snapshot.financeDisplayState(at: entry.date) == .stale {
                 Text(futureModuleCurrency(netWorth, maximumFractionDigits: 2))
-                    .font(.system(size: 24, weight: .bold, design: .rounded))
+                    .lifeOSWidgetTypography(.hero)
                     .foregroundStyle(chrome.hero)
                 Text(futureModuleStateText(entry.snapshot.financeDisplayState(at: entry.date)))
-                    .font(.system(size: 10, weight: .medium))
+                    .lifeOSWidgetTypography(.metadata)
                     .foregroundStyle(chrome.tertiary)
                 Spacer(minLength: 0)
                 Text("Aggregate only")
-                    .font(.system(size: 9, weight: .medium))
+                    .lifeOSWidgetTypography(.metadata)
                     .foregroundStyle(chrome.tertiary)
             } else {
                 FutureModuleUnavailableHero(state: futureModuleMetricState(
                     entry.snapshot.financeDisplayState(at: entry.date),
                     hasValue: entry.snapshot.finance.netWorthCents != nil
                 ))
-                Spacer(minLength: 0)
-                FutureModuleFlatTrend()
             }
         }
-        .padding(15)
         .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(URL(string: "lifeos://finance"))
         .accessibilityElement(children: .combine)
@@ -383,33 +566,23 @@ struct SpendRingWidgetView: View {
                entry.snapshot.financeDisplayState(at: entry.date) == .fresh || entry.snapshot.financeDisplayState(at: entry.date) == .stale {
                 VStack(spacing: 4) {
                     Text(futureModuleCurrency(spend))
-                        .font(.system(size: 17, weight: .bold, design: .rounded))
+                        .lifeOSWidgetTypography(.compactMetric)
                         .foregroundStyle(chrome.hero)
-                        .minimumScaleFactor(0.65)
                     Text("Observed spend")
-                        .font(.system(size: 10, weight: .medium))
+                        .lifeOSWidgetTypography(.metadata)
                         .foregroundStyle(chrome.tertiary)
                 }
                 Text(futureModuleStateText(entry.snapshot.financeDisplayState(at: entry.date)))
-                    .font(.system(size: 10, weight: .medium))
+                    .lifeOSWidgetTypography(.metadata)
                     .foregroundStyle(chrome.tertiary)
             } else {
-                ZStack {
-                    FutureModuleTrackRing(diameter: 64, lineWidth: 6)
-                    Text("—")
-                        .font(.system(size: 20, weight: .bold, design: .rounded))
-                        .foregroundStyle(chrome.hero)
-                }
-                Text(futureModuleStateText(futureModuleMetricState(
+                FutureModuleUnavailableHero(state: futureModuleMetricState(
                     entry.snapshot.financeDisplayState(at: entry.date),
                     hasValue: entry.snapshot.finance.spendCents != nil
-                )))
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(chrome.tertiary)
+                ))
             }
             Spacer(minLength: 0)
         }
-        .padding(15)
         .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(URL(string: "lifeos://finance/spend"))
         .accessibilityElement(children: .combine)
@@ -441,27 +614,22 @@ struct CashFlowWidgetView: View {
             if let cashFlow = entry.snapshot.finance.cashFlowCents,
                entry.snapshot.financeDisplayState(at: entry.date) == .fresh || entry.snapshot.financeDisplayState(at: entry.date) == .stale {
                 Text(futureModuleCurrency(cashFlow, maximumFractionDigits: 2))
-                    .font(.system(size: 24, weight: .bold, design: .rounded))
+                    .lifeOSWidgetTypography(.hero)
                     .foregroundStyle(chrome.hero)
                 Text(futureModuleStateText(entry.snapshot.financeDisplayState(at: entry.date)))
-                    .font(.system(size: 10, weight: .medium))
+                    .lifeOSWidgetTypography(.metadata)
                     .foregroundStyle(chrome.tertiary)
                 Spacer(minLength: 0)
                 Text("Aggregate only")
-                    .font(.system(size: 9, weight: .medium))
+                    .lifeOSWidgetTypography(.metadata)
                     .foregroundStyle(chrome.tertiary)
             } else {
                 FutureModuleUnavailableHero(state: futureModuleMetricState(
                     entry.snapshot.financeDisplayState(at: entry.date),
                     hasValue: entry.snapshot.finance.cashFlowCents != nil
                 ))
-                Spacer(minLength: 0)
-                FutureModuleFlatTrend()
-                    .frame(height: 32)
-                FutureModuleEmptyCashFlowTracks()
             }
         }
-        .padding(15)
         .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(URL(string: "lifeos://finance/cashflow"))
         .accessibilityElement(children: .combine)
@@ -493,34 +661,22 @@ struct HealthMonitorWidgetView: View {
             if let health = entry.snapshot.fitness.healthScore,
                entry.snapshot.fitnessDisplayState(at: entry.date) == .fresh || entry.snapshot.fitnessDisplayState(at: entry.date) == .stale {
                 Text(futureModuleScore(health))
-                    .font(.system(size: 28, weight: .bold, design: .rounded))
+                    .lifeOSWidgetTypography(.hero)
                     .foregroundStyle(chrome.hero)
                 Text("Health aggregate")
-                    .font(.system(size: 10, weight: .medium))
+                    .lifeOSWidgetTypography(.metadata)
                     .foregroundStyle(chrome.tertiary)
                 Spacer(minLength: 0)
                 Text(futureModuleStateText(entry.snapshot.fitnessDisplayState(at: entry.date)))
-                    .font(.system(size: 9, weight: .medium))
+                    .lifeOSWidgetTypography(.metadata)
                     .foregroundStyle(chrome.tertiary)
             } else {
-                HStack(alignment: .center, spacing: 16) {
-                    FutureModuleUnavailableHero(state: futureModuleMetricState(
-                        entry.snapshot.fitnessDisplayState(at: entry.date),
-                        hasValue: entry.snapshot.fitness.healthScore != nil
-                    ))
-                        .frame(width: 92, alignment: .leading)
-                    FutureModuleEmptyHealthBars()
-                }
-                Spacer(minLength: 0)
-                Text(futureModuleStateText(futureModuleMetricState(
+                FutureModuleUnavailableHero(state: futureModuleMetricState(
                     entry.snapshot.fitnessDisplayState(at: entry.date),
                     hasValue: entry.snapshot.fitness.healthScore != nil
-                )))
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(chrome.tertiary)
+                ))
             }
         }
-        .padding(15)
         .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(URL(string: "lifeos://fitness"))
         .accessibilityElement(children: .combine)
@@ -552,7 +708,7 @@ struct RecoveryRingWidgetView: View {
                     .frame(width: 14, height: 14)
                     .foregroundStyle(chrome.usesTransparentTreatment ? chrome.secondary : LifeOSTokens.Module.fitness)
                 Text("Recovery")
-                    .font(.system(size: 12, weight: .semibold))
+                    .lifeOSWidgetTypography(.title)
                     .foregroundStyle(chrome.hero)
                     .lineLimit(1)
             }
@@ -563,28 +719,22 @@ struct RecoveryRingWidgetView: View {
                 ZStack {
                     FutureModuleProgressRing(diameter: 56, lineWidth: 6, progress: recovery / 100)
                     Text(futureModuleScore(recovery))
-                        .font(.system(size: 19, weight: .bold, design: .rounded))
+                        .lifeOSWidgetTypography(.compactMetric)
                         .foregroundStyle(chrome.hero)
                 }
                 Text(futureModuleStateText(futureModuleMetricState(
                     entry.snapshot.fitnessDisplayState(at: entry.date),
                     hasValue: entry.snapshot.fitness.recoveryScore != nil
                 )))
-                    .font(.system(size: 10, weight: .medium))
+                    .lifeOSWidgetTypography(.metadata)
                     .foregroundStyle(chrome.tertiary)
             } else {
-                ZStack {
-                    FutureModuleTrackRing(diameter: 56, lineWidth: 6)
-                    Text("—")
-                        .font(.system(size: 19, weight: .bold, design: .rounded))
-                        .foregroundStyle(chrome.hero)
-                }
-                Text(futureModuleStateText(entry.snapshot.fitnessDisplayState(at: entry.date)))
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(chrome.tertiary)
+                FutureModuleUnavailableHero(state: futureModuleMetricState(
+                    entry.snapshot.fitnessDisplayState(at: entry.date),
+                    hasValue: entry.snapshot.fitness.recoveryScore != nil
+                ))
             }
         }
-        .padding(15)
         .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(URL(string: "lifeos://fitness"))
         .accessibilityElement(children: .combine)
@@ -602,61 +752,67 @@ struct TasksSmallWidgetView: View {
     var body: some View {
         VStack(spacing: 8) {
             FutureModuleWidgetHeader(title: "Today's Tasks", icon: .tasks, accent: LifeOSTokens.Module.tasks)
-
             Spacer(minLength: 0)
-            FutureModuleUnavailableHero(
-                state: entry.snapshot.privacyMode == .redacted ? .redacted : .unavailable
-            )
+            TasksWidgetSummary(data: entry.tasks)
             Spacer(minLength: 0)
         }
-        .padding(15)
         .lifeOSWidgetContainer { LifeOSTokens.surface }
-        .widgetURL(URL(string: "lifeos://tasks/today"))
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(
-            "Today's Tasks, \(entry.snapshot.privacyMode == .redacted ? "summary hidden" : "not connected")"
-        )
+        .widgetURL(TasksWidgetData.destination)
+    }
+}
+
+private struct TasksWidgetSummary: View {
+    let data: TasksWidgetData
+    @Environment(\.lifeOSWidgetChrome) private var chrome
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(data.pendingCount.map(String.init) ?? (data.state == .redacted ? "Hidden" : "—"))
+                .lifeOSWidgetTypography(.compactMetric)
+                .foregroundStyle(chrome.hero)
+            Text(data.detail)
+                .lifeOSWidgetTypography(.metadata)
+                .foregroundStyle(chrome.secondary)
+        }
     }
 }
 
 struct TasksMediumWidgetView: View {
     let entry: FutureModuleWidgetEntry
-
-    @Environment(\.showsWidgetContainerBackground) private var showsWidgetContainerBackground
-    @Environment(\.widgetRenderingMode) private var widgetRenderingMode
-
+    @Environment(\.showsWidgetContainerBackground) private var showsBackground
+    @Environment(\.widgetRenderingMode) private var renderingMode
     private var chrome: LifeOSWidgetChrome {
-        LifeOSWidgetChrome.resolving(
-            showsContainerBackground: showsWidgetContainerBackground,
-            renderingMode: widgetRenderingMode
-        )
+        .resolving(showsContainerBackground: showsBackground, renderingMode: renderingMode)
     }
 
     var body: some View {
         HStack(spacing: 14) {
-            FutureModuleWidgetHeader(title: "Today's Tasks", icon: .tasks, accent: LifeOSTokens.Module.tasks)
-                .frame(maxWidth: 132, alignment: .topLeading)
-
-            Divider()
-                .overlay(LifeOSTokens.hairlineBorder)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(entry.snapshot.privacyMode == .redacted ? "Hidden" : "—")
-                    .font(.system(size: 24, weight: .bold, design: .rounded))
-                    .foregroundStyle(chrome.hero)
-                Text(entry.snapshot.privacyMode == .redacted ? "Summary hidden" : "Not connected")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(chrome.tertiary)
+            VStack(alignment: .leading, spacing: 10) {
+                FutureModuleWidgetHeader(title: "Today's Tasks", icon: .tasks, accent: LifeOSTokens.Module.tasks)
+                TasksWidgetSummary(data: entry.tasks)
+            }
+            .frame(maxWidth: 132, alignment: .leading)
+            Divider().overlay(chrome.separator)
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(entry.tasks.rows) { row in
+                    Link(destination: TasksWidgetData.destination) {
+                        HStack(spacing: 6) {
+                            LifeOSIcon(row.done ? .done : .planned)
+                                .frame(width: 13, height: 13)
+                                .foregroundStyle(row.done ? LifeOSTokens.success : chrome.secondary)
+                            Text(row.title).lineLimit(1)
+                        }
+                        .lifeOSWidgetTypography(.metadata)
+                        .foregroundStyle(chrome.hero)
+                    }
+                    .accessibilityIdentifier("tasks-widget-row-\(row.id.uuidString)")
+                    .accessibilityLabel("\(row.title), \(row.done ? "completed" : "pending"), open Calendar")
+                }
             }
             Spacer(minLength: 0)
         }
-        .padding(15)
         .lifeOSWidgetContainer { LifeOSTokens.surface }
-        .widgetURL(URL(string: "lifeos://tasks/today"))
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(
-            "Today's Tasks, \(entry.snapshot.privacyMode == .redacted ? "summary hidden" : "not connected")"
-        )
+        .widgetURL(TasksWidgetData.destination)
     }
 }
 
@@ -677,6 +833,24 @@ struct TasksWidgetView: View {
 
 // MARK: - Exact Nutrition medium widgets
 
+/// Distinct observed metrics from the approved brand ramps. Transparent hosts
+/// use the brighter stops independent of the system's light/dark appearance.
+enum NutritionWidgetPalette {
+    static func calories(transparent: Bool) -> Color {
+        transparent ? .lifeOSOrange400 : .lifeOSTasksOrange
+    }
+    static func protein(transparent: Bool) -> Color {
+        transparent ? .lifeOSTeal400 : .lifeOSTealInfo
+    }
+    static func carbohydrates(transparent: Bool) -> Color {
+        transparent ? .lifeOSViolet400 : .lifeOSFitnessViolet
+    }
+    static func fat(transparent: Bool) -> Color {
+        transparent ? LifeOSTokens.widgetTransparentSupporting : LifeOSTokens.metadataText
+    }
+}
+
+
 private func nutritionWidgetMetricState(
     _ metric: WidgetNutritionMetric,
     at date: Date
@@ -696,7 +870,7 @@ private func nutritionWidgetStateText(_ state: WidgetAggregateAvailability) -> S
     switch state {
     case .fresh: return "Aggregate"
     case .stale: return "Stale summary"
-    case .unavailable: return "Not connected"
+    case .unavailable: return "No data"
     case .redacted: return "Summary hidden"
     }
 }
@@ -714,6 +888,58 @@ private func nutritionWidgetValue(
     return unit.isEmpty ? number : "\(number) \(unit)"
 }
 
+/// Privacy states stay explicit in the provenance badge and accessibility
+/// values. The visual value remains compact so a redacted metric cannot force
+/// a narrow widget cell to truncate or collide with its unit label.
+private func nutritionWidgetDisplayValue(
+    _ metric: WidgetNutritionMetric,
+    at date: Date,
+    fractionDigits: Int = 0
+) -> String {
+    guard nutritionWidgetHasValue(metric, at: date), let value = metric.value else {
+        return "—"
+    }
+    return value.formatted(.number.precision(.fractionLength(fractionDigits)))
+}
+
+/// The calorie number is the primary value in the medium nutrition widgets.
+/// WidgetKit can propose less width than the nominal medium family, so keep
+/// every candidate intrinsic and stop at the approved 22-point floor.
+private struct NutritionWidgetPrimaryValue: View {
+    let metric: WidgetNutritionMetric
+    let date: Date
+    let color: Color
+
+    @Environment(\.lifeOSWidgetChrome) private var chrome
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            value(size: 28)
+            value(size: 24)
+            value(size: 22)
+        }
+    }
+
+    @ViewBuilder
+    private func value(size: CGFloat) -> some View {
+        Text(nutritionWidgetDisplayValue(metric, at: date))
+            .lifeOSWidgetTypography(LifeOSWidgetTypography.Role.numericFallback(for: size))
+            .monospacedDigit()
+            .foregroundStyle(valueColor)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private var valueColor: Color {
+        switch nutritionWidgetMetricState(metric, at: date) {
+        case .fresh, .stale:
+            return color
+        case .unavailable, .redacted:
+            return chrome.hero
+        }
+    }
+}
+
 private struct NutritionWidgetSourceBadge: View {
     let summary: WidgetSafeNutritionSummary
     let date: Date
@@ -722,11 +948,15 @@ private struct NutritionWidgetSourceBadge: View {
 
     var body: some View {
         Text(summary.provenanceLabel ?? nutritionWidgetStateText(summary.displayState(at: date)))
-            .font(.system(size: 7, weight: .semibold))
+            .lifeOSWidgetTypography(.metadata)
+            .fontWeight(.semibold)
             .tracking(0.15)
-            .foregroundStyle(summary.provenanceLabel == nil ? chrome.tertiary : LifeOSTokens.warning)
+            .foregroundStyle(chrome.secondary)
             .lineLimit(1)
-            .minimumScaleFactor(0.65)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(chrome.panelFill(opacity: 0.36), in: Capsule())
+            .overlay(Capsule().stroke(chrome.separator, lineWidth: 0.6))
             .accessibilityLabel("Nutrition data status")
             .accessibilityValue(summary.provenanceLabel ?? nutritionWidgetStateText(summary.displayState(at: date)))
     }
@@ -746,7 +976,7 @@ private struct NutritionWidgetHeader: View {
                 .frame(width: 15, height: 15)
                 .foregroundStyle(iconColor)
             Text(title)
-                .font(LifeOSFont.widgetHeader())
+                .lifeOSWidgetTypography(.title)
                 .foregroundStyle(chrome.hero)
                 .lineLimit(1)
             Spacer(minLength: 4)
@@ -756,7 +986,7 @@ private struct NutritionWidgetHeader: View {
 }
 
 private enum NutritionWidgetAction: String, CaseIterable, Identifiable {
-    case photoImport, camera, barcode, aiProposal, search
+    case photoImport, camera
 
     var id: String { rawValue }
 
@@ -764,9 +994,6 @@ private enum NutritionWidgetAction: String, CaseIterable, Identifiable {
         switch self {
         case .photoImport: URL(string: "lifeos://fitness/nutrition/import")!
         case .camera: URL(string: "lifeos://fitness/nutrition/camera")!
-        case .barcode: URL(string: "lifeos://fitness/nutrition/barcode")!
-        case .aiProposal: URL(string: "lifeos://fitness/nutrition/ai-proposal")!
-        case .search: URL(string: "lifeos://fitness/nutrition/search")!
         }
     }
 
@@ -774,9 +1001,13 @@ private enum NutritionWidgetAction: String, CaseIterable, Identifiable {
         switch self {
         case .photoImport: "Import food photo from library"
         case .camera: "Capture food photo with camera"
-        case .barcode: "Scan food barcode"
-        case .aiProposal: "Open disconnected AI photo proposal"
-        case .search: "Search food records"
+        }
+    }
+
+    var shortLabel: String {
+        switch self {
+        case .photoImport: "Photo"
+        case .camera: "Camera"
         }
     }
 
@@ -784,9 +1015,6 @@ private enum NutritionWidgetAction: String, CaseIterable, Identifiable {
         switch self {
         case .photoImport: "photo.badge.plus"
         case .camera: "camera.fill"
-        case .barcode: "barcode.viewfinder"
-        case .aiProposal: "sparkles"
-        case .search: "magnifyingglass"
         }
     }
 }
@@ -795,115 +1023,75 @@ private struct NutritionWidgetQuickActions: View {
     @Environment(\.lifeOSWidgetChrome) private var chrome
 
     var body: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: 8) {
             ForEach(NutritionWidgetAction.allCases) { action in
                 Link(destination: action.url) {
-                    Image(systemName: action.systemName)
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundStyle(chrome.hero.opacity(0.82))
-                        .frame(maxWidth: .infinity, minHeight: 26)
+                    HStack(spacing: 5) {
+                        Image(systemName: action.systemName)
+                            .font(.system(size: 14, weight: .medium))
+                        Text(action.shortLabel)
+                            .lifeOSWidgetTypography(.metadata)
+                            .fontWeight(.semibold)
+                            .lineLimit(1)
+                    }
+                    .foregroundStyle(chrome.hero)
+                    .frame(maxWidth: .infinity, minHeight: 32, maxHeight: 32)
+                    .background(chrome.panelFill(opacity: 0.36), in: Capsule())
+                    .overlay(Capsule().stroke(chrome.separator, lineWidth: 0.6))
                         .contentShape(Rectangle())
                 }
+                .frame(maxWidth: .infinity, minHeight: 32, maxHeight: 32)
                 .accessibilityLabel(action.label)
                 .accessibilityHint("Opens the app capture flow")
-                if action != .search {
-                    Rectangle()
-                        .fill(LifeOSTokens.quietBorder)
-                        .frame(width: 1, height: 24)
-                        .accessibilityHidden(true)
-                }
             }
         }
+        .frame(maxWidth: .infinity, minHeight: 32, maxHeight: 32)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Nutrition capture actions")
     }
 }
 
-private struct NutritionDotMatrix: View {
+private struct NutritionMacroMetric: View {
     let title: String
     let metric: WidgetNutritionMetric
     let goal: WidgetNutritionMetric
     let date: Date
-    /// Macro data semantics (§5.5): protein accent, carbs success, fat warning.
     let color: Color
 
-    private let columns = Array(repeating: GridItem(.fixed(4), spacing: 3), count: 8)
-
     @Environment(\.lifeOSWidgetChrome) private var chrome
 
     var body: some View {
-        VStack(spacing: 3) {
+        VStack(alignment: .leading, spacing: 1) {
             Text(title)
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(chrome.hero.opacity(0.82))
-            LazyVGrid(columns: columns, spacing: 3) {
-                ForEach(0..<40, id: \.self) { index in
-                    Circle()
-                        .fill(index < filledDots ? color : LifeOSTokens.quietBorder.opacity(0.55))
-                        .frame(width: 4, height: 4)
-                }
-            }
-            .frame(width: 53, height: 32)
-            Text(nutritionWidgetValue(metric, at: date, unit: "g"))
-                .font(.system(size: 10, weight: .bold, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(chrome.hero)
+                .lifeOSWidgetTypography(.metadata)
+                .fontWeight(.semibold)
+                .foregroundStyle(chrome.secondary)
                 .lineLimit(1)
-                .minimumScaleFactor(0.65)
+            HStack(alignment: .firstTextBaseline, spacing: 3) {
+                Text(nutritionWidgetValue(metric, at: date))
+                    .lifeOSWidgetTypography(.compactMetric)
+                    .monospacedDigit()
+                    .foregroundStyle(valueColor)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                Text("g")
+                    .lifeOSWidgetTypography(.metadata)
+                    .foregroundStyle(chrome.tertiary)
+            }
         }
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(title)
-        .accessibilityValue("\(nutritionWidgetValue(metric, at: date, unit: "grams")); \(nutritionWidgetStateText(nutritionWidgetMetricState(metric, at: date)))")
+        .accessibilityValue("\(nutritionWidgetValue(metric, at: date, unit: "grams")); goal \(nutritionWidgetValue(goal, at: date, unit: "grams")); \(nutritionWidgetStateText(nutritionWidgetMetricState(metric, at: date)))")
     }
 
-    private var filledDots: Int {
-        guard nutritionWidgetHasValue(metric, at: date),
-              nutritionWidgetHasValue(goal, at: date),
-              let value = metric.value,
-              let target = goal.value,
-              target > 0 else { return 0 }
-        return min(40, max(0, Int((value / target * 40).rounded(.down))))
-    }
-}
-
-private struct NutritionQualityRing: View {
-    let metric: WidgetNutritionMetric
-    let label: String?
-    let date: Date
-
-    @Environment(\.lifeOSWidgetChrome) private var chrome
-
-    var body: some View {
-        VStack(spacing: 3) {
-            ZStack {
-                Circle()
-                    .stroke(LifeOSTokens.quietBorder, style: StrokeStyle(lineWidth: 4, dash: [2, 2]))
-                if nutritionWidgetHasValue(metric, at: date), let score = metric.value {
-                    Circle()
-                        .trim(from: 0, to: min(1, max(0, score / 100)))
-                        .stroke(LifeOSTokens.success, style: StrokeStyle(lineWidth: 4, lineCap: .round))
-                        .rotationEffect(.degrees(-90))
-                    Text(score.formatted(.number.precision(.fractionLength(0))))
-                        .font(.system(size: 18, weight: .bold, design: .rounded))
-                        .monospacedDigit()
-                } else {
-                    Text(metric.state == .redacted ? "•" : "—")
-                        .font(.system(size: 16, weight: .bold, design: .rounded))
-                }
-            }
-            .frame(width: 54, height: 54)
-            Text(label ?? nutritionWidgetStateText(nutritionWidgetMetricState(metric, at: date)))
-                .font(.system(size: 8, weight: .medium))
-                .foregroundStyle(label == nil ? chrome.tertiary : LifeOSTokens.warning)
-                .lineLimit(2)
-                .multilineTextAlignment(.center)
-                .minimumScaleFactor(0.6)
+    private var valueColor: Color {
+        switch nutritionWidgetMetricState(metric, at: date) {
+        case .fresh, .stale:
+            return color
+        case .unavailable, .redacted:
+            return chrome.hero
         }
-        .frame(width: 66)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Food quality")
-        .accessibilityValue(nutritionWidgetValue(metric, at: date, fractionDigits: 0) + " out of 100; " + (label ?? nutritionWidgetStateText(nutritionWidgetMetricState(metric, at: date))))
     }
 }
 
@@ -921,26 +1109,36 @@ struct NutritionOverviewWidgetView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        let nutrition = entry.snapshot.nutrition
+        VStack(alignment: .leading, spacing: 4) {
             NutritionWidgetHeader(title: "Today's Food", summary: entry.snapshot.nutrition, date: entry.date)
-            HStack(alignment: .center, spacing: 5) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(nutritionWidgetValue(entry.snapshot.nutrition.caloriesEaten, at: entry.date, unit: "kcal"))
-                        .font(.system(size: 16, weight: .bold, design: .rounded))
-                        .monospacedDigit()
-                    Text("eaten")
-                        .font(.system(size: 8, weight: .medium))
-                        .foregroundStyle(chrome.tertiary)
-                }
-                NutritionDotMatrix(title: "Fat", metric: entry.snapshot.nutrition.fatGrams, goal: entry.snapshot.nutrition.fatGoalGrams, date: entry.date, color: LifeOSTokens.warning)
-                NutritionDotMatrix(title: "Carbs", metric: entry.snapshot.nutrition.carbsGrams, goal: entry.snapshot.nutrition.carbsGoalGrams, date: entry.date, color: LifeOSTokens.success)
-                NutritionDotMatrix(title: "Protein", metric: entry.snapshot.nutrition.proteinGrams, goal: entry.snapshot.nutrition.proteinGoalGrams, date: entry.date, color: LifeOSTokens.accent)
-                NutritionQualityRing(metric: entry.snapshot.nutrition.qualityScore, label: entry.snapshot.nutrition.qualityLabel, date: entry.date)
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("Calories")
+                    .lifeOSWidgetTypography(.metadata)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(chrome.secondary)
+                    .lineLimit(1)
+                NutritionWidgetPrimaryValue(
+                    metric: nutrition.caloriesEaten,
+                    date: entry.date,
+                    color: NutritionWidgetPalette.calories(transparent: chrome.usesTransparentTreatment)
+                )
+                Text("kcal")
+                    .lifeOSWidgetTypography(.metadata)
+                    .foregroundStyle(chrome.tertiary)
+                Spacer(minLength: 4)
+                Text("Goal \(nutritionWidgetValue(nutrition.calorieGoal, at: entry.date, unit: "kcal"))")
+                    .lifeOSWidgetTypography(.metadata)
+                    .foregroundStyle(chrome.secondary)
+                    .lineLimit(1)
             }
-            Divider().overlay(LifeOSTokens.quietBorder)
+            HStack(spacing: 10) {
+                NutritionMacroMetric(title: "Protein", metric: nutrition.proteinGrams, goal: nutrition.proteinGoalGrams, date: entry.date, color: NutritionWidgetPalette.protein(transparent: chrome.usesTransparentTreatment))
+                NutritionMacroMetric(title: "Carbs", metric: nutrition.carbsGrams, goal: nutrition.carbsGoalGrams, date: entry.date, color: NutritionWidgetPalette.carbohydrates(transparent: chrome.usesTransparentTreatment))
+                NutritionMacroMetric(title: "Fat", metric: nutrition.fatGrams, goal: nutrition.fatGoalGrams, date: entry.date, color: NutritionWidgetPalette.fat(transparent: chrome.usesTransparentTreatment))
+            }
             NutritionWidgetQuickActions()
         }
-        .padding(12)
         .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(URL(string: "lifeos://fitness/nutrition"))
         .accessibilityElement(children: .contain)
@@ -948,88 +1146,172 @@ struct NutritionOverviewWidgetView: View {
     }
 }
 
-private struct NutritionCalorieTrack: View {
-    let eaten: WidgetNutritionMetric
-    let goal: WidgetNutritionMetric
-    let date: Date
+/// Geometry contract for the medium Calories & Macros widget.
+///
+/// The helper is shared by the production layout and the snapshot gate. That
+/// keeps the proof about the actual three-column composition instead of testing
+/// an unrelated approximation of the view tree.
+struct NutritionCaloriesMacrosLayout: Equatable {
+    static let headerHeight: CGFloat = 20
+    static let headerContentSpacing: CGFloat = 6
+    static let columnSpacing: CGFloat = 10
+    static let macroSpacing: CGFloat = 6
+    static let macroCellHeight: CGFloat = 68
+    static let minimumCalorieWidth: CGFloat = 84
+    static let minimumMacroCellWidth: CGFloat = 44
+    static let valueFallbackSizes: [CGFloat] = [28, 24, 22]
 
-    @Environment(\.lifeOSWidgetChrome) private var chrome
+    let contentBounds: CGRect
+    let headerFrame: CGRect
+    let contentFrame: CGRect
+    let calorieFrame: CGRect
+    let macroFrame: CGRect
+    let macroFrames: [CGRect]
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            GeometryReader { proxy in
-                let progress: CGFloat = {
-                    guard nutritionWidgetHasValue(eaten, at: date), nutritionWidgetHasValue(goal, at: date),
-                          let eaten = eaten.value, let goal = goal.value, goal > 0 else { return 0 }
-                    return min(1, max(0, eaten / goal))
-                }()
-                HStack(spacing: 3) {
-                    ForEach(0..<8, id: \.self) { index in
-                        Capsule()
-                            .fill(CGFloat(index + 1) / 8 <= progress ? LifeOSTokens.accent : LifeOSTokens.quietBorder.opacity(0.68))
-                            .frame(width: max(2, (proxy.size.width - 21) / 8), height: 16)
-                    }
-                }
-            }
-            .frame(height: 16)
-            Text("Goal \(nutritionWidgetValue(goal, at: date, unit: "kcal"))")
-                .font(.system(size: 8, weight: .medium))
-                .foregroundStyle(chrome.tertiary)
-                .monospacedDigit()
+    init(
+        containerSize: CGSize,
+        contentMargins: EdgeInsets = EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0)
+    ) {
+        let width = max(0, containerSize.width)
+        let height = max(0, containerSize.height)
+        let contentWidth = max(0, width - contentMargins.leading - contentMargins.trailing)
+        let contentHeight = max(0, height - contentMargins.top - contentMargins.bottom)
+        let bounds = CGRect(
+            x: contentMargins.leading,
+            y: contentMargins.top,
+            width: contentWidth,
+            height: contentHeight
+        )
+        let resolvedHeaderHeight = min(Self.headerHeight, bounds.height)
+        let header = CGRect(
+            x: bounds.minX,
+            y: bounds.minY,
+            width: bounds.width,
+            height: resolvedHeaderHeight
+        )
+        let resolvedSpacing = min(
+            Self.headerContentSpacing,
+            max(0, bounds.maxY - header.maxY)
+        )
+        let contentOriginY = min(bounds.maxY, header.maxY + resolvedSpacing)
+        let content = CGRect(
+            x: bounds.minX,
+            y: contentOriginY,
+            width: bounds.width,
+            height: max(0, bounds.maxY - contentOriginY)
+        )
+
+        let availableColumnsWidth = max(0, content.width - Self.columnSpacing)
+        let minimumMacroRailWidth = (Self.minimumMacroCellWidth * 3) + (Self.macroSpacing * 2)
+        let maximumCalorieWidth = max(0, availableColumnsWidth - minimumMacroRailWidth)
+        let preferredCalorieWidth = max(
+            Self.minimumCalorieWidth,
+            availableColumnsWidth * 0.34
+        )
+        let calorieWidth = min(preferredCalorieWidth, maximumCalorieWidth)
+        let macroWidth = max(0, availableColumnsWidth - calorieWidth)
+        let macroCellWidth = max(0, (macroWidth - (Self.macroSpacing * 2)) / 3)
+        let cellHeight = min(Self.macroCellHeight, content.height)
+        let calorie = CGRect(
+            x: content.minX,
+            y: content.minY,
+            width: calorieWidth,
+            height: cellHeight
+        )
+        let macroRail = CGRect(
+            x: calorie.maxX + Self.columnSpacing,
+            y: content.minY,
+            width: macroWidth,
+            height: content.height
+        )
+        let cells = (0..<3).map { index in
+            CGRect(
+                x: macroRail.minX + CGFloat(index) * (macroCellWidth + Self.macroSpacing),
+                y: macroRail.minY,
+                width: macroCellWidth,
+                height: cellHeight
+            )
         }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Calories progress")
-        .accessibilityValue("\(nutritionWidgetValue(eaten, at: date, unit: "kilocalories")) eaten; goal \(nutritionWidgetValue(goal, at: date, unit: "kilocalories"))")
+
+        self.contentBounds = bounds
+        self.headerFrame = header
+        self.contentFrame = content
+        self.calorieFrame = calorie
+        self.macroFrame = macroRail
+        self.macroFrames = cells
+    }
+
+    var essentialFrames: [CGRect] {
+        [headerFrame, calorieFrame] + macroFrames
+    }
+
+    var essentialFramesAreInBounds: Bool {
+        guard contentBounds.width > 0, contentBounds.height > 0,
+              macroFrames.count == 3 else { return false }
+        return essentialFrames.allSatisfy { frame in
+            frame.width > 0 && frame.height > 0 &&
+            frame.minX >= contentBounds.minX - 0.01 &&
+            frame.minY >= contentBounds.minY - 0.01 &&
+            frame.maxX <= contentBounds.maxX + 0.01 &&
+            frame.maxY <= contentBounds.maxY + 0.01
+        }
     }
 }
 
 private struct NutritionMacroGoalCell: View {
+    @Environment(\.lifeOSWidgetChrome) private var chrome
     let title: String
     let metric: WidgetNutritionMetric
     let goal: WidgetNutritionMetric
     let date: Date
-    /// Macro data semantics (§5.5): protein accent, carbs success, fat warning.
+    /// Each macro uses its own approved brand ramp; macro values do not reuse
+    /// the blue observed-series color.
     let color: Color
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 2) {
-                Text(title)
-                    .font(.system(size: 9, weight: .semibold))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.5)
-                Spacer(minLength: 1)
-                progressRing
-            }
-            Text(remainingText)
-                .font(.system(size: 9, weight: .bold, design: .rounded))
-                .monospacedDigit()
+            Text(title)
+                .lifeOSWidgetTypography(.metadata)
+                .fontWeight(.semibold)
+                .foregroundStyle(chrome.secondary)
                 .lineLimit(1)
-                .minimumScaleFactor(0.5)
+            HStack(alignment: .firstTextBaseline, spacing: 3) {
+                ViewThatFits(in: .horizontal) {
+                    value(size: 28)
+                    value(size: 24)
+                    value(size: 22)
+                }
+                Text("g")
+                    .lifeOSWidgetTypography(.metadata)
+                    .foregroundStyle(chrome.tertiary)
+            }
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 6)
-        .background(LifeOSTokens.canvas.opacity(0.45), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(LifeOSTokens.quietBorder, lineWidth: 0.7))
+        .padding(.horizontal, 4)
+        .padding(.vertical, 4)
+        .background(chrome.panelFill(opacity: 0.45), in: RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous).stroke(chrome.separator, lineWidth: 0.7))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(title)
         .accessibilityValue("\(remainingText); \(nutritionWidgetStateText(nutritionWidgetMetricState(metric, at: date)))")
     }
 
-    private var progressRing: some View {
-        ZStack {
-            Circle().stroke(LifeOSTokens.quietBorder, lineWidth: 2.5)
-            if let ratio {
-                Circle().trim(from: 0, to: ratio).stroke(color, style: StrokeStyle(lineWidth: 2.5, lineCap: .round)).rotationEffect(.degrees(-90))
-            }
+    private var valueColor: Color {
+        switch nutritionWidgetMetricState(metric, at: date) {
+        case .fresh, .stale:
+            return color
+        case .unavailable, .redacted:
+            return chrome.hero
         }
-        .frame(width: 16, height: 16)
     }
 
-    private var ratio: Double? {
-        guard nutritionWidgetHasValue(metric, at: date), nutritionWidgetHasValue(goal, at: date),
-              let value = metric.value, let target = goal.value, target > 0 else { return nil }
-        return min(1, max(0, value / target))
+    @ViewBuilder
+    private func value(size: CGFloat) -> some View {
+        Text(compactValueText)
+            .lifeOSWidgetTypography(LifeOSWidgetTypography.Role.numericFallback(for: size))
+            .monospacedDigit()
+            .foregroundStyle(valueColor)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
     }
 
     private var remainingText: String {
@@ -1038,6 +1320,10 @@ private struct NutritionMacroGoalCell: View {
         let consumed = value.formatted(.number.precision(.fractionLength(0)))
         let targetText = target.formatted(.number.precision(.fractionLength(0)))
         return "\(consumed) / \(targetText) g"
+    }
+
+    private var compactValueText: String {
+        nutritionWidgetDisplayValue(metric, at: date)
     }
 }
 
@@ -1056,25 +1342,46 @@ struct CaloriesMacrosWidgetView: View {
 
     var body: some View {
         let nutrition = entry.snapshot.nutrition
-        VStack(alignment: .leading, spacing: 7) {
-            NutritionWidgetHeader(title: "Calories & Macros", summary: nutrition, date: entry.date)
-            HStack(alignment: .center, spacing: 9) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Calories").font(.system(size: 11, weight: .semibold))
-                    Text(calorieStatus).font(.system(size: 13, weight: .bold, design: .rounded)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.55)
-                    NutritionCalorieTrack(eaten: nutrition.caloriesEaten, goal: nutrition.calorieGoal, date: entry.date)
+        GeometryReader { proxy in
+            let layout = NutritionCaloriesMacrosLayout(containerSize: proxy.size)
+            VStack(alignment: .leading, spacing: NutritionCaloriesMacrosLayout.headerContentSpacing) {
+                NutritionWidgetHeader(title: "Calories & Macros", summary: nutrition, date: entry.date)
+                    .frame(width: layout.headerFrame.width, height: layout.headerFrame.height, alignment: .leading)
+
+                HStack(alignment: .top, spacing: NutritionCaloriesMacrosLayout.columnSpacing) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Calories")
+                            .lifeOSWidgetTypography(.metadata)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(chrome.secondary)
+                            .lineLimit(1)
+                        HStack(alignment: .firstTextBaseline, spacing: 4) {
+                            NutritionWidgetPrimaryValue(
+                                metric: nutrition.caloriesEaten,
+                                date: entry.date,
+                                color: NutritionWidgetPalette.calories(transparent: chrome.usesTransparentTreatment)
+                            )
+                            Text("kcal")
+                                .lifeOSWidgetTypography(.metadata)
+                                .foregroundStyle(chrome.tertiary)
+                        }
+                    }
+                    .frame(width: layout.calorieFrame.width, height: layout.calorieFrame.height, alignment: .topLeading)
+
+                    HStack(alignment: .top, spacing: NutritionCaloriesMacrosLayout.macroSpacing) {
+                        NutritionMacroGoalCell(title: "Fat", metric: nutrition.fatGrams, goal: nutrition.fatGoalGrams, date: entry.date, color: NutritionWidgetPalette.fat(transparent: chrome.usesTransparentTreatment))
+                            .frame(width: layout.macroFrames[0].width, height: layout.macroFrames[0].height, alignment: .topLeading)
+                        NutritionMacroGoalCell(title: "Carbs", metric: nutrition.carbsGrams, goal: nutrition.carbsGoalGrams, date: entry.date, color: NutritionWidgetPalette.carbohydrates(transparent: chrome.usesTransparentTreatment))
+                            .frame(width: layout.macroFrames[1].width, height: layout.macroFrames[1].height, alignment: .topLeading)
+                        NutritionMacroGoalCell(title: "Protein", metric: nutrition.proteinGrams, goal: nutrition.proteinGoalGrams, date: entry.date, color: NutritionWidgetPalette.protein(transparent: chrome.usesTransparentTreatment))
+                            .frame(width: layout.macroFrames[2].width, height: layout.macroFrames[2].height, alignment: .topLeading)
+                    }
+                    .frame(width: layout.macroFrame.width, height: layout.contentFrame.height, alignment: .topLeading)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                NutritionMacroGoalCell(title: "Fat", metric: nutrition.fatGrams, goal: nutrition.fatGoalGrams, date: entry.date, color: LifeOSTokens.warning)
-                NutritionMacroGoalCell(title: "Carbs", metric: nutrition.carbsGrams, goal: nutrition.carbsGoalGrams, date: entry.date, color: LifeOSTokens.success)
-                NutritionMacroGoalCell(title: "Protein", metric: nutrition.proteinGrams, goal: nutrition.proteinGoalGrams, date: entry.date, color: LifeOSTokens.accent)
+                .frame(width: layout.contentFrame.width, height: layout.contentFrame.height, alignment: .topLeading)
             }
-            Text("Goal period · today · \(nutritionWidgetStateText(entry.snapshot.nutritionDisplayState(at: entry.date)))")
-                .font(.system(size: 8, weight: .medium))
-                .foregroundStyle(chrome.tertiary)
-                .lineLimit(1)
+            .frame(width: layout.contentBounds.width, height: layout.contentBounds.height, alignment: .topLeading)
         }
-        .padding(12)
         .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(URL(string: "lifeos://fitness/nutrition/goals"))
         .accessibilityElement(children: .contain)
@@ -1128,7 +1435,7 @@ private struct NutritionSignedBalanceScale: View {
                 Spacer()
                 Text("500")
             }
-            .font(.system(size: 8, weight: .medium, design: .rounded))
+            .lifeOSWidgetTypography(.metadata)
             .monospacedDigit()
             .foregroundStyle(chrome.tertiary)
         }
@@ -1157,24 +1464,22 @@ struct NetEnergyWidgetView: View {
             NutritionWidgetHeader(title: "Net Energy", summary: nutrition, date: entry.date)
             HStack(alignment: .firstTextBaseline, spacing: 5) {
                 Text(balanceNumberText)
-                    .font(.system(size: 21, weight: .bold, design: .rounded))
+                    .lifeOSWidgetTypography(.hero)
                     .monospacedDigit()
                     .lineLimit(1)
-                    .minimumScaleFactor(0.55)
-                Text("kcal balance").font(.system(size: 9, weight: .medium)).foregroundStyle(chrome.tertiary)
+                Text("kcal balance").lifeOSWidgetTypography(.metadata).foregroundStyle(chrome.tertiary)
                 Spacer(minLength: 5)
                 Text("Burned \(nutritionWidgetValue(nutrition.caloriesBurned, at: entry.date, unit: "kcal"))")
-                    .font(.system(size: 9, weight: .semibold, design: .rounded)).monospacedDigit()
+                    .lifeOSWidgetTypography(.metadata).fontWeight(.semibold).monospacedDigit()
                 Text("Eaten \(nutritionWidgetValue(nutrition.caloriesEaten, at: entry.date, unit: "kcal"))")
-                    .font(.system(size: 9, weight: .semibold, design: .rounded)).monospacedDigit()
+                    .lifeOSWidgetTypography(.metadata).fontWeight(.semibold).monospacedDigit()
             }
             NutritionSignedBalanceScale(balance: signedBalance, date: entry.date)
             Text(provenanceText)
-                .font(.system(size: 8, weight: .medium))
+                .lifeOSWidgetTypography(.metadata)
                 .foregroundStyle(chrome.tertiary)
                 .lineLimit(1)
         }
-        .padding(12)
         .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(URL(string: "lifeos://fitness/net-energy"))
         .accessibilityElement(children: .contain)
@@ -1273,10 +1578,10 @@ private struct FitnessCompactWidgetHeader: View {
         let iconColor = chrome.usesTransparentTreatment ? chrome.secondary : accent
         HStack(spacing: 5) {
             LifeOSIcon(icon)
-                .frame(width: 12, height: 12)
+                .frame(width: 16, height: 16)
                 .foregroundStyle(iconColor)
             Text(title)
-                .font(LifeOSFont.widgetHeader(11))
+                .lifeOSWidgetTypography(.title)
                 .foregroundStyle(chrome.hero)
             Spacer(minLength: 0)
         }
@@ -1292,11 +1597,11 @@ private struct FitnessDemoBadge: View {
 
     var body: some View {
         Text("DEMO · NOT LIVE")
-            .font(.system(size: compact ? 7 : 8, weight: .bold))
+            .lifeOSWidgetTypography(.metadata)
+            .fontWeight(.bold)
             .tracking(compact ? 0.2 : 0.35)
             .foregroundStyle(LifeOSTokens.warning)
             .lineLimit(1)
-            .minimumScaleFactor(0.7)
     }
 }
 
@@ -1320,33 +1625,42 @@ private struct FitnessRingCell: View {
     var body: some View {
         Link(destination: URL(string: route)!) {
             VStack(spacing: 2) {
-                ZStack {
-                    Circle()
-                        .stroke(LifeOSTokens.Ring.track, lineWidth: 4)
-                    if let value = metric.value, fitnessWidgetState(metric, at: date) == .fresh || fitnessWidgetState(metric, at: date) == .stale {
+                if let value = metric.value,
+                   fitnessWidgetState(metric, at: date) == .fresh || fitnessWidgetState(metric, at: date) == .stale {
+                    ZStack {
+                        Circle()
+                            .stroke(LifeOSTokens.Ring.track, lineWidth: 4)
                         Circle()
                             .trim(from: 0, to: min(1, max(0, value / 100)))
                             .stroke(fitnessWidgetStatusColor(progress: value / 100), style: StrokeStyle(lineWidth: 4, lineCap: .round))
                             .rotationEffect(.degrees(-90))
                         Text(value.formatted(.number.precision(.fractionLength(0))) + "%")
-                            .font(.system(size: 9, weight: .bold, design: .rounded))
+                            .lifeOSWidgetTypography(.metadata)
+                            .fontWeight(.bold)
                             .monospacedDigit()
                             .lineLimit(1)
-                            .minimumScaleFactor(0.65)
-                    } else {
-                        Text(metric.state == .redacted ? "•" : "—")
-                            .font(.system(size: 12, weight: .bold, design: .rounded))
                     }
+                    .frame(width: 37, height: 37)
+                } else {
+                    VStack(spacing: 3) {
+                        Image(systemName: metric.state == .redacted ? "lock.fill" : "minus")
+                            .font(.system(size: 12, weight: .semibold))
+                        Text(metric.state == .redacted ? "Hidden" : "No data")
+                            .lifeOSWidgetTypography(.metadata)
+                            .fontWeight(.semibold)
+                            .lineLimit(1)
+                    }
+                    .foregroundStyle(chrome.tertiary)
+                    .frame(minWidth: 37, minHeight: 37)
                 }
-                .frame(width: 37, height: 37)
                 Text(title)
-                    .font(.system(size: 8, weight: .semibold))
+                    .lifeOSWidgetTypography(.metadata)
+                    .fontWeight(.semibold)
                     .lineLimit(1)
                 Text(fitnessWidgetState(metric, at: date) == .fresh ? "Observed" : futureModuleStateText(fitnessWidgetState(metric, at: date)))
-                    .font(.system(size: 6, weight: .medium))
+                    .lifeOSWidgetTypography(.metadata)
                     .foregroundStyle(chrome.tertiary)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.65)
             }
             .padding(.horizontal, 4)
             .padding(.vertical, 2)
@@ -1385,10 +1699,10 @@ struct DailyOverviewWidgetView: View {
             ) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(entry.date, format: .dateTime.weekday(.abbreviated).month(.abbreviated).day())
-                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .lifeOSWidgetTypography(.title)
                         .lineLimit(1)
                     Text("Aggregate signals")
-                        .font(.system(size: 7, weight: .medium))
+                        .lifeOSWidgetTypography(.metadata)
                         .foregroundStyle(chrome.tertiary)
                         .lineLimit(1)
                 }
@@ -1400,10 +1714,9 @@ struct DailyOverviewWidgetView: View {
                 FitnessRingCell(title: "Sleep", metric: fitness.sleepScore, route: "lifeos://fitness/sleep", date: entry.date)
             }
             .padding(5)
-            .background(LifeOSTokens.canvas.opacity(0.32), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(LifeOSTokens.quietBorder, lineWidth: 0.7))
+            .background(chrome.panelFill(opacity: 0.32), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(chrome.separator, lineWidth: 0.7))
         }
-        .padding(10)
         .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(URL(string: "lifeos://fitness/daily-overview"))
         .accessibilityElement(children: .contain)
@@ -1447,12 +1760,11 @@ private struct FitnessHealthMetricCell: View {
                 }
                 .frame(height: 42)
                 Text(fitnessWidgetMetricValueText(metric, at: date))
-                .font(.system(size: 10, weight: .bold, design: .rounded))
+                .lifeOSWidgetTypography(.compactMetric)
                 .monospacedDigit()
                 .lineLimit(1)
-                .minimumScaleFactor(0.5)
                 Text(metric.unit.displayName)
-                    .font(.system(size: 7, weight: .medium))
+                    .lifeOSWidgetTypography(.metadata)
                     .foregroundStyle(chrome.tertiary)
                 LifeOSIcon(icon)
                     .frame(width: 11, height: 11)
@@ -1460,8 +1772,8 @@ private struct FitnessHealthMetricCell: View {
             }
             .padding(.horizontal, 3)
             .padding(.vertical, 3)
-            .background(LifeOSTokens.canvas.opacity(0.28), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(LifeOSTokens.quietBorder, lineWidth: 0.7))
+            .background(chrome.panelFill(opacity: 0.28), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(chrome.separator, lineWidth: 0.7))
             .frame(maxWidth: .infinity, minHeight: 91)
         }
         .buttonStyle(.plain)
@@ -1489,30 +1801,71 @@ private struct FitnessHealthMetricCell: View {
     }
 }
 
+private struct FitnessHealthMetricDescriptor: Identifiable {
+    let id: String
+    let title: String
+    let metric: WidgetFitnessMetric
+    let route: String
+    let icon: LifeOSIconName
+}
+
+private func fitnessHealthMetricDescriptors(_ fitness: WidgetSafeFitnessWidgetsSummary) -> [FitnessHealthMetricDescriptor] {
+    [
+        FitnessHealthMetricDescriptor(id: "respiration", title: "Respiration", metric: fitness.respiration, route: "lifeos://fitness/health/respiration", icon: .fitness),
+        FitnessHealthMetricDescriptor(id: "heart-rate", title: "Resting heart rate", metric: fitness.heartRate, route: "lifeos://fitness/health/heart-rate", icon: .heartRate),
+        FitnessHealthMetricDescriptor(id: "hrv", title: "HRV", metric: fitness.hrv, route: "lifeos://fitness/health/hrv", icon: .health),
+        FitnessHealthMetricDescriptor(id: "spo2", title: "SpO₂", metric: fitness.spo2, route: "lifeos://fitness/health/spo2", icon: .verified),
+        FitnessHealthMetricDescriptor(id: "temperature", title: "Temperature", metric: fitness.temperature, route: "lifeos://fitness/health/temperature", icon: .warning),
+        FitnessHealthMetricDescriptor(id: "sleep-duration", title: "Sleep", metric: fitness.sleepDuration, route: "lifeos://fitness/health/sleep-duration", icon: .sleep)
+    ]
+}
+
 struct FitnessHealthMonitorWidgetView: View {
     let entry: FutureModuleWidgetEntry
 
     var body: some View {
         let fitness = entry.snapshot.fitnessWidgets
+        let availableMetrics = fitnessHealthMetricDescriptors(fitness).filter { descriptor in
+            guard descriptor.metric.value != nil else { return false }
+            let state = fitnessWidgetState(descriptor.metric, at: entry.date)
+            return state == .fresh || state == .stale
+        }
+        let visibleMetrics = Array(availableMetrics.prefix(3))
+        let additionalCount = max(0, availableMetrics.count - visibleMetrics.count)
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 FutureModuleWidgetHeader(title: "Health Monitor", icon: .health, accent: LifeOSTokens.Module.fitness)
                 if fitness.isDemoFixture { FitnessDemoBadge() }
             }
-            HStack(alignment: .top, spacing: 2) {
-                FitnessHealthMetricCell(title: "Respiration", metric: fitness.respiration, route: "lifeos://fitness/health/respiration", date: entry.date, icon: .fitness)
-                FitnessHealthMetricCell(title: "Heart rate", metric: fitness.heartRate, route: "lifeos://fitness/health/heart-rate", date: entry.date, icon: .heartRate)
-                FitnessHealthMetricCell(title: "HRV", metric: fitness.hrv, route: "lifeos://fitness/health/hrv", date: entry.date, icon: .health)
-                FitnessHealthMetricCell(title: "SpO₂", metric: fitness.spo2, route: "lifeos://fitness/health/spo2", date: entry.date, icon: .verified)
-                FitnessHealthMetricCell(title: "Temperature", metric: fitness.temperature, route: "lifeos://fitness/health/temperature", date: entry.date, icon: .warning)
-                FitnessHealthMetricCell(title: "Sleep", metric: fitness.sleepDuration, route: "lifeos://fitness/health/sleep-duration", date: entry.date, icon: .sleep)
+            if visibleMetrics.isEmpty {
+                FutureModuleUnavailableHero(
+                    state: entry.snapshot.fitnessDisplayState(at: entry.date) == .redacted ? .redacted : .unavailable,
+                    unavailableText: "No reviewed health observations"
+                )
+            } else {
+                HStack(alignment: .top, spacing: 5) {
+                    ForEach(visibleMetrics) { descriptor in
+                        FitnessHealthMetricCell(
+                            title: descriptor.title,
+                            metric: descriptor.metric,
+                            route: descriptor.route,
+                            date: entry.date,
+                            icon: descriptor.icon
+                        )
+                    }
+                }
+                if additionalCount > 0 {
+                    Text("+\(additionalCount) more source metrics in LifeOS")
+                        .lifeOSWidgetTypography(.metadata)
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .lineLimit(1)
+                }
             }
         }
-        .padding(11)
         .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(URL(string: "lifeos://fitness/health"))
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Health Monitor\(fitnessWidgetDemoDisclosure(fitness)), six independent observations: respiration, heart rate, HRV, oxygen saturation, temperature, and sleep duration")
+        .accessibilityLabel("Health Monitor\(fitnessWidgetDemoDisclosure(fitness)), \(availableMetrics.count) source-backed observations shown or available in LifeOS")
     }
 }
 
@@ -1550,17 +1903,17 @@ private struct FitnessStressChart: View {
                         .frame(width: 8, height: 8)
                         .offset(x: max(0, proxy.size.width - 8), y: max(0, proxy.size.height * (1 - normalized) - 4))
                     Text(currentValue.formatted(.number.precision(.fractionLength(0))))
-                        .font(.system(size: 8, weight: .bold, design: .rounded))
+                        .lifeOSWidgetTypography(.metadata)
                         .monospacedDigit()
                         .foregroundStyle(LifeOSTokens.Series.observed)
                         .offset(x: max(0, proxy.size.width - 25), y: max(0, proxy.size.height * (1 - normalized) - 17))
                 }
                 Text("100")
-                    .font(.system(size: 7, weight: .medium, design: .rounded))
+                    .lifeOSWidgetTypography(.metadata)
                     .foregroundStyle(chrome.tertiary)
                     .offset(x: 2, y: -1)
                 Text("0")
-                    .font(.system(size: 7, weight: .medium, design: .rounded))
+                    .lifeOSWidgetTypography(.metadata)
                     .foregroundStyle(chrome.tertiary)
                     .offset(x: 6, y: proxy.size.height - 10)
             }
@@ -1595,7 +1948,7 @@ struct FitnessStressWidgetView: View {
                 if fitness.isDemoFixture { FitnessDemoBadge() }
                 Spacer(minLength: 0)
                 Text(fitnessWidgetFreshness(fitness.stressScore, at: entry.date))
-                    .font(.system(size: 8, weight: .medium))
+                    .lifeOSWidgetTypography(.metadata)
                     .foregroundStyle(chrome.tertiary)
                     .lineLimit(1)
             }
@@ -1609,12 +1962,11 @@ struct FitnessStressWidgetView: View {
                     Text(label)
                 }
             }
-            .font(.system(size: 8, weight: .medium, design: .rounded))
+            .lifeOSWidgetTypography(.metadata)
             .monospacedDigit()
             .foregroundStyle(chrome.tertiary)
             .lineLimit(1)
         }
-        .padding(10)
         .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(URL(string: "lifeos://fitness/stress"))
         .accessibilityElement(children: .contain)
@@ -1665,23 +2017,22 @@ struct FitnessEnergyReserveWidgetView: View {
                 if fitness.isDemoFixture { FitnessDemoBadge(compact: true) }
                 Spacer(minLength: 0)
                 Text(futureModuleStateText(state))
-                    .font(.system(size: 8, weight: .medium))
+                    .lifeOSWidgetTypography(.metadata)
                     .foregroundStyle(chrome.tertiary)
                     .lineLimit(1)
             }
             HStack(alignment: .firstTextBaseline, spacing: 5) {
                 Text(fitnessWidgetValue(energy.level, at: entry.date))
-                    .font(.system(size: 28, weight: .bold, design: .rounded))
+                    .lifeOSWidgetTypography(.hero)
                     .monospacedDigit()
                 Text("% reserve")
-                    .font(.system(size: 9, weight: .medium))
+                    .lifeOSWidgetTypography(.metadata)
                     .foregroundStyle(chrome.tertiary)
                 Spacer(minLength: 0)
                 Text(lastChargedText(energy.lastChargedAt))
-                    .font(.system(size: 9, weight: .medium))
+                    .lifeOSWidgetTypography(.metadata)
                     .foregroundStyle(chrome.tertiary)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.65)
             }
             FitnessEnergySegments(level: energy.level.value)
             HStack(spacing: 7) {
@@ -1690,7 +2041,6 @@ struct FitnessEnergyReserveWidgetView: View {
                 Spacer(minLength: 0)
             }
         }
-        .padding(10)
         .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(URL(string: "lifeos://fitness/energy-reserve"))
         .accessibilityElement(children: .contain)
@@ -1724,15 +2074,14 @@ private struct FitnessEnergyChip: View {
             // Neutral legend dots — charge/discharge are facts, not statuses.
             Circle().fill(chrome.tertiary).frame(width: 5, height: 5)
             Text("\(title) \(signedValue)")
-                .font(.system(size: 9, weight: .semibold, design: .rounded))
+                .lifeOSWidgetTypography(.metadata)
                 .monospacedDigit()
                 .lineLimit(1)
-                .minimumScaleFactor(0.65)
         }
         .padding(.horizontal, 7)
         .padding(.vertical, 4)
-        .background(LifeOSTokens.canvas.opacity(0.45), in: Capsule())
-        .overlay(Capsule().stroke(LifeOSTokens.quietBorder, lineWidth: 0.7))
+        .background(chrome.panelFill(opacity: 0.45), in: Capsule())
+        .overlay(Capsule().stroke(chrome.separator, lineWidth: 0.7))
         .accessibilityElement(children: .combine)
     }
 }

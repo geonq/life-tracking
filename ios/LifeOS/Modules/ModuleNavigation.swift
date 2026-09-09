@@ -160,6 +160,31 @@ public extension LifeOSModule {
     ]
 }
 
+/// App-shell routing extends the widget route catalog without changing its legacy semantics.
+enum LifeOSNavigationRoute: Equatable {
+    case existing(LifeOSDeepLink)
+    case home
+
+    init(url: URL) {
+        if let route = LifeOSDeepLink(url: url) {
+            self = .existing(route)
+        } else { self = .home }
+    }
+
+    var module: LifeOSModule {
+        switch self {
+        case .existing(let route): route.module
+        case .home: .home
+        }
+    }
+
+    static func restoredSecondaryModule(_ rawValue: String) -> LifeOSModule? {
+        guard let module = LifeOSModule(rawValue: rawValue),
+              LifeOSModule.moreGroups.flatMap(\.modules).contains(module) else { return nil }
+        return module
+    }
+}
+
 public extension LifeOSDeepLink {
     var module: LifeOSModule {
         switch self {
@@ -167,7 +192,7 @@ public extension LifeOSDeepLink {
         case .calendar, .newCalendarEvent: .calendar
         case .tax: .tax
         case .finance, .financeSpend, .financeCashFlow: .finance
-        case .fitness, .fitnessDailyOverview, .fitnessStrain, .fitnessRecovery, .fitnessSleep,
+        case .fitness, .fitnessTraining, .fitnessDailyOverview, .fitnessStrain, .fitnessRecovery, .fitnessSleep,
              .fitnessHealthMonitor, .fitnessRespiration, .fitnessHeartRate, .fitnessHRV, .fitnessSpO2,
              .fitnessTemperature, .fitnessSleepDuration, .fitnessNutrition, .fitnessNutritionGoals, .fitnessNutritionImport,
              .fitnessNutritionCamera, .fitnessNutritionBarcode, .fitnessNutritionAIProposal,
@@ -182,6 +207,7 @@ public extension LifeOSDeepLink {
         case .financeSpend: "Spend"
         case .financeCashFlow: "Cash Flow"
         case .fitnessDailyOverview: "Daily Overview"
+        case .fitnessTraining: "Training"
         case .fitnessStrain: "Strain"
         case .fitnessRecovery: "Recovery"
         case .fitnessSleep: "Sleep"
@@ -212,6 +238,7 @@ public extension LifeOSDeepLink {
         case .fitnessNutrition, .fitnessNutritionGoals, .fitnessNutritionImport,
              .fitnessNutritionCamera, .fitnessNutritionBarcode, .fitnessNutritionAIProposal,
              .fitnessNutritionSearch, .fitnessNetEnergy: .nutrition
+        case .fitnessTraining: .training
         case .fitness, .fitnessDailyOverview, .fitnessStrain, .fitnessRecovery, .fitnessSleep,
              .fitnessHealthMonitor, .fitnessRespiration, .fitnessHeartRate, .fitnessHRV, .fitnessSpO2,
              .fitnessTemperature, .fitnessSleepDuration: .today
@@ -269,6 +296,10 @@ public struct LifeOSModuleLandingView: View {
     }
 
     public var body: some View {
+        landingBody
+    }
+
+    private var landingBody: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 header
@@ -303,10 +334,10 @@ public struct LifeOSModuleLandingView: View {
 
             VStack(alignment: .leading, spacing: 5) {
                 Text(module.title)
-                    .font(LifeOSFont.pageTitle(30))
+                    .lifeOSTypography(.pageTitle)
                     .tracking(-0.35)
                 Text(module.subtitle)
-                    .font(LifeOSFont.supportingText())
+                    .lifeOSTypography(.body)
                     .foregroundStyle(LifeOSTokens.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -324,11 +355,11 @@ public struct LifeOSModuleLandingView: View {
                 )
             }
             Text(module.unavailableMessage)
-                .font(LifeOSFont.bodyText())
+                .lifeOSTypography(.body)
                 .foregroundStyle(LifeOSTokens.primaryText)
                 .fixedSize(horizontal: false, vertical: true)
             Text("Unavailable values stay unavailable until a reviewed source is available.")
-                .font(LifeOSFont.metadata())
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.secondaryText)
         }
         .padding(18)
@@ -342,14 +373,14 @@ public struct LifeOSModuleLandingView: View {
     private func routeCard(section: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Requested view")
-                .font(LifeOSFont.inter(11, weight: .semiBold))
+                .lifeOSTypography(.body, weight: .semibold)
                 .tracking(0.5)
                 .textCase(.uppercase)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
             Text("\(module.title) / \(section)")
-                .font(LifeOSFont.inter(16, weight: .semiBold))
+                .lifeOSTypography(.body, weight: .semibold)
             Text("This route is ready for navigation, but its data surface is not connected in this build.")
-                .font(LifeOSFont.inter(13))
+                .lifeOSTypography(.body)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
         }
         .padding(18)
@@ -362,16 +393,16 @@ public struct LifeOSModuleLandingView: View {
     private var previewStructure: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("DEMO · PREVIEW STRUCTURE · NOT LIVE DATA")
-                .font(LifeOSFont.inter(10, weight: .bold))
+                .lifeOSTypography(.body, weight: .bold)
                 .tracking(0.65)
                 .foregroundStyle(LifeOSTokens.warning)
             ForEach(["Overview", "Recent activity", "Trends"], id: \.self) { label in
                 HStack {
                     Text(label)
-                        .font(LifeOSFont.inter(13, weight: .medium))
+                        .lifeOSTypography(.body, weight: .medium)
                     Spacer()
                     Text("Unavailable")
-                        .font(LifeOSFont.inter(12, weight: .semiBold))
+                        .lifeOSTypography(.body, weight: .semibold)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
                 .padding(.vertical, 3)
@@ -392,6 +423,9 @@ public struct LifeOSMoreModulesView: View {
     private let usesVisualFixtures: Bool
     private let destinationForModule: (LifeOSModule, LifeOSDeepLink?) -> AnyView
     @State private var selectedModule: LifeOSModule?
+    @State private var restoredOnce = false
+    @SceneStorage("LifeOS.More.selectedModule.v1") private var restoredModule = ""
+    private let initialModule: LifeOSModule?
 
     public init(
         initialModule: LifeOSModule? = nil,
@@ -399,6 +433,7 @@ public struct LifeOSMoreModulesView: View {
         usesVisualFixtures: Bool = false,
         destinationForModule: @escaping (LifeOSModule, LifeOSDeepLink?) -> AnyView
     ) {
+        self.initialModule = initialModule
         self.usesVisualFixtures = usesVisualFixtures
         self.destinationForModule = destinationForModule
         _selectedModule = State(initialValue: initialModule)
@@ -412,14 +447,14 @@ public struct LifeOSMoreModulesView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
                     Text("The rest of LifeOS, grouped so it stays easy to reach one-handed.")
-                        .font(LifeOSFont.inter(14))
+                        .lifeOSTypography(.body)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
 
                     ForEach(LifeOSModule.moreGroups) { group in
                         VStack(alignment: .leading, spacing: 8) {
                             Text(group.title.uppercased())
-                                .font(LifeOSFont.inter(11, weight: .bold))
+                                .lifeOSTypography(.body, weight: .bold)
                                 .tracking(0.7)
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
 
@@ -443,6 +478,15 @@ public struct LifeOSMoreModulesView: View {
             .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
             .navigationTitle("More")
             .accessibilityIdentifier("more-modules-screen")
+            .onAppear {
+                guard !restoredOnce else { return }
+                restoredOnce = true
+                if selectedModule == nil {
+                    selectedModule = initialModule ?? LifeOSNavigationRoute.restoredSecondaryModule(restoredModule)
+                }
+            }
+            .onChange(of: initialModule) { _, module in selectedModule = module }
+            .onChange(of: selectedModule) { _, module in restoredModule = module?.rawValue ?? "" }
             .navigationDestination(item: $selectedModule) { module in
                 destinationForModule(module, module == initialRoute?.module ? initialRoute : nil)
             }
@@ -450,28 +494,31 @@ public struct LifeOSMoreModulesView: View {
     }
 
     private func moduleRow(_ module: LifeOSModule) -> some View {
-        Button {
+        let selected = selectedModule == module
+        return Button {
             selectedModule = module
         } label: {
-            HStack(spacing: 14) {
+            HStack(spacing: 12) {
+                Capsule(style: .continuous)
+                    .fill(selected ? LifeOSTokens.accent : .clear)
+                    .frame(width: 3, height: 20)
                 LifeOSIcon(module.icon)
-                    .foregroundStyle(module.accent)
-                    .frame(width: 22, height: 22)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(module.title)
-                        .font(LifeOSFont.navigationLabel(15))
-                        .foregroundStyle(.primary)
-                    Text(module.hasWorkingView ? "Open" : "Not connected")
-                        .font(LifeOSFont.metadata())
-                        .foregroundStyle(module.hasWorkingView ? LifeOSTokens.success : LifeOSTokens.tertiaryText)
-                }
+                    .foregroundStyle(selected ? LifeOSTokens.selectedNavigationText : LifeOSTokens.secondaryText)
+                    .frame(width: 24, height: 24)
+                Text(module.title)
+                    .lifeOSTypography(.label, weight: .medium)
+                    .foregroundStyle(selected ? LifeOSTokens.selectedNavigationText : LifeOSTokens.secondaryText)
                 Spacer(minLength: 12)
                 LifeOSIcon(.chevronRight)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
-                    .frame(width: 15, height: 15)
+                    .frame(width: 24, height: 24)
             }
             .padding(.horizontal, 16)
-            .frame(minHeight: 58)
+            .frame(minHeight: 48)
+            .background(
+                selected ? LifeOSTokens.selectedNavigationFill : .clear,
+                in: RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
+            )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

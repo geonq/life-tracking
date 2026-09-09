@@ -140,7 +140,8 @@ public enum FinanceTransactionCategory: String, Codable, CaseIterable, Hashable,
     }
 
     /// Icon shown next to the category in a spend list. Reuses existing
-    /// `LifeOSIconName` cases only — no new Iconoir mappings are introduced.
+    /// Uses the shared `LifeOSIconName` catalog so transaction rows keep the
+    /// same native SF Symbol language as the rest of the app.
     public var iconName: LifeOSIconName {
         switch self {
         case .groceries: .grocery

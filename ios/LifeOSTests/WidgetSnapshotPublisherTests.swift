@@ -296,6 +296,68 @@ final class WidgetSnapshotPublisherTests: XCTestCase {
         )
     }
 
+    func testSuccessfulSleepThenTimeoutKeepsOnlyExplicitlyStaleDuration() throws {
+        let end = now.addingTimeInterval(-120)
+        let sample = try HealthKitObservation(
+            metric: .sleep, identity: HealthKitSampleIdentity(uuid: UUID()),
+            value: .sleep(try HealthKitSleepValue(stage: .asleepCore, timeZoneIdentifier: "Europe/Berlin")),
+            startDate: end.addingTimeInterval(-3600), endDate: end,
+            provenance: try provenance(), now: now)
+        let projection = fitnessProjection(states: [try metricState(metric: .sleep, observations: [sample])])
+        let fresh = WidgetSnapshotPublisher.mapFitnessWidgets(projection: projection,
+            integration: .init(authorizationState: .readIndeterminate, lastObserverCompletion: .success), selectedDate: now, now: now)
+        XCTAssertEqual(fresh.sleepDuration.value, 1)
+        XCTAssertEqual(fresh.sleepDuration.state(at: now), .fresh)
+        let stale = WidgetSnapshotPublisher.mapFitnessWidgets(projection: projection,
+            integration: .init(authorizationState: .readIndeterminate, lastObserverCompletion: .timedOut), selectedDate: now, now: now)
+        XCTAssertEqual(stale.sleepDuration.value, 1)
+        XCTAssertEqual(stale.sleepDuration.observedAt, end)
+        XCTAssertEqual(stale.sleepDuration.state(at: now), .stale)
+        let denied = WidgetSnapshotPublisher.mapFitnessWidgets(projection: projection,
+            integration: .init(authorizationState: .revoked), selectedDate: now, now: now)
+        XCTAssertNil(denied.sleepDuration.value)
+    }
+
+    func testSuccessFailureAndRevocationPublishNewTruthWithDedupe() async throws {
+        let sampleDate = now.addingTimeInterval(-120)
+        let observation = try quantityObservation(metric: .restingHeartRate, value: 58, at: sampleDate)
+        let projection = fitnessProjection(states: [try metricState(metric: .restingHeartRate, observations: [observation])])
+        let spy = Spy()
+        let publisher = WidgetSnapshotPublisher(write: { _ in spy.recordWrite() }, reload: { spy.recordReload() })
+        let success = HealthKitIntegrationSnapshot(authorizationState: .readIndeterminate, lastObserverCompletion: .success)
+        let fresh = WidgetSnapshotPublisher.mapFitnessWidgets(projection: projection, integration: success, selectedDate: now, now: now)
+        XCTAssertEqual(fresh.heartRate.state(at: now), .fresh)
+        let first = await publisher.publish(finance: .unavailable(), fitness: .unavailable(), fitnessWidgets: fresh,
+            nutrition: .unavailable(), privacyMode: .summaryAllowed, now: now)
+        XCTAssertTrue(first)
+        for (index, failure) in [HealthKitObserverCompletion.timedOut, .failure("error"), .failure("cancelled")].enumerated() {
+            let integration = HealthKitIntegrationSnapshot(authorizationState: .readIndeterminate, lastObserverCompletion: failure)
+            let stale = WidgetSnapshotPublisher.mapFitnessWidgets(projection: projection, integration: integration, selectedDate: now, now: now)
+            XCTAssertEqual(stale.heartRate.state(at: now), .stale)
+            XCTAssertEqual(stale.heartRate.value, 58)
+            XCTAssertEqual(stale.heartRate.observedAt, sampleDate)
+            XCTAssertEqual(stale.heartRate.sourceLabel, fresh.heartRate.sourceLabel)
+            XCTAssertNil(stale.recovery.value)
+            let changed = await publisher.publish(finance: .unavailable(), fitness: .unavailable(), fitnessWidgets: stale,
+                nutrition: .unavailable(), privacyMode: .summaryAllowed, now: now)
+            XCTAssertEqual(changed, index == 0)
+        }
+        let revoked = WidgetSnapshotPublisher.mapFitnessWidgets(projection: projection,
+            integration: .init(authorizationState: .revoked, lastObserverCompletion: .success), selectedDate: now, now: now)
+        XCTAssertNil(revoked.heartRate.value)
+        XCTAssertNil(revoked.heartRate.observedAt)
+        for state in [HealthKitAuthorizationState.protectedDataUnavailable, .writeAuthorized, .requestRequired] {
+            let blocked = WidgetSnapshotPublisher.mapFitnessWidgets(projection: projection,
+                integration: .init(authorizationState: state, lastObserverCompletion: .success), selectedDate: now, now: now)
+            XCTAssertNil(blocked.heartRate.value)
+        }
+        let changed = await publisher.publish(finance: .unavailable(), fitness: .unavailable(), fitnessWidgets: revoked,
+            nutrition: .unavailable(), privacyMode: .summaryAllowed, now: now)
+        XCTAssertTrue(changed)
+        XCTAssertEqual(spy.writeCount, 3)
+        XCTAssertEqual(spy.reloadCount, 3)
+    }
+
     func testObservedHeartRateMapsToFreshValueWithExactObservedAt() throws {
         let sampleDate = now.addingTimeInterval(-120)
         let observation = try quantityObservation(metric: .restingHeartRate, value: 58, at: sampleDate)

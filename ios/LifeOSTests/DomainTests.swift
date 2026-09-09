@@ -166,6 +166,16 @@ final class DomainTests: XCTestCase {
         ).isDemoFixture)
     }
 
+    func testFitnessTrainingDeepLinkRoutesToDedicatedTrainingSection() throws {
+        let route = try XCTUnwrap(LifeOSDeepLink(url: URL(string: "lifeos://fitness/training")!))
+
+        XCTAssertEqual(route, .fitnessTraining)
+        XCTAssertEqual(route.module, .fitness)
+        XCTAssertEqual(route.fitnessSection, .training)
+        XCTAssertEqual(route.sectionTitle, "Training")
+        XCTAssertNil(route.fitnessEntryPoint)
+    }
+
     func testStressDetailScrubMapsToAggregateBucketsAndClamps() {
         XCTAssertEqual(FitnessStressScrubModel.index(locationX: 0, width: 100, bucketCount: 5), 0)
         XCTAssertEqual(FitnessStressScrubModel.index(locationX: 50, width: 100, bucketCount: 5), 2)
@@ -181,7 +191,7 @@ final class DomainTests: XCTestCase {
         XCTAssertEqual(LifeOSModule.moreGroups.flatMap(\.modules), [.tax, .settings])
 
         let primary = LifeOSModule.macPrimaryModules
-        XCTAssertLessThanOrEqual(primary.count, 6)
+        XCTAssertLessThanOrEqual(primary.count, 7)
         XCTAssertEqual(Set(primary).count, primary.count, "Primary destinations must be unique")
         XCTAssertTrue(primary.allSatisfy(\.hasWorkingView), "Primary navigation cannot expose dead module shells")
 

@@ -90,7 +90,7 @@ struct FitnessSupplementsView: View {
                         LifeOSIcon(.add).frame(width: 14, height: 14)
                         Text("Add")
                     }
-                        .font(LifeOSFont.inter(12, weight: .semiBold))
+                        .lifeOSTypography(.body, weight: .semibold)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(LifeOSTokens.accent)
@@ -114,7 +114,7 @@ struct FitnessSupplementsView: View {
                 } else {
                     FitnessCard {
                         Text("Visual fixture session · local notifications are disabled and nothing is persisted.")
-                            .font(LifeOSFont.caption(10))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                     }
                 }
@@ -137,7 +137,7 @@ struct FitnessSupplementsView: View {
                 FitnessSupplementTimelineCard(supplements: session.records, states: session.states, stock: session.stocks)
 
                 Toggle("Show read-only Calendar overlay", isOn: $showingCalendarOverlay)
-                    .font(LifeOSFont.inter(12, weight: .medium))
+                    .lifeOSTypography(.body, weight: .medium)
                 if showingCalendarOverlay {
                     FitnessSupplementCalendarOverlay(supplements: session.records, states: session.states)
                 }
@@ -149,7 +149,7 @@ struct FitnessSupplementsView: View {
 
             if let notice {
                 Text(notice)
-                    .font(LifeOSFont.caption(11))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(noticeIsError ? LifeOSTokens.warning : LifeOSTokens.success)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -157,9 +157,9 @@ struct FitnessSupplementsView: View {
             FitnessCard {
                 VStack(alignment: .leading, spacing: 7) {
                     Text("Safety boundary")
-                        .font(LifeOSFont.header(14))
+                        .lifeOSTypography(.sectionTitle)
                     Text("LifeOS records what you chose to take. It does not recommend a dose, validate interactions, or tell you what to do medically. Missed doses remain missed; there is never doubling advice or automatic dose changes.")
-                        .font(LifeOSFont.body(12))
+                        .lifeOSTypography(.body)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -279,10 +279,10 @@ private struct FitnessSupplementsPrivacyCard: View {
                 HStack(spacing: 8) {
                     LifeOSIcon(.security).foregroundStyle(LifeOSTokens.accent).frame(width: 17, height: 17)
                     Text("Private reminder copy")
-                        .font(LifeOSFont.header(14))
+                        .lifeOSTypography(.sectionTitle)
                 }
                 Text("Lock-screen reminder copy is always redacted. Product name, dose, and timing remain in-app.")
-                    .font(LifeOSFont.caption(10))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
         }
@@ -301,17 +301,17 @@ private struct FitnessReminderStatusCard: View {
             VStack(alignment: .leading, spacing: 9) {
                 HStack {
                     Text("Local reminders")
-                        .font(LifeOSFont.header(15))
+                        .lifeOSTypography(.sectionTitle)
                     Spacer()
                     Text(statusLabel)
-                        .font(LifeOSFont.inter(10, weight: .semiBold))
+                        .lifeOSTypography(.body, weight: .semibold)
                         .foregroundStyle(statusColor)
                     Text(schedulingLabel)
-                        .font(LifeOSFont.inter(10, weight: .semiBold))
+                        .lifeOSTypography(.body, weight: .semibold)
                         .foregroundStyle(schedulingColor)
                 }
                 Text("Only explicit user-entered clock times are actionable schedules. Free-form timing notes stay visible as facts; Taken, Snooze, and Skip remain session occurrence actions.")
-                    .font(LifeOSFont.caption(10))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                     .fixedSize(horizontal: false, vertical: true)
                 permissionAction
@@ -344,18 +344,18 @@ private struct FitnessReminderStatusCard: View {
         if !hasActionableSchedule {
             VStack(alignment: .leading, spacing: 7) {
                 Text("No clock schedule. Enter a timing value in HH:mm format first; free-form timing notes remain informational and do not use notifications.")
-                    .font(LifeOSFont.caption(10))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                     .fixedSize(horizontal: false, vertical: true)
                 switch permissionState {
                 case .denied:
                     Text("Notifications are denied. Enable LifeOS notifications in Settings before local reminders can be used.")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.warning)
                         .fixedSize(horizontal: false, vertical: true)
                 case .authorized, .provisional, .ephemeral:
                     Text("Alerts and sound are allowed. No explicit clock schedule is present, so no reminder is scheduled.")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 case .checking, .notDetermined, .unknown, .error:
@@ -366,12 +366,12 @@ private struct FitnessReminderStatusCard: View {
             switch permissionState {
             case .checking:
                 Text("Checking current notification permission. No reminder is being scheduled.")
-                    .font(LifeOSFont.caption(10))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             case .notDetermined:
                 VStack(alignment: .leading, spacing: 7) {
                     Text("Notifications are not enabled yet. Allow alert and sound access for local reminders; this does not schedule a plan.")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                     if SupplementNotificationPermissionStateMapper.canRequestPermission(
@@ -379,14 +379,14 @@ private struct FitnessReminderStatusCard: View {
                         hasActionableSchedule: hasActionableSchedule
                     ) {
                         Button("Allow alert and sound", action: onRequestPermission)
-                            .font(LifeOSFont.inter(12, weight: .semiBold))
+                            .lifeOSTypography(.body, weight: .semibold)
                             .foregroundStyle(LifeOSTokens.accent)
                             .buttonStyle(.plain)
                     }
                 }
             case .denied:
                 Text("Notifications are denied. Enable LifeOS notifications in Settings before local reminders can be used.")
-                    .font(LifeOSFont.caption(10))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.warning)
                     .fixedSize(horizontal: false, vertical: true)
             case .authorized:
@@ -398,22 +398,22 @@ private struct FitnessReminderStatusCard: View {
             case .unknown:
                 VStack(alignment: .leading, spacing: 7) {
                     Text("Notification permission returned an unrecognized state. No reminder status can be confirmed.")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.warning)
                         .fixedSize(horizontal: false, vertical: true)
                     Button("Check again", action: onRetry)
-                        .font(LifeOSFont.inter(12, weight: .semiBold))
+                        .lifeOSTypography(.body, weight: .semibold)
                         .foregroundStyle(LifeOSTokens.accent)
                         .buttonStyle(.plain)
                 }
             case .error:
                 VStack(alignment: .leading, spacing: 7) {
                     Text("Could not read notification permission. Try again; no reminder status is confirmed.")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.warning)
                         .fixedSize(horizontal: false, vertical: true)
                     Button("Check again", action: onRetry)
-                        .font(LifeOSFont.inter(12, weight: .semiBold))
+                        .lifeOSTypography(.body, weight: .semibold)
                         .foregroundStyle(LifeOSTokens.accent)
                         .buttonStyle(.plain)
                 }
@@ -454,18 +454,18 @@ private struct FitnessReminderStatusCard: View {
             case .partial(let addedCount, let failedCount, let pendingCount):
                 Text("Some pending requests were reconciled: \(addedCount) added, \(failedCount) could not be added, \(pendingCount) pending. Delivery is not confirmed.")
                 Button("Check again", action: onRetry)
-                    .font(LifeOSFont.inter(12, weight: .semiBold))
+                    .lifeOSTypography(.body, weight: .semibold)
                     .foregroundStyle(LifeOSTokens.accent)
                     .buttonStyle(.plain)
             case .error:
                 Text("Could not reconcile local reminders. Try again; no delivery is confirmed.")
                 Button("Check again", action: onRetry)
-                    .font(LifeOSFont.inter(12, weight: .semiBold))
+                    .lifeOSTypography(.body, weight: .semibold)
                     .foregroundStyle(LifeOSTokens.accent)
                     .buttonStyle(.plain)
             }
         }
-        .font(LifeOSFont.caption(10))
+        .lifeOSTypography(.metadata)
         .foregroundStyle(LifeOSTokens.tertiaryText)
         .fixedSize(horizontal: false, vertical: true)
     }
@@ -487,20 +487,20 @@ private struct FitnessSupplementProductCard: View {
                         .overlay(LifeOSIcon(.verified).foregroundStyle(LifeOSTokens.accent).frame(width: 19, height: 19))
                     VStack(alignment: .leading, spacing: 3) {
                         Text(supplement.name)
-                            .font(LifeOSFont.header(15))
+                            .lifeOSTypography(.sectionTitle)
                             .fixedSize(horizontal: false, vertical: true)
                         Text("\(supplement.brand) · \(supplement.form.rawValue) · \(supplement.strength)")
-                            .font(LifeOSFont.caption(10))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                             .fixedSize(horizontal: false, vertical: true)
                         if !supplement.nutrientFacts.isEmpty {
                             Text(supplementFactsText(supplement.nutrientFacts))
-                                .font(LifeOSFont.caption(9))
+                                .lifeOSTypography(.metadata)
                                 .foregroundStyle(LifeOSTokens.accent)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                         Text(doseLabel)
-                            .font(LifeOSFont.caption(10))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(supplement.userDose == nil ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -511,7 +511,7 @@ private struct FitnessSupplementProductCard: View {
                 HStack(spacing: 8) {
                     LifeOSIcon(.calendar).frame(width: 14, height: 14).foregroundStyle(LifeOSTokens.accent)
                     Text("\(supplement.timing) · \(supplement.timeZoneIdentifier)")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -529,7 +529,7 @@ private struct FitnessSupplementProductCard: View {
                         .disabled(!canAct || occurrenceState == .taken || occurrenceState == .skipped || occurrenceState == .missed)
                 }
                 Text("Only a confirmed Taken action decrements stock by the configured inventory dose (\(supplement.inventoryUnitsPerDose) \(supplement.servingUnit)). Snooze and Skip never change inventory.")
-                    .font(LifeOSFont.caption(9))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -553,7 +553,7 @@ private struct FitnessOccurrencePill: View {
 
     var body: some View {
         Text(state?.fitnessLabel ?? "Not scheduled")
-            .font(LifeOSFont.inter(10, weight: .semiBold))
+            .lifeOSTypography(.body, weight: .semibold)
             .foregroundStyle(state?.fitnessColor ?? LifeOSTokens.tertiaryText)
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
@@ -569,26 +569,26 @@ private struct FitnessInventoryRow: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Stock").font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
-                    Text("\(stock) \(unitLabel)").font(LifeOSFont.inter(14, weight: .semiBold)).monospacedDigit()
+                    Text("Stock").lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
+                    Text("\(stock) \(unitLabel)").lifeOSTypography(.body, weight: .semibold).monospacedDigit()
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 3) {
                     Text(stock <= supplement.reorderThreshold ? "Low stock" : "Estimated remaining")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(stock <= supplement.reorderThreshold ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)
                     Text(remainingLabel)
-                        .font(LifeOSFont.inter(11, weight: .semiBold))
+                        .lifeOSTypography(.body, weight: .semibold)
                         .foregroundStyle(stock <= supplement.reorderThreshold ? LifeOSTokens.warning : .primary)
                         .multilineTextAlignment(.trailing)
                 }
             }
             VStack(alignment: .leading, spacing: 5) {
                 Text(expiryLabel)
-                    .font(LifeOSFont.caption(9))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(isExpired ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)
                 Text(refillLabel)
-                    .font(LifeOSFont.caption(9))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(stock <= supplement.reorderThreshold ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)
             }
         }
@@ -641,10 +641,10 @@ private struct FitnessSupplementAdherenceCard: View {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
                     Text("Adherence")
-                        .font(LifeOSFont.header(15))
+                        .lifeOSTypography(.sectionTitle)
                     Spacer()
                     Text("Confirmed occurrences")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 112), spacing: 10)], spacing: 10) {
@@ -653,7 +653,7 @@ private struct FitnessSupplementAdherenceCard: View {
                     AdherenceColumn(label: "90 days", value: average(\.adherence90))
                 }
                 Text("Descriptive percentages only. They do not represent a health outcome and do not imply that adherence caused a change in sleep, HRV, stress, or any other metric.")
-                    .font(LifeOSFont.caption(10))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -673,9 +673,9 @@ private struct AdherenceColumn: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(label).font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
+            Text(label).lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
             Text(value)
-                .font(LifeOSFont.spaceGrotesk(21, weight: .bold))
+                .lifeOSTypography(.sectionTitle, weight: .bold)
                 .monospacedDigit()
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -693,10 +693,10 @@ private struct FitnessSupplementTimelineCard: View {
             VStack(alignment: .leading, spacing: 9) {
                 HStack {
                     Text("Daily timeline")
-                        .font(LifeOSFont.header(15))
+                        .lifeOSTypography(.sectionTitle)
                     Spacer()
                     Text("Local status")
-                        .font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
+                        .lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
                 }
                 if supplements.isEmpty {
                     FitnessEmptyRow(title: "No scheduled doses", detail: "Add a user-entered schedule to see its local timeline.", icon: .calendar)
@@ -708,14 +708,14 @@ private struct FitnessSupplementTimelineCard: View {
                                 .frame(width: 2, height: 38)
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(supplement.timing)
-                                    .font(LifeOSFont.caption(10))
+                                    .lifeOSTypography(.metadata)
                                     .foregroundStyle(LifeOSTokens.tertiaryText)
                                     .fixedSize(horizontal: false, vertical: true)
                                 Text(supplement.name)
-                                    .font(LifeOSFont.inter(12, weight: .semiBold))
+                                    .lifeOSTypography(.body, weight: .semibold)
                                     .fixedSize(horizontal: false, vertical: true)
                                 Text(timelineLabel(for: supplement))
-                                    .font(LifeOSFont.caption(10))
+                                    .lifeOSTypography(.metadata)
                                     .foregroundStyle(LifeOSTokens.tertiaryText)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
@@ -746,22 +746,22 @@ private struct FitnessSupplementCalendarOverlay: View {
                     HStack(spacing: 7) {
                         LifeOSIcon(.calendar).foregroundStyle(LifeOSTokens.accent).frame(width: 16, height: 16)
                         Text("Calendar overlay")
-                            .font(LifeOSFont.header(14))
+                            .lifeOSTypography(.sectionTitle)
                     }
                     Spacer()
                     Text("Read-only")
-                        .font(LifeOSFont.inter(10, weight: .semiBold))
+                        .lifeOSTypography(.body, weight: .semibold)
                         .foregroundStyle(LifeOSTokens.warning)
                 }
                 Text("This is a projection of the supplement schedule. Supplements remain the source of truth; editing an event should return to this screen.")
-                    .font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
+                    .lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
                 ForEach(supplements) { supplement in
                     HStack {
-                        Text(supplement.timing).font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
-                        Text(supplement.name).font(LifeOSFont.inter(12, weight: .medium))
+                        Text(supplement.timing).lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
+                        Text(supplement.name).lifeOSTypography(.body, weight: .medium)
                         Spacer()
                         Text(states[supplement.id]?.fitnessLabel ?? "Not scheduled")
-                            .font(LifeOSFont.caption(10))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(states[supplement.id]?.fitnessColor ?? LifeOSTokens.tertiaryText)
                     }
                 }
@@ -809,9 +809,9 @@ private struct FitnessAddSupplementSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 13) {
                     Text("User-entered product")
-                        .font(LifeOSFont.headerLarge(22))
+                        .lifeOSTypography(.pageTitle)
                     Text("LifeOS stores the product label and your chosen dose as facts. Leave the dose blank rather than accepting a generic recommendation.")
-                        .font(LifeOSFont.body(12)).foregroundStyle(LifeOSTokens.tertiaryText)
+                        .lifeOSTypography(.body).foregroundStyle(LifeOSTokens.tertiaryText)
                     catalogSection
                     FitnessCard {
                         VStack(spacing: 11) {
@@ -822,21 +822,21 @@ private struct FitnessAddSupplementSheet: View {
                                     Text(option.rawValue).tag(option)
                                 }
                             }
-                            .font(LifeOSFont.inter(13, weight: .medium))
+                            .lifeOSTypography(.body, weight: .medium)
                             FitnessSupplementField(title: "Label strength", text: $strength)
                             FitnessSupplementField(title: "Inventory unit", text: $servingUnit)
                             Text("This exact unit is used for stock and nutrient facts (for example tablet, capsule, serving, or ml). A catalog selection copies its source unit here; review it before saving.")
-                                .font(LifeOSFont.caption(9))
+                                .lifeOSTypography(.metadata)
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                                 .fixedSize(horizontal: false, vertical: true)
                             FitnessSupplementField(title: "Your dose", text: $userDose)
                             if !nutrientFacts.isEmpty {
                                 VStack(alignment: .leading, spacing: 5) {
                                     Text("Exact nutrient facts per unit")
-                                        .font(LifeOSFont.caption(11))
+                                        .lifeOSTypography(.metadata)
                                         .foregroundStyle(LifeOSTokens.accent)
                                     Text(supplementFactsText(nutrientFacts))
-                                        .font(LifeOSFont.caption(10))
+                                        .lifeOSTypography(.metadata)
                                         .foregroundStyle(LifeOSTokens.tertiaryText)
                                         .fixedSize(horizontal: false, vertical: true)
                                 }
@@ -850,7 +850,7 @@ private struct FitnessAddSupplementSheet: View {
                                 FitnessSupplementField(title: "Timing note (optional)", text: $timingNote)
                             }
                             Text("Choose the clock explicitly. An optional context label is stored separately; LifeOS never infers 11:30 from a phrase such as Before lunch.")
-                                .font(LifeOSFont.caption(9))
+                                .lifeOSTypography(.metadata)
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                                 .fixedSize(horizontal: false, vertical: true)
                             FitnessSupplementField(title: "Stock units", text: $stock)
@@ -866,25 +866,25 @@ private struct FitnessAddSupplementSheet: View {
                         "I confirm this product, label facts, dose, schedule, and inventory settings",
                         isOn: $planConfirmationAcknowledged
                     )
-                    .font(LifeOSFont.inter(12, weight: .medium))
+                    .lifeOSTypography(.body, weight: .medium)
                     .accessibilityIdentifier("supplement-plan-confirmation")
                     Text("This acknowledgement is required immediately before the plan is persisted. Catalog results are reference-only and never become a dose recommendation.")
-                        .font(LifeOSFont.caption(9))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                     Text("Reminders use the local timezone, and Taken/Snooze/Skip are separate from this product record.")
-                        .font(LifeOSFont.caption(10)).foregroundStyle(LifeOSTokens.tertiaryText)
+                        .lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
                     Text(
                         persistenceEnabled
                             ? "Add saves this user-entered record locally on this device. No network or provider lookup is used."
                             : "Add is local to this visual fixture session. Nothing entered here is written to persistent storage."
                     )
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.warning)
                         .fixedSize(horizontal: false, vertical: true)
                     if let validationMessage {
                         Text(validationMessage)
-                            .font(LifeOSFont.caption(10))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.warning)
                     }
                     HStack {
@@ -930,9 +930,9 @@ private struct FitnessAddSupplementSheet: View {
         FitnessCard {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Search exact product or nutrient")
-                    .font(LifeOSFont.header(14))
+                    .lifeOSTypography(.sectionTitle)
                 Text("Optional Windows catalog · reference facts only. Selecting a result copies the label values into this local form; review them before saving.")
-                    .font(LifeOSFont.caption(9))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                     .fixedSize(horizontal: false, vertical: true)
                 TextField("e.g. folic acid, calcium, B12", text: $catalogQuery)
@@ -940,11 +940,11 @@ private struct FitnessAddSupplementSheet: View {
                     .accessibilityIdentifier("supplement-catalog-search")
                 if catalogLoading {
                     ProgressView("Searching reference catalog…")
-                        .font(LifeOSFont.caption(10))
+                        .lifeOSTypography(.metadata)
                 }
                 if let catalogError {
                     Text(catalogError)
-                        .font(LifeOSFont.caption(9))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.warning)
                 }
                 if let response = catalogResponse, !response.entries.isEmpty {
@@ -954,17 +954,17 @@ private struct FitnessAddSupplementSheet: View {
                         } label: {
                             VStack(alignment: .leading, spacing: 3) {
                                 HStack {
-                                    Text(entry.name).font(LifeOSFont.control())
+                                    Text(entry.name).lifeOSTypography(.button)
                                     Spacer()
                                     if selectedCatalogID == entry.id {
                                         LifeOSIcon(.verified).foregroundStyle(LifeOSTokens.success)
                                     }
                                 }
                                 Text("\(entry.brand) · \(entry.form.rawValue) · \(entry.servingUnit)")
-                                    .font(LifeOSFont.caption(9))
+                                    .lifeOSTypography(.metadata)
                                     .foregroundStyle(LifeOSTokens.tertiaryText)
                                 Text(supplementFactsText(entry.nutrients))
-                                    .font(LifeOSFont.caption(9))
+                                    .lifeOSTypography(.metadata)
                                     .foregroundStyle(LifeOSTokens.accent)
                                     .multilineTextAlignment(.leading)
                             }
@@ -976,7 +976,7 @@ private struct FitnessAddSupplementSheet: View {
                     }
                 } else if !catalogQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !catalogLoading && catalogError == nil {
                     Text("No catalog result. You can still enter the label facts manually.")
-                        .font(LifeOSFont.caption(9))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
             }
@@ -1167,11 +1167,11 @@ private struct FitnessSupplementField: View {
 
     var body: some View {
         HStack {
-            Text(title).font(LifeOSFont.caption(11)).foregroundStyle(LifeOSTokens.tertiaryText)
+            Text(title).lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
             Spacer()
             TextField(title, text: $text)
                 .multilineTextAlignment(.trailing)
-                .font(LifeOSFont.inter(13, weight: .medium))
+                .lifeOSTypography(.body, weight: .medium)
 #if os(iOS)
                 .keyboardType(numeric ? .numbersAndPunctuation : .default)
 #endif

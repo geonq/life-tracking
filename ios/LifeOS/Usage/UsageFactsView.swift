@@ -48,7 +48,11 @@ struct UsageFactsView: View {
                 subtitle: "Sourced observations for \(snapshot.provider.displayName)",
                 icon: .usage
             )
-            .padding(.bottom, 12)
+            Text(subLabel)
+                .lifeOSTypography(.metadata)
+                .foregroundStyle(LifeOSTokens.tertiaryText)
+                .padding(.top, 4)
+                .padding(.bottom, 12)
 
             // Lifetime tokens — GAP. No cumulative-tokens-ever field in UsageAnalytics.swift;
             // `activity` only covers the current short window.
@@ -108,8 +112,12 @@ struct UsageFactsView: View {
     private var bankedResetsCard: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("Banked resets")
-                .font(LifeOSFont.cardTitle(16))
-                .padding(.bottom, 6)
+                .lifeOSTypography(.cardTitle)
+            Text("Provider detail is not modeled in this snapshot")
+                .lifeOSTypography(.metadata)
+                .foregroundStyle(LifeOSTokens.tertiaryText)
+                .padding(.top, 4)
+                .padding(.bottom, 12)
 
             // Banked resets — GAP across all four sub-fields. Only a static demo string exists
             // today (OverviewDomain.swift), not a real modeled field. 02 §0 data-gaps item 1.
@@ -130,21 +138,15 @@ struct UsageFactsView: View {
 
     private func factRow(label: String, value: String) -> some View {
         HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(label)
-                    .font(LifeOSFont.bodyText(14))
-                    .foregroundStyle(LifeOSTokens.primaryText)
-                Text(subLabel)
-                    .font(LifeOSFont.metadata(11))
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
-            }
+            Text(label)
+                .lifeOSTypography(.body)
+                .foregroundStyle(LifeOSTokens.primaryText)
             Spacer(minLength: 12)
             Text(value)
-                .font(LifeOSFont.control(14))
+                .lifeOSTypography(.button)
                 .foregroundStyle(value == "Not available" ? LifeOSTokens.tertiaryText : .primary)
                 .multilineTextAlignment(.trailing)
                 .lineLimit(2)
-                .minimumScaleFactor(0.8)
         }
         .accessibilityElement(children: .combine)
     }

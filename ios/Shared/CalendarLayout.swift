@@ -100,6 +100,262 @@ public struct CalendarEventCornerRadii: Equatable, Sendable {
     }
 }
 
+/// A wall-clock position that survives a calendar-window replacement. The
+/// visual timeline is always 00:00...24:00, so restoring this value preserves
+/// the user's place in the day without storing an absolute Date that could be
+/// interpreted in the wrong DST fold.
+public struct CalendarTimelineScrollAnchor: Equatable, Sendable {
+    public static let dayMinutes = 24 * 60
+
+    public let wallMinute: Int
+
+    public init(wallMinute: Int) {
+        self.wallMinute = min(Self.dayMinutes, max(0, wallMinute))
+    }
+
+    public var hour: Int {
+        min(23, wallMinute / 60)
+    }
+
+    public static func id(for hour: Int) -> String {
+        "calendar-timeline-hour-\(min(23, max(0, hour)))"
+    }
+
+    public static func todayMinusTwoHours(now: Date, calendar: Calendar) -> Self {
+        let currentMinute = Int(CalendarTimelineScale.wallClockMinute(for: now, calendar: calendar).rounded(.down))
+        return Self(wallMinute: currentMinute - 2 * 60)
+    }
+
+    public static func from(scrollOffset: Double, hourHeight: Double) -> Self {
+        guard scrollOffset.isFinite, hourHeight.isFinite, hourHeight > 0 else {
+            return Self(wallMinute: 0)
+        }
+        let minute = Int((max(0, scrollOffset) / hourHeight * 60).rounded())
+        return Self(wallMinute: minute)
+    }
+
+    public func offset(hourHeight: Double) -> Double {
+        guard hourHeight.isFinite, hourHeight > 0 else { return 0 }
+        return Double(wallMinute) / 60 * hourHeight
+    }
+}
+
+/// Explicit navigation is separate from retained scroll state. A request is
+/// consumed once by the active timeline and therefore cannot replay after a
+/// user starts a new native scroll.
+public struct CalendarTimelineScrollRequest: Equatable, Sendable {
+    public let id: Int
+    public let anchor: CalendarTimelineScrollAnchor
+
+    public init(id: Int, anchor: CalendarTimelineScrollAnchor) {
+        self.id = id
+        self.anchor = anchor
+    }
+}
+
+/// Pure lifecycle state for macOS magnification. The view owns the native
+/// scroll view and persistence callback; this state owns the invariant that a
+/// cancelled/interrupted zoom restores its captured scale and offset.
+public struct CalendarTimelineZoomSession: Equatable, Sendable {
+    public let startingHourHeight: Double
+    public let startingScrollOffset: Double
+    public let focalViewportOffset: Double
+    public private(set) var latest: CalendarTimelineZoomResult
+    public private(set) var isActive: Bool
+
+    public init(
+        hourHeight: Double,
+        scrollOffset: Double,
+        focalViewportOffset: Double
+    ) {
+        let safeHourHeight = hourHeight.isFinite ? hourHeight : CalendarInteractionLayout.minimumHourHeight
+        let safeScrollOffset = scrollOffset.isFinite ? max(0, scrollOffset) : 0
+        let safeFocalOffset = focalViewportOffset.isFinite ? max(0, focalViewportOffset) : 0
+        self.startingHourHeight = safeHourHeight
+        self.startingScrollOffset = safeScrollOffset
+        self.focalViewportOffset = safeFocalOffset
+        self.latest = CalendarTimelineZoomResult(
+            hourHeight: safeHourHeight,
+            scrollOffset: safeScrollOffset,
+            focalMinute: 60 * (safeScrollOffset + safeFocalOffset) / max(0.0001, safeHourHeight)
+        )
+        self.isActive = true
+    }
+
+    @discardableResult
+    public mutating func update(
+        magnification: Double,
+        viewportHeight: Double,
+        contentBottomInset: Double = CalendarInteractionLayout.timelineEndpointClearance
+    ) -> CalendarTimelineZoomResult? {
+        guard isActive, magnification.isFinite, magnification > 0 else { return nil }
+        let result = CalendarInteractionLayout.zoomedTimeline(
+            hourHeight: startingHourHeight,
+            scrollOffset: startingScrollOffset,
+            focalViewportOffset: focalViewportOffset,
+            magnification: magnification,
+            viewportHeight: viewportHeight,
+            contentBottomInset: contentBottomInset
+        )
+        guard result.hourHeight.isFinite, result.scrollOffset.isFinite else { return nil }
+        latest = result
+        return result
+    }
+
+    @discardableResult
+    public mutating func complete() -> CalendarTimelineZoomResult? {
+        guard isActive else { return nil }
+        isActive = false
+        return latest
+    }
+
+    @discardableResult
+    public mutating func cancel() -> CalendarTimelineZoomResult? {
+        guard isActive else { return nil }
+        isActive = false
+        latest = CalendarTimelineZoomResult(
+            hourHeight: startingHourHeight,
+            scrollOffset: startingScrollOffset,
+            focalMinute: 60 * (startingScrollOffset + focalViewportOffset) / max(0.0001, startingHourHeight)
+        )
+        return latest
+    }
+}
+
+/// Generation-scoped ownership for the iPhone timeline pinch. SwiftUI can
+/// deliver an ended/cancelled callback after another interaction has already
+/// taken ownership of the timeline. A token makes those late callbacks
+/// harmless: they can neither update nor commit a newer pinch.
+public struct CalendarTimelineZoomTransaction: Equatable, Sendable {
+    public struct Token: Equatable, Sendable {
+        fileprivate let generation: UInt64
+
+        fileprivate init(generation: UInt64) {
+            self.generation = generation
+        }
+    }
+
+    private var session: CalendarTimelineZoomSession?
+    public private(set) var generation: UInt64 = 0
+
+    public init() {}
+
+    public var isActive: Bool { session != nil }
+
+    @discardableResult
+    public mutating func begin(
+        hourHeight: Double,
+        scrollOffset: Double,
+        focalViewportOffset: Double
+    ) -> Token? {
+        guard session == nil else { return nil }
+        generation &+= 1
+        session = CalendarTimelineZoomSession(
+            hourHeight: hourHeight,
+            scrollOffset: scrollOffset,
+            focalViewportOffset: focalViewportOffset
+        )
+        return Token(generation: generation)
+    }
+
+    @discardableResult
+    public mutating func update(
+        token: Token,
+        magnification: Double,
+        viewportHeight: Double
+    ) -> CalendarTimelineZoomResult? {
+        guard token.generation == generation,
+              var session,
+              session.isActive else { return nil }
+        guard let result = session.update(
+            magnification: magnification,
+            viewportHeight: viewportHeight
+        ) else { return nil }
+        self.session = session
+        return result
+    }
+
+    /// Commits only the token that still owns this transaction. The generation
+    /// advances on termination so every token held by an old recognizer is
+    /// invalid immediately, including after a successful commit.
+    @discardableResult
+    public mutating func finish(token: Token) -> CalendarTimelineZoomResult? {
+        guard token.generation == generation,
+              var session,
+              let result = session.complete() else { return nil }
+        self.session = nil
+        generation &+= 1
+        return result
+    }
+
+    /// Cancels the current token and returns the captured baseline. Repeating
+    /// cancellation is idempotent and cannot restore or commit a later
+    /// transaction.
+    @discardableResult
+    public mutating func cancel(token: Token? = nil) -> CalendarTimelineZoomResult? {
+        guard let activeSession = session,
+              token.map({ $0.generation != generation }) != true else {
+            return nil
+        }
+        var session = activeSession
+        let result = session.cancel()
+        self.session = nil
+        generation &+= 1
+        return result
+    }
+}
+
+private struct CalendarMinHeap<Element> {
+    private var values: [Element] = []
+    private let precedes: (Element, Element) -> Bool
+
+    init(by precedes: @escaping (Element, Element) -> Bool) {
+        self.precedes = precedes
+    }
+
+    var peek: Element? { values.first }
+
+    mutating func insert(_ value: Element) {
+        values.append(value)
+        siftUp(from: values.count - 1)
+    }
+
+    mutating func pop() -> Element? {
+        guard !values.isEmpty else { return nil }
+        if values.count == 1 { return values.removeLast() }
+        let result = values[0]
+        values[0] = values.removeLast()
+        siftDown(from: 0)
+        return result
+    }
+
+    private mutating func siftUp(from index: Int) {
+        var child = index
+        while child > 0 {
+            let parent = (child - 1) / 2
+            guard precedes(values[child], values[parent]) else { return }
+            values.swapAt(child, parent)
+            child = parent
+        }
+    }
+
+    private mutating func siftDown(from index: Int) {
+        var parent = index
+        while true {
+            let left = parent * 2 + 1
+            guard left < values.count else { return }
+            var candidate = left
+            let right = left + 1
+            if right < values.count, precedes(values[right], values[left]) {
+                candidate = right
+            }
+            guard precedes(values[candidate], values[parent]) else { return }
+            values.swapAt(parent, candidate)
+            parent = candidate
+        }
+    }
+}
+
 public enum CalendarOverlapLayout {
     /// IMG_0663 uses a proportional first overlap: Clip begins about 37% into
     /// the day column, while each deeper layer adds only a small fixed step.
@@ -119,6 +375,11 @@ public enum CalendarOverlapLayout {
 
     private struct ColumnEvent {
         let event: VisibleEvent
+        let depth: Int
+    }
+
+    private struct ActiveLane {
+        let end: Date
         let depth: Int
     }
 
@@ -154,28 +415,39 @@ public enum CalendarOverlapLayout {
                 groupEndIndex += 1
             }
 
-            let group = Array(visible[index..<groupEndIndex])
             // Keep the leading track occupied when an overlap starts exactly
             // as the previous full-width event ends. This is the Notion/Figma
             // stack language: Gym remains the base, Clip/Tax enter as trailing
             // layers, and chillen can reclaim the base once that stack ends.
-            let startsAtPreviousBoundary = previousGroupEnd == group.first?.start
-            let depthOffset = startsAtPreviousBoundary && group.count > 1 ? 1 : 0
-            var depthEnds: [Date] = []
+            let startsAtPreviousBoundary = previousGroupEnd == visible[index].start
+            let groupCount = groupEndIndex - index
+            let depthOffset = startsAtPreviousBoundary && groupCount > 1 ? 1 : 0
+            var availableDepths = CalendarMinHeap<Int>(by: <)
+            var activeLanes = CalendarMinHeap<ActiveLane> {
+                if $0.end != $1.end { return $0.end < $1.end }
+                return $0.depth < $1.depth
+            }
+            var nextDepth = 0
             var assigned: [ColumnEvent] = []
+            assigned.reserveCapacity(groupCount)
 
-            for event in group {
-                if let available = depthEnds.firstIndex(where: { $0 <= event.start }) {
-                    depthEnds[available] = event.end
-                    assigned.append(ColumnEvent(event: event, depth: available + depthOffset))
-                } else {
-                    let depth = depthEnds.count
-                    depthEnds.append(event.end)
-                    assigned.append(ColumnEvent(event: event, depth: depth + depthOffset))
+            for event in visible[index..<groupEndIndex] {
+                while let active = activeLanes.peek, active.end <= event.start {
+                    _ = activeLanes.pop()
+                    availableDepths.insert(active.depth)
                 }
+                let depth: Int
+                if let available = availableDepths.pop() {
+                    depth = available
+                } else {
+                    depth = nextDepth
+                    nextDepth += 1
+                }
+                activeLanes.insert(ActiveLane(end: event.end, depth: depth))
+                assigned.append(ColumnEvent(event: event, depth: depth + depthOffset))
             }
 
-            let columnCount = max(1, depthEnds.count + depthOffset)
+            let columnCount = max(1, nextDepth + depthOffset)
             output.append(contentsOf: assigned.map {
                 CalendarEventPlacement(
                     item: $0.event.item,
@@ -250,17 +522,15 @@ public enum CalendarOverlapLayout {
 
 /// Pure geometry for the sticky all-day lane above the timed grid.
 ///
-/// Row contract (geonq's exact rule): every all-day entry owns exactly one
-/// lane cell, and one empty cell always trails below them. Zero entries
-/// therefore render exactly ONE empty cell; n entries render n cells plus one
-/// empty cell. Overlaps never share a row because sharing would collapse the
-/// count. Keeping this separate from SwiftUI makes the lane height and
-/// stacking deterministic across iPhone sizes and gives the interaction tests
-/// a model contract to exercise without rendering a view.
+/// Row contract for the bounded all-day lane: at most two event rows are
+/// visible, overflow is represented by one +N row, and one empty creation row
+/// always trails below them. Keeping the cap in the layout model prevents a
+/// dense calendar from consuming the timed viewport.
 public enum CalendarAllDayLayout {
     public static let rowHeight: Double = 26
     public static let rowSpacing: Double = 2
     public static let minimumRows = 1
+    public static let maximumVisibleEventRows = 2
 
     public struct Placement: Equatable, Identifiable, Sendable {
         public let item: CalendarItem
@@ -346,14 +616,35 @@ public enum CalendarAllDayLayout {
         return "\(sourceID.uuidString)-\(occurrenceStart)"
     }
 
-    /// Entries + 1: the trailing empty cell is part of the contract even when
-    /// the lane is empty (zero entries -> exactly one cell).
+    public static func overflowCount(
+        items: [CalendarItem],
+        days: [Date],
+        calendar: Calendar
+    ) -> Int {
+        max(0, placements(items: items, days: days, calendar: calendar).count - maximumVisibleEventRows)
+    }
+
+    /// The row at which the compact +N overflow affordance is rendered.
+    public static func overflowRowIndex(
+        items: [CalendarItem],
+        days: [Date],
+        calendar: Calendar
+    ) -> Int? {
+        overflowCount(items: items, days: days, calendar: calendar) > 0
+            ? maximumVisibleEventRows
+            : nil
+    }
+
+    /// Two visible event rows, one optional overflow row, and one creation row.
     public static func rowCount(
         items: [CalendarItem],
         days: [Date],
         calendar: Calendar
     ) -> Int {
-        max(minimumRows, placements(items: items, days: days, calendar: calendar).count + 1)
+        let count = placements(items: items, days: days, calendar: calendar).count
+        let visibleRows = min(maximumVisibleEventRows, count)
+        let overflowRow = count > maximumVisibleEventRows ? 1 : 0
+        return max(minimumRows, visibleRows + overflowRow + 1)
     }
 
     public static func height(
@@ -484,6 +775,27 @@ public enum CalendarGestureArbitration {
     }
 
     public static func parentHorizontalScrollEnabled(
+        eventMutationActive: Bool,
+        hasProvisionalPreview: Bool
+    ) -> Bool {
+        !eventMutationActive && !hasProvisionalPreview
+    }
+
+    /// Native vertical scrolling owns every iPhone timeline surface until a
+    /// deliberate event move/resize or creation gesture has acquired the
+    /// shared mutation session. This keeps empty space, event bodies, and
+    /// resize handles on the same scroll path.
+    public static func nativeVerticalTimelineScrollEnabled(
+        eventMutationActive: Bool,
+        hasProvisionalPreview: Bool
+    ) -> Bool {
+        !eventMutationActive && !hasProvisionalPreview
+    }
+
+    /// Magnification can begin only while the timeline is idle. Once an edit
+    /// owns the shared session, the pinch recognizer must fail rather than
+    /// partially changing density underneath the edit.
+    public static func timelineZoomEnabled(
         eventMutationActive: Bool,
         hasProvisionalPreview: Bool
     ) -> Bool {
@@ -759,6 +1071,18 @@ public struct CalendarTimelineScale: Equatable, Sendable {
     }
 }
 
+public struct CalendarTimelineZoomResult: Equatable, Sendable {
+    public let hourHeight: Double
+    public let scrollOffset: Double
+    public let focalMinute: Double
+
+    public init(hourHeight: Double, scrollOffset: Double, focalMinute: Double) {
+        self.hourHeight = hourHeight
+        self.scrollOffset = scrollOffset
+        self.focalMinute = focalMinute
+    }
+}
+
 /// Pure calendar math used by the timeline's press/drag interactions. Keeping
 /// this separate from SwiftUI makes snap thresholds, DST behavior, and edge
 /// clamping deterministic in unit tests and keeps the gesture code small.
@@ -766,28 +1090,17 @@ public enum CalendarInteractionLayout {
     public static let snapIntervalMinutes = 15
     public static let minimumDurationMinutes = 15
     public static let creationDurationMinutes = 60
-    /// Space after the final 24:00 mark so the endpoint remains visible when
-    /// the finite timed viewport is scrolled all the way to the bottom. This
-    /// is display-only; creation and event math continue to use `timelineHeight`.
-    ///
-    /// The buffer must exceed every floating layer that covers the timeline's
-    /// trailing edge on iPhone: the home-indicator safe area, the compact tab
-    /// bar, and the calendar's own quick-action pill/FAB overlay. A buffer
-    /// budgeted only for the first two clamps maximum scroll with 21:00+
-    /// hidden behind the floating chrome and the last reachable hour stuck
-    /// around 13:00 at the top of the viewport — the reported
-    /// "vertical scroll stops around 13:00" regression.
-    public static let homeIndicatorSafeAreaHeight: Double = 34
-    public static let compactTabBarHeight: Double = 50
-    public static let quickActionsOverlayHeight: Double = 58
-    public static let endpointLabelClearance: Double = 14
-    public static let endpointScrollMargin: Double = 8
-    public static let timelineBottomInset: Double =
-        homeIndicatorSafeAreaHeight
-            + compactTabBarHeight
-            + quickActionsOverlayHeight
-            + endpointLabelClearance
-            + endpointScrollMargin
+    /// The density limits are shared by the macOS trackpad gesture and its
+    /// secondary slider fallback. Keeping them in the layout layer prevents
+    /// either control from creating a scale the timeline cannot render.
+    public static let minimumHourHeight: Double = 38
+    public static let maximumHourHeight: Double = 110
+    public static let timelineTimeGutter: Double = 40
+    public static let timelineOuterInset: Double = 8
+    /// Clearance after the final 24:00 mark. Bottom controls are reserved by
+    /// the owning page's safe-area inset, so this is the only display space
+    /// added to the 24-hour axis itself.
+    public static let timelineEndpointClearance: Double = 24
     /// The short range shown while a mobile time selection is being held.
     /// The editor receives the actual dragged interval; this is only the
     /// initial ghost before the finger expresses a longer/shorter range.
@@ -1097,12 +1410,52 @@ public enum CalendarInteractionLayout {
     /// gesture. The boundary itself belongs to the first day column.
     public static func isPagerStartInDaySurface(
         startX: Double,
-        timeGutter: Double = 52
+        timeGutter: Double = timelineTimeGutter
     ) -> Bool {
         guard startX.isFinite,
               timeGutter.isFinite,
               timeGutter >= 0 else { return false }
         return startX >= timeGutter
+    }
+
+    /// Returns whether a day column intersects the currently visible day
+    /// surface. `columnOriginX` and `horizontalContentOffset` are document
+    /// coordinates, so the same calculation works for the iPhone virtual
+    /// strip and the horizontally scrollable Mac week.
+    public static func isTimelineDayColumnVisible(
+        dayIndex: Int,
+        dayCount: Int,
+        columnWidth: Double,
+        columnOriginX: Double,
+        timeGutter: Double,
+        contentWidth: Double,
+        viewportWidth: Double,
+        horizontalContentOffset: Double = 0
+    ) -> Bool {
+        guard dayIndex >= 0,
+              dayIndex < dayCount,
+              dayCount > 0,
+              columnWidth.isFinite,
+              columnWidth > 0,
+              columnOriginX.isFinite,
+              timeGutter.isFinite,
+              contentWidth.isFinite,
+              viewportWidth.isFinite,
+              horizontalContentOffset.isFinite else { return false }
+
+        let safeContentWidth = max(0, contentWidth)
+        let visibleMin = max(0, horizontalContentOffset)
+        let visibleMax = min(
+            safeContentWidth,
+            visibleMin + max(0, viewportWidth)
+        )
+        let daySurfaceMin = max(timeGutter, visibleMin)
+        let daySurfaceMax = min(safeContentWidth, visibleMax)
+        guard daySurfaceMax > daySurfaceMin else { return false }
+
+        let columnMin = columnOriginX + Double(dayIndex) * columnWidth
+        let columnMax = columnMin + columnWidth
+        return columnMin < daySurfaceMax && columnMax > daySurfaceMin
     }
 
     /// The Mac empty-grid drag must be visibly intentional. A click or a
@@ -1157,35 +1510,124 @@ public enum CalendarInteractionLayout {
         return hourHeight * 24
     }
 
-    /// Scroll content height for the timed grid. The axis itself still ends
-    /// at exactly 24 hours; the extra inset is only a reachable visual buffer
-    /// for the final label/boundary.
-    public static func timelineContentHeight(days: [Date], hourHeight: Double, calendar: Calendar) -> Double {
-        timelineHeight(days: days, hourHeight: hourHeight, calendar: calendar) + timelineBottomInset
-    }
-
-    /// Viewport-aware scroll content height for the timed grid.
-    ///
-    /// The reported "vertical scroll stops around 13:00" regression was a
-    /// max-offset clamp, not a missing inset: with a fixed bottom buffer the
-    /// deepest reachable offset is `axis + inset - viewport`, so the topmost
-    /// reachable hour was `maxOffset / hourHeight` — about 12:37 at the
-    /// zoomed-out 38pt hour height and 15:59 at the default 54pt. Once the
-    /// viewport filled with late-day hours the scroll simply stopped, no
-    /// matter how much day was left. Reserving at least one full viewport of
-    /// trailing space lets the 24:00 endpoint itself travel to the top of the
-    /// viewport (`maxOffset >= axis`), so every wall-clock hour 00:00..24:00
-    /// can always be scrolled into view at any hour height and any occluding
-    /// chrome. The fixed inset remains the floor for very short viewports.
+    /// Scroll content height for the timed grid. `occlusionHeight` is measured
+    /// by the owning container when an overlay cannot be reserved through a
+    /// safe-area inset. The axis remains exactly 24 wall-clock hours.
     public static func timelineContentHeight(
         days: [Date],
         hourHeight: Double,
         calendar: Calendar,
-        viewportHeight: Double
+        occlusionHeight: Double = 0
     ) -> Double {
         let axis = timelineHeight(days: days, hourHeight: hourHeight, calendar: calendar)
-        let safeViewport = viewportHeight.isFinite ? max(0, viewportHeight) : 0
-        return axis + max(timelineBottomInset, safeViewport)
+        let safeOcclusion = occlusionHeight.isFinite ? max(0, occlusionHeight) : 0
+        return axis + safeOcclusion + timelineEndpointClearance
+    }
+
+    /// Maps one macOS pinch sample to a bounded timeline density and scroll
+    /// offset. `focalViewportOffset` is measured from the top of the finite
+    /// viewport, while `scrollOffset` is measured from the top of the timed
+    /// content. The focal wall-clock minute is calculated before scaling and
+    /// then placed back under the same viewport point:
+    ///
+    ///     m = 60 * (s0 + p) / h0
+    ///     h1 = clamp(h0 * factor, 38, 110)
+    ///     s1 = clamp(m * h1 / 60 - p, 0, H(h1) - V)
+    ///
+    /// This is pure so the focal-point contract can be tested without an
+    /// AppKit host or a live scroll view. `contentBottomInset` includes the
+    /// endpoint clearance and any measured occlusion below the timed viewport.
+    public static func zoomedTimeline(
+        hourHeight: Double,
+        scrollOffset: Double,
+        focalViewportOffset: Double,
+        magnification: Double,
+        viewportHeight: Double,
+        contentBottomInset: Double = timelineEndpointClearance
+    ) -> CalendarTimelineZoomResult {
+        let baseHourHeight = finiteClamped(
+            hourHeight,
+            lower: minimumHourHeight,
+            upper: maximumHourHeight,
+            fallback: minimumHourHeight
+        )
+        let factor: Double
+        if magnification == .infinity {
+            factor = .greatestFiniteMagnitude
+        } else if magnification.isNaN || magnification <= 0 {
+            factor = 1
+        } else {
+            factor = magnification
+        }
+        let scaledHourHeight = baseHourHeight * factor
+        let nextHourHeight = finiteClamped(
+            scaledHourHeight,
+            lower: minimumHourHeight,
+            upper: maximumHourHeight,
+            fallback: factor >= 1 ? maximumHourHeight : minimumHourHeight
+        )
+        let viewport = finiteNonNegative(viewportHeight)
+        let bottomInset = finiteNonNegative(contentBottomInset)
+        let baseContentHeight = timelineHeight(
+            days: [],
+            hourHeight: baseHourHeight,
+            calendar: .current
+        ) + bottomInset
+        let nextContentHeight = timelineHeight(
+            days: [],
+            hourHeight: nextHourHeight,
+            calendar: .current
+        ) + bottomInset
+        let baseMaximumOffset = timelineMaximumScrollOffset(
+            contentHeight: baseContentHeight,
+            viewportHeight: viewport
+        )
+        let safeScrollOffset: Double
+        if scrollOffset == .infinity {
+            safeScrollOffset = baseMaximumOffset
+        } else {
+            safeScrollOffset = min(
+                baseMaximumOffset,
+                max(0, scrollOffset.isFinite ? scrollOffset : 0)
+            )
+        }
+        let focalPoint: Double
+        if focalViewportOffset == .infinity {
+            focalPoint = viewport
+        } else {
+            focalPoint = min(
+                viewport,
+                max(0, focalViewportOffset.isFinite ? focalViewportOffset : 0)
+            )
+        }
+        let focalMinute = 60 * (safeScrollOffset + focalPoint) / baseHourHeight
+        let proposedOffset = focalMinute * nextHourHeight / 60 - focalPoint
+        let nextMaximumOffset = timelineMaximumScrollOffset(
+            contentHeight: nextContentHeight,
+            viewportHeight: viewport
+        )
+        return CalendarTimelineZoomResult(
+            hourHeight: nextHourHeight,
+            scrollOffset: min(
+                nextMaximumOffset,
+                max(0, proposedOffset.isFinite ? proposedOffset : 0)
+            ),
+            focalMinute: focalMinute
+        )
+    }
+
+    private static func finiteNonNegative(_ value: Double) -> Double {
+        value.isFinite ? max(0, value) : 0
+    }
+
+    private static func finiteClamped(
+        _ value: Double,
+        lower: Double,
+        upper: Double,
+        fallback: Double
+    ) -> Double {
+        guard value.isFinite else { return fallback }
+        return min(upper, max(lower, value))
     }
 
     /// Deepest scroll offset the timed grid will ever reach for the given
@@ -1203,9 +1645,11 @@ public enum CalendarInteractionLayout {
         date: Date?,
         calendar: Calendar
     ) -> String {
+        _ = date
+        _ = calendar
+        guard minute >= 0 else { return "" }
         guard minute >= dayMinutes else {
-            guard let date else { return "" }
-            return String(format: "%02d:00", calendar.component(.hour, from: date))
+            return String(format: "%02d:00", min(23, minute / 60))
         }
         return "24:00"
     }

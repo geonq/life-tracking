@@ -1,5 +1,4 @@
 import SwiftUI
-import Iconoir
 
 public enum LifeOSIconName: Sendable {
     case overview
@@ -55,60 +54,60 @@ public enum LifeOSIconName: Sendable {
     case inProgress
     case importDocument
 
-    fileprivate var icon: Iconoir {
+    fileprivate var systemName: String {
         switch self {
-        case .overview: .viewGrid
-        case .home: .home
-        case .usage: .graphUp
-        case .clipper: .clipboardCheck
-        case .health: .heart
-        case .finance: .bank
-        case .bankConnections: .link
-        case .investments: .statsUpSquare
-        case .business: .suitcase
-        case .calendar: .calendar
-        case .tax: .pageSearch
-        case .documents: .page
-        case .tasks: .taskList
-        case .grocery: .cart
-        case .shopping: .shoppingBag
-        case .reports: .reports
-        case .fitness: .activity
-        case .settings: .settings
-        case .more: .list
-        case .chevronLeft: .navArrowLeft
-        case .chevronRight: .navArrowRight
-        case .zoomIn: .zoomIn
-        case .zoomOut: .zoomOut
-        case .views: .eye
-        case .subscribers: .userPlus
-        case .revenue: .handCash
-        case .heartRate: .heart
-        case .sleep: .moonSat
-        case .savings: .piggyBank
-        case .budget: .wallet
-        case .cashFlow: .dataTransferBoth
-        case .income: .dataTransferUp
-        case .spending: .dataTransferDown
-        case .netWorth: .coins
-        case .coins: .coins
-        case .graphUp: .graphUp
-        case .add: .plus
-        case .calendarPlus: .calendarPlus
-        case .search: .search
-        case .undo: .undo
-        case .refresh: .refresh
-        case .assistant: .chatBubble
-        case .security: .lock
-        case .verified: .badgeCheck
-        case .warning: .warningTriangle
-        case .image: .mediaImage
-        case .empty: .sunLight
-        case .done: .checkCircle
-        case .aborted: .warningCircle
-        case .planned: .circle
-        case .inProgress: .clock
-        case .importDocument: .pagePlus
+        case .overview: "square.grid.2x2"
+        case .home: "house"
+        case .usage: "chart.bar"
+        case .clipper: "checklist"
+        case .health: "heart"
+        case .finance: "creditcard"
+        case .bankConnections: "link"
+        case .investments: "chart.line.uptrend.xyaxis"
+        case .business: "briefcase"
+        case .calendar: "calendar"
+        case .tax: "doc.text"
+        case .documents: "folder"
+        case .tasks: "checklist"
+        case .grocery: "basket"
+        case .shopping: "bag"
+        case .reports: "chart.bar.doc.horizontal"
+        case .fitness: "heart"
+        case .settings: "gearshape"
+        case .more: "ellipsis"
+        case .chevronLeft: "chevron.left"
+        case .chevronRight: "chevron.right"
+        case .zoomIn: "plus.magnifyingglass"
+        case .zoomOut: "minus.magnifyingglass"
+        case .views: "eye"
+        case .subscribers: "person.2"
+        case .revenue: "banknote"
+        case .heartRate: "waveform.path.ecg"
+        case .sleep: "moon.zzz"
+        case .savings: "piggybank"
+        case .budget: "wallet.pass"
+        case .cashFlow: "arrow.left.arrow.right"
+        case .income: "arrow.up"
+        case .spending: "arrow.down"
+        case .netWorth: "chart.line.uptrend.xyaxis"
+        case .coins: "circle.hexagongrid"
+        case .graphUp: "chart.line.uptrend.xyaxis"
+        case .add: "plus"
+        case .calendarPlus: "calendar.badge.plus"
+        case .search: "magnifyingglass"
+        case .undo: "arrow.uturn.backward"
+        case .refresh: "arrow.clockwise"
+        case .assistant: "sparkles"
+        case .security: "lock"
+        case .verified: "checkmark.seal"
+        case .warning: "exclamationmark.triangle"
+        case .image: "photo"
+        case .empty: "sun.max"
+        case .done: "checkmark.circle"
+        case .aborted: "xmark.circle"
+        case .planned: "circle"
+        case .inProgress: "clock"
+        case .importDocument: "doc.badge.plus"
         }
     }
 
@@ -184,10 +183,9 @@ public struct LifeOSIcon: View {
     }
 
     public var body: some View {
-        name.icon.asImage
+        Image(systemName: name.systemName)
             .renderingMode(.template)
-            .resizable()
-            .scaledToFit()
+            .font(.system(size: 17, weight: .medium, design: .default))
             .modifier(LifeOSIconAccessibilityModifier(label: explicitAccessibilityLabel))
     }
 }

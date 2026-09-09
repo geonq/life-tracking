@@ -95,9 +95,9 @@ public struct FitnessStressDetailView: View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Stress")
-                    .font(LifeOSFont.headerLarge(28))
+                    .lifeOSTypography(.pageTitle)
                 Text(selectedDate.stressDateLabel)
-                    .font(LifeOSFont.body(13))
+                    .lifeOSTypography(.body)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
             Spacer(minLength: 8)
@@ -148,29 +148,29 @@ public struct FitnessStressDetailView: View {
     private func heroCopy(for day: FitnessStressDay) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Selected-day observation")
-                .font(LifeOSFont.caption(11).weight(.semibold))
+                .lifeOSTypography(.metadata, weight: .semibold)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
             if let value = day.stress.value {
                 HStack(alignment: .lastTextBaseline, spacing: 8) {
                     Text(value, format: .number.precision(.fractionLength(0...1)))
-                        .font(LifeOSFont.spaceGrotesk(42, weight: .bold))
+                        .lifeOSTypography(.sectionTitle, weight: .bold)
                         .monospacedDigit()
                     Text(day.stress.unit)
-                        .font(LifeOSFont.body(15))
+                        .lifeOSTypography(.body)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
                 Text(day.stress.scale.map { "Source scale · \(formatNumber($0.minimum))–\(formatNumber($0.maximum))" } ?? "Source scale not supplied")
-                    .font(LifeOSFont.caption(11))
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             } else {
                 Text("—")
-                    .font(LifeOSFont.spaceGrotesk(42, weight: .bold))
+                    .lifeOSTypography(.sectionTitle, weight: .bold)
                 Text("No source value")
-                    .font(LifeOSFont.body(14))
+                    .lifeOSTypography(.body)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
             Text(day.stress.evidence.summary)
-                .font(LifeOSFont.caption(10))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -196,16 +196,16 @@ public struct FitnessStressDetailView: View {
             VStack(spacing: 2) {
                 if let value = metric.value {
                     Text(value, format: .number.precision(.fractionLength(0...1)))
-                        .font(LifeOSFont.spaceGrotesk(31, weight: .bold))
+                        .lifeOSTypography(.sectionTitle, weight: .bold)
                         .monospacedDigit()
                     Text("observed")
-                        .font(LifeOSFont.caption(10).weight(.semibold))
+                        .lifeOSTypography(.metadata, weight: .semibold)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 } else {
                     Text("—")
-                        .font(LifeOSFont.spaceGrotesk(31, weight: .bold))
+                        .lifeOSTypography(.sectionTitle, weight: .bold)
                     Text("unavailable")
-                        .font(LifeOSFont.caption(10).weight(.semibold))
+                        .lifeOSTypography(.metadata, weight: .semibold)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
             }
@@ -218,10 +218,10 @@ public struct FitnessStressDetailView: View {
     private func contextPanel(for day: FitnessStressDay) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Context supplied")
-                .font(LifeOSFont.header(16))
+                .lifeOSTypography(.sectionTitle)
             if day.averageHRV.isUnavailable && day.averageHeartRate.isUnavailable {
                 Text("Average HRV and average heart rate were not supplied by the Stress source.")
-                    .font(LifeOSFont.body(12))
+                    .lifeOSTypography(.body)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
@@ -237,18 +237,18 @@ public struct FitnessStressDetailView: View {
         StressSurfaceCard {
             VStack(alignment: .leading, spacing: 6) {
                 Text(metric.title)
-                    .font(LifeOSFont.caption(11).weight(.semibold))
+                    .lifeOSTypography(.metadata, weight: .semibold)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                 HStack(alignment: .lastTextBaseline, spacing: 5) {
-                    Text(metric.value ?? 0, format: .number.precision(.fractionLength(0...1)))
-                        .font(LifeOSFont.spaceGrotesk(25, weight: .bold))
+                    Text(metric.value.map { formatNumber($0) } ?? "—")
+                        .lifeOSTypography(.sectionTitle, weight: .bold)
                         .monospacedDigit()
                     Text(metric.unit)
-                        .font(LifeOSFont.caption(12))
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
-                Text(metric.evidence.source ?? "Source unavailable")
-                    .font(LifeOSFont.caption(10))
+                Text("\(metric.evidence.statusLabel) · \(metric.evidence.summary)")
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -259,19 +259,19 @@ public struct FitnessStressDetailView: View {
         StressSurfaceCard {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Coaching")
-                    .font(LifeOSFont.header(16))
+                    .lifeOSTypography(.sectionTitle)
                 if let text = day.coaching.text {
                     Text(text)
-                        .font(LifeOSFont.body(13))
+                        .lifeOSTypography(.body)
                         .fixedSize(horizontal: false, vertical: true)
                     if let provenance = day.coaching.provenanceSummary {
                         Text(provenance)
-                            .font(LifeOSFont.caption(10))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                     }
                 } else {
                     Text("Source-authored coaching is unavailable for this observation.")
-                        .font(LifeOSFont.body(13))
+                        .lifeOSTypography(.body)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
             }
@@ -281,7 +281,7 @@ public struct FitnessStressDetailView: View {
     private var seriesTabs: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Stress series")
-                .font(LifeOSFont.header(16))
+                .lifeOSTypography(.sectionTitle)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     ForEach(FitnessStressSeriesKind.allCases) { kind in
@@ -300,16 +300,16 @@ public struct FitnessStressDetailView: View {
                 HStack(alignment: .firstTextBaseline) {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Intraday \(selectedKind.title)")
-                            .font(LifeOSFont.header(16))
+                            .lifeOSTypography(.sectionTitle)
                         Text("Source samples · scrub to inspect the selected point")
-                            .font(LifeOSFont.caption(10))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                     }
                     Spacer(minLength: 8)
                     if let series = selectedSeries,
                        let sample = series.samples.first(where: { $0.id == selectedSampleID }) {
                         Text(sample.value, format: .number.precision(.fractionLength(0...1)))
-                            .font(LifeOSFont.spaceGrotesk(23, weight: .bold))
+                            .lifeOSTypography(.sectionTitle, weight: .bold)
                             .monospacedDigit()
                     }
                 }
@@ -321,12 +321,12 @@ public struct FitnessStressDetailView: View {
                     )
                     if let sample = series.samples.first(where: { $0.id == selectedSampleID }) {
                         Text("Selected \(sample.timestamp, format: .dateTime.hour().minute()) · \(formatNumber(sample.value)) \(series.scale?.unit ?? "source units")")
-                            .font(LifeOSFont.caption(10))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                     }
                 } else {
                     Text("No \(selectedKind.title.lowercased()) source samples are supplied for this date. LifeOS does not substitute the overall series.")
-                        .font(LifeOSFont.body(12))
+                        .lifeOSTypography(.body)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -340,17 +340,17 @@ public struct FitnessStressDetailView: View {
             VStack(alignment: .leading, spacing: 11) {
                 HStack(alignment: .firstTextBaseline) {
                     Text("Observed duration")
-                        .font(LifeOSFont.header(16))
+                        .lifeOSTypography(.sectionTitle)
                     Spacer(minLength: 8)
                     if let total = day.distribution.totalObservedSeconds {
                         Text(formatDuration(total))
-                            .font(LifeOSFont.spaceGrotesk(21, weight: .bold))
+                            .lifeOSTypography(.sectionTitle, weight: .bold)
                             .monospacedDigit()
                     }
                 }
                 if day.distribution.isUnavailable {
                     Text("Low, medium, and high buckets are unavailable because the source did not supply a reconciled duration.")
-                        .font(LifeOSFont.body(12))
+                        .lifeOSTypography(.body)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 } else {
                     ForEach(FitnessStressBand.allCases, id: \.self) { band in
@@ -361,12 +361,12 @@ public struct FitnessStressDetailView: View {
                         let mediumLabel = labels[.medium] ?? "—"
                         let highLabel = labels[.high] ?? "—"
                         Text("Source threshold labels · \(lowLabel) · \(mediumLabel) · \(highLabel)")
-                            .font(LifeOSFont.caption(10))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                     }
                     if let provenance = day.distribution.provenance {
                         Text(provenance)
-                            .font(LifeOSFont.caption(10))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                     }
                 }
@@ -380,10 +380,10 @@ public struct FitnessStressDetailView: View {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(alignment: .firstTextBaseline) {
                     Text("Day coverage")
-                        .font(LifeOSFont.header(16))
+                        .lifeOSTypography(.sectionTitle)
                     Spacer(minLength: 8)
                     Text(selectedDate, format: .dateTime.month(.wide).year())
-                        .font(LifeOSFont.caption(11).weight(.semibold))
+                        .lifeOSTypography(.metadata, weight: .semibold)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 7), spacing: 8) {
@@ -396,7 +396,7 @@ public struct FitnessStressDetailView: View {
                     StressCoverageLegend(color: LifeOSTokens.tertiaryText.opacity(0.45), title: "Unavailable")
                     StressCoverageLegend(color: LifeOSTokens.tertiaryText, title: "Explicit zero")
                 }
-                .font(LifeOSFont.caption(10))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
             }
         }
@@ -416,11 +416,11 @@ public struct FitnessStressDetailView: View {
         StressSurfaceCard {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Trend analysis")
-                    .font(LifeOSFont.header(16))
+                    .lifeOSTypography(.sectionTitle)
                 let windows = snapshot.windows(for: selectedKind)
                 if windows.isEmpty {
                     Text("No named source windows are supplied for \(selectedKind.title). Range controls stay unavailable until that source history exists.")
-                        .font(LifeOSFont.body(12))
+                        .lifeOSTypography(.body)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 } else {
@@ -438,14 +438,14 @@ public struct FitnessStressDetailView: View {
                             .frame(height: 112)
                         HStack(alignment: .firstTextBaseline) {
                             Text(window.average.map(formatNumber) ?? "—")
-                                .font(LifeOSFont.spaceGrotesk(22, weight: .bold))
+                                .lifeOSTypography(.sectionTitle, weight: .bold)
                                 .monospacedDigit()
                             Text("average · \(window.trendLabel ?? "Insufficient history")")
-                                .font(LifeOSFont.caption(11))
+                                .lifeOSTypography(.metadata)
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                             Spacer(minLength: 8)
                             Text(window.sourceWindow)
-                                .font(LifeOSFont.caption(10))
+                                .lifeOSTypography(.metadata)
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                                 .multilineTextAlignment(.trailing)
                         }
@@ -459,13 +459,13 @@ public struct FitnessStressDetailView: View {
     private var provenanceSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Source and state")
-                .font(LifeOSFont.header(15))
+                .lifeOSTypography(.sectionTitle)
             Text((selectedDay?.evidence ?? .unavailable("No selected-day source observation.")).summary)
-                .font(LifeOSFont.caption(10))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .fixedSize(horizontal: false, vertical: true)
             Text("Stress is an observed trend in this view, not a mental-health or medical claim.")
-                .font(LifeOSFont.caption(10))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
         }
         .padding(.horizontal, 2)
@@ -475,9 +475,9 @@ public struct FitnessStressDetailView: View {
         StressSurfaceCard {
             VStack(alignment: .leading, spacing: 7) {
                 Text(title)
-                    .font(LifeOSFont.header(16))
+                    .lifeOSTypography(.sectionTitle)
                 Text(detail)
-                    .font(LifeOSFont.body(12))
+                    .lifeOSTypography(.body)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -505,7 +505,7 @@ private struct StressSeriesTabButton: View {
         let background: Color = isSelected ? LifeOSTokens.accent : LifeOSTokens.surface
         Button(action: action) {
             Text(kind.title)
-                .font(LifeOSFont.caption(11).weight(.semibold))
+                .lifeOSTypography(.metadata, weight: .semibold)
                 .foregroundStyle(foreground)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
@@ -527,7 +527,7 @@ private struct StressRangeButton: View {
         let foreground: Color = isSelected ? .white : .primary
         let background: Color = isSelected ? LifeOSTokens.accent : LifeOSTokens.surface
         return Button(title, action: action)
-            .font(LifeOSFont.caption(11).weight(.semibold))
+            .lifeOSTypography(.metadata, weight: .semibold)
             .foregroundStyle(foreground)
             .padding(.horizontal, 11)
             .padding(.vertical, 7)
@@ -557,7 +557,7 @@ private struct StressStateBadge: View {
 
     var body: some View {
         Text(title)
-            .font(LifeOSFont.caption(10).weight(.semibold))
+            .lifeOSTypography(.metadata, weight: .semibold)
             .foregroundStyle(color)
             .padding(.horizontal, 9)
             .padding(.vertical, 6)
@@ -599,7 +599,7 @@ private struct FitnessStressSeriesChart: View {
                 VStack(alignment: .trailing, spacing: 0) {
                     ForEach(Array(axisValues.enumerated()), id: \.offset) { index, value in
                         Text(formatNumber(value))
-                            .font(LifeOSFont.caption(9))
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                             .monospacedDigit()
                             .frame(maxWidth: .infinity, alignment: .trailing)
@@ -657,7 +657,7 @@ private struct FitnessStressSeriesChart: View {
                         ForEach(Array(xTickIndices.enumerated()), id: \.offset) { tickIndex, sampleIndex in
                             let alignment: Alignment = tickIndex == 0 ? .leading : (tickIndex == xTickIndices.count - 1 ? .trailing : .center)
                             Text(orderedSamples[sampleIndex].timestamp, format: .dateTime.hour().minute())
-                                .font(LifeOSFont.caption(9))
+                                .lifeOSTypography(.metadata)
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                                 .frame(width: 48, alignment: alignment)
                                 .position(x: clampedLabelX(for: orderedSamples[sampleIndex].timestamp, width: proxy.size.width), y: 7)
@@ -805,7 +805,7 @@ private struct StressDistributionRow: View {
     var body: some View {
         HStack(spacing: 9) {
             Text(band.title)
-                .font(LifeOSFont.body(12).weight(.semibold))
+                .lifeOSTypography(.body, weight: .semibold)
                 .frame(width: 58, alignment: .leading)
             GeometryReader { proxy in
                 Capsule()
@@ -818,11 +818,11 @@ private struct StressDistributionRow: View {
             }
             .frame(height: 8)
             Text(percentageLabel)
-                .font(LifeOSFont.caption(11).weight(.semibold))
+                .lifeOSTypography(.metadata, weight: .semibold)
                 .monospacedDigit()
                 .frame(width: 42, alignment: .trailing)
             Text(distribution.duration(for: band).map(formatDuration) ?? "—")
-                .font(LifeOSFont.caption(11))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .monospacedDigit()
                 .frame(width: 54, alignment: .trailing)
@@ -865,9 +865,9 @@ private struct StressCoverageCell: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(fill)
                 .frame(height: 28)
-                .overlay(Text(date, format: .dateTime.day()).font(LifeOSFont.caption(10).weight(.semibold)).foregroundStyle(textColor))
+                .overlay(Text(date, format: .dateTime.day()).lifeOSTypography(.metadata, weight: .semibold).foregroundStyle(textColor))
             Text(label)
-                .font(.system(size: 7, weight: .medium))
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)

@@ -38,7 +38,9 @@ public enum FinanceChartMode: String, CaseIterable, Identifiable, Hashable {
 /// via `matchedGeometryEffect`, the labels themselves never move).
 struct FinanceChartModeSwitcher: View {
     @Binding var selection: FinanceChartMode
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    @Environment(\.lifeOSReduceMotion) private var requestedReduceMotion
+    private var reduceMotion: Bool { systemReduceMotion || requestedReduceMotion }
     @Namespace private var namespace
 
     var body: some View {
@@ -46,14 +48,11 @@ struct FinanceChartModeSwitcher: View {
             ForEach(FinanceChartMode.allCases) { mode in
                 Button {
                     guard selection != mode else { return }
-                    if reduceMotion {
-                        selection = mode
-                    } else {
-                        withAnimation(LifeOSMotion.snappy) { selection = mode }
-                    }
+                    // Animate the control, not the dataset replaced by this binding.
+                    selection = mode
                 } label: {
                     Text(mode.title)
-                        .font(LifeOSFont.axis().weight(selection == mode ? .semibold : .regular))
+                        .lifeOSTypography(.metadata, weight: selection == mode ? .semibold : .regular)
                         .foregroundStyle(selection == mode ? .primary : LifeOSTokens.tertiaryText)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 6)
@@ -62,11 +61,11 @@ struct FinanceChartModeSwitcher: View {
                                 Capsule()
                                     .fill(LifeOSTokens.surface)
                                     .overlay(Capsule().stroke(LifeOSTokens.hairlineBorder, lineWidth: 1))
-                                    .matchedGeometryEffect(id: "finance.chartMode.highlight", in: namespace)
+                                    .modifier(FinanceHeroMorphTag(id: "finance.chartMode.highlight", namespace: reduceMotion ? nil : namespace))
                             }
                         }
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(FinanceMotionControlStyle())
                 .accessibilityLabel(mode.accessibilityTitle)
                 .accessibilityValue(selection == mode ? "Selected" : "Available")
             }
@@ -75,6 +74,7 @@ struct FinanceChartModeSwitcher: View {
         .background(Color.primary.opacity(0.06), in: Capsule())
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Chart mode")
+        .animation(LifeOSMotion.curve(for: .selection, reduceMotion: reduceMotion)?.animation, value: selection)
         .accessibilityValue(selection.accessibilityTitle)
     }
 }
@@ -119,14 +119,11 @@ struct FinanceBarChartView: View {
     @Binding var selectedBucketID: String?
     let isDemo: Bool
 
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    @Environment(\.lifeOSReduceMotion) private var requestedReduceMotion
+    private var reduceMotion: Bool { systemReduceMotion || requestedReduceMotion }
     @State private var drawn: CGFloat = 0
-
-    private var datasetID: String {
-        buckets
-            .map { "\($0.weekStart.timeIntervalSinceReferenceDate):\($0.totalCents ?? -1):\($0.isComplete)" }
-            .joined(separator: "|")
-    }
+    @State private var hasPresented = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -143,17 +140,21 @@ struct FinanceBarChartView: View {
             // false (too-low) number mid-animation for every frame before it
             // finishes, exactly what §C forbids.
             .mask(alignment: .leading) {
-                Rectangle().frame(width: proxy.size.width * drawn)
+                Rectangle().frame(width: proxy.size.width * (reduceMotion ? 1 : drawn))
             }
         }
-        .frame(height: 166)
-        .task(id: "\(datasetID)-\(reduceMotion)") {
-            drawn = 0
-            guard !reduceMotion else {
-                drawn = 1
+        .frame(height: 220)
+        .task {
+            let reveal = LifeOSChartMotionPolicy.shouldReveal(hasPresented: hasPresented, interacting: selectedBucketID != nil, reduceMotion: reduceMotion)
+            hasPresented = true
+            guard reveal else {
+                LifeOSMotion.withoutAnimation { drawn = 1 }
                 return
             }
             withAnimation(LifeOSMotion.chartDraw) { drawn = 1 }
+        }
+        .onChange(of: reduceMotion) { _, reduced in
+            if reduced { LifeOSMotion.withoutAnimation { drawn = 1 } }
         }
     }
 
@@ -162,47 +163,53 @@ struct FinanceBarChartView: View {
         let id = FinanceChartSelectionCodec.id(seriesID: seriesID, date: bucket.weekStart)
         let isSelected = selectedBucketID == id
 
-        Group {
-            if bucket.isGap {
-                // Honesty contract: no coverage here at all. A visible, but
-                // clearly non-value, dashed outline slot — never nothing
-                // (which would look identical to a hidden bar) and never a
-                // filled bar (which would look like an observed zero).
-                Capsule()
-                    .stroke(LifeOSTokens.tertiaryText.opacity(0.4), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
-                    .frame(width: FinanceBarChartView.barWidth, height: max(trackHeight * 0.16, 12))
-            } else {
-                let barHeight = max(CGFloat(bucket.height ?? 0) * trackHeight, bucket.totalCents == 0 ? 2 : 3)
-                Capsule()
-                    .fill(LifeOSTokens.Series.observed.opacity(bucket.isComplete ? 1 : 0.5))
-                    .frame(width: FinanceBarChartView.barWidth, height: barHeight)
-                    .overlay {
-                        // The still-accumulating current week reads as
-                        // partial (dashed outline), never as a genuine decline.
-                        if !bucket.isComplete {
-                            Capsule()
-                                .stroke(LifeOSTokens.Series.observed, style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
-                                .frame(width: FinanceBarChartView.barWidth, height: barHeight)
-                        }
-                    }
-            }
-        }
-        .overlay {
-            if isSelected {
-                Capsule().stroke(LifeOSTokens.primaryText, lineWidth: 1.5)
-                    .padding(-2)
-            }
-        }
-        .frame(height: trackHeight, alignment: .bottom)
-        .contentShape(Rectangle())
-        .onTapGesture {
+        Button {
             if selectedBucketID != id {
                 ScrubBubble<EmptyView>.snapHaptic()
             }
-            selectedBucketID = id
+            LifeOSMotion.withoutAnimation {
+                drawn = 1
+                selectedBucketID = id
+            }
+        } label: {
+            Group {
+                if bucket.isGap {
+                    // Honesty contract: no coverage here at all. A visible, but
+                    // clearly non-value, dashed outline slot — never nothing
+                    // (which would look identical to a hidden bar) and never a
+                    // filled bar (which would look like an observed zero).
+                    Capsule()
+                        .stroke(LifeOSTokens.tertiaryText.opacity(0.4), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                        .frame(width: FinanceBarChartView.barWidth, height: max(trackHeight * 0.16, 12))
+                } else {
+                    let barHeight = max(CGFloat(bucket.height ?? 0) * trackHeight, bucket.totalCents == 0 ? 2 : 3)
+                    Capsule()
+                        .fill(LifeOSTokens.Series.observed.opacity(bucket.isComplete ? 1 : 0.5))
+                        .frame(width: FinanceBarChartView.barWidth, height: barHeight)
+                        .overlay {
+                            // The still-accumulating current week reads as
+                            // partial (dashed outline), never as a genuine decline.
+                            if !bucket.isComplete {
+                                Capsule()
+                                    .stroke(LifeOSTokens.Series.observed, style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
+                                    .frame(width: FinanceBarChartView.barWidth, height: barHeight)
+                            }
+                        }
+                }
+            }
+            .overlay {
+                if isSelected {
+                    Capsule().stroke(LifeOSTokens.primaryText, lineWidth: 1.5)
+                        .padding(-2)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: trackHeight, alignment: .bottom)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(FinanceMotionControlStyle())
         .accessibilityElement(children: .ignore)
-        .accessibilityAddTraits(.isButton)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
         .accessibilityLabel(accessibilityLabel(for: bucket))
         .accessibilityValue(accessibilityValue(for: bucket))
     }
@@ -229,24 +236,29 @@ struct FinanceBarSelectionDetail: View {
     @Binding var selectedBucketID: String?
     let isDemo: Bool
 
+    private var orderedBuckets: [LifeOSBarBucket] {
+        // `FinanceDisplaySnapshot.barBuckets` is emitted chronologically by
+        // `LifeOSBarChartKit.weeklyBuckets`; keep selection linear here.
+        buckets
+    }
+
     private var bucket: LifeOSBarBucket? {
-        let ordered = buckets.sorted { $0.weekStart < $1.weekStart }
         if let selectedBucketID {
-            if let exact = ordered.first(where: {
+            if let exact = orderedBuckets.first(where: {
                 FinanceChartSelectionCodec.id(seriesID: seriesTitle, date: $0.weekStart) == selectedBucketID
             }) {
                 return exact
             }
             if let date = FinanceChartSelectionCodec.date(fromID: selectedBucketID) {
-                if let containing = ordered.first(where: { date >= $0.weekStart && date < $0.weekEnd }) {
+                if let containing = orderedBuckets.first(where: { date >= $0.weekStart && date < $0.weekEnd }) {
                     return containing
                 }
-                return ordered.min { lhs, rhs in
+                return orderedBuckets.min { lhs, rhs in
                     abs(lhs.weekStart.timeIntervalSince(date)) < abs(rhs.weekStart.timeIntervalSince(date))
                 }
             }
         }
-        return ordered.last
+        return orderedBuckets.last
     }
 
     var body: some View {
@@ -257,19 +269,19 @@ struct FinanceBarSelectionDetail: View {
                     .frame(width: 4, height: 35)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(seriesTitle)
-                        .font(LifeOSFont.axis().weight(.semibold))
+                        .lifeOSTypography(.metadata, weight: .semibold)
                         .foregroundStyle(LifeOSTokens.primaryText)
                     if bucket.isUnavailable {
                         Text("No data")
-                            .font(LifeOSFont.inter(17, weight: .semiBold))
+                            .lifeOSTypography(.body, weight: .semibold)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                     } else {
                         Text(FinanceCurrencyFormatter.euro(cents: bucket.totalCents))
-                            .font(LifeOSFont.inter(17, weight: .semiBold).monospacedDigit())
+                            .lifeOSTypography(.body, weight: .semibold).monospacedDigit()
                             .numericTransition()
                     }
                     Text("\(weekRangeLabel(bucket)) · \(weekStatusLabel(bucket))")
-                        .font(LifeOSFont.axis())
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                         .lineLimit(2)
                 }
@@ -305,5 +317,31 @@ struct FinanceBarSelectionDetail: View {
         formatter.dateFormat = "MMM d"
         let end = bucket.weekEnd.addingTimeInterval(-1)
         return "\(formatter.string(from: bucket.weekStart)) – \(formatter.string(from: end))"
+    }
+}
+
+/// Layout-neutral feedback for existing compact chart controls.
+struct FinanceMotionControlStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Feedback(configuration: configuration)
+    }
+    private struct Feedback: View {
+        let configuration: ButtonStyleConfiguration
+        @Environment(\.isEnabled) private var enabled
+        @Environment(\.isFocused) private var focused
+        @Environment(\.accessibilityReduceMotion) private var systemReduced
+        @Environment(\.lifeOSReduceMotion) private var requestedReduced
+        @State private var hovered = false
+        var body: some View {
+            configuration.label
+                .background((enabled && (hovered || focused) ? LifeOSTokens.primaryText.opacity(0.06) : .clear), in: Capsule())
+                .opacity(enabled ? (configuration.isPressed ? 0.72 : 1) : 0.5)
+                .overlay { if enabled && focused { Capsule().stroke(LifeOSTokens.accent, lineWidth: 1) } }
+                .onHover { hovered = $0 }
+                .onDisappear { hovered = false }
+                .onChange(of: enabled) { _, value in if !value { hovered = false } }
+                .animation(LifeOSMotion.curve(for: .hover, reduceMotion: systemReduced || requestedReduced)?.animation, value: hovered || focused)
+                .animation(LifeOSMotion.curve(for: configuration.isPressed ? .press : .release, reduceMotion: systemReduced || requestedReduced)?.animation, value: configuration.isPressed)
+        }
     }
 }

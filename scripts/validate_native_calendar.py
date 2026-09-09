@@ -699,7 +699,7 @@ def main() -> int:
     require(mac_entitlements.get("com.apple.security.app-sandbox") is True, "macOS app must enable App Sandbox")
     require(mac_entitlements.get("com.apple.security.network.client") is True, "macOS app needs sandbox outbound-network permission")
     require(mac_entitlements.get("com.apple.security.network.server") is True, "macOS app needs sandbox inbound-network permission")
-    require("REPLACE_WITH_TEAM_CONFIGURED_ID" in project, "App Group configuration must remain explicit until team-configured")
+    require("APP_GROUP_IDENTIFIER: group.com.hermes.lifeos" in project, "App Group configuration must use the stable LifeOS identifier")
 
     calendar_domain = (IOS / "Shared/CalendarDomain.swift").read_text(encoding="utf-8")
     for token in ("CalendarItem", "CalendarProgress", "CalendarSnapshot", "deletedAt", "deleting(at:", "iconAsset"):

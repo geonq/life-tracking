@@ -5,9 +5,181 @@ import XCTest
 
 @MainActor
 final class LifeOSWidgetSnapshotTests: XCTestCase {
+    func testFutureWidgetTypographyUsesScaledCappedRolesAndNumericFallbacks() throws {
+        XCTAssertEqual(LifeOSWidgetTypography.Role.hero.baseSize, 28)
+        XCTAssertEqual(LifeOSWidgetTypography.Role.heroFallback.baseSize, 24)
+        XCTAssertEqual(LifeOSWidgetTypography.Role.heroMinimum.baseSize, 22)
+        XCTAssertEqual(LifeOSWidgetTypography.Role.heroMinimum.minimumSize, 22)
+        XCTAssertEqual(LifeOSWidgetTypography.Role.hero.maximumSize, 34)
+        XCTAssertEqual(
+            LifeOSWidgetTypography.Role.numericFallback(for: 28),
+            .hero
+        )
+        XCTAssertEqual(
+            LifeOSWidgetTypography.Role.numericFallback(for: 24),
+            .heroFallback
+        )
+        XCTAssertEqual(
+            LifeOSWidgetTypography.Role.numericFallback(for: 22),
+            .heroMinimum
+        )
+
+        let iosRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: iosRoot.appendingPathComponent("LifeOSWidget/FutureModuleWidgets.swift"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(source.contains("@ScaledMetric private var scaledSize: CGFloat"))
+        XCTAssertTrue(source.contains(".lifeOSWidgetTypography(.hero)"))
+        XCTAssertTrue(source.contains("Role.numericFallback(for: size)"))
+        XCTAssertFalse(source.contains("compatibilityFont"))
+        XCTAssertFalse(source.contains(".system(size: baseSize"))
+        XCTAssertFalse(source.contains(".font(LifeOSWidgetTypography."))
+
+        let nextEventSource = try String(
+            contentsOf: iosRoot.appendingPathComponent("LifeOSWidget/NextEventWidget.swift"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(nextEventSource.contains(".lifeOSWidgetTypography(.hero)"))
+        XCTAssertTrue(nextEventSource.contains(".lifeOSWidgetTypography(.metadata)"))
+        XCTAssertTrue(nextEventSource.contains(".lifeOSWidgetTypography(.compactMetric)"))
+        XCTAssertFalse(nextEventSource.contains(".font(LifeOSWidgetTypography."))
+        XCTAssertFalse(nextEventSource.contains(".font(.system(size: 20"))
+        XCTAssertFalse(nextEventSource.contains(".font(.system(size: 22"))
+    }
+
+    func testTasksProjectionObservedEmptyStalePrivacyAndRouting() throws {
+        let now = Date(timeIntervalSince1970: 1_780_000_000)
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let id = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        let todo = try CalendarItem(id: id, title: "Plan day", kind: .todo,
+                                    start: now, end: now.addingTimeInterval(600))
+        let snapshot = CalendarSnapshot(items: [todo])
+        let observed = TasksWidgetData.project(snapshot, savedAt: now, privacy: .summaryAllowed, at: now, calendar: calendar)
+        XCTAssertEqual(observed.state, .fresh)
+        XCTAssertEqual(observed.pendingCount, 1)
+        XCTAssertEqual(observed.refreshAt, now.addingTimeInterval(901))
+        XCTAssertEqual(observed.rows.map(\.id), [id])
+        XCTAssertEqual(observed.rows.map(\.title), ["Pending task"])
+        XCTAssertEqual(TasksWidgetData.destination.absoluteString, "lifeos://calendar")
+        XCTAssertEqual(LifeOSDeepLink(url: TasksWidgetData.destination), .calendar)
+        let empty = TasksWidgetData.project(CalendarSnapshot(), savedAt: now, privacy: .summaryAllowed, at: now)
+        XCTAssertEqual(empty.pendingCount, 0)
+        XCTAssertEqual(empty.state, .fresh)
+        let absent = TasksWidgetData.project(nil, savedAt: nil, privacy: .summaryAllowed, at: now)
+        XCTAssertNil(absent.pendingCount)
+        XCTAssertEqual(absent.state, .unavailable)
+        let stale = TasksWidgetData.project(snapshot, savedAt: now.addingTimeInterval(-901), privacy: .summaryAllowed, at: now, calendar: calendar)
+        XCTAssertEqual(stale.state, .stale)
+        XCTAssertEqual(stale.pendingCount, 1)
+        let hidden = TasksWidgetData.project(snapshot, savedAt: now, privacy: .redacted, at: now)
+        XCTAssertEqual(hidden.state, .redacted)
+        XCTAssertNil(hidden.pendingCount)
+        XCTAssertTrue(hidden.rows.isEmpty)
+        XCTAssertTrue(FutureModuleWidgetEntry(date: now, tasks: observed).tasks.rows.isEmpty)
+    }
+
+    func testTasksSensitiveTitlesNeverEnterWidgetPresentation() throws {
+        let now = Date(timeIntervalSince1970: 1_780_000_000)
+        let secrets = ["Private oncology appointment", "Confidential acquisition review", "Secret debt repayment"]
+        let items = try secrets.enumerated().map { index, title in
+            try CalendarItem(
+                id: UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", index + 1))!,
+                title: title, kind: .todo, status: index == 2 ? .done : .planned,
+                start: now.addingTimeInterval(Double(index)), end: now.addingTimeInterval(600),
+                createdAt: now, updatedAt: now
+            )
+        }
+        let snapshot = CalendarSnapshot(items: items.reversed())
+        for privacy in [WidgetPrivacyMode.summaryAllowed, .redacted] {
+            for age in [0.0, 901.0] {
+                let data = TasksWidgetData.project(snapshot, savedAt: now.addingTimeInterval(-age),
+                                                   privacy: privacy, at: now, calendar: fixedCalendar)
+                let entry = FutureModuleWidgetEntry(date: now, snapshot: FutureWidgetSnapshot(
+                    generatedAt: now, privacyMode: privacy), tasks: data)
+                // These are the exact entries consumed by both widget sizes,
+                // including their visible row text and combined accessibility text.
+                let small = TasksSmallWidgetView(entry: entry)
+                let medium = TasksMediumWidgetView(entry: entry)
+                for presentation in [data, small.entry.tasks, medium.entry.tasks] {
+                    for secret in secrets {
+                        XCTAssertFalse(String(reflecting: presentation).contains(secret))
+                        XCTAssertFalse(presentation.rows.contains { $0.title.contains(secret) })
+                        XCTAssertFalse(presentation.detail.contains(secret))
+                    }
+                    if privacy == .summaryAllowed {
+                        XCTAssertEqual(presentation.state, age == 0 ? .fresh : .stale)
+                        XCTAssertEqual(presentation.pendingCount, 2)
+                        XCTAssertEqual(presentation.rows.map(\.id), items.map(\.id))
+                        XCTAssertEqual(presentation.rows.map(\.done), [false, false, true])
+                        XCTAssertEqual(presentation.rows.map(\.title), ["Pending task", "Pending task", "Completed task"])
+                    } else {
+                        XCTAssertEqual(presentation.state, .redacted)
+                        XCTAssertNil(presentation.pendingCount)
+                        XCTAssertTrue(presentation.rows.isEmpty)
+                    }
+                }
+                XCTAssertEqual(TasksWidgetData.destination.absoluteString, "lifeos://calendar")
+                XCTAssertEqual(LifeOSDeepLink(url: TasksWidgetData.destination), .calendar)
+                let name = "tasks-private-\(privacy)-\(Int(age))"
+                render(small, named: "\(name)-small", size: smallSize,
+                       renderingMode: .accented, wallpaper: Color(white: 0.4))
+                render(medium, named: "\(name)-medium", size: mediumSize,
+                       renderingMode: .accented, wallpaper: Color(white: 0.4))
+            }
+        }
+    }
+
+    func testTasksStorageMissingMalformedAndOversizedNeverBecomesEmpty() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: url) }
+        XCTAssertThrowsError(try TasksWidgetData.readSnapshot(at: url))
+        try Data("invalid".utf8).write(to: url)
+        XCTAssertThrowsError(try TasksWidgetData.readSnapshot(at: url))
+        try Data(repeating: 32, count: CalendarSnapshot.maximumEncodedBytes + 1).write(to: url)
+        XCTAssertThrowsError(try TasksWidgetData.readSnapshot(at: url))
+        try JSONEncoder.calendar.encode(CalendarSnapshot()).write(to: url)
+        XCTAssertTrue(try TasksWidgetData.readSnapshot(at: url).items.isEmpty)
+    }
+
+    func testTasksGreyWallpaperObservedAndStale() throws {
+        let now = Date(timeIntervalSince1970: 1_780_000_000)
+        let todo = try CalendarItem(title: "Plan tomorrow and review priorities", kind: .todo,
+                                    start: now, end: now.addingTimeInterval(600))
+        for age in [0.0, 901.0] {
+            let data = TasksWidgetData.project(CalendarSnapshot(items: [todo]), savedAt: now.addingTimeInterval(-age), privacy: .summaryAllowed, at: now)
+            let entry = FutureModuleWidgetEntry(date: now, snapshot: FutureWidgetSnapshot(generatedAt: now, privacyMode: .summaryAllowed), tasks: data)
+            render(TasksMediumWidgetView(entry: entry), named: "tasks-checklist-\(Int(age))", size: mediumSize, renderingMode: .accented, wallpaper: Color(white: 0.4))
+            render(TasksSmallWidgetView(entry: entry), named: "tasks-count-\(Int(age))", size: smallSize, renderingMode: .accented, wallpaper: Color(white: 0.4))
+        }
+    }
+
+    func testTasksChecklistBoundAndExcludedItems() throws {
+        let now = Date(timeIntervalSince1970: 1_780_000_000)
+        let items = try (0..<5).map { offset in
+            try CalendarItem(title: "Task \(offset)", kind: .todo,
+                             start: now.addingTimeInterval(Double(offset)), end: now.addingTimeInterval(600))
+        }
+        let event = try CalendarItem(title: "Event", start: now, end: now.addingTimeInterval(600))
+        let done = try CalendarItem(title: "Done", kind: .todo, status: .done, start: now, end: now.addingTimeInterval(600))
+        let aborted = try CalendarItem(title: "Aborted", kind: .todo, status: .aborted, start: now, end: now.addingTimeInterval(600))
+        let deleted = try CalendarItem(title: "Deleted", kind: .todo, start: now, end: now.addingTimeInterval(600), deletedAt: now)
+        let data = TasksWidgetData.project(CalendarSnapshot(items: items + [event, done, aborted, deleted]), savedAt: now,
+                                          privacy: .summaryAllowed, at: now)
+        XCTAssertEqual(data.pendingCount, 5)
+        XCTAssertEqual(data.rows.count, 3)
+        XCTAssertEqual(data.rows.map(\.title), Array(repeating: "Pending task", count: 3))
+        XCTAssertEqual(data.rows.map(\.id), Array(items.prefix(3)).map(\.id))
+    }
+
     private let smallSize = CGSize(width: 155, height: 155)
     private let mediumSize = CGSize(width: 329, height: 155)
     private let scale: CGFloat = 2
+    private let widgetKitMediumMargins = EdgeInsets(top: 8, leading: 8, bottom: 8, trailing: 8)
+    private let transparentWidgetMediumMargins = EdgeInsets(top: 16, leading: 16, bottom: 16, trailing: 16)
 
     private var demoUsageEntry: LifeOSEntry {
         let observedAt = DemoDataProvider.observedAt
@@ -30,9 +202,10 @@ final class LifeOSWidgetSnapshotTests: XCTestCase {
     }
 
     private var summaryAllowedFutureEntry: FutureModuleWidgetEntry {
-        let observedAt = Date(
-            timeIntervalSince1970: floor(Date(timeIntervalSinceNow: -60).timeIntervalSince1970)
-        )
+        summaryAllowedEntry(at: Date(timeIntervalSince1970: floor(Date(timeIntervalSinceNow: -60).timeIntervalSince1970)))
+    }
+
+    private func summaryAllowedEntry(at observedAt: Date) -> FutureModuleWidgetEntry {
         let finance = WidgetSafeFinanceSummary(
             connector: .connected,
             consent: .granted,
@@ -511,6 +684,77 @@ final class LifeOSWidgetSnapshotTests: XCTestCase {
         )
     }
 
+    func testNutritionProgressTokensAreDistinctAndContrastOnTransparentGrey() throws {
+        let calories = NutritionWidgetPalette.calories(transparent: true)
+        let protein = NutritionWidgetPalette.protein(transparent: true)
+        XCTAssertEqual(calories, Color.lifeOSOrange400)
+        XCTAssertEqual(protein, Color.lifeOSTeal400)
+        XCTAssertNotEqual(calories, protein)
+        XCTAssertEqual(NutritionWidgetPalette.calories(transparent: false), Color.lifeOSTasksOrange)
+        XCTAssertEqual(NutritionWidgetPalette.protein(transparent: false), Color.lifeOSTealInfo)
+        XCTAssertEqual(LifeOSTokens.Series.estimate, Color.lifeOSSeriesEstimate)
+        func luminance(_ color: Color) throws -> Double {
+            let rgb = try XCTUnwrap(NSColor(color).usingColorSpace(.sRGB))
+            XCTAssertEqual(rgb.alphaComponent, 1, accuracy: 0.001)
+            func linear(_ value: CGFloat) -> Double {
+                let v = Double(value)
+                return v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4)
+            }
+            return 0.2126 * linear(rgb.redComponent) + 0.7152 * linear(rgb.greenComponent) + 0.0722 * linear(rgb.blueComponent)
+        }
+        for grey in [0.12, 0.20, 0.25, 0.30, 0.40] {
+            let background = try luminance(Color(.sRGB, white: grey, opacity: 1))
+            for token in [calories, protein] {
+                XCTAssertGreaterThanOrEqual((try luminance(token) + 0.05) / (background + 0.05), 3)
+            }
+        }
+    }
+
+    func testClearChromeKeepsTextOpaqueAndPanelsClear() throws {
+        for mode in [WidgetRenderingMode.fullColor, .accented, .vibrant] {
+            for showsBackground in [false, true] {
+                let chrome = LifeOSWidgetChrome.resolving(showsContainerBackground: showsBackground, renderingMode: mode)
+                let transparent = !showsBackground || mode != .fullColor
+                XCTAssertEqual(chrome.usesTransparentTreatment, transparent)
+                if transparent {
+                    XCTAssertEqual(chrome.hero, .white)
+                    XCTAssertEqual(chrome.secondary, LifeOSTokens.widgetTransparentSupporting)
+                    XCTAssertEqual(chrome.tertiary, LifeOSTokens.widgetTransparentSupporting)
+                    for color in [chrome.hero, chrome.secondary, chrome.tertiary] {
+                        let resolved = try XCTUnwrap(NSColor(color).usingColorSpace(.deviceRGB))
+                        XCTAssertEqual(resolved.alphaComponent, 1, accuracy: 0.001)
+                    }
+                    XCTAssertEqual(NSColor(chrome.panelFill(opacity: 0.32)).alphaComponent, 0, accuracy: 0.001)
+                    XCTAssertEqual(NSColor(chrome.panelFill(opacity: 0.45)).alphaComponent, 0, accuracy: 0.001)
+                } else {
+                    XCTAssertEqual(NSColor(chrome.panelFill(opacity: 0.32)).alphaComponent, 0.32, accuracy: 0.001)
+                    XCTAssertEqual(chrome.panelFill(opacity: 0.45), LifeOSTokens.canvas.opacity(0.45))
+                }
+            }
+        }
+        XCTAssertEqual(futureModuleStateText(.unavailable), "No data")
+        XCTAssertEqual(futureModuleStateText(.redacted), "Summary hidden")
+        XCTAssertEqual(futureModuleStateText(.stale), "Stale summary")
+    }
+
+    func testGreyWallpaperWidgetStates() {
+        let grey = Color(white: 0.4)
+        render(CalendarWidgetView(entry: calendarDemoEntry), named: "grey-calendar", size: mediumSize, renderingMode: .accented, wallpaper: grey)
+        render(LifeOSUsageSmallWidgetView(entry: demoUsageEntry), named: "grey-usage", size: smallSize, renderingMode: .accented, wallpaper: grey)
+        let fixedDate = DemoDataProvider.observedAt
+        let observed = summaryAllowedEntry(at: fixedDate)
+        let missing = FutureModuleWidgetEntry(date: fixedDate, snapshot: FutureWidgetSnapshot(generatedAt: fixedDate, privacyMode: .summaryAllowed))
+        let stale = FutureModuleWidgetEntry(date: fixedDate.addingTimeInterval(futureWidgetFreshnessWindow + 1), snapshot: observed.snapshot)
+        XCTAssertEqual(stale.snapshot.financeDisplayState(at: stale.date), .stale)
+        for (name, entry) in [("hidden", unavailableFutureEntry), ("unavailable", missing), ("observed", observed), ("stale", stale)] {
+            render(NetWorthWidgetView(entry: entry), named: "grey-net-worth-\(name)", size: mediumSize, renderingMode: .accented, wallpaper: grey)
+            render(SpendRingWidgetView(entry: entry), named: "grey-spend-\(name)", size: smallSize, renderingMode: .accented, wallpaper: grey)
+            render(DailyOverviewWidgetView(entry: entry), named: "grey-daily-\(name)", size: mediumSize, renderingMode: .accented, wallpaper: grey)
+            render(FitnessHealthMonitorWidgetView(entry: entry), named: "grey-health-\(name)", size: mediumSize, renderingMode: .accented, wallpaper: grey)
+            render(TasksMediumWidgetView(entry: entry), named: "grey-tasks-\(name)", size: mediumSize, renderingMode: .accented, wallpaper: grey)
+        }
+    }
+
     func testFutureModuleSnapshots() {
         let entry = unavailableFutureEntry
 
@@ -787,6 +1031,53 @@ final class LifeOSWidgetSnapshotTests: XCTestCase {
         XCTAssertEqual(entry.snapshot.fitnessDisplayState, .fresh)
     }
 
+    func testNutritionMacroCellUsesPanelChromeRole() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("LifeOSWidget/FutureModuleWidgets.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let start = try XCTUnwrap(source.range(of: "private struct NutritionMacroGoalCell: View {"))
+        let end = try XCTUnwrap(source.range(of: "struct CaloriesMacrosWidgetView: View {", range: start.upperBound..<source.endIndex))
+        let cell = source[start.lowerBound..<end.lowerBound]
+        XCTAssertTrue(cell.contains(".background(chrome.panelFill(opacity: 0.45),"))
+        XCTAssertFalse(cell.contains("LifeOSTokens.canvas"))
+    }
+
+    func testCaloriesMacrosMediumLayoutKeepsAllEssentialFramesInBounds() {
+        for margins in [widgetKitMediumMargins, transparentWidgetMediumMargins] {
+            let layout = NutritionCaloriesMacrosLayout(
+                containerSize: mediumSize,
+                contentMargins: margins
+            )
+
+            XCTAssertEqual(layout.macroFrames.count, 3)
+            XCTAssertTrue(layout.essentialFramesAreInBounds)
+            XCTAssertEqual(NutritionCaloriesMacrosLayout.valueFallbackSizes, [28, 24, 22])
+            XCTAssertGreaterThan(layout.calorieFrame.width, 0)
+            XCTAssertGreaterThan(layout.calorieFrame.height, 0)
+            XCTAssertGreaterThan(layout.macroFrame.width, 0)
+            XCTAssertGreaterThan(layout.macroFrame.height, 0)
+            XCTAssertEqual(layout.macroFrames.map(\.minY), Array(repeating: layout.contentFrame.minY, count: 3))
+            XCTAssertTrue(layout.macroFrames.allSatisfy { $0.width > 0 && $0.height > 0 })
+            XCTAssertLessThanOrEqual(layout.macroFrames[2].maxX, layout.contentBounds.maxX)
+            XCTAssertLessThanOrEqual(layout.macroFrames[2].maxY, layout.contentBounds.maxY)
+        }
+    }
+
+    func testNutritionGreyWallpaperTransparentAndTintedSnapshots() {
+        let fixedDate = DemoDataProvider.observedAt
+        let observed = summaryAllowedEntry(at: fixedDate)
+        let missing = FutureModuleWidgetEntry(date: fixedDate, snapshot: FutureWidgetSnapshot(generatedAt: fixedDate, privacyMode: .summaryAllowed))
+        let stale = FutureModuleWidgetEntry(date: fixedDate.addingTimeInterval(futureWidgetFreshnessWindow + 1), snapshot: observed.snapshot)
+        for (modeName, mode) in [("accented", WidgetRenderingMode.accented), ("vibrant", .vibrant)] {
+            for (name, entry) in [("hidden", unavailableFutureEntry), ("unavailable", missing), ("observed", observed), ("stale", stale)] {
+                render(NutritionOverviewWidgetView(entry: entry), named: "grey-nutrition-overview-\(modeName)-\(name)", size: mediumSize, renderingMode: mode, wallpaper: Color(white: 0.4))
+                render(CaloriesMacrosWidgetView(entry: entry), named: "grey-nutrition-macros-\(modeName)-\(name)", size: mediumSize, renderingMode: mode, wallpaper: Color(white: 0.4), contentMargins: widgetKitMediumMargins)
+                render(NetEnergyWidgetView(entry: entry), named: "grey-nutrition-energy-\(modeName)-\(name)", size: mediumSize, renderingMode: mode, wallpaper: Color(white: 0.4))
+            }
+        }
+    }
+
     func testNutritionMediumWidgetsDemoLightAndDarkSnapshots() {
         let entry = summaryAllowedFutureEntry
         for (suffix, scheme) in [("dark", ColorScheme.dark), ("light", ColorScheme.light)] {
@@ -800,7 +1091,8 @@ final class LifeOSWidgetSnapshotTests: XCTestCase {
                 CaloriesMacrosWidgetView(entry: entry),
                 named: "nutrition-calories-macros-medium-demo-\(suffix)",
                 size: mediumSize,
-                colorScheme: scheme
+                colorScheme: scheme,
+                contentMargins: widgetKitMediumMargins
             )
             render(
                 NetEnergyWidgetView(entry: entry),
@@ -840,7 +1132,7 @@ final class LifeOSWidgetSnapshotTests: XCTestCase {
         XCTAssertEqual(entry.snapshot.nutrition.carbsGrams.state(at: now), .stale)
         XCTAssertEqual(entry.snapshot.nutrition.qualityScore.state(at: now), .redacted)
         render(NutritionOverviewWidgetView(entry: entry), named: "nutrition-overview-medium-independent-states", size: mediumSize)
-        render(CaloriesMacrosWidgetView(entry: entry), named: "nutrition-calories-macros-medium-independent-states", size: mediumSize)
+        render(CaloriesMacrosWidgetView(entry: entry), named: "nutrition-calories-macros-medium-independent-states", size: mediumSize, contentMargins: widgetKitMediumMargins)
         render(NetEnergyWidgetView(entry: entry), named: "nutrition-net-energy-medium-independent-states", size: mediumSize)
     }
 
@@ -1308,6 +1600,8 @@ final class LifeOSWidgetSnapshotTests: XCTestCase {
         locale: Locale = Locale(identifier: "en_US_POSIX"),
         renderingMode: WidgetRenderingMode = .fullColor,
         colorScheme: ColorScheme = .dark,
+        wallpaper: Color? = nil,
+        contentMargins: EdgeInsets = EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0),
         file: StaticString = #filePath,
         line: UInt = #line
     ) {
@@ -1315,8 +1609,10 @@ final class LifeOSWidgetSnapshotTests: XCTestCase {
         let rootView = ZStack {
             // WidgetKit normally supplies this container background. The wrapper keeps the
             // off-screen host deterministic without changing production widget backgrounds.
-            LifeOSTokens.surface
-            view.environment(\.widgetRenderingMode, renderingMode)
+            wallpaper ?? LifeOSTokens.surface
+            view
+                .environment(\.widgetRenderingMode, renderingMode)
+                .padding(contentMargins)
         }
         .frame(width: size.width, height: size.height)
         .environment(\.locale, locale)
@@ -1371,11 +1667,22 @@ final class LifeOSWidgetSnapshotTests: XCTestCase {
         }
         XCTAssertEqual(bitmap.pixelsWide, pixelWidth, "Unexpected \(name) width", file: file, line: line)
         XCTAssertEqual(bitmap.pixelsHigh, pixelHeight, "Unexpected \(name) height", file: file, line: line)
-        XCTAssertGreaterThan(png.count, 1_024, "Empty \(name) PNG", file: file, line: line)
 
         let attachment = XCTAttachment(uniformTypeIdentifier: "public.png", name: "\(name).png", payload: png)
         attachment.lifetime = .keepAlways
         add(attachment)
+
+        // Optional artifact export also works with direct xctest, where no
+        // xcresult attachment collector is available.
+        if let output = ProcessInfo.processInfo.environment["LIFEOS_WIDGET_SNAPSHOT_OUTPUT"] {
+            do {
+                let directory = URL(fileURLWithPath: output, isDirectory: true)
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                try png.write(to: directory.appendingPathComponent("\(name).png"), options: .atomic)
+            } catch {
+                XCTFail("Could not export \(name): \(error)", file: file, line: line)
+            }
+        }
     }
 
     private var fixedCalendar: Calendar {

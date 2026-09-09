@@ -182,13 +182,11 @@ class NativeReleaseInvariantTests(unittest.TestCase):
 
     def test_selected_tab_text_uses_a_text_safe_neutral_role(self) -> None:
         source = (ROOT / "ios/LifeOS/LifeOSApp.swift").read_text(encoding="utf-8")
-        self.assertIn(
-            ".foregroundStyle(isSelected ? tab.accent : LifeOSTokens.tertiaryText)",
-            source,
-        )
-        self.assertIn(
-            ".foregroundStyle(isSelected ? LifeOSTokens.primaryText : LifeOSTokens.tertiaryText)",
-            source,
+        self.assertGreaterEqual(
+            source.count(
+                ".foregroundStyle(isSelected ? LifeOSTokens.selectedNavigationText : LifeOSTokens.tertiaryText)"
+            ),
+            2,
         )
 
     def test_health_prompts_are_settings_only_and_write_is_explicit(self) -> None:

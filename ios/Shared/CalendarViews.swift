@@ -98,12 +98,185 @@ private final class CalendarInteractionSession: ObservableObject {
     @Published var statusMutationActive = false
 }
 
+/// Real vertical layout targets for ScrollViewReader. The targets are clear
+/// views at the hour boundaries, so programmatic fallback scrolling resolves
+/// against the timed grid rather than a translated label frame.
+private struct CalendarTimelineHourAnchors: View {
+    let hourHeight: CGFloat
+    let totalHeight: CGFloat
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(0..<24, id: \.self) { hour in
+                Color.clear
+                    .frame(width: 1, height: hourHeight)
+                    .id(CalendarTimelineScrollAnchor.id(for: hour))
+            }
+        }
+        .frame(width: 1, height: totalHeight, alignment: .top)
+        .accessibilityHidden(true)
+    }
+}
+
+/// The single time-gutter renderer used by both platform timelines. Labels are
+/// positioned from the wall-clock axis rather than from a normalized Date so a
+/// DST gap or fold cannot move a row or render the same hour twice.
+private struct CalendarTimelineHourLabels: View {
+    let day: Date
+    let todayColumnVisible: Bool
+    let hourHeight: CGFloat
+    let contentHeight: CGFloat
+    let width: CGFloat
+    let calendar: Calendar
+
+    var body: some View {
+        let scale = CalendarInteractionLayout.timelineScale(
+            day: day,
+            hourHeight: Double(hourHeight),
+            calendar: calendar
+        )
+        let dayMinutes = scale?.dayMinutes ?? 1_440
+        let marks = Array(stride(from: 0, through: dayMinutes, by: 60))
+        let axisHeight = CGFloat(CalendarInteractionLayout.timelineHeight(
+            days: [day],
+            hourHeight: Double(hourHeight),
+            calendar: calendar
+        ))
+
+        TimelineView(.periodic(from: .now, by: 60)) { context in
+            let nowY: CGFloat? = todayColumnVisible
+                ? min(
+                    max(0, axisHeight - 1),
+                    max(
+                        0,
+                        CGFloat(CalendarTimelineScale.wallClockMinute(for: context.date, calendar: calendar) / 60)
+                            * hourHeight
+                    )
+                )
+                : nil
+
+            ZStack(alignment: .topTrailing) {
+                ForEach(marks, id: \.self) { minute in
+                    let y = CGFloat(minute) / 60 * hourHeight
+                    let date = scale?.date(
+                        for: Double(minute) / 60 * Double(hourHeight),
+                        calendar: calendar,
+                        snappingTo: 1
+                    )
+                    if nowY.map({ abs($0 - y) > 12 }) ?? true {
+                        Text(CalendarInteractionLayout.timelineHourLabel(
+                            minute: minute,
+                            dayMinutes: dayMinutes,
+                            date: date,
+                            calendar: calendar
+                        ))
+                        .lifeOSTypography(.metadata).monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .topTrailing)
+                        .padding(.trailing, 8)
+                        .offset(y: y)
+                        .id(minute / 60)
+                        .accessibilityIdentifier(minute == dayMinutes ? "calendar-timeline-end" : "")
+                    }
+                }
+            }
+            .frame(width: width, height: contentHeight, alignment: .topTrailing)
+        }
+    }
+}
+
 #if os(macOS)
 private struct CalendarMacScrollOffsetKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
 
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = nextValue()
+    }
+}
+
+private struct CalendarMacTimelineScrollOffsetKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+/// Resolves the native scroll view that hosts the SwiftUI timeline. SwiftUI's
+/// ScrollViewReader only exposes semantic anchors; the AppKit bridge supplies
+/// the continuous offset required to keep a pinch's focal time stationary.
+private struct CalendarMacScrollViewResolver: NSViewRepresentable {
+    let onResolve: (NSScrollView) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        NSView(frame: .zero)
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            var ancestor = nsView.superview
+            while let view = ancestor {
+                if let scrollView = view as? NSScrollView {
+                    onResolve(scrollView)
+                    return
+                }
+                ancestor = view.superview
+            }
+        }
+    }
+}
+#endif
+
+#if os(iOS)
+private struct CalendarTimelineVerticalOffsetMeasurement: Equatable {
+    let offset: CGFloat
+    let contentHeight: CGFloat
+
+    static let zero = Self(offset: 0, contentHeight: 0)
+}
+
+private struct CalendarTimelineVerticalOffsetKey: PreferenceKey {
+    static var defaultValue = CalendarTimelineVerticalOffsetMeasurement.zero
+
+    static func reduce(
+        value: inout CalendarTimelineVerticalOffsetMeasurement,
+        nextValue: () -> CalendarTimelineVerticalOffsetMeasurement
+    ) {
+        value = nextValue()
+    }
+}
+
+/// Resolves the single UIKit scroll owner created by SwiftUI. ScrollViewReader
+/// is still used for semantic hour anchors; this bridge is only for the
+/// continuous pixel offset required by direct pinch tracking and cancellation.
+private struct CalendarIOSScrollViewResolver: UIViewRepresentable {
+    let onResolve: (UIScrollView) -> Void
+
+    final class Coordinator {
+        weak var resolvedScrollView: UIScrollView?
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeUIView(context: Context) -> UIView {
+        UIView(frame: .zero)
+    }
+
+    func updateUIView(_ view: UIView, context: Context) {
+        guard context.coordinator.resolvedScrollView == nil else { return }
+        DispatchQueue.main.async {
+            var ancestor = view.superview
+            while let view = ancestor {
+                if let scrollView = view as? UIScrollView {
+                    context.coordinator.resolvedScrollView = scrollView
+                    onResolve(scrollView)
+                    return
+                }
+                ancestor = view.superview
+            }
+        }
     }
 }
 #endif
@@ -396,9 +569,9 @@ public struct CalendarItemRow: View {
                 CalendarIconView(item: item).accessibilityLabel(item.icon.map { "Icon \($0)" } ?? "Icon")
             }
             VStack(alignment: .leading, spacing: 4) {
-                Text(item.title).font(.headline)
+                Text(item.title).lifeOSTypography(.cardTitle)
                 Text("\(item.start, format: Self.time) – \(item.end, format: Self.time)")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .lifeOSTypography(.metadata).foregroundStyle(.secondary)
             }
             Spacer()
             Circle().fill(CalendarEventVisuals.accent).frame(width: 9, height: 9)
@@ -474,16 +647,32 @@ public struct CalendarTimelineView: View {
     /// Called once a page settles. The parent recenters the virtual strip on
     /// this date, keeping only previous/current/next windows materialized.
     public let onCommitDateChange: ((Date) -> Void)?
+    /// The timeline owns focal-time math and gesture arbitration; the page
+    /// owns the persisted hour-height state after a zoom completes.
+    public let onHourHeightChange: ((CGFloat) -> Void)?
+    /// A one-shot programmatic wall-time navigation request. Retained scroll
+    /// state is handled by the timeline and never replays this command.
+    public let scrollRequest: CalendarTimelineScrollRequest?
+    public let onScrollRequestConsumed: ((Int) -> Void)?
     public let monthNamespace: Namespace.ID?
     public let monthExpanded: Bool
     public let monthSelectedDate: Date?
     public let reduceMotion: Bool
     @StateObject private var interactionSession = CalendarInteractionSession()
+    @State private var layoutRevision = 0
 #if os(macOS)
     @State private var macScrollOffset: CGFloat = 0
+    @State private var macTimelineScrollOffset: CGFloat = 0
+    @State private var macTimelineScrollView: NSScrollView?
+    @State private var macZoomSession: CalendarTimelineZoomSession?
+    @State private var pendingMacZoomOffset: CGFloat?
+    @State private var macPreviewHourHeight: CGFloat?
+    @State private var macRetainedTimelineAnchor: CalendarTimelineScrollAnchor?
+    @State private var macPreviousVerticalScrollElasticity: NSScrollView.Elasticity?
+    @GestureState private var macMagnifyGestureActive = false
 #endif
 
-    private let timeGutter: CGFloat = 52
+    private let timeGutter: CGFloat = CGFloat(CalendarInteractionLayout.timelineTimeGutter)
 #if os(macOS)
     private let minimumDayWidth: CGFloat = 112
 #else
@@ -501,6 +690,9 @@ public struct CalendarTimelineView: View {
                 onStatusUpdate: CalendarStatusUpdateHandler? = nil,
                 onPreviewDateChange: ((Date) -> Void)? = nil,
                 onCommitDateChange: ((Date) -> Void)? = nil,
+                onHourHeightChange: ((CGFloat) -> Void)? = nil,
+                scrollRequest: CalendarTimelineScrollRequest? = nil,
+                onScrollRequestConsumed: ((Int) -> Void)? = nil,
                 monthNamespace: Namespace.ID? = nil,
                 monthExpanded: Bool = false,
                 monthSelectedDate: Date? = nil,
@@ -520,6 +712,9 @@ public struct CalendarTimelineView: View {
         self.onStatusUpdate = onStatusUpdate
         self.onPreviewDateChange = onPreviewDateChange
         self.onCommitDateChange = onCommitDateChange
+        self.onHourHeightChange = onHourHeightChange
+        self.scrollRequest = scrollRequest
+        self.onScrollRequestConsumed = onScrollRequestConsumed
         self.monthNamespace = monthNamespace
         self.monthExpanded = monthExpanded
         self.monthSelectedDate = monthSelectedDate
@@ -545,20 +740,54 @@ public struct CalendarTimelineView: View {
             onTimedCreationDraft: onTimedCreationDraft,
             onPreviewDateChange: onPreviewDateChange,
             onCommitDateChange: onCommitDateChange,
-            monthNamespace: monthNamespace,
-            monthExpanded: monthExpanded,
-            monthSelectedDate: monthSelectedDate,
-            reduceMotion: reduceMotion,
-            interactionSession: interactionSession
+            onHourHeightChange: onHourHeightChange,
+            scrollRequest: scrollRequest,
+                onScrollRequestConsumed: onScrollRequestConsumed,
+                monthNamespace: monthNamespace,
+                monthExpanded: monthExpanded,
+                monthSelectedDate: monthSelectedDate,
+                reduceMotion: reduceMotion,
+                layoutRevision: layoutRevision,
+                interactionSession: interactionSession
         )
 #else
         GeometryReader { viewport in
+            let renderedHourHeight = macPreviewHourHeight ?? hourHeight
             let contentWidth = max(viewport.size.width, timeGutter + CGFloat(days.count) * minimumDayWidth)
             let timelineHeight = CGFloat(CalendarInteractionLayout.timelineHeight(
                 days: days,
-                hourHeight: Double(hourHeight),
+                hourHeight: Double(renderedHourHeight),
                 calendar: calendar
             ))
+            let contentHeight = CGFloat(CalendarInteractionLayout.timelineContentHeight(
+                days: days,
+                hourHeight: Double(renderedHourHeight),
+                calendar: calendar
+            ))
+            let allDayHeight = CGFloat(CalendarAllDayLayout.height(
+                items: items,
+                days: days,
+                calendar: calendar
+            ))
+            let timedViewportHeight = CGFloat(CalendarInteractionLayout.timedViewportHeight(
+                containerHeight: Double(viewport.size.height),
+                dayHeaderHeight: 58,
+                allDayHeight: Double(allDayHeight)
+            ))
+            let macColumnWidth = days.isEmpty
+                ? 0
+                : max(0, (contentWidth - timeGutter) / CGFloat(days.count))
+            let todayColumnIndex = days.firstIndex(where: { calendar.isDateInToday($0) }) ?? -1
+            let todayColumnVisible = CalendarInteractionLayout.isTimelineDayColumnVisible(
+                dayIndex: todayColumnIndex,
+                dayCount: days.count,
+                columnWidth: Double(macColumnWidth),
+                columnOriginX: Double(timeGutter),
+                timeGutter: Double(timeGutter),
+                contentWidth: Double(contentWidth),
+                viewportWidth: Double(viewport.size.width),
+                horizontalContentOffset: Double(max(0, -macScrollOffset))
+            )
             ScrollView(.horizontal) {
                 VStack(spacing: 0) {
                     dayHeader(width: contentWidth)
@@ -572,47 +801,180 @@ public struct CalendarTimelineView: View {
                     )
                     ScrollViewReader { scrollProxy in
                         ScrollView(.vertical) {
-                            HStack(alignment: .top, spacing: 0) {
-                                hourLabels(timelineHeight: timelineHeight)
-                                    .frame(width: timeGutter)
-                                ForEach(days, id: \.self) { day in
-                                    CalendarDayTimeline(
-                                        day: day,
-                                        items: items,
-                                        hourHeight: hourHeight,
-                                        calendar: calendar,
-                                        onSelect: onSelect,
-                                        onCreate: onCreate,
-                                        onCreateTimedRange: onCreateTimedRange,
-                                        timedCreationPreview: timedCreationPreview,
-                                        onTimedCreationDraft: nil,
-                                        onUpdate: onUpdate,
-                                        onStatusUpdate: onStatusUpdate,
-                                        monthNamespace: monthNamespace,
-                                        monthExpanded: monthExpanded,
-                                        monthSelectedDate: monthSelectedDate,
-                                        reduceMotion: reduceMotion,
-                                        isInteractionEnabled: true,
-                                        interactionSession: interactionSession,
-                                        onVerticalPan: nil
+                            ZStack(alignment: .topLeading) {
+                                HStack(alignment: .top, spacing: 0) {
+                                    hourLabels(
+                                        timelineHeight: timelineHeight,
+                                        hourHeight: renderedHourHeight,
+                                        todayColumnVisible: todayColumnVisible
                                     )
-                                    .frame(width: (contentWidth - timeGutter) / CGFloat(max(days.count, 1)))
+                                        .frame(width: timeGutter)
+                                    ForEach(days, id: \.self) { day in
+                                        CalendarDayTimeline(
+                                            day: day,
+                                            items: items,
+                                            hourHeight: renderedHourHeight,
+                                            calendar: calendar,
+                                            onSelect: onSelect,
+                                            onCreate: onCreate,
+                                            onCreateTimedRange: onCreateTimedRange,
+                                            timedCreationPreview: timedCreationPreview,
+                                            onTimedCreationDraft: nil,
+                                            onUpdate: onUpdate,
+                                            onStatusUpdate: onStatusUpdate,
+                                            monthNamespace: monthNamespace,
+                                            monthExpanded: monthExpanded,
+                                            monthSelectedDate: monthSelectedDate,
+                                            reduceMotion: reduceMotion,
+                                            isInteractionEnabled: true,
+                                            interactionSession: interactionSession,
+                                            verticalScrollOffset: macTimelineScrollOffset,
+                                            visibleViewportHeight: timedViewportHeight,
+                                            layoutRevision: layoutRevision
+                                        )
+                                        .frame(width: (contentWidth - timeGutter) / CGFloat(max(days.count, 1)))
+                                    }
+                                }
+                                .overlay {
+                                    CalendarNowLine(
+                                        days: days,
+                                        todayColumnVisible: todayColumnVisible,
+                                        calendar: calendar,
+                                        timeGutter: timeGutter,
+                                        totalHeight: timelineHeight,
+                                        contentWidth: contentWidth,
+                                        columnOriginX: timeGutter
+                                    )
+                                }
+                                CalendarTimelineHourAnchors(
+                                    hourHeight: renderedHourHeight,
+                                    totalHeight: timelineHeight
+                                )
+                                .frame(width: 1, height: timelineHeight, alignment: .top)
+                                .allowsHitTesting(false)
+                            }
+                            .frame(width: contentWidth, height: contentHeight, alignment: .topLeading)
+                            .background {
+                                GeometryReader { content in
+                                    Color.clear.preference(
+                                        key: CalendarMacTimelineScrollOffsetKey.self,
+                                        value: max(0, -content.frame(in: .named("calendar-mac-timeline-scroll")).minY)
+                                    )
+                                }
                             }
                             .overlay {
-                                CalendarNowLine(
-                                    days: days,
-                                    calendar: calendar,
-                                    timeGutter: timeGutter,
-                                    totalHeight: timelineHeight,
-                                    contentWidth: contentWidth,
-                                    reduceMotion: reduceMotion
-                                )
+                                CalendarMacScrollViewResolver { scrollView in
+                                    guard macTimelineScrollView !== scrollView else { return }
+                                    macTimelineScrollView = scrollView
+                                }
+                                .frame(width: 1, height: 1)
+                                .allowsHitTesting(false)
                             }
                         }
+                        .coordinateSpace(name: "calendar-mac-timeline-scroll")
+                        .simultaneousGesture(
+                            macTimelineMagnificationGesture(
+                                viewportHeight: timedViewportHeight,
+                                scrollProxy: scrollProxy
+                            ),
+                            including: .all
+                        )
+                        .onPreferenceChange(CalendarMacTimelineScrollOffsetKey.self) { offset in
+                            guard abs(macTimelineScrollOffset - offset) > 0.5 else { return }
+                            macTimelineScrollOffset = offset
+                            guard macZoomSession == nil else { return }
+                            macRetainedTimelineAnchor = CalendarTimelineScrollAnchor.from(
+                                scrollOffset: Double(offset),
+                                hourHeight: Double(renderedHourHeight)
+                            )
                         }
-                        .task(id: days.first) {
-                            scrollProxy.scrollTo(initialVisibleHour, anchor: .top)
+                        .onChange(of: hourHeight) { previousHourHeight, updatedHourHeight in
+                            if let previewHourHeight = macPreviewHourHeight,
+                               abs(previewHourHeight - updatedHourHeight) <= 0.1,
+                               macZoomSession == nil {
+                                macPreviewHourHeight = nil
+                                if let pendingMacZoomOffset {
+                                    applyMacTimelineScrollOffset(
+                                        pendingMacZoomOffset,
+                                        hourHeight: updatedHourHeight,
+                                        scrollProxy: scrollProxy
+                                    )
+                                    self.pendingMacZoomOffset = nil
+                                }
+                                return
+                            }
+                            guard macZoomSession == nil else { return }
+                            guard previousHourHeight > 0,
+                                  updatedHourHeight > 0,
+                                  abs(previousHourHeight - updatedHourHeight) > 0.1 else { return }
+                            let center = timedViewportHeight / 2
+                            let densityChange = CalendarInteractionLayout.zoomedTimeline(
+                                hourHeight: Double(previousHourHeight),
+                                scrollOffset: Double(currentMacTimelineScrollOffset),
+                                focalViewportOffset: Double(center),
+                                magnification: Double(updatedHourHeight / previousHourHeight),
+                                viewportHeight: Double(timedViewportHeight)
+                            )
+                            macRetainedTimelineAnchor = CalendarTimelineScrollAnchor.from(
+                                scrollOffset: densityChange.scrollOffset,
+                                hourHeight: Double(updatedHourHeight)
+                            )
+                            applyMacTimelineScrollOffset(
+                                CGFloat(densityChange.scrollOffset),
+                                hourHeight: updatedHourHeight,
+                                scrollProxy: scrollProxy,
+                                animated: true
+                            )
                         }
+                        .onAppear {
+                            restoreMacTimelinePositionIfNeeded(
+                                scrollProxy: scrollProxy,
+                                hourHeight: renderedHourHeight,
+                                initial: true
+                            )
+                        }
+                        .onChange(of: days.first) { _, _ in
+                            // A week replacement keeps the retained wall-clock
+                            // position. It must never recenter to the morning.
+                            guard macZoomSession == nil,
+                                  scrollRequest == nil,
+                                  let retained = macRetainedTimelineAnchor else { return }
+                            applyMacTimelineAnchor(
+                                retained,
+                                hourHeight: renderedHourHeight,
+                                scrollProxy: scrollProxy
+                            )
+                        }
+                        .onChange(of: scrollRequest) { _, request in
+                            guard let request else { return }
+                            applyMacTimelineAnchor(
+                                request.anchor,
+                                hourHeight: renderedHourHeight,
+                                scrollProxy: scrollProxy
+                            )
+                            onScrollRequestConsumed?(request.id)
+                        }
+                        .onChange(of: interactionSession.eventMoveActive) { _, active in
+                            if active { cancelMacZoom(scrollProxy: scrollProxy) }
+                        }
+                        .onChange(of: macMagnifyGestureActive) { _, active in
+                            if !active, macZoomSession != nil {
+                                cancelMacZoom(scrollProxy: scrollProxy)
+                            }
+                        }
+                        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { notification in
+                            guard let window = macTimelineScrollView?.window,
+                                  notification.object as? NSWindow === window else { return }
+                            cancelMacZoom(scrollProxy: scrollProxy)
+                        }
+                        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
+                            cancelMacZoom(scrollProxy: scrollProxy)
+                        }
+                        .onDisappear {
+                            cancelMacZoom(scrollProxy: scrollProxy)
+                        }
+                        .scrollDisabled(macZoomSession != nil || interactionSession.eventMoveActive || interactionSession.eventMovePreview != nil)
+                        .frame(height: timedViewportHeight)
                     }
                 }
                 .frame(width: contentWidth)
@@ -620,12 +982,12 @@ public struct CalendarTimelineView: View {
                     GeometryReader { content in
                         Color.clear.preference(
                             key: CalendarMacScrollOffsetKey.self,
-                            value: content.frame(in: .named("calendar-mac-timeline-scroll")).minX
+                            value: content.frame(in: .named("calendar-mac-horizontal-scroll")).minX
                         )
                     }
                 }
             }
-            .coordinateSpace(name: "calendar-mac-timeline-scroll")
+            .coordinateSpace(name: "calendar-mac-horizontal-scroll")
             .scrollDisabled(!CalendarGestureArbitration.parentHorizontalScrollEnabled(
                 eventMutationActive: interactionSession.eventMoveActive,
                 hasProvisionalPreview: interactionSession.eventMovePreview != nil
@@ -639,11 +1001,12 @@ public struct CalendarTimelineView: View {
         .accessibilityLabel("Calendar timeline, \(days.count) days")
         .accessibilityIdentifier("calendar-visible-range")
         .accessibilityValue(
-            "\(days.map(calendarISODate).joined(separator: ",")); offset=\(Int(macScrollOffset.rounded()))"
+            "\(days.map(calendarISODate).joined(separator: ",")); horizontalOffset=\(Int(macScrollOffset.rounded())); verticalOffset=\(Int(macTimelineScrollOffset.rounded())); hourHeight=\(Int((macPreviewHourHeight ?? hourHeight).rounded()))"
         )
 #endif
         }
         .onChange(of: items) { _, updatedItems in
+            layoutRevision &+= 1
             guard let preview = interactionSession.eventMovePreview,
                   let committed = updatedItems.first(where: { $0.id == preview.item.id }),
                   committed.start == preview.start,
@@ -659,7 +1022,7 @@ public struct CalendarTimelineView: View {
                 let dayHolidays = holidays.filter { calendar.isDate($0.date, inSameDayAs: day) }
                 VStack(spacing: 2) {
                     Text(day, format: .dateTime.weekday(.abbreviated))
-                        .font(.caption.weight(.medium))
+                        .lifeOSTypography(.metadata, weight: .medium)
                         .foregroundStyle(.secondary)
                     CalendarDayHeaderNumber(
                         day: day,
@@ -690,43 +1053,248 @@ public struct CalendarTimelineView: View {
         return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
     }
 
-    private func hourLabels(timelineHeight: CGFloat) -> some View {
-        let scale = CalendarInteractionLayout.timelineScale(
+    private func hourLabels(
+        timelineHeight: CGFloat,
+        hourHeight: CGFloat,
+        todayColumnVisible: Bool
+    ) -> some View {
+        CalendarTimelineHourLabels(
             day: days.first ?? .now,
-            hourHeight: Double(hourHeight),
+            todayColumnVisible: todayColumnVisible,
+            hourHeight: hourHeight,
+            contentHeight: timelineHeight,
+            width: timeGutter,
             calendar: calendar
         )
-        let marks = Array(stride(from: 0, to: scale?.dayMinutes ?? 1_440, by: 60))
-        return ZStack(alignment: .topTrailing) {
-            ForEach(marks, id: \.self) { minute in
-                let date = scale.flatMap {
-                    $0.date(for: Double(minute) / 60 * Double(hourHeight), calendar: calendar, snappingTo: 1)
-                }
-                Text(date.map { String(format: "%02d:00", calendar.component(.hour, from: $0)) } ?? "")
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .topTrailing)
-                    .padding(.trailing, 8)
-                    .offset(y: CGFloat(scale?.y(for: date ?? .now, calendar: calendar) ?? Double(minute) / 60 * Double(hourHeight)))
-                    .id(minute / 60)
-            }
-        }
-        .frame(height: timelineHeight)
     }
 
-    /// Starts near the first useful daytime event instead of an empty midnight grid.
-    /// Overnight events remain available by scrolling upward.
-    private var initialVisibleHour: Int {
-        let visibleDayStarts = Set(days.map { calendar.startOfDay(for: $0) })
-        let firstDaytimeEventHour = items
-            .filter { item in
-                visibleDayStarts.contains(calendar.startOfDay(for: item.start)) &&
-                    item.end.timeIntervalSince(item.start) <= 12 * 60 * 60
+#if os(macOS)
+    private func macTimelineMagnificationGesture(
+        viewportHeight: CGFloat,
+        scrollProxy: ScrollViewProxy
+    ) -> some Gesture {
+        MagnifyGesture(minimumScaleDelta: 0.01)
+            .updating($macMagnifyGestureActive) { _, active, _ in
+                active = true
             }
-            .map { calendar.component(.hour, from: $0.start) }
-            .filter { $0 >= 6 }
-            .min()
-        return max(0, min(8, (firstDaytimeEventHour ?? 9) - 1))
+            .onChanged { value in
+                guard CalendarGestureArbitration.timelineZoomEnabled(
+                          eventMutationActive: interactionSession.eventMoveActive,
+                          hasProvisionalPreview: interactionSession.eventMovePreview != nil
+                      ),
+                      value.magnification.isFinite,
+                      value.magnification > 0 else {
+                    cancelMacZoom(scrollProxy: scrollProxy)
+                    return
+                }
+
+                if macZoomSession == nil {
+                    let focalY = value.startLocation.y.isFinite ? value.startLocation.y : 0
+                    beginMacZoom(focalViewportOffset: focalY)
+                }
+                guard var session = macZoomSession,
+                      let zoom = session.update(
+                          magnification: Double(value.magnification),
+                          viewportHeight: Double(viewportHeight)
+                      ) else {
+                    cancelMacZoom(scrollProxy: scrollProxy)
+                    return
+                }
+                macZoomSession = session
+                macPreviewHourHeight = CGFloat(zoom.hourHeight)
+                let targetOffset = CGFloat(zoom.scrollOffset)
+                pendingMacZoomOffset = targetOffset
+                applyMacTimelineScrollOffset(
+                    targetOffset,
+                    hourHeight: CGFloat(zoom.hourHeight),
+                    scrollProxy: scrollProxy
+                )
+            }
+            .onEnded { _ in
+                finishMacZoom(scrollProxy: scrollProxy)
+            }
+    }
+
+    private func beginMacZoom(focalViewportOffset: CGFloat) {
+        guard macZoomSession == nil,
+              CalendarGestureArbitration.timelineZoomEnabled(
+                  eventMutationActive: interactionSession.eventMoveActive,
+                  hasProvisionalPreview: interactionSession.eventMovePreview != nil
+              ) else { return }
+        stopMacTimelineMomentum()
+        if let scrollView = macTimelineScrollView {
+            macPreviousVerticalScrollElasticity = scrollView.verticalScrollElasticity
+            scrollView.verticalScrollElasticity = .none
+        }
+        macZoomSession = CalendarTimelineZoomSession(
+            hourHeight: Double(macPreviewHourHeight ?? hourHeight),
+            scrollOffset: Double(currentMacTimelineScrollOffset),
+            focalViewportOffset: Double(focalViewportOffset)
+        )
+    }
+
+    private func finishMacZoom(scrollProxy: ScrollViewProxy) {
+        guard var session = macZoomSession,
+              let result = session.complete() else { return }
+        macZoomSession = nil
+        restoreMacScrollViewState()
+        macPreviewHourHeight = CGFloat(result.hourHeight)
+        pendingMacZoomOffset = CGFloat(result.scrollOffset)
+        macRetainedTimelineAnchor = CalendarTimelineScrollAnchor.from(
+            scrollOffset: result.scrollOffset,
+            hourHeight: result.hourHeight
+        )
+        applyMacTimelineScrollOffset(
+            CGFloat(result.scrollOffset),
+            hourHeight: CGFloat(result.hourHeight),
+            scrollProxy: scrollProxy
+        )
+        if let onHourHeightChange {
+            // The parent receives the new density only after the gesture has
+            // completed successfully. Cancellation never persists a sample.
+            onHourHeightChange(CGFloat(result.hourHeight))
+        } else {
+            macPreviewHourHeight = nil
+            pendingMacZoomOffset = nil
+        }
+    }
+
+    private func cancelMacZoom(scrollProxy: ScrollViewProxy) {
+        guard var session = macZoomSession,
+              let restore = session.cancel() else { return }
+        macZoomSession = nil
+        macPreviewHourHeight = nil
+        pendingMacZoomOffset = nil
+        restoreMacScrollViewState()
+        macRetainedTimelineAnchor = CalendarTimelineScrollAnchor.from(
+            scrollOffset: restore.scrollOffset,
+            hourHeight: restore.hourHeight
+        )
+        applyMacTimelineScrollOffset(
+            CGFloat(restore.scrollOffset),
+            hourHeight: CGFloat(restore.hourHeight),
+            scrollProxy: scrollProxy
+        )
+    }
+
+    private func stopMacTimelineMomentum() {
+        guard let scrollView = macTimelineScrollView else { return }
+        let origin = scrollView.contentView.bounds.origin
+        // Setting the live clip bounds without animation interrupts an
+        // in-flight inertial scroll before the pinch claims the axis.
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            scrollView.contentView.animator().setBoundsOrigin(origin)
+        }
+        scrollView.contentView.setBoundsOrigin(origin)
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+    }
+
+    private func restoreMacScrollViewState() {
+        guard let scrollView = macTimelineScrollView else {
+            macPreviousVerticalScrollElasticity = nil
+            return
+        }
+        if let previous = macPreviousVerticalScrollElasticity {
+            scrollView.verticalScrollElasticity = previous
+        }
+        macPreviousVerticalScrollElasticity = nil
+    }
+
+    private func restoreMacTimelinePositionIfNeeded(
+        scrollProxy: ScrollViewProxy,
+        hourHeight: CGFloat,
+        initial: Bool
+    ) {
+        guard initial, macRetainedTimelineAnchor == nil else { return }
+        let anchor = scrollRequest?.anchor ?? CalendarTimelineScrollAnchor.todayMinusTwoHours(
+            now: .now,
+            calendar: calendar
+        )
+        macRetainedTimelineAnchor = anchor
+        applyMacTimelineAnchor(anchor, hourHeight: hourHeight, scrollProxy: scrollProxy)
+        if let request = scrollRequest {
+            onScrollRequestConsumed?(request.id)
+        }
+    }
+
+    private func applyMacTimelineAnchor(
+        _ anchor: CalendarTimelineScrollAnchor,
+        hourHeight: CGFloat,
+        scrollProxy: ScrollViewProxy
+    ) {
+        macRetainedTimelineAnchor = anchor
+        let offset = CGFloat(anchor.offset(hourHeight: Double(hourHeight)))
+        macTimelineScrollOffset = offset
+        applyMacTimelineScrollOffset(offset, hourHeight: hourHeight, scrollProxy: scrollProxy)
+    }
+
+    private var currentMacTimelineScrollOffset: CGFloat {
+        guard let scrollView = macTimelineScrollView else {
+            return max(0, macTimelineScrollOffset)
+        }
+        let documentMinY = scrollView.documentView?.bounds.minY ?? 0
+        return max(0, scrollView.contentView.bounds.minY - documentMinY)
+    }
+
+    private func applyMacTimelineScrollOffset(
+        _ offset: CGFloat,
+        hourHeight: CGFloat,
+        scrollProxy: ScrollViewProxy,
+        animated: Bool = false
+    ) {
+        guard offset.isFinite else { return }
+        let desiredOffset = max(0, offset)
+        if let scrollView = macTimelineScrollView,
+           let documentView = scrollView.documentView {
+            let documentBounds = documentView.bounds
+            let viewportHeight = scrollView.contentView.bounds.height
+            let minimumY = documentBounds.minY
+            let maximumY = max(minimumY, documentBounds.maxY - viewportHeight)
+            var origin = scrollView.contentView.bounds.origin
+            origin.y = min(maximumY, max(minimumY, minimumY + desiredOffset))
+            let updateOffset = {
+                scrollView.contentView.setBoundsOrigin(origin)
+                scrollView.reflectScrolledClipView(scrollView.contentView)
+            }
+            if animated {
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0.16
+                    context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                    scrollView.contentView.animator().setBoundsOrigin(origin)
+                }
+            } else {
+                updateOffset()
+            }
+            macTimelineScrollOffset = max(0, origin.y - minimumY)
+            return
+        }
+
+        let safeHourHeight = max(0.0001, hourHeight)
+        let targetHour = min(23, max(0, Int((desiredOffset / safeHourHeight).rounded())))
+        if animated {
+            withAnimation(.easeOut(duration: 0.16)) {
+                scrollProxy.scrollTo(CalendarTimelineScrollAnchor.id(for: targetHour), anchor: .top)
+            }
+        } else {
+            scrollProxy.scrollTo(CalendarTimelineScrollAnchor.id(for: targetHour), anchor: .top)
+        }
+    }
+#endif
+}
+
+/// Clips a moving strip layer to the day area (everything right of the
+/// pinned hour gutter). Virtual neighbour columns are mounted to the left of
+/// the anchor so a rightward swipe reveals them as if they were already there;
+/// without this mask their trailing edge sits visibly inside the gutter zone at
+/// rest. The mask is layout-neutral, so probes and hit testing keep geometry.
+private extension View {
+    func calendarDayAreaMask(totalWidth: CGFloat, gutter: CGFloat) -> some View {
+        mask(alignment: .leading) {
+            Rectangle()
+                .frame(width: max(0, totalWidth - gutter))
+                .offset(x: gutter)
+        }
     }
 }
 
@@ -771,22 +1339,6 @@ private struct CalendarPagerPendingSettle: Equatable {
     let normalizedVelocity: Double
 }
 
-/// Clips a moving strip layer to the day area (everything right of the
-/// pinned hour gutter). Virtual neighbour columns are mounted to the left of
-/// the anchor so a rightward swipe reveals them "as if they were already
-/// there"; without this mask their trailing edge sits visibly inside the
-/// gutter zone at rest. The mask is layout-neutral, so probes and hit
-/// testing keep their existing geometry.
-private extension View {
-    func calendarDayAreaMask(totalWidth: CGFloat, gutter: CGFloat) -> some View {
-        mask(alignment: .leading) {
-            Rectangle()
-                .frame(width: max(0, totalWidth - gutter))
-                .offset(x: gutter)
-        }
-    }
-}
-
 /// A continuous iPhone day strip, Notion-style. Instead of paging whole
 /// three-day windows, the strip materializes single-day columns around the
 /// anchor (two spare days on each side of the visible window) and slides them
@@ -811,10 +1363,14 @@ private struct CalendarPagedTimeline: View {
     let onStatusUpdate: CalendarStatusUpdateHandler?
     let onPreviewDateChange: ((Date) -> Void)?
     let onCommitDateChange: ((Date) -> Void)?
+    let onHourHeightChange: ((CGFloat) -> Void)?
+    let scrollRequest: CalendarTimelineScrollRequest?
+    let onScrollRequestConsumed: ((Int) -> Void)?
     let monthNamespace: Namespace.ID?
     let monthExpanded: Bool
     let monthSelectedDate: Date?
     let reduceMotion: Bool
+    let layoutRevision: Int
     let interactionSession: CalendarInteractionSession
     @State private var pageAnchor: Date
     @State private var lastPreviewCallbackDate: Date?
@@ -840,15 +1396,20 @@ private struct CalendarPagedTimeline: View {
     /// settled swipe yanked the timeline back to the morning hours and broke
     /// the "the next day was already there" illusion vertically.
     @State private var didInitialVerticalScroll = false
-    /// Fallback scroll anchor used only when a vertical pan starts over an
-    /// event-owned interaction surface. Native ScrollView scrolling remains
-    /// the default; this state makes those rows deterministic when SwiftUI's
-    /// nested long-press recognizers delay the ancestor pan.
-    // The first over-event pan advances from the midnight fallback to the
-    // 09:00 viewport; subsequent pans advance in four-hour steps. 09:00 is
-    // far enough to move 24:00 while retaining the source event on-screen.
-    @State private var manualVerticalScrollHour = 5
-    @State private var lastManualVerticalPanAt: Date?
+    @State private var verticalScrollOffset: CGFloat = 0
+    @State private var retainedTimelineAnchor: CalendarTimelineScrollAnchor?
+#if os(iOS)
+    /// iPhone density changes are transactional. The session owns the
+    /// captured pre-pinch scale; the preview is rendered locally and the page
+    /// callback is invoked only after a valid idle pinch completes.
+    @State private var iPhoneZoomTransaction = CalendarTimelineZoomTransaction()
+    @State private var iPhoneZoomGestureToken: CalendarTimelineZoomTransaction.Token?
+    @State private var iPhonePreviewHourHeight: CGFloat?
+    @State private var iPhonePendingTimelineScrollOffset: CGFloat?
+    @State private var iPhoneTimelineScrollView: UIScrollView?
+    @State private var iPhoneNativeOffsetAdjustment: CGFloat = 0
+    @GestureState private var iPhoneMagnificationGestureActive = false
+#endif
 
     init(days: [Date], items: [CalendarItem], holidays: [CalendarHoliday], hourHeight: CGFloat,
          calendar: Calendar, onSelect: @escaping CalendarEventSelectionHandler,
@@ -857,8 +1418,10 @@ private struct CalendarPagedTimeline: View {
          timedCreationPreview: CalendarTimedCreationPreview?,
          onTimedCreationDraft: ((CalendarTimedCreationPreview?) -> Void)?,
          onPreviewDateChange: ((Date) -> Void)?, onCommitDateChange: ((Date) -> Void)?,
+         onHourHeightChange: ((CGFloat) -> Void)?,
+         scrollRequest: CalendarTimelineScrollRequest?, onScrollRequestConsumed: ((Int) -> Void)?,
          monthNamespace: Namespace.ID?, monthExpanded: Bool, monthSelectedDate: Date?, reduceMotion: Bool,
-         interactionSession: CalendarInteractionSession) {
+         layoutRevision: Int, interactionSession: CalendarInteractionSession) {
         self.days = days
         self.items = items
         self.holidays = holidays
@@ -874,16 +1437,21 @@ private struct CalendarPagedTimeline: View {
         self.onTimedCreationDraft = onTimedCreationDraft
         self.onPreviewDateChange = onPreviewDateChange
         self.onCommitDateChange = onCommitDateChange
+        self.onHourHeightChange = onHourHeightChange
+        self.scrollRequest = scrollRequest
+        self.onScrollRequestConsumed = onScrollRequestConsumed
         self.monthNamespace = monthNamespace
         self.monthExpanded = monthExpanded
         self.monthSelectedDate = monthSelectedDate
         self.reduceMotion = reduceMotion
+        self.layoutRevision = layoutRevision
         self.interactionSession = interactionSession
         _pageAnchor = State(initialValue: calendar.startOfDay(for: days.first ?? .now))
     }
 
     private var visibleDayCount: Int { max(1, days.count) }
-    private let timeGutter: CGFloat = 52
+    private let timeGutter: CGFloat = CGFloat(CalendarInteractionLayout.timelineTimeGutter)
+    private let outerInset: CGFloat = CGFloat(CalendarInteractionLayout.timelineOuterInset)
     private let dayHeaderHeight: CGFloat = 58
     /// Spare pre-mounted days on each side of the visible window. The drag is
     /// clamped well below one spare column, so a swipe can never expose
@@ -920,35 +1488,47 @@ private struct CalendarPagedTimeline: View {
 
     var body: some View {
         GeometryReader { viewport in
+            let timelineWidth = max(1, viewport.size.width - outerInset * 2)
+            let renderedHourHeight = iPhonePreviewHourHeight ?? hourHeight
             let columnWidth = Self.columnWidth(
-                forAvailableWidth: viewport.size.width - timeGutter,
+                forAvailableWidth: timelineWidth - timeGutter,
                 visibleDays: visibleDayCount
             )
             let stripDays = virtualDays
             let virtualWidth = columnWidth * CGFloat(stripDays.count)
             let timelineAxisHeight = CGFloat(CalendarInteractionLayout.timelineHeight(
                 days: days,
-                hourHeight: Double(hourHeight),
+                hourHeight: Double(renderedHourHeight),
                 calendar: calendar
             ))
             let contentHeight = CGFloat(CalendarInteractionLayout.timelineContentHeight(
                 days: days,
-                hourHeight: Double(hourHeight),
-                calendar: calendar,
-                viewportHeight: Double(viewport.size.height)
+                hourHeight: Double(renderedHourHeight),
+                calendar: calendar
             ))
             let allDayHeight = CGFloat(CalendarAllDayLayout.height(
                 items: items,
                 days: visibleWindow,
                 calendar: calendar
             ))
+            let visibleDayStarts = Set(visibleWindow.map { calendar.startOfDay(for: $0) })
+            let todayColumnIndex = stripDays.firstIndex(where: { calendar.isDateInToday($0) }) ?? -1
+            let todayColumnVisible = CalendarInteractionLayout.isTimelineDayColumnVisible(
+                dayIndex: todayColumnIndex,
+                dayCount: stripDays.count,
+                columnWidth: Double(columnWidth),
+                columnOriginX: Double(stripBaseX(columnWidth: columnWidth) + horizontalDragOffset),
+                timeGutter: Double(timeGutter),
+                contentWidth: Double(timelineWidth),
+                viewportWidth: Double(timelineWidth)
+            )
             let timedViewportHeight = CGFloat(CalendarInteractionLayout.timedViewportHeight(
                 containerHeight: Double(viewport.size.height),
                 dayHeaderHeight: Double(dayHeaderHeight),
                 allDayHeight: Double(allDayHeight)
             ))
             VStack(spacing: 0) {
-                dayHeaderStrip(days: stripDays, columnWidth: columnWidth, containerWidth: viewport.size.width)
+                dayHeaderStrip(days: stripDays, columnWidth: columnWidth, containerWidth: timelineWidth)
                 CalendarAllDayLaneStrip(
                     days: stripDays,
                     visibleDays: visibleWindow,
@@ -969,14 +1549,14 @@ private struct CalendarPagedTimeline: View {
                             // neighbours slide under the pinned hour gutter
                             // instead of showing through it at rest.
                             Color.clear
-                                .frame(width: viewport.size.width, height: contentHeight, alignment: .topLeading)
+                                .frame(width: timelineWidth, height: contentHeight, alignment: .topLeading)
                                 .overlay(alignment: .topLeading) {
                                     HStack(alignment: .top, spacing: 0) {
                                         ForEach(stripDays, id: \.self) { day in
                                             CalendarDayTimeline(
-                                                day: day,
-                                                items: items,
-                                                hourHeight: hourHeight,
+                                            day: day,
+                                            items: items,
+                                                hourHeight: renderedHourHeight,
                                                 calendar: calendar,
                                                 onSelect: onSelect,
                                                 onCreate: onCreate,
@@ -989,51 +1569,33 @@ private struct CalendarPagedTimeline: View {
                                                 monthExpanded: monthExpanded,
                                                 monthSelectedDate: monthSelectedDate,
                                                 reduceMotion: reduceMotion,
-                                                isInteractionEnabled: isVisibleDay(day, window: visibleWindow),
+                                                isInteractionEnabled: visibleDayStarts.contains(calendar.startOfDay(for: day)),
                                                 interactionSession: interactionSession,
-                                                onVerticalPan: { translation in
-                                                    let now = Date.now
-                                                    if let lastManualVerticalPanAt,
-                                                       now.timeIntervalSince(lastManualVerticalPanAt) < 0.25 {
-                                                        // The handle and its parent event
-                                                        // can both observe one physical
-                                                        // swipe. One timeline gesture
-                                                        // must advance only one step.
-                                                        return
-                                                    }
-                                                    self.lastManualVerticalPanAt = now
-                                                    let direction = translation < 0 ? 1 : -1
-                                                    manualVerticalScrollHour = min(
-                                                        23,
-                                                        max(0, manualVerticalScrollHour + direction * 4)
-                                                    )
-                                                    withAnimation(reduceMotion ? nil : .easeOut(duration: 0.20)) {
-                                                        scrollProxy.scrollTo(
-                                                            CalendarTimelineScrollAnchor.id(for: manualVerticalScrollHour),
-                                                            anchor: .top
-                                                        )
-                                                    }
-                                                }
+                                                verticalScrollOffset: verticalScrollOffset,
+                                                visibleViewportHeight: timedViewportHeight,
+                                                layoutRevision: layoutRevision
                                             )
                                             .frame(width: columnWidth)
                                         }
                                     }
                                     .frame(width: virtualWidth, height: contentHeight, alignment: .topLeading)
-                                    .overlay {
-                                        CalendarNowLine(
-                                            days: stripDays,
-                                            calendar: calendar,
-                                            timeGutter: timeGutter,
-                                            totalHeight: timelineAxisHeight,
-                                            contentWidth: virtualWidth,
-                                            columnWidthOverride: columnWidth,
-                                            reduceMotion: reduceMotion
-                                        )
-                                    }
                                     .offset(x: stripBaseX(columnWidth: columnWidth) + horizontalDragOffset)
                                 }
-                                .calendarDayAreaMask(totalWidth: viewport.size.width, gutter: timeGutter)
-                            hourLabels(contentHeight: contentHeight)
+                                .calendarDayAreaMask(totalWidth: timelineWidth, gutter: timeGutter)
+                            CalendarNowLine(
+                                days: stripDays,
+                                todayColumnVisible: todayColumnVisible,
+                                calendar: calendar,
+                                timeGutter: timeGutter,
+                                totalHeight: timelineAxisHeight,
+                                contentWidth: timelineWidth,
+                                columnOriginX: stripBaseX(columnWidth: columnWidth) + horizontalDragOffset,
+                                columnWidthOverride: columnWidth
+                            )
+                            hourLabels(
+                                contentHeight: contentHeight,
+                                todayColumnVisible: todayColumnVisible
+                            )
                                 // Top-aligned: the labels are absolutely
                                 // offset inside a naturally short ZStack, so
                                 // the default center alignment would shove
@@ -1042,44 +1604,119 @@ private struct CalendarPagedTimeline: View {
                                 .zIndex(1)
                                 .allowsHitTesting(false)
                             CalendarTimelineHourAnchors(
-                                hourHeight: hourHeight,
+                                hourHeight: renderedHourHeight,
                                 totalHeight: timelineAxisHeight
                             )
                             .frame(width: 1, height: timelineAxisHeight, alignment: .top)
                             .offset(x: -1)
                             .allowsHitTesting(false)
                         }
-                        .frame(width: viewport.size.width, height: contentHeight, alignment: .topLeading)
+                        .frame(width: timelineWidth, height: contentHeight, alignment: .topLeading)
                         .clipped()
-                    }
-                    // The pager's axis lock owns horizontal movement while
-                    // the finger is down; a settle in flight is owned by its
-                    // animation and a new horizontal grab interrupts it, so
-                    // vertical scrolling never needs to be frozen here.
-                    .simultaneousGesture(pagerDragGesture(columnWidth: columnWidth), including: .all)
-                    .accessibilityIdentifier("calendar-vertical-timeline-scroll")
-                    .task {
-                        guard !didInitialVerticalScroll else { return }
-                        didInitialVerticalScroll = true
-                        var transaction = Transaction()
-                        transaction.disablesAnimations = true
-                        // An immediate scrollTo can land before the ScrollView
-                        // knows its final content size and clamp to offset 0.
-                        // Re-assert across the first layout passes instead of
-                        // re-running on every settled swipe (which yanked the
-                        // reader back to the morning hours after each swipe).
-                        for delay in [0.0, 0.15, 0.4] {
-                            if delay > 0 {
-                                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-                            }
-                            withTransaction(transaction) {
-                                scrollProxy.scrollTo(
-                                    CalendarTimelineScrollAnchor.id(for: initialVisibleHour),
-                                    anchor: .top
+                        // This reader is inside the moving content. Measuring
+                        // the ScrollView itself reports the viewport and
+                        // therefore cannot describe the user's actual offset.
+                        .background {
+                            GeometryReader { content in
+                                let frame = content.frame(in: .named("calendar-timeline-viewport"))
+                                let offset = frame.minY.isFinite ? max(0, -frame.minY) : 0
+                                let height = frame.height.isFinite ? max(0, frame.height) : 0
+                                Color.clear.preference(
+                                    key: CalendarTimelineVerticalOffsetKey.self,
+                                    value: CalendarTimelineVerticalOffsetMeasurement(
+                                        offset: offset,
+                                        contentHeight: height
+                                    )
                                 )
                             }
                         }
+                        .overlay {
+                            CalendarIOSScrollViewResolver { scrollView in
+                                if iPhoneTimelineScrollView !== scrollView {
+                                    iPhoneTimelineScrollView = scrollView
+                                }
+                                let measured = verticalScrollOffset
+                                let native = scrollView.contentOffset.y
+                                if measured.isFinite, native.isFinite {
+                                    iPhoneNativeOffsetAdjustment = native - measured
+                                }
+                                settlePendingIPhoneTimelineScrollOffsetIfPossible()
+                            }
+                            .frame(width: 1, height: 1)
+                            .allowsHitTesting(false)
+                        }
                     }
+                    // Native vertical scrolling owns the timeline on every
+                    // surface until an editing gesture claims the session.
+                    .simultaneousGesture(pagerDragGesture(columnWidth: columnWidth), including: .all)
+#if os(iOS)
+                    // The zoom recognizer is attached to the same timeline
+                    // owner as the native scroll. It only mutates the local
+                    // transactional preview after the shared arbitration
+                    // gate succeeds, so it cannot run as an independent
+                    // parent gesture during an edit.
+                    .gesture(
+                        iPhoneTimelineMagnificationGesture(viewportHeight: timedViewportHeight),
+                        including: .all
+                    )
+#endif
+                    .scrollDisabled(!CalendarGestureArbitration.nativeVerticalTimelineScrollEnabled(
+                        eventMutationActive: interactionSession.eventMoveActive,
+                        hasProvisionalPreview: interactionSession.eventMovePreview != nil
+                    ))
+                    .accessibilityIdentifier("calendar-vertical-timeline-scroll")
+                    .onPreferenceChange(CalendarTimelineVerticalOffsetKey.self) { measurement in
+                        let offset = measurement.offset
+                        verticalScrollOffset = offset
+                        if let scrollView = iPhoneTimelineScrollView,
+                           scrollView.contentOffset.y.isFinite,
+                           offset.isFinite {
+                            iPhoneNativeOffsetAdjustment = scrollView.contentOffset.y - offset
+                        }
+                        settlePendingIPhoneTimelineScrollOffsetIfPossible()
+                        guard !iPhoneZoomTransaction.isActive,
+                              abs(offset - (retainedTimelineAnchor?.offset(hourHeight: Double(renderedHourHeight)) ?? .greatestFiniteMagnitude)) > 0.5 else { return }
+                        retainedTimelineAnchor = CalendarTimelineScrollAnchor.from(
+                            scrollOffset: Double(offset),
+                            hourHeight: Double(renderedHourHeight)
+                        )
+                    }
+                    .onAppear {
+                        guard !didInitialVerticalScroll else { return }
+                        didInitialVerticalScroll = true
+                        let anchor = scrollRequest?.anchor ?? retainedTimelineAnchor ?? CalendarTimelineScrollAnchor.todayMinusTwoHours(
+                            now: .now,
+                            calendar: calendar
+                        )
+                        applyiPhoneTimelineAnchor(anchor, scrollProxy: scrollProxy)
+                        if let request = scrollRequest {
+                            onScrollRequestConsumed?(request.id)
+                        }
+                    }
+                    .onChange(of: scrollRequest) { _, request in
+                        guard let request else { return }
+                        applyiPhoneTimelineAnchor(request.anchor, scrollProxy: scrollProxy)
+                        onScrollRequestConsumed?(request.id)
+                    }
+#if os(iOS)
+                    .onChange(of: iPhoneMagnificationGestureActive) { _, isActive in
+                        guard !isActive else { return }
+                        // MagnificationGesture has no public onCancelled
+                        // callback. GestureState resets on both normal end
+                        // and recognizer cancellation; the transaction makes
+                        // the normal-end reset a harmless no-op.
+                        cancelIPhoneZoom()
+                    }
+                    .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+                        cancelIPhoneZoom()
+                    }
+                    .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
+                        cancelIPhoneZoom()
+                    }
+                    .onDisappear {
+                        cancelIPhoneZoom()
+                    }
+#endif
                     .frame(height: timedViewportHeight)
                     .coordinateSpace(name: "calendar-timeline-viewport")
                     .overlay {
@@ -1091,7 +1728,7 @@ private struct CalendarPagedTimeline: View {
                     }
                 }
             }
-            .frame(width: viewport.size.width)
+            .frame(width: timelineWidth)
             .clipped()
             .coordinateSpace(name: "calendar-horizontal-pager")
             .onPreferenceChange(CalendarStripOffsetPreferenceKey.self) { stripX in
@@ -1118,12 +1755,31 @@ private struct CalendarPagedTimeline: View {
                 cancelStripImmediately(to: target)
             }
             .onChange(of: interactionSession.eventMoveActive) { _, isActive in
+                #if os(iOS)
+                if isActive {
+                    // Only an active pinch is cancelled. An edit release
+                    // leaves the recognizer idle and cannot poison the next
+                    // independent pinch sequence.
+                    cancelIPhoneZoom()
+                }
+                #endif
                 guard isActive else { return }
                 // A long-press move can win while the strip is mid-drag or
                 // mid-settle. Recenter immediately so the event owns the
                 // horizontal gesture and the header reflects the settled page.
                 resetStripForEventOwnership()
             }
+#if os(iOS)
+            .onChange(of: interactionSession.eventMovePreview) { _, preview in
+                if preview != nil { cancelIPhoneZoom() }
+            }
+            .onChange(of: hourHeight) { _, updatedHourHeight in
+                guard !iPhoneZoomTransaction.isActive,
+                      let previewHourHeight = iPhonePreviewHourHeight,
+                      abs(previewHourHeight - updatedHourHeight) <= 0.1 else { return }
+                iPhonePreviewHourHeight = nil
+            }
+#endif
             .overlay(alignment: .top) {
                 // Stable semantic probe for the pinned header. It is
                 // non-hit-testing so the physical swipe falls through to the
@@ -1137,16 +1793,173 @@ private struct CalendarPagedTimeline: View {
                     .accessibilityIdentifier("calendar-pager")
                     .allowsHitTesting(false)
             }
+            .padding(.horizontal, outerInset)
         }
     }
 
-    private func isVisibleDay(_ day: Date, window: [Date]) -> Bool {
-        window.contains(where: { calendar.isDate($0, inSameDayAs: day) })
+#if os(iOS)
+    private func iPhoneTimelineMagnificationGesture(viewportHeight: CGFloat) -> some Gesture {
+        MagnificationGesture()
+            .updating($iPhoneMagnificationGestureActive) { _, state, _ in
+                state = true
+            }
+            .onChanged { scale in
+                guard CalendarGestureArbitration.timelineZoomEnabled(
+                    eventMutationActive: interactionSession.eventMoveActive,
+                    hasProvisionalPreview: interactionSession.eventMovePreview != nil
+                ) else {
+                    cancelIPhoneZoom()
+                    return
+                }
+                guard viewportHeight.isFinite, viewportHeight > 0 else {
+                    cancelIPhoneZoom()
+                    return
+                }
+
+                if iPhoneZoomGestureToken == nil {
+                    // MagnificationGesture exposes the scale but not the
+                    // pinch anchor on the deployment target. The viewport
+                    // center keeps iPhone on the same focal-time math as the
+                    // Mac session while retaining native vertical scrolling.
+                    iPhonePendingTimelineScrollOffset = nil
+                    iPhoneZoomGestureToken = iPhoneZoomTransaction.begin(
+                        hourHeight: Double(hourHeight),
+                        scrollOffset: Double(verticalScrollOffset),
+                        focalViewportOffset: Double(viewportHeight / 2)
+                    )
+                }
+                guard let token = iPhoneZoomGestureToken,
+                      let zoom = iPhoneZoomTransaction.update(
+                          token: token,
+                          magnification: Double(scale),
+                          viewportHeight: Double(viewportHeight)
+                      ) else {
+                    cancelIPhoneZoom()
+                    return
+                }
+                setIPhoneZoomPreview(
+                    hourHeight: CGFloat(zoom.hourHeight),
+                    scrollOffset: CGFloat(zoom.scrollOffset)
+                )
+            }
+            .onEnded { _ in
+                finishIPhoneZoom()
+            }
     }
+
+    private func finishIPhoneZoom() {
+        guard CalendarGestureArbitration.timelineZoomEnabled(
+            eventMutationActive: interactionSession.eventMoveActive,
+            hasProvisionalPreview: interactionSession.eventMovePreview != nil
+        ) else {
+            cancelIPhoneZoom()
+            return
+        }
+        // An ended callback from a recognizer that was cancelled by an edit,
+        // disappearance, or scene interruption has no token and is ignored.
+        // It must never be allowed to finish a later pinch.
+        guard let token = iPhoneZoomGestureToken,
+              let result = iPhoneZoomTransaction.finish(token: token) else { return }
+        iPhoneZoomGestureToken = nil
+        // Keep the preview mounted until the parent accepts the completed
+        // scale. The onChange handler removes it after the source of truth
+        // reflects the same value, preventing a visible snap to the old
+        // density during the commit transaction.
+        var transaction = Transaction()
+        transaction.animation = nil
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            iPhonePendingTimelineScrollOffset = CGFloat(result.scrollOffset)
+            iPhonePreviewHourHeight = CGFloat(result.hourHeight)
+            onHourHeightChange?(CGFloat(result.hourHeight))
+        }
+        applyIPhoneTimelineScrollOffset(CGFloat(result.scrollOffset))
+    }
+
+    private func cancelIPhoneZoom() {
+        guard let restoration = iPhoneZoomTransaction.cancel(token: iPhoneZoomGestureToken) else {
+            // A second cancellation or a stale recognizer completion is a
+            // no-op. In particular, it cannot clear a newer committed
+            // preview or alter a newer transaction.
+            iPhoneZoomGestureToken = nil
+            return
+        }
+        var transaction = Transaction()
+        transaction.animation = nil
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            iPhoneZoomGestureToken = nil
+            iPhonePreviewHourHeight = nil
+            iPhonePendingTimelineScrollOffset = CGFloat(restoration.scrollOffset)
+        }
+        // The direct UIKit update is immediate and non-animated. The pending
+        // value is retried by the moving-content preference after SwiftUI has
+        // resized the timeline, which also handles a target near the bottom.
+        applyIPhoneTimelineScrollOffset(CGFloat(restoration.scrollOffset))
+    }
+
+    private func setIPhoneZoomPreview(hourHeight: CGFloat, scrollOffset: CGFloat) {
+        var transaction = Transaction()
+        transaction.animation = nil
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            iPhonePreviewHourHeight = hourHeight
+            iPhonePendingTimelineScrollOffset = scrollOffset
+        }
+        applyIPhoneTimelineScrollOffset(scrollOffset)
+    }
+
+    private func settlePendingIPhoneTimelineScrollOffsetIfPossible() {
+        guard let pendingOffset = iPhonePendingTimelineScrollOffset,
+              let scrollView = iPhoneTimelineScrollView,
+              scrollView.contentOffset.y.isFinite else { return }
+        applyIPhoneTimelineScrollOffset(pendingOffset)
+        let semanticOffset = scrollView.contentOffset.y - iPhoneNativeOffsetAdjustment
+        guard semanticOffset.isFinite,
+              abs(semanticOffset - pendingOffset) <= 1 else { return }
+        iPhonePendingTimelineScrollOffset = nil
+    }
+
+    private func applyIPhoneTimelineScrollOffset(_ semanticOffset: CGFloat) {
+        guard semanticOffset.isFinite,
+              let scrollView = iPhoneTimelineScrollView else { return }
+        let adjustment = iPhoneNativeOffsetAdjustment.isFinite ? iPhoneNativeOffsetAdjustment : 0
+        let desiredY = semanticOffset + adjustment
+        guard desiredY.isFinite else { return }
+
+        let minimumY = -scrollView.adjustedContentInset.top
+        let maximumY = max(
+            minimumY,
+            scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom
+        )
+        let targetY = min(max(desiredY, minimumY), maximumY)
+        guard targetY.isFinite,
+              abs(scrollView.contentOffset.y - targetY) > 0.25 else { return }
+
+        var point = scrollView.contentOffset
+        point.y = targetY
+        UIView.performWithoutAnimation {
+            scrollView.setContentOffset(point, animated: false)
+        }
+    }
+#endif
 
     private func commitAccessibilityDate(_ date: Date) -> String {
         let parts = calendar.dateComponents([.year, .month, .day], from: date)
         return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
+    }
+
+    private func applyiPhoneTimelineAnchor(
+        _ anchor: CalendarTimelineScrollAnchor,
+        scrollProxy: ScrollViewProxy
+    ) {
+        retainedTimelineAnchor = anchor
+        var transaction = Transaction()
+        transaction.animation = nil
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            scrollProxy.scrollTo(CalendarTimelineScrollAnchor.id(for: anchor.hour), anchor: .top)
+        }
     }
 
     private func cancelStripImmediately(to target: Date) {
@@ -1587,7 +2400,7 @@ private struct CalendarPagedTimeline: View {
         let dayHolidays = holidays.filter { calendar.isDate($0.date, inSameDayAs: day) }
         return VStack(spacing: 2) {
             Text(day, format: .dateTime.weekday(.abbreviated))
-                .font(.caption.weight(.medium))
+                .lifeOSTypography(.metadata, weight: .medium)
                 .foregroundStyle(.secondary)
             CalendarDayHeaderNumber(
                 day: day,
@@ -1609,50 +2422,15 @@ private struct CalendarPagedTimeline: View {
         .overlay(alignment: .trailing) { Rectangle().fill(Color.primary.opacity(0.08)).frame(width: 1) }
     }
 
-    private func hourLabels(contentHeight: CGFloat) -> some View {
-        let scale = CalendarInteractionLayout.timelineScale(
+    private func hourLabels(contentHeight: CGFloat, todayColumnVisible: Bool) -> some View {
+        CalendarTimelineHourLabels(
             day: pageAnchor,
-            hourHeight: Double(hourHeight),
+            todayColumnVisible: todayColumnVisible,
+            hourHeight: hourHeight,
+            contentHeight: contentHeight,
+            width: timeGutter,
             calendar: calendar
         )
-        let dayMinutes = scale?.dayMinutes ?? 1_440
-        let marks = Array(stride(from: 0, through: dayMinutes, by: 60))
-        return ZStack(alignment: .topTrailing) {
-            ForEach(marks, id: \.self) { minute in
-                let date = scale.flatMap {
-                    $0.date(for: Double(minute) / 60 * Double(hourHeight), calendar: calendar, snappingTo: 1)
-                }
-                Text(CalendarInteractionLayout.timelineHourLabel(
-                    minute: minute,
-                    dayMinutes: dayMinutes,
-                    date: date,
-                    calendar: calendar
-                ))
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .topTrailing)
-                    .padding(.trailing, 8)
-                    .offset(y: CGFloat(scale?.y(for: date ?? .now, calendar: calendar) ?? Double(minute) / 60 * Double(hourHeight)))
-                    .id(minute / 60)
-                    // Keep the real 24:00 label as the UI probe for the
-                    // trailing endpoint. It does not add height or alter the
-                    // finite viewport.
-                    .accessibilityIdentifier(minute == dayMinutes ? "calendar-timeline-end" : "")
-            }
-        }
-    }
-
-    /// Starts near the first useful daytime event instead of an empty midnight
-    /// grid. Overnight events remain available by scrolling upward. Runs once
-    /// per strip lifetime so settled swipes preserve the reader's position.
-    private var initialVisibleHour: Int {
-        let visibleDayStarts = Set(visibleWindow.map { calendar.startOfDay(for: $0) })
-        let firstDaytimeEventHour = items
-            .filter { visibleDayStarts.contains(calendar.startOfDay(for: $0.start)) && $0.end.timeIntervalSince($0.start) <= 12 * 60 * 60 }
-            .map { calendar.component(.hour, from: $0.start) }
-            .filter { $0 >= 6 }
-            .min()
-        return max(0, min(8, (firstDaytimeEventHour ?? 9) - 1))
     }
 }
 
@@ -1669,6 +2447,7 @@ private struct CalendarAllDayLaneStrip: View {
     let timeGutter: CGFloat
     let onSelect: ((CalendarItem) -> Void)?
     let onCreateAllDay: ((Date) -> Void)?
+    @State private var overflowPresented = false
 
     /// Virtual neighbours are mounted so a multi-day bar can track the pager,
     /// but events that live only in those neighbours must not consume rows in
@@ -1688,6 +2467,19 @@ private struct CalendarAllDayLaneStrip: View {
 
     private var placements: [CalendarAllDayLayout.Placement] {
         CalendarAllDayLayout.placements(items: visibleLayoutItems, days: days, calendar: calendar)
+    }
+
+    private var visiblePlacements: [CalendarAllDayLayout.Placement] {
+        Array(placements.prefix(CalendarAllDayLayout.maximumVisibleEventRows))
+    }
+
+    private var overflowItems: [CalendarItem] {
+        placements.dropFirst(CalendarAllDayLayout.maximumVisibleEventRows).map(\.item)
+    }
+
+    private var overflowDayIndex: Int {
+        guard let firstVisibleDay = visibleDays.first else { return 0 }
+        return days.firstIndex(where: { calendar.isDate($0, inSameDayAs: firstVisibleDay) }) ?? 0
     }
 
     private var rowCount: Int {
@@ -1747,7 +2539,7 @@ private struct CalendarAllDayLaneStrip: View {
                                 .frame(width: 1, height: laneHeight)
                                 .offset(x: CGFloat(index + 1) * columnWidth - 1)
                         }
-                        ForEach(placements, id: \.renderID) { placement in
+                        ForEach(visiblePlacements, id: \.renderID) { placement in
                             CalendarAllDayEventChip(
                                 item: placement.item,
                                 calendar: calendar,
@@ -1761,6 +2553,25 @@ private struct CalendarAllDayLaneStrip: View {
                             .offset(
                                 x: CGFloat(placement.firstDayIndex) * columnWidth + 1,
                                 y: CGFloat(placement.row) * (CalendarAllDayLayout.rowHeight + CGFloat(CalendarAllDayLayout.rowSpacing)) + 2
+                                )
+                        }
+                        if !overflowItems.isEmpty,
+                           let overflowRow = CalendarAllDayLayout.overflowRowIndex(
+                               items: visibleLayoutItems,
+                               days: days,
+                               calendar: calendar
+                           ) {
+                            CalendarAllDayOverflowButton(count: overflowItems.count) {
+                                overflowPresented = true
+                            }
+                            .frame(
+                                width: max(1, columnWidth - 2),
+                                height: CalendarAllDayLayout.rowHeight - 4,
+                                alignment: .leading
+                            )
+                            .offset(
+                                x: CGFloat(overflowDayIndex) * columnWidth + 1,
+                                y: CGFloat(overflowRow) * (CalendarAllDayLayout.rowHeight + CGFloat(CalendarAllDayLayout.rowSpacing)) + 2
                             )
                         }
                         ForEach(visibleEmptyCells) { cell in
@@ -1783,7 +2594,7 @@ private struct CalendarAllDayLaneStrip: View {
                     gutter: timeGutter
                 )
             Text(Locale.current.identifier.hasPrefix("de") ? "Ganztägig" : "All-day")
-                .font(.caption2)
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(.secondary)
                 .frame(width: timeGutter - 8, height: laneHeight, alignment: .trailing)
                 .padding(.trailing, 8)
@@ -1806,6 +2617,13 @@ private struct CalendarAllDayLaneStrip: View {
         .accessibilityLabel("All-day events")
         .accessibilityIdentifier("calendar-all-day-lane")
         .accessibilityValue(accessibilitySummary)
+        .sheet(isPresented: $overflowPresented) {
+            CalendarAllDayOverflowSheet(
+                items: overflowItems,
+                calendar: calendar,
+                onSelect: onSelect
+            )
+        }
     }
 
 }
@@ -1848,31 +2666,6 @@ private struct CalendarAllDayEmptyCell: View {
     }
 }
 
-private enum CalendarTimelineScrollAnchor {
-    static func id(for hour: Int) -> String {
-        "calendar-timeline-hour-\(max(0, hour))"
-    }
-}
-
-/// Real vertical layout targets for ScrollViewReader. The previous targets
-/// were offset hour-label Text views inside a ZStack, which could resolve to
-/// the label's unscrolled layout frame rather than the timed grid coordinate.
-private struct CalendarTimelineHourAnchors: View {
-    let hourHeight: CGFloat
-    let totalHeight: CGFloat
-
-    var body: some View {
-        VStack(spacing: 0) {
-            ForEach(0..<24, id: \.self) { hour in
-                Color.clear
-                    .frame(width: 1, height: hourHeight)
-                    .id(CalendarTimelineScrollAnchor.id(for: hour))
-            }
-        }
-        .frame(width: 1, height: totalHeight, alignment: .top)
-        .accessibilityHidden(true)
-    }
-}
 #endif
 
 private struct CalendarAllDayRow: View {
@@ -1884,9 +2677,18 @@ private struct CalendarAllDayRow: View {
     let timeGutter: CGFloat
     let width: CGFloat
     let onSelect: ((CalendarItem) -> Void)?
+    @State private var overflowPresented = false
 
     private var placements: [CalendarAllDayLayout.Placement] {
         CalendarAllDayLayout.placements(items: items, days: days, calendar: calendar)
+    }
+
+    private var visiblePlacements: [CalendarAllDayLayout.Placement] {
+        Array(placements.prefix(CalendarAllDayLayout.maximumVisibleEventRows))
+    }
+
+    private var overflowItems: [CalendarItem] {
+        placements.dropFirst(CalendarAllDayLayout.maximumVisibleEventRows).map(\.item)
     }
 
     private var laneHeight: CGFloat {
@@ -1906,7 +2708,7 @@ private struct CalendarAllDayRow: View {
     var body: some View {
         HStack(spacing: 0) {
             Text(Locale.current.identifier.hasPrefix("de") ? "Ganztägig" : "All-day")
-                .font(.caption2)
+                .lifeOSTypography(.metadata)
                 .foregroundStyle(.secondary)
                 .frame(width: timeGutter - 8, height: laneHeight, alignment: .trailing)
                 .padding(.trailing, 8)
@@ -1917,7 +2719,7 @@ private struct CalendarAllDayRow: View {
                         .frame(width: 1, height: laneHeight)
                         .offset(x: CGFloat(index + 1) * dayWidth - 1)
                 }
-                ForEach(placements, id: \.renderID) { placement in
+                ForEach(visiblePlacements, id: \.renderID) { placement in
                     CalendarAllDayEventChip(
                         item: placement.item,
                         calendar: calendar,
@@ -1933,6 +2735,25 @@ private struct CalendarAllDayRow: View {
                         y: CGFloat(placement.row) * (Self.minimumHeight + CGFloat(CalendarAllDayLayout.rowSpacing)) + 2
                     )
                 }
+                if !overflowItems.isEmpty,
+                   let overflowRow = CalendarAllDayLayout.overflowRowIndex(
+                       items: items,
+                       days: days,
+                       calendar: calendar
+                   ) {
+                    CalendarAllDayOverflowButton(count: overflowItems.count) {
+                        overflowPresented = true
+                    }
+                    .frame(
+                        width: max(1, dayWidth - 2),
+                        height: Self.minimumHeight - 4,
+                        alignment: .leading
+                    )
+                    .offset(
+                        x: 1,
+                        y: CGFloat(overflowRow) * (Self.minimumHeight + CGFloat(CalendarAllDayLayout.rowSpacing)) + 2
+                    )
+                }
             }
             .frame(width: max(0, width - timeGutter), height: laneHeight, alignment: .topLeading)
         }
@@ -1943,6 +2764,13 @@ private struct CalendarAllDayRow: View {
         .accessibilityLabel("All-day events")
         .accessibilityIdentifier("calendar-all-day-lane")
         .accessibilityValue(accessibilitySummary)
+        .sheet(isPresented: $overflowPresented) {
+            CalendarAllDayOverflowSheet(
+                items: overflowItems,
+                calendar: calendar,
+                onSelect: onSelect
+            )
+        }
     }
 
     private var dayWidth: CGFloat {
@@ -1991,17 +2819,113 @@ private struct CalendarAllDayEventChip: View {
     }
 
     private func calendarISODate(_ date: Date) -> String {
-        let parts = itemCalendar.dateComponents([.year, .month, .day], from: date)
+        let parts = calendar.dateComponents([.year, .month, .day], from: date)
         return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
     }
+}
 
-    private var itemCalendar: Calendar {
-        guard let identifier = item.timeZoneIdentifier,
-              let timeZone = TimeZone(identifier: identifier) else { return calendar }
-        var value = calendar
-        value.timeZone = timeZone
-        return value
+private struct CalendarAllDayOverflowButton: View {
+    let count: Int
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text("+\(count) more")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(CalendarEventVisuals.accent)
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                .padding(.horizontal, 6)
+                .background(
+                    CalendarEventVisuals.accent.opacity(0.10),
+                    in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Show \(count) more all-day events")
+        .accessibilityIdentifier("calendar-all-day-overflow")
     }
+}
+
+private struct CalendarAllDayOverflowRow: Identifiable {
+    let item: CalendarItem
+
+    var id: String {
+        CalendarAllDayLayout.renderIdentity(for: item)
+    }
+}
+
+private struct CalendarAllDayOverflowSheet: View {
+    let items: [CalendarItem]
+    let calendar: Calendar
+    let onSelect: ((CalendarItem) -> Void)?
+    @Environment(\.dismiss) private var dismiss
+
+    private var rows: [CalendarAllDayOverflowRow] {
+        items.map(CalendarAllDayOverflowRow.init(item:))
+    }
+
+    var body: some View {
+        NavigationStack {
+            List(rows) { row in
+                if let onSelect {
+                    Button {
+                        onSelect(row.item)
+                        dismiss()
+                    } label: {
+                        rowLabel(for: row.item)
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    rowLabel(for: row.item)
+                }
+            }
+            .navigationTitle("More all-day events")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+#if os(macOS)
+        .frame(minWidth: 360, idealWidth: 440, minHeight: 260)
+#endif
+    }
+
+    private func rowLabel(for item: CalendarItem) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(item.title)
+                .lifeOSTypography(.body, weight: .medium)
+                .foregroundStyle(LifeOSTokens.primaryText)
+            Text(itemDateRange(item))
+                .lifeOSTypography(.metadata)
+                .foregroundStyle(LifeOSTokens.secondaryText)
+        }
+        .padding(.vertical, 3)
+        .contentShape(Rectangle())
+    }
+
+    private func itemDateRange(_ item: CalendarItem) -> String {
+        var style = Date.FormatStyle.dateTime
+            .weekday(.abbreviated)
+            .month(.abbreviated)
+            .day()
+            .locale(.current)
+        style.timeZone = calendar.timeZone
+        return "\(item.start.formatted(style)) – \(item.end.formatted(style))"
+    }
+}
+
+private struct CalendarDayTimelineLayoutCache {
+    let revision: Int
+    let dayStart: Date
+    let timeZoneIdentifier: String
+    let movingItemID: UUID?
+    let timedItems: [CalendarItem]
+    let basePlacements: [CalendarEventPlacement]
+    let placementByRenderID: [String: CalendarEventPlacement]
 }
 
 private struct CalendarDayTimeline: View {
@@ -2022,7 +2946,10 @@ private struct CalendarDayTimeline: View {
     let reduceMotion: Bool
     let isInteractionEnabled: Bool
     let interactionSession: CalendarInteractionSession
-    let onVerticalPan: ((CGFloat) -> Void)?
+    let verticalScrollOffset: CGFloat
+    let visibleViewportHeight: CGFloat
+    let layoutRevision: Int
+    @State private var layoutCache: CalendarDayTimelineLayoutCache?
 #if os(iOS)
     @State private var pressCreationActive = false
     @State private var pressCreationSnapMinutes: Int?
@@ -2033,28 +2960,87 @@ private struct CalendarDayTimeline: View {
         return calendar.dateInterval(of: .day, for: start) ?? DateInterval(start: start, end: start)
     }
 
-    private var timedItems: [CalendarItem] {
+    private var movingItemID: UUID? {
+        interactionSession.eventMovePreview?.item.id
+    }
+
+    private var hasCurrentLayoutCache: Bool {
+        guard let layoutCache else { return false }
+        return layoutCache.revision == layoutRevision &&
+            layoutCache.dayStart == interval.start &&
+            layoutCache.timeZoneIdentifier == calendar.timeZone.identifier &&
+            layoutCache.movingItemID == movingItemID
+    }
+
+    private func makeLayoutCache() -> CalendarDayTimelineLayoutCache {
         // The pager owns several neighbouring columns and recomputes their
-        // placement while the finger moves. Keep each layout pass bounded to
-        // events that can actually render in this day. A cross-day move still
-        // carries its source item so the provisional layout can place the
-        // destination ghost correctly while the event is being dragged.
-        let movingItemID = interactionSession.eventMovePreview?.item.id
-        return items.filter { item in
+        // placement while the finger moves. Keep the settled layout indexed
+        // by day and source revision so ordinary native scrolling does not
+        // repeat filtering, sorting, or lane allocation in every body pass.
+        // A cross-day move still carries its source item so the provisional
+        // layout can place the destination ghost correctly while editing.
+        let timedItems = items.filter { item in
             guard !CalendarAllDayLayout.isAllDay(item, calendar: calendar) else { return false }
             if item.id == movingItemID { return true }
             return !item.isDeleted && item.start < interval.end && item.end > interval.start
         }
+        let basePlacements = CalendarOverlapLayout.layout(items: timedItems, interval: interval)
+        var placementByRenderID: [String: CalendarEventPlacement] = [:]
+        placementByRenderID.reserveCapacity(basePlacements.count)
+        for placement in basePlacements {
+            placementByRenderID[placement.renderID] = placement
+        }
+        return CalendarDayTimelineLayoutCache(
+            revision: layoutRevision,
+            dayStart: interval.start,
+            timeZoneIdentifier: calendar.timeZone.identifier,
+            movingItemID: movingItemID,
+            timedItems: timedItems,
+            basePlacements: basePlacements,
+            placementByRenderID: placementByRenderID
+        )
     }
 
-    private var basePlacements: [CalendarEventPlacement] {
-        CalendarOverlapLayout.layout(items: timedItems, interval: interval)
+    private var currentLayoutCache: CalendarDayTimelineLayoutCache {
+        if hasCurrentLayoutCache, let layoutCache {
+            return layoutCache
+        }
+        return makeLayoutCache()
     }
 
-    private var provisionalPlacements: [CalendarEventPlacement] {
-        guard let preview = interactionSession.eventMovePreview else { return basePlacements }
+    private func rebuildLayoutCache() {
+        layoutCache = makeLayoutCache()
+    }
+
+    private func renderWindowPlacements(
+        _ placements: [CalendarEventPlacement],
+        scale: CalendarTimelineScale
+    ) -> [CalendarEventPlacement] {
+        guard verticalScrollOffset.isFinite,
+              visibleViewportHeight.isFinite,
+              visibleViewportHeight > 0 else { return placements }
+        let buffer = max(1, Double(hourHeight) * 2)
+        let visibleStart = max(0, Double(verticalScrollOffset) - buffer)
+        let visibleEnd = min(
+            scale.totalHeight,
+            Double(verticalScrollOffset + visibleViewportHeight) + buffer
+        )
+        guard visibleEnd >= visibleStart else { return placements }
+        return placements.filter { placement in
+            let start = scale.y(for: placement.visibleStart, calendar: calendar)
+            let end = start + scale.height(
+                from: placement.visibleStart,
+                to: placement.visibleEnd,
+                calendar: calendar
+            )
+            return end >= visibleStart && start <= visibleEnd
+        }
+    }
+
+    private func provisionalPlacements(using cache: CalendarDayTimelineLayoutCache) -> [CalendarEventPlacement] {
+        guard let preview = interactionSession.eventMovePreview else { return cache.basePlacements }
         return CalendarOverlapLayout.layoutWithProvisionalMove(
-            items: timedItems,
+            items: cache.timedItems,
             movingItemID: preview.item.id,
             provisionalStart: preview.start,
             provisionalEnd: preview.end,
@@ -2062,18 +3048,22 @@ private struct CalendarDayTimeline: View {
         )
     }
 
-    private var renderedPlacements: [CalendarEventPlacement] {
-        guard let preview = interactionSession.eventMovePreview else { return basePlacements }
-        return provisionalPlacements.filter { $0.id != preview.item.id }
-    }
-
     var body: some View {
         GeometryReader { proxy in
+            let cache = currentLayoutCache
+            let provisionalPlacements = provisionalPlacements(using: cache)
+            let allRenderedPlacements = interactionSession.eventMovePreview == nil
+                ? cache.basePlacements
+                : provisionalPlacements.filter { $0.id != interactionSession.eventMovePreview?.item.id }
             let scale = CalendarInteractionLayout.timelineScale(
                 day: day,
                 hourHeight: Double(hourHeight),
                 calendar: calendar
             ) ?? CalendarTimelineScale(interval: interval, hourHeight: Double(hourHeight))
+            let renderedPlacements = renderWindowPlacements(
+                allRenderedPlacements,
+                scale: scale
+            )
             let totalHeight = CGFloat(scale.totalHeight)
             ZStack(alignment: .topLeading) {
                 ZStack(alignment: .topLeading) {
@@ -2095,7 +3085,6 @@ private struct CalendarDayTimeline: View {
                     // scrolling. The press sequence still claims an
                     // intentional creation after its hold threshold.
                     .simultaneousGesture(creationPressDragGesture(proxy: proxy))
-                    .simultaneousGesture(emptyGridVerticalTimelinePanGesture(proxy: proxy))
 #else
                     .simultaneousGesture(macDoubleClickGesture(proxy: proxy))
                     .simultaneousGesture(macCreationDragGesture(proxy: proxy))
@@ -2139,7 +3128,9 @@ private struct CalendarDayTimeline: View {
 
                 if let preview = interactionSession.eventMovePreview,
                    calendar.isDate(preview.item.start, inSameDayAs: day),
-                   let sourcePlacement = basePlacements.first(where: { $0.id == preview.item.id }) {
+                   let sourcePlacement = cache.placementByRenderID[
+                       CalendarAllDayLayout.renderIdentity(for: preview.item)
+                   ] {
                     // Keep the source card as the sole interactive drag
                     // surface. Its existing move offset carries it toward the
                     // destination while source siblings use provisional lanes.
@@ -2188,6 +3179,10 @@ private struct CalendarDayTimeline: View {
             hourHeight: Double(hourHeight),
             calendar: calendar
         )?.totalHeight ?? Double(hourHeight * 24)))
+        .onAppear { rebuildLayoutCache() }
+        .onChange(of: layoutRevision) { _, _ in rebuildLayoutCache() }
+        .onChange(of: day) { _, _ in rebuildLayoutCache() }
+        .onChange(of: movingItemID) { _, _ in rebuildLayoutCache() }
     }
 
     @ViewBuilder
@@ -2231,7 +3226,6 @@ private struct CalendarDayTimeline: View {
             narrow: layerWidth < 82,
             availableHeight: renderedHeight,
             hidesSecondaryMetadata: placement.depth == 0 && placement.columnCount > 1,
-            timeZone: item.timeZoneIdentifier.flatMap(TimeZone.init(identifier:)) ?? calendar.timeZone,
             cornerRadii: placement.cornerRadii,
             day: day,
             hourHeight: hourHeight,
@@ -2243,8 +3237,7 @@ private struct CalendarDayTimeline: View {
             interactionSession: interactionSession,
             onSelect: selection,
             onUpdate: interactive ? onUpdate : nil,
-            onStatusUpdate: interactive ? onStatusUpdate : nil,
-            onVerticalPan: interactive ? onVerticalPan : nil
+            onStatusUpdate: interactive ? onStatusUpdate : nil
         )
         .frame(width: layerWidth, alignment: .topLeading)
         .offset(x: CGFloat(layerFrame.leading), y: y + 1)
@@ -2345,22 +3338,6 @@ private struct CalendarDayTimeline: View {
         CalendarTimedCreationPreview(day: interval.start, start: interval.start, end: interval.end)
     }
 
-    /// The empty grid's sequenced creation recognizer can delay the ancestor
-    /// ScrollView pan until its hold threshold. Keep a narrow fallback for a
-    /// deliberate quick vertical drag, matching the event-row fallback while
-    /// leaving event points and press-created ranges to their own owners.
-    private func emptyGridVerticalTimelinePanGesture(proxy: GeometryProxy) -> some Gesture {
-        DragGesture(minimumDistance: 8, coordinateSpace: .local)
-            .onEnded { value in
-                guard isInteractionEnabled,
-                      !interactionSession.eventMoveActive,
-                      !isTimedEventPoint(value.startLocation, in: proxy),
-                      abs(value.translation.height) > abs(value.translation.width),
-                      abs(value.translation.height) >= 12 else { return }
-                onVerticalPan?(value.translation.height)
-            }
-    }
-
     private func isTimedEventPoint(_ point: CGPoint, in proxy: GeometryProxy) -> Bool {
         guard point.x.isFinite, point.y.isFinite else { return false }
         guard let scale = CalendarInteractionLayout.timelineScale(
@@ -2369,7 +3346,7 @@ private struct CalendarDayTimeline: View {
             calendar: calendar
         ) else { return false }
 
-        return basePlacements.contains { placement in
+        return currentLayoutCache.basePlacements.contains { placement in
             let layerFrame = placement.layerFrame(
                 containerWidth: Double(proxy.size.width),
                 edgeInset: 1
@@ -2389,6 +3366,7 @@ private struct CalendarDayTimeline: View {
             return eventFrame.contains(point)
         }
     }
+
 #endif
 
 #if os(macOS)
@@ -2533,7 +3511,6 @@ private struct CalendarInteractiveTimelineEvent: View {
     let narrow: Bool
     let availableHeight: CGFloat
     let hidesSecondaryMetadata: Bool
-    let timeZone: TimeZone
     let cornerRadii: CalendarEventCornerRadii
     let day: Date
     let hourHeight: CGFloat
@@ -2546,7 +3523,6 @@ private struct CalendarInteractiveTimelineEvent: View {
     let onSelect: () -> Void
     let onUpdate: CalendarUpdateHandler?
     let onStatusUpdate: CalendarStatusUpdateHandler?
-    let onVerticalPan: ((CGFloat) -> Void)?
 
     @State private var moveMinutes = 0
     @State private var moveDays = 0
@@ -2574,7 +3550,7 @@ private struct CalendarInteractiveTimelineEvent: View {
             narrow: narrow,
             availableHeight: availableHeight,
             hidesSecondaryMetadata: hidesSecondaryMetadata,
-            timeZone: timeZone,
+            calendar: calendar,
             cornerRadii: cornerRadii,
             accessibilityID: eventAccessibilityID,
             // The card owns only selection/move rendering. The interactive
@@ -2605,14 +3581,11 @@ private struct CalendarInteractiveTimelineEvent: View {
         .simultaneousGesture(tapGesture)
         .highPriorityGesture(moveGesture, including: .gesture)
 #else
-        // The sequenced long-press move must own an event-body drag before
-        // the surrounding vertical timeline/pager consumes it. A quick
-        // vertical drag fails the bounded long press and is handled by the
-        // explicit vertical fallback below; an intentional hold therefore
-        // cannot be reinterpreted as timeline scrolling.
+        // The sequenced long-press move claims the event body only after its
+        // deliberate hold succeeds. Until then the native timeline ScrollView
+        // remains the sole owner of a quick vertical drag.
         .simultaneousGesture(tapGesture)
         .highPriorityGesture(moveGesture, including: .gesture)
-        .simultaneousGesture(verticalTimelinePanGesture)
 #endif
         .simultaneousGesture(moveStartClassifier)
         .animation(reduceMotion ? nil : LifeOSMotion.primary, value: item.start)
@@ -2818,14 +3791,8 @@ private struct CalendarInteractiveTimelineEvent: View {
 
     private var accessibilityValue: String {
         var style = Date.FormatStyle.dateTime.hour().minute().locale(.current)
-        style.timeZone = timeZone
+        style.timeZone = calendar.timeZone
         return "\(calendarISODate(item.start)) \(item.start.formatted(style)) to \(calendarISODate(item.end)) \(item.end.formatted(style)); move actions available"
-    }
-
-    private var presentationCalendar: Calendar {
-        var value = calendar
-        value.timeZone = timeZone
-        return value
     }
 
     @ViewBuilder
@@ -2857,8 +3824,10 @@ private struct CalendarInteractiveTimelineEvent: View {
                 .accessibilityAction(named: "Resize shorter 15 minutes") { commitResize(minutes: -15) }
                 .accessibilityAction(named: "Resize longer 15 minutes") { commitResize(minutes: 15) }
                 .contentShape(Rectangle())
-                .gesture(resizeOrVerticalGesture)
-                .simultaneousGesture(verticalTimelinePanGesture)
+                // A quick drag over the handle remains a native timeline
+                // scroll. The long press below claims this surface only when
+                // resize intent has been established.
+                .gesture(resizeGesture)
 
             // The visual affordance stays compact while the invisible control
             // above provides the forgiving touch target.
@@ -2904,25 +3873,6 @@ private struct CalendarInteractiveTimelineEvent: View {
                 moveStartIsBody = false
             }
     }
-
-#if os(iOS)
-    private var resizeOrVerticalGesture: some Gesture {
-        resizeGesture.exclusively(before: verticalTimelinePanGesture)
-    }
-
-    private var verticalTimelinePanGesture: some Gesture {
-        DragGesture(minimumDistance: 8, coordinateSpace: .local)
-            .onEnded { value in
-                guard abs(value.translation.height) > abs(value.translation.width),
-                      abs(value.translation.height) >= 12,
-                      !isMoving,
-                      !isResizing,
-                      !mutationCommitInFlight else { return }
-                onVerticalPan?(value.translation.height)
-            }
-    }
-
-#endif
 
     private var moveGesture: some Gesture {
         LongPressGesture(minimumDuration: 0.45, maximumDistance: 12)
@@ -3100,7 +4050,7 @@ private struct CalendarInteractiveTimelineEvent: View {
     }
 
     private func calendarISODate(_ date: Date) -> String {
-        let components = presentationCalendar.dateComponents([.year, .month, .day], from: date)
+        let components = calendar.dateComponents([.year, .month, .day], from: date)
         guard let year = components.year, let month = components.month, let day = components.day else { return "" }
         return String(format: "%04d-%02d-%02d", year, month, day)
     }
@@ -3145,19 +4095,23 @@ private struct CalendarInteractiveTimelineEvent: View {
 
 private struct CalendarNowLine: View {
     let days: [Date]
+    let todayColumnVisible: Bool
     let calendar: Calendar
     let timeGutter: CGFloat
     let totalHeight: CGFloat
     let contentWidth: CGFloat
+    /// X position of the leading edge of the first day column in the enclosing
+    /// timeline. The label remains at x=0 while the marker follows this
+    /// column origin during iPhone paging.
+    let columnOriginX: CGFloat
     /// The iOS day strip passes its virtual column width explicitly because
     /// its layer spans more days than the visible window; the Mac week grid
     /// keeps the derived `(contentWidth - gutter) / days` behavior.
     var columnWidthOverride: CGFloat? = nil
-    let reduceMotion: Bool
 
     var body: some View {
-        if days.contains(where: calendar.isDateInToday) {
-            TimelineView(.periodic(from: .now, by: 60)) { context in
+        if todayColumnVisible {
+            TimelineView<PeriodicTimelineSchedule, AnyView>(.periodic(from: Date.now, by: 60)) { context in
                 let day = calendar.startOfDay(for: context.date)
                 let scale = CalendarInteractionLayout.timelineScale(
                     day: day,
@@ -3166,33 +4120,40 @@ private struct CalendarNowLine: View {
                 )
                 let y = min(totalHeight - 1, max(0, CGFloat(scale?.y(for: context.date, calendar: calendar) ?? 0)))
                 // The rule spans only today's column (Notion parity); the
-                // gutter label + dot stay pinned to the left edge.
+                // gutter label remains pinned while the line follows the
+                // current day during horizontal paging.
                 let dayColumnWidth = columnWidthOverride ??
                     (days.isEmpty ? 0 : max(0, (contentWidth - timeGutter) / CGFloat(days.count)))
                 let todayIndex = days.firstIndex(where: { calendar.isDateInToday($0) }) ?? 0
-                HStack(spacing: 0) {
+                AnyView(ZStack(alignment: .topLeading) {
                     Text(CalendarTimelineScale.localizedTimeLabel(for: context.date, calendar: calendar))
-                        .font(.caption2.monospacedDigit().weight(.semibold))
-                        .foregroundStyle(Color.primary)
+                        .lifeOSTypography(.metadata, weight: .semibold).monospacedDigit()
+                        .foregroundStyle(LifeOSTokens.calendarRed)
                         .lineLimit(1)
                         .minimumScaleFactor(0.72)
                         .allowsTightening(true)
-                        // The trailing padding is part of the label's
-                        // footprint; keep label + dot + rule exactly within
-                        // the available content width.
                         .frame(width: max(0, timeGutter - 5), alignment: .trailing)
                         .padding(.trailing, 5)
-                    Circle()
-                        .fill(Color.primary)
-                        .frame(width: 7, height: 7)
-                    Rectangle()
-                        .fill(Color.primary)
-                        .frame(width: max(0, dayColumnWidth - 7), height: 2)
+                        .offset(y: y - 1)
+
+                    Color.clear
+                        .frame(width: contentWidth, height: totalHeight, alignment: .topLeading)
+                        .overlay(alignment: .topLeading) {
+                            HStack(spacing: 0) {
+                                Circle()
+                                    .fill(LifeOSTokens.calendarRed)
+                                    .frame(width: 5, height: 5)
+                                Rectangle()
+                                    .fill(LifeOSTokens.calendarRed)
+                                    .frame(width: max(0, dayColumnWidth - 5), height: 1)
+                            }
+                            .offset(x: columnOriginX + CGFloat(todayIndex) * dayColumnWidth, y: y - 1)
+                        }
+                        .calendarDayAreaMask(totalWidth: contentWidth, gutter: timeGutter)
                 }
-                .offset(x: CGFloat(todayIndex) * dayColumnWidth, y: y - 1)
-                .frame(width: contentWidth, alignment: .leading)
-                .animation(reduceMotion ? nil : .linear(duration: 0.3), value: y)
+                .frame(width: contentWidth, height: totalHeight, alignment: .topLeading)
                 .zIndex(4)
+                )
             }
         }
     }
@@ -3209,7 +4170,7 @@ private struct CalendarDayHeaderNumber: View {
     var body: some View {
         let isToday = calendar.isDateInToday(day)
         let label = Text(day, format: .dateTime.day())
-            .font(.title3.weight(isToday ? .bold : .medium))
+            .lifeOSTypography(.sectionTitle, weight: isToday ? .bold : .medium)
             // Inverted today marker: numeral in canvas color on primaryText.
             .foregroundStyle(isToday ? LifeOSTokens.canvas : Color.primary)
             .frame(width: 30, height: 28)
@@ -3235,7 +4196,7 @@ private struct CalendarTimelineEvent: View {
     let narrow: Bool
     let availableHeight: CGFloat
     let hidesSecondaryMetadata: Bool
-    let timeZone: TimeZone
+    let calendar: Calendar
     let cornerRadii: CalendarEventCornerRadii
     let accessibilityID: String
     @State private var isHovering = false
@@ -3246,22 +4207,16 @@ private struct CalendarTimelineEvent: View {
         !hidesSecondaryMetadata && !compact && !narrow && availableHeight >= 62
     }
 
-    private var displayCalendar: Calendar {
-        var calendar = Calendar.current
-        calendar.timeZone = timeZone
-        return calendar
-    }
-
     private var eventTimeRangeLabel: String {
-        "\(CalendarTimelineScale.localizedTimeLabel(for: item.start, calendar: displayCalendar))–" +
-            "\(CalendarTimelineScale.localizedTimeLabel(for: item.end, calendar: displayCalendar))"
+        "\(CalendarTimelineScale.localizedTimeLabel(for: item.start, calendar: calendar))–" +
+            "\(CalendarTimelineScale.localizedTimeLabel(for: item.end, calendar: calendar))"
     }
 
     private var eventAccessibilityLabel: String {
         let kindLabel = item.kind == .todo ? "To-do, \(item.status.label)" : item.status.label
         return "\(item.icon ?? "No icon") \(item.title), \(kindLabel), " +
-            "\(CalendarTimelineScale.localizedTimeLabel(for: item.start, calendar: displayCalendar)) to " +
-            "\(CalendarTimelineScale.localizedTimeLabel(for: item.end, calendar: displayCalendar))"
+            "\(CalendarTimelineScale.localizedTimeLabel(for: item.start, calendar: calendar)) to " +
+            "\(CalendarTimelineScale.localizedTimeLabel(for: item.end, calendar: calendar))"
     }
 
     @ViewBuilder
@@ -3278,7 +4233,7 @@ private struct CalendarTimelineEvent: View {
                     leadingStatusControl
                         .frame(width: 14, height: 14)
                     Text(item.title)
-                        .font(.caption.weight(.semibold))
+                        .lifeOSTypography(.metadata, weight: .semibold)
                         .lineLimit(1)
                         .minimumScaleFactor(0.62)
                         .truncationMode(.tail)
@@ -3288,13 +4243,13 @@ private struct CalendarTimelineEvent: View {
                     leadingStatusControl
                     VStack(alignment: .leading, spacing: 1) {
                         Text(item.title)
-                            .font(.caption.weight(.semibold))
+                            .lifeOSTypography(.metadata, weight: .semibold)
                             .lineLimit(1)
                             .minimumScaleFactor(0.62)
                             .truncationMode(.tail)
                         if showsSecondaryMetadata {
                             Text(eventTimeRangeLabel)
-                                .font(.caption2.monospacedDigit())
+                                .lifeOSTypography(.metadata).monospacedDigit()
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                                 .minimumScaleFactor(0.70)
@@ -3432,7 +4387,7 @@ public struct CalendarMonthGrid: View {
                 // Single-letter weekday symbols repeat (S/T). Index identity keeps
                 // all seven columns instead of SwiftUI coalescing duplicate IDs.
                 ForEach(Array(weekdaySymbols.enumerated()), id: \.offset) { _, symbol in
-                    Text(symbol).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    Text(symbol).lifeOSTypography(.metadata, weight: .semibold).foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity).padding(.vertical, 8)
                 }
                 ForEach(days, id: \.self) { day in
@@ -3450,7 +4405,7 @@ public struct CalendarMonthGrid: View {
         .overlay(alignment: .bottomLeading) {
             if let moveStatus {
                 Text(moveStatus.message)
-                    .font(.caption)
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(moveStatus == .success ? .green : .orange)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
@@ -3489,7 +4444,7 @@ public struct CalendarMonthGrid: View {
         return VStack(alignment: .leading, spacing: 4) {
             Button { onSelectDate(day) } label: {
                 Text(day, format: .dateTime.day())
-                    .font(.caption.weight(calendar.isDateInToday(day) ? .bold : .medium))
+                    .lifeOSTypography(.metadata, weight: calendar.isDateInToday(day) ? .bold : .medium)
                     .foregroundStyle(calendar.isDateInToday(day) ? LifeOSTokens.canvas : (isCurrentMonth ? Color.primary : Color.secondary))
                     .frame(width: 25, height: 25)
                     .background(calendar.isDateInToday(day) ? CalendarEventVisuals.today : .clear, in: Circle())
@@ -3734,7 +4689,7 @@ private struct CalendarMonthEventChip: View {
                     Text(item.title).lineLimit(1)
                 }
             }
-            .font(.caption2)
+            .lifeOSTypography(.metadata)
             .padding(.horizontal, compact ? 3 : 4)
             .padding(.vertical, 2)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -3785,21 +4740,13 @@ private struct CalendarMonthEventChip: View {
     }
 
     private func calendarISODate(_ date: Date) -> String {
-        let parts = itemCalendar.dateComponents([.year, .month, .day], from: date)
+        let parts = calendar.dateComponents([.year, .month, .day], from: date)
         return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
-    }
-
-    private var itemCalendar: Calendar {
-        guard let identifier = item.timeZoneIdentifier,
-              let timeZone = TimeZone(identifier: identifier) else { return calendar }
-        var value = calendar
-        value.timeZone = timeZone
-        return value
     }
 
     private var accessibilityTimeStyle: Date.FormatStyle {
         var style = Date.FormatStyle.dateTime.hour().minute().locale(.current)
-        style.timeZone = itemCalendar.timeZone
+        style.timeZone = calendar.timeZone
         return style
     }
 
@@ -3889,7 +4836,7 @@ public struct CalendarExpandedMonthGrid: View {
             Color.clear.frame(height: 24)
             ForEach(Array(weekdaySymbols.enumerated()), id: \.offset) { _, symbol in
                 Text(symbol)
-                    .font(.caption.weight(.medium))
+                    .lifeOSTypography(.metadata, weight: .medium)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity)
                     .frame(height: 24)
@@ -3897,7 +4844,7 @@ public struct CalendarExpandedMonthGrid: View {
 
             ForEach(Array(days.chunked(into: 7).enumerated()), id: \.offset) { _, week in
                 Text(weekNumber(for: week.first))
-                    .font(.caption2.monospacedDigit())
+                    .lifeOSTypography(.metadata).monospacedDigit()
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, minHeight: 54)
                 // Date is the stable identity. Using the weekday index here
@@ -4168,7 +5115,7 @@ public struct CalendarEmojiPicker: View {
         LazyVGrid(columns: Array(repeating: GridItem(.fixed(34), spacing: 7), count: 6), spacing: 7) {
             ForEach(emojis, id: \.self) { emoji in
                 Button { selection = emoji } label: {
-                    Text(emoji).font(.title3).frame(width: 34, height: 34)
+                    Text(emoji).font(.system(size: 20, weight: .regular, design: .default)).frame(width: 34, height: 34)
                         .background(selection == emoji ? LifeOSTokens.accent.opacity(0.20) : Color.primary.opacity(0.04),
                                     in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                         .overlay(RoundedRectangle(cornerRadius: 8).stroke(selection == emoji ? LifeOSTokens.accent : .clear))
@@ -4186,6 +5133,119 @@ private extension Array {
         guard size > 0 else { return [] }
         return stride(from: 0, to: count, by: size).map { start in
             Array(self[start..<Swift.min(start + size, count)])
+        }
+    }
+}
+
+/// Shared production entry point for iPhone and Mac. No token is stored in
+/// preferences, restoration state, logs, or the calendar snapshot.
+@available(iOS 17.0, macOS 14.0, *)
+public struct CalendarPairingView: View {
+    @ObservedObject var coordinator: CalendarCoordinator
+    @Environment(\.dismiss) private var dismiss
+    @State private var input = ""
+    @State private var verified = false
+    @State private var confirmPresented = false
+
+    public var body: some View {
+        NavigationStack {
+            Form {
+                Section("Nearby Calendar sync") {
+                    Text(coordinator.pairingState.message)
+                        .accessibilityIdentifier("calendar-pairing-status")
+                    Text(CalendarPairingState.connectionMessage(coordinator.syncStatus))
+                        .lifeOSTypography(.metadata).foregroundStyle(.secondary)
+                    Text("Keep both apps open nearby. Pairing is memory-only: stopping sync or quitting either app requires a new pairing on both devices. This pairs one device and shares your Calendar snapshot.")
+                        .lifeOSTypography(.metadata).foregroundStyle(.secondary)
+                    if let error = coordinator.pairingError {
+                        Text(error).foregroundStyle(.red)
+                    }
+                }
+                if coordinator.pairingState.available {
+                    handoffControls
+                }
+            }
+            .formStyle(.grouped)
+            .navigationTitle("Pair nearby device")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .confirmationDialog("Allow Calendar sync with this device?", isPresented: $confirmPresented, titleVisibility: .visible) {
+                Button("Confirm pairing and allow sync") { coordinator.confirmPairing() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Only confirm after transferring the handoff privately and checking the same verification code on both devices. Confirm on the other device too.")
+            }
+        }
+#if os(macOS)
+        .frame(minWidth: 500, idealWidth: 560, minHeight: 580)
+#endif
+        .onChange(of: coordinator.pairingState.stage) { _, _ in
+            verified = false
+            input = ""
+        }
+        .onDisappear {
+            input = ""
+            if coordinator.pairingState.stage != "confirmed" { coordinator.cancelPairing() }
+        }
+    }
+
+    @ViewBuilder private var handoffControls: some View {
+        let state = coordinator.pairingState
+        if state.stage == "confirmed" {
+            Section {
+                Text("Peer ID: \(state.remoteSender ?? "")").lifeOSTypography(.metadata).textSelection(.enabled)
+                Button("Connect / retry") { coordinator.retryPairingConnection() }
+                Button("Revoke pairing", role: .destructive) { coordinator.cancelPairing() }
+            }
+        } else {
+            Section("1. Transfer privately") {
+                if state.stage != "awaitingResponse" && state.stage != "awaitingConfirmation" {
+                    Button("Create one-time offer") { coordinator.createPairing() }
+                    Text("Create an offer on one device only. On the other device, paste that offer below.")
+                }
+                if let outgoing = state.outgoing {
+                    Text(state.stage == "awaitingResponse" ? "Offer" : "Response — return to the first device")
+                    Text(outgoing).lifeOSTypography(.metadata).monospacedDigit()
+                        .lineLimit(4).textSelection(.enabled).privacySensitive()
+                    ShareLink(item: outgoing) { Text("Share handoff privately…") }
+                    Text("The handoff contains a secret. Use AirDrop or another private channel to your own device; remove any saved or copied handoff after pairing.")
+                        .lifeOSTypography(.metadata).foregroundStyle(.secondary)
+                }
+                if state.stage != "awaitingConfirmation" {
+                    TextField("Paste offer or response", text: $input, axis: .vertical)
+                        .lineLimit(3...5).autocorrectionDisabled().privacySensitive()
+                        .accessibilityIdentifier("calendar-pairing-input")
+                        .onChange(of: input) { _, value in
+                            if value.utf8.count > CalendarPairingHandoff.maximumTokenBytes {
+                                input = String(value.prefix(CalendarPairingHandoff.maximumTokenBytes))
+                            }
+                        }
+                    Button("Review handoff") {
+                        coordinator.importPairing(input)
+                        input = ""
+                    }.disabled(input.isEmpty)
+                }
+            }
+            if let fingerprint = state.fingerprint {
+                Section("2. Compare and confirm on both devices") {
+                    Text("Verification code: \(fingerprint)")
+                        .lifeOSTypography(.body).monospacedDigit().textSelection(.enabled)
+                    if let sender = state.remoteSender {
+                        Text("Peer ID: \(sender)").lifeOSTypography(.metadata)
+                    }
+                    if state.stage == "awaitingConfirmation" {
+                        Toggle("I transferred the response and verified the same code on both devices", isOn: $verified)
+                        Button("Confirm pairing…") { confirmPresented = true }
+                            .disabled(!verified)
+                    }
+                }
+            }
+            if state.stage == "awaitingResponse" || state.stage == "awaitingConfirmation" {
+                Button("Cancel pairing", role: .destructive) { coordinator.cancelPairing() }
+            }
         }
     }
 }

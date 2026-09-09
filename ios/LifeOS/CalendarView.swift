@@ -93,12 +93,14 @@ public struct CalendarView: View {
     @State private var anchoredEditorPresentation: CalendarEditorPresentation?
     @State private var timedCreationPreview: CalendarTimedCreationPreview?
     @State private var isSearchPresented = false
+    @State private var isPairingPresented = false
+    @State private var timelineScrollRequest: CalendarTimelineScrollRequest?
+    @State private var nextTimelineScrollRequestID = 0
 #if os(macOS)
     @State private var editorAnchorFrame: CGRect?
     @State private var editorPresentationGeneration = 0
 #endif
     @State private var hourHeight: CGFloat = 54
-    @State private var gestureStartHourHeight: CGFloat?
     @Binding private var requestNewEvent: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Namespace private var calendarMonthNamespace
@@ -224,12 +226,6 @@ public struct CalendarView: View {
         return style
     }
 
-    private var sidebarTimeStyle: Date.FormatStyle {
-        var style = Date.FormatStyle.dateTime.hour().minute()
-        style.timeZone = calendar.timeZone
-        return style
-    }
-
     public var body: some View {
         Group {
 #if os(macOS)
@@ -285,6 +281,9 @@ public struct CalendarView: View {
             materializedDisplayItems = expandedItems
             materializedDisplayItemsSourceKey = Self.displayItemsSourceKey(for: sourceItems)
         }
+        .sheet(isPresented: $isPairingPresented) {
+            CalendarPairingView(coordinator: coordinator)
+        }
         .sheet(isPresented: $isSearchPresented) {
             CalendarSearchView(
                 items: displayItems,
@@ -314,19 +313,19 @@ public struct CalendarView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Schedule")
-                            .font(LifeOSFont.spaceGrotesk(12, weight: .medium))
+                            .lifeOSTypography(.sectionTitle, weight: .medium)
                         Text(selectedDate, format: sidebarDateStyle)
-                            .font(LifeOSFont.inter(10, weight: .medium))
+                            .lifeOSTypography(.body, weight: .medium)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                     }
 
                     if selectedDayItems.isEmpty {
                         VStack(alignment: .leading, spacing: 5) {
                             Text("No events")
-                                .font(LifeOSFont.inter(12, weight: .medium))
+                                .lifeOSTypography(.body, weight: .medium)
                                 .foregroundStyle(Color.secondary)
                             Text("The day is clear.")
-                                .font(LifeOSFont.inter(10, weight: .regular))
+                                .lifeOSTypography(.body, weight: .regular)
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                         }
                         .padding(.top, 2)
@@ -373,7 +372,7 @@ public struct CalendarView: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Color.primary)
                     .lineLimit(1)
-                Text("\(item.start, format: sidebarTimeStyle) – \(item.end, format: sidebarTimeStyle)")
+                Text(sidebarEventTimeLabel(item))
                     .font(.system(size: 9, weight: .medium))
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
@@ -388,10 +387,15 @@ public struct CalendarView: View {
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
     }
+
+    private func sidebarEventTimeLabel(_ item: CalendarItem) -> String {
+        "\(CalendarTimelineScale.localizedTimeLabel(for: item.start, calendar: calendar)) – " +
+            CalendarTimelineScale.localizedTimeLabel(for: item.end, calendar: calendar)
+    }
 #else
     private var mobileLayout: some View {
         calendarContent
-            .overlay(alignment: .bottom) {
+            .safeAreaInset(edge: .bottom, spacing: 0) {
                 calendarQuickActions
             }
             .refreshable { await coordinator.manualRefresh() }
@@ -455,7 +459,7 @@ public struct CalendarView: View {
                 HStack(spacing: 10) {
                     Image(systemName: "exclamationmark.triangle")
                     Text(message)
-                        .font(.caption)
+                        .lifeOSTypography(.metadata)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     Button("Retry") {
                         Task { _ = await coordinator.retryLastSave() }
@@ -472,7 +476,7 @@ public struct CalendarView: View {
                 HStack(spacing: 10) {
                     Image(systemName: "arrow.triangle.2.circlepath")
                     Text(warning)
-                        .font(.caption)
+                        .lifeOSTypography(.metadata)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .padding(.horizontal, 14)
@@ -607,23 +611,15 @@ public struct CalendarView: View {
                 onStatusUpdate: updateStatus,
                 onPreviewDateChange: previewDate,
                 onCommitDateChange: commitPreviewDate,
+                onHourHeightChange: calendarHourHeightChangeHandler,
+                scrollRequest: timelineScrollRequest,
+                onScrollRequestConsumed: consumeTimelineScrollRequest,
                 monthNamespace: reduceMotion ? nil : calendarMonthNamespace,
                 monthExpanded: monthExpanded,
                 monthSelectedDate: headerDate,
                 reduceMotion: reduceMotion
             )
         }
-        #if os(iOS)
-        .simultaneousGesture(
-            MagnificationGesture()
-                .onChanged { scale in
-                    if gestureStartHourHeight == nil { gestureStartHourHeight = hourHeight }
-                    hourHeight = min(110, max(38, (gestureStartHourHeight ?? hourHeight) * scale))
-                }
-                .onEnded { _ in gestureStartHourHeight = nil }
-        )
-        .accessibilityHint("Pinch vertically to change hour spacing")
-        #endif
     }
 
     private var calendarHeader: some View {
@@ -633,7 +629,7 @@ public struct CalendarView: View {
                 Button(action: toggleMonthExpansion) {
                     HStack(spacing: 5) {
                         Text(headerDate, format: .dateTime.month(.wide))
-                            .font(LifeOSFont.title(22))
+                            .lifeOSTypography(.sectionTitle)
                             .tracking(-0.2)
                             .lineLimit(1)
                         LifeOSIcon(.chevronRight)
@@ -693,6 +689,8 @@ public struct CalendarView: View {
                     Button("Week") { setDisplayMode(.week) }
                     #endif
                     Button("Month view") { setDisplayMode(.month) }
+                    Divider()
+                    Button("Pair nearby device…") { isPairingPresented = true }
                 } label: {
                     LifeOSIcon(.calendar)
                         .frame(width: 17, height: 17)
@@ -731,11 +729,11 @@ public struct CalendarView: View {
                 HStack(spacing: 10) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(selectedDate, format: .dateTime.month(.wide).year())
-                            .font(LifeOSFont.headerLarge(22))
+                            .lifeOSTypography(.pageTitle)
                             .accessibilityIdentifier("calendar-header-date")
                             .accessibilityValue(calendarISODate(selectedDate))
                         Text(displayMode == .month ? "Month" : timelineSubtitle)
-                            .font(LifeOSFont.caption())
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -761,7 +759,9 @@ public struct CalendarView: View {
                     .accessibilityLabel("Undo last calendar change")
                     .accessibilityHint("Restores the calendar before the most recent saved change")
                     .accessibilityIdentifier("calendar-undo")
-                    Button("Today") { selectedDate = .now }
+                    Button("Pair nearby device…") { isPairingPresented = true }
+                        .accessibilityIdentifier("calendar-pair-device")
+                    Button("Today", action: goToToday)
                         .buttonStyle(.bordered)
                     Button { move(by: -1) } label: {
                         LifeOSIcon(.chevronLeft).frame(width: 16, height: 16)
@@ -799,9 +799,7 @@ public struct CalendarView: View {
                     .frame(maxWidth: 260)
                     Spacer()
                     if displayMode == .timeline {
-                        Slider(value: $hourHeight, in: 38...110, step: 2)
-                            .frame(width: 110)
-                            .accessibilityLabel("Hour height")
+                        macDensityControls
                     }
                 }
             }
@@ -812,6 +810,64 @@ public struct CalendarView: View {
         .background(LifeOSTokens.canvas)
         .overlay(alignment: .bottom) { Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 1) }
     }
+
+    private var calendarHourHeightChangeHandler: ((CGFloat) -> Void)? {
+        { hourHeight = $0 }
+    }
+
+#if os(macOS)
+    private var macDensityControls: some View {
+        HStack(spacing: 4) {
+            Text("Density")
+                .lifeOSTypography(.metadata)
+                .foregroundStyle(LifeOSTokens.secondaryText)
+            Button {
+                adjustHourHeight(by: -8)
+            } label: {
+                Image(systemName: "minus")
+                    .frame(width: 26, height: 26)
+            }
+            .buttonStyle(.bordered)
+            .accessibilityLabel("Decrease timeline density")
+            .accessibilityHint("Decreases hour spacing by 8 points")
+            Button {
+                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.16)) {
+                    hourHeight = 54
+                }
+            } label: {
+                Text("\(Int((hourHeight / 54 * 100).rounded()))%")
+                    .monospacedDigit()
+                    .frame(minWidth: 42)
+            }
+            .buttonStyle(.bordered)
+            .accessibilityLabel("Reset timeline density")
+            .accessibilityValue("\(Int(hourHeight.rounded())) points per hour")
+            .accessibilityHint("Resets hour spacing to 54 points")
+            Button {
+                adjustHourHeight(by: 8)
+            } label: {
+                Image(systemName: "plus")
+                    .frame(width: 26, height: 26)
+            }
+            .buttonStyle(.bordered)
+            .accessibilityLabel("Increase timeline density")
+            .accessibilityHint("Increases hour spacing by 8 points")
+        }
+        .controlSize(.small)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Timeline density controls")
+        .help("Pinch on the schedule with the trackpad to zoom around the pointer")
+    }
+
+    private func adjustHourHeight(by delta: CGFloat) {
+        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.16)) {
+            hourHeight = min(
+                CGFloat(CalendarInteractionLayout.maximumHourHeight),
+                max(CGFloat(CalendarInteractionLayout.minimumHourHeight), hourHeight + delta)
+            )
+        }
+    }
+#endif
 
 #if os(iOS)
     private func calendarModeButton(_ mode: CalendarDisplayMode, label: String) -> some View {
@@ -934,8 +990,19 @@ public struct CalendarView: View {
     }
 
     private func goToToday() {
-        let today = calendar.startOfDay(for: .now)
+        let now = Date.now
+        let today = calendar.startOfDay(for: now)
         retargetSelectedDate(today)
+        nextTimelineScrollRequestID &+= 1
+        timelineScrollRequest = CalendarTimelineScrollRequest(
+            id: nextTimelineScrollRequestID,
+            anchor: .todayMinusTwoHours(now: now, calendar: calendar)
+        )
+    }
+
+    private func consumeTimelineScrollRequest(_ id: Int) {
+        guard timelineScrollRequest?.id == id else { return }
+        timelineScrollRequest = nil
     }
 
     private func previewDate(_ date: Date) {
@@ -1264,17 +1331,7 @@ private struct CalendarNextEventPill: View {
     }
 
     private var timeLabel: String {
-        var zoned = calendar
-        zoned.timeZone = itemTimeZone
-        return String(
-            format: "%02d:%02d",
-            zoned.component(.hour, from: item.start),
-            zoned.component(.minute, from: item.start)
-        )
-    }
-
-    private var itemTimeZone: TimeZone {
-        item.timeZoneIdentifier.flatMap(TimeZone.init(identifier:)) ?? calendar.timeZone
+        CalendarTimelineScale.localizedTimeLabel(for: item.start, calendar: calendar)
     }
 }
 
@@ -1763,7 +1820,7 @@ struct CalendarEditor: View {
     private var editorHeader: some View {
         HStack(spacing: 12) {
             Text("Event")
-                .font(LifeOSFont.spaceGrotesk(16, weight: .bold))
+                .lifeOSTypography(.sectionTitle, weight: .bold)
             Spacer(minLength: 0)
             Button(action: commit) {
                 Image(systemName: "checkmark")
@@ -2301,7 +2358,7 @@ private struct CalendarEditorTimePill<PopoverContent: View>: View {
     var body: some View {
         Button { isPresented = true } label: {
             Text(timeLabel)
-                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .font(.system(size: 12, weight: .semibold, design: .default)).monospacedDigit()
                 .foregroundStyle(.primary)
                 .padding(.horizontal, 9)
                 .padding(.vertical, 6)
@@ -2429,7 +2486,7 @@ private struct CalendarEditorTimePopover: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 72)
                     .multilineTextAlignment(.center)
-                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .font(.system(size: 12, weight: .medium, design: .default)).monospacedDigit()
                     .onSubmit(commitTypedValue)
                     .accessibilityIdentifier("calendar-event-time-input")
             }
@@ -2464,7 +2521,7 @@ private struct CalendarEditorTimePopover: View {
                                 } label: {
                                     HStack {
                                         Text(Self.label(for: candidate, calendar: calendar))
-                                            .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                            .font(.system(size: 12, weight: .medium, design: .default)).monospacedDigit()
                                         Spacer(minLength: 0)
                                         if calendar.dateComponents([.hour, .minute], from: candidate) == calendar.dateComponents([.hour, .minute], from: date) {
                                             Image(systemName: "checkmark")
@@ -2551,7 +2608,7 @@ private struct CalendarEditorIcon: View {
                     .font(.system(size: 21, weight: .medium))
                     .symbolRenderingMode(.hierarchical)
             } else if let icon {
-                Text(icon).font(.title2)
+                Text(icon).font(.system(size: 22, weight: .regular, design: .default))
             } else {
                 HStack(spacing: 5) {
                     Image(systemName: "plus")
@@ -4006,7 +4063,7 @@ struct CalendarCustomIconSheet: View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 20) {
                 Text("Custom icons can be reused across your local calendar.")
-                    .font(.body)
+                    .lifeOSTypography(.body)
                     .foregroundStyle(.secondary)
 
                 Button { showingImporter = true } label: {
@@ -4031,7 +4088,7 @@ struct CalendarCustomIconSheet: View {
 
                 VStack(alignment: .leading, spacing: 7) {
                     Text("Icon name")
-                        .font(.subheadline.weight(.semibold))
+                        .lifeOSTypography(.label, weight: .semibold)
                     TextField("have-fun-with-it", text: $name)
                         .textFieldStyle(.roundedBorder)
                         .accessibilityIdentifier("calendar-icon-custom-name")
@@ -4236,11 +4293,12 @@ struct CalendarSearchView: View {
         .contentShape(Rectangle())
     }
 
-    /// Date and time rendered in the item's own time zone so a result row
-    /// never silently relabels a cross-zone event into the device zone.
+    /// Search results use the calendar's display zone. Selecting a result
+    /// opens the editor, where the stored event zone remains explicitly
+    /// disclosed when the event has one.
     private func resultSubtitle(_ item: CalendarItem) -> String {
         var style = Date.FormatStyle.dateTime.weekday(.abbreviated).month(.abbreviated).day().hour().minute()
-        style.timeZone = item.timeZoneIdentifier.flatMap(TimeZone.init(identifier:)) ?? calendar.timeZone
+        style.timeZone = calendar.timeZone
         return item.start.formatted(style)
     }
 }

@@ -138,11 +138,11 @@ struct FinanceAnalyticsView: View {
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(selectedEntry?.title ?? "Analytics & Tools")
-                    .font(LifeOSFont.display())
+                    .lifeOSTypography(.pageTitle)
                     .tracking(-0.5)
                     .modifier(FinanceHeroMorphTag(id: "finance-analytics-hero", namespace: selectedEntry == nil ? heroNamespace : nil))
                 Text(selectedEntry?.subtitle ?? "Wealth, spending abroad, and travel")
-                    .font(LifeOSFont.metadata())
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.secondaryText)
             }
             Spacer(minLength: 6)
@@ -162,15 +162,15 @@ struct FinanceAnalyticsView: View {
                             .frame(width: 20, height: 20)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(entry.title)
-                                .font(LifeOSFont.control())
+                                .lifeOSTypography(.button)
                             Text(entry.subtitle)
-                                .font(LifeOSFont.axis())
+                                .lifeOSTypography(.metadata)
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                         }
                         Spacer(minLength: 8)
                         if !entry.hasData {
                             Text("Unavailable")
-                                .font(LifeOSFont.axis())
+                                .lifeOSTypography(.metadata)
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 3)
@@ -205,9 +205,7 @@ struct FinanceAnalyticsView: View {
                 actionTitle: onOpenConnections == nil ? nil : "Manage connections",
                 action: onOpenConnections
             )
-            .padding(18)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .flatCard()
+            .padding(.vertical, 4)
             .accessibilityIdentifier("finance-analytics-spending-abroad")
         case .travel:
             FinanceEmptyModuleRow(
@@ -217,9 +215,7 @@ struct FinanceAnalyticsView: View {
                 actionTitle: onOpenConnections == nil ? nil : "Manage connections",
                 action: onOpenConnections
             )
-            .padding(18)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .flatCard()
+            .padding(.vertical, 4)
             .accessibilityIdentifier("finance-analytics-travel")
         }
     }
@@ -245,7 +241,10 @@ struct FinanceAnalyticsView: View {
                     points: snapshot.points(for: .netWorth, range: selectedRange),
                     selectedPoint: $selectedNetWorthPoint,
                     isDemo: snapshot.isDemo,
+                    availabilityIdentity: "wealth|\(selectedRange.rawValue)",
+                    chartState: snapshot.chartState(for: .netWorth, range: selectedRange),
                     emptyDetail: "Net-worth history is not available from the current Finance contract.",
+                    showMaxAction: selectedRange == .max ? nil : { selectedRange = .max },
                     projection: Self.wealthProjection(from: snapshot.netWorthPoints)
                 )
             }
