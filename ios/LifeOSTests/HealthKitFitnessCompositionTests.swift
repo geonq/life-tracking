@@ -1378,4 +1378,64 @@ final class HealthKitFitnessCompositionTests: XCTestCase {
         XCTAssertEqual(empty.snapshot.sleep.quality, .unavailable)
         XCTAssertTrue(empty.snapshot.sleep.detail.contains("Unavailable"))
     }
+
+    func testCoreTrendSemanticRoleSeparatesExplicitEstimateFromObservedSeries() {
+        let estimate = FitnessMetric(
+            title: "Energy reserve",
+            value: "70",
+            unit: "%",
+            detail: "Derived estimate · demo fixture",
+            quality: .demo,
+            trend: [0.62, 0.70],
+            sourceState: .demo
+        )
+        XCTAssertEqual(estimate.fitnessTrendSemanticRole, .estimated)
+        XCTAssertEqual(estimate.fitnessTrendSemanticRole.label, "Derived / Estimated")
+        XCTAssertEqual(estimate.fitnessTrendSemanticRole.tokenName, "estimate")
+
+        let observed = FitnessMetric(
+            title: "Energy reserve",
+            value: "70",
+            unit: "%",
+            detail: "Observed source samples",
+            quality: .observed,
+            trend: [62, 70],
+            sourceState: .observed
+        )
+        XCTAssertEqual(observed.fitnessTrendSemanticRole, .observed)
+        XCTAssertEqual(observed.fitnessTrendSemanticRole.tokenName, "observed")
+    }
+
+    func testActivitySeriesIndexPreservesDateSelectionAcrossRefreshes() {
+        let firstDate = now.addingTimeInterval(-2 * 86_400)
+        let middleDate = now.addingTimeInterval(-86_400)
+        let lastDate = now
+        let points = [
+            FitnessActivitySeriesPoint(date: lastDate, value: 3),
+            FitnessActivitySeriesPoint(date: firstDate, value: 1),
+            FitnessActivitySeriesPoint(date: middleDate, value: 2)
+        ]
+        let index = FitnessActivitySeriesIndex(points: points)
+
+        XCTAssertEqual(index.points.map(\.date), [firstDate, middleDate, lastDate])
+        XCTAssertEqual(index.index(for: middleDate), 1)
+        XCTAssertEqual(index.point(for: middleDate)?.value, 2)
+        XCTAssertEqual(index.selectableRank(for: 1), 1)
+        XCTAssertEqual(index.nearestIndex(toX: 100, width: 100), 2)
+
+        let refreshed = FitnessActivitySeriesIndex(points: [
+            FitnessActivitySeriesPoint(date: lastDate, value: 3),
+            FitnessActivitySeriesPoint(date: firstDate, value: 1),
+            FitnessActivitySeriesPoint(date: middleDate, value: 22)
+        ])
+        XCTAssertEqual(refreshed.index(for: middleDate), index.index(for: middleDate))
+        XCTAssertEqual(refreshed.point(for: middleDate)?.value, 22)
+        XCTAssertNotEqual(refreshed.revision, index.revision)
+
+        let removed = FitnessActivitySeriesIndex(points: [
+            FitnessActivitySeriesPoint(date: firstDate, value: 1),
+            FitnessActivitySeriesPoint(date: lastDate, value: 3)
+        ])
+        XCTAssertNil(removed.index(for: middleDate), "A refresh must clear a selected activity date whose record disappeared")
+    }
 }

@@ -8,6 +8,22 @@ public enum HealthKitIntegrationLifecycle: String, Codable, Sendable {
     case active
 }
 
+/// Read permission is intentionally separate from sample availability: HealthKit
+/// cannot distinguish denied read access from an empty readable result.
+public enum HealthKitDataTruth: Equatable, Sendable {
+    case unsupported
+    case permissionRequired
+    case permissionDenied
+    case permissionIndeterminate
+    case noSamples
+    case stale
+    case refreshing
+    case providerFailure
+    case observed
+    case partial
+    case conflict
+}
+
 /// A small, HealthKit-free snapshot that can be passed to shared UI/domain
 /// code without making that code import HealthKit or know about HK queries.
 public struct HealthKitIntegrationSnapshot: Equatable, Sendable {
@@ -18,11 +34,10 @@ public struct HealthKitIntegrationSnapshot: Equatable, Sendable {
     public let isWriteRequestInFlight: Bool
     public let explicitRequestCompleted: Bool
     public let lastObserverCompletion: HealthKitObserverCompletion?
-    /// Monotonically identifies every accepted observer/reconciliation update
-    /// that durably changed at least one projection for the current controller
-    /// lifetime. The completion value itself is intentionally retained for
-    /// diagnostics, but `.success` is Equatable, so consumers that must react
-    /// to every durable update observe this sequence instead.
+    /// Advances for every accepted completion (including repeated failures)
+    /// and changes away from an established read-authorization state.
+    /// Consumers must invalidate rendered truth even when reconciliation
+    /// could not commit a new projection.
     public let observerCompletionSequence: UInt64
     public let backgroundDeliveryState: HealthKitBackgroundDeliveryState
     public let backgroundDeliveryErrorDescription: String?
@@ -39,8 +54,10 @@ public struct HealthKitIntegrationSnapshot: Equatable, Sendable {
         observerCompletionSequence: UInt64 = 0,
         backgroundDeliveryState: HealthKitBackgroundDeliveryState = .notConfigured,
         backgroundDeliveryErrorDescription: String? = nil,
-        errorDescription: String? = nil
+        errorDescription: String? = nil,
+        isRefreshInFlight: Bool = false
     ) {
+        self.isRefreshInFlight = isRefreshInFlight
         self.authorizationState = authorizationState
         self.writeAuthorizationState = writeAuthorizationState
         self.lifecycle = lifecycle
@@ -52,6 +69,24 @@ public struct HealthKitIntegrationSnapshot: Equatable, Sendable {
         self.backgroundDeliveryState = backgroundDeliveryState
         self.backgroundDeliveryErrorDescription = backgroundDeliveryErrorDescription
         self.errorDescription = errorDescription
+    }
+
+    public let isRefreshInFlight: Bool
+
+    public var dataTruth: HealthKitDataTruth {
+        switch authorizationState {
+        case .unavailable: return .unsupported
+        case .restricted, .revoked: return .permissionDenied
+        case .protectedDataUnavailable, .error: return .providerFailure
+        case .notRequested, .requestRequired, .requestPending: return .permissionRequired
+        default: break
+        }
+        if isRefreshInFlight { return .refreshing }
+        switch lastObserverCompletion {
+        case .failure, .timedOut: return .providerFailure
+        case .partialSuccess: return .partial
+        default: return .permissionIndeterminate
+        }
     }
 
     public var authorization: HealthKitAuthorizationState { authorizationState }
@@ -216,6 +251,11 @@ public final class HealthKitIntegrationController: ObservableObject {
     private var writeRequestTask: Task<HealthKitAuthorizationReport, Never>?
     private var statusTask: Task<(HealthKitAuthorizationReport, HealthKitAuthorizationState), Never>?
     private var backgroundDeliveryTask: Task<HealthKitBackgroundDeliveryReport, Never>?
+    private struct RefreshWaiter {
+        let afterSequence: UInt64
+        let continuation: CheckedContinuation<Void, Error>
+    }
+    private var refreshWaiters: [UUID: RefreshWaiter] = [:]
 
     public init(
         client: (any HealthKitIntegrationClient)? = nil,
@@ -263,6 +303,11 @@ public final class HealthKitIntegrationController: ObservableObject {
         statusTask = task
         let (report, writeAuthorizationState) = await task.value
         guard token == generation, currentOperation == statusOperationID else { return }
+        guard !Task.isCancelled else {
+            statusTask = nil
+            publishCancelledRefresh()
+            return
+        }
         statusTask = nil
         switch report.state {
         case .unavailable, .restricted, .protectedDataUnavailable, .revoked, .error:
@@ -271,7 +316,6 @@ public final class HealthKitIntegrationController: ObservableObject {
             publish(
                 authorizationState: report.state,
                 writeAuthorizationState: writeAuthorizationState,
-                lastObserverCompletion: .replace(nil),
                 errorDescription: .replace(report.errorDescription)
             )
         case .readIndeterminate:
@@ -304,6 +348,33 @@ public final class HealthKitIntegrationController: ObservableObject {
 
     public func refreshAuthorizationStatus() async { await refreshStatus() }
 
+    /// Runs the existing foreground HealthKit reconciliation and waits for its
+    /// app-owned observer completion. The method never requests permission or
+    /// creates a second query owner; an unavailable/request-required state is
+    /// returned to the caller for truthful presentation.
+    @discardableResult
+    public func refreshAndAwait() async throws -> HealthKitIntegrationSnapshot {
+        guard !usesVisualFixtures else { return snapshot }
+        try Task.checkCancellation()
+        let sequenceBefore = snapshot.observerCompletionSequence
+        await refreshStatus()
+        try Task.checkCancellation()
+
+        guard snapshot.authorizationState == .readIndeterminate,
+              snapshot.lifecycle == .active else { return snapshot }
+
+        // A status refresh starts a session when needed. If the existing
+        // session was already settled, explicitly request one foreground pass
+        // so this call has a fresh completion to await.
+        if snapshot.observerCompletionSequence <= sequenceBefore,
+           !snapshot.isRefreshInFlight {
+            startSessionIfEligible(refreshExisting: true)
+        }
+        try await waitForRefreshCompletion(after: sequenceBefore)
+        try Task.checkCancellation()
+        return snapshot
+    }
+
     /// Requests read access exactly once while a prompt is in flight. A true
     /// completion only means the sheet completed; read access stays
     /// indeterminate because HealthKit does not reveal per-type read denial.
@@ -334,6 +405,11 @@ public final class HealthKitIntegrationController: ObservableObject {
         let normalized = Self.normalizedPromptReport(report)
         guard currentOperation == requestOperationID else { return normalized }
         requestTask = nil
+        guard !Task.isCancelled else {
+            publishCancelledRefresh()
+            publish(isRequestInFlight: false)
+            return HealthKitAuthorizationReport(state: snapshot.authorizationState)
+        }
         if report.promptCompleted == true { explicitRequestCompleted = true }
         switch normalized.state {
         case .readIndeterminate:
@@ -473,7 +549,7 @@ public final class HealthKitIntegrationController: ObservableObject {
     /// unawaited status task here would race an explicit permission request.
     public func appActive() {
         guard snapshot.lifecycle != .active else { return }
-        publish(lifecycle: .active, lastObserverCompletion: .replace(nil))
+        publish(lifecycle: .active)
         startSessionIfEligible(refreshExisting: true)
     }
 
@@ -484,17 +560,20 @@ public final class HealthKitIntegrationController: ObservableObject {
     /// the app is inactive or suspended. Permission requests also remain valid
     /// while the system sheet temporarily inactivates the scene.
     public func appInactive() {
+        let cancelledRead = snapshot.isRefreshInFlight || statusTask != nil
         observerCallbackOperationID &+= 1
         statusOperationID &+= 1
         statusTask?.cancel()
         statusTask = nil
-        publish(lifecycle: .inactive, lastObserverCompletion: .replace(nil))
+        if cancelledRead { publishCancelledRefresh() }
+        publish(lifecycle: .inactive, isRefreshInFlight: false)
     }
 
     /// Actual background/teardown invalidates permission and status work so a
     /// late completion cannot mutate the background or a later session.
     public func applicationDidEnterBackground() {
         appInactive()
+        if requestTask != nil { publishCancelledRefresh() }
         requestOperationID &+= 1
         requestTask?.cancel()
         requestTask = nil
@@ -521,6 +600,7 @@ public final class HealthKitIntegrationController: ObservableObject {
         }
         let token = generation
         let metrics = Self.supportedMetrics
+        publish(isRefreshInFlight: true)
         // Registration remains synchronous, and the production bridge makes
         // repeated active refreshes idempotent at the HKObserverQuery layer.
         observerCallbackOperationID &+= 1
@@ -535,6 +615,46 @@ public final class HealthKitIntegrationController: ObservableObject {
             }
         }
         configureBackgroundDeliveryIfNeeded(client: client)
+    }
+
+    private func waitForRefreshCompletion(after sequence: UInt64) async throws {
+        guard snapshot.lifecycle == .active,
+              snapshot.observerCompletionSequence <= sequence,
+              snapshot.isRefreshInFlight else { return }
+        try Task.checkCancellation()
+        let id = UUID()
+        try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                guard self.snapshot.observerCompletionSequence <= sequence,
+                      self.snapshot.isRefreshInFlight else {
+                    continuation.resume()
+                    return
+                }
+                self.refreshWaiters[id] = RefreshWaiter(
+                    afterSequence: sequence,
+                    continuation: continuation
+                )
+            }
+        }, onCancel: {
+            Task { @MainActor [weak self] in
+                self?.cancelRefreshWaiter(id)
+            }
+        })
+    }
+
+    private func cancelRefreshWaiter(_ id: UUID) {
+        guard let waiter = refreshWaiters.removeValue(forKey: id) else { return }
+        waiter.continuation.resume(throwing: CancellationError())
+    }
+
+    private func settleRefreshWaiters() {
+        let ready = refreshWaiters.filter { id, waiter in
+            snapshot.observerCompletionSequence > waiter.afterSequence || !snapshot.isRefreshInFlight
+        }
+        for (id, waiter) in ready {
+            refreshWaiters.removeValue(forKey: id)
+            waiter.continuation.resume()
+        }
     }
 
     private func configureBackgroundDeliveryIfNeeded(
@@ -580,6 +700,8 @@ public final class HealthKitIntegrationController: ObservableObject {
         backgroundDeliveryTask?.cancel()
         backgroundDeliveryTask = nil
         client?.stopAllObservers()
+        publish(isRefreshInFlight: false)
+        settleRefreshWaiters()
     }
 
     private func receiveObserverCompletion(
@@ -594,21 +716,28 @@ public final class HealthKitIntegrationController: ObservableObject {
         switch completion {
         case .failure(let message), .partialSuccess(let message):
             error = message
-        case .success, .timedOut:
+        case .timedOut:
+            error = "HealthKit refresh timed out."
+        case .success:
             error = nil
-        }
-        let successSequence: UInt64?
-        switch completion {
-        case .success, .partialSuccess:
-            successSequence = snapshot.observerCompletionSequence &+ 1
-        case .failure, .timedOut:
-            successSequence = nil
         }
         publish(
             lastObserverCompletion: .replace(completion),
-            observerCompletionSequence: successSequence,
-            errorDescription: .replace(error)
+            observerCompletionSequence: snapshot.observerCompletionSequence &+ 1,
+            errorDescription: .replace(error),
+            isRefreshInFlight: false
         )
+        settleRefreshWaiters()
+    }
+
+    private func publishCancelledRefresh() {
+        publish(
+            lastObserverCompletion: .replace(.failure("HealthKit refresh cancelled.")),
+            observerCompletionSequence: snapshot.observerCompletionSequence &+ 1,
+            errorDescription: .replace("HealthKit refresh cancelled."),
+            isRefreshInFlight: false
+        )
+        settleRefreshWaiters()
     }
 
     private enum OptionalReplacement<Value> {
@@ -627,7 +756,8 @@ public final class HealthKitIntegrationController: ObservableObject {
         observerCompletionSequence: UInt64? = nil,
         backgroundDeliveryState: HealthKitBackgroundDeliveryState? = nil,
         backgroundDeliveryErrorDescription: OptionalReplacement<String> = .preserve,
-        errorDescription: OptionalReplacement<String> = .preserve
+        errorDescription: OptionalReplacement<String> = .preserve,
+        isRefreshInFlight: Bool? = nil
     ) {
         let old = snapshot
         let observerCompletion: HealthKitObserverCompletion?
@@ -653,10 +783,12 @@ public final class HealthKitIntegrationController: ObservableObject {
             isWriteRequestInFlight: isWriteRequestInFlight ?? old.isWriteRequestInFlight,
             explicitRequestCompleted: explicitRequestCompleted ?? old.explicitRequestCompleted,
             lastObserverCompletion: observerCompletion,
-            observerCompletionSequence: observerCompletionSequence ?? old.observerCompletionSequence,
+            observerCompletionSequence: observerCompletionSequence ?? (old.observerCompletionSequence
+                &+ ((authorizationState != nil && old.authorizationState == .readIndeterminate && authorizationState != old.authorizationState) ? 1 : 0)),
             backgroundDeliveryState: backgroundDeliveryState ?? old.backgroundDeliveryState,
             backgroundDeliveryErrorDescription: backgroundError,
-            errorDescription: error
+            errorDescription: error,
+            isRefreshInFlight: isRefreshInFlight ?? old.isRefreshInFlight
         )
     }
 
@@ -694,6 +826,44 @@ public final class HealthKitIntegrationController: ObservableObject {
         default:
             return observed
         }
+    }
+}
+/// Live controller truth overlays retained samples without altering their
+/// identities, provenance, anchors, or durable history.
+extension HealthKitIntegrationSnapshot {
+    var permitsCurrentFitnessRendering: Bool {
+        authorizationState == .readIndeterminate && dataTruth == .permissionIndeterminate
+    }
+
+    var permitsRetainedFitnessWidgetValues: Bool {
+        // Locked/protected data and write-only authorization never grant a
+        // widget permission to display previously retained read values.
+        guard authorizationState == .readIndeterminate || authorizationState == .error else { return false }
+        switch dataTruth {
+        case .providerFailure, .refreshing, .partial, .permissionIndeterminate: return true
+        default: return false
+        }
+    }
+}
+
+extension HealthKitFitnessComposition {
+    public static func snapshot(
+        from projection: HealthKitFitnessProjection?,
+        integration: HealthKitIntegrationSnapshot,
+        selectedDate: Date
+    ) -> FitnessSnapshot {
+        guard integration.permitsCurrentFitnessRendering else {
+            let stale = integration.permitsRetainedFitnessWidgetValues
+            let permissionNeeded = integration.dataTruth == .permissionRequired || integration.dataTruth == .permissionDenied
+            return FitnessSnapshot(source: FitnessSourceState(
+                status: stale ? .stale : (permissionNeeded ? .permissionRequired : .unavailable),
+                title: stale ? "HealthKit data unavailable · retained history is stale" : "HealthKit data unavailable",
+                detail: "Current HealthKit reads are unavailable. Retained observations have not been deleted; no current value is inferred.",
+                freshness: stale ? "Stale · awaiting successful reconciliation" : "Unavailable · check Health access"
+            ))
+        }
+        guard let projection else { return .unavailable }
+        return snapshot(from: projection, selectedDate: selectedDate)
     }
 }
 #endif

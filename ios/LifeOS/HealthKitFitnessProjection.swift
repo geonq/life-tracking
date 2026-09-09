@@ -132,6 +132,29 @@ public struct HealthKitFitnessMetricProjection: Equatable, Sendable {
     public var canonicalUnit: HealthKitCanonicalUnit? { metric.canonicalUnit }
     public var value: HealthKitQuantityValue? { latest?.quantity }
 
+    /// Evaluates freshness against an explicit clock, never the persistence
+    /// commit time. A successful empty refresh cannot make an old sample live.
+    /// `noSamples` means no readable samples in this selection, not read consent.
+    public func dataTruth(
+        at now: Date,
+        maximumSampleAge: TimeInterval,
+        integration: HealthKitIntegrationSnapshot? = nil
+    ) -> HealthKitDataTruth {
+        healthKitDataTruth(state: state, syncState: syncState, sampleEndDate: latest?.endDate,
+                          now: now, maximumSampleAge: maximumSampleAge, integration: integration)
+    }
+
+    /// Only explicitly fresh observed data may be presented as current.
+    /// Historical values remain available through `latest` with provenance.
+    public func currentValue(
+        at now: Date,
+        maximumSampleAge: TimeInterval,
+        integration: HealthKitIntegrationSnapshot? = nil
+    ) -> HealthKitQuantityValue? {
+        dataTruth(at: now, maximumSampleAge: maximumSampleAge, integration: integration) == .observed
+            ? value : nil
+    }
+
     fileprivate init(
         metric: HealthKitMetricID,
         persistedState: HealthKitMetricState,
@@ -245,6 +268,15 @@ public struct HealthKitFitnessSleepProjection: Equatable, Sendable {
     public let samples: [HealthKitFitnessSleepSample]
     public let conflicts: [HealthKitObservationConflict]
     public let provenance: [HealthKitProvenance]
+
+    public func dataTruth(
+        at now: Date,
+        maximumSampleAge: TimeInterval,
+        integration: HealthKitIntegrationSnapshot? = nil
+    ) -> HealthKitDataTruth {
+        healthKitDataTruth(state: state, syncState: syncState, sampleEndDate: endDate,
+                          now: now, maximumSampleAge: maximumSampleAge, integration: integration)
+    }
 
     public var interval: DateInterval? {
         guard let startDate, let endDate, endDate >= startDate else { return nil }
@@ -539,6 +571,64 @@ public struct HealthKitFitnessProjection: Equatable, Sendable {
         metrics[metric] ?? Self.emptyMetricProjection(for: metric)
     }
 
+    /// Converts the already-owned workout projection into the shared training
+    /// history boundary. This is a read-only adapter: it performs no HealthKit
+    /// query, does not write the training ledger, and never creates set,
+    /// repetition, load, Training Effect, recovery, zone, or route values.
+    ///
+    /// A projection with structural issues fails closed with an error query
+    /// state and no rows. A synced workout metric with no samples is still a
+    /// complete, empty window, which is different from a source that has never
+    /// been read.
+    public func trainingImportedSnapshot(now: Date = .now) -> TrainingImportedHistorySnapshot? {
+        guard windowStart.timeIntervalSinceReferenceDate.isFinite,
+              windowEnd.timeIntervalSinceReferenceDate.isFinite,
+              now.timeIntervalSinceReferenceDate.isFinite,
+              windowEnd > windowStart else { return nil }
+
+        let queryState: TrainingSourceState = issues.isEmpty
+            ? Self.trainingSourceState(for: metric(.workout))
+            : .error
+        let upperBound = min(windowEnd, now)
+        guard upperBound > windowStart else { return nil }
+
+        let coverage: TrainingCoverage
+        switch queryState {
+        case .imported:
+            guard let complete = try? TrainingCoverage(
+                kind: .complete,
+                lowerBound: windowStart,
+                upperBound: upperBound,
+                now: now
+            ) else { return nil }
+            coverage = complete
+        case .partial, .stale, .conflict:
+            guard let partial = try? TrainingCoverage(
+                kind: .partial,
+                lowerBound: windowStart,
+                upperBound: upperBound,
+                now: now
+            ) else { return nil }
+            coverage = partial
+        case .unavailable, .readIndeterminate, .error, .local, .mixed:
+            guard let unavailable = try? TrainingCoverage(kind: .unavailable, now: now) else { return nil }
+            coverage = unavailable
+        }
+
+        let inputs: [TrainingImportedWorkoutInput]
+        if issues.isEmpty {
+            inputs = workouts.compactMap { try? TrainingImportedWorkoutInput(workout: $0) }
+        } else {
+            inputs = []
+        }
+        return try? TrainingHistoryProjection.makeImportedSnapshot(
+            from: inputs,
+            queryState: queryState,
+            queryCoverage: coverage,
+            now: now
+        ).snapshot
+    }
+
     public func dailyTotal(
         for metric: HealthKitMetricID,
         on date: Date
@@ -812,7 +902,7 @@ public struct HealthKitFitnessProjection: Equatable, Sendable {
         sourceFilter: HealthKitFitnessSourceFilter,
         kind: String
     ) -> String? {
-        guard !hasSelection else { return nil }
+        if hasSelection && state == .observed { return nil }
         switch state {
         case .unavailable:
             return sourceFilter == .all
@@ -1043,10 +1133,134 @@ public struct HealthKitFitnessProjection: Equatable, Sendable {
         return lhs.identity.stableKey < rhs.identity.stableKey
     }
 
+    private static func trainingSourceState(for metric: HealthKitFitnessMetricProjection) -> TrainingSourceState {
+        switch metric.state {
+        case .conflict:
+            return .conflict
+        case .error:
+            return .error
+        case .readIndeterminate:
+            return .readIndeterminate
+        case .partial:
+            return .partial
+        case .stale:
+            return .stale
+        case .observed:
+            return .imported
+        case .permissionRequired:
+            return .unavailable
+        case .unavailable:
+            switch metric.syncState {
+            case .synced:
+                return .imported
+            case .syncing, .partial:
+                return .partial
+            case .stale:
+                return .stale
+            case .readIndeterminate:
+                return .readIndeterminate
+            case .conflict:
+                return .conflict
+            case .fullResyncRequired, .error:
+                return .error
+            case .neverSynced:
+                return .unavailable
+            }
+        }
+    }
+
     private static func workoutOrder(_ lhs: HealthKitFitnessWorkout, _ rhs: HealthKitFitnessWorkout) -> Bool {
         if lhs.startDate != rhs.startDate { return lhs.startDate < rhs.startDate }
         if lhs.endDate != rhs.endDate { return lhs.endDate < rhs.endDate }
         return lhs.id < rhs.id
     }
+}
+
+// MARK: - Training projection adapter
+
+extension TrainingImportedWorkoutInput {
+    /// Adapts an already-projected HealthKit value. The composition boundary
+    /// remains HealthKit-free; this narrow adapter stays with the iOS source.
+    public init(workout: HealthKitFitnessWorkout) throws {
+        let identity = try TrainingImportedWorkoutIdentity(
+            uuid: workout.identity.uuid,
+            syncIdentifier: workout.identity.syncIdentifier,
+            aliases: workout.identity.aliases,
+            revision: try TrainingImportedSampleRevision(syncVersion: workout.identity.revision.numericValue)
+        )
+        let source = workout.provenance.source
+        let device = workout.provenance.device
+        let provenance = try TrainingImportedWorkoutProvenance(
+            sourceBundleIdentifier: source?.bundleIdentifier,
+            sourceName: source?.name,
+            sourceVersion: source?.version,
+            sourceProductType: source?.productType,
+            sourceOperatingSystemVersion: source?.operatingSystemVersion,
+            deviceName: device?.name,
+            deviceManufacturer: device?.manufacturer,
+            deviceModel: device?.model,
+            deviceHardwareVersion: device?.hardwareVersion,
+            deviceFirmwareVersion: device?.firmwareVersion,
+            deviceSoftwareVersion: device?.softwareVersion,
+            deviceLocalIdentifier: device?.localIdentifier,
+            helioMatch: TrainingSourceQualification(rawValue: workout.provenance.helioMatch.rawValue) ?? .unattributed
+        )
+        self.init(
+            identity: identity,
+            activityTypeRawValue: workout.activityTypeRawValue,
+            startedAt: workout.startDate,
+            endedAt: workout.endDate,
+            durationSeconds: workout.durationSeconds,
+            activeEnergyKilocalories: workout.activeEnergyKilocalories,
+            healthState: TrainingImportedHealthState(workout.state),
+            provenance: provenance
+        )
+    }
+}
+
+private extension TrainingImportedHealthState {
+    init(_ state: HealthKitMetricState) {
+        switch state {
+        case .unavailable: self = .unavailable
+        case .permissionRequired: self = .permissionRequired
+        case .readIndeterminate: self = .readIndeterminate
+        case .observed: self = .observed
+        case .partial: self = .partial
+        case .stale: self = .stale
+        case .conflict: self = .conflict
+        case .error: self = .error
+        }
+    }
+}
+/// Shared quantity/sleep policy; callers choose the metric's freshness budget.
+private func healthKitDataTruth(
+    state: HealthKitMetricState,
+    syncState: HealthKitSyncState,
+    sampleEndDate: Date?,
+    now: Date,
+    maximumSampleAge: TimeInterval,
+    integration: HealthKitIntegrationSnapshot?
+) -> HealthKitDataTruth {
+        if let integration {
+            switch integration.dataTruth {
+            case .unsupported, .permissionRequired, .permissionDenied, .providerFailure, .refreshing, .partial:
+                return integration.dataTruth
+            default: break
+            }
+        }
+        if syncState == .syncing { return .refreshing }
+        switch state {
+        case .error: return .providerFailure
+        case .conflict: return .conflict
+        case .permissionRequired: return .permissionRequired
+        case .readIndeterminate: return .permissionIndeterminate
+        default: break
+        }
+        guard let sampleEndDate else { return .noSamples }
+        let age = now.timeIntervalSince(sampleEndDate)
+        guard age.isFinite, maximumSampleAge.isFinite, maximumSampleAge >= 0,
+              age >= 0, age <= maximumSampleAge, state != .stale else { return .stale }
+        if state == .partial { return .partial }
+        return .observed
 }
 #endif

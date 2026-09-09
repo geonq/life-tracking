@@ -283,10 +283,13 @@ extension WidgetSnapshotPublisher {
     /// permanently unavailable.
     public static func mapFitnessWidgets(
         projection: HealthKitFitnessProjection?,
+        integration: HealthKitIntegrationSnapshot? = nil,
         selectedDate: Date = .now,
         now: Date = .now
     ) -> WidgetSafeFitnessWidgetsSummary {
-        guard let projection else { return .unavailable() }
+        guard let projection,
+              integration?.permitsRetainedFitnessWidgetValues != false else { return .unavailable() }
+        let retainedState: WidgetAggregateAvailability = integration?.permitsCurrentFitnessRendering == false ? .stale : .fresh
 
         func metric(
             _ projectionMetric: HealthKitFitnessMetricProjection,
@@ -300,7 +303,7 @@ extension WidgetSnapshotPublisher {
             return WidgetFitnessMetric(
                 value: latest.quantity.value,
                 unit: unit,
-                state: .fresh,
+                state: retainedState,
                 observedAt: latest.endDate,
                 sourceLabel: sourceLabel
             )
@@ -319,7 +322,7 @@ extension WidgetSnapshotPublisher {
             sleepDuration = WidgetFitnessMetric(
                 value: derived.hours,
                 unit: .hours,
-                state: .fresh,
+                state: retainedState,
                 observedAt: derived.observedAt,
                 sourceLabel: "HealthKit"
             )

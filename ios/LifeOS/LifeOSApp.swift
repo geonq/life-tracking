@@ -17,9 +17,10 @@ private enum LifeOSAppTab: Hashable, CaseIterable {
         }
     }
 
-    /// Keep the compact nav on SF Symbols so each selected state has a genuine
-    /// outline/filled pair, while the rest of the app continues to use LifeOSIcon.
-    var outlineSymbol: String {
+    /// Keep the compact nav on one stable SF Symbol per route. Selection is
+    /// expressed by weight, color, and the selected surface rather than by
+    /// swapping the symbol's silhouette.
+    var symbol: String {
         switch self {
         case .home: "house"
         case .calendar: "calendar"
@@ -29,28 +30,6 @@ private enum LifeOSAppTab: Hashable, CaseIterable {
         }
     }
 
-    var filledSymbol: String {
-        switch self {
-        case .home: "house.fill"
-        case .calendar: "calendar.circle.fill"
-        case .finance: "creditcard.fill"
-        case .fitness: "figure.run.circle.fill"
-        case .more: "ellipsis.circle.fill"
-        }
-    }
-
-    /// Each primary destination gets a quiet identity accent. The selected
-    /// state also uses a filled symbol and an accessibility selection trait,
-    /// so the palette is wayfinding rather than a color-only status signal.
-    var accent: Color {
-        switch self {
-        case .home: LifeOSTokens.Module.usage
-        case .calendar: LifeOSTokens.Module.calendar
-        case .finance: LifeOSTokens.Module.finance
-        case .fitness: LifeOSTokens.Module.fitness
-        case .more: LifeOSTokens.Module.tasks
-        }
-    }
 }
 
 @main
@@ -60,6 +39,7 @@ struct LifeOSApp: App {
     @StateObject private var usageCoordinator: UsageCoordinator
     @StateObject private var financeCoordinator: FinanceCoordinator
     @StateObject private var clipperCoordinator: ClipperCoordinator
+    @StateObject private var fitnessTrainingCoordinator: FitnessTrainingCoordinator
     @StateObject private var healthKitController: HealthKitIntegrationController
 #if os(iOS)
     @StateObject private var healthKitFitnessRepository: HealthKitFitnessRepository
@@ -108,6 +88,7 @@ struct LifeOSApp: App {
                 usesVisualFixtures: enabled
             )
         )
+        _fitnessTrainingCoordinator = StateObject(wrappedValue: FitnessTrainingCoordinator())
         let promptCompleted = !enabled && UserDefaults.standard.bool(forKey: Self.healthReadPromptCompletedKey)
 #if os(iOS)
         let healthKitClient: HealthKitProductionClient? = enabled ? nil : HealthKitProductionClient()
@@ -117,11 +98,26 @@ struct LifeOSApp: App {
             initialExplicitRequestCompleted: promptCompleted
         )
         _healthKitController = StateObject(wrappedValue: healthKitController)
-        _healthKitFitnessRepository = StateObject(wrappedValue: HealthKitFitnessRepository(
+        let healthKitFitnessRepository = HealthKitFitnessRepository(
             client: healthKitClient,
             usesVisualFixtures: enabled
-        ))
+        )
+        _healthKitFitnessRepository = StateObject(wrappedValue: healthKitFitnessRepository)
         _homeFitnessSnapshot = State(initialValue: enabled ? .demo : .unavailable)
+        LifeOSAutomationRefreshRegistry.shared.registerHealthRefresh { @MainActor in
+            try Task.checkCancellation()
+            let sequenceBefore = healthKitController.snapshot.observerCompletionSequence
+            let snapshot = try await healthKitController.refreshAndAwait()
+            try Task.checkCancellation()
+            guard snapshot.authorizationState == .readIndeterminate else { return .unavailable }
+            let projection = await healthKitFitnessRepository.refresh()
+            try Task.checkCancellation()
+            return LifeOSAutomationHealthRefreshState.evaluated(
+                snapshot: snapshot,
+                projection: projection,
+                didCompleteRefresh: snapshot.observerCompletionSequence > sequenceBefore
+            )
+        }
         healthKitController.applicationLaunched()
 #endif
     }
@@ -193,7 +189,8 @@ struct LifeOSApp: App {
                             initialNutritionEntryPoint: selectedModuleRoute?.nutritionEntryPoint,
                             initialFitnessEntryPoint: selectedModuleRoute?.fitnessEntryPoint,
                             usesVisualFixtures: usesVisualFixtures,
-                            onSourceReview: { navigate(.settings) }
+                            onSourceReview: { navigate(.settings) },
+                            trainingCoordinator: fitnessTrainingCoordinator
                         )
                     case .more:
                         LifeOSMoreModulesView(
@@ -234,13 +231,14 @@ struct LifeOSApp: App {
             .preferredColorScheme(forcedColorScheme)
             .animation(reduceMotion ? nil : LifeOSMotion.ease, value: calendarCoordinator.snapshot.items.count)
             .onOpenURL { url in
-                guard let destination = LifeOSDeepLink(url: url) else {
+                switch LifeOSNavigationRoute(url: url) {
+                case .existing(let destination): navigate(destination)
+                case .home:
                     selectTab(.home)
                     selectedModuleRoute = nil
                     showingUsage = false
-                    return
+                    requestingNewCalendarEvent = false
                 }
-                navigate(destination)
             }
             .task {
                 if !usesVisualFixtures {
@@ -290,6 +288,10 @@ struct LifeOSApp: App {
                 updateHomeFitnessSnapshot(from: projection)
                 Task { @MainActor in await publishWidgetSnapshots() }
             }
+            .onChange(of: healthKitController.snapshot) { _, _ in
+                updateHomeFitnessSnapshot(from: healthKitFitnessRepository.projection)
+                Task { @MainActor in await publishWidgetSnapshots() }
+            }
             .onChange(of: healthKitController.snapshot.observerCompletionSequence) { _, _ in
                 guard !usesVisualFixtures else { return }
                 Task { @MainActor in
@@ -304,6 +306,9 @@ struct LifeOSApp: App {
             .onChange(of: financeCoordinator.state) { _, _ in
                 Task { @MainActor in await publishWidgetSnapshots() }
             }
+#if os(iOS)
+            .environment(\.lifeOSHealthKitFitnessProjection, healthKitFitnessRepository.projection)
+#endif
         }
 #if os(iOS)
         .backgroundTask(.appRefresh(LifeOSBackgroundRefresh.identifier)) {
@@ -325,7 +330,7 @@ struct LifeOSApp: App {
         async let usage: Void = usageCoordinator.refresh()
         async let finance: Void = financeCoordinator.refresh()
         async let clipper: Void = clipperCoordinator.refresh()
-        async let fitness: Void = healthKitFitnessRepository.refresh()
+        async let fitness = healthKitFitnessRepository.refresh()
         _ = await (calendar, usage, finance, clipper, fitness)
         await publishWidgetSnapshots()
     }
@@ -342,7 +347,7 @@ struct LifeOSApp: App {
         async let usage: Void = usageCoordinator.refresh()
         async let finance: Void = financeCoordinator.refresh()
         async let clipper: Void = clipperCoordinator.refresh()
-        async let fitness: Void = healthKitFitnessRepository.refresh()
+        async let fitness = healthKitFitnessRepository.refresh()
         _ = await (calendar, usage, finance, clipper, fitness)
         await publishWidgetSnapshots()
     }
@@ -374,6 +379,7 @@ struct LifeOSApp: App {
         let fitness = WidgetSnapshotPublisher.mapFitness(projection: fitnessProjection, now: now)
         let fitnessWidgets = WidgetSnapshotPublisher.mapFitnessWidgets(
             projection: fitnessProjection,
+            integration: healthKitController.snapshot,
             selectedDate: now,
             now: now
         )
@@ -408,15 +414,16 @@ struct LifeOSApp: App {
             homeFitnessSnapshot = .unavailable
             return
         }
-        homeFitnessSnapshot = HealthKitFitnessComposition.snapshot(from: projection, selectedDate: .now)
+        homeFitnessSnapshot = HealthKitFitnessComposition.snapshot(from: projection, integration: healthKitController.snapshot, selectedDate: .now)
     }
 
     private var fitnessSnapshotProvider: ((Date) -> FitnessSnapshot)? {
         guard !usesVisualFixtures else { return nil }
         let repository = healthKitFitnessRepository
+        let controller = healthKitController
         return { date in
             guard let projection = repository.projection else { return .unavailable }
-            return HealthKitFitnessComposition.snapshot(from: projection, selectedDate: date)
+            return HealthKitFitnessComposition.snapshot(from: projection, integration: controller.snapshot, selectedDate: date)
         }
     }
 
@@ -447,7 +454,7 @@ struct LifeOSApp: App {
         case .finance, .financeSpend, .financeCashFlow:
             showingUsage = false
             selectTab(.finance)
-        case .fitness, .fitnessNutrition, .fitnessNutritionGoals, .fitnessNutritionImport,
+        case .fitness, .fitnessTraining, .fitnessNutrition, .fitnessNutritionGoals, .fitnessNutritionImport,
              .fitnessNutritionCamera, .fitnessNutritionBarcode, .fitnessNutritionAIProposal,
              .fitnessNutritionSearch, .fitnessNetEnergy, .fitnessDailyOverview,
              .fitnessStrain, .fitnessRecovery, .fitnessSleep, .fitnessRespiration,
@@ -683,15 +690,15 @@ private struct CompactTabBarItem: View {
     var body: some View {
         Button(action: action) {
             VStack(spacing: 2) {
-                Image(systemName: isSelected ? tab.filledSymbol : tab.outlineSymbol)
+                Image(systemName: tab.symbol)
                     .font(.system(size: 17, weight: isSelected ? .semibold : .regular))
-                    .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(isSelected ? tab.accent : LifeOSTokens.tertiaryText)
+                    .symbolRenderingMode(.monochrome)
+                    .foregroundStyle(isSelected ? LifeOSTokens.selectedNavigationText : LifeOSTokens.tertiaryText)
                     .modifier(CompactTabSymbolTransition(enabled: !reduceMotion))
                     .frame(width: 20, height: 19)
                 Text(title)
-                    .font(LifeOSFont.navigationLabel())
-                    .foregroundStyle(isSelected ? LifeOSTokens.primaryText : LifeOSTokens.tertiaryText)
+                    .lifeOSTypography(.label)
+                    .foregroundStyle(isSelected ? LifeOSTokens.selectedNavigationText : LifeOSTokens.tertiaryText)
                     .lineLimit(1)
             }
             .padding(.horizontal, 8)
@@ -699,7 +706,7 @@ private struct CompactTabBarItem: View {
             .frame(maxWidth: .infinity, minHeight: 44)
             .background(
                 Capsule(style: .continuous)
-                    .fill(isSelected ? LifeOSTokens.Module.surface(tab.accent, opacity: 0.14) : .clear)
+                    .fill(isSelected ? LifeOSTokens.selectedNavigationFill : .clear)
             )
             .contentShape(Rectangle())
         }

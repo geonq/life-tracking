@@ -21,7 +21,14 @@ public final class HealthKitFitnessRepository: ObservableObject {
     private let now: () -> Date
     private let testStateReader: StateReader?
     private var generation: UInt64 = 0
-    private var projectionTask: Task<HealthKitFitnessProjection?, Never>?
+    private var refreshOperationID: UInt64 = 0
+    private var activeRefreshOperationID: UInt64?
+    private var refreshTask: Task<HealthKitFitnessProjection?, Never>?
+    private struct RefreshWaiter {
+        let operationID: UInt64
+        let continuation: CheckedContinuation<HealthKitFitnessProjection?, Never>
+    }
+    private var refreshWaiters: [UUID: RefreshWaiter] = [:]
 
     /// Production wiring. A missing client, including fixture mode, remains
     /// unavailable and never attempts a retained-store read.
@@ -36,7 +43,6 @@ public final class HealthKitFitnessRepository: ObservableObject {
         self.now = Date.init
         self.testStateReader = nil
         self.projection = nil
-        self.projectionTask = nil
     }
 
     /// Test-only reader seam. Production cannot use this initializer, and the
@@ -55,20 +61,62 @@ public final class HealthKitFitnessRepository: ObservableObject {
         self.now = now
         self.testStateReader = testStateReader
         self.projection = nil
-        self.projectionTask = nil
     }
 
     /// Reads retained states once and publishes a rolling, bounded projection.
-    /// The actor-isolated bridge call may suspend; the generation token keeps
-    /// an older overlapping response from replacing a newer projection.
-    public func refresh() async {
-        projectionTask?.cancel()
-        generation &+= 1
-        let refreshGeneration = generation
+    /// Overlapping callers join the same operation instead of cancelling and
+    /// replacing one another. Each caller still has independent cancellation:
+    /// a cancelled waiter returns without cancelling work another caller is
+    /// using, while the last waiter cancels the shared operation.
+    @discardableResult
+    public func refresh() async -> HealthKitFitnessProjection? {
+        guard !Task.isCancelled else { return nil }
 
+        let operationID: UInt64
+        if refreshTask != nil, let activeRefreshOperationID {
+            operationID = activeRefreshOperationID
+        } else {
+            refreshOperationID &+= 1
+            operationID = refreshOperationID
+            activeRefreshOperationID = operationID
+            generation &+= 1
+            let refreshGeneration = generation
+            let newTask: Task<HealthKitFitnessProjection?, Never> = Task { @MainActor [weak self] in
+                guard let self else { return nil }
+                return await self.performRefresh(generation: refreshGeneration)
+            }
+            refreshTask = newTask
+            Task { @MainActor [weak self] in
+                let result = await newTask.value
+                self?.finishRefresh(operationID: operationID, result: result)
+            }
+        }
+
+        let waiterID = UUID()
+        return await withTaskCancellationHandler(operation: {
+            await withCheckedContinuation { continuation in
+                guard !Task.isCancelled else {
+                    continuation.resume(returning: nil)
+                    cancelRefreshIfUnobserved(operationID: operationID)
+                    return
+                }
+                refreshWaiters[waiterID] = RefreshWaiter(
+                    operationID: operationID,
+                    continuation: continuation
+                )
+            }
+        }, onCancel: {
+            Task { @MainActor [weak self] in
+                self?.cancelRefreshWaiter(waiterID, operationID: operationID)
+            }
+        })
+    }
+
+    private func performRefresh(generation refreshGeneration: UInt64) async -> HealthKitFitnessProjection? {
+        guard !Task.isCancelled else { return nil }
         guard !usesVisualFixtures else {
             projection = nil
-            return
+            return nil
         }
 
         let states: [HealthKitStoredMetricState]
@@ -78,21 +126,20 @@ public final class HealthKitFitnessRepository: ObservableObject {
             states = await testStateReader(HealthKitIntegrationController.supportedMetrics)
         } else {
             projection = nil
-            return
+            return nil
         }
 
-        guard refreshGeneration == generation else { return }
+        guard !Task.isCancelled, refreshGeneration == generation else { return nil }
         guard let window = Self.boundedWindow(now: now(), calendar: calendar) else {
             projection = nil
-            return
+            return nil
         }
-        guard !Task.isCancelled else { return }
 
         // Projection is pure but can scan tens of thousands of retained
         // observations. Keep that work off the MainActor so opening the app
         // cannot turn durable HealthKit composition into a watchdog path.
         let projectionCalendar = calendar
-        let task = Task.detached(priority: .utility) { [states, window, projectionCalendar] in
+        let worker = Task.detached(priority: .utility) { [states, window, projectionCalendar] in
             HealthKitFitnessProjection.makeCancellable(
                 states: states,
                 window: window,
@@ -100,16 +147,47 @@ public final class HealthKitFitnessRepository: ObservableObject {
                 isCancelled: { Task.isCancelled }
             )
         }
-        projectionTask = task
         let nextProjection = await withTaskCancellationHandler(
-            operation: { await task.value },
-            onCancel: { task.cancel() }
+            operation: { await worker.value },
+            onCancel: { worker.cancel() }
         )
 
-        guard refreshGeneration == generation else { return }
-        projectionTask = nil
-        guard !Task.isCancelled, let nextProjection else { return }
+        guard !Task.isCancelled,
+              refreshGeneration == generation,
+              let nextProjection else { return nil }
         projection = nextProjection
+        return nextProjection
+    }
+
+    private func cancelRefreshWaiter(_ waiterID: UUID, operationID: UInt64) {
+        guard let waiter = refreshWaiters.removeValue(forKey: waiterID),
+              waiter.operationID == operationID else { return }
+        waiter.continuation.resume(returning: nil)
+        cancelRefreshIfUnobserved(operationID: operationID)
+    }
+
+    private func cancelRefreshIfUnobserved(operationID: UInt64) {
+        guard activeRefreshOperationID == operationID,
+              !refreshWaiters.values.contains(where: { $0.operationID == operationID }) else { return }
+        // Retire the cancelled operation immediately. A new caller arriving
+        // before an uncooperative reader returns must start a fresh operation,
+        // and the generation change prevents the old operation from
+        // publishing when it eventually unwinds.
+        generation &+= 1
+        refreshTask?.cancel()
+        activeRefreshOperationID = nil
+        refreshTask = nil
+    }
+
+    private func finishRefresh(operationID: UInt64, result: HealthKitFitnessProjection?) {
+        guard activeRefreshOperationID == operationID else { return }
+        activeRefreshOperationID = nil
+        refreshTask = nil
+        let waiters = refreshWaiters.filter { $0.value.operationID == operationID }
+        for (waiterID, waiter) in waiters {
+            refreshWaiters.removeValue(forKey: waiterID)
+            waiter.continuation.resume(returning: result)
+        }
     }
 
     private static func explicitCalendar(_ calendar: Calendar) -> Calendar {

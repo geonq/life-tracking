@@ -27,6 +27,92 @@ private final class ProjectionCancellationProbe: @unchecked Sendable {
 final class HealthKitFitnessProjectionTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_700_000_000)
 
+    func testSuccessfulSampleThenFailureRendersUnavailableWithoutChangingHistory() throws {
+        let sample = try quantity(metric: .restingHeartRate, value: 58, at: now.addingTimeInterval(-60))
+        let projection = HealthKitFitnessProjection(
+            states: [try state(metric: .restingHeartRate, observations: [sample])],
+            window: window(now.addingTimeInterval(-3600), now))
+        let success = HealthKitIntegrationSnapshot(authorizationState: .readIndeterminate, lastObserverCompletion: .success)
+        let rendered = HealthKitFitnessComposition.snapshot(from: projection, integration: success, selectedDate: now)
+        XCTAssertTrue(rendered.healthMonitor.contains { $0.value == "58" })
+        for failure in [HealthKitObserverCompletion.timedOut, .failure("error"), .failure("cancelled"), .partialSuccess("partial")] {
+            let integration = HealthKitIntegrationSnapshot(authorizationState: .readIndeterminate, lastObserverCompletion: failure)
+            let result = HealthKitFitnessComposition.snapshot(from: projection, integration: integration, selectedDate: now)
+            XCTAssertEqual(result.source.status, .stale)
+            XCTAssertTrue(result.healthMonitor.allSatisfy { $0.value == nil })
+            XCTAssertTrue(result.workouts.isEmpty)
+            XCTAssertNil(result.nutrition.hydrationMilliliters)
+            XCTAssertNil(projection.restingHeartRate.currentValue(at: now, maximumSampleAge: 3600, integration: integration))
+            XCTAssertEqual(projection.restingHeartRate.latest?.identity, sample.identity)
+            XCTAssertEqual(projection.restingHeartRate.latest?.provenance, sample.provenance)
+            XCTAssertEqual(projection.restingHeartRate.value?.value, 58)
+        }
+        let revoked = HealthKitIntegrationSnapshot(authorizationState: .revoked, lastObserverCompletion: .success)
+        let denied = HealthKitFitnessComposition.snapshot(from: projection, integration: revoked, selectedDate: now)
+        XCTAssertEqual(denied.source.status, .permissionRequired)
+        XCTAssertTrue(denied.healthMonitor.allSatisfy { $0.value == nil })
+        XCTAssertEqual(HealthKitFitnessComposition.snapshot(from: projection, integration: success, selectedDate: now)
+            .healthMonitor.first { $0.value == "58" }?.value, "58")
+    }
+
+    func testProjectedBiologyDisplayWithholdsRetainedValueWhenSourceIsBlocked() throws {
+        let sample = try quantity(metric: .bodyMass, value: 72, at: now.addingTimeInterval(-60))
+        let projection = HealthKitFitnessProjection(
+            states: [try state(metric: .bodyMass, observations: [sample])],
+            window: window(now.addingTimeInterval(-3600), now))
+        let snapshot = HealthKitFitnessComposition.snapshot(from: projection, selectedDate: now)
+        let observed = try XCTUnwrap(snapshot.biology.metrics.first { $0.currentValue == 72 })
+        XCTAssertNotEqual(observed.displayValue, "—")
+        for sourceState: FitnessMetric.SourceState in [.conflict] {
+            let blocked = FitnessBiologyMetric(id: observed.id, state: observed.state, sourceState: sourceState)
+            XCTAssertEqual(blocked.displayValue, "—", "Retained payload must not bypass \(sourceState)")
+            XCTAssertTrue(blocked.samples.isEmpty)
+        }
+        for sourceState: FitnessMetric.SourceState in [.partial, .stale] {
+            let retained = FitnessBiologyMetric(id: observed.id, state: observed.state, sourceState: sourceState)
+            XCTAssertEqual(retained.displayValue, observed.displayValue)
+            XCTAssertEqual(retained.sourceState, sourceState)
+        }
+    }
+
+    func testProjectedMetricCompactProvenanceKeepsItsOwnSourceDeviceAndFreshness() throws {
+        let sample = try quantity(metric: .restingHeartRate, value: 58, at: now.addingTimeInterval(-60))
+        let projection = HealthKitFitnessProjection(
+            states: [try state(metric: .restingHeartRate, observations: [sample])],
+            window: window(now.addingTimeInterval(-3600), now))
+        let snapshot = HealthKitFitnessComposition.snapshot(from: projection, selectedDate: now)
+        let metric = try XCTUnwrap(snapshot.healthMonitor.first { $0.value == "58" })
+        let evidence = try XCTUnwrap(metric.provenance)
+        XCTAssertTrue(metric.compactProvenanceSummary.contains(evidence.source))
+        XCTAssertTrue(metric.compactProvenanceSummary.contains(evidence.device))
+        XCTAssertTrue(metric.compactProvenanceSummary.contains(evidence.freshness))
+        let absent = FitnessMetric.unavailable("Heart rate", reason: "No samples in the selected day")
+        XCTAssertEqual(absent.compactProvenanceSummary, absent.detail)
+        XCTAssertNil(absent.value)
+    }
+
+    func testLocalTargetsDoNotInventNutritionObservationsInHealthKitSnapshot() throws {
+        let sample = try quantity(metric: .water, value: 200, at: now.addingTimeInterval(-60))
+        let projection = HealthKitFitnessProjection(
+            states: [try state(metric: .water, observations: [sample])],
+            window: window(now.addingTimeInterval(-3600), now))
+        let nutrition = HealthKitFitnessComposition.snapshot(from: projection, selectedDate: now).nutrition
+        let targeted = nutrition.applyingGoal(NutritionGoal(
+            effectiveFrom: now, calorieTarget: 2200, proteinGramsTarget: 160,
+            carbGramsTarget: -1, fatGramsTarget: 0, createdAt: now))
+        XCTAssertEqual(targeted.hydrationMilliliters, nutrition.hydrationMilliliters)
+        XCTAssertEqual(targeted.calorieTarget, 2200)
+        XCTAssertNil(targeted.caloriesConsumed)
+        XCTAssertTrue(targeted.macroValues.allSatisfy { $0.value == nil })
+        XCTAssertEqual(targeted.macroValues.first { $0.name == "Protein" }?.target, 160)
+        XCTAssertNil(targeted.macroValues.first { $0.name == "Carbs" }?.target)
+        XCTAssertEqual(targeted.macroValues.first { $0.name == "Fat" }?.target, 0)
+        let removed = targeted.applyingGoal(nil)
+        XCTAssertNil(removed.calorieTarget)
+        XCTAssertTrue(removed.macroValues.allSatisfy { $0.target == nil && $0.value == nil })
+        XCTAssertEqual(removed.hydrationMilliliters, nutrition.hydrationMilliliters)
+    }
+
     private func provenance(
         bundle: String = "com.example.health",
         manufacturer: String? = nil,
@@ -124,6 +210,53 @@ final class HealthKitFitnessProjectionTests: XCTestCase {
 
     private func window(_ start: Date, _ end: Date) -> DateInterval {
         DateInterval(start: start, end: end)
+    }
+
+    func testTruthSeparatesRefreshFailureEmptyAndFreshnessWithoutLosingProvenance() throws {
+        let sample = try quantity(metric: .restingHeartRate, value: 60,
+                                  at: now.addingTimeInterval(-120), provenance: helioProvenance())
+        for (sync, expected) in [(HealthKitSyncState.synced, HealthKitDataTruth.observed),
+                                 (.syncing, .refreshing), (.error, .providerFailure),
+                                 (.readIndeterminate, .permissionIndeterminate),
+                                 (.stale, .stale), (.partial, .partial)] {
+            let metric = HealthKitFitnessProjection(
+                states: [try state(metric: .restingHeartRate, observations: [sample], syncState: sync)],
+                window: window(now.addingTimeInterval(-3600), now)
+            ).restingHeartRate
+            XCTAssertEqual(metric.dataTruth(at: now, maximumSampleAge: 300), expected)
+            XCTAssertEqual(metric.latest?.provenance, sample.provenance)
+            XCTAssertEqual(metric.latest?.endDate, sample.endDate)
+            XCTAssertEqual(metric.currentValue(at: now, maximumSampleAge: 300) != nil, expected == .observed)
+            if sync == .synced {
+                XCTAssertEqual(metric.dataTruth(at: now, maximumSampleAge: 60), .stale)
+                XCTAssertNil(metric.currentValue(at: now, maximumSampleAge: 60))
+                XCTAssertEqual(metric.dataTruth(at: now, maximumSampleAge: .nan), .stale)
+                XCTAssertEqual(metric.dataTruth(at: sample.endDate.addingTimeInterval(-1), maximumSampleAge: 300), .stale)
+                XCTAssertEqual(metric.dataTruth(at: now, maximumSampleAge: 120), .observed)
+            }
+        }
+        let empty = HealthKitFitnessProjection(states: [], window: window(now.addingTimeInterval(-3600), now)).restingHeartRate
+        XCTAssertEqual(empty.dataTruth(at: now, maximumSampleAge: 300), .noSamples)
+        XCTAssertNil(empty.currentValue(at: now, maximumSampleAge: 300))
+        for (auth, expected) in [(HealthKitAuthorizationState.unavailable, HealthKitDataTruth.unsupported),
+                                 (.restricted, .permissionDenied), (.revoked, .permissionDenied),
+                                 (.requestRequired, .permissionRequired), (.error, .providerFailure)] {
+            XCTAssertEqual(empty.dataTruth(at: now, maximumSampleAge: 300,
+                integration: .init(authorizationState: auth)), expected)
+        }
+    }
+
+    func testSleepFreshnessUsesSampleEndAndPreservesEvidence() throws {
+        let sample = try sleep(stage: .asleepCore, start: now.addingTimeInterval(-7200),
+                               end: now.addingTimeInterval(-3600), provenance: helioProvenance())
+        let projection = HealthKitFitnessProjection(
+            states: [try state(metric: .sleep, observations: [sample])],
+            window: window(now.addingTimeInterval(-86400), now)).sleep
+        XCTAssertEqual(projection.dataTruth(at: now, maximumSampleAge: 7200), .observed)
+        XCTAssertEqual(projection.dataTruth(at: now, maximumSampleAge: 60), .stale)
+        XCTAssertEqual(projection.samples.first?.provenance, sample.provenance)
+        XCTAssertEqual(projection.dataTruth(at: now, maximumSampleAge: 7200,
+            integration: .init(authorizationState: .readIndeterminate, isRefreshInFlight: true)), .refreshing)
     }
 
     func testEmptyStateIsUnavailableAndDoesNotFabricateZeroOrScore() throws {

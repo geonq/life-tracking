@@ -111,9 +111,8 @@ final class HealthKitFitnessRepositoryTests: XCTestCase {
         XCTAssertLessThanOrEqual(projection.windowEnd.timeIntervalSince(projection.windowStart), HealthKitFitnessProjection.maximumWindow)
     }
 
-    func testOverlappingRefreshCancelsOldWorkerAndCannotPublishStaleProjection() async {
+    func testOverlappingRefreshCallersShareOneWorkerAndReceiveItsProjection() async {
         let gate = ReadGate()
-        let older = [storedState(metric: .bodyMass, syncState: .partial)]
         let newer = [storedState(metric: .bodyMass, syncState: .error)]
         let repository = HealthKitFitnessRepository(
             testStateReader: { metrics in await gate.read(metrics) },
@@ -123,17 +122,44 @@ final class HealthKitFitnessRepositoryTests: XCTestCase {
         let first = Task { @MainActor in await repository.refresh() }
         await waitUntil { await gate.count == 1 }
         let second = Task { @MainActor in await repository.refresh() }
-        await waitUntil { await gate.count == 2 }
+        for _ in 0..<20 { await Task.yield() }
+        let readCount = await gate.count
+        XCTAssertEqual(readCount, 1)
 
-        await gate.resume(position: 1, states: newer)
-        await second.value
+        await gate.resume(position: 0, states: newer)
+        let secondProjection = await second.value
+        let firstProjection = await first.value
+        XCTAssertEqual(secondProjection?.metric(.bodyMass).state, .error)
+        XCTAssertEqual(firstProjection?.metric(.bodyMass).state, .error)
         XCTAssertEqual(repository.projection?.metric(.bodyMass).state, .error)
+    }
 
-        await gate.resume(position: 0, states: older)
-        await first.value
-        // The first refresh may finish after the newer worker, but its
-        // canceled/stale result must never replace the published projection.
-        XCTAssertEqual(repository.projection?.metric(.bodyMass).state, .error)
+    func testCanceledWaiterDoesNotCancelRefreshNeededByAnotherCaller() async {
+        let gate = ReadGate()
+        let repository = HealthKitFitnessRepository(
+            testStateReader: { metrics in await gate.read(metrics) },
+            now: { self.now }
+        )
+
+        let canceled = Task { @MainActor in await repository.refresh() }
+        await waitUntil { await gate.count == 1 }
+        let survivor = Task { @MainActor in await repository.refresh() }
+        for _ in 0..<20 { await Task.yield() }
+
+        canceled.cancel()
+        for _ in 0..<20 { await Task.yield() }
+        let canceledProjection = await canceled.value
+        XCTAssertNil(canceledProjection)
+        let readCount = await gate.count
+        XCTAssertEqual(readCount, 1)
+
+        await gate.resume(
+            position: 0,
+            states: [storedState(metric: .bodyMass, syncState: .synced)]
+        )
+        let survivorProjection = await survivor.value
+        XCTAssertEqual(survivorProjection?.metric(.bodyMass).state, .observed)
+        XCTAssertEqual(repository.projection?.metric(.bodyMass).state, .observed)
     }
 
     func testCanceledRefreshCannotPublishAProjection() async {
@@ -151,7 +177,7 @@ final class HealthKitFitnessRepositoryTests: XCTestCase {
             states: [storedState(metric: .bodyMass, syncState: .synced)]
         )
 
-        await refresh.value
+        _ = await refresh.value
         XCTAssertNil(repository.projection)
     }
 
