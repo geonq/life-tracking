@@ -1,6 +1,6 @@
 # DECISIONS — LifeOS native app
 
-Updated 2026-09-09 20:42 Europe/Berlin.
+Updated 2026-09-09 21:16 Europe/Berlin.
 
 ## Product and design
 
@@ -46,5 +46,23 @@ Updated 2026-09-09 20:42 Europe/Berlin.
 
 - Use Luna Max for bounded implementation and Astra Medium for batched review.
   Keep worker write scopes disjoint and commit coherent groups gradually.
-- Keep coordination files below 200 lines. Do not add usage-limit watchers,
-  overnight schedulers, or unrelated AI features.
+- Keep coordination files below 200 lines. Do not add a Claude usage-limit
+  watcher, overnight supervisor, or unrelated AI feature. Backend scheduled
+  tasks that publish trusted Tailscale identity or collect approved automatic
+  sync data are security/product infrastructure and remain permitted.
+
+## Fresh Astra/backend disposition
+
+- The fresh Astra Medium plan is the current implementation order: repair the
+  Windows verifier/installer, then shell/state B, nutrition receipt F,
+  Finance/Usage C, Calendar D, Fitness E, widgets G, Windows runtime W, and
+  integrated evidence H. Review B+F first, then batch the remaining visual
+  tranches by subsystem.
+- Do not merge PR #1 while the four native P1s or the Windows candidate failure
+  remain. A green historical suite does not override a reproduced runtime
+  failure.
+- Treat the PowerShell identity-chain failure as a source bug. Preserve
+  reparse, handle identity, bounds, ACL, and rollback checks while correcting
+  only the collection-shape contract; do not special-case `SOURCE_SHA.txt`.
+- Preserve the dirty Windows API checkout. Stage and verify candidates under a
+  unique source hash before any service or Tailscale mutation.

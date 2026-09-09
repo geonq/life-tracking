@@ -1,14 +1,15 @@
 # HANDOFF — LifeOS native app
 
-Updated 2026-09-09 20:42 Europe/Berlin.
+Updated 2026-09-09 21:16 Europe/Berlin.
 
 ## Current verdict
 
-**NO-GO for completion until the external acceptance gates are exercised.**
-The local source, security repairs, backend contracts, and available native
-logic/snapshot suites are green. The app has not been certified against the
-always-on Windows runtime, provider consent, real HealthKit/Zepp data, the
-physical iPhone, or Personal Team installation.
+**NO-GO for completion and merge.** The existing source foundation and prior
+focused suites are useful, but the fresh Astra plan and live Windows candidate
+verification found local blockers before the external gates can be accepted.
+The app has not been certified against the always-on Windows runtime, provider
+consent, real HealthKit/Zepp data, the physical iPhone, or Personal Team
+installation.
 
 Advisor and generic conversational AI are absent from the product path. Calorie
 photo tracking is the only permitted in-app AI flow. No usage watcher or
@@ -57,13 +58,21 @@ bounded JSON reads, tax redaction and page handling, CSV formula neutralization,
 atomic tax writes, symlink-safe usage writes, localhost Host checks, explicit
 Codex path resolution, and constant-time ingest-secret comparison.
 
-Astra source reviews found no P0/P1 and the final foundation/release gate was
-GO. Their follow-up findings were fixed: tax redaction field boundaries,
-macOS Fitness refresh coalescing and generation ownership, timezone conversion
-overflow handling, subsecond Calendar edit/delete ordering, Calendar PUT MIME
-checks, icon schema/hash checks before ImageIO decoding, the SF Pro foundation
-layout contracts, selector measurement/disabled states, and measured Mac sheet
-sizing. No regression against the twelve Claude findings was identified.
+Astra Medium's fresh plan is **NO-GO** pending four native P1 repairs: both
+shells must preserve Finance observation/error/actions, Finance projections
+must share selected range scope, photo meal confirmation must use the durable
+draft receipt path, and navigation must preserve module route/filter/scroll/
+draft state. It also identifies P2 work for exact chart selection, Settings
+layout, Calendar header pinch, widget destinations, and efficient Usage
+decimation. These findings are separate from Claude's twelve fixes.
+
+The backend audit found a likely PowerShell 5.1 syntax blocker in
+`install.ps1` and the live Windows candidate reproduced a second blocker: the
+path identity chain is returned as a nested array, so stable files fail the
+leaf-handle identity check. The candidate is staged remotely but not verified
+or installed. The audit also queued bounded-body, barcode-error, finance-error,
+writer/secret-path, and consent-restart hardening; none is being hidden behind
+a green test count.
 
 ## Verification evidence
 
@@ -85,10 +94,11 @@ sizing. No regression against the twelve Claude findings was identified.
 
 ## External acceptance gates
 
-- Windows services were not installed/listening in the latest read-only audit.
-  The current candidate is built and checksum-verified locally, but it still
-  needs Windows PowerShell 5.1 verification, installation, Tailscale Serve,
-  and restart/recovery/readback checks. Preserve the dirty remote API checkout.
+- Windows services/listeners are still absent. Tailscale is running, the
+  Python venv, Claude secret, and edge-token input exist, and the candidate is
+  staged under `D:\Hermes\lifeos-candidates`; candidate verification fails on
+  the reproduced identity-chain bug before any install mutation. Preserve the
+  dirty remote API checkout.
 - Enable Banking consent/readback and real account observations are unverified.
 - Physical iPhone HealthKit permissions/data, Zepp sync, Shortcut execution,
   USB refresh, and seven-day Personal Team renewal are unverified.
@@ -104,3 +114,14 @@ sizing. No regression against the twelve Claude findings was identified.
 Do not claim full completion from source or simulator evidence alone. Keep
 coordination files below 200 lines, use live data in production paths, isolate
 visual fixtures, and update this handoff after every coherent pushed group.
+
+## Next serialized queue
+
+1. Repair and Windows-parse the candidate verifier/installer, then rerun the
+   staged verifier and preflight without changing services.
+2. Complete Astra's B shell/state tranche, then F receipt correctness; review
+   those together before Finance/Usage, Calendar, Fitness, and widgets.
+3. Harden the remaining backend P2s, rebuild the final candidate, and only
+   then perform Windows install, Serve, recovery, and live readback.
+4. Finish physical-device/provider/widget/UI evidence and keep PR #1 draft
+   until every gate has direct evidence.
