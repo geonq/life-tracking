@@ -1,6 +1,6 @@
 # DECISIONS — LifeOS native app
 
-Updated 2026-09-09 18:34 Europe/Berlin.
+Updated 2026-09-09 20:42 Europe/Berlin.
 
 ## Product and design
 
@@ -37,6 +37,10 @@ Updated 2026-09-09 18:34 Europe/Berlin.
 - Personal Team signing and seven-day renewal remain platform-managed steps.
   Native Shortcuts can open Zepp and report LifeOS refresh/status; a public
   Zepp API is not assumed.
+- The Windows release contract keeps the ordinary per-file limit at 64 MiB and
+  allows 256 MiB only for the exact manifest-bound `node-runtime/node.exe` and
+  `service-host/LifeOS.ServiceHost.exe` paths. Aggregate candidate and recovery
+  limits remain finite.
 
 ## Workflow
 

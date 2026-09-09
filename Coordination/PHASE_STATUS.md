@@ -1,12 +1,12 @@
 # PHASE STATUS — LifeOS
 
-Updated 2026-09-09 18:34 Europe/Berlin.
+Updated 2026-09-09 20:42 Europe/Berlin.
 
 - Overall: **NO-GO for completion pending external acceptance; local source is
   GO after the final Astra follow-up fixes.**
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- Latest source commit before this documentation refresh: `656e3f1` (`9a46ac5`
-  is the preceding native hardening commit).
+- Latest source commit: `1129a92`; preceding commits `5087c04` and `7fc3cc3`
+  contain the Windows release and visual contract work.
 - PR #1 is open, draft, and mergeable; it is not merged.
 - No scheduling/usage watcher is in the product or workflow.
 
@@ -20,20 +20,27 @@ Updated 2026-09-09 18:34 Europe/Berlin.
    Nutrition capture, Tax privacy/persistence, and native Shortcut intents.
 4. API/gateway security, bounded reads, live/fixture separation, Windows
    staging/ACL/recovery contracts, and explicit runtime path handling.
+5. Clean Windows candidate build and 81-entry manifest verification; exact
+   Node/service-host artifacts are accepted under the scoped 256 MiB contract.
 
 ## Verification
 
 - API: 131 tests and TypeScript typecheck pass.
 - Gateway: 447 tests pass with two dependency warnings.
-- Source/deployment validators: 157 tests and 47 subtests pass.
-- iOS logic: 1,526 tests pass; macOS logic/snapshots: 49 tests pass.
+- Windows source/deployment suite: 68 tests pass with loopback permission;
+  design source suite: 11 tests pass.
+- Current iOS generic test build succeeds; current macOS logic/snapshots: 49
+  tests pass. The 1,526 iOS simulator tests are prior baseline evidence
+  because this Mac has no available simulator runtime.
+- Source validators: 157 tests and 47 subtests pass on the preceding baseline.
 - Available unsigned LifeOS build, Swift parsing, XcodeGen, native calendar,
-  release invariants, Advisor scan, and diff check pass.
-- Astra final review: no P0/P1; all reported P2/P3 follow-ups are repaired.
+  release invariants, removed-product scan, and diff check pass.
+- Final Astra source gate: GO; all reported follow-up findings are repaired.
 
 ## Blocking acceptance
 
-- Windows services, standalone runtime, Tailscale Serve, and recovery/readback.
+- Windows PowerShell 5.1 suites, candidate installation, standalone runtime,
+  Tailscale Serve, and recovery/readback.
 - Enable Banking provider consent and real finance observations.
 - Physical iPhone HealthKit/Zepp/Shortcuts/USB behavior and Personal Team
   signing/renewal.

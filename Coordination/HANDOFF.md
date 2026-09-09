@@ -1,6 +1,6 @@
 # HANDOFF — LifeOS native app
 
-Updated 2026-09-09 18:34 Europe/Berlin.
+Updated 2026-09-09 20:42 Europe/Berlin.
 
 ## Current verdict
 
@@ -17,14 +17,15 @@ overnight scheduler is part of the product.
 ## Git and review state
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- Latest source commit before this documentation refresh: `656e3f1`.
-- The branch contains the native commit `9a46ac5` and backend/Windows commit
-  `656e3f1` after the previous handoff `f813a70`.
+- Latest source commit: `1129a92` (`Finalize shared visual system foundation`).
+- Preceding pushed commits are `5087c04` (Windows release bounds/recovery) and
+  `7fc3cc3` (visual implementation contract).
+- Local `HEAD` matches `origin/lifeos-foundation-checkpoint-20260812`; no dirty
+  tracked files, lost commits, reset, force-push, or branch replacement found.
 - PR #1 remains open, draft, and mergeable against `main`; it is intentionally
   not merged until the external gates and the existing UI acceptance lane are
   complete.
-- No reset, force-push, lost commit, or branch replacement was found. Keep
-  future changes as small attributable commits.
+- Keep future changes as small attributable commits.
 
 ## Implemented source slices
 
@@ -43,6 +44,9 @@ overnight scheduler is part of the product.
 - Bounded API/gateway reads, localhost/JSON headers, constant-time secret
   comparison, explicit Codex executable paths, Windows manifest/ACL/recovery
   checks, safe staging, and serialized durable fitness publication.
+- The clean release builder produced source SHA `1129a92`; its 81-entry
+  candidate manifest verifies, including the 86,989,128-byte standalone Node
+  runtime and 100,383,246-byte service host under their exact 256 MiB paths.
 
 ## Security review status
 
@@ -53,30 +57,38 @@ bounded JSON reads, tax redaction and page handling, CSV formula neutralization,
 atomic tax writes, symlink-safe usage writes, localhost Host checks, explicit
 Codex path resolution, and constant-time ingest-secret comparison.
 
-Astra’s final review found no P0/P1. Its P2/P3 follow-up findings were then
-fixed: tax redaction field boundaries, macOS Fitness refresh coalescing and
-generation ownership, timezone conversion overflow handling, subsecond
-Calendar edit/delete ordering, Calendar PUT MIME checks, and icon schema/hash
-checks before ImageIO decoding.
+Astra source reviews found no P0/P1 and the final foundation/release gate was
+GO. Their follow-up findings were fixed: tax redaction field boundaries,
+macOS Fitness refresh coalescing and generation ownership, timezone conversion
+overflow handling, subsecond Calendar edit/delete ordering, Calendar PUT MIME
+checks, icon schema/hash checks before ImageIO decoding, the SF Pro foundation
+layout contracts, selector measurement/disabled states, and measured Mac sheet
+sizing. No regression against the twelve Claude findings was identified.
 
 ## Verification evidence
 
 - API: **131 Vitest tests passed**; TypeScript typecheck passed.
 - Gateway: **447 pytest tests passed**; two dependency deprecation warnings.
-- Repository validators: **157 tests passed and 47 subtests passed**.
-- iOS logic: **1,526 tests passed, 0 failures**, iPhone 17 simulator.
-- macOS logic/snapshots: **49 tests passed, 0 failures**.
+- Windows builder/deployment source suite: **68 tests passed** with the
+  packaged loopback smoke permission.
+- Design source suite: **11 tests passed**; Swift parse and `git diff --check`
+  passed.
+- iOS current source: generic `build-for-testing` succeeded; no simulator
+  runtime is installed, so the prior 1,526-test simulator result is baseline
+  evidence rather than a current execution claim.
+- macOS logic/snapshots: **49 tests passed, 0 failures** on the current source.
+- Repository validators: **157 tests passed and 47 subtests passed** on the
+  preceding unchanged validator baseline.
 - The available Apple destination LifeOS build succeeded with unsigned
-  development settings.
-- Native release, calendar topology, XcodeGen, changed-file Swift parsing,
-  Advisor source scan, and `git diff --check` passed.
+  development settings; native release, calendar topology, XcodeGen, and the
+  removed-product source scan passed.
 
 ## External acceptance gates
 
-- Windows services are not installed in the current read-only inspection;
-  gateway/sync/API ports were not listening and only a development Node
-  runtime was present. Provision the standalone approved runtime, install the
-  service host, configure Tailscale Serve, and run recovery/readback checks.
+- Windows services were not installed/listening in the latest read-only audit.
+  The current candidate is built and checksum-verified locally, but it still
+  needs Windows PowerShell 5.1 verification, installation, Tailscale Serve,
+  and restart/recovery/readback checks. Preserve the dirty remote API checkout.
 - Enable Banking consent/readback and real account observations are unverified.
 - Physical iPhone HealthKit permissions/data, Zepp sync, Shortcut execution,
   USB refresh, and seven-day Personal Team renewal are unverified.

@@ -1,8 +1,9 @@
 # TODO — LifeOS completion gates
 
-Updated 2026-09-09 18:34 Europe/Berlin.
+Updated 2026-09-09 20:42 Europe/Berlin.
 
-Local source implementation and review are complete at source commit `656e3f1`.
+Local source implementation and review are complete for the current batch at
+source commit `1129a92`.
 The remaining queue requires external runtime, provider, device, and visual
 evidence.
 
@@ -20,13 +21,16 @@ evidence.
 5. Verify live freshness and truthful unavailable states after authority setup;
    keep visual fixtures out of production reads and sync.
 6. Resolve the Obsidian graph/mind-map feasibility item in GitHub issue #2.
+7. Keep PR #1 and issue #3 current with each pushed implementation batch and
+   distinguish source GO from external release acceptance.
 
 ## Completed verification
 
-API 131 tests plus typecheck; gateway 447 tests; repository validators 157
-tests plus 47 subtests; iOS logic 1,526 tests; macOS logic 49 tests; available
-unsigned LifeOS build; Swift parsing; XcodeGen; native calendar; release
-invariants; Advisor source scan; and diff check.
+API 131 tests plus typecheck; gateway 447 tests; Windows source/deployment 68
+tests; design source 11 tests; current generic iOS test build; current macOS
+logic 49 tests; available unsigned LifeOS build; Swift parsing; XcodeGen;
+native calendar; release invariants; removed-product scan; diff check; and an
+81-entry checksum-verified Windows candidate for source `1129a92`.
 
 ## Constraints
 
