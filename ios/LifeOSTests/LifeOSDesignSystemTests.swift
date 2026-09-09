@@ -5,37 +5,36 @@ import UIKit
 
 final class LifeOSDesignSystemTests: XCTestCase {
     func testTypographyFacadeExposesEveryContractRole() {
-        let roles: [Font] = [
-            LifeOSTypography.pageTitle(),
-            LifeOSTypography.sectionTitle(),
-            LifeOSTypography.cardTitle(),
-            LifeOSTypography.body(),
-            LifeOSTypography.label(),
-            LifeOSTypography.metadata(),
-            LifeOSTypography.metric(),
-            LifeOSTypography.metricCompact(),
-            LifeOSTypography.button(),
-        ]
-
-        XCTAssertEqual(roles.count, 9)
+        XCTAssertEqual(LifeOSTypography.Role.allCases.count, 9)
+        XCTAssertEqual(
+            Set(LifeOSTypography.Role.allCases),
+            Set([
+                .pageTitle,
+                .sectionTitle,
+                .cardTitle,
+                .body,
+                .label,
+                .metadata,
+                .metric,
+                .metricCompact,
+                .button,
+            ])
+        )
     }
 
     func testTypographyRolesUseExactSystemSizesWeightsAndMetricDigits() {
-        let contracts: [(String, Font, Font)] = [
-            ("pageTitle", LifeOSTypography.pageTitle(), .system(size: 28, weight: .bold, design: .default)),
-            ("sectionTitle", LifeOSTypography.sectionTitle(), .system(size: 20, weight: .semibold, design: .default)),
-            ("cardTitle", LifeOSTypography.cardTitle(), .system(size: 17, weight: .semibold, design: .default)),
-            ("body", LifeOSTypography.body(), .system(size: 17, weight: .regular, design: .default)),
-            ("label", LifeOSTypography.label(), .system(size: 15, weight: .medium, design: .default)),
-            ("metadata", LifeOSTypography.metadata(), .system(size: 13, weight: .regular, design: .default)),
-            ("metric", LifeOSTypography.metric(), .system(size: 36, weight: .semibold, design: .default).monospacedDigit()),
-            ("metricCompact", LifeOSTypography.metricCompact(), .system(size: 24, weight: .semibold, design: .default).monospacedDigit()),
-            ("button", LifeOSTypography.button(), .system(size: 15, weight: .semibold, design: .default)),
-        ]
-
-        for (role, actual, expected) in contracts {
-            XCTAssertEqual(actual, expected, "Typography role \(role) does not match its contract")
-        }
+        XCTAssertEqual(LifeOSTypography.Role.pageTitle.baseSize, 28)
+        XCTAssertEqual(LifeOSTypography.Role.sectionTitle.baseSize, 20)
+        XCTAssertEqual(LifeOSTypography.Role.cardTitle.baseSize, 17)
+        XCTAssertEqual(LifeOSTypography.Role.body.baseSize, 17)
+        XCTAssertEqual(LifeOSTypography.Role.label.baseSize, 15)
+        XCTAssertEqual(LifeOSTypography.Role.metadata.baseSize, 13)
+        XCTAssertEqual(LifeOSTypography.Role.metric.baseSize, 36)
+        XCTAssertEqual(LifeOSTypography.Role.metricCompact.baseSize, 24)
+        XCTAssertEqual(LifeOSTypography.Role.button.baseSize, 15)
+        XCTAssertTrue(LifeOSTypography.Role.metric.usesMonospacedDigits)
+        XCTAssertTrue(LifeOSTypography.Role.metricCompact.usesMonospacedDigits)
+        XCTAssertFalse(LifeOSTypography.Role.body.usesMonospacedDigits)
     }
 
     @MainActor
@@ -157,10 +156,17 @@ final class LifeOSDesignSystemTests: XCTestCase {
                 LifeOSTokens.Space.xxl,
                 LifeOSTokens.Space.xxxl,
             ],
-            [4, 8, 12, 16, 20, 24, 32, 40]
+            [4, 8, 12, 16, 24, 24, 32, 48]
         )
         XCTAssertEqual([LifeOSTokens.Radius.control, LifeOSTokens.Radius.card, LifeOSTokens.Radius.hero], [10, 16, 24])
         XCTAssertEqual(LifeOSTokens.Control.minimumTarget, 44)
+        XCTAssertEqual(LifeOSTokens.pagePadding, 16)
+        XCTAssertEqual(LifeOSTokens.sectionGap, LifeOSTokens.Space.xl)
+        XCTAssertEqual(LifeOSTokens.siblingGap, LifeOSTokens.Space.md)
+        XCTAssertEqual(LifeOSTokens.labelValueGap, LifeOSTokens.Space.xs)
+        XCTAssertEqual(LifeOSTokens.labelHelperGap, LifeOSTokens.Space.xxs)
+        XCTAssertEqual(LifeOSTokens.proseMaxWidth, 640)
+        XCTAssertEqual(LifeOSTokens.statusRowMinHeight, 56)
     }
 
     /// Quiet Machine §2.5/§4.1: no shadows at rest and exactly one hairline
@@ -180,13 +186,74 @@ final class LifeOSDesignSystemTests: XCTestCase {
         XCTAssertEqual(LifeOSTokens.info, LifeOSTokens.accent)
 
         // Chart series semantics per §2.4.
-        // Estimates are vivid green by current product decision, deliberately
-        // distinct from the amber `warning` semantic and target token.
-        XCTAssertEqual(LifeOSTokens.Series.estimate, Color.lifeOSSeriesEstimate)
+        // Estimates are vivid green and the target is a neutral reference;
+        // they must remain distinct from each other and from warning amber.
+        XCTAssertEqual(LifeOSTokens.Series.estimate, LifeOSTokens.estimate)
         XCTAssertNotEqual(LifeOSTokens.Series.estimate, LifeOSTokens.warning)
         XCTAssertNotEqual(LifeOSTokens.Series.estimate, LifeOSTokens.Series.target)
-        XCTAssertEqual(LifeOSTokens.Series.target, LifeOSTokens.success)
+        XCTAssertEqual(LifeOSTokens.Series.target, LifeOSTokens.neutralTarget)
         XCTAssertEqual(LifeOSTokens.Series.history, LifeOSTokens.metadataText)
+    }
+
+    func testSemanticColorPairsMeetContrastAndPreserveDistinctRoles() {
+        let pairs = [
+            LifeOSSemanticColorPairs.primaryAction,
+            LifeOSSemanticColorPairs.primaryActionHover,
+            LifeOSSemanticColorPairs.primaryActionPressed,
+            LifeOSSemanticColorPairs.selectedNavigation,
+            LifeOSSemanticColorPairs.focus,
+            LifeOSSemanticColorPairs.neutralTarget,
+            LifeOSSemanticColorPairs.estimate,
+            LifeOSSemanticColorPairs.calories,
+            LifeOSSemanticColorPairs.protein,
+            LifeOSSemanticColorPairs.link,
+        ]
+
+        for pair in pairs {
+            XCTAssertTrue(pair.meetsTextContrast, "Text contrast failed for \(pair)")
+            XCTAssertTrue(pair.meetsGraphicContrast, "Graphic contrast failed for \(pair)")
+        }
+
+        XCTAssertNotEqual(
+            LifeOSSemanticColorPairs.neutralTarget.darkForegroundHex,
+            LifeOSSemanticColorPairs.estimate.darkForegroundHex
+        )
+        XCTAssertNotEqual(
+            LifeOSSemanticColorPairs.calories.darkForegroundHex,
+            LifeOSSemanticColorPairs.protein.darkForegroundHex
+        )
+        XCTAssertEqual(Color.lifeOSPrimaryActionFill, Color.lifeOSBlue600)
+        XCTAssertEqual(Color.lifeOSOnPrimaryAction, Color.white)
+    }
+
+    func testHitTargetsAndSelectorFallbackStayBounded() {
+        XCTAssertEqual(LifeOSHitTarget.resolve(), 44)
+        XCTAssertEqual(LifeOSHitTarget.resolve(8), 44)
+        XCTAssertEqual(LifeOSHitTarget.resolve(64), 64)
+        XCTAssertEqual(LifeOSHitTarget.resolve(.infinity), 96)
+        XCTAssertEqual(LifeOSHitTarget.resolve(-.infinity), 44)
+        XCTAssertEqual(LifeOSHitTarget.resolve(.nan), 44)
+        XCTAssertTrue(LifeOSSelectorLayout.usesMenu(availableWidth: 300, intrinsicPillWidth: 301))
+        XCTAssertFalse(LifeOSSelectorLayout.usesMenu(availableWidth: 300, intrinsicPillWidth: 300))
+        XCTAssertTrue(LifeOSSelectorLayout.usesMenu(availableWidth: 300, intrinsicPillWidth: 300, accessibilitySize: true))
+    }
+
+    func testIconCatalogUsesContractMappingsAndMonochromeRendering() throws {
+        XCTAssertEqual(LifeOSIconName.home.systemImageName, "house")
+        XCTAssertEqual(LifeOSIconName.finance.systemImageName, "creditcard")
+        XCTAssertEqual(LifeOSIconName.reports.systemImageName, "chart.bar.doc")
+        XCTAssertEqual(LifeOSIconName.calendarPlus.systemImageName, "calendar.badge.plus")
+
+        let iosRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: iosRoot.appendingPathComponent("Shared/LifeOSIcon.swift"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(source.contains(".symbolRenderingMode(.monochrome)"))
+        XCTAssertFalse(source.contains(".renderingMode(.template)"))
+        XCTAssertFalse(source.contains("case .assistant"))
     }
 
     func testResponsiveMetricsKeepMobileAndWideDesktopContracts() {

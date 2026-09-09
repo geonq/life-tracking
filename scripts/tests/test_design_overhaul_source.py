@@ -449,30 +449,39 @@ def test_product_typography_uses_the_system_facade() -> None:
             assert not _matches(CUSTOM_FONT_PATTERNS, text), relative
 
     typography = _read(REPO_ROOT / "ios/Shared/Typography.swift")
+    assert "public enum Role: CaseIterable, Hashable" in typography
+    assert "public static func modifier(" in typography
+    assert "@ScaledMetric private var scaledSize: CGFloat" in typography
     for role in ROLE_STYLES:
-        assert f"public static func {role}" in typography
+        assert f".{role}" in typography
 
 
 def test_app_typography_uses_exact_system_role_contract() -> None:
     typography = _read(REPO_ROOT / "ios/Shared/Typography.swift")
-    assert typography.count("systemFont(size:") == len(ROLE_STYLES)
-    assert ".system(size: size, weight: weight, design: .default)" in typography
+    assert ".system(size: scaledSize, weight: weight, design: .default)" in typography
+    assert typography.count(".system(size: scaledSize, weight: weight, design: .default)") == 2
     assert ".system(textStyle" not in typography
     assert "relativeTo: role.dynamicTypeAnchor" in typography
     assert "Font.custom" not in typography
-    for role, contract in ROLE_STYLES.items():
-        signature = (
-            f"public static func {role}(weight: Font.Weight = .{contract['weight']}) -> Font"
-        )
-        assert signature in typography
-        start = typography.index(signature)
-        next_role = typography.find("\n    public static func ", start + len(signature))
-        body = typography[start: next_role if next_role >= 0 else typography.rfind("\n}")]
-        assert f"systemFont(size: {contract['size']}, weight: weight)" in body
-        if contract["monospaced"]:
-            assert ".monospacedDigit()" in body
-        else:
-            assert ".monospacedDigit()" not in body
+    base_size_contracts = (
+        "case .pageTitle: 28",
+        "case .sectionTitle: 20",
+        "case .cardTitle, .body: 17",
+        "case .label, .button: 15",
+        "case .metadata: 13",
+        "case .metric: 36",
+        "case .metricCompact: 24",
+    )
+    for contract in base_size_contracts:
+        assert contract in typography
+    assert "case .pageTitle: .bold" in typography
+    assert "case .sectionTitle, .cardTitle, .metric, .metricCompact, .button: .semibold" in typography
+    assert "case .body, .metadata: .regular" in typography
+    assert "case .label: .medium" in typography
+    assert "self == .metric || self == .metricCompact" in typography
+    assert ".monospacedDigit()" in typography
+    assert "public static func pageTitle" not in typography
+    assert "public static func sectionTitle" not in typography
 
     # The facade has an explicit base size because its existing public shape
     # returns a Font value rather than a View that can consume a SwiftUI

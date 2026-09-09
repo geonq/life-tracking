@@ -1182,7 +1182,7 @@ struct SettingsView: View {
 
     private var categories: [SettingsCategory] {
         [
-            .init(id: "providers", title: "AI providers", subtitle: "Codex, Claude, GLM, DeepSeek, Google AI Studio", readiness: .providers(usageSettings.readiness), icon: .assistant, color: LifeOSTokens.Module.usage),
+            .init(id: "providers", title: "Usage providers", subtitle: "Observed provider usage and connection status", readiness: .providers(usageSettings.readiness), icon: .usage, color: LifeOSTokens.Module.usage),
             .init(id: "finance", title: "Bank connections", subtitle: "Sparkasse, Revolut Personal / Business, Trade Republic, and consent", readiness: .finance(financeSettings.readiness), icon: .bankConnections, color: LifeOSTokens.Module.finance),
             .init(id: "clipper", title: "Clipper", subtitle: "Transit capture via the Windows gateway source", readiness: clipperReadiness, icon: .clipper, color: LifeOSTokens.Module.business),
             .init(id: "health", title: "Health & devices", subtitle: "Helio → Zepp → Apple Health / HealthKit", readiness: .healthRead(healthReadAccess.state), icon: .health, color: LifeOSTokens.Module.fitness),
@@ -1516,11 +1516,11 @@ struct ProviderConnectionsSettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 SettingsIntro(
-                    title: "AI & provider connections",
+                    title: "Provider usage",
                     message: "Usage is read from the Windows Hermes server. This client never accepts, copies, or stores a provider key."
                 )
 
-                SettingsSection(title: "Provider status", icon: .assistant) {
+                SettingsSection(title: "Provider status", icon: .usage) {
                     VStack(spacing: 0) {
                         ForEach(snapshot.providers) { provider in
                             SettingsStatusRow(
@@ -1601,7 +1601,7 @@ struct ProviderConnectionsSettingsView: View {
             .padding(LifeOSTokens.pagePadding)
         }
         .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
-        .navigationTitle("AI & Providers")
+        .navigationTitle("Provider usage")
     }
 
     private func providerDetail(_ provider: ProviderConnectionSettings) -> String {
@@ -1650,7 +1650,7 @@ struct ProviderConnectionsSettingsView: View {
     private func providerIdentityIcon(_ provider: Provider) -> LifeOSIconName {
         switch provider {
         case .codex: .usage
-        case .claude: .assistant
+        case .claude: .usage
         case .glm: .graphUp
         case .deepseek: .search
         case .googleAIStudio: .business

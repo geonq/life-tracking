@@ -2,12 +2,10 @@ import SwiftUI
 
 /// The product's single typography facade.
 ///
-/// The `Font` returning methods are retained as a source-compatible boundary
-/// for existing screens. A `Font` is a value and cannot read SwiftUI's
-/// Dynamic Type environment after it is created, so new or migrated views
-/// should use `View.lifeOSTypography(_:)` below. That modifier owns the
-/// `@ScaledMetric` property and applies the role's system font in the view's
-/// environment.
+/// A `Font` is a value and cannot read SwiftUI's Dynamic Type environment after
+/// it is created. Views therefore apply this facade through
+/// `View.lifeOSTypography(_:)`, whose modifier owns the `@ScaledMetric`
+/// property and applies the role's system font in the view's environment.
 public enum LifeOSTypography {
     /// A semantic role with a custom base size and a Dynamic Type anchor.
     ///
@@ -79,49 +77,6 @@ public enum LifeOSTypography {
         }
     }
 
-    private static func systemFont(
-        size: CGFloat,
-        weight: Font.Weight
-    ) -> Font {
-        .system(size: size, weight: weight, design: .default)
-    }
-
-    public static func pageTitle(weight: Font.Weight = .bold) -> Font {
-        systemFont(size: 28, weight: weight)
-    }
-
-    public static func sectionTitle(weight: Font.Weight = .semibold) -> Font {
-        systemFont(size: 20, weight: weight)
-    }
-
-    public static func cardTitle(weight: Font.Weight = .semibold) -> Font {
-        systemFont(size: 17, weight: weight)
-    }
-
-    public static func body(weight: Font.Weight = .regular) -> Font {
-        systemFont(size: 17, weight: weight)
-    }
-
-    public static func label(weight: Font.Weight = .medium) -> Font {
-        systemFont(size: 15, weight: weight)
-    }
-
-    public static func metadata(weight: Font.Weight = .regular) -> Font {
-        systemFont(size: 13, weight: weight)
-    }
-
-    public static func metric(weight: Font.Weight = .semibold) -> Font {
-        systemFont(size: 36, weight: weight).monospacedDigit()
-    }
-
-    public static func metricCompact(weight: Font.Weight = .semibold) -> Font {
-        systemFont(size: 24, weight: weight).monospacedDigit()
-    }
-
-    public static func button(weight: Font.Weight = .semibold) -> Font {
-        systemFont(size: 15, weight: weight)
-    }
-
     /// Returns a Dynamic Type-aware modifier for a semantic role.
     public static func modifier(
         for role: Role,
@@ -169,9 +124,8 @@ public enum LifeOSTypography {
 public extension View {
     /// Applies a LifeOS typography role with Dynamic Type scaling.
     ///
-    /// This is the migration API for screens whose old call sites used
-    /// `.font(LifeOSTypography.body())`. It preserves the role's base size at
-    /// the default content size and scales it from the declared Apple anchor.
+    /// This preserves the role's base size at the default content size and
+    /// scales it from the declared Apple anchor.
     func lifeOSTypography(
         _ role: LifeOSTypography.Role,
         weight: Font.Weight? = nil

@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 
 #if os(macOS)
@@ -5,6 +6,77 @@ import AppKit
 #else
 import UIKit
 #endif
+
+/// A platform-independent color pair. SwiftUI's adaptive `Color` provider is
+/// intentionally not introspectable in unit tests, so semantic pairs keep
+/// their authored sRGB values here as well as in the rendered tokens.
+struct LifeOSColorPair: Equatable, Sendable {
+    let darkForegroundHex: UInt32
+    let darkBackgroundHex: UInt32
+    let lightForegroundHex: UInt32
+    let lightBackgroundHex: UInt32
+
+    init(
+        darkForegroundHex: UInt32,
+        darkBackgroundHex: UInt32,
+        lightForegroundHex: UInt32,
+        lightBackgroundHex: UInt32
+    ) {
+        self.darkForegroundHex = darkForegroundHex
+        self.darkBackgroundHex = darkBackgroundHex
+        self.lightForegroundHex = lightForegroundHex
+        self.lightBackgroundHex = lightBackgroundHex
+    }
+
+    var darkContrastRatio: Double {
+        LifeOSContrast.contrastRatio(
+            foreground: darkForegroundHex,
+            background: darkBackgroundHex
+        )
+    }
+
+    var lightContrastRatio: Double {
+        LifeOSContrast.contrastRatio(
+            foreground: lightForegroundHex,
+            background: lightBackgroundHex
+        )
+    }
+
+    var meetsTextContrast: Bool {
+        darkContrastRatio >= 4.5 && lightContrastRatio >= 4.5
+    }
+
+    var meetsGraphicContrast: Bool {
+        darkContrastRatio >= 3 && lightContrastRatio >= 3
+    }
+}
+
+/// WCAG contrast math for authored opaque sRGB pairs. Composited wallpaper
+/// treatment is intentionally kept out of this helper; transparent widgets
+/// use their opaque backing token before this calculation is applied.
+enum LifeOSContrast {
+    static func relativeLuminance(of hex: UInt32) -> Double {
+        func linear(_ channel: UInt32) -> Double {
+            let value = Double(channel) / 255
+            return value <= 0.04045
+                ? value / 12.92
+                : pow((value + 0.055) / 1.055, 2.4)
+        }
+
+        let red = linear((hex >> 16) & 0xFF)
+        let green = linear((hex >> 8) & 0xFF)
+        let blue = linear(hex & 0xFF)
+        return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+    }
+
+    static func contrastRatio(foreground: UInt32, background: UInt32) -> Double {
+        let foregroundLuminance = relativeLuminance(of: foreground)
+        let backgroundLuminance = relativeLuminance(of: background)
+        let lighter = max(foregroundLuminance, backgroundLuminance)
+        let darker = min(foregroundLuminance, backgroundLuminance)
+        return (lighter + 0.05) / (darker + 0.05)
+    }
+}
 
 /// The selected-navigation colors are kept as named sRGB contract values so
 /// tests can verify both appearance pairs without attempting to introspect a
@@ -14,6 +86,77 @@ enum LifeOSSelectedNavigationPalette {
     static let darkBackgroundHex: UInt32 = 0x011E47
     static let lightForegroundHex: UInt32 = 0x0244A2
     static let lightBackgroundHex: UInt32 = 0xE6F0FF
+}
+
+/// Semantic pairs used by controls and data meaning. Keep these values in
+/// lockstep with the adaptive Color roles below.
+enum LifeOSSemanticColorPairs {
+    static let primaryAction = LifeOSColorPair(
+        darkForegroundHex: 0xFFFFFF,
+        darkBackgroundHex: 0x0253C4,
+        lightForegroundHex: 0xFFFFFF,
+        lightBackgroundHex: 0x0253C4
+    )
+    static let primaryActionHover = LifeOSColorPair(
+        darkForegroundHex: 0xFFFFFF,
+        darkBackgroundHex: 0x0244A2,
+        lightForegroundHex: 0xFFFFFF,
+        lightBackgroundHex: 0x0244A2
+    )
+    static let primaryActionPressed = LifeOSColorPair(
+        darkForegroundHex: 0xFFFFFF,
+        darkBackgroundHex: 0x013174,
+        lightForegroundHex: 0xFFFFFF,
+        lightBackgroundHex: 0x013174
+    )
+    static let selectedNavigation = LifeOSColorPair(
+        darkForegroundHex: LifeOSSelectedNavigationPalette.darkForegroundHex,
+        darkBackgroundHex: LifeOSSelectedNavigationPalette.darkBackgroundHex,
+        lightForegroundHex: LifeOSSelectedNavigationPalette.lightForegroundHex,
+        lightBackgroundHex: LifeOSSelectedNavigationPalette.lightBackgroundHex
+    )
+    static let focus = LifeOSColorPair(
+        darkForegroundHex: 0x5DA0FD,
+        darkBackgroundHex: 0x131315,
+        lightForegroundHex: 0x0253C4,
+        lightBackgroundHex: 0xFFFFFF
+    )
+    static let neutralTarget = LifeOSColorPair(
+        darkForegroundHex: 0xA1A1AA,
+        darkBackgroundHex: 0x131315,
+        lightForegroundHex: 0x52525B,
+        lightBackgroundHex: 0xFFFFFF
+    )
+    static let estimate = LifeOSColorPair(
+        darkForegroundHex: 0x60D386,
+        darkBackgroundHex: 0x131315,
+        lightForegroundHex: 0x01773B,
+        lightBackgroundHex: 0xFFFFFF
+    )
+    static let calories = LifeOSColorPair(
+        darkForegroundHex: 0xFFB06E,
+        darkBackgroundHex: 0x131315,
+        lightForegroundHex: 0xA25A03,
+        lightBackgroundHex: 0xFFFFFF
+    )
+    static let protein = LifeOSColorPair(
+        darkForegroundHex: 0x63D2D2,
+        darkBackgroundHex: 0x131315,
+        lightForegroundHex: 0x067878,
+        lightBackgroundHex: 0xFFFFFF
+    )
+    static let link = LifeOSColorPair(
+        darkForegroundHex: 0xB8D5FE,
+        darkBackgroundHex: 0x131315,
+        lightForegroundHex: 0x013174,
+        lightBackgroundHex: 0xFFFFFF
+    )
+    static let disabled = LifeOSColorPair(
+        darkForegroundHex: 0xA1A1AA,
+        darkBackgroundHex: 0x1B1B1E,
+        lightForegroundHex: 0x52525B,
+        lightBackgroundHex: 0xF4F4F5
+    )
 }
 
 // MARK: - Branded Color Palette
@@ -224,6 +367,47 @@ public extension Color {
         lightRed: 0x02/255, lightGreen: 0x53/255, lightBlue: 0xC4/255
     )
 
+    // Explicit action, link, focus, and data-meaning roles. These are kept
+    // separate from the general accent so a future screen cannot accidentally
+    // make a chart series look like a button or a focus ring.
+    static let lifeOSPrimaryActionFill = Color(hex: LifeOSSemanticColorPairs.primaryAction.darkBackgroundHex)
+    static let lifeOSOnPrimaryAction = lifeOSWhite
+    static let lifeOSPrimaryActionHover = Color(hex: LifeOSSemanticColorPairs.primaryActionHover.darkBackgroundHex)
+    static let lifeOSPrimaryActionPressed = Color(hex: LifeOSSemanticColorPairs.primaryActionPressed.darkBackgroundHex)
+    static let lifeOSLinkForeground = lifeOSAdaptiveHex(
+        dark: LifeOSSemanticColorPairs.link.darkForegroundHex,
+        light: LifeOSSemanticColorPairs.link.lightForegroundHex
+    )
+    static let lifeOSFocusStroke = lifeOSFocusBlue
+    static let lifeOSNeutralTarget = lifeOSAdaptiveHex(
+        dark: LifeOSSemanticColorPairs.neutralTarget.darkForegroundHex,
+        light: LifeOSSemanticColorPairs.neutralTarget.lightForegroundHex
+    )
+    static let lifeOSEstimateGreen = lifeOSAdaptiveHex(
+        dark: LifeOSSemanticColorPairs.estimate.darkForegroundHex,
+        light: LifeOSSemanticColorPairs.estimate.lightForegroundHex
+    )
+    /// Compatibility alias retained for the existing widget snapshot target;
+    /// new code should use the semantic estimate role above.
+    static let lifeOSSeriesEstimate = lifeOSEstimateGreen
+    static let lifeOSCalories = lifeOSAdaptiveHex(
+        dark: LifeOSSemanticColorPairs.calories.darkForegroundHex,
+        light: LifeOSSemanticColorPairs.calories.lightForegroundHex
+    )
+    static let lifeOSProtein = lifeOSAdaptiveHex(
+        dark: LifeOSSemanticColorPairs.protein.darkForegroundHex,
+        light: LifeOSSemanticColorPairs.protein.lightForegroundHex
+    )
+    static let lifeOSEssentialBorder = lifeOSAdaptiveHex(dark: 0x73737D, light: 0x767680)
+    static let lifeOSDisabledFill = lifeOSAdaptiveHex(
+        dark: LifeOSSemanticColorPairs.disabled.darkBackgroundHex,
+        light: LifeOSSemanticColorPairs.disabled.lightBackgroundHex
+    )
+    static let lifeOSDisabledForeground = lifeOSAdaptiveHex(
+        dark: LifeOSSemanticColorPairs.disabled.darkForegroundHex,
+        light: LifeOSSemanticColorPairs.disabled.lightForegroundHex
+    )
+
     /// The selected-navigation pair is deliberately distinct from focus
     /// blue: a row needs a stable filled surface and a text color that stays
     /// readable in both appearances.
@@ -306,10 +490,6 @@ public extension Color {
         darkRed: 0xFF/255, darkGreen: 0xB2/255, darkBlue: 0x24/255,
         lightRed: 0xC2/255, lightGreen: 0x74/255, lightBlue: 0x03/255
     )
-    /// Current estimate — a second green semantic, kept distinct from the
-    /// target green by the existing Finance green ramp and by its dashed line.
-    /// The current product decision supersedes the older orange estimate token.
-    static let lifeOSSeriesEstimate = lifeOSFinanceGreen
     /// Text-safe semantic green. Indicators may keep the more vivid `success`.
     static let lifeOSSuccessText = lifeOSAdaptiveColor(
         darkRed: 0x30/255, darkGreen: 0xD1/255, darkBlue: 0x58/255,
@@ -337,13 +517,14 @@ public enum LifeOSTokens {
         public static let xs: CGFloat = 8
         public static let sm: CGFloat = 12
         public static let md: CGFloat = 16
-        public static let lg: CGFloat = 20
+        /// Compatibility name for the 24pt foundation step. New layout code
+        /// should use `LifeOSTokens.sectionGap` when the relationship is a
+        /// section boundary rather than a generic spacing value.
+        public static let lg: CGFloat = 24
         public static let xl: CGFloat = 24
         public static let xxl: CGFloat = 32
-        public static let xxxl: CGFloat = 40
-        /// The large page section gap. `xxxl` remains for older surfaces that
-        /// still use the pre-overhaul scale.
-        public static let xxxxl: CGFloat = 48
+        /// The 48pt page-level separation step.
+        public static let xxxl: CGFloat = 48
     }
 
     /// Allowed corner radii. Capsules are used for status/selectors.
@@ -358,7 +539,7 @@ public enum LifeOSTokens {
     /// Platform minimums for interactive controls and pointer targets.
     public enum Control {
 #if os(macOS)
-        public static let minimumTarget: CGFloat = 28
+        public static let minimumTarget: CGFloat = 32
         public static let standardHeight: CGFloat = 32
         public static let iconButton: CGFloat = 32
 #else
@@ -382,20 +563,26 @@ public enum LifeOSTokens {
     public static let contentMaxWidth: CGFloat = 1120
     public static let chartMaxWidth: CGFloat = 1440
 
-    // MARK: Legacy geometry aliases
+    // MARK: Named layout relationships and compatibility aliases
 
-    public static let pagePadding: CGFloat = 20
-    public static let grid: CGFloat = 4
-    public static let spacing: CGFloat = grid * 3
+    /// Existing screens still use this name while they migrate to
+    /// `pageGutter`; it must not reintroduce the old 20pt drift.
+    public static let pagePadding: CGFloat = pageGutter
+    public static let spacing: CGFloat = Space.sm
     public static let corner: CGFloat = Radius.card
     public static let smallCorner: CGFloat = Radius.control
-    public static let cardPadding: CGFloat = 16
-    public static let iconFrame: CGFloat = 32
-    public static let overviewContentInset: CGFloat = 40
-    public static let overviewCardHeight: CGFloat = 80
+    public static let cardPadding: CGFloat = Space.md
+    /// Existing overview callers now resolve to the canonical page gutter.
+    public static let overviewContentInset: CGFloat = pageGutter
     public static let overviewCardGap: CGFloat = Space.md
     public static let overviewCardCorner: CGFloat = Radius.card
-    public static let overviewIconTile: CGFloat = 36
+
+    public static let sectionGap: CGFloat = Space.xl
+    public static let siblingGap: CGFloat = Space.md
+    public static let labelValueGap: CGFloat = Space.xs
+    public static let labelHelperGap: CGFloat = Space.xxs
+    public static let proseMaxWidth: CGFloat = 640
+    public static let statusRowMinHeight: CGFloat = 56
 
     // MARK: Canvas & Surface (theme-aware)
 
@@ -423,6 +610,14 @@ public enum LifeOSTokens {
 
     /// Used for focus and primary data, never as structural chrome.
     public static let accent = Color.lifeOSFocusBlue
+    /// The sole filled primary action role. It is deliberately distinct from
+    /// the adaptive focus/data blue above.
+    public static let primaryActionFill = Color.lifeOSPrimaryActionFill
+    public static let onPrimaryAction = Color.lifeOSOnPrimaryAction
+    public static let primaryActionHover = Color.lifeOSPrimaryActionHover
+    public static let primaryActionPressed = Color.lifeOSPrimaryActionPressed
+    public static let linkForeground = Color.lifeOSLinkForeground
+    public static let focusStroke = Color.lifeOSFocusStroke
     /// Pressed reads lighter on dark, darker on light (inverted direction).
     public static let accentHover = Color.lifeOSAccentHover
     public static let accentPressed = Color.lifeOSAccentPressed
@@ -436,8 +631,13 @@ public enum LifeOSTokens {
     public static let metadataText = Color.lifeOSMetadataText
     public static let subtleBorder = Color.lifeOSSubtleBorder
     public static let strongBorder = Color.lifeOSStrongBorder
+    /// Essential unfilled-control edge; decorative separators keep the
+    /// lighter `subtleBorder` role.
+    public static let essentialBorder = Color.lifeOSEssentialBorder
     /// Disabled text only — never for readable content.
     public static let quaternaryText = Color.lifeOSQuaternaryText
+    public static let disabledFill = Color.lifeOSDisabledFill
+    public static let disabledForeground = Color.lifeOSDisabledForeground
 
     /// success / positive / income / target-met → Apple-dark green (calmer light green)
     public static let success = Color.lifeOSSuccess
@@ -451,6 +651,14 @@ public enum LifeOSTokens {
     public static let warningText = Color.lifeOSWarningText
     /// danger / negative / over-limit / failed
     public static let danger  = Color.lifeOSDanger
+    /// Neutral goal/reference mark, kept separate from status green.
+    public static let neutralTarget = Color.lifeOSNeutralTarget
+    /// Green estimated/projection mark; the estimate label uses this role too.
+    public static let estimate = Color.lifeOSEstimateGreen
+    /// Orange calorie meaning and teal protein meaning remain stable across
+    /// modules, independent of the module identity accent.
+    public static let calories = Color.lifeOSCalories
+    public static let protein = Color.lifeOSProtein
     /// Retired teal — one accent only. Alias of `accent` kept for compile;
     /// call sites migrate to `accent` (or a semantic) in the Phase 2 sweep.
     /// Deliberately NOT `@available(deprecated)` yet: that would emit warnings
@@ -464,10 +672,10 @@ public enum LifeOSTokens {
         public static let actual = LifeOSTokens.chartObserved
         /// Descriptive alias for new chart call sites. `actual` remains for compatibility.
         public static let observed = LifeOSTokens.chartObserved
-        /// Target pace — success green, dashed [6,4] at 1.25pt.
-        public static let target = LifeOSTokens.success
-        /// Current estimate — vivid green, dashed [3,3] at 1.5pt.
-        public static let estimate = Color.lifeOSSeriesEstimate
+        /// Current estimate — green, dashed [6,4] at 2pt.
+        public static let estimate = LifeOSTokens.estimate
+        /// Neutral goal/reference line, dashed [2,4].
+        public static let target = LifeOSTokens.neutralTarget
         /// Past estimate / account history — tertiary grey, dotted at 1.25pt.
         public static let history = LifeOSTokens.metadataText
     }
@@ -751,29 +959,9 @@ public enum LifeOSMotion {
     }
 }
 
-// MARK: - Branded Modifier Helpers
+// MARK: - Compatibility card recipe
 
 extension View {
-    /// Status indicator (Quiet Machine §4.2): a 6pt semantic dot plus
-    /// overline-style text in the same semantic color. No background, no
-    /// stroke — tinted capsules are retired. Uppercase per the overline role.
-    func lifeOSStatusPill(color: Color, text: String) -> some View {
-        self.overlay(alignment: .trailing) {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(color)
-                    .frame(width: 6, height: 6)
-                Text(text)
-                    .font(LifeOSTypography.label())
-                    .tracking(0.8)
-                    .textCase(.uppercase)
-                    .foregroundStyle(color)
-                    .lineLimit(1)
-            }
-            .accessibilityElement(children: .combine)
-        }
-    }
-
     /// The Quiet Machine card: one flat surface fill + ONE solid hairline
     /// border. No gradient, no material, no second stroke, no shadow, and no
     /// reduce-transparency branch (the surface is opaque).
@@ -787,29 +975,38 @@ private struct LifeOSFlatCardModifier: ViewModifier {
     let cornerRadius: CGFloat
     let featured: Bool
 
+    @Environment(\.displayScale) private var displayScale
+
     private var shape: RoundedRectangle {
         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
     }
 
     func body(content: Content) -> some View {
+        let hairlineWidth = displayScale.isFinite && displayScale > 0 ? 1 / displayScale : 1
+
         content
             .background(featured ? LifeOSTokens.raised : LifeOSTokens.surface, in: shape)
-            .overlay(shape.stroke(LifeOSTokens.hairlineBorder, lineWidth: 1))
+            .overlay(shape.stroke(LifeOSTokens.hairlineBorder, lineWidth: hairlineWidth))
             .contentShape(shape)
     }
 }
 
 // MARK: - Button recipe (Quiet Machine §4.3)
 
-/// The three sanctioned button variants.
+/// The four sanctioned button variants.
 ///
 /// Primary   — accent fill, no border, white label in both appearances.
-/// Secondary — clear fill with a 1pt hairline border, primaryText label.
+/// Secondary — raised neutral fill with a 1pt hairline border, primaryText label.
 /// Destructive — clear fill, no border, danger label.
 ///
 /// Pressed state fills `strongBorder` (secondary) / `accentPressed` (primary).
 public struct LifeOSButtonStyle: ButtonStyle {
-    public enum Variant { case primary, secondary, destructive }
+    public enum Variant: Equatable {
+        case primary
+        case secondary
+        case tertiary
+        case destructive
+    }
 
     public let variant: Variant
 
@@ -839,7 +1036,10 @@ private struct LifeOSButtonBody: View {
             .lifeOSTypography(.button)
             .foregroundStyle(labelColor)
             .padding(.horizontal, LifeOSTokens.Space.md)
-            .frame(minHeight: LifeOSTokens.Control.standardHeight)
+            .frame(
+                minWidth: LifeOSTokens.Control.minimumTarget,
+                minHeight: LifeOSTokens.Control.standardHeight
+            )
             .background(
                 fillColor(pressed: pressed, highlighted: highlighted),
                 in: RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
@@ -847,15 +1047,15 @@ private struct LifeOSButtonBody: View {
             .overlay {
                 if variant == .secondary {
                     RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
-                        .stroke(LifeOSTokens.hairlineBorder, lineWidth: 1)
+                        .stroke(LifeOSTokens.essentialBorder, lineWidth: 1)
                 }
             }
             .scaleEffect(isEnabled && !reduceMotion && pressed ? 0.98 : 1)
             .overlay {
                 if isEnabled && isFocused {
                     RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
-                        .stroke(LifeOSTokens.accent, lineWidth: 2)
-                        .padding(-3)
+                        .stroke(LifeOSTokens.focusStroke, lineWidth: 2)
+                        .padding(-2)
                 }
             }
             .onHover { hovered = $0 }
@@ -875,26 +1075,30 @@ private struct LifeOSButtonBody: View {
     }
 
     private func fillColor(pressed: Bool, highlighted: Bool) -> Color {
-        guard isEnabled else { return LifeOSTokens.raised }
+        guard isEnabled else { return LifeOSTokens.disabledFill }
         switch variant {
         case .primary:
-            if pressed { return Color.lifeOSBlue800 }
-            if highlighted { return Color.lifeOSBlue700 }
-            return Color.lifeOSBlue600
+            if pressed { return LifeOSTokens.primaryActionPressed }
+            if highlighted { return LifeOSTokens.primaryActionHover }
+            return LifeOSTokens.primaryActionFill
         case .secondary:
-            return pressed ? LifeOSTokens.strongBorder : (highlighted ? LifeOSTokens.raised : .clear)
+            return pressed ? LifeOSTokens.strongBorder : LifeOSTokens.raised
+        case .tertiary:
+            return highlighted || pressed ? LifeOSTokens.raised : .clear
         case .destructive:
             return pressed ? LifeOSTokens.strongBorder : (highlighted ? LifeOSTokens.raised : .clear)
         }
     }
 
     private var labelColor: Color {
-        guard isEnabled else { return LifeOSTokens.quaternaryText }
+        guard isEnabled else { return LifeOSTokens.disabledForeground }
         switch variant {
         case .primary:
-            return .white
+            return LifeOSTokens.onPrimaryAction
         case .secondary:
             return LifeOSTokens.primaryText
+        case .tertiary:
+            return LifeOSTokens.linkForeground
         case .destructive:
             return LifeOSTokens.danger
         }

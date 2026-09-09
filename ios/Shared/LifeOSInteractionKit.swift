@@ -26,6 +26,25 @@ public struct LifeOSInteractionPolicy: Equatable, Sendable {
     public var allowsUserDrivenMotion: Bool { true }
 }
 
+/// Resolves requested control sizes to a platform minimum while rejecting
+/// invalid/unbounded values. The maximum prevents an accidental layout value
+/// from swallowing neighboring controls; callers can still choose a larger
+/// visual surface around the target.
+enum LifeOSHitTarget {
+#if os(macOS)
+    static let minimum: CGFloat = 32
+#else
+    static let minimum: CGFloat = 44
+#endif
+    static let maximum: CGFloat = 96
+
+    static func resolve(_ requested: CGFloat? = nil) -> CGFloat {
+        guard let requested else { return minimum }
+        guard requested.isFinite else { return requested == .infinity ? maximum : minimum }
+        return min(max(requested, minimum), maximum)
+    }
+}
+
 /// Pure state resolution for pressed, hover, focus and cancellation handling.
 public struct LifeOSInteractionState: Equatable, Sendable {
     public let phase: LifeOSInteractionPhase
@@ -176,7 +195,7 @@ public struct LifeOSInteractionModifier: ViewModifier {
             .overlay {
                 if effectiveState.isFocused {
                     RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
-                        .stroke(LifeOSTokens.accent, lineWidth: 2)
+                        .stroke(LifeOSTokens.focusStroke, lineWidth: 2)
                         .padding(2)
                 }
             }

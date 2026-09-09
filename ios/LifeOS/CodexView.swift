@@ -605,7 +605,7 @@ struct UsageView: View {
     private func providerIcon(_ provider: Provider) -> LifeOSIconName {
         switch provider {
         case .codex: return .usage
-        case .claude: return .assistant
+        case .claude: return .usage
         case .glm: return .graphUp
         case .deepseek: return .search
         case .googleAIStudio: return .business
@@ -898,7 +898,7 @@ struct UsageModelMixCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            UsageCardHeader(title: "Model mix", subtitle: "Token composition by model", icon: .assistant)
+            UsageCardHeader(title: "Model mix", subtitle: "Token composition by model", icon: .usage)
             ModelCompositionChart(models: models)
         }
         .flatCard()

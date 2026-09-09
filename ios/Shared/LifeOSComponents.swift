@@ -28,6 +28,9 @@ public struct LifeOSCard<Content: View>: View {
     private let padding: CGFloat
     private let content: Content
 
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.displayScale) private var displayScale
+
     public init(
         level: LifeOSSurfaceLevel = .surface,
         cornerRadius: CGFloat = LifeOSTokens.Radius.card,
@@ -42,42 +45,20 @@ public struct LifeOSCard<Content: View>: View {
 
     public var body: some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        let hairlineWidth = displayScale.isFinite && displayScale > 0 ? 1 / displayScale : 1
+        let shadowOpacity = colorScheme == .dark ? 0.24 : 0.12
 
         content
             .padding(padding)
             .background(level.fill, in: shape)
-            .overlay(shape.stroke(LifeOSTokens.subtleBorder, lineWidth: 0.5))
+            .overlay(shape.stroke(LifeOSTokens.subtleBorder, lineWidth: hairlineWidth))
             .shadow(
-                color: level.usesShadow ? Color.black.opacity(0.35) : .clear,
+                color: level.usesShadow ? Color.black.opacity(shadowOpacity) : .clear,
                 radius: level.usesShadow ? 16 : 0,
                 x: 0,
-                y: level.usesShadow ? 12 : 0
+                y: level.usesShadow ? 8 : 0
             )
             .contentShape(shape)
-    }
-}
-
-private struct LifeOSSurfaceModifier: ViewModifier {
-    let level: LifeOSSurfaceLevel
-    let cornerRadius: CGFloat
-    let padding: CGFloat
-
-    func body(content: Content) -> some View {
-        LifeOSCard(level: level, cornerRadius: cornerRadius, padding: padding) {
-            content
-        }
-    }
-}
-
-public extension View {
-    /// Applies the same solid surface recipe as `LifeOSCard` to an existing
-    /// view hierarchy.
-    func lifeOSSurface(
-        level: LifeOSSurfaceLevel = .surface,
-        cornerRadius: CGFloat = LifeOSTokens.Radius.card,
-        padding: CGFloat = LifeOSTokens.cardPadding
-    ) -> some View {
-        modifier(LifeOSSurfaceModifier(level: level, cornerRadius: cornerRadius, padding: padding))
     }
 }
 
@@ -114,7 +95,7 @@ private struct LifeOSIconButtonStyle: ButtonStyle {
             .overlay {
                 RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
                     .stroke(
-                        isFocused ? LifeOSTokens.accent : LifeOSTokens.subtleBorder,
+                        isFocused ? LifeOSTokens.focusStroke : LifeOSTokens.essentialBorder,
                         lineWidth: isFocused ? 2 : 0.5
                     )
             }
@@ -157,13 +138,15 @@ public struct LifeOSIconButton: View {
     }
 
     private var targetSize: CGFloat {
-        max(requestedSize ?? LifeOSTokens.Control.iconButton, LifeOSTokens.Control.minimumTarget)
+        LifeOSHitTarget.resolve(requestedSize ?? LifeOSTokens.Control.iconButton)
     }
 
     public var body: some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: 15, weight: .semibold))
+                .symbolRenderingMode(.monochrome)
+                .font(.system(size: 17, weight: .medium, design: .default))
+                .frame(width: 20, height: 20)
         }
         .buttonStyle(
             LifeOSIconButtonStyle(
@@ -175,7 +158,344 @@ public struct LifeOSIconButton: View {
         )
         .onHover { isHovered = $0 }
         .focused($isFocused)
+        .contentShape(Rectangle())
         .accessibilityLabel(Text(label))
+    }
+}
+
+// MARK: - Canonical button
+
+/// A single-action button recipe. The label is kept outside the style so a
+/// busy state can reserve the same 16pt leading slot as an icon and avoid
+/// shifting the action text while a write is in flight.
+public struct LifeOSButton: View {
+    public enum Variant: Equatable {
+        case primary
+        case secondary
+        case tertiary
+        case destructive
+
+        fileprivate var styleVariant: LifeOSButtonStyle.Variant {
+            switch self {
+            case .primary: .primary
+            case .secondary: .secondary
+            case .tertiary: .tertiary
+            case .destructive: .destructive
+            }
+        }
+    }
+
+    private let title: String
+    private let variant: Variant
+    private let systemImage: String?
+    private let isEnabled: Bool
+    private let isBusy: Bool
+    private let action: () -> Void
+
+    public init(
+        _ title: String,
+        variant: Variant = .secondary,
+        systemImage: String? = nil,
+        isEnabled: Bool = true,
+        isBusy: Bool = false,
+        action: @escaping () -> Void
+    ) {
+        self.title = title
+        self.variant = variant
+        self.systemImage = systemImage
+        self.isEnabled = isEnabled
+        self.isBusy = isBusy
+        self.action = action
+    }
+
+    public var body: some View {
+        Button(action: action) {
+            HStack(spacing: LifeOSTokens.Space.xs) {
+                Group {
+                    if isBusy {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(LifeOSTokens.disabledForeground)
+                    } else if let systemImage {
+                        Image(systemName: systemImage)
+                            .symbolRenderingMode(.monochrome)
+                            .font(.system(size: 15, weight: .medium, design: .default))
+                    } else {
+                        Color.clear
+                    }
+                }
+                .frame(width: 16, height: 16)
+
+                Text(title)
+                    .lifeOSTypography(.button)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(minWidth: LifeOSTokens.Control.minimumTarget)
+        }
+        .buttonStyle(LifeOSButtonStyle(variant.styleVariant))
+        .disabled(!isEnabled || isBusy)
+        .accessibilityLabel(Text(title))
+        .accessibilityValue(isBusy ? Text("In progress") : Text(""))
+    }
+}
+
+// MARK: - Selector
+
+public struct LifeOSSelectorOption<ID: Hashable>: Identifiable {
+    public let id: ID
+    public let title: String
+    public let isEnabled: Bool
+    public let unavailableReason: String?
+
+    public init(
+        id: ID,
+        title: String,
+        isEnabled: Bool = true,
+        unavailableReason: String? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.isEnabled = isEnabled
+        self.unavailableReason = unavailableReason
+    }
+}
+
+private struct LifeOSSelectorAvailableWidthKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+private struct LifeOSSelectorMeasuredWidthsKey: PreferenceKey {
+    static var defaultValue: [CGFloat] = []
+
+    static func reduce(value: inout [CGFloat], nextValue: () -> [CGFloat]) {
+        value.append(contentsOf: nextValue())
+    }
+}
+
+enum LifeOSSelectorLayout {
+    static let minimumCellWidth: CGFloat = 64
+
+    static func usesMenu(
+        availableWidth: CGFloat,
+        intrinsicPillWidth: CGFloat,
+        accessibilitySize: Bool = false
+    ) -> Bool {
+        guard availableWidth.isFinite, intrinsicPillWidth.isFinite else { return true }
+        return accessibilitySize || intrinsicPillWidth > max(0, availableWidth)
+    }
+}
+
+/// A selector that keeps the pill treatment when all labels fit and falls
+/// back to a labeled menu before the row can clip or become horizontally
+/// scrollable. Each option owns at most one action.
+public struct LifeOSSelector<ID: Hashable>: View {
+    private let options: [LifeOSSelectorOption<ID>]
+    @Binding private var selection: ID
+
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    @Environment(\.lifeOSReduceMotion) private var requestedReduceMotion
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    @State private var hoveredOption: ID?
+    @State private var availableWidth: CGFloat = 0
+    @State private var measuredIntrinsicPillWidth: CGFloat = 0
+    @FocusState private var focusedOption: ID?
+    @ScaledMetric(relativeTo: .headline) private var selectorTextSize: CGFloat = 15
+
+    public init(
+        options: [LifeOSSelectorOption<ID>],
+        selection: Binding<ID>
+    ) {
+        self.options = options
+        self._selection = selection
+    }
+
+    private var reduceMotion: Bool { systemReduceMotion || requestedReduceMotion }
+
+    private var selectedOption: LifeOSSelectorOption<ID>? {
+        options.first { $0.id == selection }
+    }
+
+    private func select(_ option: LifeOSSelectorOption<ID>) {
+        guard option.isEnabled, option.id != selection else { return }
+        if reduceMotion {
+            LifeOSMotion.withoutAnimation { selection = option.id }
+        } else {
+            selection = option.id
+        }
+    }
+
+    private var intrinsicPillWidth: CGFloat {
+        let largestCellWidth = options.map { option in
+            max(
+                LifeOSSelectorLayout.minimumCellWidth,
+                CGFloat(option.title.count) * selectorTextSize * 0.62 + LifeOSTokens.Space.xl
+            )
+        }.max() ?? LifeOSSelectorLayout.minimumCellWidth
+        let gap = CGFloat(max(0, options.count - 1)) * LifeOSTokens.Space.xxs
+        return largestCellWidth * CGFloat(max(1, options.count)) + gap
+    }
+
+    /// Measures the actual system font once per layout pass. The fallback
+    /// estimate only covers the first pass before the preference arrives;
+    /// `ViewThatFits` remains the final guard against a narrow proposal.
+    private var intrinsicMeasurement: some View {
+        HStack(spacing: LifeOSTokens.Space.xxs) {
+            ForEach(options) { option in
+                Text(option.title)
+                    .lifeOSTypography(.button)
+                    .padding(.horizontal, LifeOSTokens.Space.sm)
+                    .frame(minWidth: LifeOSSelectorLayout.minimumCellWidth)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .background {
+                        GeometryReader { proxy in
+                            Color.clear.preference(
+                                key: LifeOSSelectorMeasuredWidthsKey.self,
+                                value: [proxy.size.width]
+                            )
+                        }
+                    }
+            }
+        }
+        .fixedSize(horizontal: true, vertical: false)
+        .hidden()
+        .accessibilityHidden(true)
+        .allowsHitTesting(false)
+    }
+
+    private var shouldUseMenu: Bool {
+        let measuredWidth = measuredIntrinsicPillWidth > 0
+            ? measuredIntrinsicPillWidth
+            : intrinsicPillWidth
+        return LifeOSSelectorLayout.usesMenu(
+            availableWidth: availableWidth > 0 ? availableWidth : measuredWidth,
+            intrinsicPillWidth: measuredWidth,
+            accessibilitySize: dynamicTypeSize.isAccessibilitySize
+        )
+    }
+
+    private var pillRow: some View {
+        HStack(spacing: LifeOSTokens.Space.xxs) {
+            ForEach(options) { option in
+                Button {
+                    select(option)
+                } label: {
+                    Text(option.title)
+                        .lifeOSTypography(.button)
+                        .foregroundStyle(
+                            option.isEnabled
+                                ? (option.id == selection ? LifeOSTokens.primaryText : LifeOSTokens.secondaryText)
+                                : LifeOSTokens.disabledForeground
+                        )
+                        .padding(.horizontal, LifeOSTokens.Space.sm)
+                        .frame(
+                            minWidth: LifeOSSelectorLayout.minimumCellWidth,
+                            maxWidth: .infinity,
+                            minHeight: LifeOSTokens.Control.standardHeight
+                        )
+                        .background(
+                            option.isEnabled && (option.id == selection || hoveredOption == option.id)
+                                ? LifeOSTokens.raised
+                                : (option.isEnabled ? .clear : LifeOSTokens.disabledFill),
+                            in: RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
+                        )
+                        .overlay {
+                            if focusedOption == option.id {
+                                RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
+                                    .stroke(LifeOSTokens.focusStroke, lineWidth: 2)
+                            }
+                        }
+                }
+                .buttonStyle(.plain)
+                .disabled(!option.isEnabled)
+                .focused($focusedOption, equals: option.id)
+                .onHover { isInside in
+                    if isInside {
+                        hoveredOption = option.id
+                    } else if hoveredOption == option.id {
+                        hoveredOption = nil
+                    }
+                }
+                .accessibilityAddTraits(option.id == selection ? .isSelected : [])
+                .accessibilityHint(option.unavailableReason.map { Text($0) } ?? Text(""))
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .animation(reduceMotion ? nil : LifeOSMotion.selector, value: selection)
+        .animation(
+            reduceMotion ? nil : LifeOSMotion.curve(for: .hover, reduceMotion: false)?.animation,
+            value: hoveredOption
+        )
+    }
+
+    private var menu: some View {
+        Menu {
+            ForEach(options) { option in
+                Button {
+                    select(option)
+                } label: {
+                    Text(option.unavailableReason.map { "\(option.title) · \($0)" } ?? option.title)
+                }
+                .disabled(!option.isEnabled)
+                .accessibilityHint(option.unavailableReason.map { Text($0) } ?? Text(""))
+            }
+        } label: {
+            HStack(spacing: LifeOSTokens.Space.xs) {
+                Text(selectedOption?.title ?? "Select")
+                    .lifeOSTypography(.button)
+                    .foregroundStyle(LifeOSTokens.primaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: LifeOSTokens.Space.xs)
+                Image(systemName: "chevron.up.chevron.down")
+                    .symbolRenderingMode(.monochrome)
+                    .font(.system(size: 13, weight: .medium, design: .default))
+            }
+            .padding(.horizontal, LifeOSTokens.Space.sm)
+            .frame(minWidth: LifeOSSelectorLayout.minimumCellWidth, minHeight: LifeOSTokens.Control.standardHeight)
+            .background(LifeOSTokens.raised, in: RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
+                    .stroke(LifeOSTokens.essentialBorder, lineWidth: 1)
+            }
+        }
+        .accessibilityLabel(Text("Select option"))
+    }
+
+    public var body: some View {
+        Group {
+            if shouldUseMenu {
+                menu
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    pillRow
+                    menu
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            GeometryReader { proxy in
+                Color.clear
+                    .preference(key: LifeOSSelectorAvailableWidthKey.self, value: proxy.size.width)
+            }
+        }
+        .background(intrinsicMeasurement)
+        .onPreferenceChange(LifeOSSelectorAvailableWidthKey.self) { width in
+            guard width.isFinite, width > 0, abs(width - availableWidth) > 0.5 else { return }
+            availableWidth = width
+        }
+        .onPreferenceChange(LifeOSSelectorMeasuredWidthsKey.self) { widths in
+            guard let largest = widths.filter({ $0.isFinite }).max(), largest > 0 else { return }
+            let gap = CGFloat(max(0, options.count - 1)) * LifeOSTokens.Space.xxs
+            let measured = largest * CGFloat(max(1, options.count)) + gap
+            guard measured.isFinite, abs(measured - measuredIntrinsicPillWidth) > 0.5 else { return }
+            measuredIntrinsicPillWidth = measured
+        }
+        .frame(minHeight: LifeOSTokens.Control.standardHeight)
     }
 }
 
@@ -540,6 +860,7 @@ public enum LifeOSContentState: Equatable, Sendable {
     case demo(detail: String?)
     case unavailable(reason: String)
     case partial(detail: String)
+    case redacted(reason: String)
 
     fileprivate var title: String {
         switch self {
@@ -550,6 +871,7 @@ public enum LifeOSContentState: Equatable, Sendable {
         case .demo: "Demo data"
         case .unavailable: "Unavailable"
         case .partial: "Partial data"
+        case .redacted: "Hidden"
         }
     }
 
@@ -562,6 +884,7 @@ public enum LifeOSContentState: Equatable, Sendable {
         case .demo(let detail): detail ?? "DEMO · NOT LIVE"
         case .unavailable(let reason): reason
         case .partial(let detail): detail
+        case .redacted(let reason): reason
         }
     }
 
@@ -574,6 +897,7 @@ public enum LifeOSContentState: Equatable, Sendable {
         case .demo: "theatermasks"
         case .unavailable: "questionmark.circle"
         case .partial: "circle.lefthalf.filled"
+        case .redacted: "lock"
         }
     }
 
@@ -582,7 +906,115 @@ public enum LifeOSContentState: Equatable, Sendable {
         case .loading, .empty, .unavailable: .neutral
         case .stale, .demo, .partial: .warning
         case .error: .danger
+        case .redacted: .neutral
         }
+    }
+}
+
+// MARK: - Canonical status row
+
+/// A compact state row that keeps the cause and its one valid recovery action
+/// together without turning the whole row into a button. It is safe to place
+/// inside a card or above retained content; it never creates chart geometry.
+public struct LifeOSStatusRow: View {
+    private let state: LifeOSContentState
+    private let observedAt: Date?
+    private let actionTitle: String?
+    private let action: (() -> Void)?
+
+    public init(
+        state: LifeOSContentState,
+        observedAt: Date? = nil,
+        actionTitle: String? = nil,
+        action: (() -> Void)? = nil
+    ) {
+        self.state = state
+        self.observedAt = observedAt
+        self.actionTitle = actionTitle ?? (action == nil ? nil : "Try again")
+        self.action = action
+    }
+
+    private var messageBlock: some View {
+        VStack(alignment: .leading, spacing: LifeOSTokens.labelHelperGap) {
+            Text(state.title)
+                .lifeOSTypography(.cardTitle)
+                .foregroundStyle(LifeOSTokens.primaryText)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text(state.message)
+                .lifeOSTypography(.body)
+                .foregroundStyle(LifeOSTokens.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let observedAt {
+                Text("Last observed \(observedAt.formatted(date: .abbreviated, time: .shortened))")
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.metadataText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if case .demo = state {
+                LifeOSStatusPill(label: "DEMO · NOT LIVE", tone: .demo)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var stateIcon: some View {
+        if case .loading = state {
+            ProgressView()
+                .controlSize(.small)
+                .tint(LifeOSTokens.accent)
+                .frame(width: 20, height: 20)
+        } else {
+            Image(systemName: state.iconName)
+                .symbolRenderingMode(.monochrome)
+                .font(.system(size: 15, weight: .medium, design: .default))
+                .foregroundStyle(state.tone.foreground)
+                .frame(width: 20, height: 20)
+        }
+    }
+
+    @ViewBuilder
+    private var recoveryAction: some View {
+        if let action, let actionTitle, !actionTitle.isEmpty {
+            LifeOSButton(
+                actionTitle,
+                variant: .tertiary,
+                action: action
+            )
+        }
+    }
+
+    private var horizontalLayout: some View {
+        HStack(alignment: .center, spacing: LifeOSTokens.Space.sm) {
+            stateIcon
+            messageBlock
+                .layoutPriority(1)
+            recoveryAction
+        }
+    }
+
+    private var stackedLayout: some View {
+        VStack(alignment: .leading, spacing: LifeOSTokens.Space.xs) {
+            HStack(alignment: .top, spacing: LifeOSTokens.Space.sm) {
+                stateIcon
+                messageBlock
+            }
+            recoveryAction
+        }
+    }
+
+    public var body: some View {
+        ViewThatFits(in: .horizontal) {
+            horizontalLayout
+            stackedLayout
+        }
+        .padding(.horizontal, LifeOSTokens.Space.sm)
+        .padding(.vertical, LifeOSTokens.Space.sm)
+        .frame(minHeight: LifeOSTokens.statusRowMinHeight, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .contain)
     }
 }
 
@@ -599,47 +1031,207 @@ public struct LifeOSStateView: View {
     }
 
     public var body: some View {
-        Group {
-            if case .loading = state {
-                HStack(spacing: LifeOSTokens.Space.xs) {
-                    ProgressView()
-                        .controlSize(.small)
-                        .tint(LifeOSTokens.accent)
-                    Text(state.title)
-                        .lifeOSTypography(.cardTitle)
-                        .foregroundStyle(LifeOSTokens.primaryText)
-                    Spacer(minLength: 0)
-                }
-            } else {
-                VStack(alignment: .leading, spacing: LifeOSTokens.Space.xs) {
-                    HStack(spacing: LifeOSTokens.Space.xs) {
-                        Image(systemName: state.iconName)
-                            .foregroundStyle(state.tone.foreground)
-                        Text(state.title)
-                            .lifeOSTypography(.cardTitle)
-                            .foregroundStyle(LifeOSTokens.primaryText)
-                    }
+        LifeOSStatusRow(
+            state: state,
+            actionTitle: retry == nil ? nil : "Try again",
+            action: retry
+        )
+    }
+}
 
-                    Text(state.message)
-                        .lifeOSTypography(.metadata)
+// MARK: - Canonical sheet surface
+
+#if os(macOS)
+private struct LifeOSSheetPresentationLayout: Layout {
+    let maxHeight: CGFloat
+    let availableHeightInset: CGFloat
+
+    func sizeThatFits(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) -> CGSize {
+        guard subviews.count >= 3 else { return .zero }
+
+        let width = proposal.width.flatMap { value in
+            value.isFinite ? max(0, value) : nil
+        }
+        let childProposal = ProposedViewSize(width: width, height: nil)
+        let scrollSize = subviews[0].sizeThatFits(childProposal)
+        let dividerSize = subviews[1].sizeThatFits(childProposal)
+        let footerSize = subviews[2].sizeThatFits(childProposal)
+        let naturalHeight = scrollSize.height + dividerSize.height + footerSize.height
+        let safeNaturalHeight = naturalHeight.isFinite ? max(0, naturalHeight) : maxHeight
+        let availableBound = proposal.height.flatMap { value in
+            guard value.isFinite, value > 0 else { return nil }
+            return max(0, value - availableHeightInset)
+        } ?? maxHeight
+        let height = min(safeNaturalHeight, maxHeight, availableBound)
+        let naturalWidth = max(scrollSize.width, max(dividerSize.width, footerSize.width))
+        return CGSize(width: width ?? max(0, naturalWidth), height: max(0, height))
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
+        guard subviews.count >= 3 else { return }
+
+        let childWidth = max(0, bounds.width)
+        let footerSize = subviews[2].sizeThatFits(
+            ProposedViewSize(width: childWidth, height: nil)
+        )
+        let footerHeight = min(max(0, footerSize.height), max(0, bounds.height))
+        let dividerHeight = min(1, max(0, bounds.height - footerHeight))
+        let scrollHeight = max(0, bounds.height - footerHeight - dividerHeight)
+
+        subviews[0].place(
+            at: CGPoint(x: bounds.minX, y: bounds.minY),
+            anchor: .topLeading,
+            proposal: ProposedViewSize(width: childWidth, height: scrollHeight)
+        )
+        subviews[1].place(
+            at: CGPoint(x: bounds.minX, y: bounds.minY + scrollHeight),
+            anchor: .topLeading,
+            proposal: ProposedViewSize(width: childWidth, height: dividerHeight)
+        )
+        subviews[2].place(
+            at: CGPoint(x: bounds.minX, y: bounds.maxY - footerHeight),
+            anchor: .topLeading,
+            proposal: ProposedViewSize(width: childWidth, height: footerHeight)
+        )
+    }
+}
+#endif
+
+/// A sheet body with one scroll owner and a footer that remains visible while
+/// long forms grow. Each platform supplies a bounded presentation while the
+/// body remains scrollable.
+public struct LifeOSSheet<Content: View, Footer: View>: View {
+    private let title: String
+    private let subtitle: String?
+    private let content: Content
+    private let footer: Footer
+    private let onDismiss: (() -> Void)?
+
+    @Environment(\.dismiss) private var dismiss
+
+    public init(
+        title: String,
+        subtitle: String? = nil,
+        onDismiss: (() -> Void)? = nil,
+        @ViewBuilder content: () -> Content,
+        @ViewBuilder footer: () -> Footer
+    ) {
+        self.title = title
+        self.subtitle = subtitle
+        self.content = content()
+        self.footer = footer()
+        self.onDismiss = onDismiss
+    }
+
+    public var body: some View {
+#if os(macOS)
+        LifeOSSheetPresentationLayout(maxHeight: 760, availableHeightInset: 48) {
+            scrollContent
+            Divider()
+            footerContent
+        }
+        .frame(
+            minWidth: 420,
+            idealWidth: 560,
+            maxWidth: 640
+        )
+#elseif os(iOS)
+        sheetStack
+            .presentationDetents([.large])
+            .presentationDragIndicator(.visible)
+#else
+        sheetStack
+#endif
+    }
+
+    @ViewBuilder
+    private var sheetStack: some View {
+        VStack(spacing: 0) {
+            scrollContent
+            Divider()
+            footerContent
+        }
+    }
+
+    private var scrollContent: some View {
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: LifeOSTokens.Space.xl) {
+                header
+
+                content
+            }
+            .frame(maxWidth: LifeOSTokens.proseMaxWidth, alignment: .topLeading)
+            .padding(.horizontal, LifeOSTokens.pageGutter)
+            .padding(.vertical, LifeOSTokens.Space.xl)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .scrollIndicators(.hidden)
+    }
+
+    private var footerContent: some View {
+        footer
+            .frame(maxWidth: LifeOSTokens.proseMaxWidth, alignment: .trailing)
+            .padding(.horizontal, LifeOSTokens.pageGutter)
+            .padding(.vertical, LifeOSTokens.Space.sm)
+            .frame(maxWidth: .infinity, alignment: .trailing)
+    }
+
+    @ViewBuilder
+    private var header: some View {
+        HStack(alignment: .top, spacing: LifeOSTokens.Space.md) {
+            VStack(alignment: .leading, spacing: LifeOSTokens.labelHelperGap) {
+                Text(title)
+                    .lifeOSTypography(.sectionTitle)
+                    .foregroundStyle(LifeOSTokens.primaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if let subtitle, !subtitle.isEmpty {
+                    Text(subtitle)
+                        .lifeOSTypography(.body)
                         .foregroundStyle(LifeOSTokens.secondaryText)
                         .fixedSize(horizontal: false, vertical: true)
-
-                    if case .demo = state {
-                        LifeOSStatusPill(label: "DEMO · NOT LIVE", tone: .demo)
-                    }
-
-                    if let retry {
-                        Button("Try again", action: retry)
-                            .lifeOSTypography(.button)
-                            .foregroundStyle(LifeOSTokens.accent)
-                            .frame(minHeight: LifeOSTokens.Control.minimumTarget)
-                    }
                 }
             }
+
+            Spacer(minLength: LifeOSTokens.Space.sm)
+
+            LifeOSIconButton(
+                systemName: "xmark",
+                accessibilityLabel: "Close",
+                action: dismissSheet
+            )
         }
-        .padding(.vertical, LifeOSTokens.Space.xs)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .combine)
+    }
+
+    private func dismissSheet() {
+        if let onDismiss {
+            onDismiss()
+        } else {
+            dismiss()
+        }
+    }
+}
+
+public extension LifeOSSheet where Footer == EmptyView {
+    init(
+        title: String,
+        subtitle: String? = nil,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.init(
+            title: title,
+            subtitle: subtitle,
+            content: content,
+            footer: { EmptyView() }
+        )
     }
 }

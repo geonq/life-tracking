@@ -42,7 +42,6 @@ public enum LifeOSIconName: Sendable {
     case search
     case undo
     case refresh
-    case assistant
     case security
     case verified
     case warning
@@ -54,7 +53,9 @@ public enum LifeOSIconName: Sendable {
     case inProgress
     case importDocument
 
-    fileprivate var systemName: String {
+    /// The exact SF Symbol used for this semantic icon. Keeping the mapping
+    /// centralized prevents route-specific weight and glyph drift.
+    var systemImageName: String {
         switch self {
         case .overview: "square.grid.2x2"
         case .home: "house"
@@ -71,7 +72,7 @@ public enum LifeOSIconName: Sendable {
         case .tasks: "checklist"
         case .grocery: "basket"
         case .shopping: "bag"
-        case .reports: "chart.bar.doc.horizontal"
+        case .reports: "chart.bar.doc"
         case .fitness: "heart"
         case .settings: "gearshape"
         case .more: "ellipsis"
@@ -97,7 +98,6 @@ public enum LifeOSIconName: Sendable {
         case .search: "magnifyingglass"
         case .undo: "arrow.uturn.backward"
         case .refresh: "arrow.clockwise"
-        case .assistant: "sparkles"
         case .security: "lock"
         case .verified: "checkmark.seal"
         case .warning: "exclamationmark.triangle"
@@ -158,7 +158,6 @@ public enum LifeOSIconName: Sendable {
         case .search: "Search"
         case .undo: "Undo"
         case .refresh: "Refresh"
-        case .assistant: "Assistant"
         case .security: "Security"
         case .verified: "Verified"
         case .warning: "Warning"
@@ -183,8 +182,8 @@ public struct LifeOSIcon: View {
     }
 
     public var body: some View {
-        Image(systemName: name.systemName)
-            .renderingMode(.template)
+        Image(systemName: name.systemImageName)
+            .symbolRenderingMode(.monochrome)
             .font(.system(size: 17, weight: .medium, design: .default))
             .modifier(LifeOSIconAccessibilityModifier(label: explicitAccessibilityLabel))
     }

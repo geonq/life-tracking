@@ -116,8 +116,8 @@ final class LifeOSMacSnapshotTests: XCTestCase {
     func testOverviewMeasuredWidthContractAtMacReviewWidths() {
         let gutter = LifeOSTokens.overviewContentInset
         let expectedContentWidths: [(outer: CGFloat, content: CGFloat, columns: Int)] = [
-            (800, 720, 2),
-            (900, 820, 2),
+            (800, 752, 2),
+            (900, 852, 2),
             (1_200, 1_120, 2)
         ]
 
