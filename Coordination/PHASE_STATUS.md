@@ -1,50 +1,48 @@
 # PHASE STATUS — LifeOS
 
-Updated 2026-09-09 07:15 Europe/Berlin.
+Updated 2026-09-09 18:34 Europe/Berlin.
 
-- Overall: **NO-GO pending external acceptance gates; source review is GO.**
+- Overall: **NO-GO for completion pending external acceptance; local source is
+  GO after the final Astra follow-up fixes.**
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- Commits: `69439f8`, `0493b39`, `e215c01`, and `38b05c7`.
-- Final design and training plans are in `tasks/`; all coordination files stay
-  under 200 lines.
+- Latest source commit before this documentation refresh: `656e3f1` (`9a46ac5`
+  is the preceding native hardening commit).
+- PR #1 is open, draft, and mergeable; it is not merged.
+- No scheduling/usage watcher is in the product or workflow.
 
-## Completed source work
+## Completed local work
 
-1. SF Pro/system typography, shared visual primitives, responsive geometry,
-   motion ownership, widget backing, and Advisor removal.
-2. Calendar scrolling/paging/editing/trackpad magnification and repaired
-   Finance, Recovery, Biology, and Nutrition states.
-3. Local-first workout templates/sessions/sets/history/PRs/reports plus
-   read-only Apple Health evidence and truthful Zepp boundaries.
-4. Enable Banking/live Finance plus manual Trade Republic import and durable
-   imported-finance sync.
-5. HealthKit refresh/status App Intents for native Shortcut composition.
-6. API/gateway queues/auth/bounded reads and Windows manifest, ACL, recovery,
-   inventory, and Node-runtime hardening.
+1. SF Pro design system, responsive shells, interaction/motion primitives,
+   readable widgets, and removal of Advisor/generic conversational AI.
+2. Calendar transport/authentication, mobile reachability, Mac magnification,
+   precise dates, bounded Codable, and safe tombstone ordering.
+3. Live Finance/Trade Republic import, Fitness/HealthKit/workout contracts,
+   Nutrition capture, Tax privacy/persistence, and native Shortcut intents.
+4. API/gateway security, bounded reads, live/fixture separation, Windows
+   staging/ACL/recovery contracts, and explicit runtime path handling.
 
-## Verification status
+## Verification
 
-- API: 124/124 tests and TypeScript typecheck pass.
-- Windows deployment source: 55/55; release builder: 12/12.
-- Python AST, shell syntax, Swift parse, and `git diff --check` pass.
-- Astra Medium backend final review: GO; no P0/P1/P2 findings remain.
-- Astra Medium Swift/product final review: GO; no P0/P1/P2 findings remain.
-- Gateway pytest and Windows PowerShell/Pester are unavailable in this
-  environment. Unsigned Xcode builds stall before compilation here.
-- Latest sanitized progress reply is posted in [GitHub issue #2](https://github.com/geonq/life-tracking/issues/2#issuecomment-5596190145).
+- API: 131 tests and TypeScript typecheck pass.
+- Gateway: 447 tests pass with two dependency warnings.
+- Source/deployment validators: 157 tests and 47 subtests pass.
+- iOS logic: 1,526 tests pass; macOS logic/snapshots: 49 tests pass.
+- Available unsigned LifeOS build, Swift parsing, XcodeGen, native calendar,
+  release invariants, Advisor scan, and diff check pass.
+- Astra final review: no P0/P1; all reported P2/P3 follow-ups are repaired.
 
-## Remaining gates
+## Blocking acceptance
 
-- Complete unsigned iOS and macOS builds, then run available simulator tests.
-- Inspect real Mac pinch/hover behavior, iPhone scroll/keyboard/dismissal, and
-  widget clear/tinted/grey-wallpaper states.
-- Exercise HealthKit/Zepp sync, Shortcuts, Enable Banking consent/readback,
-  Windows services/recovery, and Personal Team installation.
-- Keep manual platform actions visible: iPhone trust/developer mode, signing
-  renewal, and the user-tapped Zepp sync step.
+- Windows services, standalone runtime, Tailscale Serve, and recovery/readback.
+- Enable Banking provider consent and real finance observations.
+- Physical iPhone HealthKit/Zepp/Shortcuts/USB behavior and Personal Team
+  signing/renewal.
+- iOS/macOS UI and WidgetKit visual/gesture acceptance, including transparent
+  grey-wallpaper states and Mac pinch/hover behavior.
+- Obsidian mind-map integration remains issue #2 scope.
 
-## Operating rule
+## Rule
 
-Commit and push each coherent code/doc group with exact paths. Update this
-file, `HANDOFF.md`, and `DECISIONS.md` after each final group. Do not reset or
-bulk-clean the dirty worktree.
+Keep changes attributable and coordination files under 200 lines. Record
+external evidence separately from source evidence; do not mark this phase
+complete until every blocking acceptance item has a result.

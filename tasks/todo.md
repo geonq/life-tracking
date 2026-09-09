@@ -1,45 +1,36 @@
-# TODO — LifeOS completion pass
+# TODO — LifeOS completion gates
 
-Updated 2026-09-08 09:40 Europe/Berlin.
+Updated 2026-09-09 18:34 Europe/Berlin.
 
-## Active queue
+Local source implementation and review are complete at source commit `656e3f1`.
+The remaining queue requires external runtime, provider, device, and visual
+evidence.
 
-1. **Foundation and removal — active Luna Max lane**
-   - Delete Advisor Swift/API/contracts/gateway/providers, routes, secrets,
-     intents, deep links, tests, and Xcode references.
-   - Migrate every custom font call/resource to the SF Pro/system facade.
-   - Establish shared page, card, status, button, selector, and sheet tokens.
-2. **Windows hardening — active Luna Max lane**
-   - Fix Serve validator parity, safe rollback arguments, supported authority
-     sidecar evolution, recovered transaction poisoning, and partial snapshots.
-3. **Calendar — next Luna Max lane**
-   - Give iPhone one bounded vertical timeline scroll region with reachable
-     late-day content and one current-time marker assembly.
-   - Add bounded Mac trackpad pinch zoom with focal-time preservation and tests.
-   - Preserve secure manual pairing, outbox, and DST/cross-midnight semantics.
-4. **Finance/Fitness/Nutrition — next Luna Max lane**
-   - Apply shared hierarchy and compact truthful states to Finance, Recovery,
-     Biology, and Nutrition. Define finance mode/range availability and meal
-     draft/save semantics before styling controls.
-5. **Widgets/shell/motion — next Luna Max lane**
-   - Rework navigation icons, selected rows, all widget families/modes, grey
-     wallpaper contrast, and interruptible state-correct animations.
-6. **Batched review/integration — Astra Medium then Luna Max**
-   - Review foundation+Windows, then Calendar+modules, then widgets/full diff.
-   - Run all feasible tests/builds, capture state/interaction evidence, update
-     coordination records, and record every remaining external gate.
+## Active gates
 
-## Verification commands
+1. Provision and verify the Windows standalone runtime, service host, Tailscale
+   Serve path, protected snapshots, restart recovery, and remote readback.
+2. Complete Enable Banking consent/readback with the real accounts and import a
+   real Trade Republic CSV through the durable reconciliation path.
+3. Exercise HealthKit, Zepp sync, Shortcuts, USB refresh, and seven-day Personal
+   Team signing/renewal on the physical iPhone 17 and Mac.
+4. Rerun iOS UI, macOS UI, and WidgetKit acceptance: scroll reachability,
+   keyboard/sheet dismissal, pinch/hover behavior, and transparent grey-wallpaper
+   rendering.
+5. Verify live freshness and truthful unavailable states after authority setup;
+   keep visual fixtures out of production reads and sync.
+6. Resolve the Obsidian graph/mind-map feasibility item in GitHub issue #2.
 
-- `git diff --check`
-- `npm test`
-- API build/typecheck/tests and gateway pytest in `/private/tmp/lifeos-gateway-venv`
-- Existing unsigned iOS simulator and macOS/widget schemes/scripts
-- Widget snapshot tests and Windows source/static tests
+## Completed verification
 
-## External acceptance gates
+API 131 tests plus typecheck; gateway 447 tests; repository validators 157
+tests plus 47 subtests; iOS logic 1,526 tests; macOS logic 49 tests; available
+unsigned LifeOS build; Swift parsing; XcodeGen; native calendar; release
+invariants; Advisor source scan; and diff check.
 
-Physical iPhone 17 HealthKit/Zepp, Personal Team App Group/signing,
-WidgetKit clear/tinted rendering, USB refresh, Enable Banking consent,
-Windows PowerShell/service/Tailscale runtime, and durable Mac↔iPhone receipts.
-Do not mark completion from simulator or source evidence alone.
+## Constraints
+
+Use live production data, serialize native builds, keep coordination files under
+200 lines, use bounded implementation/review scopes, and record external gates
+separately from source evidence. Do not add a usage watcher, scheduler, demo
+fallback, or unrelated conversational AI.
