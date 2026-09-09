@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
-import { win32 } from 'node:path';
+import { lstatSync } from 'node:fs';
+import { posix, win32 } from 'node:path';
 import { parseStrictJSON } from './json-boundary.js';
 
 export type CodexWindow = { minutes: number; usedPercent: number; resetAt?: string };
@@ -117,27 +118,95 @@ export function mapCodexResponse(rateLimits: unknown): CodexLiveResult {
   return windows.length ? { connectorState: windows.some(w => w.usedPercent >= 100) ? 'rate_limited' : 'healthy', windows } : { connectorState: 'unavailable', windows: [], error: 'Codex returned no valid rate-limit windows' };
 }
 
-export function codexSpawnSpec(platform = process.platform, commandShell = process.env.ComSpec || 'cmd.exe'): { command: string; args: string[] } {
-  return platform === 'win32'
-    ? { command: commandShell, args: ['/d', '/s', '/c', 'codex.cmd', 'app-server'] }
-    : { command: 'codex', args: ['app-server'] };
+export type CodexSpawnSpec = { command: string; args: string[] };
+export type CodexSpawnOptions = {
+  platform?: string;
+  executablePath?: string;
+  shellPath?: string;
+  systemRoot?: string;
+  isRegularFile?: (path: string) => boolean;
+};
+
+const defaultWindowsRoot = 'C:\\Windows';
+const maxExecutablePathLength = 4096;
+const regularFile = (path: string): boolean => {
+  try {
+    const entry = lstatSync(path);
+    return entry.isFile() && !entry.isSymbolicLink();
+  } catch {
+    return false;
+  }
+};
+
+function windowsSystemRoot(value: string | undefined): string | undefined {
+  if (value === undefined) return defaultWindowsRoot;
+  if (!/^[A-Za-z]:[\\/]Windows$/i.test(value)) return undefined;
+  return win32.normalize(value);
+}
+
+function approvedWindowsPath(value: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(value)
+    && win32.isAbsolute(value)
+    && value.length <= maxExecutablePathLength
+    && !/[\u0000-\u001f\u007f"<>|?*%&^!;:]/.test(value.slice(2));
+}
+
+function approvedPosixPath(value: string): boolean {
+  return posix.isAbsolute(value)
+    && value.length <= maxExecutablePathLength
+    && !/[\u0000-\u001f\u007f]/.test(value);
+}
+
+/**
+ * Resolve the only process paths the adapter may launch. The executable is
+ * deliberately explicit; no PATH lookup is performed. Windows uses the
+ * system cmd.exe only, and both paths must be existing non-symlink files.
+ */
+export function codexSpawnSpec(options: CodexSpawnOptions = {}): CodexSpawnSpec | undefined {
+  const platform = options.platform ?? process.platform;
+  const isRegularFile = options.isRegularFile ?? regularFile;
+  const executablePath = options.executablePath ?? process.env.CODEX_EXECUTABLE_PATH;
+  if (!executablePath) return undefined;
+
+  if (platform === 'win32') {
+    const systemRoot = windowsSystemRoot(options.systemRoot ?? process.env.SystemRoot);
+    if (!systemRoot) return undefined;
+    const expectedShell = win32.join(systemRoot, 'System32', 'cmd.exe');
+    const shellPath = options.shellPath ?? process.env.CODEX_SHELL_PATH ?? process.env.ComSpec ?? expectedShell;
+    if (!approvedWindowsPath(shellPath) || win32.normalize(shellPath).toLowerCase() !== expectedShell.toLowerCase()) return undefined;
+    if (!approvedWindowsPath(executablePath)) return undefined;
+    const normalizedExecutable = win32.normalize(executablePath);
+    const executableName = win32.basename(normalizedExecutable).toLowerCase();
+    if (executableName !== 'codex.cmd' && executableName !== 'codex.exe') return undefined;
+    const normalizedShell = win32.normalize(shellPath);
+    if (!isRegularFile(normalizedShell) || !isRegularFile(normalizedExecutable)) return undefined;
+    return {
+      command: normalizedShell,
+      // Keep the command passed to /c as one argument and quote the explicit
+      // path so spaces in the approved installation directory stay inert.
+      args: ['/d', '/s', '/c', `"${normalizedExecutable}" app-server`],
+    };
+  }
+
+  if (!approvedPosixPath(executablePath)) return undefined;
+  const normalizedExecutable = posix.normalize(executablePath);
+  if (posix.basename(normalizedExecutable) !== 'codex' || !isRegularFile(normalizedExecutable)) return undefined;
+  return { command: normalizedExecutable, args: ['app-server'] };
 }
 
 /** Never let a writable collector working directory shadow `codex.cmd`. */
-export function codexWorkingDirectory(platform = process.platform, commandShell = process.env.ComSpec || 'cmd.exe'): string {
+export function codexWorkingDirectory(platform = process.platform, systemRootOverride = process.env.SystemRoot): string {
   if (platform !== 'win32') return '/';
-  // Keep the parameter in the signature for deterministic platform tests, but
-  // never derive cwd from ComSpec: an overridden shell path may be writable.
-  void commandShell;
-  const systemRoot = typeof process.env.SystemRoot === 'string' && /^[A-Za-z]:\\Windows$/i.test(process.env.SystemRoot)
-    ? process.env.SystemRoot : 'C:\\Windows';
+  const systemRoot = windowsSystemRoot(systemRootOverride) ?? defaultWindowsRoot;
   return win32.join(systemRoot, 'System32');
 }
 
 function spawnCodex(): ChildProcess {
-  const spec = codexSpawnSpec();
+  const systemRoot = process.env.SystemRoot;
+  const spec = codexSpawnSpec({ platform: process.platform, systemRoot });
+  if (!spec) throw new Error('Codex app-server unavailable');
   return spawn(spec.command, spec.args, {
-    cwd: codexWorkingDirectory(), stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true,
+    cwd: codexWorkingDirectory(process.platform, systemRoot), stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true,
   });
 }
 

@@ -700,7 +700,7 @@ def calendar_write_headers(etag, key="validation-write"):
 @pytest.mark.parametrize("item", [
     None, True, 1, "event", [], {}, {"id": "not-a-uuid"},
     calendar_item(unknown=True), calendar_item(revision=2**63 - 1),
-    calendar_item(title="  "), calendar_item(title=None), calendar_item(id="not-a-uuid"),
+    calendar_item(title="  "), calendar_item(title=None), calendar_item(title="x" * 241), calendar_item(id="not-a-uuid"),
     calendar_item(status="unknown"), calendar_item(status=[]), calendar_item(kind={}),
     calendar_item(start="yesterday"), calendar_item(end="2026-09-08T08:00:00Z"),
     calendar_item(createdAt=123), calendar_item(updatedAt="2026-09-08"),
@@ -2875,6 +2875,38 @@ def test_imported_finance_replays_exact_body_after_authority_advances(tmp_path, 
     assert misuse.json()["revision"] == 2
 
 
+def test_imported_finance_receipt_lookup_returns_only_exact_commit_state(tmp_path, monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "FINANCE_IMPORTED_PATH", tmp_path / "finance-imported.json")
+    initial = client.get("/finance/imported", headers=AUTH)
+    unknown = client.get("/finance/imported/receipt/never-committed", headers=AUTH)
+    assert unknown.status_code == 200
+    assert unknown.json() == {"state": "unknown", "revision": None}
+
+    key = "receipt-proof-1"
+    committed = client.put(
+        "/finance/imported",
+        headers=imported_finance_headers(initial.headers["etag"], key),
+        json=imported_finance_request(0, [{
+            "operation": "upsert",
+            "record": imported_finance_record(source_revision=0),
+            "expectedSourceRevision": 0,
+        }]),
+    )
+    assert committed.status_code == 200
+
+    proof = client.get(f"/finance/imported/receipt/{key}", headers=AUTH)
+    assert proof.status_code == 200
+    assert proof.json() == {"state": "committed", "revision": 1}
+    assert "fingerprint" not in proof.json()
+    assert "records" not in proof.json()
+    assert proof.headers["cache-control"] == "no-store"
+
+    invalid = client.get("/finance/imported/receipt/not a key", headers=AUTH)
+    assert invalid.status_code == 400
+
+
 def test_imported_finance_rejects_stale_source_and_category_preconditions_atomically(tmp_path, monkeypatch):
     import main
 
@@ -3067,6 +3099,210 @@ def test_imported_finance_duplicate_key_with_different_fingerprint_is_conflict(t
     assert conflict.status_code == 409
     assert conflict.headers["x-lifeos-conflict"] == "true"
     assert conflict.json()["revision"] == 1
+
+
+def _fitness_iso(value):
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _fitness_payload(now=None):
+    now = now or datetime.now(timezone.utc)
+    generated = now - timedelta(seconds=20)
+    observed = now - timedelta(seconds=30)
+    return {
+        "schemaVersion": 1,
+        "state": "observed",
+        "generatedAt": _fitness_iso(generated),
+        "observedAt": _fitness_iso(observed),
+        "source": "healthkit",
+        "provenance": "iphone_healthkit_projection",
+        "metrics": [{
+            "metric": "heart_rate",
+            "value": 61.5,
+            "unit": "bpm",
+            "observedAt": _fitness_iso(observed),
+        }],
+        "days": [],
+        "workouts": [],
+    }
+
+
+def test_fitness_observation_requires_tailscale_identity_for_read_and_write():
+    assert client.get("/fitness/observation").status_code == 403
+    assert client.post("/fitness/observation", json=_fitness_payload()).status_code == 403
+
+
+def test_fitness_observation_round_trips_valid_live_payload(tmp_path, monkeypatch):
+    path = tmp_path / "fitness-observation.json"
+    monkeypatch.setattr(main, "FITNESS_OBSERVATION_PATH", path)
+    payload = _fitness_payload()
+
+    written = client.post("/fitness/observation", headers=AUTH, json=payload)
+    assert written.status_code == 200
+    assert path.exists()
+
+    read = client.get("/fitness/observation", headers=AUTH)
+    assert read.status_code == 200
+    assert read.headers["x-lifeos-fitness-state"] == "observed"
+    assert read.json()["metrics"] == payload["metrics"]
+
+
+def test_fitness_observation_accepts_paused_workout_active_duration(tmp_path, monkeypatch):
+    path = tmp_path / "fitness-observation.json"
+    monkeypatch.setattr(main, "FITNESS_OBSERVATION_PATH", path)
+    now = datetime.now(timezone.utc)
+    payload = _fitness_payload(now)
+    workout_end = now - timedelta(seconds=30)
+    payload["workouts"] = [{
+        "activityTypeRawValue": 37,
+        "startAt": _fitness_iso(workout_end - timedelta(minutes=60)),
+        "endAt": _fitness_iso(workout_end),
+        "durationSeconds": 50 * 60,
+    }]
+
+    written = client.post("/fitness/observation", headers=AUTH, json=payload)
+
+    assert written.status_code == 200
+    assert written.json() == {"status": "ok", "result": "stored"}
+    response = client.get("/fitness/observation", headers=AUTH)
+    assert response.status_code == 200
+    assert response.json()["workouts"] == payload["workouts"]
+
+
+def test_fitness_observation_ignores_reversed_arrival_and_keeps_newer_generation(tmp_path, monkeypatch):
+    path = tmp_path / "fitness-observation.json"
+    monkeypatch.setattr(main, "FITNESS_OBSERVATION_PATH", path)
+    now = datetime.now(timezone.utc)
+    newer = _fitness_payload(now)
+    newer["metrics"][0]["value"] = 72.0
+    older = _fitness_payload(now - timedelta(minutes=1))
+    older["metrics"][0]["value"] = 58.0
+
+    first = client.post("/fitness/observation", headers=AUTH, json=newer)
+    second = client.post("/fitness/observation", headers=AUTH, json=older)
+
+    assert first.status_code == 200
+    assert first.json() == {"status": "ok", "result": "stored"}
+    assert second.status_code == 200
+    assert second.json() == {
+        "status": "ok",
+        "result": "ignored",
+        "reason": "older_observation",
+    }
+    current = client.get("/fitness/observation", headers=AUTH)
+    assert current.status_code == 200
+    assert current.json()["metrics"][0]["value"] == 72.0
+
+
+def test_fitness_observation_equal_generation_is_idempotent(tmp_path, monkeypatch):
+    path = tmp_path / "fitness-observation.json"
+    monkeypatch.setattr(main, "FITNESS_OBSERVATION_PATH", path)
+    payload = _fitness_payload()
+
+    first = client.post("/fitness/observation", headers=AUTH, json=payload)
+    replay = client.post("/fitness/observation", headers=AUTH, json=copy.deepcopy(payload))
+
+    assert first.status_code == 200
+    assert replay.status_code == 200
+    assert replay.json() == {
+        "status": "ok",
+        "result": "already_current",
+        "reason": "idempotent_replay",
+    }
+    assert len(replay.content) <= 128
+
+
+def test_fitness_observation_get_marks_old_observation_stale_and_clears_values(tmp_path, monkeypatch):
+    path = tmp_path / "fitness-observation.json"
+    monkeypatch.setattr(main, "FITNESS_OBSERVATION_PATH", path)
+    payload = _fitness_payload(datetime.now(timezone.utc) - timedelta(minutes=16))
+    path.write_text(json.dumps(payload))
+
+    response = client.get("/fitness/observation", headers=AUTH)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["state"] == "stale"
+    assert body["metrics"] == []
+    assert body["days"] == []
+    assert body["workouts"] == []
+    assert response.headers["x-lifeos-fitness-state"] == "stale"
+
+
+def test_fitness_observation_rejects_stale_publish_and_malformed_payloads(tmp_path, monkeypatch):
+    path = tmp_path / "fitness-observation.json"
+    monkeypatch.setattr(main, "FITNESS_OBSERVATION_PATH", path)
+    stale = _fitness_payload(datetime.now(timezone.utc) - timedelta(minutes=16))
+    assert client.post("/fitness/observation", headers=AUTH, json=stale).status_code == 422
+    assert not path.exists()
+
+    unknown = copy.deepcopy(_fitness_payload())
+    unknown["unexpected"] = True
+    assert client.post("/fitness/observation", headers=AUTH, json=unknown).status_code == 422
+
+    wrong_unit = copy.deepcopy(_fitness_payload())
+    wrong_unit["metrics"][0]["unit"] = "ms"
+    assert client.post("/fitness/observation", headers=AUTH, json=wrong_unit).status_code == 422
+
+    malformed_state = copy.deepcopy(_fitness_payload())
+    malformed_state["state"] = []
+    malformed_state_response = client.post("/fitness/observation", headers=AUTH, json=malformed_state)
+    assert malformed_state_response.status_code == 422
+    assert malformed_state_response.json() == {"error": "fitness_observation_invalid"}
+
+    future = copy.deepcopy(_fitness_payload())
+    future["generatedAt"] = _fitness_iso(datetime.now(timezone.utc) + timedelta(minutes=1))
+    assert client.post("/fitness/observation", headers=AUTH, json=future).status_code == 422
+
+    nonfinite = json.dumps(_fitness_payload()).replace("61.5", "NaN").encode()
+    assert client.post(
+        "/fitness/observation",
+        headers={**AUTH, "content-type": "application/json"},
+        content=nonfinite,
+    ).status_code == 422
+
+
+@pytest.mark.parametrize("boundary_timestamp", [
+    "0001-01-01T00:00:00+01:00",
+    "9999-12-31T23:59:59-01:00",
+])
+def test_fitness_observation_rejects_timezone_conversion_overflow_as_controlled_422(boundary_timestamp):
+    payload = _fitness_payload()
+    payload["generatedAt"] = boundary_timestamp
+    payload["observedAt"] = boundary_timestamp
+
+    response = client.post("/fitness/observation", headers=AUTH, json=payload)
+
+    assert response.status_code == 422
+    assert response.json() == {"error": "fitness_observation_invalid"}
+
+
+def test_fitness_observation_enforces_request_and_response_limits(tmp_path, monkeypatch):
+    path = tmp_path / "fitness-observation.json"
+    monkeypatch.setattr(main, "FITNESS_OBSERVATION_PATH", path)
+    oversized_request = b"x" * (main.FITNESS_OBSERVATION_MAX_BODY_SIZE + 1)
+    response = client.post(
+        "/fitness/observation",
+        headers={**AUTH, "content-type": "application/json"},
+        content=oversized_request,
+    )
+    assert response.status_code == 413
+
+    path.write_bytes(b"x" * (main.FITNESS_OBSERVATION_MAX_RESPONSE_SIZE + 1))
+    assert client.get("/fitness/observation", headers=AUTH).status_code == 503
+
+
+def test_fitness_observation_preserves_explicit_unavailable_state(tmp_path, monkeypatch):
+    path = tmp_path / "fitness-observation.json"
+    monkeypatch.setattr(main, "FITNESS_OBSERVATION_PATH", path)
+    payload = _fitness_payload()
+    payload["state"] = "unavailable"
+    payload["metrics"] = []
+    path.write_text(json.dumps(payload))
+
+    response = client.get("/fitness/observation", headers=AUTH)
+    assert response.status_code == 200
+    assert response.json()["state"] == "unavailable"
+    assert response.json()["metrics"] == []
 
 
 # Ephemeral local service capability only. Never read operator credentials or use network.

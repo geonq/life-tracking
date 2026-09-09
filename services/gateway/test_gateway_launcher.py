@@ -123,8 +123,9 @@ def test_local_readiness_adapter_returns_503_when_probe_times_out(monkeypatch) -
     def readiness_check() -> bool:
         nonlocal calls
         calls += 1
-        started.set()
-        release.wait(timeout=2)
+        if calls == 1:
+            started.set()
+            release.wait(timeout=2)
         return True
 
     adapter = launcher.LocalReadinessAdapter(lambda *_: None, readiness_check)
@@ -146,15 +147,26 @@ def test_local_readiness_adapter_returns_503_when_probe_times_out(monkeypatch) -
         assert messages[1]["body"] == b'{"readiness":"unavailable"}'
         assert calls == 1
 
+        # The first timed-out thread is still blocked and cannot be killed.
+        # A single bounded recovery slot must nevertheless be able to prove
+        # readiness without queuing unlimited work behind it.
+        messages.clear()
+        await adapter({
+            "type": "http",
+            "path": "/ready",
+            "client": ("127.0.0.1", 8787),
+        }, None, send)
+        assert messages[0]["status"] == 200
+        assert messages[1]["body"] == b'{"readiness":"ready"}'
+        assert calls == 2
+
         release.set()
-        inflight = adapter._inflight_readiness
-        assert inflight is not None
-        await asyncio.wait_for(asyncio.shield(inflight), 2)
 
     try:
         asyncio.run(exercise())
     finally:
         release.set()
+        adapter._reader.shutdown()
 
 
 def test_local_readiness_adapter_coalesces_concurrent_probes(monkeypatch) -> None:
@@ -202,6 +214,225 @@ def test_local_readiness_adapter_coalesces_concurrent_probes(monkeypatch) -> Non
         asyncio.run(exercise())
     finally:
         release.set()
+        adapter._reader.shutdown()
+
+
+def test_bounded_probe_keeps_completed_handle_current_through_unrelated_submit() -> None:
+    first_key = object()
+    second_key = object()
+    first_done = threading.Event()
+    second_done = threading.Event()
+
+    def probe(key):
+        (first_done if key is first_key else second_done).set()
+        return True
+
+    reader = launcher._BoundedThreadProbe(probe, thread_name_prefix="test-proof")
+    try:
+        first = reader.submit(first_key)
+        assert first is not None
+        assert first_done.wait(1)
+        assert first.future.result(timeout=1) is True
+
+        # The first proof is complete, but its consumer has not checked it yet.
+        # A distinct submission must use the free worker slot without deleting
+        # the first proof record.
+        second = reader.submit(second_key)
+        assert second is not None
+        assert second_done.wait(1)
+        assert second.future.result(timeout=1) is True
+        assert reader.is_current(first)
+        assert reader.is_current(second)
+
+        reader.release(first)
+        reader.release(second)
+        assert not reader.is_current(first)
+        assert not reader.is_current(second)
+    finally:
+        reader.shutdown()
+
+
+def test_bounded_probe_admits_third_request_after_bounded_wait() -> None:
+    keys = [object(), object(), object()]
+    started = [threading.Event() for _ in keys]
+    release = [threading.Event(), threading.Event()]
+
+    def probe(key):
+        index = keys.index(key)
+        started[index].set()
+        if index < len(release):
+            release[index].wait(timeout=2)
+        return True
+
+    reader = launcher._BoundedThreadProbe(probe, thread_name_prefix="test-admission")
+
+    async def exercise() -> None:
+        first = await reader.submit_async(keys[0], timeout=1.0)
+        assert first is not None
+        assert await asyncio.to_thread(started[0].wait, 1)
+        second = await reader.submit_async(keys[1], timeout=1.0)
+        assert second is not None
+        assert await asyncio.to_thread(started[1].wait, 1)
+
+        third_task = asyncio.create_task(reader.submit_async(keys[2], timeout=1.0))
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(third_task), timeout=0.05)
+
+        # Completing either worker wakes the one bounded admission waiter.
+        release[0].set()
+        third = await asyncio.wait_for(third_task, timeout=1.0)
+        assert third is not None
+        assert await asyncio.to_thread(started[2].wait, 1)
+        release[1].set()
+        assert first.future.result(timeout=1) is True
+        assert second.future.result(timeout=1) is True
+        assert third.future.result(timeout=1) is True
+
+        reader.release(first)
+        reader.release(second)
+        reader.release(third)
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        for event in release:
+            event.set()
+        reader.shutdown()
+
+
+def test_bounded_probe_admission_wakes_when_releasing_retained_proof_frees_capacity() -> None:
+    retained_keys = [object() for _ in range(launcher.BOUNDED_PROBE_MAX_TRACKED_PROBES)]
+    waiter_key = object()
+    waiter_started = threading.Event()
+    waiter_release = threading.Event()
+
+    def probe(key):
+        if key is waiter_key:
+            waiter_started.set()
+            waiter_release.wait(timeout=2)
+        return True
+
+    reader = launcher._BoundedThreadProbe(probe, thread_name_prefix="test-retained-admission")
+
+    async def exercise() -> None:
+        retained = []
+        for key in retained_keys:
+            handle = reader.submit(key)
+            assert handle is not None
+            assert handle.future.result(timeout=1) is True
+            retained.append(handle)
+
+        waiter_task = asyncio.create_task(reader.submit_async(waiter_key, timeout=1.0))
+        await asyncio.sleep(0)
+        assert not waiter_started.is_set()
+
+        # All tracked slots are completed proofs. Releasing one is the only
+        # state transition that creates capacity; the waiter must wake without
+        # relying on another probe completing.
+        reader.release(retained.pop())
+        waiter = await asyncio.wait_for(waiter_task, timeout=1.0)
+        assert waiter is not None
+        assert await asyncio.to_thread(waiter_started.wait, 1)
+
+        waiter_release.set()
+        assert waiter.future.result(timeout=1) is True
+        for handle in retained:
+            reader.release(handle)
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        waiter_release.set()
+        reader.shutdown()
+
+
+def test_bounded_probe_admission_timeout_is_fail_closed_and_does_not_start_work() -> None:
+    keys = [object(), object(), object()]
+    started = [threading.Event() for _ in keys]
+    release = [threading.Event(), threading.Event()]
+
+    def probe(key):
+        index = keys.index(key)
+        started[index].set()
+        if index < len(release):
+            release[index].wait(timeout=2)
+        return True
+
+    reader = launcher._BoundedThreadProbe(probe, thread_name_prefix="test-timeout")
+
+    async def exercise() -> None:
+        first = await reader.submit_async(keys[0], timeout=1.0)
+        assert first is not None
+        assert await asyncio.to_thread(started[0].wait, 1)
+        second = await reader.submit_async(keys[1], timeout=1.0)
+        assert second is not None
+        assert await asyncio.to_thread(started[1].wait, 1)
+
+        third = await reader.submit_async(keys[2], timeout=0.02)
+        assert third is None
+        assert not started[2].is_set()
+        release[0].set()
+        release[1].set()
+        reader.release(first)
+        reader.release(second)
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        for event in release:
+            event.set()
+        reader.shutdown()
+
+
+def test_bounded_probe_rejects_stale_and_cancelled_handles() -> None:
+    stale_key = object()
+    cancelled_key = object()
+    started = {stale_key: threading.Event(), cancelled_key: threading.Event()}
+    release = {stale_key: threading.Event(), cancelled_key: threading.Event()}
+
+    def probe(key):
+        started[key].set()
+        release[key].wait(timeout=2)
+        return True
+
+    reader = launcher._BoundedThreadProbe(probe, thread_name_prefix="test-stale")
+
+    async def exercise() -> None:
+        stale = await reader.submit_async(stale_key, timeout=1.0)
+        assert stale is not None
+        assert await asyncio.to_thread(started[stale_key].wait, 1)
+        reader.mark_stale(stale)
+        assert not reader.is_current(stale)
+        release[stale_key].set()
+        await asyncio.to_thread(stale.future.result, 1)
+        reader.release(stale)
+
+        cancelled = await reader.submit_async(cancelled_key, timeout=1.0)
+        assert cancelled is not None
+        assert await asyncio.to_thread(started[cancelled_key].wait, 1)
+
+        async def consume() -> bool:
+            consumer_started.set()
+            return await asyncio.shield(asyncio.wrap_future(cancelled.future))
+
+        consumer_started = asyncio.Event()
+        consumer = asyncio.create_task(consume())
+        await consumer_started.wait()
+        consumer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await consumer
+        reader.mark_stale(cancelled)
+        assert not reader.is_current(cancelled)
+        release[cancelled_key].set()
+        await asyncio.to_thread(cancelled.future.result, 1)
+        reader.release(cancelled)
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        for event in release.values():
+            event.set()
+        reader.shutdown()
 
 
 def test_local_readiness_adapter_rejects_non_loopback_and_forwards_other_routes() -> None:
@@ -238,18 +469,12 @@ def test_local_readiness_adapter_rejects_non_loopback_and_forwards_other_routes(
 def test_current_gateway_dependencies_ready_rechecks_snapshot_service_and_api(
     monkeypatch,
 ) -> None:
-    observed = {"serve": {"canonical": True}, "api": True, "service": 1234}
+    observed = {"serve": exact_web(), "api": True, "service": 1234}
 
     monkeypatch.setattr(
         launcher,
         "_read_tailscale_snapshot",
         lambda path: (observed["serve"], "machine.example.ts.net", "operator@example.com"),
-    )
-    monkeypatch.setattr(
-        launcher,
-        "_serve_is_exact",
-        lambda serve, expected_dns_name=None: serve is observed["serve"]
-        and expected_dns_name == "machine.example.ts.net",
     )
     monkeypatch.setattr(launcher, "_is_windows_host", lambda: True)
     monkeypatch.setattr(
@@ -262,6 +487,9 @@ def test_current_gateway_dependencies_ready_rechecks_snapshot_service_and_api(
     assert launcher._current_gateway_dependencies_ready(
         "http://127.0.0.1:8787", "snapshot.json", "Tailscale"
     )
+    assert launcher._serve_is_exact(
+        observed["serve"], expected_dns_name="machine.example.ts.net"
+    )
 
     observed["api"] = False
     assert not launcher._current_gateway_dependencies_ready(
@@ -273,7 +501,10 @@ def test_current_gateway_dependencies_ready_rechecks_snapshot_service_and_api(
         "http://127.0.0.1:8787", "snapshot.json", "Tailscale"
     )
     observed["service"] = 1234
-    observed["serve"] = {"changed": True}
+    observed["serve"] = exact_web(proxy="http://127.0.0.1:8422")
+    assert not launcher._serve_is_exact(
+        observed["serve"], expected_dns_name="machine.example.ts.net"
+    )
     assert not launcher._current_gateway_dependencies_ready(
         "http://127.0.0.1:8787", "snapshot.json", "Tailscale"
     )
@@ -648,14 +879,18 @@ def test_forged_local_caller_cannot_authorize_through_gateway_adapter(monkeypatc
             "X-LifeOS-Trusted-Edge": token,
         },
     )
-    assert response.status_code == 403
+    assert response.status_code == 503
 
 
 def test_adapter_fails_closed_when_peer_query_raises() -> None:
     captured: dict = {}
+    messages = []
 
     async def app(scope, _receive, _send):
         captured.update(scope)
+
+    async def send(message):
+        messages.append(message)
 
     adapter = launcher.TrustedEdgeHeaderAdapter(
         app,
@@ -666,8 +901,198 @@ def test_adapter_fails_closed_when_peer_query_raises() -> None:
     asyncio.run(adapter({"type": "http", "headers": [
         (b"Tailscale-User-Login", b"operator@example.com"),
         (b"Tailscale-App-Capabilities", cap_header),
-    ]}, None, None))
-    assert all(name.lower() != launcher.TRUSTED_EDGE_HEADER for name, _ in captured["headers"])
+    ]}, None, send))
+    assert messages[0]["status"] == 503
+    assert messages[1]["body"] == b"Edge unavailable"
+    assert captured == {}
+
+
+def test_adapter_uses_the_bounded_transport_proof_once_on_a_worker_thread(runtime_snapshot) -> None:
+    caller_thread = threading.get_ident()
+    verifier_threads = []
+    verifier_calls = []
+    captured = {}
+
+    def peer_verifier(scope):
+        verifier_calls.append(scope)
+        verifier_threads.append(threading.get_ident())
+        return True
+
+    async def app(scope, _receive, _send):
+        captured.update(scope)
+
+    adapter = launcher.TrustedEdgeHeaderAdapter(
+        app,
+        "t" * 32,
+        peer_verifier=peer_verifier,
+    )
+    cap_header = json.dumps({launcher.TRUSTED_EDGE_APP_CAPABILITY: [{"src": ["*"]}]}).encode("ascii")
+    scope = {
+        "type": "http",
+        "headers": [(launcher.TAILSCALE_APP_CAPABILITIES_HEADER, cap_header)],
+    }
+    try:
+        asyncio.run(adapter(scope, None, None))
+    finally:
+        adapter._reader.shutdown()
+
+    assert len(verifier_calls) == 1
+    assert all(thread_id != caller_thread for thread_id in verifier_threads)
+    assert (launcher.TRUSTED_EDGE_HEADER, b"t" * 32) in captured["headers"]
+
+
+def test_cancelled_lease_probe_invalidates_its_generation_before_recovery(
+    monkeypatch,
+    runtime_snapshot,
+):
+    started = threading.Event()
+    replacement_started = threading.Event()
+    release_first = threading.Event()
+    calls = 0
+
+    def peer_verifier(_scope):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started.set()
+            release_first.wait(timeout=2)
+            return False
+        replacement_started.set()
+        return True
+
+    adapter = launcher.TrustedEdgeHeaderAdapter(
+        None,
+        "t" * 32,
+        peer_verifier=peer_verifier,
+    )
+    monkeypatch.setattr(launcher, "TAILSCALE_RUNTIME_READ_TIMEOUT_SECONDS", 1.0)
+    scope = {
+        "type": "http",
+        "client": ("127.0.0.1", 51000),
+        "server": ("127.0.0.1", launcher.GATEWAY_LOOPBACK_PORT),
+    }
+
+    async def exercise():
+        cancelled = asyncio.create_task(adapter._lease_valid(scope))
+        assert await asyncio.to_thread(started.wait, 1)
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+
+        replacement = asyncio.create_task(adapter._lease_valid(scope))
+        assert await asyncio.to_thread(replacement_started.wait, 1)
+        assert await replacement
+        assert calls == 2
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        release_first.set()
+        adapter._reader.shutdown()
+
+
+def test_concurrent_http_and_established_stream_checks_use_bounded_admission(
+    monkeypatch,
+    runtime_snapshot,
+):
+    stream_check_started = threading.Event()
+    http_check_started = threading.Event()
+    release_stream_check = threading.Event()
+    release_http_check = threading.Event()
+    stream_calls = 0
+    calls_lock = threading.Lock()
+
+    def peer_verifier(scope):
+        nonlocal stream_calls
+        label = scope["test_label"]
+        if label == "stream":
+            with calls_lock:
+                stream_calls += 1
+                call_number = stream_calls
+            # The adapter checks once before forwarding the accept message;
+            # the next call is the established-stream watchdog proof.
+            if call_number < 3:
+                return True
+            stream_check_started.set()
+            release_stream_check.wait(timeout=2)
+            return True
+        if label == "http-1":
+            http_check_started.set()
+            release_http_check.wait(timeout=2)
+            return True
+        return True
+
+    ticks = asyncio.Queue()
+
+    async def tick(interval):
+        assert interval == launcher.TAILSCALE_RUNTIME_LEASE_SECONDS
+        await ticks.get()
+
+    monkeypatch.setattr(launcher.asyncio, "sleep", tick)
+    messages = []
+    established = asyncio.Event()
+
+    async def send(message):
+        messages.append(message)
+
+    async def app(_scope, _receive, send_message):
+        await send_message({"type": "websocket.accept"})
+        established.set()
+        await asyncio.Event().wait()
+
+    stream_scope = {
+        "type": "websocket",
+        "test_label": "stream",
+        "headers": [],
+    }
+    http_scope = {
+        "type": "http",
+        "test_label": "http-1",
+        "headers": [],
+    }
+    third_http_scope = {
+        "type": "http",
+        "test_label": "http-2",
+        "headers": [],
+    }
+    adapter = launcher.TrustedEdgeHeaderAdapter(
+        app,
+        "t" * 32,
+        peer_verifier=peer_verifier,
+    )
+
+    async def exercise() -> None:
+        stream_task = asyncio.create_task(adapter(stream_scope, None, send))
+        await asyncio.wait_for(established.wait(), timeout=1.0)
+
+        # The watchdog check is the proof used by an already established
+        # stream. Hold it while an HTTP request occupies the second worker.
+        ticks.put_nowait(None)
+        assert await asyncio.to_thread(stream_check_started.wait, 1)
+        http_task = asyncio.create_task(adapter._lease_valid(http_scope))
+        assert await asyncio.to_thread(http_check_started.wait, 1)
+
+        third_task = asyncio.create_task(
+            adapter._lease_valid(third_http_scope)
+        )
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(third_task), timeout=0.05)
+
+        release_stream_check.set()
+        assert await asyncio.wait_for(third_task, timeout=1.0)
+        release_http_check.set()
+        assert await asyncio.wait_for(http_task, timeout=1.0)
+
+        stream_task.cancel()
+        await asyncio.gather(stream_task, return_exceptions=True)
+        assert messages == [{"type": "websocket.accept"}]
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        release_stream_check.set()
+        release_http_check.set()
+        adapter._reader.shutdown()
 
 
 @pytest.mark.parametrize("mutation", ["stale", "login", "dns", "malformed", "duplicate", "route", "capability", "funnel", "missing"])
@@ -788,21 +1213,160 @@ def test_runtime_stream_continuation_and_expiry(monkeypatch, runtime_snapshot, k
     asyncio.run(exercise())
 
 
-def test_runtime_lease_timeout_fails_closed_without_queueing_reads(monkeypatch, runtime_snapshot):
-    from concurrent.futures import Future
-    pending = Future()
-    submissions = []
-    adapter = launcher.TrustedEdgeHeaderAdapter(None, "t" * 32)
-    adapter._reader.shutdown()
-    adapter._reader = SimpleNamespace(submit=lambda fn: submissions.append(fn) or pending)
-    monkeypatch.setattr(launcher, "TAILSCALE_RUNTIME_READ_TIMEOUT_SECONDS", 0.001)
+@pytest.mark.parametrize(
+    ("changed_peer_pid", "changed_service_pid"),
+    ((1001, None), (1001, 2002), (2002, 1001)),
+    ids=("service-removed", "service-replaced", "transport-replaced"),
+)
+def test_runtime_stream_revokes_when_current_tailscale_transport_changes(
+    monkeypatch,
+    runtime_snapshot,
+    changed_peer_pid,
+    changed_service_pid,
+):
+    observed = {"peer": 1001, "service": 1001}
+    monkeypatch.setattr(launcher, "_is_windows_host", lambda: True)
+    monkeypatch.setattr(launcher, "_windows_tcp_peer_pid", lambda _scope: observed["peer"])
+    monkeypatch.setattr(
+        launcher,
+        "_windows_tailscale_service_pid",
+        lambda _name: observed["service"],
+    )
+
+    ticks = asyncio.Queue()
+
+    async def tick(interval):
+        assert interval == launcher.TAILSCALE_RUNTIME_LEASE_SECONDS
+        await ticks.get()
+
+    monkeypatch.setattr(launcher.asyncio, "sleep", tick)
+    continued = asyncio.Event()
+    cancelled = asyncio.Event()
+    messages = []
+
+    async def app(_scope, _receive, send):
+        try:
+            await send({"type": "websocket.accept"})
+            await send({"type": "websocket.send", "text": "valid"})
+            continued.set()
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    async def send(message):
+        messages.append(message)
+
+    scope = {
+        "type": "websocket",
+        "client": ("127.0.0.1", 51000),
+        "server": ("127.0.0.1", launcher.GATEWAY_LOOPBACK_PORT),
+        "headers": [(b"tailscale-app-capabilities", json.dumps({
+            launcher.TRUSTED_EDGE_APP_CAPABILITY: [{"src": ["*"]}],
+        }).encode())],
+    }
+    adapter = launcher.TrustedEdgeHeaderAdapter(app, "t" * 32)
+
     async def exercise():
-        assert not await adapter._lease_valid()
-        assert not await adapter._lease_valid()
-        assert len(submissions) == 1
-        assert not pending.cancelled()
-        pending.set_result(False)
-    asyncio.run(exercise())
+        task = asyncio.create_task(adapter(scope, None, send))
+        try:
+            await asyncio.wait_for(continued.wait(), 2)
+            observed["peer"] = changed_peer_pid
+            observed["service"] = changed_service_pid
+            ticks.put_nowait(None)
+            await asyncio.wait_for(task, 2)
+            assert cancelled.is_set()
+            assert messages[-1] == {"type": "websocket.close", "code": 4403}
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        adapter._reader.shutdown()
+
+
+def test_runtime_lease_probe_recovers_after_first_probe_timeout(monkeypatch, runtime_snapshot):
+    started = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    def peer_verifier(_scope):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started.set()
+            release.wait(timeout=2)
+        return True
+
+    adapter = launcher.TrustedEdgeHeaderAdapter(
+        None,
+        "t" * 32,
+        peer_verifier=peer_verifier,
+    )
+    monkeypatch.setattr(launcher, "TAILSCALE_RUNTIME_READ_TIMEOUT_SECONDS", 0.01)
+    scope = {
+        "type": "http",
+        "client": ("127.0.0.1", 51000),
+        "server": ("127.0.0.1", launcher.GATEWAY_LOOPBACK_PORT),
+    }
+
+    async def exercise():
+        assert not await adapter._lease_valid(scope)
+        assert await asyncio.to_thread(started.wait, 1)
+        assert await adapter._lease_valid(scope)
+        assert calls == 2
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        release.set()
+        adapter._reader.shutdown()
+
+
+def test_runtime_lease_probe_fails_closed_when_both_probe_slots_are_occupied(
+    monkeypatch,
+    runtime_snapshot,
+):
+    started = [threading.Event(), threading.Event()]
+    release = threading.Event()
+    calls = 0
+
+    def peer_verifier(_scope):
+        nonlocal calls
+        call_index = calls
+        calls += 1
+        if call_index < len(started):
+            started[call_index].set()
+            release.wait(timeout=2)
+        return True
+
+    adapter = launcher.TrustedEdgeHeaderAdapter(
+        None,
+        "t" * 32,
+        peer_verifier=peer_verifier,
+    )
+    monkeypatch.setattr(launcher, "TAILSCALE_RUNTIME_READ_TIMEOUT_SECONDS", 0.01)
+    scope = {
+        "type": "http",
+        "client": ("127.0.0.1", 51000),
+        "server": ("127.0.0.1", launcher.GATEWAY_LOOPBACK_PORT),
+    }
+
+    async def exercise():
+        assert not await adapter._lease_valid(scope)
+        assert await asyncio.to_thread(started[0].wait, 1)
+        assert not await adapter._lease_valid(scope)
+        assert await asyncio.to_thread(started[1].wait, 1)
+        assert not await adapter._lease_valid(scope)
+        assert calls == 2
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        release.set()
+        adapter._reader.shutdown()
 
 
 def test_runtime_receive_rejects_revoked_snapshot_before_delivery(runtime_snapshot):

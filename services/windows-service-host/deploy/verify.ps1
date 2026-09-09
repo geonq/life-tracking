@@ -12,6 +12,43 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Deployment.Common.ps1')
 
+# Override the shared helper for this verifier: the SCM contract is stricter
+# than a generic JSON readiness check and requires the exact response bytes.
+function Wait-LoopbackReadiness {
+    param(
+        [Parameter(Mandatory)][uri]$Uri,
+        [int]$TimeoutSeconds = 45
+    )
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ([DateTimeOffset]::UtcNow -lt $deadline) {
+        try {
+            $response = Invoke-WebRequest -UseBasicParsing -Uri $Uri -Method Get -MaximumRedirection 0 -TimeoutSec 3
+            if ($response.StatusCode -eq 200 -and [string]$response.Content -ceq '{"readiness":"ready"}') {
+                return $true
+            }
+        } catch {
+            # The service may still be binding its listener or deliberately
+            # reject a non-contract response while it is warming up.
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    return $false
+}
+
+function Assert-ServiceHostProbeContract {
+    param(
+        [Parameter(Mandatory)][string]$ConfigPath,
+        [Parameter(Mandatory)][int]$Port,
+        [Parameter(Mandatory)][string]$Name
+    )
+    $config = Read-LifeOSBoundedJsonFile -Path $ConfigPath -MaxBytes 65536 -Description "$Name service config"
+    $expectedHealth = "http://127.0.0.1:${Port}/health"
+    $expectedReadiness = "http://127.0.0.1:${Port}/ready"
+    if ([string]$config.healthUrl -cne $expectedHealth -or [string]$config.readinessUrl -cne $expectedReadiness) {
+        throw "$Name service config has an unexpected health/readiness probe contract."
+    }
+}
+
 function Assert-VerificationMarker {
     param(
         [Parameter(Mandatory)][psobject]$Marker,
@@ -539,6 +576,8 @@ Assert-ExistingFile $tailscaleEdgeToken 'Tailscale edge token'
 Assert-PathOnlyJson $apiConfig
 Assert-PathOnlyJson $gatewayConfig
 Assert-PathOnlyJson $gatewayAppConfig
+Assert-ServiceHostProbeContract -ConfigPath $apiConfig -Port 8787 -Name 'LifeOSAPI'
+Assert-ServiceHostProbeContract -ConfigPath $gatewayConfig -Port 8421 -Name 'LifeOSGateway'
 
 # A health response alone does not prove that the reviewed release is the one
 # serving the port. Verify the candidate inventory that shipped with this

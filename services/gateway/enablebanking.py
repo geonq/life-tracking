@@ -361,7 +361,6 @@ class EnableBankingService:
         names = (
             "ENABLE_BANKING_APP_ID",
             "ENABLE_BANKING_PRIVATE_KEY_PATH",
-            "ENABLE_BANKING_CERTIFICATE_PATH",
             "ENABLE_BANKING_API_BASE_URL",
             "ENABLE_BANKING_REDIRECT_URI",
         )
@@ -373,7 +372,10 @@ class EnableBankingService:
         if not cls._safe_redirect_uri(values["ENABLE_BANKING_REDIRECT_URI"]):
             return None
         try:
-            for name in ("ENABLE_BANKING_PRIVATE_KEY_PATH", "ENABLE_BANKING_CERTIFICATE_PATH"):
+            # Enable Banking uses the private key to sign the runtime JWT. The
+            # public certificate is uploaded during application registration
+            # and is not a runtime mTLS credential.
+            for name in ("ENABLE_BANKING_PRIVATE_KEY_PATH",):
                 path = Path(values[name])
                 if not path.is_file() or path.is_symlink() or path.stat().st_size > cls.SECRET_FILE_MAX_BYTES:
                     return None
@@ -382,7 +384,6 @@ class EnableBankingService:
         return {
             "app_id": values["ENABLE_BANKING_APP_ID"],
             "private_key_path": values["ENABLE_BANKING_PRIVATE_KEY_PATH"],
-            "certificate_path": values["ENABLE_BANKING_CERTIFICATE_PATH"],
             "api_base_url": values["ENABLE_BANKING_API_BASE_URL"],
             "redirect_uri": values["ENABLE_BANKING_REDIRECT_URI"],
         }
@@ -1271,6 +1272,10 @@ class EnableBankingService:
             timeout=self.REQUEST_TIMEOUT,
             follow_redirects=False,
             trust_env=False,
+            # Runtime authentication is JWT-based; keep normal certificate
+            # verification enabled and do not pass the registration cert as a
+            # client certificate.
+            verify=True,
         )
 
     @classmethod

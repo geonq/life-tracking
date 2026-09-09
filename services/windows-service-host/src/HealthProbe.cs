@@ -1,10 +1,11 @@
 using System.Net.Http.Headers;
+using System.Text;
 
 namespace LifeOS.ServiceHost;
 
 public interface IHealthProbe
 {
-    Task<bool> WaitUntilHealthyAsync(Uri healthUrl, TimeSpan timeout, CancellationToken cancellationToken);
+    Task<bool> WaitUntilReadyAsync(Uri readinessUrl, TimeSpan timeout, CancellationToken cancellationToken);
 }
 
 public sealed class LoopbackHealthProbe : IHealthProbe
@@ -23,7 +24,10 @@ public sealed class LoopbackHealthProbe : IHealthProbe
         client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
     }
 
-    public async Task<bool> WaitUntilHealthyAsync(Uri healthUrl, TimeSpan timeout, CancellationToken cancellationToken)
+    internal const int MaxReadinessPayloadBytes = 64;
+    private static readonly byte[] ExactReadyPayload = Encoding.UTF8.GetBytes("{\"readiness\":\"ready\"}");
+
+    public async Task<bool> WaitUntilReadyAsync(Uri readinessUrl, TimeSpan timeout, CancellationToken cancellationToken)
     {
         using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutSource.CancelAfter(timeout);
@@ -33,8 +37,9 @@ public sealed class LoopbackHealthProbe : IHealthProbe
         {
             try
             {
-                using var response = await client.GetAsync(healthUrl, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
-                if ((int)response.StatusCode is >= 200 and <= 299)
+                using var response = await client.GetAsync(readinessUrl, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
+                if (response.StatusCode == System.Net.HttpStatusCode.OK
+                    && await HasExactReadyPayloadAsync(response, token).ConfigureAwait(false))
                 {
                     return true;
                 }
@@ -51,6 +56,10 @@ public sealed class LoopbackHealthProbe : IHealthProbe
             {
                 // An individual request timed out; continue until the gate expires.
             }
+            catch (IOException)
+            {
+                // A listener can close the response while it is warming up.
+            }
 
             try
             {
@@ -63,5 +72,32 @@ public sealed class LoopbackHealthProbe : IHealthProbe
         }
 
         return false;
+    }
+
+    public static bool IsExactReadyPayload(ReadOnlySpan<byte> payload)
+        => payload.SequenceEqual(ExactReadyPayload);
+
+    private static async Task<bool> HasExactReadyPayloadAsync(HttpResponseMessage response, CancellationToken cancellationToken)
+    {
+        if (response.Content.Headers.ContentLength is > MaxReadinessPayloadBytes)
+        {
+            return false;
+        }
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        var buffer = new byte[MaxReadinessPayloadBytes + 1];
+        var total = 0;
+        while (total < buffer.Length)
+        {
+            var count = await stream.ReadAsync(buffer.AsMemory(total), cancellationToken).ConfigureAwait(false);
+            if (count == 0)
+            {
+                break;
+            }
+
+            total += count;
+        }
+
+        return total <= MaxReadinessPayloadBytes && IsExactReadyPayload(buffer.AsSpan(0, total));
     }
 }

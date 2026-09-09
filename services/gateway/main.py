@@ -253,7 +253,7 @@ def _is_browser_mutation_scope(scope) -> bool:
     path = scope.get("path")
     method = str(scope.get("method", "")).upper()
     return method in MUTATING_METHODS and (
-        path in {"/calendar", "/documents", "/finance/connect", "/finance/imported", "/nutrition/photo-proposal"}
+        path in {"/calendar", "/documents", "/finance/connect", "/finance/imported", "/nutrition/photo-proposal", "/fitness/observation"}
         or (isinstance(path, str) and path.startswith("/finance/connect/"))
     )
 
@@ -322,6 +322,65 @@ DOCUMENTS_INDEX_PATH = DATA_DIR / "documents.json"
 DOCUMENTS_DIR = DATA_DIR / "documents"
 SUPPLEMENT_CATALOG_PATH = Path(os.environ.get("LIFEOS_SUPPLEMENT_CATALOG_PATH", DATA_DIR / "supplements.sqlite3"))
 supplement_catalog = SupplementCatalogService(SUPPLEMENT_CATALOG_PATH)
+
+FITNESS_OBSERVATION_SCHEMA_VERSION = 1
+FITNESS_OBSERVATION_MAX_BODY_SIZE = 128 * 1024
+FITNESS_OBSERVATION_MAX_RESPONSE_SIZE = 128 * 1024
+FITNESS_OBSERVATION_MAX_METRICS = 32
+FITNESS_OBSERVATION_MAX_DAYS = 31
+FITNESS_OBSERVATION_MAX_VALUES_PER_DAY = 8
+FITNESS_OBSERVATION_MAX_WORKOUTS = 64
+FITNESS_OBSERVATION_STALE_AFTER = timedelta(minutes=15)
+FITNESS_OBSERVATION_MAX_HISTORY = timedelta(days=31)
+FITNESS_OBSERVATION_MAX_CURRENT_METRIC_AGE = timedelta(hours=48)
+# HealthKit's Workout.duration is active duration and can be shorter than the
+# wall-clock interval when the user pauses. One second only covers fractional
+# second serialization/date rounding at the upper bound.
+FITNESS_OBSERVATION_WORKOUT_DURATION_ROUNDING_TOLERANCE_SECONDS = 1.0
+FITNESS_OBSERVATION_BODY_TIMEOUT = 8.0
+FITNESS_OBSERVATION_PATH = DATA_DIR / "fitness-observation.json"
+FITNESS_OBSERVATION_FIELDS = {
+    "schemaVersion", "state", "generatedAt", "observedAt", "source", "provenance",
+    "metrics", "days", "workouts",
+}
+FITNESS_OBSERVATION_STATES = {"observed", "stale", "unavailable", "permission_required"}
+FITNESS_OBSERVATION_CURRENT_METRICS = {
+    "heart_rate", "resting_heart_rate", "heart_rate_variability", "respiratory_rate",
+    "oxygen_saturation", "vo2_max", "body_mass", "body_fat_percentage", "lean_body_mass",
+}
+FITNESS_OBSERVATION_DAILY_METRICS = {"steps", "active_energy", "water", "caffeine", "sleep_duration"}
+FITNESS_OBSERVATION_UNITS = {
+    "heart_rate": "bpm",
+    "resting_heart_rate": "bpm",
+    "heart_rate_variability": "ms",
+    "respiratory_rate": "per_minute",
+    "oxygen_saturation": "percent",
+    "vo2_max": "ml_per_kg_min",
+    "body_mass": "kg",
+    "body_fat_percentage": "percent",
+    "lean_body_mass": "kg",
+    "steps": "count",
+    "active_energy": "kcal",
+    "water": "ml",
+    "caffeine": "mg",
+    "sleep_duration": "seconds",
+}
+FITNESS_OBSERVATION_VALUE_LIMITS = {
+    "heart_rate": 1_000,
+    "resting_heart_rate": 1_000,
+    "heart_rate_variability": 10_000,
+    "respiratory_rate": 1_000,
+    "oxygen_saturation": 100,
+    "vo2_max": 200,
+    "body_mass": 1_000,
+    "body_fat_percentage": 100,
+    "lean_body_mass": 1_000,
+    "steps": 1_000_000,
+    "active_energy": 1_000_000,
+    "water": 1_000_000,
+    "caffeine": 1_000_000,
+    "sleep_duration": 172_800,
+}
 
 CLAUDE_INGEST_UPSTREAM = "http://127.0.0.1:8787/api/usage/claude-ingest"
 CLAUDE_INGEST_MAX_BODY_SIZE = 16 * 1024
@@ -456,6 +515,7 @@ USAGE_MAX_STRUCTURE_NODES = 10_000
 calendar_lock = asyncio.Lock()
 documents_lock = asyncio.Lock()
 finance_imported_lock = asyncio.Lock()
+fitness_observation_lock = asyncio.Lock()
 calendar_revision = 0
 documents_revision = 0
 
@@ -1171,6 +1231,256 @@ def _validate_persisted_finance_payload(data: dict) -> bool:
     return _validate_finance_payload(data, age_consistent=False)
 
 
+def _parse_fitness_timestamp(value):
+    if not _is_iso8601(value):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+        return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else None
+    except (AttributeError, OverflowError, OSError, TypeError, ValueError):
+        return None
+
+
+def _validate_fitness_value(value, *, daily: bool, generated_at: datetime, now: datetime) -> bool:
+    if not isinstance(value, dict) or set(value) != {"metric", "value", "unit", "observedAt"}:
+        return False
+    metric = value["metric"]
+    if not _is_choice(metric, FITNESS_OBSERVATION_CURRENT_METRICS | FITNESS_OBSERVATION_DAILY_METRICS):
+        return False
+    if (metric in FITNESS_OBSERVATION_DAILY_METRICS) != daily:
+        return False
+    if value["unit"] != FITNESS_OBSERVATION_UNITS[metric]:
+        return False
+    if not _is_number(value["value"]) or not 0 <= value["value"] <= FITNESS_OBSERVATION_VALUE_LIMITS[metric]:
+        return False
+    observed_at = _parse_fitness_timestamp(value["observedAt"])
+    if observed_at is None:
+        return False
+    if not daily and observed_at < generated_at - FITNESS_OBSERVATION_MAX_CURRENT_METRIC_AGE:
+        return False
+    return (
+        generated_at - FITNESS_OBSERVATION_MAX_HISTORY <= observed_at <= generated_at + timedelta(seconds=5)
+        and observed_at <= now + timedelta(seconds=5)
+    )
+
+
+def _validate_fitness_observation_payload(
+    data: dict,
+    *,
+    now: datetime | None = None,
+    enforce_freshness: bool = True,
+    allow_non_observed: bool = False,
+) -> bool:
+    """Validate the bounded cross-device Fitness contract at the gateway."""
+    if not isinstance(data, dict) or set(data) != FITNESS_OBSERVATION_FIELDS:
+        return False
+    if isinstance(data["schemaVersion"], bool) or data["schemaVersion"] != FITNESS_OBSERVATION_SCHEMA_VERSION:
+        return False
+    if not isinstance(data["state"], str) or data["state"] not in FITNESS_OBSERVATION_STATES:
+        return False
+    if data["source"] != "healthkit" or data["provenance"] != "iphone_healthkit_projection":
+        return False
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        return False
+    generated_at = _parse_fitness_timestamp(data["generatedAt"])
+    observed_at = _parse_fitness_timestamp(data["observedAt"])
+    if generated_at is None or observed_at is None:
+        return False
+    generated_age = now - generated_at
+    if generated_age < timedelta(seconds=-5) or generated_age > FITNESS_OBSERVATION_MAX_HISTORY:
+        return False
+    if observed_at > generated_at + timedelta(seconds=5) or observed_at > now + timedelta(seconds=5):
+        return False
+
+    metrics = data["metrics"]
+    days = data["days"]
+    workouts = data["workouts"]
+    if not isinstance(metrics, list) or not isinstance(days, list) or not isinstance(workouts, list):
+        return False
+    if (
+        len(metrics) > FITNESS_OBSERVATION_MAX_METRICS
+        or len(days) > FITNESS_OBSERVATION_MAX_DAYS
+        or len(workouts) > FITNESS_OBSERVATION_MAX_WORKOUTS
+    ):
+        return False
+
+    state = data["state"]
+    if state == "observed":
+        if enforce_freshness and generated_age > FITNESS_OBSERVATION_STALE_AFTER:
+            return False
+        if not metrics and not any(isinstance(day, dict) and day.get("values") for day in days) and not workouts:
+            return False
+    elif not allow_non_observed or metrics or days or workouts:
+        return False
+
+    seen_metrics = set()
+    for value in metrics:
+        if not _validate_fitness_value(value, daily=False, generated_at=generated_at, now=now):
+            return False
+        if value["metric"] in seen_metrics:
+            return False
+        seen_metrics.add(value["metric"])
+
+    seen_days = set()
+    for day in days:
+        if not isinstance(day, dict) or set(day) != {"date", "values"}:
+            return False
+        day_date = _parse_fitness_timestamp(day["date"])
+        values = day["values"]
+        if (
+            day_date is None
+            or day_date in seen_days
+            or not generated_at - FITNESS_OBSERVATION_MAX_HISTORY <= day_date <= generated_at + timedelta(seconds=5)
+            or day_date > now + timedelta(seconds=5)
+            or not isinstance(values, list)
+            or len(values) > FITNESS_OBSERVATION_MAX_VALUES_PER_DAY
+        ):
+            return False
+        seen_days.add(day_date)
+        seen_day_metrics = set()
+        for value in values:
+            if not _validate_fitness_value(value, daily=True, generated_at=generated_at, now=now):
+                return False
+            if value["metric"] in seen_day_metrics:
+                return False
+            seen_day_metrics.add(value["metric"])
+
+    seen_workouts = set()
+    for workout in workouts:
+        if not isinstance(workout, dict) or set(workout) not in (
+            {"activityTypeRawValue", "startAt", "endAt", "durationSeconds"},
+            {"activityTypeRawValue", "startAt", "endAt", "durationSeconds", "activeEnergyKilocalories"},
+        ):
+            return False
+        activity = workout["activityTypeRawValue"]
+        start_at = _parse_fitness_timestamp(workout["startAt"])
+        end_at = _parse_fitness_timestamp(workout["endAt"])
+        duration = workout["durationSeconds"]
+        energy = workout.get("activeEnergyKilocalories")
+        if (
+            isinstance(activity, bool)
+            or not isinstance(activity, int)
+            or not 0 <= activity <= 1_000_000
+            or start_at is None
+            or end_at is None
+            or end_at <= start_at
+            or start_at < generated_at - FITNESS_OBSERVATION_MAX_HISTORY
+            or end_at > generated_at + timedelta(seconds=5)
+            or start_at > now + timedelta(seconds=5)
+            or end_at > now + timedelta(seconds=5)
+            or not _is_number(duration)
+            or not 0 < duration <= FITNESS_OBSERVATION_MAX_HISTORY.total_seconds()
+            or duration > (
+                (end_at - start_at).total_seconds()
+                + FITNESS_OBSERVATION_WORKOUT_DURATION_ROUNDING_TOLERANCE_SECONDS
+            )
+            or (energy is not None and (not _is_number(energy) or not 0 <= energy <= 1_000_000))
+        ):
+            return False
+        identity = (activity, start_at, end_at)
+        if identity in seen_workouts:
+            return False
+        seen_workouts.add(identity)
+
+    item_dates = [
+        _parse_fitness_timestamp(value["observedAt"])
+        for value in metrics
+    ] + [
+        _parse_fitness_timestamp(value["observedAt"])
+        for day in days for value in day["values"]
+    ] + [
+        _parse_fitness_timestamp(workout["endAt"])
+        for workout in workouts
+    ]
+    return all(item_date is not None and item_date <= observed_at + timedelta(seconds=1) for item_date in item_dates)
+
+
+def _fitness_observation_bytes(payload: dict) -> bytes:
+    try:
+        body = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, UnicodeError, ValueError, OverflowError, RecursionError) as exc:
+        raise ValueError("fitness observation cannot be serialized") from exc
+    if len(body) > FITNESS_OBSERVATION_MAX_RESPONSE_SIZE:
+        raise ValueError("fitness observation exceeds limit")
+    return body
+
+
+def _stale_fitness_observation(payload: dict) -> dict:
+    return {
+        **payload,
+        "state": "stale",
+        "metrics": [],
+        "days": [],
+        "workouts": [],
+    }
+
+
+def _load_valid_fitness_observation(*, now: datetime) -> dict | None:
+    """Read the current bounded observation for ordering, failing closed on bad state."""
+    try:
+        body = _read_bounded_state_file(
+            FITNESS_OBSERVATION_PATH,
+            FITNESS_OBSERVATION_MAX_RESPONSE_SIZE,
+        )
+    except (_BoundedFileTooLarge, _CalendarStateUnavailable, OSError):
+        return None
+    if body is None:
+        return None
+    try:
+        payload = json.loads(
+            body.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite_constant,
+            parse_int=_calendar_integer,
+        )
+    except (
+        UnicodeDecodeError,
+        UnicodeEncodeError,
+        json.JSONDecodeError,
+        ValueError,
+        TypeError,
+        OverflowError,
+        RecursionError,
+    ):
+        return None
+    return payload if _validate_fitness_observation_payload(
+        payload,
+        now=now,
+        enforce_freshness=False,
+        allow_non_observed=True,
+    ) else None
+
+
+def _fitness_observation_order_key(payload: dict) -> tuple[datetime, datetime]:
+    """Order lifecycle publications by generation, then evidence observation time."""
+    generated_at = _parse_fitness_timestamp(payload["generatedAt"])
+    observed_at = _parse_fitness_timestamp(payload["observedAt"])
+    if generated_at is None or observed_at is None:
+        raise ValueError("invalid fitness observation ordering timestamps")
+    return generated_at, observed_at
+
+
+def _fitness_publication_response(*, result: str, reason: str | None = None) -> Response:
+    """Return a tiny, cache-free publication result with no observation data."""
+    payload = {"status": "ok", "result": result}
+    if reason is not None:
+        payload["reason"] = reason
+    return JSONResponse(
+        payload,
+        headers={
+            "Cache-Control": "no-store",
+            "X-LifeOS-Fitness-Publication": result,
+        },
+    )
+
+
 _CLIPPER_SNAPSHOT_FIELDS = {
     "schemaVersion", "availability", "generatedAt", "currency", "provenance"
 }
@@ -1408,6 +1718,30 @@ async def _read_bounded_finance_request(request: Request) -> bytes:
             return bytes(body)
     except TimeoutError as exc:
         raise TimeoutError("finance request timeout") from exc
+
+
+async def _read_bounded_fitness_observation_request(request: Request) -> bytes:
+    try:
+        async with asyncio.timeout(FITNESS_OBSERVATION_BODY_TIMEOUT):
+            length_values = _raw_header_values(request, "content-length")
+            if len(length_values) > 1:
+                raise HTTPException(status_code=400, detail="duplicate content length")
+            raw_length = _calendar_header(request, "content-length")
+            if raw_length is not None:
+                try:
+                    content_length = int(raw_length)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail="invalid content length") from exc
+                if content_length < 0 or content_length > FITNESS_OBSERVATION_MAX_BODY_SIZE:
+                    raise HTTPException(status_code=413, detail="fitness observation body exceeds limit")
+            body = bytearray()
+            async for chunk in request.stream():
+                if len(body) + len(chunk) > FITNESS_OBSERVATION_MAX_BODY_SIZE:
+                    raise HTTPException(status_code=413, detail="fitness observation body exceeds limit")
+                body.extend(chunk)
+            return bytes(body)
+    except TimeoutError as exc:
+        raise HTTPException(status_code=408, detail="fitness observation request timeout") from exc
 
 
 def _finance_consent_response(payload: dict, status_code: int, *, revision: int | None = None) -> Response:
@@ -2329,7 +2663,11 @@ def _validate_calendar_item(value: object) -> None:
         r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", identifier
     ):
         raise ValueError("invalid calendar item id")
-    if not isinstance(value["title"], str) or not value["title"].strip():
+    if (
+        not isinstance(value["title"], str)
+        or not value["title"].strip()
+        or len(value["title"].strip().encode("utf-8")) > 240
+    ):
         raise ValueError("invalid calendar title")
     if not _is_choice(value["status"], {"planned", "in_progress", "done", "aborted", "blocked"}):
         raise ValueError("invalid calendar progress")
@@ -3965,6 +4303,32 @@ async def get_finance_imported() -> Response:
         return _finance_imported_response(body, snapshot["revision"])
 
 
+@app.get("/finance/imported/receipt/{idempotency_key}")
+async def get_finance_imported_receipt(idempotency_key: str) -> Response:
+    """Return only the durable commit state for one imported-ledger key."""
+    if not FINANCE_IMPORTED_IDEMPOTENCY_KEY_PATTERN.fullmatch(idempotency_key):
+        return JSONResponse({"error": "invalid_idempotency_key"}, status_code=400)
+    async with finance_imported_lock:
+        try:
+            _body, snapshot, metadata = _load_finance_imported_state()
+        except (_FinanceImportedStateUnavailable, OSError, ValueError):
+            return JSONResponse({"error": "finance_imported_unavailable"}, status_code=503)
+        record = next(
+            (item for item in metadata["idempotency"] if item["key"] == idempotency_key),
+            None,
+        )
+        payload = (
+            {"state": "committed", "revision": record["revision"]}
+            if record is not None
+            else {"state": "unknown", "revision": None}
+        )
+        # `snapshot` is read above as part of the validated state load. Do not
+        # return it here: the receipt endpoint is a narrow proof lookup and
+        # must not become a second ledger read contract.
+        _ = snapshot
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+
 @app.put("/finance/imported")
 async def put_finance_imported(request: Request) -> Response:
     """Conditionally apply a bounded manual-ledger delta exactly once."""
@@ -4088,6 +4452,115 @@ async def get_finance_summary() -> Response:
             if status[field] is not None:
                 response.headers[header] = status[field]
     return response
+
+
+@app.get("/fitness/observation")
+async def get_fitness_observation() -> Response:
+    async with fitness_observation_lock:
+        try:
+            body = _read_bounded_state_file(
+                FITNESS_OBSERVATION_PATH,
+                FITNESS_OBSERVATION_MAX_RESPONSE_SIZE,
+            )
+        except (_BoundedFileTooLarge, _CalendarStateUnavailable, OSError):
+            return JSONResponse({"error": "fitness_observation_unavailable"}, status_code=503)
+        if body is None:
+            return JSONResponse({"error": "fitness_observation_unavailable"}, status_code=503)
+        try:
+            payload = json.loads(
+                body.decode("utf-8"),
+                object_pairs_hook=_reject_duplicate_keys,
+                parse_constant=_reject_nonfinite_constant,
+                parse_int=_calendar_integer,
+            )
+        except (UnicodeDecodeError, UnicodeEncodeError, json.JSONDecodeError, ValueError, TypeError, OverflowError, RecursionError):
+            return JSONResponse({"error": "fitness_observation_unavailable"}, status_code=503)
+        now = datetime.now(timezone.utc)
+        if not _validate_fitness_observation_payload(
+            payload,
+            now=now,
+            enforce_freshness=False,
+            allow_non_observed=True,
+        ):
+            return JSONResponse({"error": "fitness_observation_unavailable"}, status_code=503)
+        generated_at = _parse_fitness_timestamp(payload["generatedAt"])
+        if generated_at is None:
+            return JSONResponse({"error": "fitness_observation_unavailable"}, status_code=503)
+        if payload["state"] == "observed" and now - generated_at > FITNESS_OBSERVATION_STALE_AFTER:
+            payload = _stale_fitness_observation(payload)
+            if not _validate_fitness_observation_payload(
+                payload,
+                now=now,
+                enforce_freshness=False,
+                allow_non_observed=True,
+            ):
+                return JSONResponse({"error": "fitness_observation_unavailable"}, status_code=503)
+        try:
+            response_body = _fitness_observation_bytes(payload)
+        except ValueError:
+            return JSONResponse({"error": "fitness_observation_unavailable"}, status_code=503)
+    return Response(
+        content=response_body,
+        media_type="application/json",
+        headers={
+            "Cache-Control": "no-store",
+            "X-LifeOS-Fitness-State": payload["state"],
+        },
+    )
+
+
+@app.post("/fitness/observation")
+async def post_fitness_observation(request: Request) -> Response:
+    if _calendar_header(request, "content-type") != "application/json":
+        return JSONResponse({"error": "content_type"}, status_code=415)
+    try:
+        body = await _read_bounded_fitness_observation_request(request)
+        payload = json.loads(
+            body.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite_constant,
+            parse_int=_calendar_integer,
+        )
+    except HTTPException as exc:
+        error = "request_too_large" if exc.status_code == 413 else "request_timeout" if exc.status_code == 408 else "invalid_request"
+        return JSONResponse({"error": error}, status_code=exc.status_code)
+    except (UnicodeDecodeError, UnicodeEncodeError, json.JSONDecodeError, ValueError, TypeError, OverflowError, RecursionError):
+        return JSONResponse({"error": "invalid_request"}, status_code=422)
+
+    now = datetime.now(timezone.utc)
+    if not _validate_fitness_observation_payload(payload, now=now, enforce_freshness=True):
+        return JSONResponse({"error": "fitness_observation_invalid"}, status_code=422)
+    try:
+        canonical_body = _fitness_observation_bytes(payload)
+    except ValueError:
+        return JSONResponse({"error": "fitness_observation_invalid"}, status_code=422)
+    async with fitness_observation_lock:
+        durable = _load_valid_fitness_observation(now=now)
+        if durable is not None:
+            try:
+                incoming_key = _fitness_observation_order_key(payload)
+                durable_key = _fitness_observation_order_key(durable)
+            except ValueError:
+                return JSONResponse({"error": "fitness_observation_unavailable"}, status_code=503)
+            if incoming_key < durable_key:
+                return _fitness_publication_response(
+                    result="ignored",
+                    reason="older_observation",
+                )
+            if incoming_key == durable_key:
+                try:
+                    durable_body = _fitness_observation_bytes(durable)
+                except ValueError:
+                    return JSONResponse({"error": "fitness_observation_unavailable"}, status_code=503)
+                return _fitness_publication_response(
+                    result="already_current",
+                    reason="idempotent_replay" if durable_body == canonical_body else "equal_generation",
+                )
+        try:
+            _atomic_write_bytes(FITNESS_OBSERVATION_PATH, canonical_body)
+        except (OSError, ValueError):
+            return JSONResponse({"error": "fitness_observation_unavailable"}, status_code=503)
+    return _fitness_publication_response(result="stored")
 
 
 @app.get("/clipper/summary")

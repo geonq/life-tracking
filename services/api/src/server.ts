@@ -20,6 +20,14 @@ import {
 import { CLIPPER_MAX_BYTES, ClipperStore, ClipperStoreError } from './clipper-store.js';
 import { parseStrictJSON } from './json-boundary.js';
 
+// Bound every phase of an inbound HTTP exchange. requestTimeout bounds the
+// complete request including the body; timeout bounds socket inactivity while
+// a body is streamed; headersTimeout bounds the header phase.
+export const API_HEADERS_TIMEOUT_MS = 10_000;
+export const API_REQUEST_TIMEOUT_MS = 30_000;
+export const API_SOCKET_TIMEOUT_MS = 30_000;
+export const API_KEEP_ALIVE_TIMEOUT_MS = 5_000;
+
 function usageStorePath(): string | undefined {
   const configured = process.env.USAGE_STORE_PATH;
   if (configured !== undefined && (!configured || configured.includes('\0') || !isAbsolute(configured))) return undefined;
@@ -32,7 +40,12 @@ function clipperStorePath(): string | undefined {
 }
 const history = () => new UsageHistory(usageStorePath() ?? resolve('usage-history.jsonl'));
 const defaultClipperStore = new ClipperStore(clipperStorePath());
-const json = (res: ServerResponse, status: number, value: unknown) => { res.statusCode = status; res.end(JSON.stringify(value)); };
+function setJSONHeaders(res: ServerResponse): void {
+  res.setHeader('content-type', 'application/json');
+  res.setHeader('cache-control', 'no-store');
+  res.setHeader('x-content-type-options', 'nosniff');
+}
+const json = (res: ServerResponse, status: number, value: unknown) => { setJSONHeaders(res); res.statusCode = status; res.end(JSON.stringify(value)); };
 
 /**
  * Fixture endpoints are an explicit opt-in surface. In particular, a
@@ -122,14 +135,16 @@ async function validateUsageStore(): Promise<boolean> {
   }
 }
 
-/** Startup gate: enabled ingestion and local-service routes require valid file-only secrets before binding. */
-export async function validateStartupConfiguration(): Promise<boolean> {
+/** Startup gate: validate secrets, usage state, and the non-mutating Clipper state before binding. */
+export async function validateStartupConfiguration(clipperStore?: ClipperStore): Promise<boolean> {
   if (!(await localApiConfigurationReady())) return false;
   if (claudeIngestEnabled() && (await claudeIngestSecret()) === undefined) return false;
   if (codexIngestEnabled() && (await codexIngestSecret()) === undefined) return false;
   if (clipperIngestEnabled() && (await clipperIngestSecret()) === undefined) return false;
   if (process.env.CLIPPER_STORE_PATH !== undefined && clipperStorePath() === undefined) return false;
-  return validateUsageStore();
+  if (!(await validateUsageStore())) return false;
+  const configuredStore = clipperStore ?? new ClipperStore(clipperStorePath() ?? resolve('clipper-snapshot.json'));
+  return configuredStore.ready();
 }
 const unavailableFinanceSummary = () => {
   const generatedAt = new Date().toISOString();
@@ -147,6 +162,28 @@ const unavailableFinanceSummary = () => {
   });
 };
 const loopback = (req: IncomingMessage) => ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress ?? '');
+const allowedHostNames = new Set(['localhost', '127.0.0.1', '::1', '::ffff:127.0.0.1']);
+
+function parseHostHeader(value: string): { name: string; port: number } | undefined {
+  if (!value || value.trim() !== value) return undefined;
+  const match = value.startsWith('[')
+    ? /^\[([^\]]+)\]:(\d+)$/.exec(value)
+    : /^([^:]+):(\d+)$/.exec(value);
+  if (!match) return undefined;
+  const port = Number(match[2]);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535 || String(port) !== match[2]) return undefined;
+  return { name: match[1]!.toLowerCase(), port };
+}
+
+/** Require an explicit loopback Host with the port assigned to this socket. */
+export function validApiHost(req: IncomingMessage): boolean {
+  const localPort = req.socket.localPort;
+  if (typeof localPort !== 'number' || !Number.isSafeInteger(localPort) || localPort < 1 || localPort > 65_535) return false;
+  const host = singleHeader(req, 'host');
+  const parsed = host === undefined ? undefined : parseHostHeader(host);
+  return parsed !== undefined && parsed.port === localPort && allowedHostNames.has(parsed.name);
+}
+
 async function body(req: IncomingMessage, maximumBytes = MAX_BODY_BYTES): Promise<Buffer> {
   const declared = singleHeader(req, 'content-length');
   if (headerValues(req, 'content-length').length > 0 && declared === undefined) {
@@ -405,7 +442,10 @@ export async function app(
   const configuredBarcodeClient = barcodeClient ?? createConfiguredOpenFoodFactsClient();
   const configuredClipperStore = clipperStore ?? defaultClipperStore;
   const configuredNutritionPhotoClient = nutritionPhotoClient ?? createConfiguredNutritionPhotoProposalClient();
-  res.setHeader('content-type', 'application/json'); res.setHeader('cache-control', 'no-store');
+  setJSONHeaders(res);
+  // Real Node requests always expose the listener port. Direct unit callers
+  // may omit it because they are invoking this handler without a socket.
+  if (req.socket.localPort !== undefined && !validApiHost(req)) return json(res, 400, { error: 'invalid_host' });
   if (req.url !== '/health' && req.url !== '/ready' && !loopback(req)) return json(res, 403, { error: 'loopback_only' });
   // Keep the method/path matrix explicit before any URL-only handler can run.
   // A protected route with the wrong verb is rejected without reading data or
@@ -446,7 +486,7 @@ export async function app(
     return lookupBarcode(req, res, configuredBarcodeClient);
   }
   if (req.url === '/ready') {
-    const ready = await validateStartupConfiguration();
+    const ready = await validateStartupConfiguration(configuredClipperStore);
     return json(res, ready ? 200 : 503, { readiness: ready ? 'ready' : 'unavailable' });
   }
   if (req.url === '/health') return json(res, 200, {
@@ -556,7 +596,7 @@ export function createApiServer(
   nutritionPhotoClient?: NutritionPhotoProposalClient,
 ) {
   const configuredBarcodeClient = barcodeClient ?? createConfiguredOpenFoodFactsClient();
-  return createServer((req, res) => app(
+  const server = createServer((req, res) => void app(
     req,
     res,
     readLive,
@@ -564,6 +604,11 @@ export function createApiServer(
     clipperStore,
     nutritionPhotoClient,
   ));
+  server.headersTimeout = API_HEADERS_TIMEOUT_MS;
+  server.requestTimeout = API_REQUEST_TIMEOUT_MS;
+  server.timeout = API_SOCKET_TIMEOUT_MS;
+  server.keepAliveTimeout = API_KEEP_ALIVE_TIMEOUT_MS;
+  return server;
 }
 
 export type ApiRuntime = {
@@ -591,7 +636,7 @@ export type StartApiServerOptions = {
 
 /** Validate, bind only to loopback, and install one idempotent graceful shutdown path. */
 export async function startApiServer(options: StartApiServerOptions = {}): Promise<StartedApiServer> {
-  if (!(await validateStartupConfiguration())) throw new Error('startup_configuration_invalid');
+  if (!(await validateStartupConfiguration(options.clipperStore))) throw new Error('startup_configuration_invalid');
   const server = createApiServer(
     options.readLive ?? readCodexLive,
     undefined,

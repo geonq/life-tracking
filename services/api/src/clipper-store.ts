@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
-import { lstat, open } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { access, lstat, open } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
 import { ClipperSnapshot, parseClipperSnapshot, unavailableClipperSnapshot, type ClipperSnapshot as Snapshot } from '@iphone-life-os/contracts';
 import { atomicWriteFile } from './atomic-file.js';
 import { parseStrictJSON } from './json-boundary.js';
@@ -228,6 +228,21 @@ export class ClipperStore {
 
   async get(): Promise<Snapshot> {
     return (await this.readCommitted()).snapshot;
+  }
+
+  /** Validate existing durable state without loading or mutating this instance. */
+  async ready(): Promise<boolean> {
+    if (!this.file) return true;
+    try {
+      const parent = await lstat(dirname(this.file));
+      if (!parent.isDirectory() || parent.isSymbolicLink()
+        || (process.platform !== 'win32' && (parent.mode & 0o022) !== 0)) return false;
+      await access(dirname(this.file), fsConstants.R_OK | fsConstants.W_OK | fsConstants.X_OK);
+      await this.loadUnlocked();
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /** Return the durable Clipper authority revision; missing state is revision zero. */

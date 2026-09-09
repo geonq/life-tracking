@@ -1,5 +1,7 @@
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Hosting.WindowsServices;
 using Microsoft.Extensions.Logging;
 
 namespace LifeOS.ServiceHost;
@@ -24,6 +26,18 @@ internal static class Program
             {
                 serviceOptions.ServiceName = invocation.ServiceName ?? DefaultServiceName;
             });
+
+            // AddWindowsService uses the stock lifetime, whose OnStart callback
+            // releases the generic-host startup gate before hosted services run.
+            // Replace it only for a real Windows Service process so the actual
+            // SCM callback remains pending until ChildSupervisor has reported
+            // the exact readiness contract.
+            builder.Services.AddSingleton<IServiceStartupGate, ServiceStartupGate>();
+            if (OperatingSystem.IsWindows() && WindowsServiceHelpers.IsWindowsService())
+            {
+                builder.Services.Replace(
+                    ServiceDescriptor.Singleton<IHostLifetime, ReadinessWindowsServiceLifetime>());
+            }
 
             builder.Logging.ClearProviders();
             builder.Services.AddSingleton(options);

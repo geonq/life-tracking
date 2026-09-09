@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import type { ChildProcess } from 'node:child_process';
 import { describe, expect, it, vi } from 'vitest';
-import { CodexRpcError, createCodexTransport, readCodexAppServer, type Transport } from './codex-adapter.js';
+import { CodexRpcError, codexSpawnSpec, createCodexTransport, readCodexAppServer, readCodexLive, type Transport } from './codex-adapter.js';
 
 function transportFor(handler: (method: string) => Promise<unknown>): { transport: Transport; close: ReturnType<typeof vi.fn> } {
   const close = vi.fn();
@@ -11,6 +11,68 @@ function transportFor(handler: (method: string) => Promise<unknown>): { transpor
 }
 
 describe('Codex app-server boundary', () => {
+  it('requires explicit absolute regular files and rejects unsafe resolution without process creation', async () => {
+    const isRegularFile = vi.fn(() => true);
+    expect(codexSpawnSpec({
+      platform: 'win32', systemRoot: 'C:\\Windows', shellPath: 'C:\\Windows\\System32\\cmd.exe',
+      executablePath: 'C:\\Program Files\\Codex\\codex.cmd', isRegularFile,
+    })).toEqual({ command: 'C:\\Windows\\System32\\cmd.exe', args: ['/d', '/s', '/c', '"C:\\Program Files\\Codex\\codex.cmd" app-server'] });
+    expect(codexSpawnSpec({
+      platform: 'win32', systemRoot: 'C:\\Windows', shellPath: 'cmd.exe',
+      executablePath: 'C:\\Program Files\\Codex\\codex.cmd', isRegularFile,
+    })).toBeUndefined();
+    expect(codexSpawnSpec({
+      platform: 'win32', systemRoot: 'C:\\Windows', shellPath: 'C:\\Windows\\System32\\cmd.exe',
+      executablePath: 'C:\\Program Files\\Codex\\codex.cmd', isRegularFile: () => false,
+    })).toBeUndefined();
+    expect(codexSpawnSpec({ platform: 'win32', executablePath: 'C:\\Temp\\other.cmd', isRegularFile })).toBeUndefined();
+    expect(codexSpawnSpec({ platform: 'darwin', executablePath: 'codex', isRegularFile })).toBeUndefined();
+    expect(isRegularFile).toHaveBeenCalledTimes(2);
+
+    for (const unsafePath of [
+      'C:\\Program Files\\Codex\\codex&safe.cmd',
+      'C:\\Program Files\\Codex\\codex%PATH%.cmd',
+      'C:\\Program Files\\Codex\\codex^safe.cmd',
+      'C:\\Program Files\\Codex\\codex!safe.cmd',
+      'C:\\Program Files\\Codex\\codex;safe.cmd',
+      'C:\\Program Files\\Codex\\folder:codex.cmd',
+      `C:\\${'x'.repeat(4090)}\\codex.cmd`,
+    ]) {
+      expect(codexSpawnSpec({
+        platform: 'win32', systemRoot: 'C:\\Windows', shellPath: 'C:\\Windows\\System32\\cmd.exe',
+        executablePath: unsafePath, isRegularFile: () => true,
+      })).toBeUndefined();
+    }
+
+    expect(codexSpawnSpec({ platform: 'darwin', executablePath: `/${'x'.repeat(4096)}/codex`, isRegularFile: () => true })).toBeUndefined();
+  });
+
+  it('keeps disabled live mode from resolving or spawning Codex', async () => {
+    const previous = process.env.CODEX_LIVE_ENABLED;
+    const previousExecutable = process.env.CODEX_EXECUTABLE_PATH;
+    try {
+      process.env.CODEX_LIVE_ENABLED = 'false';
+      delete process.env.CODEX_EXECUTABLE_PATH;
+      await expect(readCodexLive()).resolves.toMatchObject({ connectorState: 'unavailable', error: 'Live Codex connector disabled' });
+    } finally {
+      if (previous === undefined) delete process.env.CODEX_LIVE_ENABLED; else process.env.CODEX_LIVE_ENABLED = previous;
+      if (previousExecutable === undefined) delete process.env.CODEX_EXECUTABLE_PATH; else process.env.CODEX_EXECUTABLE_PATH = previousExecutable;
+    }
+  });
+
+  it('fails closed when the default Codex executable is not configured', async () => {
+    const previousExecutable = process.env.CODEX_EXECUTABLE_PATH;
+    const previousShell = process.env.CODEX_SHELL_PATH;
+    try {
+      delete process.env.CODEX_EXECUTABLE_PATH;
+      delete process.env.CODEX_SHELL_PATH;
+      await expect(readCodexAppServer()).resolves.toMatchObject({ connectorState: 'unavailable', failureReason: 'transport' });
+    } finally {
+      if (previousExecutable === undefined) delete process.env.CODEX_EXECUTABLE_PATH; else process.env.CODEX_EXECUTABLE_PATH = previousExecutable;
+      if (previousShell === undefined) delete process.env.CODEX_SHELL_PATH; else process.env.CODEX_SHELL_PATH = previousShell;
+    }
+  });
+
   it('accepts only the allowlisted rate-limit rejection after initialization', async () => {
     const providerUnavailable = await readCodexAppServer(() => transportFor(async method => {
       if (method === 'initialize') return {};

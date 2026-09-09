@@ -4,7 +4,16 @@ import { Readable } from 'node:stream';
 import { chmod, mkdtemp, mkdir, readFile, rm, rmdir, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { app, createApiServer, startApiServer, validateStartupConfiguration } from './server.js';
+import {
+  API_HEADERS_TIMEOUT_MS,
+  API_KEEP_ALIVE_TIMEOUT_MS,
+  API_REQUEST_TIMEOUT_MS,
+  API_SOCKET_TIMEOUT_MS,
+  app,
+  createApiServer,
+  startApiServer,
+  validateStartupConfiguration,
+} from './server.js';
 
 import { authorizeLocalApi } from './local-auth.js';
 
@@ -72,6 +81,36 @@ const closeApiServer = (server: ReturnType<typeof createApiServer>) => new Promi
 });
 
 describe('HTTP API', () => {
+  it('configures bounded header, request-body, socket, and keep-alive deadlines', () => {
+    const server = createApiServer();
+
+    expect(server.headersTimeout).toBe(API_HEADERS_TIMEOUT_MS);
+    expect(server.requestTimeout).toBe(API_REQUEST_TIMEOUT_MS);
+    expect(server.timeout).toBe(API_SOCKET_TIMEOUT_MS);
+    expect(server.keepAliveTimeout).toBe(API_KEEP_ALIVE_TIMEOUT_MS);
+  });
+
+  it('requires a loopback Host with the bound port and adds a nosniff response header', async () => {
+    const server = createApiServer(async () => ({ connectorState: 'unavailable', windows: [] }));
+    await listenApiServer(server);
+    try {
+      const address = server.address(); if (!address || typeof address === 'string') throw Error('no address');
+      const call = (host: string) => new Promise<{ status: number; nosniff: string | undefined }>((resolve, reject) => {
+        const req = request({ host: LOOPBACK_HOST, port: address.port, path: '/health', headers: { host } }, response => {
+          response.resume(); response.on('end', () => resolve({ status: response.statusCode!, nosniff: response.headers['x-content-type-options'] as string | undefined }));
+        });
+        req.on('error', reject); req.end();
+      });
+      await expect(call(`localhost:${address.port}`)).resolves.toEqual({ status: 200, nosniff: 'nosniff' });
+      await expect(call(`[::1]:${address.port}`)).resolves.toEqual({ status: 200, nosniff: 'nosniff' });
+      await expect(call(`evil.example:${address.port}`)).resolves.toEqual({ status: 400, nosniff: 'nosniff' });
+      await expect(call(`127.0.0.1:${address.port + 1}`)).resolves.toEqual({ status: 400, nosniff: 'nosniff' });
+      await expect(call('localhost')).resolves.toEqual({ status: 400, nosniff: 'nosniff' });
+    } finally {
+      await closeApiServer(server);
+    }
+  });
+
   it('rejects malformed and mismatched Content-Length before parsing JSON', async () => {
     const callWithLength = async (contentLength: string) => {
       const req = Readable.from([Buffer.from('{}')]) as Readable & {
@@ -715,7 +754,7 @@ describe('dedicated local service authentication', () => {
       const address = server.address(); if (!address || typeof address === 'string') throw Error('no address');
       const status = await new Promise<number>((resolve, reject) => {
         const req = request({ host: LOOPBACK_HOST, port: address.port, path: '/api/codex/live',
-          headers: ['Host', 'localhost', ...valid(), 'aUtHoRiZaTiOn', `Bearer ${LOCAL_SECRET}`] }, res => {
+          headers: ['Host', `localhost:${address.port}`, ...valid(), 'aUtHoRiZaTiOn', `Bearer ${LOCAL_SECRET}`] }, res => {
           res.resume(); res.on('end', () => resolve(res.statusCode!));
         });
         req.on('error', reject); req.end();

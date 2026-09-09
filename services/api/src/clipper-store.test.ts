@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { chmod, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { CLIPPER_MAX_BYTES, ClipperStore, ClipperStoreError, MAX_CLIPPER_QUEUE_DEPTH } from './clipper-store.js';
@@ -34,6 +34,31 @@ describe('ClipperStore', () => {
   it('returns an honest unavailable state before the first Hermes observation', async () => {
     const result = await new ClipperStore().get();
     expect(result.availability).toBe('unavailable');
+  });
+
+  it('reports missing state as ready and rejects corrupt or unsafe existing state', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'lifeos-clipper-readiness-'));
+    const missingPath = join(directory, 'missing.json');
+    const missing = new ClipperStore(missingPath);
+    expect(await missing.ready()).toBe(true);
+    expect((missing as unknown as { loaded: boolean }).loaded).toBe(false);
+
+    const corruptPath = join(directory, 'corrupt.json');
+    await writeFile(corruptPath, '{not-json', { mode: 0o600 });
+    const corrupt = new ClipperStore(corruptPath);
+    expect(await corrupt.ready()).toBe(false);
+    expect((corrupt as unknown as { loaded: boolean }).loaded).toBe(false);
+
+    const validPath = join(directory, 'valid.json');
+    const writer = new ClipperStore(validPath);
+    await writer.ingest('readiness-valid', JSON.stringify(snapshot));
+    expect(await new ClipperStore(validPath).ready()).toBe(true);
+
+    if (process.platform !== 'win32') {
+      const linkedPath = join(directory, 'linked.json');
+      await symlink(corruptPath, linkedPath);
+      expect(await new ClipperStore(linkedPath).ready()).toBe(false);
+    }
   });
 
   it('accepts observed snapshots, replays identical keys, and rejects key reuse', async () => {

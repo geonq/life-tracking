@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Hosting.WindowsServices;
 using LifeOS.ServiceHost;
 using Xunit;
 
@@ -90,6 +91,8 @@ public sealed class ServiceHostTests
         {
             ["PORT"] = 8787,
             ["NODE_ENV"] = "production",
+            ["LIFEOS_LOCAL_API_ENABLED"] = true,
+            ["LIFEOS_LOCAL_API_SECRET_FILE"] = fixture.SecretPath,
             ["USAGE_STORE_PATH"] = fixture.StorePath,
             ["CLIPPER_STORE_PATH"] = fixture.StorePath,
             ["LIFEOS_DATA_DIR"] = fixture.Root,
@@ -104,7 +107,6 @@ public sealed class ServiceHostTests
             ["GOOGLE_AI_STUDIO_FOOD_MODEL_VERSION"] = "generate-content-json-v1",
             ["ENABLE_BANKING_APP_ID"] = "lifeos-test-app",
             ["ENABLE_BANKING_PRIVATE_KEY_PATH"] = fixture.SecretPath,
-            ["ENABLE_BANKING_CERTIFICATE_PATH"] = fixture.SecretPath,
             ["ENABLE_BANKING_API_BASE_URL"] = "https://api.enablebanking.com",
             ["ENABLE_BANKING_REDIRECT_URI"] = "https://lifeos.example.test/callback",
         };
@@ -168,12 +170,67 @@ public sealed class ServiceHostTests
             {
                 ["ENABLE_BANKING_APP_ID"] = "lifeos-test-app",
                 ["ENABLE_BANKING_PRIVATE_KEY_PATH"] = fixture.SecretPath,
-                ["ENABLE_BANKING_CERTIFICATE_PATH"] = fixture.SecretPath,
                 ["ENABLE_BANKING_API_BASE_URL"] = "https://api.enablebanking.com?unexpected=1",
                 ["ENABLE_BANKING_REDIRECT_URI"] = "https://lifeos.example.test/callback",
             })}",
             StringComparison.Ordinal);
         Assert.Throws<ConfigValidationException>(() => ServiceHostConfigLoader.ParseAndValidate(Encoding.UTF8.GetBytes(bankingWithQuery)));
+    }
+
+    [Fact]
+    public void ConfigValidationAcceptsOnlyAnExplicitSafeCodexExecutablePath()
+    {
+        using var fixture = TestFixture.Create();
+        var configured = fixture.ValidJson().Replace(
+            "\"environment\":{}",
+            $"\"environment\":{JsonSerializer.Serialize(new Dictionary<string, object>
+            {
+                ["CODEX_EXECUTABLE_PATH"] = fixture.CodexExecutablePath,
+                ["CODEX_LIVE_ENABLED"] = false,
+            })}",
+            StringComparison.Ordinal);
+
+        var options = ServiceHostConfigLoader.ParseAndValidate(Encoding.UTF8.GetBytes(configured));
+        Assert.Equal(fixture.CodexExecutablePath, options.Environment["CODEX_EXECUTABLE_PATH"]);
+        Assert.Equal("false", options.Environment["CODEX_LIVE_ENABLED"]);
+
+        foreach (var invalidPath in new[]
+        {
+            fixture.ExecutablePath,
+            Path.Combine(fixture.Root, "codex.cmd.bak"),
+            Path.Combine(fixture.Root, "codex&unsafe.cmd"),
+            Path.Combine(fixture.Root, "codex%PATH%.cmd"),
+            Path.Combine(fixture.Root, new string('x', 4090), "codex.cmd"),
+        })
+        {
+            var invalid = fixture.ValidJson().Replace(
+                "\"environment\":{}",
+                $"\"environment\":{JsonSerializer.Serialize(new Dictionary<string, object> { ["CODEX_EXECUTABLE_PATH"] = invalidPath })}",
+                StringComparison.Ordinal);
+            Assert.Throws<ConfigValidationException>(() => ServiceHostConfigLoader.ParseAndValidate(Encoding.UTF8.GetBytes(invalid)));
+        }
+
+        var liveWithoutPath = fixture.ValidJson().Replace(
+            "\"environment\":{}",
+            "\"environment\":{\"CODEX_LIVE_ENABLED\":true}",
+            StringComparison.Ordinal);
+        Assert.Throws<ConfigValidationException>(() => ServiceHostConfigLoader.ParseAndValidate(Encoding.UTF8.GetBytes(liveWithoutPath)));
+
+        var linkPath = Path.Combine(fixture.Root, "codex.exe");
+        try
+        {
+            File.CreateSymbolicLink(linkPath, fixture.CodexExecutablePath);
+        }
+        catch (Exception) when (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var linked = fixture.ValidJson().Replace(
+            "\"environment\":{}",
+            $"\"environment\":{JsonSerializer.Serialize(new Dictionary<string, object> { ["CODEX_EXECUTABLE_PATH"] = linkPath })}",
+            StringComparison.Ordinal);
+        Assert.Throws<ConfigValidationException>(() => ServiceHostConfigLoader.ParseAndValidate(Encoding.UTF8.GetBytes(linked)));
     }
 
     [Theory]
@@ -221,6 +278,67 @@ public sealed class ServiceHostTests
         Assert.DoesNotContain("xyz", output, StringComparison.Ordinal);
         Assert.DoesNotContain("very-secret", output, StringComparison.Ordinal);
         Assert.Contains("[REDACTED]", output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ReadinessPayloadMustBeTheExactServiceContract()
+    {
+        Assert.True(LoopbackHealthProbe.IsExactReadyPayload(Encoding.UTF8.GetBytes("{\"readiness\":\"ready\"}")));
+        Assert.False(LoopbackHealthProbe.IsExactReadyPayload(Encoding.UTF8.GetBytes("{ \"readiness\": \"ready\" }")));
+        Assert.False(LoopbackHealthProbe.IsExactReadyPayload(Encoding.UTF8.GetBytes("{\"readiness\":\"unavailable\"}")));
+    }
+
+    [Fact]
+    public void ReadinessLifetimeUsesTheOfficialWindowsServiceLifetime()
+    {
+        Assert.Equal(typeof(WindowsServiceLifetime), typeof(ReadinessWindowsServiceLifetime).BaseType);
+    }
+
+    [Fact]
+    public async Task ServiceStartupGateKeepsTheScmStartCallbackPendingUntilReadiness()
+    {
+        using var gate = new ServiceStartupGate(new FakeHostLifetime());
+        var waitHintRequested = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var waitTask = Task.Run(() => gate.WaitForDecision(
+            milliseconds => waitHintRequested.TrySetResult(milliseconds),
+            TimeSpan.FromSeconds(3)));
+
+        var waitHint = await waitHintRequested.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.InRange(waitHint, ServiceStartupGate.MinimumScmWaitHintMilliseconds, ServiceStartupGate.MaximumScmWaitHintMilliseconds);
+        Assert.False(waitTask.IsCompleted);
+
+        gate.ReportReady();
+        await waitTask.WaitAsync(TimeSpan.FromSeconds(2));
+    }
+
+    [Fact]
+    public async Task ServiceStartupGatePropagatesFailureAndCancelsReadiness()
+    {
+        using var gate = new ServiceStartupGate(new FakeHostLifetime());
+        var waitHintRequested = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var waitTask = Task.Run(() => gate.WaitForDecision(
+            milliseconds => waitHintRequested.TrySetResult(milliseconds),
+            TimeSpan.FromSeconds(3)));
+        await waitHintRequested.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        var failure = new InvalidOperationException("readiness failed");
+        gate.ReportFailure(failure);
+
+        var thrown = await Assert.ThrowsAsync<InvalidOperationException>(() => waitTask);
+        Assert.Same(failure, thrown);
+        Assert.True(gate.StartupCancellationToken.IsCancellationRequested);
+    }
+
+    [Fact]
+    public async Task ServiceStartupGateFailsClosedWhenTheBoundedTimeoutExpires()
+    {
+        using var gate = new ServiceStartupGate(new FakeHostLifetime());
+        var waitTask = Task.Run(() => gate.WaitForDecision(
+            _ => { },
+            TimeSpan.FromMilliseconds(100)));
+
+        await Assert.ThrowsAsync<TimeoutException>(() => waitTask).WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.True(gate.StartupCancellationToken.IsCancellationRequested);
     }
 
     [Fact]
@@ -279,18 +397,20 @@ public sealed class ServiceHostTests
     }
 
     [Fact]
-    public async Task SupervisorStartsOneChildWithoutBlockingOnHealthAndStopsGracefully()
+    public async Task SupervisorStartsOneChildAfterReadinessAndStopsGracefully()
     {
         using var fixture = TestFixture.Create();
         var child = new FakeChildProcess(exitOnGraceful: true);
         var factory = new FakeChildFactory(child);
         var lifetime = new FakeHostLifetime();
-        var supervisor = fixture.Supervisor(factory, new FakeHealthProbe(true), lifetime);
+        var startupGate = new FakeServiceStartupGate();
+        var supervisor = fixture.Supervisor(factory, new FakeHealthProbe(true), lifetime, startupGate: startupGate);
 
         await supervisor.StartAsync(CancellationToken.None);
         Assert.Equal(1, factory.StartCount);
         Assert.True(child.Started);
         Assert.False(lifetime.StopCalled);
+        Assert.True(startupGate.Ready);
 
         await supervisor.StopAsync(CancellationToken.None);
         Assert.Equal(1, child.GracefulRequests);
@@ -298,7 +418,7 @@ public sealed class ServiceHostTests
     }
 
     [Fact]
-    public async Task SupervisorStartReturnsWhileHealthGateIsStillPending()
+    public async Task SupervisorStartWaitsForReadinessBeforeReturning()
     {
         using var fixture = TestFixture.Create();
         var child = new FakeChildProcess(exitOnGraceful: true);
@@ -307,9 +427,10 @@ public sealed class ServiceHostTests
         var supervisor = fixture.Supervisor(new FakeChildFactory(child), health, lifetime);
 
         var startTask = supervisor.StartAsync(CancellationToken.None);
-        var completed = await Task.WhenAny(startTask, Task.Delay(TimeSpan.FromSeconds(1)));
+        var completed = await Task.WhenAny(startTask, Task.Delay(TimeSpan.FromMilliseconds(100)));
 
-        Assert.Same(startTask, completed);
+        Assert.NotSame(startTask, completed);
+        health.Complete(true);
         await startTask;
         Assert.False(lifetime.StopCalled);
 
@@ -317,16 +438,17 @@ public sealed class ServiceHostTests
     }
 
     [Fact]
-    public async Task SupervisorSignalsFailureWhenChildExitsBeforeHealth()
+    public async Task SupervisorRejectsStartupWhenReadinessFails()
     {
         using var fixture = TestFixture.Create();
         var child = new FakeChildProcess(exitImmediately: true);
         var lifetime = new FakeHostLifetime();
-        var supervisor = fixture.Supervisor(new FakeChildFactory(child), new FakeHealthProbe(false), lifetime);
+        var startupGate = new FakeServiceStartupGate();
+        var supervisor = fixture.Supervisor(new FakeChildFactory(child), new FakeHealthProbe(false), lifetime, startupGate: startupGate);
 
-        await supervisor.StartAsync(CancellationToken.None);
-        await WaitForAsync(() => lifetime.StopCalled);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => supervisor.StartAsync(CancellationToken.None));
         Assert.Equal(0, child.GracefulRequests);
+        Assert.NotNull(startupGate.Failure);
     }
 
     [Fact]
@@ -367,6 +489,7 @@ public sealed class ServiceHostTests
     {
         public string Root { get; }
         public string ExecutablePath { get; }
+        public string CodexExecutablePath { get; }
         public string LogDirectory { get; }
         public string StorePath { get; }
         public string SecretPath { get; }
@@ -375,12 +498,14 @@ public sealed class ServiceHostTests
         {
             Root = root;
             ExecutablePath = Path.Combine(root, "child.bin");
+            CodexExecutablePath = Path.Combine(root, "codex.cmd");
             LogDirectory = Path.Combine(root, "logs");
             StorePath = Path.Combine(root, "state", "usage-history.jsonl");
             SecretPath = Path.Combine(root, "secret.txt");
             Directory.CreateDirectory(root);
             Directory.CreateDirectory(Path.GetDirectoryName(StorePath)!);
             File.WriteAllText(ExecutablePath, "test");
+            File.WriteAllText(CodexExecutablePath, "@echo off");
             File.WriteAllText(SecretPath, "test-secret-file");
             Directory.CreateDirectory(LogDirectory);
         }
@@ -399,6 +524,7 @@ public sealed class ServiceHostTests
                 arguments = new[] { "--config", ExecutablePath },
                 environment = new Dictionary<string, object>(),
                 healthUrl = "http://127.0.0.1:8787/health",
+                readinessUrl = "http://127.0.0.1:8787/ready",
                 startupTimeoutSeconds = 2,
                 shutdownTimeoutSeconds = 2,
                 logDirectory = LogDirectory,
@@ -408,9 +534,9 @@ public sealed class ServiceHostTests
             });
 
         public ServiceHostOptions Options(long maxBytes = 128, int maxFiles = 3)
-            => new(ExecutablePath, Root, new[] { "--config", ExecutablePath }, new Dictionary<string, string>(), new Uri("http://127.0.0.1:8787/health"), TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2), LogDirectory, "child.log", maxBytes, maxFiles);
+            => new(ExecutablePath, Root, new[] { "--config", ExecutablePath }, new Dictionary<string, string>(), new Uri("http://127.0.0.1:8787/health"), new Uri("http://127.0.0.1:8787/ready"), TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2), LogDirectory, "child.log", maxBytes, maxFiles);
 
-        public ChildSupervisor Supervisor(FakeChildFactory factory, IHealthProbe probe, FakeHostLifetime lifetime, IProcessFailureSignal? failure = null, TimeSpan? shutdownTimeout = null, IRotatingLogSinkFactory? logFactory = null)
+        public ChildSupervisor Supervisor(FakeChildFactory factory, IHealthProbe probe, FakeHostLifetime lifetime, IProcessFailureSignal? failure = null, TimeSpan? shutdownTimeout = null, IRotatingLogSinkFactory? logFactory = null, IServiceStartupGate? startupGate = null)
         {
             var options = Options();
             if (shutdownTimeout is not null)
@@ -418,7 +544,7 @@ public sealed class ServiceHostTests
                 options = options with { ShutdownTimeout = shutdownTimeout.Value };
             }
 
-            return new ChildSupervisor(options, factory, probe, logFactory ?? new FakeLogSinkFactory(), failure ?? new FakeFailureSignal(), lifetime);
+            return new ChildSupervisor(options, factory, probe, logFactory ?? new FakeLogSinkFactory(), failure ?? new FakeFailureSignal(), lifetime, startupGate ?? new FakeServiceStartupGate());
         }
 
         public void Dispose()
@@ -477,15 +603,17 @@ public sealed class ServiceHostTests
 
     private sealed class FakeHealthProbe(bool healthy) : IHealthProbe
     {
-        public Task<bool> WaitUntilHealthyAsync(Uri healthUrl, TimeSpan timeout, CancellationToken cancellationToken) => Task.FromResult(healthy);
+        public Task<bool> WaitUntilReadyAsync(Uri readinessUrl, TimeSpan timeout, CancellationToken cancellationToken) => Task.FromResult(healthy);
     }
 
     private sealed class BlockingHealthProbe : IHealthProbe
     {
         private readonly TaskCompletionSource<bool> result = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        public Task<bool> WaitUntilHealthyAsync(Uri healthUrl, TimeSpan timeout, CancellationToken cancellationToken)
+        public Task<bool> WaitUntilReadyAsync(Uri readinessUrl, TimeSpan timeout, CancellationToken cancellationToken)
             => result.Task.WaitAsync(cancellationToken);
+
+        public void Complete(bool value) => result.TrySetResult(value);
     }
 
     private sealed class FakeLogSinkFactory : IRotatingLogSinkFactory
@@ -503,6 +631,27 @@ public sealed class ServiceHostTests
     {
         public bool Failed { get; private set; }
         public void FailService() => Failed = true;
+    }
+
+    private sealed class FakeServiceStartupGate : IServiceStartupGate
+    {
+        public CancellationToken StartupCancellationToken => CancellationToken.None;
+        public bool Ready { get; private set; }
+        public Exception? Failure { get; private set; }
+
+        public void ReportReady() => Ready = true;
+
+        public void ReportFailure(Exception error) => Failure = error;
+
+        public void WaitForDecision(Action<int> requestAdditionalTime, TimeSpan timeout)
+        {
+            _ = requestAdditionalTime;
+            _ = timeout;
+        }
+
+        public void Dispose()
+        {
+        }
     }
 
     private sealed class FakeHostLifetime : IHostApplicationLifetime

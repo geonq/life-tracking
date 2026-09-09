@@ -94,6 +94,34 @@ def test_credentials_accept_exact_allowlisted_https_destinations(tmp_path, monke
     )
 
 
+def test_runtime_credentials_do_not_require_registration_certificate(tmp_path, monkeypatch):
+    adapter = service(tmp_path, monkeypatch)
+    monkeypatch.delenv("ENABLE_BANKING_CERTIFICATE_PATH", raising=False)
+
+    credentials = adapter._credentials()
+
+    assert credentials is not None
+    assert "certificate_path" not in credentials
+
+
+def test_provider_client_keeps_tls_verification_and_omits_registration_certificate(
+    tmp_path, monkeypatch,
+):
+    adapter = service(tmp_path, monkeypatch)
+    captured = {}
+
+    def fake_async_client(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(enablebanking.httpx, "AsyncClient", fake_async_client)
+
+    adapter._http_client()
+
+    assert captured["verify"] is True
+    assert "cert" not in captured
+
+
 @pytest.mark.parametrize(
     ("environment_name", "value"),
     [

@@ -1,4 +1,10 @@
+using System.Diagnostics;
+using System.Runtime.ExceptionServices;
+using System.Runtime.Versioning;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Hosting.WindowsServices;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace LifeOS.ServiceHost;
 
@@ -12,6 +18,150 @@ public sealed class ProcessFailureSignal : IProcessFailureSignal
     public void FailService() => Environment.ExitCode = 1;
 }
 
+public interface IServiceStartupGate : IDisposable
+{
+    CancellationToken StartupCancellationToken { get; }
+
+    void ReportReady();
+
+    void ReportFailure(Exception error);
+
+    void WaitForDecision(Action<int> requestAdditionalTime, TimeSpan timeout);
+}
+
+public sealed class ServiceStartupGate : IServiceStartupGate
+{
+    public const int MinimumScmWaitHintMilliseconds = 1_000;
+    public const int MaximumScmWaitHintMilliseconds = 5_000;
+
+    private readonly TaskCompletionSource<StartupDecision> decision = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly CancellationTokenSource startupCancellation = new();
+    private readonly CancellationTokenRegistration stoppingRegistration;
+    private int disposed;
+
+    public ServiceStartupGate(IHostApplicationLifetime applicationLifetime)
+    {
+        stoppingRegistration = applicationLifetime.ApplicationStopping.Register(
+            static state => ((ServiceStartupGate)state!).ReportFailure(
+                new OperationCanceledException("Service startup was canceled.")),
+            this);
+    }
+
+    public CancellationToken StartupCancellationToken => startupCancellation.Token;
+
+    public void ReportReady() => decision.TrySetResult(StartupDecision.Ready);
+
+    public void ReportFailure(Exception error)
+    {
+        ArgumentNullException.ThrowIfNull(error);
+        if (decision.TrySetResult(new StartupDecision(error)))
+        {
+            startupCancellation.Cancel();
+        }
+    }
+
+    public void WaitForDecision(Action<int> requestAdditionalTime, TimeSpan timeout)
+    {
+        ArgumentNullException.ThrowIfNull(requestAdditionalTime);
+        if (timeout <= TimeSpan.Zero || timeout == Timeout.InfiniteTimeSpan)
+        {
+            throw new ArgumentOutOfRangeException(nameof(timeout));
+        }
+
+        var stopwatch = Stopwatch.StartNew();
+        while (!decision.Task.IsCompleted)
+        {
+            var remaining = timeout - stopwatch.Elapsed;
+            if (remaining <= TimeSpan.Zero)
+            {
+                ReportFailure(new TimeoutException("Service readiness did not complete before the startup timeout."));
+                break;
+            }
+
+            var waitMilliseconds = CalculateWaitMilliseconds(remaining);
+            var waitHintMilliseconds = Math.Max(waitMilliseconds, MinimumScmWaitHintMilliseconds);
+            try
+            {
+                requestAdditionalTime(waitHintMilliseconds);
+            }
+            catch (Exception error)
+            {
+                ReportFailure(error);
+                ExceptionDispatchInfo.Capture(error).Throw();
+                throw;
+            }
+
+            if (decision.Task.Wait(waitMilliseconds))
+            {
+                break;
+            }
+        }
+
+        var result = decision.Task.GetAwaiter().GetResult();
+        if (result.Error is not null)
+        {
+            ExceptionDispatchInfo.Capture(result.Error).Throw();
+        }
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref disposed, 1) != 0)
+        {
+            return;
+        }
+
+        stoppingRegistration.Dispose();
+        startupCancellation.Dispose();
+    }
+
+    private static int CalculateWaitMilliseconds(TimeSpan remaining)
+    {
+        var boundedMilliseconds = Math.Min(remaining.TotalMilliseconds, MaximumScmWaitHintMilliseconds);
+        var roundedMilliseconds = (long)Math.Ceiling(boundedMilliseconds);
+        return (int)Math.Clamp(
+            roundedMilliseconds,
+            1,
+            MaximumScmWaitHintMilliseconds);
+    }
+
+    private sealed record StartupDecision(Exception? Error)
+    {
+        public static StartupDecision Ready { get; } = new(Error: null);
+    }
+}
+
+[SupportedOSPlatform("windows")]
+public sealed class ReadinessWindowsServiceLifetime : WindowsServiceLifetime
+{
+    private readonly IServiceStartupGate startupGate;
+    private readonly TimeSpan startupTimeout;
+
+    public ReadinessWindowsServiceLifetime(
+        IHostEnvironment environment,
+        IHostApplicationLifetime applicationLifetime,
+        ILoggerFactory loggerFactory,
+        IOptions<HostOptions> hostOptions,
+        IOptions<WindowsServiceLifetimeOptions> windowsServiceOptions,
+        ServiceHostOptions serviceOptions,
+        IServiceStartupGate startupGate)
+        : base(environment, applicationLifetime, loggerFactory, hostOptions, windowsServiceOptions)
+    {
+        this.startupGate = startupGate;
+        startupTimeout = serviceOptions.StartupTimeout;
+    }
+
+    protected override void OnStart(string[] args)
+    {
+        // The official lifetime completes its private WaitForStartAsync gate in
+        // base.OnStart. That lets the generic host start ChildSupervisor while
+        // this SCM callback remains in its pending state below.
+        base.OnStart(args);
+        startupGate.WaitForDecision(RequestAdditionalTime, startupTimeout);
+    }
+}
+
 public sealed class ChildSupervisor : IHostedService, IAsyncDisposable
 {
     private readonly ServiceHostOptions options;
@@ -20,6 +170,7 @@ public sealed class ChildSupervisor : IHostedService, IAsyncDisposable
     private readonly IRotatingLogSinkFactory logSinkFactory;
     private readonly IProcessFailureSignal failureSignal;
     private readonly IHostApplicationLifetime applicationLifetime;
+    private readonly IServiceStartupGate startupGate;
     private readonly CancellationTokenSource stopping = new();
     private readonly object stateGate = new();
     private IChildProcess? child;
@@ -36,7 +187,8 @@ public sealed class ChildSupervisor : IHostedService, IAsyncDisposable
         IHealthProbe healthProbe,
         IRotatingLogSinkFactory logSinkFactory,
         IProcessFailureSignal failureSignal,
-        IHostApplicationLifetime applicationLifetime)
+        IHostApplicationLifetime applicationLifetime,
+        IServiceStartupGate startupGate)
     {
         this.options = options;
         this.processFactory = processFactory;
@@ -44,6 +196,7 @@ public sealed class ChildSupervisor : IHostedService, IAsyncDisposable
         this.logSinkFactory = logSinkFactory;
         this.failureSignal = failureSignal;
         this.applicationLifetime = applicationLifetime;
+        this.startupGate = startupGate;
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -58,6 +211,10 @@ public sealed class ChildSupervisor : IHostedService, IAsyncDisposable
             started = true;
         }
 
+        using var startupCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken,
+            stopping.Token,
+            startupGate.StartupCancellationToken);
         try
         {
             logs = logSinkFactory.Create(options);
@@ -68,18 +225,46 @@ public sealed class ChildSupervisor : IHostedService, IAsyncDisposable
                 PumpAsync(child.StandardError, "stderr", stopping.Token)
             ];
 
-            // Windows Service Control Manager has a default 30-second start
-            // deadline.  Do not hold IHostedService.StartAsync open while a
-            // cold Node/Python child warms up: the deployment performs its
-            // own health gate, while this background gate keeps the service
-            // self-healing if the child never becomes ready.
-            startupTask = MonitorStartupAsync(child, stopping.Token);
-            monitorTask = MonitorChildAsync(child, stopping.Token);
+            // The generic host does not expose the service as started to SCM
+            // until every hosted service has returned from StartAsync. Keep
+            // this gate bounded by the reviewed config timeout so a service
+            // cannot report Running before its own /ready contract is true.
+            var exitTask = child.WaitForExitAsync(stopping.Token);
+            monitorTask = MonitorChildAsync(exitTask, stopping.Token);
+            var readinessTask = healthProbe.WaitUntilReadyAsync(
+                options.ReadinessUrl,
+                options.StartupTimeout,
+                startupCancellation.Token);
+            startupTask = readinessTask;
+
+            var completed = await Task.WhenAny(readinessTask, exitTask).ConfigureAwait(false);
+            if (completed == exitTask)
+            {
+                await exitTask.ConfigureAwait(false);
+                throw new InvalidOperationException("The child exited before readiness.");
+            }
+
+            if (!await readinessTask.ConfigureAwait(false) || child.HasExited)
+            {
+                throw new InvalidOperationException("The child did not pass its readiness gate.");
+            }
+
+            startupGate.ReportReady();
         }
         catch
         {
+            stopRequested = true;
             stopping.Cancel();
-            await StopChildAsync().ConfigureAwait(false);
+            try
+            {
+                await StopChildAsync().ConfigureAwait(false);
+                await ObserveTaskAsync(startupTask).ConfigureAwait(false);
+                await ObserveTaskAsync(monitorTask).ConfigureAwait(false);
+            }
+            finally
+            {
+                startupGate.ReportFailure(new InvalidOperationException("The child did not pass its readiness gate."));
+            }
             throw;
         }
     }
@@ -126,11 +311,11 @@ public sealed class ChildSupervisor : IHostedService, IAsyncDisposable
         stopping.Dispose();
     }
 
-    private async Task MonitorChildAsync(IChildProcess process, CancellationToken cancellationToken)
+    private async Task MonitorChildAsync(Task exitTask, CancellationToken cancellationToken)
     {
         try
         {
-            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            await exitTask.ConfigureAwait(false);
             if (!stopRequested)
             {
                 failureSignal.FailService();
@@ -140,40 +325,6 @@ public sealed class ChildSupervisor : IHostedService, IAsyncDisposable
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             // Expected during service shutdown.
-        }
-    }
-
-    private async Task MonitorStartupAsync(IChildProcess process, CancellationToken cancellationToken)
-    {
-        try
-        {
-            var healthy = await healthProbe
-                .WaitUntilHealthyAsync(options.HealthUrl, options.StartupTimeout, cancellationToken)
-                .ConfigureAwait(false);
-
-            if (!healthy || process.HasExited)
-            {
-                if (!stopRequested && !cancellationToken.IsCancellationRequested)
-                {
-                    failureSignal.FailService();
-                    applicationLifetime.StopApplication();
-                }
-            }
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            // Expected during service shutdown.
-        }
-        catch
-        {
-            // A failed health probe is a failed service start.  Keep the
-            // material exception out of SCM/event output and let the host
-            // shutdown path terminate the child tree.
-            if (!stopRequested && !cancellationToken.IsCancellationRequested)
-            {
-                failureSignal.FailService();
-                applicationLifetime.StopApplication();
-            }
         }
     }
 
@@ -266,6 +417,24 @@ public sealed class ChildSupervisor : IHostedService, IAsyncDisposable
         catch (ObjectDisposedException)
         {
             // The child stream closed while the process was being stopped.
+        }
+    }
+
+    private static async Task ObserveTaskAsync(Task? task)
+    {
+        if (task is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await task.ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // The startup failure is reported by StartAsync. Do not replace it
+            // with a cancellation/child-disposal exception from a sibling task.
         }
     }
 }

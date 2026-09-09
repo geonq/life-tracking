@@ -14,9 +14,14 @@ param(
     [string]$TailscaleServiceName = 'Tailscale',
     [string]$LegacyTaskName = 'LifeOSSyncServer',
     [string]$CodexTaskName = 'LifeOSCodexCollector',
+    # Optional provider installation path. It is never inferred or passed as
+    # a command argument; the API service receives it through its cleared,
+    # allowlisted environment. Live Codex remains disabled by default.
+    [string]$CodexExecutablePath,
     [string]$TailscaleSnapshotTaskName = 'LifeOSTailscaleSnapshot',
-    # Optional provider inputs are file paths, never raw credentials. Their
-    # presence opts into the corresponding live adapter during this install.
+    # Optional provider inputs are file paths, never raw credentials. Runtime
+    # Enable Banking uses the app id, private key, API base URL, and redirect
+    # URI. The public certificate is retained only for provider registration.
     [string]$ClipperIngestSecretSource,
     [string]$GoogleAIStudioApiKeySource,
     [string]$GoogleAIStudioFoodModel,
@@ -458,6 +463,7 @@ function Get-ApiHostConfig {
         [Parameter(Mandatory)][string]$UsageHistory,
         [Parameter(Mandatory)][string]$ClaudeSecret,
         [Parameter(Mandatory)][string]$CodexSecret,
+        [string]$CodexExecutablePath,
         [Parameter(Mandatory)][string]$TempDirectory,
         [Parameter(Mandatory)][string]$LogDirectory,
         [Parameter(Mandatory)][string]$ClipperStorePath,
@@ -489,6 +495,9 @@ function Get-ApiHostConfig {
         TMP = $TempDirectory
         PATH = ($NodeExecutable | Split-Path -Parent) + ';' + (Join-Path $systemRoot 'System32')
     }
+    if (-not [string]::IsNullOrWhiteSpace($CodexExecutablePath)) {
+        $environment.CODEX_EXECUTABLE_PATH = $CodexExecutablePath
+    }
     if (-not [string]::IsNullOrWhiteSpace($ClipperSecret)) {
         $environment.CLIPPER_INGEST_ENABLED = $true
         $environment.CLIPPER_INGEST_SECRET_FILE = $ClipperSecret
@@ -517,6 +526,7 @@ function Get-ApiHostConfig {
         arguments = @((Join-Path $ApiDirectory 'dist\server.js'))
         environment = $environment
         healthUrl = 'http://127.0.0.1:8787/health'
+        readinessUrl = 'http://127.0.0.1:8787/ready'
         startupTimeoutSeconds = 45
         shutdownTimeoutSeconds = 15
         logDirectory = $LogDirectory
@@ -564,16 +574,17 @@ function Get-GatewayHostConfig {
         LIFEOS_TAILSCALE_SERVICE_NAME = $TailscaleServiceName
         LIFEOS_TAILSCALE_SNAPSHOT_PATH = $TailscaleSnapshotPath
     }
-    $bankingValues = @($EnableBankingAppId, $EnableBankingPrivateKeyPath, $EnableBankingCertificatePath, $EnableBankingApiBaseUrl, $EnableBankingRedirectUri)
+    # The public certificate is a registration artifact for Enable Banking;
+    # the runtime adapter authenticates with a JWT signed by the private key.
+    $bankingValues = @($EnableBankingAppId, $EnableBankingPrivateKeyPath, $EnableBankingApiBaseUrl, $EnableBankingRedirectUri)
     $bankingMissingCount = @($bankingValues | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count
     $bankingProvidedCount = $bankingValues.Count - $bankingMissingCount
     if ($bankingMissingCount -gt 0 -and $bankingProvidedCount -gt 0) {
-        throw 'Enable Banking configuration must provide app id, key, certificate, API base URL, and redirect URI together.'
+        throw 'Enable Banking configuration must provide app id, private key, API base URL, and redirect URI together.'
     }
     if ($bankingMissingCount -eq 0) {
         $environment.ENABLE_BANKING_APP_ID = $EnableBankingAppId
         $environment.ENABLE_BANKING_PRIVATE_KEY_PATH = $EnableBankingPrivateKeyPath
-        $environment.ENABLE_BANKING_CERTIFICATE_PATH = $EnableBankingCertificatePath
         $environment.ENABLE_BANKING_API_BASE_URL = $EnableBankingApiBaseUrl
         $environment.ENABLE_BANKING_REDIRECT_URI = $EnableBankingRedirectUri
     }
@@ -583,6 +594,7 @@ function Get-GatewayHostConfig {
         arguments = @($GatewayEntryPoint)
         environment = $environment
         healthUrl = 'http://127.0.0.1:8421/health'
+        readinessUrl = 'http://127.0.0.1:8421/ready'
         startupTimeoutSeconds = 45
         shutdownTimeoutSeconds = 15
         logDirectory = $LogDirectory
@@ -602,6 +614,25 @@ $deploymentRecoveryCompleted = $false
 try {
 $paths = Get-LifeOSDefaultPaths
 $operatorSid = Get-InteractiveOperatorSid
+$codexPathProvided = -not [string]::IsNullOrWhiteSpace($CodexExecutablePath)
+if ($codexPathProvided) {
+    # Keep this optional input path-only and fail closed before any deployment
+    # mutation. The service-host validator repeats the checks on the rendered
+    # configuration, so a later config edit cannot bypass this boundary.
+    if ($CodexExecutablePath.Length -gt 4096 -or
+        $CodexExecutablePath -notmatch '^[A-Za-z]:[\\/]' -or
+        $CodexExecutablePath -match '[\x00-\x1F\x7F"<>|?*%&^!;]' -or
+        ($CodexExecutablePath.Length -gt 2 -and $CodexExecutablePath.IndexOf(':', 2) -ge 0) -or
+        ([IO.Path]::GetFileName($CodexExecutablePath) -notmatch '(?i)^codex\.(cmd|exe)$')) {
+        throw 'Optional Codex executable path failed bounded absolute-path validation.'
+    }
+    try {
+        Assert-ExistingFile $CodexExecutablePath 'Optional Codex executable'
+        Assert-TrustedSourcePath $CodexExecutablePath $operatorSid
+    } catch {
+        throw 'Optional Codex executable path failed file, ownership, or reparse-point validation.'
+    }
+}
 $previousGeneration = Get-LifeOSPreviousInstalledGeneration -MarkerState $deploymentMutex.PreviousState -ManifestPath $deploymentMutex.PreviousManifestPath -OperatorSid $operatorSid -ExpectedGeneration ([string]$deploymentMutex.PreviousGeneration)
 $tailscaleEdgeTokenPath = Assert-TailscaleEdgeTokenSource -Path $TailscaleEdgeTokenSource -ExpectedPath (Get-LifeOSTailscaleEdgeTokenPath $paths.SecretRoot) -OperatorSid $operatorSid
 $preflightArgs = @{
@@ -644,11 +675,13 @@ $optionalSourcePaths = @(
 foreach ($optionalSource in ($optionalSourcePaths | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
     Assert-ExistingFile $optionalSource 'Optional provider secret/certificate source'
 }
-$bankingValues = @($EnableBankingAppId, $EnableBankingPrivateKeySource, $EnableBankingCertificateSource, $EnableBankingApiBaseUrl, $EnableBankingRedirectUri)
+# The certificate may be staged for Enable Banking registration, but is not a
+# runtime credential and must not be required by the gateway service config.
+$bankingValues = @($EnableBankingAppId, $EnableBankingPrivateKeySource, $EnableBankingApiBaseUrl, $EnableBankingRedirectUri)
 $hasBankingValue = @($bankingValues | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count -gt 0
 $hasAllBankingValues = @($bankingValues | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -eq 0
 if ($hasBankingValue -and -not $hasAllBankingValues) {
-    throw 'Enable Banking configuration must provide app id, key, certificate, API base URL, and redirect URI together.'
+    throw 'Enable Banking configuration must provide app id, private key, API base URL, and redirect URI together.'
 }
 if ($EnableOpenFoodFacts -and [string]::IsNullOrWhiteSpace($OpenFoodFactsContactEmail)) {
     throw 'Open Food Facts requires -OpenFoodFactsContactEmail when enabled.'
@@ -1173,7 +1206,7 @@ Assert-PathOnlyJson $gatewayConfig
 $configIntents[$gatewayConfig]['backup'] = if ([bool]$configIntents[$gatewayConfig]['priorExists']) { Join-Path $backupDirectory ('previous-' + [IO.Path]::GetFileName($gatewayConfig)) } else { $null }
 $configIntents[$gatewayConfig]['phase'] = 'complete'
 Save-InstallManifest $manifest $manifestPath
-$apiHost = Get-ApiHostConfig -NodeExecutable (Join-Path $nodeTarget 'node.exe') -ApiDirectory $apiTarget -UsageHistory $usageHistory -ClaudeSecret $claudeSecret -CodexSecret $codexSecret -ClipperStorePath (Join-Path $apiData 'clipper-snapshot.json') -ClipperSecret $(if ([string]::IsNullOrWhiteSpace($ClipperIngestSecretSource)) { '' } else { $clipperSecret }) -GoogleAIStudioApiKey $(if ([string]::IsNullOrWhiteSpace($GoogleAIStudioApiKeySource)) { '' } else { $googleAIStudioApiKey }) -GoogleAIStudioFoodModel $GoogleAIStudioFoodModel -GoogleAIStudioFoodModelVersion $GoogleAIStudioFoodModelVersion -OpenFoodFactsEnabled:$EnableOpenFoodFacts -OpenFoodFactsContactEmail $OpenFoodFactsContactEmail -TempDirectory $apiTemp -LogDirectory $apiLogs -ManagementSid $operatorSid
+$apiHost = Get-ApiHostConfig -NodeExecutable (Join-Path $nodeTarget 'node.exe') -ApiDirectory $apiTarget -UsageHistory $usageHistory -ClaudeSecret $claudeSecret -CodexSecret $codexSecret -CodexExecutablePath $CodexExecutablePath -ClipperStorePath (Join-Path $apiData 'clipper-snapshot.json') -ClipperSecret $(if ([string]::IsNullOrWhiteSpace($ClipperIngestSecretSource)) { '' } else { $clipperSecret }) -GoogleAIStudioApiKey $(if ([string]::IsNullOrWhiteSpace($GoogleAIStudioApiKeySource)) { '' } else { $googleAIStudioApiKey }) -GoogleAIStudioFoodModel $GoogleAIStudioFoodModel -GoogleAIStudioFoodModelVersion $GoogleAIStudioFoodModelVersion -OpenFoodFactsEnabled:$EnableOpenFoodFacts -OpenFoodFactsContactEmail $OpenFoodFactsContactEmail -TempDirectory $apiTemp -LogDirectory $apiLogs -ManagementSid $operatorSid
 Write-JsonAtomic $apiConfig $apiHost
 $configIntents[$apiConfig]['backup'] = if ([bool]$configIntents[$apiConfig]['priorExists']) { Join-Path $backupDirectory ('previous-' + [IO.Path]::GetFileName($apiConfig)) } else { $null }
 $configIntents[$apiConfig]['phase'] = 'complete'

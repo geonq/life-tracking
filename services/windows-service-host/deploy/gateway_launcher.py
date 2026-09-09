@@ -28,7 +28,7 @@ import stat
 import struct
 import sys
 import threading
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import urlsplit
 from ctypes import wintypes
 
@@ -59,6 +59,17 @@ TAILSCALE_RUNTIME_READ_TIMEOUT_SECONDS = 0.5
 TAILSCALE_SNAPSHOT_MAX_AGE_SECONDS = 90
 TAILSCALE_SNAPSHOT_MAX_FUTURE_SECONDS = 5
 LOCAL_READINESS_TIMEOUT_SECONDS = 1.0
+BOUNDED_PROBE_MAX_WORKERS = 2
+# A single waiter is enough to absorb the normal third simultaneous request
+# without turning a stalled Windows query into an executor queue. Additional
+# callers fail closed until one of the bounded worker slots is released.
+BOUNDED_PROBE_MAX_WAITERS = 1
+BOUNDED_PROBE_MAX_TRACKED_PROBES = (
+    BOUNDED_PROBE_MAX_WORKERS + BOUNDED_PROBE_MAX_WAITERS + 1
+)
+BOUNDED_PROBE_MAX_CONSUMERS_PER_PROBE = (
+    BOUNDED_PROBE_MAX_WORKERS + BOUNDED_PROBE_MAX_WAITERS + 1
+)
 SERVE_CONFIG_KEYS = frozenset({"Web", "TCP", "Services", "AllowFunnel", "Foreground"})
 GATEWAY_LOOPBACK_PORT = 8421
 WINDOWS_AF_INET = 2
@@ -126,6 +137,265 @@ def _loopback_api_ready(api_base_url: str) -> bool:
         return False
 
 
+class _BoundedProbeHandle(NamedTuple):
+    future: Any
+    key: Any
+    generation: int
+    consumer_id: int
+
+
+class _BoundedProbeSlot:
+    __slots__ = ("future", "key", "generation", "consumers", "admission_closed")
+
+    def __init__(self, future: Any, key: Any, generation: int) -> None:
+        self.future = future
+        self.key = key
+        self.generation = generation
+        self.consumers: set[int] = set()
+        self.admission_closed = False
+
+
+class _BoundedThreadProbe:
+    """Run blocking probes with bounded recovery and no executor queue.
+
+    A timed-out Python thread cannot be killed safely.  Keep that thread as a
+    stale worker slot, allow one replacement slot for recovery, and admit at
+    most one additional caller while both workers are occupied. Completed
+    futures do not consume a worker slot, but their proof records remain until
+    every consumer explicitly releases its handle. This keeps ``is_current``
+    race-free without retaining an unbounded history or allowing the executor
+    to grow a hidden queue.
+    """
+
+    def __init__(self, probe: Any, *, thread_name_prefix: str) -> None:
+        self._probe = probe
+        self._executor = ThreadPoolExecutor(
+            max_workers=BOUNDED_PROBE_MAX_WORKERS,
+            thread_name_prefix=thread_name_prefix,
+        )
+        self._lock = threading.RLock()
+        self._next_generation = 0
+        self._next_consumer_id = 0
+        self._slots: list[_BoundedProbeSlot] = []
+        self._waiters: list[tuple[asyncio.AbstractEventLoop, asyncio.Future[None]]] = []
+
+    def _prune_finished_locked(self) -> bool:
+        """Drop only completed probes with no live proof consumers.
+
+        A finished future is deliberately retained while a consumer still has
+        to call ``is_current``. Worker capacity is calculated independently
+        from this list, so retaining a proof cannot block an unrelated probe.
+        """
+        before = len(self._slots)
+        self._slots = [
+            slot for slot in self._slots
+            if not slot.future.done() or slot.consumers
+        ]
+        return len(self._slots) < before
+
+    def _active_worker_count_locked(self) -> int:
+        return sum(not slot.future.done() for slot in self._slots)
+
+    def _slot_for_locked(self, handle: _BoundedProbeHandle) -> _BoundedProbeSlot | None:
+        for slot in self._slots:
+            if (slot.future is handle.future and slot.key is handle.key
+                    and slot.generation == handle.generation):
+                return slot
+        return None
+
+    def _issue_handle_locked(self, slot: _BoundedProbeSlot) -> _BoundedProbeHandle:
+        consumer_id = self._next_consumer_id
+        self._next_consumer_id += 1
+        slot.consumers.add(consumer_id)
+        return _BoundedProbeHandle(
+            slot.future,
+            slot.key,
+            slot.generation,
+            consumer_id,
+        )
+
+    def _submit_now_locked(self, key: Any) -> _BoundedProbeHandle | None:
+        self._prune_finished_locked()
+        # Coalesce only while the probe is in flight. A completed proof is
+        # retained for its current consumer, but a later request gets a fresh
+        # snapshot/transport check instead of consuming an old result.
+        for slot in self._slots:
+            if (slot.key is key and not slot.admission_closed and not slot.future.done()
+                    and len(slot.consumers) < BOUNDED_PROBE_MAX_CONSUMERS_PER_PROBE):
+                return self._issue_handle_locked(slot)
+        # Preserve FIFO-like fairness for the one bounded admission waiter.
+        # Coalescing an existing in-flight probe above remains safe; a new
+        # unrelated caller must not take the slot before the waiter wakes.
+        if self._waiters:
+            return None
+        if self._active_worker_count_locked() >= BOUNDED_PROBE_MAX_WORKERS:
+            return None
+        if len(self._slots) >= BOUNDED_PROBE_MAX_TRACKED_PROBES:
+            return None
+        generation = self._next_generation
+        self._next_generation += 1
+        future = self._executor.submit(self._probe, key)
+        slot = _BoundedProbeSlot(future, key, generation)
+        self._slots.append(slot)
+        handle = self._issue_handle_locked(slot)
+        # Register after the slot is visible. If the probe completes
+        # immediately, the callback waits for this lock before pruning it.
+        future.add_done_callback(self._on_done)
+        return handle
+
+    def submit(self, key: Any) -> _BoundedProbeHandle | None:
+        """Try once without waiting; callers on an event loop use submit_async."""
+        with self._lock:
+            return self._submit_now_locked(key)
+
+    @staticmethod
+    def _resolve_waiter(future: asyncio.Future[None]) -> None:
+        if not future.done():
+            future.set_result(None)
+
+    def _notify_waiters(self) -> None:
+        with self._lock:
+            waiters = tuple(self._waiters)
+        for loop, future in waiters:
+            try:
+                loop.call_soon_threadsafe(self._resolve_waiter, future)
+            except RuntimeError:
+                # The owning event loop may have closed during test or process
+                # teardown. There is no security decision to make here.
+                continue
+
+    def _on_done(self, _future: Any) -> None:
+        with self._lock:
+            self._prune_finished_locked()
+        self._notify_waiters()
+
+    def _remove_waiter(self, future: asyncio.Future[None]) -> None:
+        with self._lock:
+            self._waiters = [
+                (loop, candidate) for loop, candidate in self._waiters
+                if candidate is not future
+            ]
+
+    async def submit_async(
+        self,
+        key: Any,
+        *,
+        timeout: float,
+    ) -> _BoundedProbeHandle | None:
+        """Admit one bounded waiter without blocking the event loop.
+
+        ``timeout`` covers both admission and execution. Only one pending
+        admission is retained; callers beyond that bound fail closed. The
+        executor receives work only after a worker slot is available, so it
+        never accumulates work behind an unkillable timed-out thread.
+        """
+        if timeout <= 0:
+            return None
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while True:
+            with self._lock:
+                handle = self._submit_now_locked(key)
+                if handle is not None:
+                    return handle
+                remaining = deadline - loop.time()
+                if remaining <= 0 or len(self._waiters) >= BOUNDED_PROBE_MAX_WAITERS:
+                    return None
+                wake = loop.create_future()
+                self._waiters.append((loop, wake))
+            try:
+                await asyncio.wait_for(asyncio.shield(wake), timeout=remaining)
+            except asyncio.TimeoutError:
+                return None
+            except asyncio.CancelledError:
+                raise
+            finally:
+                self._remove_waiter(wake)
+                if not wake.done():
+                    wake.cancel()
+
+    def is_current(self, handle: _BoundedProbeHandle) -> bool:
+        with self._lock:
+            slot = self._slot_for_locked(handle)
+            return slot is not None and handle.consumer_id in slot.consumers
+
+    def mark_stale(self, handle: _BoundedProbeHandle) -> None:
+        freed_capacity = False
+        with self._lock:
+            slot = self._slot_for_locked(handle)
+            if slot is not None:
+                # Staleness is consumer-local: one timed-out request must not
+                # revoke a still-valid coalesced consumer of the same probe.
+                slot.admission_closed = True
+                slot.consumers.discard(handle.consumer_id)
+                freed_capacity = self._prune_finished_locked()
+        if freed_capacity:
+            self._notify_waiters()
+
+    def release(self, handle: _BoundedProbeHandle) -> None:
+        """Release a proof handle after its consumer checked is_current."""
+        freed_capacity = False
+        with self._lock:
+            slot = self._slot_for_locked(handle)
+            if slot is not None:
+                slot.consumers.discard(handle.consumer_id)
+                freed_capacity = self._prune_finished_locked()
+        if freed_capacity:
+            self._notify_waiters()
+
+    def shutdown(self, *, wait: bool = True) -> None:
+        with self._lock:
+            waiters = tuple(self._waiters)
+            self._waiters.clear()
+            self._slots.clear()
+        for loop, future in waiters:
+            try:
+                loop.call_soon_threadsafe(self._resolve_waiter, future)
+            except RuntimeError:
+                continue
+        self._executor.shutdown(wait=wait, cancel_futures=True)
+
+
+async def _bounded_probe_result(
+    reader: _BoundedThreadProbe,
+    key: Any,
+    timeout: float,
+) -> bool:
+    """Run one bounded probe with one end-to-end verification deadline."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0.0, timeout)
+    try:
+        handle = await reader.submit_async(key, timeout=timeout)
+    except Exception:
+        return False
+    if handle is None:
+        return False
+    try:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            reader.mark_stale(handle)
+            return False
+        try:
+            result = await asyncio.wait_for(
+                asyncio.shield(asyncio.wrap_future(handle.future)),
+                timeout=remaining,
+            )
+        except asyncio.TimeoutError:
+            reader.mark_stale(handle)
+            return False
+        except asyncio.CancelledError:
+            reader.mark_stale(handle)
+            raise
+        except Exception:
+            reader.mark_stale(handle)
+            return False
+        if not reader.is_current(handle):
+            return False
+        return bool(result)
+    finally:
+        reader.release(handle)
+
+
 def _current_gateway_dependencies_ready(
     api_base_url: str,
     snapshot_path: str | None,
@@ -149,34 +419,20 @@ class LocalReadinessAdapter:
     def __init__(self, app: Any, readiness_check: Any) -> None:
         self._app = app
         self._readiness_check = readiness_check
-        self._inflight_readiness: asyncio.Task[bool] | None = None
-
-    async def _run_readiness_check(self) -> bool:
-        try:
-            return bool(await asyncio.to_thread(self._readiness_check))
-        except Exception:
-            # Keep dependency details inside the launcher. The endpoint only
-            # exposes the provider-neutral unavailable response below.
-            return False
-
-    def _readiness_task(self) -> asyncio.Task[bool]:
-        task = self._inflight_readiness
-        if task is None or task.done():
-            task = asyncio.create_task(self._run_readiness_check())
-            self._inflight_readiness = task
-        return task
+        self._readiness_key = object()
+        self._reader = _BoundedThreadProbe(
+            lambda _key: bool(self._readiness_check()),
+            thread_name_prefix="lifeos-readiness",
+        )
 
     async def _dependencies_ready(self) -> bool:
-        # Shield the shared task so one timed-out caller cannot cancel the
-        # check for other callers. A still-running check remains shared until
-        # it finishes, preventing a stalled filesystem from creating an
-        # unbounded executor queue.
-        task = self._readiness_task()
         try:
-            return await asyncio.wait_for(
-                asyncio.shield(task), timeout=LOCAL_READINESS_TIMEOUT_SECONDS
+            return await _bounded_probe_result(
+                self._reader,
+                self._readiness_key,
+                LOCAL_READINESS_TIMEOUT_SECONDS,
             )
-        except asyncio.TimeoutError:
+        except Exception:
             return False
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> Any:
@@ -873,10 +1129,10 @@ class TrustedEdgeHeaderAdapter:
             _, dns, login = _read_tailscale_snapshot(self._snapshot_path)
             expected_identity = (dns, login)
         self._expected_identity = expected_identity
-        # One outstanding disk operation per adapter, even on timeout. No
-        # unbounded executor queue if the Windows filesystem stalls.
-        self._reader = ThreadPoolExecutor(max_workers=1, thread_name_prefix="edge-lease")
-        self._pending_read = None
+        self._reader = _BoundedThreadProbe(
+            self._run_lease_probe,
+            thread_name_prefix="edge-lease",
+        )
         self._app = app
         self._token_header = token.encode("ascii")
         self._peer_verifier = peer_verifier or (
@@ -891,13 +1147,24 @@ class TrustedEdgeHeaderAdapter:
         except Exception:
             return False
 
-    async def _lease_valid(self) -> bool:
-        if self._pending_read is None or self._pending_read.done():
-            self._pending_read = self._reader.submit(self._snapshot_valid)
+    def _run_lease_probe(self, scope: dict[str, Any] | None) -> bool:
+        if not self._snapshot_valid():
+            return False
         try:
-            return await asyncio.wait_for(
-                asyncio.shield(asyncio.wrap_future(self._pending_read)),
-                timeout=TAILSCALE_RUNTIME_READ_TIMEOUT_SECONDS,
+            # This is deliberately part of the bounded blocking probe.  On
+            # Windows it re-queries both the TCP owner and the current SCM
+            # service PID, so a restarted or replaced Tailscale process
+            # revokes an established stream.
+            return bool(self._peer_verifier(scope))
+        except Exception:
+            return False
+
+    async def _lease_valid(self, scope: dict[str, Any] | None = None) -> bool:
+        try:
+            return await _bounded_probe_result(
+                self._reader,
+                scope,
+                TAILSCALE_RUNTIME_READ_TIMEOUT_SECONDS,
             )
         except Exception:
             return False
@@ -923,7 +1190,11 @@ class TrustedEdgeHeaderAdapter:
                 # Never present a revoked partial HTTP stream as complete.
                 raise RuntimeError("trusted edge lease expired")
 
-        if not await self._lease_valid():
+        # _lease_valid performs the exact snapshot and bounded transport proof.
+        # Its successful result is the proof used below; never invoke the
+        # potentially blocking verifier on the event loop a second time.
+        transport_is_tailscale = await self._lease_valid(scope)
+        if not transport_is_tailscale:
             return await deny()
         original_headers = scope.get("headers", [])
         headers: list[tuple[bytes, bytes]] = []
@@ -932,12 +1203,6 @@ class TrustedEdgeHeaderAdapter:
             if lowered in {TRUSTED_EDGE_HEADER, TAILSCALE_APP_CAPABILITIES_HEADER}:
                 continue
             headers.append((name, value))
-        try:
-            transport_is_tailscale = bool(self._peer_verifier(scope))
-        except Exception:
-            # A missing SCM/TCP query is an authentication failure, never a
-            # reason to pass through a caller-supplied identity assertion.
-            transport_is_tailscale = False
         if transport_is_tailscale and _has_trusted_edge_app_capability(original_headers):
             headers.append((TRUSTED_EDGE_HEADER, self._token_header))
         forwarded_scope = dict(scope)
@@ -949,7 +1214,7 @@ class TrustedEdgeHeaderAdapter:
 
         async def check():
             nonlocal revoked
-            if revoked or not await self._lease_valid():
+            if revoked or not await self._lease_valid(scope):
                 revoked = True
                 raise LeaseExpired()
 

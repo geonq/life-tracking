@@ -13,6 +13,7 @@ public sealed record ServiceHostOptions(
     IReadOnlyList<string> Arguments,
     IReadOnlyDictionary<string, string> Environment,
     Uri HealthUrl,
+    Uri ReadinessUrl,
     TimeSpan StartupTimeout,
     TimeSpan ShutdownTimeout,
     string LogDirectory,
@@ -37,6 +38,9 @@ internal sealed class ServiceHostConfigDocument
 
     [JsonPropertyName("healthUrl")]
     public string? HealthUrl { get; set; }
+
+    [JsonPropertyName("readinessUrl")]
+    public string? ReadinessUrl { get; set; }
 
     [JsonPropertyName("startupTimeoutSeconds")]
     public int? StartupTimeoutSeconds { get; set; }
@@ -155,6 +159,8 @@ public static class ServiceHostConfigValidator
 {
     private static readonly HashSet<string> AllowedEnvironmentNames = new(StringComparer.Ordinal)
     {
+        "LIFEOS_LOCAL_API_ENABLED",
+        "LIFEOS_LOCAL_API_SECRET_FILE",
         "PORT",
         "NODE_ENV",
         "USAGE_STORE_PATH",
@@ -170,6 +176,7 @@ public static class ServiceHostConfigValidator
         "CODEX_INGEST_ENABLED",
         "CODEX_INGEST_SECRET_FILE",
         "CODEX_LIVE_ENABLED",
+        "CODEX_EXECUTABLE_PATH",
         "CLIPPER_INGEST_ENABLED",
         "CLIPPER_INGEST_SECRET_FILE",
         "OPEN_FOOD_FACTS_ENABLED",
@@ -180,7 +187,6 @@ public static class ServiceHostConfigValidator
         "GOOGLE_AI_STUDIO_FOOD_MODEL_VERSION",
         "ENABLE_BANKING_APP_ID",
         "ENABLE_BANKING_PRIVATE_KEY_PATH",
-        "ENABLE_BANKING_CERTIFICATE_PATH",
         "ENABLE_BANKING_API_BASE_URL",
         "ENABLE_BANKING_REDIRECT_URI",
         "SYSTEMROOT",
@@ -199,12 +205,15 @@ public static class ServiceHostConfigValidator
     private static readonly Regex LogFilePattern = new("^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$", RegexOptions.CultureInvariant);
     private static readonly Regex ArgumentOptionPattern = new("^--[A-Za-z0-9][A-Za-z0-9_.-]*(?:=.*)?$", RegexOptions.CultureInvariant);
     private static readonly Regex ContactEmailPattern = new(@"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$", RegexOptions.CultureInvariant);
+    private static readonly Regex CodexExecutableNamePattern = new(@"(?:^|[\\/])codex\.(?:cmd|exe)\z", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    private static readonly Regex UnsafeCodexPathPattern = new(@"[\x00-\x1F\x7F""<>|?*%&^!;]", RegexOptions.CultureInvariant);
     private const int MaxContactEmailLength = 254;
+    private const int MaxCodexExecutablePathLength = 4096;
 
     internal static ServiceHostOptions Validate(ServiceHostConfigDocument model)
     {
         if (model.ExecutablePath is null || model.WorkingDirectory is null || model.Arguments is null ||
-            model.Environment is null || model.HealthUrl is null || model.StartupTimeoutSeconds is null ||
+            model.Environment is null || model.HealthUrl is null || model.ReadinessUrl is null || model.StartupTimeoutSeconds is null ||
             model.ShutdownTimeoutSeconds is null || model.LogDirectory is null || model.LogFileName is null ||
             model.MaxLogBytes is null || model.MaxLogFiles is null)
         {
@@ -222,7 +231,14 @@ public static class ServiceHostConfigValidator
 
         ValidateArguments(model.Arguments);
         var environment = ValidateEnvironment(model.Environment);
-        var healthUrl = ValidateHealthUrl(model.HealthUrl);
+        var healthUrl = ValidateProbeUrl(model.HealthUrl, "healthUrl", "/health");
+        var readinessUrl = ValidateProbeUrl(model.ReadinessUrl, "readinessUrl", "/ready");
+        if (healthUrl.Scheme != readinessUrl.Scheme
+            || !string.Equals(healthUrl.Host, readinessUrl.Host, StringComparison.OrdinalIgnoreCase)
+            || healthUrl.Port != readinessUrl.Port)
+        {
+            throw new ConfigValidationException("readinessUrl", "healthUrl and readinessUrl must target the same loopback listener");
+        }
         var startupTimeout = ValidateTimeout(model.StartupTimeoutSeconds.Value, "startupTimeoutSeconds");
         var shutdownTimeout = ValidateTimeout(model.ShutdownTimeoutSeconds.Value, "shutdownTimeoutSeconds");
 
@@ -255,6 +271,7 @@ public static class ServiceHostConfigValidator
             model.Arguments.AsReadOnly(),
             environment,
             healthUrl,
+            readinessUrl,
             startupTimeout,
             shutdownTimeout,
             model.LogDirectory,
@@ -404,8 +421,10 @@ public static class ServiceHostConfigValidator
         }
 
         var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        var localApiEnabled = IsTrue(environment, "LIFEOS_LOCAL_API_ENABLED");
         var claudeEnabled = IsTrue(environment, "CLAUDE_INGEST_ENABLED") || IsTrue(environment, "CLAUDE_STATUSLINE_ENABLED");
         var codexEnabled = IsTrue(environment, "CODEX_INGEST_ENABLED");
+        var codexLiveEnabled = IsTrue(environment, "CODEX_LIVE_ENABLED");
         var clipperEnabled = IsTrue(environment, "CLIPPER_INGEST_ENABLED");
         var googleEnabled = IsTrue(environment, "GOOGLE_AI_STUDIO_ENABLED");
         var openFoodFactsEnabled = IsTrue(environment, "OPEN_FOOD_FACTS_ENABLED");
@@ -430,10 +449,11 @@ public static class ServiceHostConfigValidator
                 throw new ConfigValidationException("environment", "values must be safe strings or booleans");
             }
 
-            if (pair.Key is "CLAUDE_INGEST_SECRET_FILE" or "CODEX_INGEST_SECRET_FILE" or "CLIPPER_INGEST_SECRET_FILE" or "GOOGLE_AI_STUDIO_API_KEY_FILE")
+            if (pair.Key is "LIFEOS_LOCAL_API_SECRET_FILE" or "CLAUDE_INGEST_SECRET_FILE" or "CODEX_INGEST_SECRET_FILE" or "CLIPPER_INGEST_SECRET_FILE" or "GOOGLE_AI_STUDIO_API_KEY_FILE")
             {
                 var required = pair.Key switch
                 {
+                    "LIFEOS_LOCAL_API_SECRET_FILE" => localApiEnabled,
                     "CLAUDE_INGEST_SECRET_FILE" => claudeEnabled,
                     "CODEX_INGEST_SECRET_FILE" => codexEnabled,
                     "CLIPPER_INGEST_SECRET_FILE" => clipperEnabled,
@@ -453,7 +473,11 @@ public static class ServiceHostConfigValidator
             {
                 ValidateNonReparsePath(value, "environment");
             }
-            else if (pair.Key is "ENABLE_BANKING_PRIVATE_KEY_PATH" or "ENABLE_BANKING_CERTIFICATE_PATH")
+            else if (pair.Key == "CODEX_EXECUTABLE_PATH")
+            {
+                ValidateCodexExecutablePath(value, "environment");
+            }
+            else if (pair.Key is "ENABLE_BANKING_PRIVATE_KEY_PATH")
             {
                 ValidateExistingFilePath(value, "environment");
             }
@@ -473,7 +497,7 @@ public static class ServiceHostConfigValidator
             {
                 throw new ConfigValidationException("environment", "PORT must be between 1 and 65535");
             }
-            else if ((pair.Key is "CLAUDE_INGEST_ENABLED" or "CLAUDE_STATUSLINE_ENABLED" or "CODEX_INGEST_ENABLED" or "CODEX_LIVE_ENABLED" or "CLIPPER_INGEST_ENABLED" or "GOOGLE_AI_STUDIO_ENABLED" or "OPEN_FOOD_FACTS_ENABLED") && value is not ("true" or "false"))
+            else if ((pair.Key is "LIFEOS_LOCAL_API_ENABLED" or "CLAUDE_INGEST_ENABLED" or "CLAUDE_STATUSLINE_ENABLED" or "CODEX_INGEST_ENABLED" or "CODEX_LIVE_ENABLED" or "CLIPPER_INGEST_ENABLED" or "GOOGLE_AI_STUDIO_ENABLED" or "OPEN_FOOD_FACTS_ENABLED") && value is not ("true" or "false"))
             {
                 throw new ConfigValidationException("environment", "the feature flag must be boolean");
             }
@@ -501,6 +525,11 @@ public static class ServiceHostConfigValidator
             throw new ConfigValidationException("environment", "CLIPPER_INGEST_SECRET_FILE is required when CLIPPER_INGEST_ENABLED is true");
         }
 
+        if (localApiEnabled && (!result.TryGetValue("LIFEOS_LOCAL_API_SECRET_FILE", out var localApiSecretPath) || string.IsNullOrWhiteSpace(localApiSecretPath)))
+        {
+            throw new ConfigValidationException("environment", "LIFEOS_LOCAL_API_SECRET_FILE is required when LIFEOS_LOCAL_API_ENABLED is true");
+        }
+
         if (googleEnabled && (!result.TryGetValue("GOOGLE_AI_STUDIO_API_KEY_FILE", out var googleKeyPath) || string.IsNullOrWhiteSpace(googleKeyPath)))
         {
             throw new ConfigValidationException("environment", "GOOGLE_AI_STUDIO_API_KEY_FILE is required when GOOGLE_AI_STUDIO_ENABLED is true");
@@ -510,19 +539,23 @@ public static class ServiceHostConfigValidator
         {
             "ENABLE_BANKING_APP_ID",
             "ENABLE_BANKING_PRIVATE_KEY_PATH",
-            "ENABLE_BANKING_CERTIFICATE_PATH",
             "ENABLE_BANKING_API_BASE_URL",
             "ENABLE_BANKING_REDIRECT_URI"
         };
         var configuredBankingCount = bankingNames.Count(result.ContainsKey);
-        if (configuredBankingCount is not 0 and not 5)
+        if (configuredBankingCount is not 0 and not 4)
         {
-            throw new ConfigValidationException("environment", "Enable Banking app id, key, certificate, API base URL, and redirect URI must be configured together");
+            throw new ConfigValidationException("environment", "Enable Banking app id, key, API base URL, and redirect URI must be configured together");
         }
 
         if (openFoodFactsEnabled && !result.ContainsKey("OPEN_FOOD_FACTS_CONTACT_EMAIL"))
         {
             throw new ConfigValidationException("environment", "OPEN_FOOD_FACTS_CONTACT_EMAIL is required when OPEN_FOOD_FACTS_ENABLED is true");
+        }
+
+        if (codexLiveEnabled && !result.ContainsKey("CODEX_EXECUTABLE_PATH"))
+        {
+            throw new ConfigValidationException("environment", "CODEX_EXECUTABLE_PATH is required when CODEX_LIVE_ENABLED is true");
         }
 
         return result;
@@ -573,6 +606,38 @@ public static class ServiceHostConfigValidator
         }
     }
 
+    private static void ValidateCodexExecutablePath(string value, string field)
+    {
+        if (value.Length is 0 or > MaxCodexExecutablePathLength
+            || UnsafeCodexPathPattern.IsMatch(value)
+            || (value.Length > 2 && value.IndexOf(':', 2) >= 0)
+            || !CodexExecutableNamePattern.IsMatch(value))
+        {
+            throw new ConfigValidationException(field, "CODEX_EXECUTABLE_PATH must be a bounded absolute codex.cmd or codex.exe path without shell metacharacters");
+        }
+
+        ValidateExistingFilePath(value, field);
+        try
+        {
+            var file = new FileInfo(value);
+            if (!file.Exists
+                || (file.Attributes & FileAttributes.Directory) != 0
+                || (file.Attributes & FileAttributes.ReparsePoint) != 0
+                || file.LinkTarget is not null)
+            {
+                throw new ConfigValidationException(field, "the Codex executable must be a regular non-reparse file");
+            }
+        }
+        catch (ConfigValidationException)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            throw new ConfigValidationException(field, "the Codex executable could not be inspected safely");
+        }
+    }
+
     private static void ValidatePathList(string value, string field)
     {
         var separator = value.Contains(';', StringComparison.Ordinal) ? ';' : Path.PathSeparator;
@@ -610,13 +675,13 @@ public static class ServiceHostConfigValidator
         }
     }
 
-    private static Uri ValidateHealthUrl(string value)
+    private static Uri ValidateProbeUrl(string value, string field, string expectedPath)
     {
         if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttp ||
             !string.IsNullOrEmpty(uri.UserInfo) || !string.IsNullOrEmpty(uri.Query) || !string.IsNullOrEmpty(uri.Fragment) ||
-            uri.Port is <= 0 or > 65535 || !IsLoopbackHost(uri.Host))
+            uri.Port is <= 0 or > 65535 || !IsLoopbackHost(uri.Host) || uri.AbsolutePath != expectedPath)
         {
-            throw new ConfigValidationException("healthUrl", "it must be an absolute loopback HTTP URL");
+            throw new ConfigValidationException(field, $"it must be the absolute loopback HTTP URL ending in {expectedPath}");
         }
 
         return uri;

@@ -156,6 +156,7 @@ directory; raw API keys or private key contents are not accepted as parameters.
   -GatewayEntryPoint 'D:\Hermes\lifeos-server\main.py' `
   -ClipperIngestSecretSource 'D:\staging\clipper-ingest.secret' `
   -GoogleAIStudioApiKeySource 'D:\staging\google-ai-studio.key' `
+  -CodexExecutablePath 'C:\Program Files\OpenAI\Codex\codex.cmd' `
   -EnableOpenFoodFacts `
   -OpenFoodFactsContactEmail 'operator@example.test' `
   -EnableBankingAppId 'registered-enable-banking-app' `
@@ -170,6 +171,14 @@ Clipper and Google AI Studio are enabled only when their protected source file
 is supplied. The installer rejects partial banking configuration and fails
 closed when a required secret file cannot be read. Unsupported payment
 providers are not enabled by this toolkit.
+
+`-CodexExecutablePath` is optional and must name an existing, regular,
+non-reparse `codex.cmd` or `codex.exe` file. The installer never discovers a
+provider installation and never places this path in the Node command line; it
+writes the path only as the API service's cleared `CODEX_EXECUTABLE_PATH`
+environment value. `CODEX_LIVE_ENABLED` remains `false` in every generated
+configuration, so supplying the path does not enable live Codex. If the path
+is omitted, or live mode is later enabled without it, the API fails closed.
 
 ## Required preflight inputs
 

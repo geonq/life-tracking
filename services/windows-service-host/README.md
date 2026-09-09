@@ -8,11 +8,24 @@ files, service identities, working directories, and log directories.
 The host does not bind a socket. The child owns its listener. The host launches
 the child with `UseShellExecute=false` and `ProcessStartInfo.ArgumentList`,
 passes only the environment entries in the config, redirects both output streams
-to bounded rotating logs, and does not print child/config values. It waits for a
-successful 2xx response from the configured literal loopback HTTP URL before
-the Windows Service lifetime reports `Running`. A child exit after readiness
-sets a non-zero process exit code and stops the service so SCM can apply its
-failure/recovery policy.
+to bounded rotating logs, and does not print child/config values. In a real
+Windows Service process, `ReadinessWindowsServiceLifetime` uses the official
+`WindowsServiceLifetime` dispatcher: it releases the generic-host start gate,
+then keeps the same SCM `OnStart` callback pending while `ChildSupervisor`
+waits for the configured readiness URL to return HTTP 200 with the exact body
+`{"readiness":"ready"}`. It calls `RequestAdditionalTime` with bounded
+1–5-second hints while that reviewed startup timeout is in progress. A
+readiness failure or timeout is raised from `OnStart` after the child cleanup
+path has run, so SCM receives a failed start and the process exits non-zero.
+The separate health URL is a liveness probe and never satisfies the SCM startup
+gate. A child exit after readiness sets a non-zero process exit code and stops
+the service so SCM can apply its failure/recovery policy.
+
+The custom lifetime is registered only when the process is actually running as
+a Windows Service. Interactive and non-Windows runs retain the context-aware
+`AddWindowsService`/console lifetime behavior; no SCM wait is applied there.
+The callback and wait-hint behavior still requires a Windows-native SCM test
+after deployment.
 
 ## Exact config schema
 
@@ -39,6 +52,7 @@ rejects unknown or duplicate properties. All fields below are required:
     "PATH": "C:\\Windows\\System32;C:\\Program Files\\nodejs"
   },
   "healthUrl": "http://127.0.0.1:8787/health",
+  "readinessUrl": "http://127.0.0.1:8787/ready",
   "startupTimeoutSeconds": 30,
   "shutdownTimeoutSeconds": 15,
   "logDirectory": "C:\\ProgramData\\LifeOS\\logs\\api",
@@ -53,7 +67,7 @@ rejects unknown or duplicate properties. All fields below are required:
 and `*_LIVE_ENABLED` flags, `CLAUDE_INGEST_SECRET_FILE`,
 `CODEX_INGEST_SECRET_FILE`, `CLIPPER_INGEST_SECRET_FILE`,
 `GOOGLE_AI_STUDIO_API_KEY_FILE`, the optional bounded Google model settings,
-the `LIFEOS_SUPPLEMENT_CATALOG_PATH` and Enable Banking file/URL settings, and
+the `LIFEOS_SUPPLEMENT_CATALOG_PATH` and Enable Banking runtime file/URL settings, and
 the runtime path keys `SYSTEMROOT`, `TEMP`, `TMP`, and `PATH`. The optional
 Open Food Facts integration adds exactly two names: `OPEN_FOOD_FACTS_ENABLED`
 (the literal boolean `true`/`false`) and
@@ -72,15 +86,19 @@ Secret values never belong in this file: put them in the child-owned secret
 files and pass only their absolute file paths. The host never reads their
 contents. A secret-file path may be absent while its corresponding ingestion
 flag is `false`; enabling that feature makes the file a required startup
-dependency.
+dependency. Enable Banking runtime authentication uses the app ID and private
+key to sign JWT requests; its public certificate is a registration artifact and
+is not a runtime environment value or client certificate.
 
 The host requires executable, working, log, and referenced secret/config paths
 to exist and rejects reparse points, junctions, and symbolic/path-redirection
 links where the OS exposes them. Safe file hardlinks are accepted because they
 do not redirect path resolution.
 The usage-store path may be a new file, but its parent directory must exist and
-be non-reparse. Health URLs must be `http://` and literal loopback (`127.0.0.1`,
-`::1`, or `localhost`) with no credentials, query, or fragment.
+be non-reparse. Probe URLs must be `http://` and literal loopback
+(`127.0.0.1`, `::1`, or `localhost`) with no credentials, query, or fragment.
+The health URL must use the `/health` path and the readiness URL the `/ready`
+path; both must target the same loopback listener.
 
 ## Invocation and SCM identity
 
