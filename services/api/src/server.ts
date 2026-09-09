@@ -1,3 +1,4 @@
+import { authorizeLocalApi, isLocalApiPath, localApiConfigurationReady, requiresLocalApiAuth } from './local-auth.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { constants as fsConstants } from 'node:fs';
 import { access, lstat, open } from 'node:fs/promises';
@@ -121,8 +122,9 @@ async function validateUsageStore(): Promise<boolean> {
   }
 }
 
-/** Startup gate: enabled ingestion must have a valid file-only secret before binding. */
+/** Startup gate: enabled ingestion and local-service routes require valid file-only secrets before binding. */
 export async function validateStartupConfiguration(): Promise<boolean> {
+  if (!(await localApiConfigurationReady())) return false;
   if (claudeIngestEnabled() && (await claudeIngestSecret()) === undefined) return false;
   if (codexIngestEnabled() && (await codexIngestSecret()) === undefined) return false;
   if (clipperIngestEnabled() && (await clipperIngestSecret()) === undefined) return false;
@@ -404,7 +406,23 @@ export async function app(
   const configuredClipperStore = clipperStore ?? defaultClipperStore;
   const configuredNutritionPhotoClient = nutritionPhotoClient ?? createConfiguredNutritionPhotoProposalClient();
   res.setHeader('content-type', 'application/json'); res.setHeader('cache-control', 'no-store');
-  if (req.url !== '/health' && !loopback(req)) return json(res, 403, { error: 'loopback_only' });
+  if (req.url !== '/health' && req.url !== '/ready' && !loopback(req)) return json(res, 403, { error: 'loopback_only' });
+  // Keep the method/path matrix explicit before any URL-only handler can run.
+  // A protected route with the wrong verb is rejected without reading data or
+  // invoking a provider; only the exact matrix entry reaches authorization.
+  if (isLocalApiPath(req.url) && !requiresLocalApiAuth(req.method, req.url)) {
+    return json(res, 405, { error: 'read_only_api' });
+  }
+  if (requiresLocalApiAuth(req.method, req.url)) {
+    const failure = await authorizeLocalApi(req);
+    if (failure !== undefined) return json(res, failure, {
+      error: failure === 503 ? 'local_api_unavailable' : failure === 403 ? 'loopback_only' : 'unauthorized',
+    });
+  }
+  // These responses contain no personal data: static fixtures/catalog, unavailable
+  // finance summary, Calendar authority refusal and public barcode catalogue.
+  // There is no Node nutrition-summary route. Any future personal-data route
+  // must explicitly join the protected matrix in local-auth.ts before wiring.
   if (req.method === 'POST' && (req.url === '/api/usage/claude-ingest' || req.url === '/api/claude/statusline')) {
     if (process.env.CLAUDE_INGEST_ENABLED !== 'true' && process.env.CLAUDE_STATUSLINE_ENABLED !== 'true') return json(res, 404, { error: 'disabled' });
     return ingest(req, res);
@@ -427,11 +445,15 @@ export async function app(
   if (req.url?.startsWith('/api/nutrition/barcode/') || req.url?.startsWith('/nutrition/barcode/')) {
     return lookupBarcode(req, res, configuredBarcodeClient);
   }
+  if (req.url === '/ready') {
+    const ready = await validateStartupConfiguration();
+    return json(res, ready ? 200 : 503, { readiness: ready ? 'ready' : 'unavailable' });
+  }
   if (req.url === '/health') return json(res, 200, {
     status: 'ok',
     service: 'iphone-life-os-api',
     mode: apiMode(),
-    readiness: 'ready',
+    readiness: await localApiConfigurationReady() ? 'ready' : 'unavailable',
   });
   if (req.url === '/api/overview') {
     if (!fixtureRoutesEnabled()) return fixtureRouteUnavailable(res);
@@ -446,10 +468,10 @@ export async function app(
   if (req.url === '/api/finance/summary') return json(res, 200, unavailableFinanceSummary());
   if (req.url === '/api/clipper/summary') {
     try {
-      const snapshot = await configuredClipperStore.get();
-      res.setHeader('x-lifeos-revision', String(await configuredClipperStore.currentRevision()));
+      const committed = await configuredClipperStore.readCommitted();
+      res.setHeader('x-lifeos-revision', String(committed.revision));
       res.setHeader('x-lifeos-schema-version', '1');
-      return json(res, 200, snapshot);
+      return json(res, 200, committed.snapshot);
     } catch {
       return json(res, 503, { error: 'clipper_unavailable' });
     }

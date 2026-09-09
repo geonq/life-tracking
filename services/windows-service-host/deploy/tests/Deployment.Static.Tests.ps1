@@ -8,6 +8,7 @@ $files = @(Get-ChildItem -LiteralPath $root -File -Include '*.ps1', '*.py' -Recu
     Where-Object { $_.FullName -ne $PSCommandPath })
 $text = ($files | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw }) -join "`n"
 $installText = Get-Content -LiteralPath (Join-Path $root 'install.ps1') -Raw
+$verifyText = Get-Content -LiteralPath (Join-Path $root 'verify.ps1') -Raw
 
 function Assert-Text {
     param([Parameter(Mandatory)][string]$Pattern, [Parameter(Mandatory)][string]$Message)
@@ -144,18 +145,66 @@ Assert-Text 'Invoke-NativeChecked -FilePath \$deploymentTest' 'Preflight runs de
 Assert-Text 'Restore-TailscaleServeSnapshot' 'Tailscale Serve state is restored on rollback.'
 Assert-Text 'Set-SecretAcl \$tailscaleEdgeTokenPath' 'Gateway service can read only the token file.'
 Assert-Text 'Assert-NoBroadAcl \$tailscaleEdgeTokenPath' 'Trusted edge token ACL is checked for broad grants.'
-Assert-Text '\*\$\{OperatorSid\}' 'ACL grants use SID-qualified icacls identities.'
+Assert-Text 'function New-LifeOSManagedAcl' 'ACL grants are built from canonical SID-qualified managed rules.'
+Assert-Text 'function Set-LifeOSAclWithBoundHandle' 'ACL grants are applied through a validated object handle.'
+Assert-Text 'SetDacl' 'The native ACL boundary applies DACLs through the validated handle.'
+Assert-Text 'function Get-LifeOSFileDigest' 'File hashes and lengths come from one validated handle-bound stream.'
+Assert-Text 'function Read-LifeOSPrefixBytes' 'Bounded prefix reads use the validated file handle.'
+Assert-Text 'function Get-LifeOSPathIdentityChain' 'Reads bind every existing path ancestor.'
+Assert-Text '\[IO\.Directory\]::EnumerateFileSystemEntries' 'Tree enumeration uses an unsorted .NET enumerator.'
+Assert-Text '\$enumerator\.MoveNext\(\)' 'Tree enumeration advances one child at a time before retaining it.'
+Assert-Text '\$enumerator\.Dispose\(\)' 'Tree enumeration disposes its incremental enumerator.'
+Assert-NotText 'Get-ChildItem -LiteralPath \$directory' 'Tree enumeration does not use the materializing filesystem-provider pipeline.'
+Assert-Text '\$seenPaths\.Add\(\$fullName\)' 'Tree enumeration rejects duplicate child paths before retaining them.'
+Assert-Text 'Bounded tree contains a duplicate path' 'Tree enumeration has an explicit duplicate failure.'
+Assert-Text 'Bounded tree contains too many files' 'Tree enumeration preserves the file limit.'
+Assert-Text 'Bounded tree contains too many directories' 'Tree enumeration preserves the directory limit.'
+Assert-Text 'Bounded tree exceeds its byte limit' 'Tree enumeration preserves the byte limit.'
+Assert-Text 'Get-LifeOSFileIntegrity' 'Candidate and installed integrity use the handle-bound digest primitive.'
 Assert-Text 'Get-LegacyGatewayListenerSnapshot' 'Legacy 8421 ownership is snapshotted before cutover.'
 Assert-Text 'Get-LoopbackPortOwner' 'Legacy listener inspection is limited to the loopback port.'
 Assert-Text 'Get-LegacyGatewayApproval' 'Legacy listener attribution is tied to the scheduled-task definition.'
 Assert-Text 'Assert-LegacyTaskUnchanged' 'Cutover and rollback revalidate the saved legacy task action.'
-Assert-Text 'Get-LegacyLauncherRuntimeCandidates' 'Legacy launcher attribution uses a dedicated fail-closed parser.'
 Assert-Text 'Get-LegacyLauncherApprovalShape' 'Legacy launcher approval validates the complete fixed-root uvicorn shape.'
 Assert-Text 'function Normalize-WindowsAbsolutePath' 'Windows runtime paths are normalized before exact comparison.'
 Assert-Text 'unsafeLink = \$null -ne \$linkType -and \[string\]\$linkType -ne ''HardLink''' 'Safe hardlinks are accepted while path-redirection links remain rejected.'
-Assert-Text 'unsafeTarget = \$null -ne \$target -and \[string\]\$linkType -ne ''HardLink''' 'Target metadata is rejected unless it describes a safe hardlink.'
 Assert-Text 'rootAssignmentLines.Count -ne 1' 'Dynamic or multiply-assigned launcher roots are rejected.'
 Assert-Text 'rootAssignments.Count -ne 1' 'Only one fixed absolute launcher root assignment is accepted.'
+
+$verifyText = Get-Content -LiteralPath (Join-Path $root 'verify.ps1') -Raw
+if ($verifyText -match '(?m)\.TryAdd\s*\(') { throw 'FAIL: Candidate verification must support Windows PowerShell 5.1 without Dictionary.TryAdd.' }
+foreach ($required in @(
+    '\$hashes\.ContainsKey\(\$relative\)',
+    '\[void\]\$hashes\.Add\(\$relative',
+    '\$expected\.ContainsKey\(\$tail\)',
+    '\[void\]\$expected\.Add\(\$tail',
+    '\$candidateByInstalled\.ContainsKey\(\$installedName\)',
+    '\[void\]\$candidateByInstalled\.Add\(\$installedName'
+)) {
+    if ($verifyText -notmatch $required) { throw "FAIL: Candidate verifier duplicate guard is missing: $required" }
+}
+foreach ($message in @(
+    'Candidate inventory manifest contains a duplicate',
+    'candidate mapping is duplicated or empty',
+    'duplicate installed mapping'
+)) {
+    if ($verifyText -notmatch [regex]::Escape($message)) { throw "FAIL: Candidate verifier duplicate behavior is not preserved: $message" }
+}
+
+$restoreStart = $text.IndexOf('function Restore-AclSnapshots', [StringComparison]::Ordinal)
+$restoreEnd = $text.IndexOf('function Assert-NoBroadAcl', [StringComparison]::Ordinal)
+if ($restoreStart -lt 0 -or $restoreEnd -le $restoreStart) { throw 'FAIL: ACL restore function is missing.' }
+$restoreText = $text.Substring($restoreStart, $restoreEnd - $restoreStart)
+if ($restoreText -match '(?i)icacls(?:\.exe)?[^\r\n]*/restore') { throw 'FAIL: ACL rollback must not invoke pathname-based icacls /restore.' }
+foreach ($required in @(
+    'Read-LifeOSBoundedJsonFile -Path \$backup',
+    'LifeOSAclTreeV1',
+    'Get-LifeOSTreeRelativePath',
+    'Set-LifeOSAclWithBoundHandle -Path \$entry\.Path',
+    'ACL restore tree contents changed since the snapshot.'
+)) {
+    if ($restoreText -notmatch $required) { throw "FAIL: Handle-bound ACL rollback invariant is missing: $required" }
+}
 Assert-Text 'locationInvocations.Count -ne 1' 'The launcher must change to its fixed root exactly once.'
 Assert-Text 'runtimeInvocations.Count -ne 1' 'Zero or multiple Python invocations are rejected.'
 Assert-Text 'literalPaths.Count -ne 0' 'Literal absolute Python paths cannot bypass the approved launcher shape.'
@@ -206,12 +255,25 @@ Assert-Text 'LegacyGatewaySource' 'Legacy data source is separate from the stage
 Assert-Text 'enablebanking-connections\.json' 'Enable Banking connection state is migrated.'
 Assert-Text 'finance-summary\.json' 'Finance summary state is migrated.'
 Assert-Text 'Assert-BoundedFile' 'Legacy Finance migrations enforce a size bound.'
-Assert-Text '256 \* 1024' 'Enable Banking migration bound is 256 KiB.'
-Assert-Text '1 \* 1024 \* 1024' 'Finance summary migration bound is 1 MiB.'
-Assert-Text 'Migrate-LegacyDataFile' 'Legacy Finance migrations use the journaled migration helper.'
+Assert-Text "'enablebanking-connections\.json' = 256 \* 1024" 'Enable Banking connection migration bound is 256 KiB.'
+Assert-Text "'finance-summary\.json' = 1 \* 1024 \* 1024" 'Finance summary migration bound is 1 MiB.'
+Assert-Text "'calendar\.json\.state\.json' = 6 \* 1024 \* 1024" 'Calendar state migration matches the gateway 6 MiB bound.'
+Assert-Text "'calendar\.json\.meta\.json' = 4 \* 1024 \* 1024" 'Calendar metadata migration matches the gateway 4 MiB bound.'
+Assert-Text "'finance-summary\.json\.meta\.json' = 4 \* 1024 \* 1024" 'Finance metadata migration matches the gateway 4 MiB bound.'
+Assert-Text "'enablebanking-revocation\.json' = 8 \* 1024 \* 1024" 'Enable Banking revocation migration matches the gateway 8 MiB bound.'
+Assert-Text "'finance-imported\.json' = 8 \* 1024 \* 1024" 'Imported finance migration matches the gateway 8 MiB bound.'
+Assert-NotText 'Migrate-LegacyDataFile' 'Legacy Finance migration has no unused helper path.'
+Assert-NotText 'Start-CodexCollectorAndVerify' 'Collector verification has no unused helper path.'
 Assert-Text "@\('-I', '-c'" 'Staged Python imports run in isolated mode.'
 Assert-Text 'function Resolve-PythonRuntimeSource' 'Python runtime resolution is centralized.'
 Assert-NotText '\$home\s*=' 'Deployment scripts do not assign the read-only PowerShell HOME variable.'
+Assert-Text '\$script:LifeOSCandidateNodeMaxFileBytes = 256 \* 1024 \* 1024' 'The allowlisted standalone Node runtime has an explicit 256 MiB bound.'
+Assert-Text '\$maxCandidateNodeFileBytes = \[long\]\$script:LifeOSCandidateNodeMaxFileBytes' 'Candidate verification consumes the explicit Node runtime bound.'
+Assert-Text 'LargeFileRelativePath ''node-runtime/node\.exe''' 'Candidate verification scopes the larger bound to the standalone Node path.'
+Assert-Text 'LargeFileRelativePath \$nodeLargeFileRelativePath' 'Installation passes the explicit Node runtime file contract.'
+Assert-Text 'function Get-LifeOSBoundedFileMaxBytes' 'Tree scans resolve per-file limits by relative path.'
+Assert-Text 'function Get-LifeOSRecoveryFileMaxBytes' 'Recovery resolves the Node exception for exact runtime files.'
+Assert-Text 'Get-LifeOSRecoveryFileMaxBytes -Path \$Path' 'Recovery artifact state uses the path-aware file limit.'
 Assert-Text 'linkType -ne ''HardLink''' 'Runtime manifests allow safe hardlinks but reject path-redirection links.'
 Assert-Text 'activationScriptNames' 'Deployed Python venvs omit profile-bound activation helpers.'
 Assert-Text 'rootInterpreter = Join-Path \$sourceRoot ''python\.exe''' 'Root-layout Python is resolved explicitly.'
@@ -236,8 +298,8 @@ Assert-Text "New-ManifestIntent.*-Kind 'config'" 'New config paths use the canon
 Assert-InstallOrder "-Kind 'config'" 'Write-JsonAtomic $gatewayConfig' 'New config paths are journaled before creation.'
 Assert-Text 'Unregister-ScheduledTask' 'A newly-created Codex task can be removed on rollback.'
 Assert-InstallOrder 'Copy-TreeVerifiedAtomic $nodeSource $nodeTarget' 'Register-CodexCollectorTask' 'Node is staged before Codex task registration.'
-Assert-InstallOrder 'Set-RestrictedAcl $directory $operatorSid @() @($gatewaySid)' '$catalogInitialized = Initialize-SupplementCatalog' 'Supplement database is initialized after gateway data ACL setup.'
-Assert-InstallOrder 'Start-CodexCollectorAndVerify' 'Stop-LegacyGatewayForCutover' 'Legacy cutover occurs only after the new API/usage gate.'
+Assert-InstallOrder 'Set-RestrictedAcl $directory $operatorSid @() @($gatewaySid) -AllowedOwnerSids @($gatewaySid) -InheritableSystemFullControl' '$catalogInitialized = Initialize-SupplementCatalog' 'Supplement database is initialized after gateway data ACL setup.'
+Assert-InstallOrder '$legacyCutover = Stop-LegacyGatewayForCutover' '$authorityFiles = ' 'Legacy writer is quiesced before authority inventory.'
 Assert-InstallOrder 'Assert-TailscaleEdgeTokenSource' 'New-BackupDirectory' 'Token source validation occurs before backup/mutation.'
 
 # A raw token value must never cross a PowerShell argument, manifest, or JSON
@@ -422,3 +484,238 @@ Assert-NotText '(?i)restart\s*/\s*\d+\s*/\s*reboot' 'SCM recovery never reboots.
 Assert-NotText '(?i)shell\s*=\s*True' 'The Python launcher never uses a shell.'
 
 Write-Host 'PASS: deployment static assertions'
+
+# Migration is an explicit, canonical recovery unit, never a legacy directory copy.
+foreach ($name in @('calendar.json', 'calendar.json.state.json', 'calendar.json.meta.json', 'calendar.json.retry.json', 'finance-summary.json', 'finance-summary.json.state.json', 'finance-summary.json.meta.json', 'enablebanking-connections.json', 'enablebanking-revocation.json', 'enablebanking-revoked.json', 'enablebanking-partial.json', 'enablebanking-runtime.json', 'finance-imported.json', 'documents.json')) {
+    if (-not $installText.Contains("'" + $name + "' =")) { throw "FAIL: Missing authority allowlist entry: $name" }
+}
+Assert-Text "'finance-summary\.json\.state\.json' = 6 \* 1024 \* 1024" 'Finance state migration matches the gateway 6 MiB bound.'
+Assert-Text "'finance-imported\.json' = 8 \* 1024 \* 1024" 'Gateway-owned imported finance state has the gateway 8 MiB bound.'
+
+$enableBankingText = Get-Content -LiteralPath (Join-Path $root '..\..\gateway\enablebanking.py') -Raw
+$enableBankingStateMatch = [regex]::Match($enableBankingText, '(?m)^\s*MAX_FINANCE_STATE_SIZE\s*=\s*(?<value>\d+)\s*\*\s*1024\s*\*\s*1024\s*$')
+$installerStateMatch = [regex]::Match($installText, "(?m)^\s*'finance-summary\.json\.state\.json'\s*=\s*(?<value>\d+)\s*\*\s*1024\s*\*\s*1024\s*$")
+if (-not $enableBankingStateMatch.Success -or -not $installerStateMatch.Success) {
+    throw 'FAIL: canonical Enable Banking state or installer state bound is missing.'
+}
+$gatewayStateBytes = [long]$enableBankingStateMatch.Groups['value'].Value * 1024 * 1024
+$installerStateBytes = [long]$installerStateMatch.Groups['value'].Value * 1024 * 1024
+if ($gatewayStateBytes -ne $installerStateBytes) {
+    throw "FAIL: installer finance state bound $installerStateBytes differs from gateway bound $gatewayStateBytes."
+}
+
+$gatewayMainText = Get-Content -LiteralPath (Join-Path $root '..\..\gateway\main.py') -Raw
+$gatewayImportedStateMatch = [regex]::Match($gatewayMainText, '(?m)^\s*FINANCE_IMPORTED_MAX_STATE_SIZE\s*=\s*(?<value>\d+)\s*\*\s*1024\s*\*\s*1024\s*$')
+$installerImportedStateMatch = [regex]::Match($installText, "(?m)^\s*'finance-imported\.json'\s*=\s*(?<value>\d+)\s*\*\s*1024\s*\*\s*1024\s*$")
+if (-not $gatewayImportedStateMatch.Success -or -not $installerImportedStateMatch.Success) {
+    throw 'FAIL: canonical imported-finance state or installer bound is missing.'
+}
+$gatewayImportedStateBytes = [long]$gatewayImportedStateMatch.Groups['value'].Value * 1024 * 1024
+$installerImportedStateBytes = [long]$installerImportedStateMatch.Groups['value'].Value * 1024 * 1024
+if ($gatewayImportedStateBytes -ne $installerImportedStateBytes) {
+    throw "FAIL: installer imported-finance bound $installerImportedStateBytes differs from gateway bound $gatewayImportedStateBytes."
+}
+Assert-Text 'Assert-AuthorityJsonBounds' 'Authority JSON has structural bounds.'
+Assert-Text 'preserve-installed' 'Reinstall preserves the installed authority set.'
+Assert-Text 'Authority backup provenance invalid' 'Missing or altered authority backup blocks rollback.'
+Assert-Text 'Authority provenance changed or incomplete' 'Post-migration writes block unsafe rollback.'
+Assert-Text 'terminalCompleted' 'Collector journals terminal completion evidence.'
+Assert-Text '\$sawRunning -and' 'Collector requires observed running-to-ready completion.'
+Assert-Text '\$exitCode -eq 2' 'Only provider unavailable is explicitly degraded.'
+
+Assert-Text 'Usage authority changed or has no provenance' 'Usage writes also block stale authority rollback.'
+Assert-Text 'function Test-AuthorityRecoveryBaseline' 'Recovered early transactions require a complete authority baseline.'
+Assert-Text 'function Get-LifeOSServiceConfigArguments' 'Install and rollback share service-manager argument encoding.'
+Assert-Text 'function Assert-CompleteLifeOSServiceSnapshot' 'Service rollback requires a complete snapshot.'
+Assert-Text 'stageState -eq ''complete''.*return' 'Completed recovery stages are idempotent.'
+
+# Inspect the verifier array itself, so matching strings elsewhere cannot mask
+# an obsolete allowlist. The Python source suite checks the compiler-derived
+# transitive import/export closure and imports/starts an isolated Node package.
+$candidateVerifierText = Get-Content -LiteralPath (Join-Path $root 'verify-candidate.ps1') -Raw
+$candidateAllowlistMatch = [regex]::Match($candidateVerifierText, '(?ms)^\$expectedFiles = @\(\r?\n(?<body>.*?)^\)')
+if (-not $candidateAllowlistMatch.Success) { throw 'FAIL: Candidate verifier allowlist is missing.' }
+$candidateEntries = @([regex]::Matches($candidateAllowlistMatch.Groups['body'].Value, '(?m)^\s+''([^'']+)''\s*$') |
+    ForEach-Object { $_.Groups[1].Value })
+if ($candidateEntries.Count -ne @($candidateEntries | Sort-Object -Unique).Count) {
+    throw 'FAIL: Candidate allowlist contains duplicate paths.'
+}
+foreach ($entry in $candidateEntries) {
+    if ($entry -cnotmatch '\A[A-Za-z0-9_@./-]+\z' -or $entry.StartsWith('/') -or
+        @($entry.Split('/') | Where-Object { $_ -eq '' -or $_ -eq '.' -or $_ -eq '..' }).Count -gt 0) {
+        throw "FAIL: Candidate allowlist must contain literal safe paths: $entry"
+    }
+}
+foreach ($requiredModule in @(
+    'api/dist/local-auth.js'
+)) {
+    if ($candidateEntries -cnotcontains $requiredModule) {
+        throw "FAIL: Candidate allowlist omits runtime module: $requiredModule"
+    }
+}
+Write-Output 'PASS: Candidate runtime module allowlist regression checks.'
+
+Assert-Text 'LIFEOS_LOCAL_API_ENABLED = ''true''' 'Local API bearer contract is explicitly enabled.'
+Assert-Text 'LIFEOS_LOCAL_API_SECRET_FILE' 'Local API callers use the separate file contract.'
+Assert-Text 'Invoke-WebRequest -Uri \$Uri -Headers \$headers' 'Protected verification transmits authentication.'
+Assert-Text 'Assert-RecoveryIdentity' 'Recovery binds generation, manifest, and operator.'
+Assert-Text 'Read-RecoveryJournal' 'Rollback resumes durable artifact progress.'
+Assert-Text 'Assert-RecoveryUnitState' 'Recovery accepts only permitted pre/post states.'
+Assert-Text '\$script:LifeOSRecoveryMaxTreeRoots = 256' 'Recovery bounds the number of artifact roots.'
+Assert-Text '\$script:LifeOSRecoveryMaxFileUnits = 65536' 'Recovery allows expanded trees within a finite file-unit bound.'
+Assert-Text '\$script:LifeOSRecoveryMaxTreeBytes = 512 \* 1024 \* 1024' 'Recovery bounds each indexed tree by bytes.'
+Assert-Text '\$script:LifeOSRecoveryMaxFileBytes = 64 \* 1024 \* 1024' 'Recovery bounds each indexed file by bytes.'
+Assert-Text '\$script:LifeOSRecoveryMaxInventoryBytes = 512 \* 1024 \* 1024' 'Recovery bounds the aggregate indexed inventory by bytes.'
+Assert-Text 'function Assert-RecoveryInventoryBounds' 'Recovery validates inventory bounds before restoration.'
+Assert-Text 'function Get-TreeManifestIndex' 'Tree validation hashes each bounded tree in one indexed pass.'
+Assert-Text 'function Get-RecoveryTreeManifestIndex' 'Recovery reuses indexed parent trees instead of rescanning descendants.'
+Assert-Text 'function Get-RecoveryCanonicalTreeRoots' 'Overlapping recovery roots are canonicalized before scanning.'
+Assert-Text 'Read-LifeOSBoundedJsonFile' 'Deployment JSON readers enforce a byte bound before parsing.'
+Assert-Text '\$script:LifeOSRecoveryProgressMaxBytes = 64 \* 1024 \* 1024' 'Recovery progress has a finite serialized-size bound.'
+Assert-Text 'function Append-RecoveryProgress' 'Recovery records per-unit progress without rewriting the full journal.'
+Assert-Text 'function Write-RecoveryProgressFramePart' 'Recovery progress records have explicit framed write boundaries.'
+Assert-Text 'SetLength\(\$committedOffset\)' 'Recovery truncates only an uncommitted progress tail.'
+Assert-Text 'Recovery progress committed record digest is invalid' 'Committed progress-record corruption is rejected.'
+Assert-Text 'function Get-LifeOSScheduledTaskExact' 'Scheduled-task absence is distinguished from provider failure.'
+Assert-Text 'FullyQualifiedErrorId' 'Scheduled-task absence classification authenticates the provider error.'
+Assert-Text '\[switch\]\$DeferStart' 'Service configuration restoration can defer starting services.'
+Assert-Text 'function Restore-LifeOSServiceSnapshots' 'Service recovery restores all configuration before dependency reconciliation.'
+Assert-Text "service-state-reconcile" 'Service state reconciliation has its own durable recovery stage.'
+Assert-Text '\[switch\]\$VerifyHealth' 'Service recovery verifies loopback health before terminal success.'
+Assert-Text 'function Assert-LifeOSServiceSnapshotState' 'Service recovery verifies the complete typed snapshot state.'
+Assert-Text 'function Complete-LifeOSRecoveryState' 'Recovery state is archived only after verified terminal stages.'
+Assert-Text 'recoveryArchivePath' 'Recovered markers bind the durable recovery archive.'
+Assert-Text 'Stop-DeploymentTaskBarrier' 'Scheduled writers join the recovery barrier.'
+Assert-Text 'Get-TaskRecoveryIdentity' 'Task action/principal/path are verified before mutation.'
+Assert-Text 'function Reconcile-LifeOSScheduledTaskSnapshotState' 'Scheduled task state is reconciled after recovery retries.'
+Assert-Text '\[AllowEmptyString\].*\$MarkerState' 'Fresh installs explicitly allow an empty marker state.'
+Assert-Text 'foreach \(\$key in \$Reference.Keys\)' 'Generation references validate dictionary keys.'
+Assert-Text 'Get-AuthorityInstallMode' 'Authority completeness is classified explicitly.'
+Assert-Text 'Test-CollectorUsagePreserved' 'Installer observations are preserved and attributed.'
+Assert-Text 'Assert-AclRoleRights' 'ACL checks required and forbidden role rights.'
+Assert-InstallOrder 'Save-InstallManifest $manifest $manifestPath' 'Bind-LifeOSDeploymentManifest $deploymentMutex' 'No marker without a manifest.'
+Assert-InstallOrder 'Stop-DeploymentTaskBarrier $manifest $manifestPath' '$apiIntent = New-ManifestIntent' 'Scheduled writers stop before code changes.'
+Write-Host 'PASS: transaction-owned recovery static assertions'
+
+
+# Scope these assertions to production bodies; test fixtures must not satisfy them.
+$commonText = Get-Content -LiteralPath (Join-Path $root 'Deployment.Common.ps1') -Raw
+
+$durableBody = ($commonText -split 'function Write-LifeOSDurableBytes', 2)[1] -split 'function Write-JsonAtomic', 2
+if ($durableBody[0].IndexOf('$stream.Flush($true)', [StringComparison]::Ordinal) -lt 0 -or
+    $durableBody[0].IndexOf('$stream.Dispose()', [StringComparison]::Ordinal) -lt 0) {
+    throw 'FAIL: durable checkpoint writer must flush contents and close its handle.'
+}
+$jsonAtomicBody = ($commonText -split 'function Write-JsonAtomic', 2)[1] -split 'function Assert-PathOnlyJson', 2
+if ($jsonAtomicBody[0].IndexOf('Write-LifeOSDurableBytes', [StringComparison]::Ordinal) -lt 0 -or
+    $jsonAtomicBody[0].IndexOf('Move-Item -LiteralPath $temp', [StringComparison]::Ordinal) -lt 0 -or
+    $jsonAtomicBody[0].IndexOf('Write-LifeOSDurableBytes', [StringComparison]::Ordinal) -gt
+    $jsonAtomicBody[0].IndexOf('Move-Item -LiteralPath $temp', [StringComparison]::Ordinal) -or
+    $jsonAtomicBody[0].Contains('[IO.File]::WriteAllBytes($temp, $bytes)')) {
+    throw 'FAIL: JSON checkpoint bytes must be durably flushed before atomic replacement.'
+}
+$boundedTreeBody = ($commonText -split 'function Get-LifeOSBoundedTreeItem', 2)[1] -split 'function Get-TreeManifestIndex', 2
+if ($boundedTreeBody[0] -match '\$unsafeTarget|\$target\s*=') {
+    throw 'FAIL: bounded tree reparse checks must use LinkType and never compare Target as a link type.'
+}
+$stageBody = ($commonText -split 'function Invoke-RecoveryStage', 2)[1] -split 'function Get-RecoveryJournalPath', 2
+if (-not $stageBody[0].Contains('Read-RecoveryJournal $Manifest') -or
+    $stageBody[0].IndexOf('Read-RecoveryJournal') -gt $stageBody[0].IndexOf('& $Action')) { throw 'FAIL: Recovery stages must authenticate the journal before acting.' }
+Assert-InstallOrder 'Save-CollectorReceipt $manifest' '$manifest.codexCollectorVerification = ' 'Collector receipt is durable before replacing manifest observations.'
+if (-not $commonText.Contains('Executable = $false') -or -not $commonText.Contains("@('.exe', '.dll')")) { throw 'FAIL: Service image ACLs require execution rights.' }
+$frozenTreeBody = ($commonText -split 'function Get-LifeOSFrozenTreeInventory', 2)[1] -split 'function Add-LifeOSManagedAccessRule', 2
+$managedAclBody = ($commonText -split 'function New-LifeOSManagedAcl', 2)[1] -split 'function Set-LifeOSAclWithBoundHandle', 2
+$traversalAclBody = ($commonText -split 'function Set-DirectoryTraversalAcl', 2)[1] -split 'function Assert-ExplicitAclAllowSet', 2
+$snapshotBody = ($commonText -split 'function Register-AclSnapshot', 2)[1] -split 'function Restore-AclSnapshots', 2
+if (-not $frozenTreeBody[0].Contains('if (-not $File -and -not $RootOnly)') -or
+    $frozenTreeBody[0].IndexOf('if (-not $File -and -not $RootOnly)') -gt $frozenTreeBody[0].IndexOf('Get-LifeOSBoundedTreeItem')) {
+    throw 'FAIL: RootOnly tree inventory must stop before descendant enumeration.'
+}
+foreach ($required in @(
+    'Register-AclSnapshot $Path -RootOnly:$RootOnly',
+    'Get-LifeOSFrozenTreeInventory -Path $Path -RootOnly:$RootOnly',
+    'Remove-TransientLogonAclRules $Path -Recurse:(!$RootOnly)',
+    'Assert-RestrictedAcl -Path $Path -OperatorSid $OperatorSid -ReadSids $ReadSids -ModifySids @() -Recurse:(!$RootOnly)',
+    '[switch]$Executable',
+    '$IsContainer -or $Executable',
+    "[IO.Path]::GetExtension([string]`$entry.Path) -in @('.exe', '.dll')",
+    '-Executable:$isExecutable',
+    '-InheritableSystemFullControl:($InheritToChildren -and $RootOnly)',
+    'if ($item.PSIsContainer -and -not $RootOnly)',
+    'Set-LifeOSAclWithBoundHandle -Path $destination -Acl $acl -Directory ([bool]$destinationItem.PSIsContainer)'
+)) {
+    if (-not ($traversalAclBody[0] + $managedAclBody[0] + $snapshotBody[0]).Contains($required)) {
+        throw "FAIL: Directory traversal ACL contract is missing: $required"
+    }
+}
+if (-not $commonText.Contains('function Assert-LifeOSExpectedImmediateChildren') -or
+    -not $commonText.Contains('[IO.SearchOption]::TopDirectoryOnly') -or
+    -not $commonText.Contains('New-LifeOSTreeItemIdentity -Item $childItem') -or
+    -not $commonText.Contains('Get-LifeOSPathIdentityChain -Path $childPath') -or
+    -not $commonText.Contains('Shared-root child grants cross-service access')) {
+    throw 'FAIL: Shared data/log roots must use a bounded, identity-checked immediate-child contract.'
+}
+$immediateChildrenBody = ($commonText -split 'function Assert-LifeOSExpectedImmediateChildren', 2)[1] -split 'function Set-AclSnapshotContext', 2
+if ($immediateChildrenBody[0].Contains('$rootComparison') -or
+    -not $immediateChildrenBody[0].Contains('$parentPath.TrimEnd(') -or
+    -not $immediateChildrenBody[0].Contains('-ine $rootFull')) {
+    throw 'FAIL: Shared-root parent comparison must use the function-local normalized root path.'
+}
+if ($traversalAclBody[0].Contains('Get-LifeOSFrozenTreeInventory -Path $Path)') -or
+    $traversalAclBody[0].Contains('Get-LifeOSBoundedTreeItem')) {
+    throw 'FAIL: RootOnly ACL setup must not directly enumerate descendants.'
+}
+foreach ($runtimeRoot in @(
+    'Set-DirectoryTraversalAcl $apiTarget $operatorSid @($apiSid) -RootOnly -InheritToChildren',
+    'Set-DirectoryTraversalAcl $gatewayTarget $operatorSid @($gatewaySid) -RootOnly -InheritToChildren',
+    'Set-DirectoryTraversalAcl $nodeTarget $operatorSid @($apiSid) -RootOnly -InheritToChildren',
+    "Set-DirectoryTraversalAcl (Join-Path `$paths.RuntimeRoot 'python312') `$operatorSid @(`$gatewaySid) -RootOnly -InheritToChildren"
+)) {
+    if (-not $installText.Contains($runtimeRoot)) { throw "FAIL: Runtime ACL boundary is not inherited by the launched tree: $runtimeRoot" }
+}
+foreach ($parentRoot in @(
+    'Set-DirectoryTraversalAcl $paths.DataRoot $operatorSid @($apiSid, $gatewaySid) -RootOnly',
+    'Set-DirectoryTraversalAcl $paths.LogRoot $operatorSid @($apiSid, $gatewaySid) -RootOnly'
+)) {
+    if (-not $installText.Contains($parentRoot)) { throw "FAIL: Shared traversal parent is not direct root-only: $parentRoot" }
+}
+# The native reinstall behavior suite exercises existing descendants on
+# Windows; this source contract is the fallback on hosts without PowerShell.
+if ($installText -match '(?m)^\s*Set-DirectoryTraversalAcl \$paths\.(DataRoot|LogRoot) \$operatorSid @\(\$apiSid, \$gatewaySid\) -RootOnly -InheritToChildren\s*$') {
+    throw 'FAIL: Data/log traversal parents must not inherit service access.'
+}
+Assert-InstallOrder 'Set-DirectoryTraversalAcl $paths.DataRoot $operatorSid @($apiSid, $gatewaySid) -RootOnly' 'foreach ($directory in @($apiData, $apiTemp, $apiLogs))' 'Data traversal boundary must precede API writable-tree hardening.'
+Assert-InstallOrder 'Set-DirectoryTraversalAcl $paths.LogRoot $operatorSid @($apiSid, $gatewaySid) -RootOnly' 'foreach ($directory in @($apiData, $apiTemp, $apiLogs))' 'Log traversal boundary must precede scoped writable-tree hardening.'
+foreach ($expectedCall in @(
+    'Assert-LifeOSExpectedImmediateChildren -Root $paths.DataRoot -ExpectedChildren ([ordered]@{ api = $apiSid; gateway = $gatewaySid }) -RequireAll',
+    'Assert-LifeOSExpectedImmediateChildren -Root $paths.LogRoot -ExpectedChildren ([ordered]@{ api = $apiSid; gateway = $gatewaySid }) -RequireAll',
+    'Assert-LifeOSExpectedImmediateChildren -Root $dataRoot -ExpectedChildren ([ordered]@{ api = $apiSid; gateway = $gatewaySid }) -RequireAll',
+    'Assert-LifeOSExpectedImmediateChildren -Root $logRoot -ExpectedChildren ([ordered]@{ api = $apiSid; gateway = $gatewaySid }) -RequireAll'
+)) {
+    if (-not ($installText + $verifyText).Contains($expectedCall)) { throw "FAIL: Shared-root child validation is missing: $expectedCall" }
+}
+foreach ($writableTree in @(
+    'Set-RestrictedAcl $directory $operatorSid @() @($apiSid) -AllowedOwnerSids @($apiSid) -InheritableSystemFullControl',
+    'Set-RestrictedAcl $directory $operatorSid @() @($gatewaySid) -AllowedOwnerSids @($gatewaySid) -InheritableSystemFullControl',
+    'Assert-RestrictedAcl $apiData $operatorSid @() @($apiSid) -AllowedOwnerSids @($apiSid) -AllowInherited -Recurse',
+    'Assert-RestrictedAcl $gatewayData $operatorSid @() @($gatewaySid) -AllowedOwnerSids @($gatewaySid) -AllowInherited -Recurse',
+    'Assert-RestrictedAcl $apiLogs $operatorSid @() @($apiSid) -AllowedOwnerSids @($apiSid) -AllowInherited -Recurse',
+    'Assert-RestrictedAcl $gatewayLogs $operatorSid @() @($gatewaySid) -AllowedOwnerSids @($gatewaySid) -AllowInherited -Recurse'
+)) {
+    if (-not ($installText + $commonText + $verifyText).Contains($writableTree)) { throw "FAIL: Managed writable ACL contract is missing: $writableTree" }
+}
+if (-not $commonText.Contains('[string[]]$AllowedOwnerSids = @()') -or
+    -not $commonText.Contains("Allowed ACL owner must be a service SID with Modify rights on this managed writable tree.")) {
+    throw 'FAIL: Service-owned writable tree owner scope is not explicit and role-bound.'
+}
+if (-not $commonText.Contains('@($AllowedOwnerSids).Count -gt 0 -and -not $File -and -not $InheritableSystemFullControl') -or
+    -not $installText.Contains('Set-RestrictedAcl $supplementCatalog $operatorSid @() @($gatewaySid) -File -AllowedOwnerSids @($gatewaySid)') -or
+    -not $verifyText.Contains('Assert-RestrictedAcl $supplementCatalog $operatorSid @() @($gatewaySid) -AllowedOwnerSids @($gatewaySid) -AllowInherited')) {
+    throw 'FAIL: Supplement catalog owner scope must remain gateway-specific and file-safe.'
+}
+$catalogVerifyLine = [regex]::Match($verifyText, '(?m)^\s*Assert-RestrictedAcl \$supplementCatalog \$operatorSid .* -AllowInherited\s*$').Value
+if ($installText -match '(?m)^\s*Set-RestrictedAcl \$supplementCatalog \$operatorSid .* -File\s*$' -or
+    ($catalogVerifyLine -and $catalogVerifyLine -notmatch '-AllowedOwnerSids')) {
+    throw 'FAIL: Supplement catalog must not use an unscoped service-owner relaxation.'
+}
+Write-Host 'PASS: remaining Windows deployment/recovery static assertions'

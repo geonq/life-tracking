@@ -15,14 +15,20 @@ import { atomicWriteFile } from './atomic-file.js';
 export const MAX_HISTORY_BYTES = 1 * 1024 * 1024;
 export const MAX_HISTORY_METADATA_BYTES = 4 * 1024 * 1024;
 export const MAX_HISTORY_STATE_BYTES = 6 * 1024 * 1024;
+export const MAX_HISTORY_SAMPLES = 10_000;
+export const MAX_HISTORY_IDEMPOTENCY_RECORDS = 10_000;
+export const MAX_HISTORY_BATCH_ENTRIES = 128;
+export const MAX_HISTORY_QUEUE_DEPTH = 64;
 const HISTORY_STATE_SCHEMA_VERSION = 1;
 const HISTORY_OPEN_FLAGS = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
 const MAX_SAFE_REVISION = Number.MAX_SAFE_INTEGER;
 
 export type UsageHistoryErrorCode =
+  | 'batch_too_large'
   | 'invalid_idempotency_key'
   | 'idempotency_key_reuse'
   | 'idempotency_store_full'
+  | 'queue_full'
   | 'storage_unavailable';
 
 export class UsageHistoryError extends Error {
@@ -56,6 +62,18 @@ type DurableUsageState = {
   metadata: UsageMetadata;
 };
 
+type QueuedMutation = {
+  task: () => Promise<unknown>;
+  resolve: (value: unknown) => void;
+  reject: (reason?: unknown) => void;
+};
+
+type MutationQueue = {
+  pending: QueuedMutation[];
+  running: boolean;
+  size: number;
+};
+
 // Keep the API's durable sidecar in lockstep with SyncDomainMetadata from the
 // shared contract. This local parser lets the standalone API package validate
 // state even when a deployment has not yet regenerated the workspace package.
@@ -69,11 +87,11 @@ const UsageMetadata = z.object({
     key: z.string().regex(/^[\x21-\x7e]{1,128}$/),
     fingerprint: z.string().regex(/^[0-9a-f]{64}$/),
     revision: z.number().finite().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-  }).strict()).max(10_000),
+  }).strict()).max(MAX_HISTORY_IDEMPOTENCY_RECORDS),
   // Usage samples are append-only telemetry in this service. A deletion
   // tombstone must not be silently accepted when no Usage delete operation
   // exists; an operator must migrate the authority contract first.
-  tombstones: z.array(z.never()).max(10_000),
+  tombstones: z.array(z.never()).max(MAX_HISTORY_IDEMPOTENCY_RECORDS),
 }).strict().superRefine((value, context) => {
   const keys = new Set<string>();
   value.idempotency.forEach((record, index) => {
@@ -104,6 +122,10 @@ function encodeEntries(entries: readonly Entry[]): Buffer {
   return Buffer.from(entries.map(entry => JSON.stringify(entry)).join('\n') + (entries.length ? '\n' : ''), 'utf8');
 }
 
+function latestEntries(entries: readonly Entry[], maxSamples: number): Entry[] {
+  return maxSamples === 0 ? [] : entries.slice(-maxSamples);
+}
+
 function idempotencyFingerprint(entries: readonly Entry[]): string {
   // An omitted capture timestamp is assigned by the API at receipt time. It
   // is transport metadata, not a new producer payload on retry, so it must not
@@ -112,7 +134,7 @@ function idempotencyFingerprint(entries: readonly Entry[]): string {
 }
 
 export class UsageHistory {
-  private static readonly writeQueues = new Map<string, Promise<void>>();
+  private static readonly writeQueues = new Map<string, MutationQueue>();
   private readonly file: string;
   private readonly metadataFile: string;
   private readonly stateFile: string;
@@ -124,6 +146,12 @@ export class UsageHistory {
     /** Injected for deterministic retention tests; production defaults to the system clock. */
     private readonly now: () => number = () => Date.now(),
   ) {
+    if (!Number.isSafeInteger(maxSamples) || maxSamples < 0 || maxSamples > MAX_HISTORY_SAMPLES) {
+      throw new RangeError('invalid_history_sample_limit');
+    }
+    if (!Number.isSafeInteger(maxAgeMs) || maxAgeMs < 0) {
+      throw new RangeError('invalid_history_age_limit');
+    }
     // history() creates a new instance per request, so the resolved path is the queue key.
     this.file = resolve(file);
     this.metadataFile = `${this.file}.meta.json`;
@@ -137,6 +165,9 @@ export class UsageHistory {
   async addMany(entries: readonly Entry[], idempotencyKey?: unknown): Promise<UsageHistoryWriteResult> {
     // Parse the complete batch before entering the queue: one invalid item cannot result in
     // a partial write of an otherwise valid batch.
+    if (!Array.isArray(entries) || entries.length > MAX_HISTORY_BATCH_ENTRIES) {
+      throw new UsageHistoryError('batch_too_large');
+    }
     const safe = entries.map(entry => UsageHistoryEntry.parse(entry));
     if (idempotencyKey !== undefined && !isUsageIdempotencyKey(idempotencyKey)) {
       throw new UsageHistoryError('invalid_idempotency_key');
@@ -152,7 +183,7 @@ export class UsageHistory {
         if (previous.fingerprint !== fingerprint) throw new UsageHistoryError('idempotency_key_reuse');
         return { kind: 'replay', revision: state.metadata.revision };
       }
-      if (idempotencyKey !== undefined && state.metadata.idempotency.length >= 10_000) {
+      if (idempotencyKey !== undefined && state.metadata.idempotency.length >= MAX_HISTORY_IDEMPOTENCY_RECORDS) {
         throw new UsageHistoryError('idempotency_store_full');
       }
 
@@ -183,10 +214,12 @@ export class UsageHistory {
       // old no-op behavior for a replay through the compatibility API.
       const acceptedObservation = nextEntries.length !== state.entries.length;
       const retained = acceptedObservation
-        ? nextEntries
-          .filter(item => this.now() - Date.parse(item.observedAt) <= this.maxAgeMs)
-          .sort((a, b) => Date.parse(a.observedAt) - Date.parse(b.observedAt))
-          .slice(-this.maxSamples)
+        ? latestEntries(
+          nextEntries
+            .filter(item => this.now() - Date.parse(item.observedAt) <= this.maxAgeMs)
+            .sort((a, b) => Date.parse(a.observedAt) - Date.parse(b.observedAt)),
+          this.maxSamples,
+        )
         : state.entries;
       const nextRaw = acceptedObservation ? encodeEntries(retained) : state.raw;
       if (nextRaw.byteLength > MAX_HISTORY_BYTES) throw new UsageHistoryError('storage_unavailable');
@@ -218,11 +251,10 @@ export class UsageHistory {
     // A corrupt or unexpectedly replaced store is an availability failure,
     // not an empty history. Callers must preserve that distinction.
     const { entries } = await this.readState();
-    return entries
+    return latestEntries(entries
       .filter(item => (!provider || item.provider === provider) && (!durationMinutes || item.durationMinutes === durationMinutes))
       .filter(item => this.now() - Date.parse(item.observedAt) <= this.maxAgeMs)
-      .sort((a, b) => Date.parse(a.observedAt) - Date.parse(b.observedAt))
-      .slice(-this.maxSamples);
+      .sort((a, b) => Date.parse(a.observedAt) - Date.parse(b.observedAt)), this.maxSamples);
   }
 
   /** Read/validate the configured store without creating or replacing it. */
@@ -367,14 +399,50 @@ export class UsageHistory {
   }
 
   private enqueue<T>(task: () => Promise<T>): Promise<T> {
-    const previous = UsageHistory.writeQueues.get(this.file) ?? Promise.resolve();
-    let result!: T;
-    const next = previous.catch(() => undefined).then(async () => {
-      result = await task();
+    let queue = UsageHistory.writeQueues.get(this.file);
+    if (queue === undefined) {
+      queue = { pending: [], running: false, size: 0 };
+      UsageHistory.writeQueues.set(this.file, queue);
+    }
+    if (queue.size >= MAX_HISTORY_QUEUE_DEPTH) {
+      throw new UsageHistoryError('queue_full');
+    }
+
+    queue.size += 1;
+    const result = new Promise<T>((resolveResult, rejectResult) => {
+      queue!.pending.push({
+        task: task as () => Promise<unknown>,
+        resolve: resolveResult as (value: unknown) => void,
+        reject: rejectResult,
+      });
     });
-    UsageHistory.writeQueues.set(this.file, next);
-    return next.then(() => result).finally(() => {
-      if (UsageHistory.writeQueues.get(this.file) === next) UsageHistory.writeQueues.delete(this.file);
-    });
+    this.drainQueue(this.file, queue);
+    return result;
+  }
+
+  private drainQueue(key: string, queue: MutationQueue): void {
+    if (queue.running) return;
+    queue.running = true;
+    void (async () => {
+      try {
+        while (queue.pending.length > 0) {
+          const operation = queue.pending.shift()!;
+          try {
+            operation.resolve(await operation.task());
+          } catch (error) {
+            operation.reject(error);
+          } finally {
+            queue.size -= 1;
+          }
+        }
+      } finally {
+        queue.running = false;
+        if (queue.size === 0 && UsageHistory.writeQueues.get(key) === queue) {
+          UsageHistory.writeQueues.delete(key);
+        } else if (queue.pending.length > 0) {
+          this.drainQueue(key, queue);
+        }
+      }
+    })();
   }
 }

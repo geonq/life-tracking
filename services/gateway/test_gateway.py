@@ -2590,6 +2590,47 @@ def test_document_retrieval_rejects_oversized_existing_file(tmp_path, monkeypatc
     assert response.status_code == 413
 
 
+def test_document_reader_is_bounded_and_identity_checked(tmp_path):
+    import main
+
+    path = tmp_path / "original.pdf"
+    path.write_bytes(b"pdf")
+    assert main._read_bounded_state_file(path, 3) == b"pdf"
+    with pytest.raises(main._BoundedFileTooLarge):
+        main._read_bounded_state_file(path, 2)
+    target = tmp_path / "target.pdf"
+    target.write_bytes(b"target")
+    link = tmp_path / "link.pdf"
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are unavailable in this test environment")
+    with pytest.raises(main._CalendarStateUnavailable):
+        main._read_bounded_state_file(link, 64)
+
+
+def test_document_reader_rejects_same_length_in_place_rewrite(tmp_path, monkeypatch):
+    import main
+
+    path = tmp_path / "original.pdf"
+    original = b"a" * (128 * 1024)
+    path.write_bytes(original)
+    real_read = main.os.read
+    read_count = 0
+
+    def read_with_rewrite(descriptor, size):
+        nonlocal read_count
+        chunk = real_read(descriptor, size)
+        if read_count == 0:
+            path.write_bytes(b"b" * len(original))
+        read_count += 1
+        return chunk
+
+    monkeypatch.setattr(main.os, "read", read_with_rewrite)
+    with pytest.raises(main._CalendarStateUnavailable):
+        main._read_bounded_state_file(path, len(original))
+
+
 def test_document_retrieval_rejects_invalid_id():
     response = client.get("/documents/not-a-uuid/file", headers=AUTH)
     assert response.status_code == 400

@@ -96,9 +96,9 @@ service SID. The commands below are examples to run on Windows during
 installation; this repository does not run or mutate SCM/ACL state:
 
 ```powershell
-sc.exe create LifeOSAPI binPath= '"C:\Program Files\LifeOS\ServiceHost\LifeOS.ServiceHost.exe" --service-name LifeOSAPI --config "C:\ProgramData\LifeOS\services\LifeOSAPI.json"' obj= 'NT SERVICE\LifeOSAPI' password= '' start= auto
+sc.exe create LifeOSAPI binPath= '"C:\Program Files\LifeOS\ServiceHost\LifeOS.ServiceHost.exe" --service-name LifeOSAPI --config "C:\ProgramData\LifeOS\services\LifeOSAPI.json"' obj= 'NT SERVICE\LifeOSAPI' password= '""' start= auto
 sc.exe sidtype LifeOSAPI unrestricted
-sc.exe create LifeOSGateway binPath= '"C:\Program Files\LifeOS\ServiceHost\LifeOS.ServiceHost.exe" --service-name LifeOSGateway --config "C:\ProgramData\LifeOS\services\LifeOSGateway.json"' obj= 'NT SERVICE\LifeOSGateway' password= '' start= auto
+sc.exe create LifeOSGateway binPath= '"C:\Program Files\LifeOS\ServiceHost\LifeOS.ServiceHost.exe" --service-name LifeOSGateway --config "C:\ProgramData\LifeOS\services\LifeOSGateway.json"' obj= 'NT SERVICE\LifeOSGateway' password= '""' start= auto
 sc.exe sidtype LifeOSGateway unrestricted
 ```
 
@@ -153,3 +153,13 @@ deployed for both services. Only the SCM arguments and private JSON/ACL paths di
 the CLI, in the host config, or in host-generated exception messages/log
 prefixes. Child output is passed through a conservative secret-pattern
 redactor before rotation.
+
+The deployment rollback path bounds each transaction to 256 artifact roots and
+65,536 file units, checks those limits and the serialized journal size before
+restoration, and records per-unit progress in bounded framed records. A torn
+uncommitted progress tail is truncated on retry and committed-record corruption
+is rejected; durable complete transitions are not duplicated. Recovery readers
+enforce explicit byte caps before JSON parsing. Service configuration is
+restored while services are stopped, then API and Gateway running state is
+reconciled in dependency order; scheduled-task enabled/running state is
+verified after every recovery retry.

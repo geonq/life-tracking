@@ -1,10 +1,37 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { request } from 'node:http';
 import { Readable } from 'node:stream';
-import { chmod, mkdtemp, mkdir, readFile, rmdir, symlink, unlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, rm, rmdir, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { app, createApiServer } from './server.js';
+import { app, createApiServer, startApiServer, validateStartupConfiguration } from './server.js';
+
+import { authorizeLocalApi } from './local-auth.js';
+
+const LOCAL_SECRET = 'local-service-test-credential-'.repeat(2);
+const localHeaders = () => ({ authorization: `Bearer ${LOCAL_SECRET}` });
+
+// Maintained independently from local-auth.ts so this test still detects a
+// route that loses protection when the production route list changes.
+const SENSITIVE_LOCAL_ROUTES: ReadonlyArray<readonly [string, string]> = [
+  ['GET', '/api/usage'],
+  ['GET', '/api/codex/live'],
+  ['GET', '/api/clipper/summary'],
+  ['POST', '/api/nutrition/photo-proposal'],
+  ['POST', '/nutrition/photo-proposal'],
+];
+let localDirectory: string;
+beforeEach(async () => {
+  localDirectory = await mkdtemp(join(tmpdir(), 'lifeos-local-auth-'));
+  const path = join(localDirectory, 'secret');
+  await writeFile(path, LOCAL_SECRET, { mode: 0o600 });
+  vi.stubEnv('LIFEOS_LOCAL_API_ENABLED', 'true');
+  vi.stubEnv('LIFEOS_LOCAL_API_SECRET_FILE', path);
+});
+afterEach(async () => {
+  vi.unstubAllEnvs();
+  await rm(localDirectory, { recursive: true, force: true });
+});
 
 const LOOPBACK_HOST = '127.0.0.1';
 
@@ -30,7 +57,7 @@ const postCodexPayload = (port: number, secret: string, payload: unknown) => new
   req.end(JSON.stringify(payload));
 });
 const getUsage = (port: number) => new Promise<{ status: number; body: any }>(resolve => {
-  const req = request({ host: LOOPBACK_HOST, port, path: '/api/usage', method: 'GET' }, response => { let value = ''; response.on('data', chunk => value += chunk);
+  const req = request({ host: LOOPBACK_HOST, port, path: '/api/usage', headers: localHeaders(), method: 'GET' }, response => { let value = ''; response.on('data', chunk => value += chunk);
     response.on('end', () => resolve({ status: response.statusCode!, body: JSON.parse(value) })); });
   req.end();
 });
@@ -55,7 +82,7 @@ describe('HTTP API', () => {
       };
       req.method = 'POST';
       req.url = '/api/nutrition/photo-proposal';
-      req.headers = { 'content-type': 'application/json', 'content-length': contentLength };
+      req.headers = { ...localHeaders(), 'content-type': 'application/json', 'content-length': contentLength };
       req.socket = { remoteAddress: LOOPBACK_HOST };
       let body = '';
       const response = {
@@ -87,7 +114,7 @@ describe('HTTP API', () => {
     const address = server.address();
     if (!address || typeof address === 'string') throw Error('no address');
     const result = await new Promise<{ status: number; body: any }>(resolve => {
-      const req = request({ host: LOOPBACK_HOST, port: address.port, path: '/api/usage', method: 'GET' }, response => {
+      const req = request({ host: LOOPBACK_HOST, port: address.port, path: '/api/usage', headers: localHeaders(), method: 'GET' }, response => {
         let value = '';
         response.on('data', chunk => value += chunk);
         response.on('end', () => resolve({ status: response.statusCode!, body: JSON.parse(value) }));
@@ -220,7 +247,7 @@ describe('HTTP API', () => {
       process.env.LIFEOS_API_MODE = 'test';
       server = createApiServer(); await listenApiServer(server);
       const address = server.address(); if (!address || typeof address === 'string') throw Error('no address');
-      const call = (path:string, method='GET') => new Promise<{status:number; body:any}>(resolve => { const req=request({host:LOOPBACK_HOST,port:address.port,path,method}, res=>{let b='';res.on('data',x=>b+=x);res.on('end',()=>resolve({status:res.statusCode!,body:JSON.parse(b)}))});req.end(); });
+      const call = (path:string, method='GET') => new Promise<{status:number; body:any}>(resolve => { const req=request({host:LOOPBACK_HOST,port:address.port,path,method,headers:localHeaders()}, res=>{let b='';res.on('data',x=>b+=x);res.on('end',()=>resolve({status:res.statusCode!,body:JSON.parse(b)}))});req.end(); });
       const health = await call('/health');
       expect(health.body).toMatchObject({ status: 'ok', mode: 'test', readiness: 'ready' });
       expect(health.body).not.toHaveProperty('demo');
@@ -358,7 +385,7 @@ describe('HTTP API', () => {
     const server = createApiServer(); await listenApiServer(server);
     const address = server.address(); if (!address || typeof address === 'string') throw Error('no address');
     const result = await new Promise<{ status: number; body: { connectors: { claude: string }; windows: unknown[] } }>(resolve => {
-      const req = request({ host: LOOPBACK_HOST, port: address.port, path: '/api/usage' }, res => {
+      const req = request({ host: LOOPBACK_HOST, port: address.port, path: '/api/usage', headers: localHeaders() }, res => {
         let body = ''; res.on('data', chunk => body += chunk); res.on('end', () => resolve({ status: res.statusCode!, body: JSON.parse(body) }));
       }); req.end();
     });
@@ -383,7 +410,7 @@ describe('HTTP API', () => {
     await listenApiServer(server);
     const address = server.address(); if (!address || typeof address === 'string') throw Error('no address');
     const body = await new Promise<{ connectors: { claude: string }; windows: Array<{ provider: string; provenance: { connectorState: string } }> }>(resolve => {
-      const req = request({ host: LOOPBACK_HOST, port: address.port, path: '/api/usage' }, response => {
+      const req = request({ host: LOOPBACK_HOST, port: address.port, path: '/api/usage', headers: localHeaders() }, response => {
         let value = ''; response.on('data', chunk => value += chunk); response.on('end', () => resolve(JSON.parse(value)));
       }); req.end();
     });
@@ -403,7 +430,7 @@ describe('HTTP API', () => {
     await listenApiServer(server);
     const address = server.address(); if (!address || typeof address === 'string') throw Error('no address');
     await new Promise<void>(resolve => {
-      const req = request({ host: LOOPBACK_HOST, port: address.port, path: '/api/usage' }, response => { response.resume(); response.on('end', resolve); });
+      const req = request({ host: LOOPBACK_HOST, port: address.port, path: '/api/usage', headers: localHeaders() }, response => { response.resume(); response.on('end', resolve); });
       req.end();
     });
     await new Promise(resolve => server.close(resolve));
@@ -426,7 +453,7 @@ describe('HTTP API', () => {
     await listenApiServer(server);
     const address = server.address(); if (!address || typeof address === 'string') throw Error('no address');
     const body = await new Promise<{ windows: Array<{ provider: string; window: string; usedPercent?: number }> }>(resolve => {
-      const req = request({ host: LOOPBACK_HOST, port: address.port, path: '/api/usage' }, response => {
+      const req = request({ host: LOOPBACK_HOST, port: address.port, path: '/api/usage', headers: localHeaders() }, response => {
         let value = ''; response.on('data', chunk => value += chunk); response.on('end', () => resolve(JSON.parse(value)));
       }); req.end();
     });
@@ -446,7 +473,7 @@ describe('HTTP API', () => {
     await listenApiServer(server);
     const address = server.address(); if (!address || typeof address === 'string') throw Error('no address');
     const body = await new Promise<{ windows: unknown[] }>(resolve => {
-      const req = request({ host: LOOPBACK_HOST, port: address.port, path: '/api/usage' }, response => {
+      const req = request({ host: LOOPBACK_HOST, port: address.port, path: '/api/usage', headers: localHeaders() }, response => {
         let value = ''; response.on('data', chunk => value += chunk); response.on('end', () => resolve(JSON.parse(value)));
       }); req.end();
     });
@@ -611,5 +638,167 @@ describe('HTTP API', () => {
     if (previousSecretFile === undefined) delete process.env.CLAUDE_INGEST_SECRET_FILE; else process.env.CLAUDE_INGEST_SECRET_FILE = previousSecretFile;
     expect(result).toEqual({ status: 503, body: '{"error":"usage_store_unavailable"}' });
     expect(await readFile(storePath, 'utf8')).toBe(corrupt);
+  });
+});
+
+
+describe('dedicated local service authentication', () => {
+  async function call(path: string, method = 'GET', auth: string[] = [], address = LOOPBACK_HOST) {
+    const req = Readable.from([Buffer.from('{}')]) as unknown as Parameters<typeof app>[0];
+    Object.assign(req, { method, url: path, headers: { 'content-type': 'application/json' },
+      rawHeaders: ['Content-Type', 'application/json', ...auth], socket: { remoteAddress: address } });
+    let body = '';
+    const res = { statusCode: 200, setHeader: () => undefined, end: (value: string) => { body = value; } };
+    const live = vi.fn(async () => ({ connectorState: 'unavailable' as const, windows: [] }));
+    const generate = vi.fn(async () => ({ accepted: true }));
+    await app(req, res as never, live, undefined, undefined, { generate } as never);
+    return { status: res.statusCode, body: JSON.parse(body), live, generate };
+  }
+  const valid = () => ['Authorization', `Bearer ${LOCAL_SECRET}`];
+
+  it('protects every sensitive route before reading data or invoking providers', async () => {
+    for (const [method, path] of SENSITIVE_LOCAL_ROUTES) {
+      for (const auth of [[], ['Authorization', 'Bearer wrong'],
+        ['Authorization', `Bearer ${'x'.repeat(LOCAL_SECRET.length)}`],
+        [...valid(), ...valid()], [...valid(), 'authorization', 'Bearer wrong'],
+        ['Authorization', `Bearer ${LOCAL_SECRET}, Bearer ${LOCAL_SECRET}`]]) {
+        const result = await call(path, method, auth);
+        expect(result.status, `${method} ${path}`).toBe(401);
+        expect(result.body).toEqual({ error: 'unauthorized' });
+        expect(result.live).not.toHaveBeenCalled(); expect(result.generate).not.toHaveBeenCalled();
+      }
+      const remote = await call(path, method, valid(), '100.100.100.100');
+      expect(remote.status).toBe(403);
+      expect(remote.live).not.toHaveBeenCalled(); expect(remote.generate).not.toHaveBeenCalled();
+      const accepted = await call(path, method, valid());
+      expect(accepted.status, path).toBe(200);
+    }
+  });
+
+  it('rejects every method mismatch for protected paths before dispatch', async () => {
+    const methods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
+    for (const [expected, path] of SENSITIVE_LOCAL_ROUTES) {
+      for (const method of methods) {
+        if (method === expected) continue;
+        const result = await call(path, method);
+        expect(result.status, `${method} ${path}`).toBe(405);
+        expect(result.body).toEqual({ error: 'read_only_api' });
+        expect(result.live).not.toHaveBeenCalled();
+        expect(result.generate).not.toHaveBeenCalled();
+      }
+    }
+  });
+
+  it('preserves authenticated cached Codex reads without invoking live access or writing history', async () => {
+    const store = join(localDirectory, 'cached-history');
+    vi.stubEnv('USAGE_STORE_PATH', store);
+    vi.stubEnv('CODEX_LIVE_ENABLED', 'false');
+    for (const age of [60_000, 60 * 60_000]) {
+      const bytes = JSON.stringify({ provider: 'codex', window: 'five_hour', durationMinutes: 300,
+        usedPercent: 12, observedAt: new Date(Date.now() - age).toISOString() }) + '\n';
+      await writeFile(store, bytes, { mode: 0o600 });
+      const result = await call('/api/usage', 'GET', valid());
+      expect(result.status).toBe(200);
+      expect(result.body.connectors.codex).toBe(age === 60_000 ? 'healthy' : 'refresh_due');
+      expect(result.body.windows[0].usedPercent).toBe(12);
+      expect(result.live).not.toHaveBeenCalled();
+      expect(await readFile(store, 'utf8')).toBe(bytes);
+    }
+  });
+
+  it('accepts loopback variants and rejects normalized duplicate headers over real HTTP', async () => {
+    for (const address of ['127.0.0.1', '::1', '::ffff:127.0.0.1'])
+      expect((await call('/api/codex/live', 'GET', valid(), address)).status).toBe(200);
+    const server = createApiServer(async () => ({ connectorState: 'unavailable', windows: [] }));
+    await listenApiServer(server);
+    try {
+      const address = server.address(); if (!address || typeof address === 'string') throw Error('no address');
+      const status = await new Promise<number>((resolve, reject) => {
+        const req = request({ host: LOOPBACK_HOST, port: address.port, path: '/api/codex/live',
+          headers: ['Host', 'localhost', ...valid(), 'aUtHoRiZaTiOn', `Bearer ${LOCAL_SECRET}`] }, res => {
+          res.resume(); res.on('end', () => resolve(res.statusCode!));
+        });
+        req.on('error', reject); req.end();
+      });
+      expect(status).toBe(401);
+    } finally { await closeApiServer(server); }
+    const req = { socket: { remoteAddress: LOOPBACK_HOST }, headers: { authorization: [`Bearer ${LOCAL_SECRET}`, `Bearer ${LOCAL_SECRET}`] } };
+    expect(await authorizeLocalApi(req as never)).toBe(401);
+  });
+
+  it('leaves public/status, static, unknown and separately authenticated routes independent', async () => {
+    vi.stubEnv('USAGE_STORE_PATH', join(localDirectory, 'history'));
+    vi.stubEnv('LIFEOS_LOCAL_API_ENABLED', 'false');
+    for (const path of ['/health', '/ready', '/api/overview', '/api/codex', '/api/finance/connectors', '/api/finance/summary'])
+      expect((await call(path)).status, path).toBe(200);
+    expect((await call('/health', 'GET', [], '192.0.2.1')).status).toBe(200);
+    expect((await call('/ready', 'GET', [], '192.0.2.1')).status).toBe(200);
+    expect((await call('/api/calendar')).status).toBe(503);
+    expect((await call('/api/nutrition/summary')).status).toBe(404);
+    expect((await call('/missing')).status).toBe(404);
+    expect((await call('/api/usage', 'POST')).status).toBe(405);
+    for (const [enabled, file, path] of [
+      ['CLAUDE_INGEST_ENABLED', 'CLAUDE_INGEST_SECRET_FILE', '/api/usage/claude-ingest'],
+      ['CLAUDE_STATUSLINE_ENABLED', 'CLAUDE_INGEST_SECRET_FILE', '/api/claude/statusline'],
+      ['CODEX_INGEST_ENABLED', 'CODEX_INGEST_SECRET_FILE', '/api/usage/codex-ingest'],
+      ['CLIPPER_INGEST_ENABLED', 'CLIPPER_INGEST_SECRET_FILE', '/api/clipper/ingest'],
+    ]) {
+      const pathValue = join(localDirectory, file);
+      const collectorSecret = file.repeat(3);
+      await writeFile(pathValue, collectorSecret, { mode: 0o600 });
+      vi.stubEnv(enabled, 'true'); vi.stubEnv(file, pathValue);
+      expect((await call(path, 'POST', valid())).status).toBe(401);
+      const result = await call(path, 'POST', ['Authorization', `Bearer ${collectorSecret}`]);
+      expect([400, 422]).toContain(result.status); // passed auth; missing idempotency/invalid body
+    }
+  });
+
+  it('fails startup and readiness for missing or malformed enabled credentials without leaking values', async () => {
+    vi.stubEnv('USAGE_STORE_PATH', join(localDirectory, 'history'));
+    const path = process.env.LIFEOS_LOCAL_API_SECRET_FILE!;
+    expect(await validateStartupConfiguration()).toBe(true);
+    for (const value of ['', 'short', 'x'.repeat(257), 'x'.repeat(4097), `${LOCAL_SECRET}\n`, 'é'.repeat(40)]) {
+      await writeFile(path, value, { mode: 0o600 });
+      expect(await validateStartupConfiguration()).toBe(false);
+      expect((await call('/ready')).status).toBe(503);
+      expect(await call('/health')).toMatchObject({ status: 200, body: { readiness: 'unavailable' } });
+      expect(await call('/api/codex/live', 'GET', valid())).toMatchObject({ status: 503, body: { error: 'local_api_unavailable' } });
+      await expect(startApiServer({ port: 0 })).rejects.toThrow('startup_configuration_invalid');
+    }
+    await unlink(path);
+    expect(await validateStartupConfiguration()).toBe(false);
+    vi.stubEnv('LIFEOS_LOCAL_API_SECRET', LOCAL_SECRET);
+    vi.stubEnv('LIFEOS_LOCAL_API_SECRET_FILE', undefined);
+    expect(await validateStartupConfiguration()).toBe(false);
+    vi.stubEnv('LIFEOS_LOCAL_API_ENABLED', 'false');
+    expect(await validateStartupConfiguration()).toBe(true);
+    expect((await call('/api/codex/live', 'GET', valid())).status).toBe(503);
+    vi.stubEnv('LIFEOS_LOCAL_API_ENABLED', 'typo');
+    expect(await validateStartupConfiguration()).toBe(false);
+    vi.stubEnv('LIFEOS_LOCAL_API_ENABLED', undefined);
+    expect((await call('/api/codex/live', 'GET', valid())).status).toBe(503);
+    await writeFile(path, LOCAL_SECRET, { mode: 0o600 });
+    vi.stubEnv('LIFEOS_LOCAL_API_SECRET_FILE', path);
+    expect((await call('/api/codex/live', 'GET', valid())).status).toBe(200);
+  });
+
+  it('rejects relative paths, directories, symlinks and permissive files and honors rotation', async () => {
+    vi.stubEnv('USAGE_STORE_PATH', join(localDirectory, 'history'));
+    const path = process.env.LIFEOS_LOCAL_API_SECRET_FILE!;
+    for (const invalid of ['relative.secret', localDirectory, join(localDirectory, 'absent')]) {
+      vi.stubEnv('LIFEOS_LOCAL_API_SECRET_FILE', invalid);
+      expect(await validateStartupConfiguration()).toBe(false);
+    }
+    vi.stubEnv('LIFEOS_LOCAL_API_SECRET_FILE', path);
+    if (process.platform !== 'win32') {
+      await chmod(path, 0o644); expect(await validateStartupConfiguration()).toBe(false);
+      await chmod(path, 0o600);
+      const link = join(localDirectory, 'link'); await symlink(path, link);
+      vi.stubEnv('LIFEOS_LOCAL_API_SECRET_FILE', link); expect(await validateStartupConfiguration()).toBe(false);
+      vi.stubEnv('LIFEOS_LOCAL_API_SECRET_FILE', path);
+    }
+    await writeFile(path, 'r'.repeat(48));
+    expect((await call('/api/codex/live', 'GET', valid())).status).toBe(401);
+    expect((await call('/api/codex/live', 'GET', ['Authorization', `Bearer ${'r'.repeat(48)}`])).status).toBe(200);
   });
 });

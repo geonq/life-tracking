@@ -9,6 +9,8 @@ import { parseStrictJSON } from './json-boundary.js';
 /** Keep a malformed Hermes payload from causing an unbounded allocation. */
 export const CLIPPER_MAX_BYTES = 256 * 1024;
 export const CLIPPER_STORE_SCHEMA_VERSION = 1;
+export const MAX_CLIPPER_IDEMPOTENCY_RECORDS = 10_000;
+export const MAX_CLIPPER_QUEUE_DEPTH = 64;
 
 export type ClipperStoreErrorCode =
   | 'body_too_large'
@@ -18,6 +20,7 @@ export type ClipperStoreErrorCode =
   | 'invalid_idempotency_key'
   | 'idempotency_key_reuse'
   | 'idempotency_store_full'
+  | 'queue_full'
   | 'storage_unavailable';
 
 export class ClipperStoreError extends Error {
@@ -42,6 +45,44 @@ type StoreEnvelope = {
   revision: number;
   tombstones: [];
 };
+
+type FileSignature = {
+  dev: number;
+  ino: number;
+  size: number;
+  mtimeMs: number;
+};
+
+type DurableState = {
+  snapshot: Snapshot | undefined;
+  idempotency: Map<string, string>;
+  idempotencyRevisions: Map<string, number>;
+  revision: number;
+  tombstones: [];
+  bytes?: Buffer;
+  signature?: FileSignature;
+};
+
+export type ClipperCommittedRead = {
+  snapshot: Snapshot;
+  revision: number;
+};
+
+type QueuedMutation = {
+  task: () => Promise<unknown>;
+  resolve: (value: unknown) => void;
+  reject: (reason?: unknown) => void;
+};
+
+type MutationQueue = {
+  pending: QueuedMutation[];
+  running: boolean;
+  size: number;
+};
+
+function inputByteLength(input: string | Buffer): number {
+  return Buffer.isBuffer(input) ? input.byteLength : Buffer.byteLength(input, 'utf8');
+}
 
 function bytesFor(input: string | Buffer): Buffer {
   return Buffer.isBuffer(input) ? Buffer.from(input) : Buffer.from(input, 'utf8');
@@ -102,8 +143,8 @@ function hasDuplicateObjectKeys(source: string): boolean {
 }
 
 function parseSnapshot(input: string | Buffer): { snapshot: Snapshot; bytes: Buffer } {
+  if (inputByteLength(input) > CLIPPER_MAX_BYTES) throw new ClipperStoreError('body_too_large');
   const bytes = bytesFor(input);
-  if (bytes.byteLength > CLIPPER_MAX_BYTES) throw new ClipperStoreError('body_too_large');
   const source = bytes.toString('utf8');
   let parsed: unknown;
   try {
@@ -153,7 +194,7 @@ function observationWatermark(snapshot: Snapshot): number {
  * is written atomically with its idempotency journal.
  */
 export class ClipperStore {
-  static readonly maximumIdempotencyRecords = 10_000;
+  static readonly maximumIdempotencyRecords = MAX_CLIPPER_IDEMPOTENCY_RECORDS;
 
   /**
    * Serialize the complete durable mutation, not just the final rename.
@@ -162,7 +203,7 @@ export class ClipperStore {
    * earlier idempotency record. The API deployment remains single-process;
    * cross-process locking is a separate deployment requirement.
    */
-  private static readonly mutationQueues = new Map<string, Promise<void>>();
+  private static readonly mutationQueues = new Map<string, MutationQueue>();
   private readonly file?: string;
   private readonly idempotency = new Map<string, string>();
   private readonly idempotencyRevisions = new Map<string, number>();
@@ -170,20 +211,28 @@ export class ClipperStore {
   private revision = 0;
   private tombstones: [] = [];
   private loaded = false;
+  /** Invalidates detached reads when this instance starts or finishes a commit. */
+  private loadGeneration = 0;
 
   constructor(file?: string) {
     this.file = file ? resolve(file) : undefined;
   }
 
-  async get(): Promise<Snapshot> {
+  async readCommitted(): Promise<ClipperCommittedRead> {
     await this.load();
-    return this.snapshot === undefined ? unavailableClipperSnapshot() : cloneSnapshot(this.snapshot);
+    return {
+      snapshot: this.snapshot === undefined ? unavailableClipperSnapshot() : cloneSnapshot(this.snapshot),
+      revision: this.revision,
+    };
+  }
+
+  async get(): Promise<Snapshot> {
+    return (await this.readCommitted()).snapshot;
   }
 
   /** Return the durable Clipper authority revision; missing state is revision zero. */
   async currentRevision(): Promise<number> {
-    await this.load();
-    return this.revision;
+    return (await this.readCommitted()).revision;
   }
 
   async ingest(idempotencyKey: unknown, input: string | Buffer): Promise<{ kind: 'accepted' | 'replay' | 'stale'; snapshot: Snapshot; revision: number }> {
@@ -195,12 +244,7 @@ export class ClipperStore {
       return this.enqueueMutation(async () => {
         // Re-read the authoritative envelope while holding the path lock so a
         // separate store instance cannot overwrite a newer journal entry.
-        this.loaded = false;
-        this.snapshot = undefined;
-        this.idempotency.clear();
-        this.idempotencyRevisions.clear();
-        this.revision = 0;
-        this.tombstones = [];
+        this.invalidateLoadedState();
         await this.load();
         return this.ingestLoaded(idempotencyKey, parsed);
       });
@@ -230,7 +274,9 @@ export class ClipperStore {
     }
 
     const previousSnapshot = this.snapshot;
-    this.idempotency.set(idempotencyKey, fingerprint);
+    const candidateIdempotency = new Map(this.idempotency);
+    const candidateIdempotencyRevisions = new Map(this.idempotencyRevisions);
+    candidateIdempotency.set(idempotencyKey, fingerprint);
 
     // A collector can deliver an older capture after a newer one (for
     // example, when a retry was delayed by a provider or a worker restart).
@@ -242,72 +288,148 @@ export class ClipperStore {
     const incomingTime = observationWatermark(parsed.snapshot);
     const currentTime = previousSnapshot ? observationWatermark(previousSnapshot) : Number.NaN;
     if (previousSnapshot && Number.isFinite(incomingTime) && Number.isFinite(currentTime) && incomingTime <= currentTime) {
-      this.idempotencyRevisions.set(idempotencyKey, this.revision);
-      try {
-        await this.persistUnlocked();
-      } catch (error) {
-        this.idempotency.delete(idempotencyKey);
-        this.idempotencyRevisions.delete(idempotencyKey);
-        throw error;
-      }
-      return { kind: 'stale', snapshot: cloneSnapshot(previousSnapshot), revision: this.revision };
+      candidateIdempotencyRevisions.set(idempotencyKey, this.revision);
+      const committed = await this.persistCandidate(previousSnapshot, candidateIdempotency, candidateIdempotencyRevisions, this.revision);
+      const committedSnapshot = committed?.snapshot ?? previousSnapshot;
+      const committedRevision = committed?.revision ?? this.revision;
+      this.publishCommitted(committedSnapshot, candidateIdempotency, candidateIdempotencyRevisions, committedRevision);
+      return { kind: 'stale', snapshot: cloneSnapshot(committedSnapshot), revision: committedRevision };
     }
 
-    this.snapshot = cloneSnapshot(parsed.snapshot);
-    const previousRevision = this.revision;
     if (this.revision >= Number.MAX_SAFE_INTEGER) {
-      this.idempotency.delete(idempotencyKey);
-      this.snapshot = previousSnapshot;
       throw new ClipperStoreError('storage_unavailable');
     }
-    this.revision += 1;
-    this.idempotencyRevisions.set(idempotencyKey, this.revision);
-    try {
-      await this.persistUnlocked();
-    } catch (error) {
-      this.idempotency.delete(idempotencyKey);
-      this.idempotencyRevisions.delete(idempotencyKey);
-      this.snapshot = previousSnapshot;
-      this.revision = previousRevision;
-      throw error;
-    }
-    return { kind: 'accepted', snapshot: cloneSnapshot(this.snapshot), revision: this.revision };
+    const candidateSnapshot = cloneSnapshot(parsed.snapshot);
+    const candidateRevision = this.revision + 1;
+    candidateIdempotencyRevisions.set(idempotencyKey, candidateRevision);
+    // A candidate is detached from the live authority. Persisting and reading
+    // it back is the commit boundary; only then may readers observe the new
+    // snapshot and revision together.
+    const committed = await this.persistCandidate(candidateSnapshot, candidateIdempotency, candidateIdempotencyRevisions, candidateRevision);
+    const committedSnapshot = committed?.snapshot ?? candidateSnapshot;
+    const committedRevision = committed?.revision ?? candidateRevision;
+    this.publishCommitted(committedSnapshot, candidateIdempotency, candidateIdempotencyRevisions, committedRevision);
+    return { kind: 'accepted', snapshot: cloneSnapshot(committedSnapshot), revision: committedRevision };
   }
 
   private async enqueueMutation<T>(operation: () => Promise<T>): Promise<T> {
     const key = this.file!;
-    const previous = ClipperStore.mutationQueues.get(key) ?? Promise.resolve();
-    let result!: T;
-    const next = previous.catch(() => undefined).then(async () => {
-      result = await operation();
-    });
-    ClipperStore.mutationQueues.set(key, next);
-    try {
-      await next;
-      return result;
-    } finally {
-      if (ClipperStore.mutationQueues.get(key) === next) ClipperStore.mutationQueues.delete(key);
+    let queue = ClipperStore.mutationQueues.get(key);
+    if (queue === undefined) {
+      queue = { pending: [], running: false, size: 0 };
+      ClipperStore.mutationQueues.set(key, queue);
     }
+    if (queue.size >= MAX_CLIPPER_QUEUE_DEPTH) {
+      throw new ClipperStoreError('queue_full');
+    }
+
+    queue.size += 1;
+    const result = new Promise<T>((resolveResult, rejectResult) => {
+      queue!.pending.push({
+        task: operation as () => Promise<unknown>,
+        resolve: resolveResult as (value: unknown) => void,
+        reject: rejectResult,
+      });
+    });
+    this.drainMutationQueue(key, queue);
+    return result;
+  }
+
+  private drainMutationQueue(key: string, queue: MutationQueue): void {
+    if (queue.running) return;
+    queue.running = true;
+    void (async () => {
+      try {
+        while (queue.pending.length > 0) {
+          const operation = queue.pending.shift()!;
+          try {
+            operation.resolve(await operation.task());
+          } catch (error) {
+            operation.reject(error);
+          } finally {
+            queue.size -= 1;
+          }
+        }
+      } finally {
+        queue.running = false;
+        if (queue.size === 0 && ClipperStore.mutationQueues.get(key) === queue) {
+          ClipperStore.mutationQueues.delete(key);
+        } else if (queue.pending.length > 0) {
+          this.drainMutationQueue(key, queue);
+        }
+      }
+    })();
   }
 
   private async load(): Promise<void> {
     if (this.loaded) return;
+    // Read into detached state first. A read may overlap a mutation, and an
+    // older read must never publish over a newer in-memory commit. The second
+    // signature check also catches an atomic replacement by another store
+    // instance before this read becomes authoritative.
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      if (this.loaded) return;
+      const generation = this.loadGeneration;
+      const state = await this.loadUnlocked();
+      if (this.loaded || this.loadGeneration !== generation) continue;
+      if (!(await this.fileStillMatches(state.signature))) continue;
+      // The identity check is asynchronous. A mutation may invalidate this
+      // detached load while it is awaiting lstat; never publish an older
+      // envelope after that await without taking the generation gate again.
+      if (this.loaded || this.loadGeneration !== generation) continue;
+      this.publishLoaded(state);
+      return;
+    }
+    this.loaded = false;
+    throw new ClipperStoreError('storage_unavailable');
+  }
+
+  private invalidateLoadedState(): void {
+    // Keep the last committed value available while the authoritative file is
+    // being reloaded. Only a validated detached result may replace it.
+    this.loaded = false;
+    this.loadGeneration += 1;
+  }
+
+  private publishLoaded(state: DurableState): void {
+    this.idempotency.clear();
+    state.idempotency.forEach((fingerprint, key) => this.idempotency.set(key, fingerprint));
+    this.idempotencyRevisions.clear();
+    state.idempotencyRevisions.forEach((journalRevision, key) => this.idempotencyRevisions.set(key, journalRevision));
+    this.snapshot = state.snapshot;
+    this.revision = state.revision;
+    this.tombstones = [];
+    this.loaded = true;
+  }
+
+  private async fileStillMatches(signature: FileSignature | undefined): Promise<boolean> {
+    if (!this.file) return true;
     try {
-      await this.loadUnlocked();
-      this.loaded = true;
+      const current = await lstat(this.file);
+      if (signature === undefined) return false;
+      return current.isFile() && !current.isSymbolicLink()
+        && current.dev === signature.dev
+        && current.ino === signature.ino
+        && current.size === signature.size
+        && current.mtimeMs === signature.mtimeMs;
     } catch (error) {
-      // A transient read failure or corrupt envelope must not poison this
-      // instance into returning an apparently clean unavailable state on the
-      // next read. Keep retrying the real durable source, and keep surfacing
-      // the typed failure until it is repaired.
-      this.loaded = false;
-      throw error;
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT' && signature === undefined) return true;
+      return false;
     }
   }
 
-  private async loadUnlocked(): Promise<void> {
-    if (!this.file) return;
+  private async loadUnlocked(): Promise<DurableState> {
+    if (!this.file) {
+      return {
+        snapshot: undefined,
+        idempotency: new Map(),
+        idempotencyRevisions: new Map(),
+        revision: 0,
+        tombstones: [],
+      };
+    }
     let bytes: Buffer;
+    let signature: FileSignature;
     let descriptor: Awaited<ReturnType<typeof open>> | undefined;
     try {
       const metadata = await lstat(this.file);
@@ -318,7 +440,8 @@ export class ClipperStore {
       const opened = await descriptor.stat();
       if (!opened.isFile() || opened.isSymbolicLink()
         || (process.platform !== 'win32' && (opened.mode & 0o077) !== 0)
-        || opened.dev !== metadata.dev || opened.ino !== metadata.ino || opened.size !== metadata.size) {
+        || opened.dev !== metadata.dev || opened.ino !== metadata.ino || opened.size !== metadata.size
+        || opened.mtimeMs !== metadata.mtimeMs) {
         throw new Error('unsafe_store');
       }
       const buffer = Buffer.alloc(CLIPPER_MAX_BYTES + 1);
@@ -331,10 +454,20 @@ export class ClipperStore {
       const after = await descriptor.stat();
       if (!after.isFile() || after.isSymbolicLink()
         || after.dev !== metadata.dev || after.ino !== metadata.ino || after.size !== metadata.size
+        || after.mtimeMs !== opened.mtimeMs
         || offset > CLIPPER_MAX_BYTES) throw new Error('unsafe_store');
       bytes = buffer.subarray(0, offset);
+      signature = { dev: after.dev, ino: after.ino, size: after.size, mtimeMs: after.mtimeMs };
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return {
+          snapshot: undefined,
+          idempotency: new Map(),
+          idempotencyRevisions: new Map(),
+          revision: 0,
+          tombstones: [],
+        };
+      }
       throw new ClipperStoreError('storage_unavailable');
     } finally {
       await descriptor?.close().catch(() => undefined);
@@ -376,36 +509,86 @@ export class ClipperStore {
         parsedJournal.set(record.key, record.fingerprint);
         parsedJournalRevisions.set(record.key, journalRevision);
       }
-      if (parsedJournal.size > ClipperStore.maximumIdempotencyRecords) throw new Error('journal_full');
-      this.idempotency.clear();
-      this.idempotencyRevisions.clear();
-      parsedJournal.forEach((fingerprint, key) => this.idempotency.set(key, fingerprint));
-      parsedJournalRevisions.forEach((journalRevision, key) => this.idempotencyRevisions.set(key, journalRevision));
-      this.snapshot = snapshot;
-      this.revision = durableRevision;
-      this.tombstones = [];
+      if (envelope.idempotency.length > ClipperStore.maximumIdempotencyRecords
+        || parsedJournal.size > ClipperStore.maximumIdempotencyRecords) throw new Error('journal_full');
+      return {
+        snapshot,
+        idempotency: parsedJournal,
+        idempotencyRevisions: parsedJournalRevisions,
+        revision: durableRevision,
+        tombstones: [],
+        bytes: Buffer.from(bytes),
+        signature,
+      };
     } catch {
       throw new ClipperStoreError('storage_unavailable');
     }
   }
 
-  private async persistUnlocked(): Promise<void> {
-    if (!this.file || !this.snapshot) return;
+  private publishCommitted(
+    snapshot: Snapshot,
+    idempotency: Map<string, string>,
+    idempotencyRevisions: Map<string, number>,
+    revision: number,
+  ): void {
+    this.loadGeneration += 1;
+    this.idempotency.clear();
+    idempotency.forEach((fingerprint, key) => this.idempotency.set(key, fingerprint));
+    this.idempotencyRevisions.clear();
+    idempotencyRevisions.forEach((journalRevision, key) => this.idempotencyRevisions.set(key, journalRevision));
+    this.snapshot = snapshot;
+    this.revision = revision;
+    this.tombstones = [];
+    this.loaded = true;
+  }
+
+  private async persistCandidate(
+    snapshot: Snapshot,
+    idempotency: Map<string, string>,
+    idempotencyRevisions: Map<string, number>,
+    revision: number,
+  ): Promise<ClipperCommittedRead | undefined> {
+    if (!this.file) return undefined;
     const envelope: StoreEnvelope = {
       schemaVersion: CLIPPER_STORE_SCHEMA_VERSION,
-      snapshot: this.snapshot,
-      idempotency: [...this.idempotency].map(([key, fingerprint]) => ({
+      snapshot,
+      idempotency: [...idempotency].map(([key, fingerprint]) => ({
         key,
         fingerprint,
-        revision: this.idempotencyRevisions.get(key) ?? this.revision,
+        revision: idempotencyRevisions.get(key) ?? revision,
       })),
-      revision: this.revision,
-      tombstones: this.tombstones,
+      revision,
+      tombstones: [],
     };
+    if (idempotency.size > ClipperStore.maximumIdempotencyRecords) {
+      throw new ClipperStoreError('idempotency_store_full');
+    }
     const body = JSON.stringify(envelope);
     if (Buffer.byteLength(body, 'utf8') > CLIPPER_MAX_BYTES) {
       throw new ClipperStoreError('storage_unavailable');
     }
-    await atomicWriteFile(this.file, body);
+    try {
+      await atomicWriteFile(this.file, body);
+      // Verify the exact committed bytes through a detached reader before
+      // publishing the live authority. This keeps a failed or externally
+      // changed write from making the in-memory snapshot look newer than the
+      // durable source.
+      const committed = await new ClipperStore(this.file).loadUnlocked();
+      // Compare the complete serialized envelope, including every journal
+      // record and its revision. Checking only the dashboard snapshot lets a
+      // truncated or concurrently replaced idempotency journal look committed
+      // even though the next retry could be accepted twice.
+      if (committed.bytes === undefined
+        || !committed.bytes.equals(Buffer.from(body, 'utf8'))
+        || committed.revision !== revision
+        || committed.snapshot === undefined
+        || JSON.stringify(committed.snapshot) !== JSON.stringify(snapshot)) {
+        throw new Error('clipper_commit_readback_mismatch');
+      }
+      return { snapshot: cloneSnapshot(committed.snapshot), revision: committed.revision };
+    } catch (error) {
+      if (error instanceof ClipperStoreError) throw error;
+      throw new ClipperStoreError('storage_unavailable');
+    }
   }
 }

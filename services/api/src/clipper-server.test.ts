@@ -14,12 +14,12 @@ function response(): MockResponse {
   return result;
 }
 
-async function call(store: ClipperStore, payload: string | undefined, headers: Record<string, string> = {}, method = 'POST') {
+async function call(store: ClipperStore, payload: string | undefined, headers: Record<string, string> = {}, method = 'POST', url = '/api/clipper/ingest') {
   const request = Readable.from(payload === undefined ? [] : [Buffer.from(payload)]) as Readable & {
     method: string; url: string; headers: Record<string, string>; socket: { remoteAddress: string };
   };
   request.method = method;
-  request.url = '/api/clipper/ingest';
+  request.url = url;
   request.headers = headers;
   request.socket = { remoteAddress: '127.0.0.1' };
   const result = response();
@@ -42,11 +42,17 @@ describe('Clipper ingest HTTP boundary', () => {
   it('requires enablement and accepts an authenticated idempotent Hermes post', async () => {
     const previousEnabled = process.env.CLIPPER_INGEST_ENABLED;
     const previousSecretFile = process.env.CLIPPER_INGEST_SECRET_FILE;
+    const previousLocalEnabled = process.env.LIFEOS_LOCAL_API_ENABLED;
+    const previousLocalSecretFile = process.env.LIFEOS_LOCAL_API_SECRET_FILE;
     const directory = await mkdtemp(join(tmpdir(), 'lifeos-clipper-http-'));
     const secretPath = join(directory, 'clipper.secret');
+    const localSecretPath = join(directory, 'local-api.secret');
     const secret = 'c'.repeat(32);
+    const localSecret = 'l'.repeat(32);
     await writeFile(secretPath, secret, { mode: 0o600 });
+    await writeFile(localSecretPath, localSecret, { mode: 0o600 });
     if (process.platform !== 'win32') await chmod(secretPath, 0o600);
+    if (process.platform !== 'win32') await chmod(localSecretPath, 0o600);
     const body = JSON.stringify(snapshot);
     const store = new ClipperStore();
     try {
@@ -55,11 +61,18 @@ describe('Clipper ingest HTTP boundary', () => {
       expect((await call(store, body, { authorization: `Bearer ${secret}`, 'content-type': 'application/json', 'idempotency-key': 'one' })).statusCode).toBe(404);
 
       process.env.CLIPPER_INGEST_ENABLED = 'true';
+      process.env.LIFEOS_LOCAL_API_ENABLED = 'true';
+      process.env.LIFEOS_LOCAL_API_SECRET_FILE = localSecretPath;
       const headers = { authorization: `Bearer ${secret}`, 'content-type': 'application/json', 'idempotency-key': 'one' };
       const accepted = await call(store, body, headers);
       expect(accepted.statusCode).toBe(200);
       expect(accepted.json.availability).toBe('observed');
       expect(accepted.headers['x-lifeos-idempotent-replay']).toBeUndefined();
+
+      const committed = await call(store, undefined, { authorization: `Bearer ${localSecret}` }, 'GET', '/api/clipper/summary');
+      expect(committed.statusCode).toBe(200);
+      expect(committed.headers['x-lifeos-revision']).toBe('1');
+      expect(committed.json).toEqual(snapshot);
 
       const replay = await call(store, body, headers);
       expect(replay.statusCode).toBe(200);
@@ -96,6 +109,8 @@ describe('Clipper ingest HTTP boundary', () => {
     } finally {
       if (previousEnabled === undefined) delete process.env.CLIPPER_INGEST_ENABLED; else process.env.CLIPPER_INGEST_ENABLED = previousEnabled;
       if (previousSecretFile === undefined) delete process.env.CLIPPER_INGEST_SECRET_FILE; else process.env.CLIPPER_INGEST_SECRET_FILE = previousSecretFile;
+      if (previousLocalEnabled === undefined) delete process.env.LIFEOS_LOCAL_API_ENABLED; else process.env.LIFEOS_LOCAL_API_ENABLED = previousLocalEnabled;
+      if (previousLocalSecretFile === undefined) delete process.env.LIFEOS_LOCAL_API_SECRET_FILE; else process.env.LIFEOS_LOCAL_API_SECRET_FILE = previousLocalSecretFile;
     }
   });
 });

@@ -14,13 +14,14 @@ Assert-SafeTaskName $LegacyTaskName
 Assert-SafeTaskName $CodexTaskName
 Assert-SafeTaskName $TailscaleSnapshotTaskName
 Assert-WindowsAdministrator
-$deploymentMutex = Enter-LifeOSDeploymentTransaction -AllowRecovery
+$deploymentMutex = $null
 $rollbackCompleted = $false
 try {
 Assert-ExistingFile $ManifestPath 'Rollback manifest'
-$manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json -ErrorAction Stop
+$manifest = Read-LifeOSBoundedJsonFile -Path $ManifestPath -MaxBytes $script:LifeOSGenerationManifestMaxBytes -Description 'Rollback manifest'
 $manifestPath = (Get-FullPath $ManifestPath)
-Assert-CanonicalRollbackManifest -Manifest $manifest -ManifestPath $manifestPath
+Assert-CanonicalRollbackManifest -Manifest $manifest -ManifestPath $manifestPath -AllowPending
+$serviceSnapshots = Get-LifeOSServiceSnapshotMap $manifest.serviceSnapshots
 $currentOperatorSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 if ($currentOperatorSid -ne [string]$manifest.operatorSid) {
     throw 'Rollback must be run by the operator that created the install manifest.'
@@ -31,13 +32,53 @@ if ([string]$manifest.legacyTask.Name -ne $LegacyTaskName -or [string]$manifest.
 $backupDirectory = [string]$manifest.paths.backupDirectory
 Assert-ExistingDirectory $backupDirectory 'Rollback backup directory'
 
+# Older manifests have no complete authority provenance. Generic artifact
+# recovery could discard acknowledged writes; require manual reconciliation.
+$authorityRecords = @($manifest.backups | Where-Object { $_.kind -eq 'authority-set' })
+$dataIntents = @($manifest.backups | Where-Object { $_.destination -eq $manifest.paths.usageHistory -or
+    ([string]$_.destination).StartsWith([string]$manifest.paths.gatewayData, [StringComparison]::OrdinalIgnoreCase) })
+if ($authorityRecords.Count -gt 1 -or ($authorityRecords.Count -eq 0 -and $dataIntents.Count -gt 0)) {
+    throw 'Rollback requires exactly one authority provenance record; manual recovery required.'
+}
+if ($null -ne $manifest.PSObject.Properties['codexCollectorVerification']) {
+    $verification = $manifest.codexCollectorVerification
+    if ($null -eq $verification.PSObject.Properties['terminalCompleted'] -or
+        $verification.terminalCompleted -ne $true -or
+        $null -eq $verification.PSObject.Properties['lastRunTime']) {
+        throw 'Collector terminal provenance missing; manual recovery required.'
+    }
+}
+$deploymentMutex = Enter-LifeOSDeploymentTransaction -AllowRecovery -RecoveryManifest $manifest -RecoveryManifestPath $manifestPath
+if ($null -ne $manifest.PSObject.Properties['snapshotTask'] -and [string]$manifest.snapshotTask.Name -ne $TailscaleSnapshotTaskName) { throw 'Snapshot task name does not match manifest.' }
+Stop-DeploymentTaskBarrier $manifest $manifestPath
 foreach ($serviceName in @('LifeOSGateway', 'LifeOSAPI')) { Stop-LifeOSService $serviceName }
 
+    # Uncertain/changed authority must never be rolled back by generic restore.
+    $resumeJournal = Read-RecoveryJournal $manifest
+    if ($null -eq $resumeJournal) {
+    foreach ($item in @($manifest.backups | Where-Object { $_.kind -eq 'authority-set' })) {
+        if ($item.phase -ne 'complete' -or $null -eq $item.PSObject.Properties['afterTree'] -or
+            ((@(Get-TreeManifest $item.destination) | ConvertTo-Json -Depth 8 -Compress) -ne
+             (@($item.afterTree) | ConvertTo-Json -Depth 8 -Compress))) {
+            throw 'Authority provenance changed or incomplete; recovery_required. Writers remain stopped.'
+        }
+        $usagePath = [string]$manifest.paths.usageHistory
+        $usageHash = if (Test-Path -LiteralPath $usagePath -PathType Leaf) { Get-FileSha256 $usagePath } else { '' }
+        if ($null -eq $item.PSObject.Properties['usageAfterSha256'] -or ($usageHash -ne [string]$item.usageAfterSha256 -and -not (Test-CollectorUsagePreserved $manifest))) {
+            throw 'Usage authority changed or has no provenance; recovery_required.'
+        }
+        if ($item.changed -and (-not (Test-Path -LiteralPath $item.backup -PathType Container) -or
+            ((@(Get-TreeManifest $item.backup) | ConvertTo-Json -Depth 8 -Compress) -ne
+             (@($item.beforeTree) | ConvertTo-Json -Depth 8 -Compress)))) {
+            throw 'Authority backup provenance invalid; recovery_required.'
+        }
+    }
+    }
 # Restore only artifacts explicitly recorded by install.ps1.  A current file
 # with no prior backup is moved into the rollback directory rather than
 # deleted, so recovery remains inspectable and reversible.
 Restore-ManifestArtifacts $manifest $backupDirectory
-Restore-AclSnapshots $manifest
+Invoke-RecoveryStage $manifest 'Restore-AclSnapshots' { Restore-AclSnapshots $manifest }
 
 $legacySnapshot = [pscustomobject]@{
     Exists = [bool]$manifest.legacyTask.Exists
@@ -49,12 +90,14 @@ $legacySnapshot = [pscustomobject]@{
 if ($legacySnapshot.Exists) {
     $taskBackup = [string]$manifest.legacyTask.Backup
     Assert-ExistingFile $taskBackup 'Legacy task backup'
-    $legacySnapshot.Xml = Get-Content -LiteralPath $taskBackup -Raw -ErrorAction Stop
+    $legacySnapshot.Xml = Read-LifeOSCappedFileText -Path $taskBackup -MaxBytes (1 * 1024 * 1024) -Description 'Legacy task recovery XML'
 }
+Enable-RecoveryWriterRestoration $manifest
 Restore-LegacyTask $legacySnapshot $LegacyTaskName
 if ($null -ne $manifest.PSObject.Properties['legacyListener'] -and [bool]$manifest.legacyListener.Exists) {
     Restore-LegacyGatewayListener -TaskSnapshot $legacySnapshot -ListenerSnapshot $manifest.legacyListener -TaskName $LegacyTaskName -TaskPath ([string]$legacySnapshot.TaskPath) -Port 8421
 }
+Reconcile-LifeOSScheduledTaskSnapshotState $legacySnapshot $LegacyTaskName
 
 $codexSnapshot = [pscustomobject]@{ Exists = $false; Enabled = $false; State = 'Stopped'; TaskPath = '\'; Xml = $null }
 if ($null -ne $manifest.PSObject.Properties['codexTask']) {
@@ -65,9 +108,9 @@ if ($null -ne $manifest.PSObject.Properties['codexTask']) {
     if ($codexSnapshot.Exists) {
         $codexBackup = [string]$manifest.codexTask.Backup
         Assert-ExistingFile $codexBackup 'Codex task backup'
-        $codexSnapshot.Xml = Get-Content -LiteralPath $codexBackup -Raw -ErrorAction Stop
+        $codexSnapshot.Xml = Read-LifeOSCappedFileText -Path $codexBackup -MaxBytes (1 * 1024 * 1024) -Description 'Codex task recovery XML'
     }
-    Restore-CodexCollectorTask $codexSnapshot $CodexTaskName
+
 }
 
 $snapshotTaskSnapshot = [pscustomobject]@{ Exists = $false; Enabled = $false; State = 'Stopped'; TaskPath = '\'; Xml = $null }
@@ -82,27 +125,19 @@ if ($null -ne $manifest.PSObject.Properties['snapshotTask']) {
     if ($snapshotTaskSnapshot.Exists) {
         $snapshotBackup = [string]$manifest.snapshotTask.Backup
         Assert-ExistingFile $snapshotBackup 'Tailscale snapshot task backup'
-        $snapshotTaskSnapshot.Xml = Get-Content -LiteralPath $snapshotBackup -Raw -ErrorAction Stop
+        $snapshotTaskSnapshot.Xml = Read-LifeOSCappedFileText -Path $snapshotBackup -MaxBytes (1 * 1024 * 1024) -Description 'Tailscale snapshot task recovery XML'
     }
-    Restore-TailscaleSnapshotTask $snapshotTaskSnapshot $TailscaleSnapshotTaskName
+
 }
 
-if ($null -ne $manifest.PSObject.Properties['serviceSnapshots']) {
-    foreach ($serviceName in @('LifeOSGateway', 'LifeOSAPI')) {
-        $snapshotProperty = $manifest.serviceSnapshots.PSObject.Properties[$serviceName]
-        if ($null -ne $snapshotProperty) {
-            Restore-LifeOSServiceSnapshot $snapshotProperty.Value
-        }
-    }
-} else {
-    # Manifests written before SCM snapshots remain safe but cannot restore a
-    # prior start mode, so leave their new service registrations disabled.
-    foreach ($serviceName in @('LifeOSAPI', 'LifeOSGateway')) {
-        $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-        if ($null -ne $service) {
-            Set-Service -Name $serviceName -StartupType Disabled -ErrorAction Stop
-        }
-    }
+$gatewayNeedsSnapshot = [string](Get-SnapshotValue $serviceSnapshots['LifeOSGateway'] 'State' '') -ceq 'Running'
+$hasSnapshotContract = $null -ne $manifest.PSObject.Properties['snapshotTask'] -and
+    $null -ne $manifest.paths.PSObject.Properties['stateDirectory'] -and
+    $null -ne $manifest.paths.PSObject.Properties['tailscaleSnapshot'] -and
+    $null -ne $manifest.paths.PSObject.Properties['tailscaleSnapshotScript'] -and
+    $null -ne $manifest.paths.PSObject.Properties['tailscaleExecutable']
+if ($gatewayNeedsSnapshot -and -not $hasSnapshotContract) {
+    throw 'Recovery cannot start the gateway without a transaction-owned Tailscale snapshot contract.'
 }
 
 if ($null -ne $manifest.PSObject.Properties['tailscaleStatusBefore'] -and
@@ -112,14 +147,39 @@ if ($null -ne $manifest.PSObject.Properties['tailscaleStatusBefore'] -and
     if ($null -ne $manifest.PSObject.Properties['tailscaleStatusAfter']) {
         $tailscaleExpectedAfter = [string]$manifest.tailscaleStatusAfter
     }
-    Restore-TailscaleServeSnapshot -TailscaleExecutable ([string]$manifest.paths.tailscaleExecutable) -Json ([string]$manifest.tailscaleStatusBefore) -ExpectedAfterJson $tailscaleExpectedAfter
+    Invoke-RecoveryStage $manifest 'Restore-TailscaleServeSnapshot' { Restore-TailscaleServeSnapshot -TailscaleExecutable ([string]$manifest.paths.tailscaleExecutable) -Json ([string]$manifest.tailscaleStatusBefore) -ExpectedAfterJson $tailscaleExpectedAfter }
 } else {
-    Write-Warning 'This older manifest has no Tailscale Serve snapshot; no Serve mutation was attempted by rollback.'
+    if ($gatewayNeedsSnapshot) { throw 'Recovery cannot start the gateway without a transaction-owned Tailscale Serve snapshot.' }
 }
 
-Write-Warning 'Rollback restores prior LifeOS service registrations/state when the install manifest contains SCM snapshots; it never deletes the legacy LifeOSSyncServer task.'
+if ($gatewayNeedsSnapshot) {
+    $snapshotTaskPath = [string]$snapshotTaskSnapshot.TaskPath
+    $stoppedSnapshotTask = [pscustomobject]@{ Exists = $true; Enabled = $false; State = 'Stopped'; TaskPath = $snapshotTaskPath }
+    Invoke-RecoveryStage $manifest 'Restore-TailscaleSnapshotTask' {
+        Restore-TailscaleSnapshotTask -Snapshot $snapshotTaskSnapshot -TaskName $TailscaleSnapshotTaskName -KeepStopped
+    } -LiveAction {
+        Reconcile-LifeOSScheduledTaskSnapshotState $stoppedSnapshotTask $TailscaleSnapshotTaskName
+    } -Postcondition {
+        Reconcile-LifeOSScheduledTaskSnapshotState $stoppedSnapshotTask $TailscaleSnapshotTaskName
+    }
+}
+
+Restore-LifeOSServiceSnapshots -Snapshots $serviceSnapshots -Manifest $manifest -ContinueOnFailure -VerifyHealth -BeforeGatewayStart {
+    Invoke-LifeOSBeforeGatewayStart -TaskName $TailscaleSnapshotTaskName -TaskPath $snapshotTaskPath -OutputPath ([string]$manifest.paths.tailscaleSnapshot) -TailscaleExecutable ([string]$manifest.paths.tailscaleExecutable)
+}
+
+Stop-DeploymentTaskBarrier $manifest $manifestPath
+Restore-LifeOSServiceSnapshots -Snapshots $serviceSnapshots -Manifest $manifest -ContinueOnFailure -VerifyHealth -BeforeGatewayStart {
+    Invoke-LifeOSBeforeGatewayStart -TaskName $TailscaleSnapshotTaskName -TaskPath $snapshotTaskPath -OutputPath ([string]$manifest.paths.tailscaleSnapshot) -TailscaleExecutable ([string]$manifest.paths.tailscaleExecutable)
+}
+Invoke-RecoveryStage $manifest 'Restore-CodexCollectorTask' { Restore-CodexCollectorTask $codexSnapshot $CodexTaskName } -Postcondition { Reconcile-LifeOSScheduledTaskSnapshotState $codexSnapshot $CodexTaskName }
+Invoke-RecoveryStage $manifest 'Restore-TailscaleSnapshotTask' { Restore-TailscaleSnapshotTask $snapshotTaskSnapshot $TailscaleSnapshotTaskName } -LiveAction { Restore-TailscaleSnapshotTask $snapshotTaskSnapshot $TailscaleSnapshotTaskName } -Postcondition { Reconcile-LifeOSScheduledTaskSnapshotState $snapshotTaskSnapshot $TailscaleSnapshotTaskName }
+Reconcile-LifeOSScheduledTaskSnapshotState $legacySnapshot $LegacyTaskName
+Reconcile-LifeOSScheduledTaskSnapshotState $codexSnapshot $CodexTaskName
+Reconcile-LifeOSScheduledTaskSnapshotState $snapshotTaskSnapshot $TailscaleSnapshotTaskName
+$recoveryArchivePath = Complete-LifeOSRecoveryState $manifest
 $rollbackCompleted = $true
-Write-Host 'LifeOS Windows rollback completed. New service state is disabled and prior task/data/code artifacts were restored or moved to the rollback backup.'
+Write-Host 'LifeOS Windows rollback completed. Prior task/data/code artifacts were restored or moved to the rollback backup, and captured service state was reconciled.'
 } finally {
     Exit-LifeOSDeploymentTransaction $deploymentMutex -Completed:$rollbackCompleted
 }

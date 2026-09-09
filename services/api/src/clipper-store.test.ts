@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { chmod, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { ClipperStore, ClipperStoreError } from './clipper-store.js';
+import { join, resolve } from 'node:path';
+import { CLIPPER_MAX_BYTES, ClipperStore, ClipperStoreError, MAX_CLIPPER_QUEUE_DEPTH } from './clipper-store.js';
 
 const observedAt = new Date(Date.now() - 30_000).toISOString();
 const provenance = {
@@ -25,6 +25,10 @@ const snapshot = {
   breakdowns: [],
   provenance,
 };
+
+function mutationQueues(): Map<string, unknown> {
+  return (ClipperStore as unknown as { mutationQueues: Map<string, unknown> }).mutationQueues;
+}
 
 describe('ClipperStore', () => {
   it('returns an honest unavailable state before the first Hermes observation', async () => {
@@ -126,6 +130,236 @@ describe('ClipperStore', () => {
     const reloaded = new ClipperStore(path);
     await expect(reloaded.ingest('concurrent-one', body)).resolves.toMatchObject({ kind: 'replay' });
     await expect(reloaded.ingest('concurrent-two', body)).resolves.toMatchObject({ kind: 'replay' });
+  });
+
+  it('does not let an overlapping old read overwrite a committed ingest', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'lifeos-clipper-read-race-'));
+    const path = join(directory, 'clipper-snapshot.json');
+    const store = new ClipperStore(path);
+    await store.ingest('read-race-initial', JSON.stringify(snapshot));
+
+    const newerAt = new Date().toISOString();
+    const newer = {
+      ...snapshot,
+      generatedAt: newerAt,
+      provenance: { ...snapshot.provenance, observedAt: newerAt },
+      metrics: Object.fromEntries(Object.entries(snapshot.metrics).map(([key, metric]) => [
+        key,
+        { ...metric, provenance: { ...metric.provenance, observedAt: newerAt } },
+      ])),
+    };
+    const internals = store as unknown as {
+      loadUnlocked: () => Promise<unknown>;
+      loaded: boolean;
+    };
+    const originalLoad = internals.loadUnlocked.bind(store);
+    let entered!: () => void;
+    const enteredPromise = new Promise<void>(resolveEntered => { entered = resolveEntered; });
+    let release!: () => void;
+    const releasePromise = new Promise<void>(resolveRelease => { release = resolveRelease; });
+    let calls = 0;
+    internals.loadUnlocked = async () => {
+      const detached = await originalLoad();
+      calls += 1;
+      if (calls === 1) {
+        entered();
+        await releasePromise;
+      }
+      return detached;
+    };
+
+    // Start a durable reload and hold the detached old envelope after it has
+    // been read. The following ingest must be able to commit before that read
+    // is allowed to publish.
+    internals.loaded = false;
+    const pendingRead = store.readCommitted();
+    await enteredPromise;
+    const pendingIngest = store.ingest('read-race-new', JSON.stringify(newer));
+    await expect(pendingIngest).resolves.toMatchObject({ kind: 'accepted', snapshot: newer, revision: 2 });
+    release();
+
+    await expect(pendingRead).resolves.toMatchObject({ snapshot: newer, revision: 2 });
+    await expect(store.readCommitted()).resolves.toMatchObject({ snapshot: newer, revision: 2 });
+  });
+
+  it('rechecks the generation after a delayed file identity check', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'lifeos-clipper-file-check-race-'));
+    const path = join(directory, 'clipper-snapshot.json');
+    const store = new ClipperStore(path);
+    await store.ingest('file-check-initial', JSON.stringify(snapshot));
+
+    const newerAt = new Date().toISOString();
+    const newer = {
+      ...snapshot,
+      generatedAt: newerAt,
+      provenance: { ...snapshot.provenance, observedAt: newerAt },
+      metrics: Object.fromEntries(Object.entries(snapshot.metrics).map(([key, metric]) => [
+        key,
+        { ...metric, provenance: { ...metric.provenance, observedAt: newerAt } },
+      ])),
+    };
+    const internals = store as unknown as {
+      fileStillMatches: (signature: unknown) => Promise<boolean>;
+      loaded: boolean;
+    };
+    const originalFileStillMatches = internals.fileStillMatches.bind(store);
+    let entered!: () => void;
+    const enteredPromise = new Promise<void>(resolveEntered => { entered = resolveEntered; });
+    let release!: () => void;
+    const releasePromise = new Promise<void>(resolveRelease => { release = resolveRelease; });
+    let calls = 0;
+    internals.fileStillMatches = async signature => {
+      calls += 1;
+      if (calls === 1) {
+        entered();
+        await releasePromise;
+      }
+      return originalFileStillMatches(signature);
+    };
+
+    internals.loaded = false;
+    const pendingRead = store.readCommitted();
+    await enteredPromise;
+
+    await expect(store.ingest('file-check-new', JSON.stringify(newer)))
+      .resolves.toMatchObject({ kind: 'accepted', snapshot: newer, revision: 2 });
+    release();
+
+    // The delayed old read must retry and return the newer committed state.
+    await expect(pendingRead).resolves.toMatchObject({ snapshot: newer, revision: 2 });
+    await expect(store.readCommitted()).resolves.toMatchObject({ snapshot: newer, revision: 2 });
+    const persisted = JSON.parse(await readFile(path, 'utf8'));
+    expect(persisted.revision).toBe(2);
+    expect(persisted.snapshot).toEqual(newer);
+    expect(persisted.idempotency.map((entry: { key: string }) => entry.key)).toEqual([
+      'file-check-initial', 'file-check-new',
+    ]);
+  });
+
+  it('keeps the last committed snapshot and revision visible until a delayed write commits', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'lifeos-clipper-commit-boundary-'));
+    const path = join(directory, 'clipper-snapshot.json');
+    const first = new ClipperStore(path);
+    await first.ingest('committed-one', JSON.stringify(snapshot));
+    const newerAt = new Date().toISOString();
+    const newer = {
+      ...snapshot,
+      generatedAt: newerAt,
+      provenance: { ...snapshot.provenance, observedAt: newerAt },
+      metrics: Object.fromEntries(Object.entries(snapshot.metrics).map(([key, metric]) => [
+        key,
+        { ...metric, provenance: { ...metric.provenance, observedAt: newerAt } },
+      ])),
+    };
+
+    const internals = first as unknown as {
+      persistCandidate: (...args: unknown[]) => Promise<unknown>;
+    };
+    const originalPersist = internals.persistCandidate.bind(first);
+    let entered!: () => void;
+    const enteredPromise = new Promise<void>(resolveEntered => { entered = resolveEntered; });
+    let release!: () => void;
+    const releasePromise = new Promise<void>(resolveRelease => { release = resolveRelease; });
+    internals.persistCandidate = async (...args: unknown[]) => {
+      entered();
+      await releasePromise;
+      return originalPersist(...args);
+    };
+
+    const pending = first.ingest('committed-two', JSON.stringify(newer));
+    await enteredPromise;
+    await expect(first.readCommitted()).resolves.toMatchObject({ snapshot, revision: 1 });
+    expect(JSON.parse(await readFile(path, 'utf8')).revision).toBe(1);
+    release();
+    await expect(pending).resolves.toMatchObject({ kind: 'accepted', snapshot: newer, revision: 2 });
+    await expect(first.readCommitted()).resolves.toMatchObject({ snapshot: newer, revision: 2 });
+  });
+
+  it('does not publish a candidate when persistence fails after a delay', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'lifeos-clipper-commit-failure-'));
+    const path = join(directory, 'clipper-snapshot.json');
+    const store = new ClipperStore(path);
+    await store.ingest('failure-one', JSON.stringify(snapshot));
+    const internals = store as unknown as {
+      persistCandidate: (...args: unknown[]) => Promise<unknown>;
+    };
+    let entered!: () => void;
+    const enteredPromise = new Promise<void>(resolveEntered => { entered = resolveEntered; });
+    let release!: () => void;
+    const releasePromise = new Promise<void>(resolveRelease => { release = resolveRelease; });
+    internals.persistCandidate = async () => {
+      entered();
+      await releasePromise;
+      throw new ClipperStoreError('storage_unavailable');
+    };
+
+    const pending = store.ingest('failure-two', JSON.stringify({ ...snapshot, generatedAt: new Date().toISOString() }));
+    await enteredPromise;
+    await expect(store.readCommitted()).resolves.toMatchObject({ snapshot, revision: 1 });
+    release();
+    await expect(pending).rejects.toMatchObject({ code: 'storage_unavailable' });
+    await expect(store.readCommitted()).resolves.toMatchObject({ snapshot, revision: 1 });
+    expect(JSON.parse(await readFile(path, 'utf8')).revision).toBe(1);
+  });
+
+  it('bounds concurrent mutations and releases path bookkeeping after the drain completes', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'lifeos-clipper-queue-'));
+    const path = join(directory, 'clipper-snapshot.json');
+    const body = JSON.stringify(snapshot);
+    const total = MAX_CLIPPER_QUEUE_DEPTH + 8;
+    const ingests = Array.from({ length: total }, (_, index) => new ClipperStore(path).ingest(`bounded-${index}`, body));
+
+    const outcomes = await Promise.allSettled(ingests);
+    const fulfilled = outcomes.filter(outcome => outcome.status === 'fulfilled');
+    const rejected = outcomes.filter(outcome => outcome.status === 'rejected');
+    expect(fulfilled).toHaveLength(MAX_CLIPPER_QUEUE_DEPTH);
+    expect(rejected).toHaveLength(total - MAX_CLIPPER_QUEUE_DEPTH);
+    expect(rejected.every(outcome => outcome.status === 'rejected'
+      && outcome.reason instanceof ClipperStoreError
+      && outcome.reason.code === 'queue_full')).toBe(true);
+    expect(mutationQueues().has(resolve(path))).toBe(false);
+
+    const persisted = JSON.parse(await readFile(path, 'utf8'));
+    expect(persisted.idempotency).toHaveLength(MAX_CLIPPER_QUEUE_DEPTH);
+    await expect(new ClipperStore(path).ingest('after-bound', body)).resolves.toMatchObject({ kind: 'stale' });
+    expect(mutationQueues().has(resolve(path))).toBe(false);
+  });
+
+  it('rejects an oversized direct payload before creating durable state', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'lifeos-clipper-body-'));
+    const path = join(directory, 'clipper-snapshot.json');
+
+    await expect(new ClipperStore(path).ingest('oversized', 'x'.repeat(CLIPPER_MAX_BYTES + 1)))
+      .rejects.toMatchObject({ code: 'body_too_large' });
+    await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('keeps the last committed snapshot readable when the serialized durable envelope exceeds its bound', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'lifeos-clipper-durable-bound-'));
+    const path = join(directory, 'clipper-snapshot.json');
+    const point = { at: observedAt, metrics };
+    const trends: Array<{ at: string; metrics: typeof metrics }> = [];
+    let body = JSON.stringify({ ...snapshot, trends });
+    while (true) {
+      const candidate = JSON.stringify({ ...snapshot, trends: [...trends, point] });
+      if (Buffer.byteLength(candidate, 'utf8') > CLIPPER_MAX_BYTES - 64) break;
+      trends.push(point);
+      body = candidate;
+    }
+    const envelope = {
+      schemaVersion: 1,
+      snapshot: JSON.parse(body),
+      idempotency: [{ key: 'large-envelope', fingerprint: '0'.repeat(64), revision: 1 }],
+      revision: 1,
+      tombstones: [],
+    };
+    expect(Buffer.byteLength(body, 'utf8')).toBeLessThanOrEqual(CLIPPER_MAX_BYTES);
+    expect(Buffer.byteLength(JSON.stringify(envelope), 'utf8')).toBeGreaterThan(CLIPPER_MAX_BYTES);
+
+    await expect(new ClipperStore(path).ingest('large-envelope', body))
+      .rejects.toMatchObject({ code: 'storage_unavailable' });
+    await expect(new ClipperStore(path).get()).resolves.toMatchObject({ availability: 'unavailable' });
+    await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('journals but does not publish an older observation after a newer one', async () => {

@@ -107,9 +107,60 @@ class WindowsReleaseBuilderTests(unittest.TestCase):
         self.assertIn("CANDIDATE-MANIFEST.sha256", builder)
         self.assertIn("lifeos-release-$source_sha.zip", builder)
 
+    def test_builder_checks_every_staged_module_before_packaging_without_credentials(self) -> None:
+        builder = BUILDER.read_text(encoding="utf-8")
+        self.assertIn('env -i NODE_ENV=test "$node_binary"', builder)
+        self.assertIn("await import(pathToFileURL(file).href)", builder)
+        for root in ("api/dist", "api/node_modules/@iphone-life-os/contracts/dist", "api/node_modules/zod"):
+            self.assertIn(repr(root), builder)
+        self.assertLess(builder.index("Staged JavaScript import closure failed"), builder.index('archive_tmp='))
+        self.assertNotIn("console.error(error)", builder)
+
+    def test_node_runtime_size_contract_matches_candidate_verifier(self) -> None:
+        builder = BUILDER.read_text(encoding="utf-8")
+        verifier = VERIFIER.read_text(encoding="utf-8")
+        common = COMMON.read_text(encoding="utf-8")
+
+        self.assertIn("candidate_node_max_file_bytes=$((256 * 1024 * 1024))", builder)
+        self.assertIn("(( node_size <= candidate_node_max_file_bytes ))", builder)
+        self.assertIn("$script:LifeOSCandidateNodeMaxFileBytes = 256 * 1024 * 1024", common)
+        self.assertIn(
+            "$maxCandidateNodeFileBytes = [long]$script:LifeOSCandidateNodeMaxFileBytes",
+            verifier,
+        )
+        self.assertIn(
+            "$maxCandidateBytes = [long]($maxCandidateFiles - 1) * $maxCandidateFileBytes + $maxCandidateNodeFileBytes",
+            verifier,
+        )
+        self.assertIn(
+            "$itemMaxBytes = if ($relativePath -ceq 'node-runtime/node.exe')",
+            verifier,
+        )
+
+    def test_builder_applies_the_same_narrow_per_file_bounds_before_copy_and_hash(self) -> None:
+        builder = BUILDER.read_text(encoding="utf-8")
+        self.assertIn("candidate_max_file_bytes=$((64 * 1024 * 1024))", builder)
+        self.assertIn("candidate_node_max_file_bytes=$((256 * 1024 * 1024))", builder)
+        self.assertIn("if [[ \"$relative_destination\" == 'node-runtime/node.exe' ]]", builder)
+        self.assertIn('source_size="$(file_size_bytes "$source")"', builder)
+        self.assertIn("candidate input exceeds its bounded size", builder)
+        self.assertIn("source API package metadata exceeds the candidate file bound", builder)
+        self.assertIn("staged API package metadata exceeds the candidate file bound", builder)
+        self.assertIn("candidate file exceeds its bounded size: {relative}", builder)
+        self.assertIn(
+            'max_bytes = 256 * 1024 * 1024 if relative == "node-runtime/node.exe" else 64 * 1024 * 1024',
+            builder,
+        )
+        copy_body = builder.split("copy_file() {", 1)[1].split("echo \"Building contracts", 1)[0]
+        self.assertLess(copy_body.index('source_size="$(file_size_bytes "$source")"'), copy_body.index('cp -p "$source"'))
+        manifest_body = builder.split("python3 - \"$release_tmp\" \"$release_tmp/CANDIDATE-MANIFEST.sha256\" <<'PY'", 1)[1].split("\nPY", 1)[0]
+        self.assertLess(manifest_body.index("path.stat().st_size > max_bytes"), manifest_body.index("path.read_bytes()"))
+
     def test_verifier_rejects_links_unexpected_files_and_unsafe_manifest_paths(self) -> None:
         verifier = VERIFIER.read_text(encoding="utf-8")
-        self.assertIn("ReparsePoint", verifier)
+        common = COMMON.read_text(encoding="utf-8")
+        self.assertIn("Get-LifeOSBoundedTreeItem", verifier)
+        self.assertIn("ReparsePoint", common)
         self.assertIn("Candidate file allowlist mismatch", verifier)
         self.assertIn("Candidate manifest paths are not sorted deterministically", verifier)
         self.assertIn("Candidate manifest path is unsafe", verifier)
@@ -156,7 +207,7 @@ class WindowsReleaseBuilderTests(unittest.TestCase):
         self.assertIn("$null = Restore-TailscaleServeLegacyMapping", snapshot)
 
         fingerprint_start = common.index("function Get-TailscaleServeFingerprint")
-        fingerprint_end = common.index("function Test-TailscaleServeEmpty")
+        fingerprint_end = common.index("function Test-TailscaleServeExact")
         fingerprint = common[fingerprint_start:fingerprint_end]
         self.assertIn("Remove($mirrorName)", fingerprint)
         self.assertNotIn("Properties.Remove('TCP')", fingerprint)

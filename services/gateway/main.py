@@ -1546,6 +1546,10 @@ class _CalendarStateUnavailable(Exception):
     """Durable Calendar state was missing, malformed, or torn."""
 
 
+class _BoundedFileTooLarge(_CalendarStateUnavailable):
+    """A regular file exceeded the caller's bounded read limit."""
+
+
 def _calendar_metadata_path() -> Path:
     return Path(f"{CALENDAR_PATH}.meta.json")
 
@@ -1559,27 +1563,136 @@ def _calendar_retry_path() -> Path:
     return Path(f"{CALENDAR_PATH}.retry.json")
 
 
+WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
+
+
+def _state_stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
+    """Return the bounded identity facts used to bind a state read."""
+    return (
+        int(value.st_dev),
+        int(value.st_ino),
+        int(value.st_size),
+        int(value.st_mode),
+        int(value.st_mtime_ns),
+        int(value.st_ctime_ns),
+        int(getattr(value, "st_file_attributes", 0)),
+    )
+
+
+def _state_is_reparse(value: os.stat_result) -> bool:
+    return stat.S_ISLNK(value.st_mode) or bool(
+        int(getattr(value, "st_file_attributes", 0)) & WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT
+    )
+
+
+def _state_path_identity_chain(path: Path) -> tuple[tuple[str, tuple[int, int, int, int, int, int, int]], ...]:
+    """Capture existing path components without resolving a reparse point."""
+    current = Path(os.path.abspath(os.fspath(path)))
+    leaf = current
+    chain: list[tuple[str, tuple[int, int, int, int, int, int, int]]] = []
+    while True:
+        try:
+            observed = os.lstat(current)
+        except FileNotFoundError:
+            break
+        except OSError as exc:
+            raise _CalendarStateUnavailable from exc
+        # POSIX development paths may contain a system ancestor symlink such
+        # as /var -> /private/var. Reject the configured leaf everywhere and
+        # reject every reparse component on Windows.
+        if _state_is_reparse(observed) and (os.name == "nt" or current == leaf):
+            raise _CalendarStateUnavailable
+        chain.append(
+            (
+                os.path.normcase(os.path.abspath(os.fspath(current))),
+                _state_stat_identity(observed),
+            )
+        )
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return tuple(reversed(chain))
+
+
+def _assert_state_path_identity_chain(
+    expected: tuple[tuple[str, tuple[int, int, int, int, int, int, int]], ...],
+    path: Path,
+) -> None:
+    if _state_path_identity_chain(path) != expected:
+        raise _CalendarStateUnavailable
+
+
 def _read_bounded_state_file(path: Path, maximum: int) -> bytes | None:
-    """Read a regular, non-symlink state file without trusting its size race."""
+    """Read a bounded state file from one identity-checked descriptor.
+
+    The body never grows beyond ``maximum``. A one-byte probe detects a file
+    that grows after the initial size check without allocating the excess.
+    Atomic writers may replace the pathname after the descriptor is closed;
+    the final identity-chain check then rejects that race as torn state.
+    """
+    if maximum <= 0:
+        raise _CalendarStateUnavailable
+    descriptor: int | None = None
     try:
+        before_chain = _state_path_identity_chain(path)
+        if not before_chain:
+            return None
         before = path.lstat()
-    except FileNotFoundError:
-        return None
-    if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode) or before.st_size > maximum:
-        raise _CalendarStateUnavailable
-    try:
-        body = path.read_bytes()
-        after = path.lstat()
-    except (FileNotFoundError, OSError) as exc:
+        before_identity = _state_stat_identity(before)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or _state_is_reparse(before)
+            or before.st_size < 0
+        ):
+            raise _CalendarStateUnavailable
+        if before.st_size > maximum:
+            raise _BoundedFileTooLarge
+
+        flags = os.O_RDONLY
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        flags |= getattr(os, "O_BINARY", 0)
+        descriptor = os.open(os.fspath(path), flags)
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _state_is_reparse(opened)
+            or _state_stat_identity(opened) != before_identity
+        ):
+            raise _CalendarStateUnavailable
+        if opened.st_size > maximum:
+            raise _BoundedFileTooLarge
+
+        body = bytearray()
+        while len(body) < maximum:
+            chunk = os.read(descriptor, min(64 * 1024, maximum - len(body)))
+            if not chunk:
+                break
+            body.extend(chunk)
+        if len(body) == maximum and os.read(descriptor, 1):
+            raise _BoundedFileTooLarge
+
+        after = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(after.st_mode)
+            or _state_is_reparse(after)
+            or _state_stat_identity(after) != before_identity
+            or len(body) != before_identity[2]
+        ):
+            raise _CalendarStateUnavailable
+        _assert_state_path_identity_chain(before_chain, path)
+        return bytes(body)
+    except _CalendarStateUnavailable:
+        raise
+    except (FileNotFoundError, OSError, ValueError) as exc:
         raise _CalendarStateUnavailable from exc
-    if (
-        not stat.S_ISREG(after.st_mode)
-        or stat.S_ISLNK(after.st_mode)
-        or (after.st_dev, after.st_ino, after.st_size) != (before.st_dev, before.st_ino, before.st_size)
-        or len(body) > maximum
-    ):
-        raise _CalendarStateUnavailable
-    return body
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
 
 class _FinanceImportedStateUnavailable(Exception):
@@ -3098,11 +3211,14 @@ async def get_document_file(doc_id: str) -> Response:
             raise HTTPException(status_code=404, detail="Original file missing")
         else:
             selected = candidates[0]
-        if selected.stat().st_size > DOCUMENT_MAX_UPLOAD_SIZE:
-            raise HTTPException(status_code=413, detail="Document exceeds retrieval limit")
-        body = selected.read_bytes()
-        if len(body) > DOCUMENT_MAX_UPLOAD_SIZE:
-            raise HTTPException(status_code=413, detail="Document exceeds retrieval limit")
+        try:
+            body = _read_bounded_state_file(selected, DOCUMENT_MAX_UPLOAD_SIZE)
+        except _BoundedFileTooLarge as exc:
+            raise HTTPException(status_code=413, detail="Document exceeds retrieval limit") from exc
+        except (_CalendarStateUnavailable, OSError) as exc:
+            raise HTTPException(status_code=503, detail="documents are unavailable") from exc
+        if body is None:
+            raise HTTPException(status_code=404, detail="Original file missing")
     media_type = mimetypes.guess_type(selected.name)[0] or "application/octet-stream"
     return Response(content=body, media_type=media_type)
 

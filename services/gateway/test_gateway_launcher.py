@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import re
+import threading
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from pathlib import Path
@@ -65,8 +66,217 @@ def test_serve_exact_requires_only_the_canonical_lifeos_web_mapping() -> None:
     assert not launcher._serve_is_exact({**exact_web(), "AllowFunnel": {"machine.example.ts.net:8420": True}})
 
 
+def test_serve_exact_accepts_only_the_powershell_https_tcp_mirror_shape() -> None:
+    paired = {**exact_web(), "TCP": {"8420": {"HTTPS": True}}}
+    assert launcher._serve_is_exact(paired, expected_dns_name="machine.example.ts.net")
+
+    unsafe_tcp_values = (
+        {"8420": {"HTTPS": False}},
+        {"8420": {"HTTPS": "true"}},
+        {"8420": {"HTTPS": True, "TCPForward": "127.0.0.1:9000"}},
+        {"8420": "https"},
+        {8420: {"HTTPS": True}},
+        {"8419-8421": {"HTTPS": True}},
+        {"https://machine.example.ts.net:8420": {"HTTPS": True}},
+    )
+    for tcp in unsafe_tcp_values:
+        assert not launcher._serve_is_exact({**exact_web(), "TCP": tcp})
+
+
 def test_tailscale_dns_name_is_read_from_identity_payload() -> None:
     assert launcher._tailscale_dns_name({"Self": {"DNSName": "machine.example.ts.net."}}) == "machine.example.ts.net"
+
+
+@pytest.mark.parametrize(("dependency_ready", "expected_status"), ((True, 200), (False, 503)))
+def test_local_readiness_adapter_rechecks_dependencies_and_keeps_health_separate(
+    dependency_ready: bool, expected_status: int
+) -> None:
+    calls = []
+
+    async def app(scope, _receive, _send):
+        calls.append(scope)
+
+    adapter = launcher.LocalReadinessAdapter(app, lambda: dependency_ready)
+    messages = []
+
+    async def send(message):
+        messages.append(message)
+
+    asyncio.run(adapter({
+        "type": "http",
+        "path": "/ready",
+        "client": ("127.0.0.1", 8787),
+    }, None, send))
+
+    assert messages[0]["status"] == expected_status
+    assert messages[1]["body"] == (
+        b'{"readiness":"ready"}' if dependency_ready else b'{"readiness":"unavailable"}'
+    )
+    assert calls == []
+
+
+def test_local_readiness_adapter_returns_503_when_probe_times_out(monkeypatch) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    def readiness_check() -> bool:
+        nonlocal calls
+        calls += 1
+        started.set()
+        release.wait(timeout=2)
+        return True
+
+    adapter = launcher.LocalReadinessAdapter(lambda *_: None, readiness_check)
+    monkeypatch.setattr(launcher, "LOCAL_READINESS_TIMEOUT_SECONDS", 0.01)
+    messages = []
+
+    async def send(message):
+        messages.append(message)
+
+    async def exercise() -> None:
+        request = asyncio.create_task(adapter({
+            "type": "http",
+            "path": "/ready",
+            "client": ("127.0.0.1", 8787),
+        }, None, send))
+        assert await asyncio.to_thread(started.wait, 1)
+        await request
+        assert messages[0]["status"] == 503
+        assert messages[1]["body"] == b'{"readiness":"unavailable"}'
+        assert calls == 1
+
+        release.set()
+        inflight = adapter._inflight_readiness
+        assert inflight is not None
+        await asyncio.wait_for(asyncio.shield(inflight), 2)
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        release.set()
+
+
+def test_local_readiness_adapter_coalesces_concurrent_probes(monkeypatch) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    def readiness_check() -> bool:
+        nonlocal calls
+        calls += 1
+        started.set()
+        release.wait(timeout=2)
+        return True
+
+    adapter = launcher.LocalReadinessAdapter(lambda *_: None, readiness_check)
+    monkeypatch.setattr(launcher, "LOCAL_READINESS_TIMEOUT_SECONDS", 1.0)
+
+    async def request() -> list:
+        messages = []
+
+        async def send(message):
+            messages.append(message)
+
+        await adapter({
+            "type": "http",
+            "path": "/ready",
+            "client": ("127.0.0.1", 8787),
+        }, None, send)
+        return messages
+
+    async def exercise() -> None:
+        first = asyncio.create_task(request())
+        assert await asyncio.to_thread(started.wait, 1)
+        second = asyncio.create_task(request())
+        await asyncio.sleep(0)
+        assert calls == 1
+
+        release.set()
+        first_messages, second_messages = await asyncio.gather(first, second)
+        assert first_messages[0]["status"] == 200
+        assert second_messages[0]["status"] == 200
+        assert calls == 1
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        release.set()
+
+
+def test_local_readiness_adapter_rejects_non_loopback_and_forwards_other_routes() -> None:
+    forwarded = []
+
+    async def app(scope, _receive, _send):
+        forwarded.append(scope)
+
+    adapter = launcher.LocalReadinessAdapter(app, lambda: True)
+    forbidden = []
+
+    async def send_forbidden(message):
+        forbidden.append(message)
+
+    asyncio.run(adapter({
+        "type": "http",
+        "path": "/ready",
+        "client": ("192.0.2.10", 8787),
+    }, None, send_forbidden))
+    assert forbidden[0]["status"] == 403
+    assert forwarded == []
+
+    messages = []
+
+    async def send_forwarded(message):
+        messages.append(message)
+
+    scope = {"type": "http", "path": "/health", "client": ("127.0.0.1", 8787)}
+    asyncio.run(adapter(scope, None, send_forwarded))
+    assert forwarded == [scope]
+    assert messages == []
+
+
+def test_current_gateway_dependencies_ready_rechecks_snapshot_service_and_api(
+    monkeypatch,
+) -> None:
+    observed = {"serve": {"canonical": True}, "api": True, "service": 1234}
+
+    monkeypatch.setattr(
+        launcher,
+        "_read_tailscale_snapshot",
+        lambda path: (observed["serve"], "machine.example.ts.net", "operator@example.com"),
+    )
+    monkeypatch.setattr(
+        launcher,
+        "_serve_is_exact",
+        lambda serve, expected_dns_name=None: serve is observed["serve"]
+        and expected_dns_name == "machine.example.ts.net",
+    )
+    monkeypatch.setattr(launcher, "_is_windows_host", lambda: True)
+    monkeypatch.setattr(
+        launcher,
+        "_windows_tailscale_service_pid",
+        lambda name: observed["service"],
+    )
+    monkeypatch.setattr(launcher, "_loopback_api_ready", lambda url: observed["api"])
+
+    assert launcher._current_gateway_dependencies_ready(
+        "http://127.0.0.1:8787", "snapshot.json", "Tailscale"
+    )
+
+    observed["api"] = False
+    assert not launcher._current_gateway_dependencies_ready(
+        "http://127.0.0.1:8787", "snapshot.json", "Tailscale"
+    )
+    observed["api"] = True
+    observed["service"] = None
+    assert not launcher._current_gateway_dependencies_ready(
+        "http://127.0.0.1:8787", "snapshot.json", "Tailscale"
+    )
+    observed["service"] = 1234
+    observed["serve"] = {"changed": True}
+    assert not launcher._current_gateway_dependencies_ready(
+        "http://127.0.0.1:8787", "snapshot.json", "Tailscale"
+    )
 
 
 IDENTITY = {"Self": {"DNSName": "machine.example.ts.net."}}
@@ -90,6 +300,86 @@ def write_snapshot(tmp_path: Path, payload, *, name: str = "tailscale-state.json
     path = tmp_path / name
     path.write_text(payload if isinstance(payload, str) else json.dumps(payload), encoding="utf-8")
     return path
+
+
+@pytest.fixture(autouse=True)
+def runtime_snapshot(monkeypatch, tmp_path):
+    path = write_snapshot(tmp_path, snapshot_payload(), name="runtime.json")
+    monkeypatch.setenv("LIFEOS_TAILSCALE_SNAPSHOT_PATH", str(path))
+    return path
+
+
+def _valid_gateway_config(tmp_path: Path) -> dict:
+    data = tmp_path / "data"
+    documents = data / "documents"
+    data.mkdir()
+    documents.mkdir()
+    secret = tmp_path / "claude.secret"
+    secret.write_bytes(b"c" * 32)
+    return {
+        "bindHost": "127.0.0.1",
+        "port": 8421,
+        "apiBaseUrl": "http://127.0.0.1:8787",
+        "dataDirectory": str(data),
+        "calendarPath": str(data / "calendar.json"),
+        "documentsPath": str(documents),
+        "claudeSecretPath": str(secret),
+        "tailscaleEdgeTokenPath": str(tmp_path / "tailscale-edge.token"),
+        "tailscaleServePort": 8420,
+        "funnel": False,
+    }
+
+
+def test_read_config_accepts_a_valid_config_without_mocking_path_validation(tmp_path: Path) -> None:
+    config_path = tmp_path / "gateway.json"
+    config_path.write_text(json.dumps(_valid_gateway_config(tmp_path)), encoding="utf-8")
+
+    value = launcher._read_config(config_path)
+
+    assert value["bindHost"] == "127.0.0.1"
+    assert value["port"] == 8421
+    assert value["dataDirectory"] == str(tmp_path / "data")
+
+
+@pytest.mark.parametrize("reader", ["config", "secret"])
+@pytest.mark.parametrize("replacement", [False, True])
+def test_bounded_config_and_secret_reads_fail_closed_on_growth_or_replacement(
+    monkeypatch, tmp_path: Path, reader: str, replacement: bool
+) -> None:
+    config = _valid_gateway_config(tmp_path)
+    config_path = tmp_path / "gateway.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    edge_token_path = tmp_path / "tailscale-edge.token"
+    edge_token_path.write_bytes(b"t" * 32)
+    target = config_path if reader == "config" else Path(config["claudeSecretPath"])
+    original_read = launcher.os.read
+    mutated = False
+
+    def read_and_mutate(descriptor: int, count: int) -> bytes:
+        nonlocal mutated
+        value = original_read(descriptor, count)
+        descriptor_identity = os.fstat(descriptor)
+        target_identity = target.stat()
+        # Match the descriptor itself so a config EOF read cannot trigger the
+        # secret fixture before the secret descriptor has supplied bytes.
+        is_target_descriptor = (
+            descriptor_identity.st_dev == target_identity.st_dev
+            and descriptor_identity.st_ino == target_identity.st_ino
+        )
+        if not mutated and is_target_descriptor:
+            mutated = True
+            if replacement:
+                replacement_path = target.with_suffix(target.suffix + ".replacement")
+                replacement_path.write_bytes(b"x" * max(32, target_identity.st_size))
+                replacement_path.replace(target)
+            else:
+                with target.open("ab") as stream:
+                    stream.write(b"x" * 32)
+        return value
+
+    monkeypatch.setattr(launcher.os, "read", read_and_mutate)
+    with pytest.raises(RuntimeError, match="invalid|changed|identity|oversized"):
+        launcher._read_config(config_path)
 
 
 SNAPSHOT_ENVIRONMENT_NAMES = (
@@ -378,3 +668,158 @@ def test_adapter_fails_closed_when_peer_query_raises() -> None:
         (b"Tailscale-App-Capabilities", cap_header),
     ]}, None, None))
     assert all(name.lower() != launcher.TRUSTED_EDGE_HEADER for name, _ in captured["headers"])
+
+
+@pytest.mark.parametrize("mutation", ["stale", "login", "dns", "malformed", "duplicate", "route", "capability", "funnel", "missing"])
+def test_runtime_lease_revalidates_after_startup(monkeypatch, runtime_snapshot, mutation):
+    now = datetime(2026, 9, 8, tzinfo=timezone.utc)
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+    monkeypatch.setattr(launcher, "datetime", Clock)
+    payload = snapshot_payload(observedAt=now.isoformat())
+    runtime_snapshot.write_text(json.dumps(payload))
+    calls = []
+    async def app(scope, receive, send):
+        calls.append(scope)
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+    adapter = launcher.TrustedEdgeHeaderAdapter(app, "t" * 32, peer_verifier=lambda _: True)
+    messages = []
+    async def send(message):
+        messages.append(message)
+    scope = {"type": "http", "headers": [(b"tailscale-app-capabilities", json.dumps({
+        launcher.TRUSTED_EDGE_APP_CAPABILITY: [{"src": ["*"]}]}).encode())]}
+    async def exercise():
+        nonlocal now
+        await adapter(scope, None, send)
+        assert messages[0]["status"] == 200
+        assert (launcher.TRUSTED_EDGE_HEADER, b"t" * 32) in calls[0]["headers"]
+        if mutation == "stale":
+            now += timedelta(seconds=91)
+        elif mutation == "login":
+            payload["login"] = "other@example.com"
+        elif mutation == "dns":
+            payload["dnsName"] = "other.example.ts.net"
+            payload["identity"] = {"Self": {"DNSName": "other.example.ts.net"}}
+        elif mutation == "route":
+            payload["serve"] = {}
+        elif mutation == "capability":
+            payload["serve"]["Web"]["machine.example.ts.net:8420"]["Handlers"]["/"]["AcceptAppCaps"] = []
+        elif mutation == "funnel":
+            payload["serve"]["AllowFunnel"] = {"machine.example.ts.net:8420": True}
+        raw = json.dumps(payload)
+        if mutation == "malformed":
+            raw = "{broken"
+        elif mutation == "duplicate":
+            raw = raw.replace('"schemaVersion": 1', '"schemaVersion": 2, "schemaVersion": 1')
+        runtime_snapshot.write_text(raw)
+        if mutation == "missing":
+            runtime_snapshot.unlink()
+        messages.clear()
+        await adapter(scope, None, send)
+        assert messages[0]["status"] == 503
+        assert len(calls) == 1
+    try:
+        asyncio.run(exercise())
+    finally:
+        adapter._reader.shutdown()
+
+
+@pytest.mark.parametrize("kind", ["websocket", "http"])
+@pytest.mark.parametrize("idle", [False, True])
+def test_runtime_stream_continuation_and_expiry(monkeypatch, runtime_snapshot, kind, idle):
+    async def exercise():
+        messages = []
+        continued = asyncio.Event()
+        cancelled = asyncio.Event()
+        ticks = asyncio.Queue()
+        real_sleep = asyncio.sleep
+        async def tick(_interval):
+            assert _interval == launcher.TAILSCALE_RUNTIME_LEASE_SECONDS
+            await ticks.get()
+        monkeypatch.setattr(launcher.asyncio, "sleep", tick)
+        async def send(message):
+            messages.append(message)
+        async def app(scope, receive, send):
+            try:
+                if kind == "websocket":
+                    await send({"type": "websocket.accept"})
+                    await send({"type": "websocket.send", "text": "valid"})
+                else:
+                    await send({"type": "http.response.start", "status": 200, "headers": []})
+                    await send({"type": "http.response.body", "body": b"valid", "more_body": True})
+                continued.set()
+                if idle:
+                    await asyncio.Event().wait()
+                else:
+                    await proceed.wait()
+                    await send({"type": "websocket.send", "text": "forbidden"} if kind == "websocket"
+                               else {"type": "http.response.body", "body": b"forbidden", "more_body": True})
+            finally:
+                cancelled.set()
+        proceed = asyncio.Event()
+        adapter = launcher.TrustedEdgeHeaderAdapter(app, "t" * 32, peer_verifier=lambda _: True)
+        task = asyncio.create_task(adapter({"type": kind, "headers": []}, None, send))
+        try:
+            await asyncio.wait_for(continued.wait(), 2)
+            assert len(messages) == 2
+            runtime_snapshot.write_text(json.dumps(snapshot_payload(
+                observedAt=(datetime.now(timezone.utc) - timedelta(seconds=91)).isoformat())))
+            if idle:
+                ticks.put_nowait(None)
+            else:
+                proceed.set()
+            if kind == "http":
+                with pytest.raises(RuntimeError, match="trusted edge lease expired"):
+                    await asyncio.wait_for(task, 2)
+                assert len(messages) == 2  # no successful terminal body
+            else:
+                await asyncio.wait_for(task, 2)
+                assert messages[-1] == {"type": "websocket.close", "code": 4403}
+            assert cancelled.is_set()
+            assert not any(m.get("text") == "forbidden" or m.get("body") == b"forbidden" for m in messages)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            adapter._reader.shutdown()
+            monkeypatch.setattr(launcher.asyncio, "sleep", real_sleep)
+    asyncio.run(exercise())
+
+
+def test_runtime_lease_timeout_fails_closed_without_queueing_reads(monkeypatch, runtime_snapshot):
+    from concurrent.futures import Future
+    pending = Future()
+    submissions = []
+    adapter = launcher.TrustedEdgeHeaderAdapter(None, "t" * 32)
+    adapter._reader.shutdown()
+    adapter._reader = SimpleNamespace(submit=lambda fn: submissions.append(fn) or pending)
+    monkeypatch.setattr(launcher, "TAILSCALE_RUNTIME_READ_TIMEOUT_SECONDS", 0.001)
+    async def exercise():
+        assert not await adapter._lease_valid()
+        assert not await adapter._lease_valid()
+        assert len(submissions) == 1
+        assert not pending.cancelled()
+        pending.set_result(False)
+    asyncio.run(exercise())
+
+
+def test_runtime_receive_rejects_revoked_snapshot_before_delivery(runtime_snapshot):
+    delivered = []
+    messages = []
+    async def receive():
+        runtime_snapshot.write_text(json.dumps(snapshot_payload(serve={})))
+        return {"type": "websocket.receive", "text": "must not arrive"}
+    async def send(message):
+        messages.append(message)
+    async def app(scope, receive, send):
+        await send({"type": "websocket.accept"})
+        delivered.append(await receive())
+    adapter = launcher.TrustedEdgeHeaderAdapter(app, "t" * 32, peer_verifier=lambda _: True)
+    try:
+        asyncio.run(adapter({"type": "websocket", "headers": []}, receive, send))
+        assert not delivered
+        assert messages[-1] == {"type": "websocket.close", "code": 4403}
+    finally:
+        adapter._reader.shutdown()

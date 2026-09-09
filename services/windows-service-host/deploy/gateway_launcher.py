@@ -11,15 +11,20 @@ prints config, identity, or secret material.
 from __future__ import annotations
 
 import argparse
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 import ctypes
 from datetime import datetime, timezone
 from email.header import decode_header
+import http.client
 import importlib
 import json
 import os
 from pathlib import Path
 import re
 import socket
+import stat
 import struct
 import sys
 import threading
@@ -47,8 +52,13 @@ TAILSCALE_APP_CAPABILITIES_HEADER = b"tailscale-app-capabilities"
 TAILSCALE_SERVICE_NAME_ENV = "LIFEOS_TAILSCALE_SERVICE_NAME"
 DEFAULT_TAILSCALE_SERVICE_NAME = "Tailscale"
 TAILSCALE_SNAPSHOT_PATH_ENV = "LIFEOS_TAILSCALE_SNAPSHOT_PATH"
+# Reviewed service constants only: never take lease policy from HTTP input.
+# Idle revocation detection is bounded by interval + read timeout.
+TAILSCALE_RUNTIME_LEASE_SECONDS = 1.0
+TAILSCALE_RUNTIME_READ_TIMEOUT_SECONDS = 0.5
 TAILSCALE_SNAPSHOT_MAX_AGE_SECONDS = 90
 TAILSCALE_SNAPSHOT_MAX_FUTURE_SECONDS = 5
+LOCAL_READINESS_TIMEOUT_SECONDS = 1.0
 SERVE_CONFIG_KEYS = frozenset({"Web", "TCP", "Services", "AllowFunnel", "Foreground"})
 GATEWAY_LOOPBACK_PORT = 8421
 WINDOWS_AF_INET = 2
@@ -59,6 +69,7 @@ WINDOWS_SC_MANAGER_CONNECT = 0x0001
 WINDOWS_SERVICE_QUERY_STATUS = 0x0004
 WINDOWS_SC_STATUS_PROCESS_INFO = 0
 WINDOWS_SERVICE_RUNNING = 4
+WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
 
 
 class _WindowsTcpRowOwnerPid(ctypes.Structure):
@@ -90,8 +101,256 @@ class EdgeTokenConfigurationError(RuntimeError):
     """A safe, operator-actionable edge-token diagnostic."""
 
 
+def _loopback_api_ready(api_base_url: str) -> bool:
+    """Check the local API readiness contract without following redirects."""
+    try:
+        parsed = urlsplit(api_base_url)
+        if (parsed.scheme != "http" or parsed.hostname != "127.0.0.1"
+                or parsed.port != 8787 or parsed.path or parsed.query or parsed.fragment
+                or parsed.username is not None or parsed.password is not None):
+            return False
+        connection = http.client.HTTPConnection("127.0.0.1", 8787, timeout=1.0)
+        try:
+            connection.request("GET", "/ready", headers={"Connection": "close"})
+            response = connection.getresponse()
+            if response.status != 200:
+                return False
+            body = response.read(1025)
+            if len(body) > 1024:
+                return False
+            value = json.loads(body)
+            return isinstance(value, dict) and value == {"readiness": "ready"}
+        finally:
+            connection.close()
+    except (OSError, http.client.HTTPException, TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def _current_gateway_dependencies_ready(
+    api_base_url: str,
+    snapshot_path: str | None,
+    tailscale_service_name: str,
+) -> bool:
+    """Re-evaluate every dependency required for a running gateway."""
+    try:
+        serve, dns_name, _login = _read_tailscale_snapshot(snapshot_path)
+        if not _serve_is_exact(serve, expected_dns_name=dns_name):
+            return False
+        if _is_windows_host() and _windows_tailscale_service_pid(tailscale_service_name) is None:
+            return False
+        return _loopback_api_ready(api_base_url)
+    except Exception:
+        return False
+
+
+class LocalReadinessAdapter:
+    """Expose a local-only readiness probe with live dependency evaluation."""
+
+    def __init__(self, app: Any, readiness_check: Any) -> None:
+        self._app = app
+        self._readiness_check = readiness_check
+        self._inflight_readiness: asyncio.Task[bool] | None = None
+
+    async def _run_readiness_check(self) -> bool:
+        try:
+            return bool(await asyncio.to_thread(self._readiness_check))
+        except Exception:
+            # Keep dependency details inside the launcher. The endpoint only
+            # exposes the provider-neutral unavailable response below.
+            return False
+
+    def _readiness_task(self) -> asyncio.Task[bool]:
+        task = self._inflight_readiness
+        if task is None or task.done():
+            task = asyncio.create_task(self._run_readiness_check())
+            self._inflight_readiness = task
+        return task
+
+    async def _dependencies_ready(self) -> bool:
+        # Shield the shared task so one timed-out caller cannot cancel the
+        # check for other callers. A still-running check remains shared until
+        # it finishes, preventing a stalled filesystem from creating an
+        # unbounded executor queue.
+        task = self._readiness_task()
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(task), timeout=LOCAL_READINESS_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            return False
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> Any:
+        if scope.get("type") == "http" and scope.get("path") == "/ready":
+            client = scope.get("client")
+            address = client[0] if isinstance(client, (tuple, list)) and client else None
+            if address not in {"127.0.0.1", "::1", "::ffff:127.0.0.1"}:
+                await send({"type": "http.response.start", "status": 403,
+                            "headers": [(b"cache-control", b"no-store")]})
+                await send({"type": "http.response.body", "body": b"Readiness is local-only"})
+                return None
+            ready = await self._dependencies_ready()
+            if not ready:
+                body = b'{"readiness":"unavailable"}'
+                await send({"type": "http.response.start", "status": 503,
+                            "headers": [(b"cache-control", b"no-store"),
+                                        (b"content-type", b"application/json"),
+                                        (b"content-length", str(len(body)).encode("ascii"))]})
+                await send({"type": "http.response.body", "body": body})
+                return None
+            body = b'{"readiness":"ready"}'
+            await send({"type": "http.response.start", "status": 200,
+                        "headers": [(b"cache-control", b"no-store"),
+                                    (b"content-type", b"application/json"),
+                                    (b"content-length", str(len(body)).encode("ascii"))]})
+            await send({"type": "http.response.body", "body": body})
+            return None
+        return await self._app(scope, receive, send)
+
+
 def _is_windows_host() -> bool:
     return os.name == "nt"
+
+
+def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
+    """Return the bounded identity facts used to bind a read to one object."""
+    return (
+        int(value.st_dev),
+        int(value.st_ino),
+        int(value.st_size),
+        int(value.st_mtime_ns),
+        int(value.st_ctime_ns),
+        int(value.st_mode),
+        int(getattr(value, "st_file_attributes", 0)),
+    )
+
+
+def _is_reparse_stat(value: os.stat_result) -> bool:
+    return stat.S_ISLNK(value.st_mode) or bool(
+        int(getattr(value, "st_file_attributes", 0)) & WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT
+    )
+
+
+def _path_identity_chain(path: Path) -> tuple[tuple[str, tuple[int, int, int, int, int, int, int]], ...]:
+    """Capture every existing component without resolving reparse points."""
+    current = Path(os.path.abspath(os.fspath(path)))
+    chain: list[tuple[str, tuple[int, int, int, int, int, int, int]]] = []
+    leaf = current
+    while True:
+        try:
+            observed = os.lstat(current)
+        except FileNotFoundError:
+            break
+        except OSError as exc:
+            raise RuntimeError("deployment path is unreadable") from exc
+        # Windows reparse points are rejected at every level. On the macOS
+        # development host, /var is a normal system symlink to /private/var;
+        # retain its identity in the ancestor chain while still rejecting a
+        # symlink at the actual configured file/directory leaf. The POSIX open
+        # uses O_NOFOLLOW for that leaf.
+        if _is_reparse_stat(observed) and (os.name == "nt" or current == leaf):
+            raise RuntimeError("reparse deployment path")
+        chain.append((os.path.normcase(os.path.abspath(os.fspath(current))), _stat_identity(observed)))
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return tuple(reversed(chain))
+
+
+def _open_regular_file(path: Path) -> int:
+    """Open one non-reparse regular file and return its owned file descriptor.
+
+    Windows uses CreateFile with FILE_FLAG_OPEN_REPARSE_POINT so a final
+    junction/symlink is opened as the reparse object and rejected by the fstat
+    check instead of being followed.  The pre/post ancestor chain checks below
+    cover path components; the descriptor remains the source of bytes and
+    final-file identity for the entire read.
+    """
+    if os.name == "nt":
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+            wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+        ]
+        create_file.restype = wintypes.HANDLE
+        handle = create_file(
+            str(path),
+            0x80000000,  # GENERIC_READ
+            0x00000001,  # FILE_SHARE_READ; writers cannot replace/grow it
+            None,
+            3,           # OPEN_EXISTING
+            0x00200000 | 0x08000000,  # OPEN_REPARSE_POINT | SEQUENTIAL_SCAN
+            None,
+        )
+        invalid = ctypes.c_void_p(-1).value
+        if handle in (None, invalid):
+            raise OSError(ctypes.get_last_error(), "deployment file could not be opened")
+        try:
+            msvcrt = ctypes.CDLL("msvcrt")
+            open_osfhandle = msvcrt._open_osfhandle
+            open_osfhandle.argtypes = [ctypes.c_int64, ctypes.c_int]
+            open_osfhandle.restype = ctypes.c_int
+            descriptor = open_osfhandle(
+                ctypes.cast(handle, ctypes.c_void_p).value,
+                os.O_RDONLY | getattr(os, "O_BINARY", 0),
+            )
+            if descriptor < 0:
+                kernel32.CloseHandle(handle)
+                raise OSError("deployment file descriptor could not be created")
+            return descriptor
+        except Exception:
+            # _open_osfhandle owns a successful handle; the exception path
+            # above only closes handles it still owns.
+            if 'descriptor' not in locals() or descriptor < 0:
+                kernel32.CloseHandle(handle)
+            raise
+
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    return os.open(os.fspath(path), flags)
+
+
+def _read_bounded_regular_file(path: Path, *, max_bytes: int, description: str) -> bytes:
+    """Read at most max_bytes+1 from one descriptor-bound regular file."""
+    if max_bytes <= 0:
+        raise RuntimeError(f"{description} has an invalid bounded read size")
+    _safe_path(str(path), file=True, directory=False)
+    before_chain = _path_identity_chain(path)
+    if not before_chain:
+        raise RuntimeError(f"{description} is missing")
+    before_leaf = before_chain[-1][1]
+    descriptor = _open_regular_file(path)
+    try:
+        opened = os.fstat(descriptor)
+        if _is_reparse_stat(opened) or not stat.S_ISREG(opened.st_mode):
+            raise RuntimeError(f"{description} is not a regular file")
+        if _stat_identity(opened) != before_leaf:
+            raise RuntimeError(f"{description} changed while it was being opened")
+        if opened.st_size > max_bytes:
+            raise RuntimeError(f"{description} is oversized")
+
+        chunks: list[bytes] = []
+        total = 0
+        while total <= max_bytes:
+            chunk = os.read(descriptor, min(65536, max_bytes + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > max_bytes:
+                raise RuntimeError(f"{description} is oversized")
+
+        closed_view = os.fstat(descriptor)
+        if _stat_identity(closed_view) != _stat_identity(opened) or total != opened.st_size:
+            raise RuntimeError(f"{description} changed while it was being read")
+        after_chain = _path_identity_chain(path)
+        if after_chain != before_chain:
+            raise RuntimeError(f"{description} path identity changed while it was being read")
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
 
 
 def _configured_tailscale_service_name() -> str:
@@ -289,7 +548,13 @@ def _safe_path(value: Any, *, file: bool, directory: bool) -> Path:
         raise RuntimeError("invalid deployment path")
     path = Path(value)
     for component in (path, *path.parents):
-        if component.is_symlink():
+        try:
+            observed = os.lstat(component)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise RuntimeError("deployment path is unreadable") from exc
+        if _is_reparse_stat(observed) and (os.name == "nt" or component == path):
             raise RuntimeError("reparse deployment path")
     if file and not path.is_file():
         raise RuntimeError("required deployment file is missing")
@@ -311,7 +576,7 @@ def _read_edge_token(path: Path) -> str:
                 "LIFEOS_TAILSCALE_EDGE_TOKEN source file is missing; create the "
                 "operator-managed token file before starting the gateway."
             )
-        raw = path.read_bytes()
+        raw = _read_bounded_regular_file(path, max_bytes=256, description="LIFEOS_TAILSCALE_EDGE_TOKEN source")
     except EdgeTokenConfigurationError:
         raise
     except OSError as exc:
@@ -335,7 +600,7 @@ def _read_edge_token(path: Path) -> str:
         ) from exc
 
 
-def _read_tailscale_snapshot() -> tuple[dict[str, Any], str, str]:
+def _read_tailscale_snapshot(snapshot_path: str | None = None) -> tuple[dict[str, Any], str, str]:
     """Read the SYSTEM-produced Tailscale state without crossing LocalAPI ACLs.
 
     The gateway service runs as a virtual service account and intentionally
@@ -351,20 +616,29 @@ def _read_tailscale_snapshot() -> tuple[dict[str, Any], str, str]:
     does not make the identity half trustworthy on its own.  Only the ACL on
     the state directory keeps the gateway out of the writer role.
     """
-    raw_path = os.environ.get(TAILSCALE_SNAPSHOT_PATH_ENV)
+    raw_path = snapshot_path or os.environ.get(TAILSCALE_SNAPSHOT_PATH_ENV)
     if not isinstance(raw_path, str) or not raw_path:
         raise RuntimeError("tailscale snapshot path is not configured")
     path = _safe_path(raw_path, file=True, directory=False)
     try:
-        if path.stat().st_size > 256 * 1024:
-            raise RuntimeError("tailscale snapshot is oversized")
-        value = json.loads(path.read_text(encoding="utf-8"))
+        raw = _read_bounded_regular_file(
+            path, max_bytes=256 * 1024, description="tailscale snapshot"
+        )
+        def unique_object(pairs):
+            result = {}
+            for key, item in pairs:
+                if key in result:
+                    raise ValueError("duplicate field")
+                result[key] = item
+            return result
+        value = json.loads(raw, object_pairs_hook=unique_object,
+                           parse_constant=lambda _: (_ for _ in ()).throw(ValueError("invalid number")))
     except RuntimeError:
         raise
     except Exception as exc:
         raise RuntimeError("tailscale snapshot is unreadable") from exc
     expected_fields = {"schemaVersion", "observedAt", "dnsName", "login", "serve", "identity"}
-    if not isinstance(value, dict) or set(value) != expected_fields or value.get("schemaVersion") != 1:
+    if not isinstance(value, dict) or set(value) != expected_fields or type(value.get("schemaVersion")) is not int or value.get("schemaVersion") != 1:
         raise RuntimeError("tailscale snapshot schema is invalid")
     observed_at = value.get("observedAt")
     if not isinstance(observed_at, str):
@@ -394,7 +668,10 @@ def _read_tailscale_snapshot() -> tuple[dict[str, Any], str, str]:
 
 def _read_config(path: Path) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(
+            _read_bounded_regular_file(path, max_bytes=64 * 1024, description="gateway config")
+            .decode("utf-8")
+        )
     except Exception as exc:
         raise RuntimeError("gateway config invalid") from exc
     if not isinstance(value, dict) or set(value) != EXPECTED_FIELDS:
@@ -403,7 +680,7 @@ def _read_config(path: Path) -> dict[str, Any]:
         raise RuntimeError("gateway config is not loopback-only")
     if value["apiBaseUrl"] != "http://127.0.0.1:8787":
         raise RuntimeError("gateway API is not loopback-only")
-    value["dataDirectory"] = str(_safe_path(value["dataDirectory"], directory=True))
+    value["dataDirectory"] = str(_safe_path(value["dataDirectory"], file=False, directory=True))
     value["calendarPath"] = str(_safe_path(value["calendarPath"], file=False, directory=False))
     value["documentsPath"] = str(_safe_path(value["documentsPath"], file=False, directory=True))
     value["claudeSecretPath"] = str(_safe_path(value["claudeSecretPath"], file=True, directory=False))
@@ -414,9 +691,12 @@ def _read_config(path: Path) -> dict[str, Any]:
             "operator-managed token file."
         )
     secret_path = Path(value["claudeSecretPath"])
-    if secret_path.stat().st_size > 4096:
-        raise RuntimeError("gateway secret is oversized")
-    secret = secret_path.read_bytes().decode("ascii")
+    try:
+        secret = _read_bounded_regular_file(
+            secret_path, max_bytes=4096, description="gateway secret"
+        ).decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError("gateway secret invalid") from exc
     if not 32 <= len(secret) <= 256 or not re.fullmatch(r"[\x21-\x7e]+", secret):
         raise RuntimeError("gateway secret invalid")
     return value
@@ -586,16 +866,65 @@ class TrustedEdgeHeaderAdapter:
         *,
         peer_verifier: Any | None = None,
         tailscale_service_name: str = DEFAULT_TAILSCALE_SERVICE_NAME,
+        expected_identity: tuple[str, str] | None = None,
     ) -> None:
+        self._snapshot_path = os.environ.get(TAILSCALE_SNAPSHOT_PATH_ENV)
+        if expected_identity is None:
+            _, dns, login = _read_tailscale_snapshot(self._snapshot_path)
+            expected_identity = (dns, login)
+        self._expected_identity = expected_identity
+        # One outstanding disk operation per adapter, even on timeout. No
+        # unbounded executor queue if the Windows filesystem stalls.
+        self._reader = ThreadPoolExecutor(max_workers=1, thread_name_prefix="edge-lease")
+        self._pending_read = None
         self._app = app
         self._token_header = token.encode("ascii")
         self._peer_verifier = peer_verifier or (
             lambda scope: _is_tailscale_service_peer(scope, tailscale_service_name)
         )
 
+    def _snapshot_valid(self) -> bool:
+        try:
+            serve, dns, login = _read_tailscale_snapshot(self._snapshot_path)
+            return ((dns, login) == self._expected_identity
+                    and _serve_is_exact(serve, expected_dns_name=dns))
+        except Exception:
+            return False
+
+    async def _lease_valid(self) -> bool:
+        if self._pending_read is None or self._pending_read.done():
+            self._pending_read = self._reader.submit(self._snapshot_valid)
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(asyncio.wrap_future(self._pending_read)),
+                timeout=TAILSCALE_RUNTIME_READ_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            return False
+
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> Any:
         if scope.get("type") not in {"http", "websocket"}:
             return await self._app(scope, receive, send)
+        started = False
+        finished = False
+
+        async def deny():
+            nonlocal finished
+            if finished:
+                return
+            finished = True
+            if scope["type"] == "websocket":
+                await send({"type": "websocket.close", "code": 4403})
+            elif not started:
+                await send({"type": "http.response.start", "status": 503,
+                            "headers": [(b"cache-control", b"no-store")]})
+                await send({"type": "http.response.body", "body": b"Edge unavailable"})
+            else:
+                # Never present a revoked partial HTTP stream as complete.
+                raise RuntimeError("trusted edge lease expired")
+
+        if not await self._lease_valid():
+            return await deny()
         original_headers = scope.get("headers", [])
         headers: list[tuple[bytes, bytes]] = []
         for name, value in original_headers:
@@ -613,7 +942,54 @@ class TrustedEdgeHeaderAdapter:
             headers.append((TRUSTED_EDGE_HEADER, self._token_header))
         forwarded_scope = dict(scope)
         forwarded_scope["headers"] = headers
-        return await self._app(forwarded_scope, receive, send)
+        revoked = False
+
+        class LeaseExpired(Exception):
+            pass
+
+        async def check():
+            nonlocal revoked
+            if revoked or not await self._lease_valid():
+                revoked = True
+                raise LeaseExpired()
+
+        async def guarded_receive():
+            await check()
+            message = await receive()
+            await check()
+            return message
+
+        async def guarded_send(message):
+            nonlocal started, finished
+            await check()
+            await send(message)
+            if message["type"] in {"http.response.start", "websocket.accept"}:
+                started = True
+            if (message["type"] == "websocket.close" or
+                message["type"] == "http.response.body" and not message.get("more_body", False)):
+                finished = True
+
+        async def watch():
+            while True:
+                await asyncio.sleep(TAILSCALE_RUNTIME_LEASE_SECONDS)
+                await check()
+
+        application = asyncio.create_task(self._app(forwarded_scope, guarded_receive, guarded_send))
+        watchdog = asyncio.create_task(watch())
+        try:
+            done, _ = await asyncio.wait({application, watchdog}, return_when=asyncio.FIRST_COMPLETED)
+            if watchdog in done:
+                await watchdog
+            return await application
+        except LeaseExpired:
+            application.cancel()
+            with suppress(asyncio.CancelledError, LeaseExpired):
+                await application
+            return await deny()
+        finally:
+            for task in (application, watchdog):
+                task.cancel()
+            await asyncio.gather(application, watchdog, return_exceptions=True)
 
 
 def _services_use_port(value: Any, port: int) -> bool | None:
@@ -648,6 +1024,16 @@ def _services_use_port(value: Any, port: int) -> bool | None:
     return False
 
 
+def _is_exact_tcp_https_mirror(value: Any) -> bool:
+    """Return whether a TCP entry is the one supported HTTPS mirror."""
+    return (
+        isinstance(value, dict)
+        and set(value) == {"HTTPS"}
+        and type(value["HTTPS"]) is bool
+        and value["HTTPS"] is True
+    )
+
+
 def _serve_is_exact(status: dict[str, Any], expected_dns_name: str | None = None) -> bool:
     if not isinstance(status, dict):
         return False
@@ -662,9 +1048,13 @@ def _serve_is_exact(status: dict[str, Any], expected_dns_name: str | None = None
     if not _is_empty_serve_value(tcp):
         if not isinstance(tcp, dict):
             return False
-        for endpoint in tcp:
+        for endpoint, config in tcp.items():
             port_range = _endpoint_port_range(str(endpoint))
-            if port_range is None or port_range[0] <= 8420 <= port_range[1]:
+            if port_range is None:
+                return False
+            if port_range[0] <= 8420 <= port_range[1] and (
+                not isinstance(endpoint, str) or endpoint != "8420" or not _is_exact_tcp_https_mirror(config)
+            ):
                 return False
     services = status.get("Services")
     if not _is_empty_serve_value(services):
@@ -738,6 +1128,19 @@ def run(config_path: Path, entry_point: Path, tailscale: Path) -> int:
         app,
         edge_token,
         tailscale_service_name=tailscale_service_name,
+        expected_identity=(expected_dns_name, login),
+    )
+    # `/health` remains the liveness contract served by the reviewed gateway;
+    # this launcher-owned local probe is a separate readiness contract. It is
+    # reachable only after all launcher preflight (including the fresh,
+    # authenticated Tailscale snapshot) has completed.
+    app = LocalReadinessAdapter(
+        app,
+        lambda: _current_gateway_dependencies_ready(
+            str(config["apiBaseUrl"]),
+            os.environ.get(TAILSCALE_SNAPSHOT_PATH_ENV),
+            tailscale_service_name,
+        ),
     )
     # Reviewed gateway modules may expose these constants.  Set them after
     # import as a defence-in-depth bridge while retaining the env contract.
@@ -762,7 +1165,7 @@ def run(config_path: Path, entry_point: Path, tailscale: Path) -> int:
             if Path(getattr(module, name)) != Path(config["documentsPath"]):
                 raise RuntimeError("documents path contract mismatch")
     uvicorn = importlib.import_module("uvicorn")
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=8421, log_level="warning"))
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=8421, log_level="warning", proxy_headers=False))
 
     def stop_on_stdin_eof() -> None:
         try:

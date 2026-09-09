@@ -20,8 +20,10 @@ const post = (port: number, secret: string, payload: string, contentType = 'appl
   req.setTimeout(5_000, () => { req.destroy(); resolve({ status: 598, body: '' }); });
   req.end(payload);
 });
-const getUsage = (port: number) => new Promise<{ status: number; body: any }>(resolve => {
-  const req = request({ host: '127.0.0.1', port, path: '/api/usage', method: 'GET' }, response => {
+const getUsage = (port: number, secret?: string) => new Promise<{ status: number; body: any }>(resolve => {
+  const req = request({ host: '127.0.0.1', port, path: '/api/usage', method: 'GET',
+    headers: secret === undefined ? {} : { authorization: `Bearer ${secret}` },
+  }, response => {
     let value = '';
     response.on('data', chunk => value += chunk);
     response.on('end', () => resolve({ status: response.statusCode!, body: JSON.parse(value) }));
@@ -33,6 +35,8 @@ const getUsage = (port: number) => new Promise<{ status: number; body: any }>(re
 
 async function configuredServer(readLive: Parameters<typeof createApiServer>[0] = async () => ({ connectorState: 'unavailable', windows: [] })) {
   const previous = {
+    localEnabled: process.env.LIFEOS_LOCAL_API_ENABLED,
+    localSecretFile: process.env.LIFEOS_LOCAL_API_SECRET_FILE,
     enabled: process.env.CODEX_INGEST_ENABLED,
     secretFile: process.env.CODEX_INGEST_SECRET_FILE,
     store: process.env.USAGE_STORE_PATH,
@@ -44,7 +48,11 @@ async function configuredServer(readLive: Parameters<typeof createApiServer>[0] 
   const secretPath = join(directory, 'codex.secret');
   const storePath = join(directory, 'history.jsonl');
   const secret = 'c'.repeat(32);
+  const localSecret = 'l'.repeat(32);
+  const localSecretPath = join(directory, 'local-api.secret');
   const restore = () => {
+    if (previous.localEnabled === undefined) delete process.env.LIFEOS_LOCAL_API_ENABLED; else process.env.LIFEOS_LOCAL_API_ENABLED = previous.localEnabled;
+    if (previous.localSecretFile === undefined) delete process.env.LIFEOS_LOCAL_API_SECRET_FILE; else process.env.LIFEOS_LOCAL_API_SECRET_FILE = previous.localSecretFile;
     if (previous.enabled === undefined) delete process.env.CODEX_INGEST_ENABLED; else process.env.CODEX_INGEST_ENABLED = previous.enabled;
     if (previous.secretFile === undefined) delete process.env.CODEX_INGEST_SECRET_FILE; else process.env.CODEX_INGEST_SECRET_FILE = previous.secretFile;
     if (previous.store === undefined) delete process.env.USAGE_STORE_PATH; else process.env.USAGE_STORE_PATH = previous.store;
@@ -54,6 +62,8 @@ async function configuredServer(readLive: Parameters<typeof createApiServer>[0] 
   };
   let server: ReturnType<typeof createApiServer> | undefined;
   try {
+    process.env.LIFEOS_LOCAL_API_ENABLED = 'true';
+    process.env.LIFEOS_LOCAL_API_SECRET_FILE = localSecretPath;
     process.env.CODEX_INGEST_ENABLED = 'true';
     process.env.CODEX_INGEST_SECRET_FILE = secretPath;
     process.env.USAGE_STORE_PATH = storePath;
@@ -61,12 +71,13 @@ async function configuredServer(readLive: Parameters<typeof createApiServer>[0] 
     delete process.env.CLAUDE_INGEST_ENABLED;
     delete process.env.CLAUDE_STATUSLINE_ENABLED;
     await writeFile(secretPath, secret, { mode: 0o600 });
+    await writeFile(localSecretPath, localSecret, { mode: 0o600 });
     server = createApiServer(readLive);
     await new Promise<void>((resolve, reject) => { server!.once('error', reject); server!.listen(0, '127.0.0.1', resolve); });
     const address = server.address();
     if (!address || typeof address === 'string') throw new Error('no address');
     return {
-      port: address.port, secret, storePath, server,
+      port: address.port, secret, localSecret, storePath, server,
       restore,
     };
   } catch (error) {
@@ -134,6 +145,22 @@ describe('sanitized Codex collector boundary', () => {
     }
   });
 
+  it('keeps local Usage reads and Codex ingestion credentials separate', async () => {
+    const fixture = await configuredServer();
+    const payload = JSON.stringify({ windows: [{ minutes: 300, usedPercent: 12 }] });
+    try {
+      expect(await getUsage(fixture.port)).toEqual({ status: 401, body: { error: 'unauthorized' } });
+      expect(await getUsage(fixture.port, fixture.secret)).toEqual({ status: 401, body: { error: 'unauthorized' } });
+      expect((await post(fixture.port, fixture.localSecret, payload)).status).toBe(401);
+      await expect(readFile(fixture.storePath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+      expect((await post(fixture.port, fixture.secret, payload)).status).toBe(200);
+      expect((await getUsage(fixture.port, fixture.localSecret)).status).toBe(200);
+    } finally {
+      await new Promise(resolve => fixture.server.close(resolve));
+      fixture.restore();
+    }
+  });
+
   it('atomically accepts and deduplicates a replay, persisting only supported fields', async () => {
     const fixture = await configuredServer();
     const payload = JSON.stringify({ windows: [
@@ -171,18 +198,18 @@ describe('sanitized Codex collector boundary', () => {
     const fresh = new Date(Date.now() - 60_000).toISOString();
     await writeFile(fixture.storePath, JSON.stringify({ provider: 'codex', window: 'five_hour', durationMinutes: 300, usedPercent: 12, observedAt: fresh }) + '\n');
     try {
-      const healthy = await getUsage(fixture.port);
+      const healthy = await getUsage(fixture.port, fixture.localSecret);
       expect(healthy.status).toBe(200);
       expect(healthy.body.connectors.codex).toBe('healthy');
       expect(healthy.body.windows.find((window: { provider: string }) => window.provider === 'codex').usedPercent).toBe(12);
       const metadataBeforeGet = await stat(fixture.storePath);
       const before = await readFile(fixture.storePath, 'utf8');
-      const repeated = await getUsage(fixture.port);
+      const repeated = await getUsage(fixture.port, fixture.localSecret);
       expect(repeated.status).toBe(200);
       expect((await stat(fixture.storePath)).mtimeMs).toBe(metadataBeforeGet.mtimeMs);
       const stale = new Date(Date.now() - 60 * 60_000).toISOString();
       await writeFile(fixture.storePath, JSON.stringify({ provider: 'codex', window: 'five_hour', durationMinutes: 300, usedPercent: 13, observedAt: stale }) + '\n');
-      const refreshDue = await getUsage(fixture.port);
+      const refreshDue = await getUsage(fixture.port, fixture.localSecret);
       expect(refreshDue.body.connectors.codex).toBe('refresh_due');
       expect(refreshDue.body.windows.find((window: { provider: string }) => window.provider === 'codex').provenance.connectorState).toBe('refresh_due');
       expect(before).not.toBe('');

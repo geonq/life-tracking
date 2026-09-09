@@ -29,8 +29,9 @@ destinations are moved into an ACL-locked install backup before replacement.
 directory into the API-owned data directory. `calendar.json`,
 `enablebanking-connections.json` (bounded to 256 KiB),
 `finance-summary.json` (bounded to 1 MiB), and `documents` are copied into the
-Gateway-owned data directory. The two Finance files are hash-verified,
-journaled, and backed up for rollback. The legacy
+Gateway-owned data directory. Gateway-created `finance-imported.json` state is also accepted during repair/upgrade and is
+bounded to 8 MiB. Finance authority files are hash-verified, journaled, and
+backed up for rollback. The legacy
 `claude-ingest.secret` is copied to the separate secret directory; it is never
 placed under a service-writable data directory. A distinct Codex secret is
 generated from the OS CSPRNG when absent. Secret contents never appear in
@@ -96,6 +97,10 @@ The builder runs the reviewed contracts/API builds and self-contained
 `win-x64` service-host publish, then stages only the explicit API/contracts/
 `zod`, gateway, deployment, test, `node.exe`, and service-host allowlist. It
 does not copy `node_modules`, a Python environment, runtime data, or secrets.
+The standalone `node.exe` is bounded to 256 MiB; candidate verification
+grants that larger bound only to `node-runtime/node.exe` and keeps the general
+candidate file bound at 64 MiB.
+
 The output is `lifeos-release-<full-source-sha>/`, a flat-content
 `lifeos-release-<full-source-sha>.zip`, and its `.sha256` sidecar. Existing
 same-SHA outputs are never overwritten. If PowerShell is unavailable on the
@@ -163,9 +168,8 @@ directory; raw API keys or private key contents are not accepted as parameters.
 Enable Banking is enabled only when all five values are supplied together.
 Clipper and Google AI Studio are enabled only when their protected source file
 is supplied. The installer rejects partial banking configuration and fails
-closed when a required secret file cannot be read. PayPal is not enabled by
-this toolkit: it still requires official account/reporting-scope eligibility
-and a separate server-side OAuth implementation.
+closed when a required secret file cannot be read. Unsupported payment
+providers are not enabled by this toolkit.
 
 ## Required preflight inputs
 
@@ -247,6 +251,12 @@ bearer values, usernames, tailnet hostnames, or IP addresses to these scripts.
 
 & "$deploy\verify.ps1"
 ```
+
+Verification must run from the extracted release's `deploy` directory so the
+installed service host, API, gateway bundle, Node runtime, configuration, and
+snapshot writer can be compared with that candidate. If the verifier is copied
+elsewhere, pass the extracted release directory explicitly with
+`-CandidateRoot`.
 
 `LifeOSAPI` is automatic-start under `NT SERVICE\LifeOSAPI`. `LifeOSGateway`
 is delayed automatic-start under `NT SERVICE\LifeOSGateway`, dependent on
@@ -345,6 +355,20 @@ or the current state changed concurrently, rollback fails closed for
 operator-led recovery. Older manifests without a Serve snapshot or the
 optional v17 token-path and v18 snapshot-path fields remain accepted by the canonical rollback
 validator and require operator-led restoration of any missing token setup.
+
+Recovery inventory is bounded per transaction at 256 tree roots and 65,536
+file units. Both limits and the matching serialized recovery-journal byte bound
+are checked before a recovery journal is published or an artifact restore
+begins. Per-unit progress is written as bounded framed records with a digest and
+commit marker; an uncommitted tail is truncated on retry, while corruption in a
+committed record is rejected. Durable unit phases are not appended twice, and
+the terminal journal write is the crash-safe checkpoint. Recovery JSON readers
+reject files above their explicit byte caps before parsing and validate
+inventory collections before walking them. Service configuration and registry
+state are restored while both services are stopped; captured running state is
+then reconciled in API-before-Gateway dependency order. Each retry also
+reconciles the captured scheduled-task existence, enabled state, and running
+state before recovery can report success.
 
 ## Static and behavioral checks
 

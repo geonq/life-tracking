@@ -21,6 +21,21 @@ die() {
     exit 1
 }
 
+# Keep the packaging policy byte-for-byte aligned with the Windows candidate
+# verifier. Only the exact standalone runtime destination gets the larger
+# allowance; every other candidate file is capped at 64 MiB.
+candidate_max_file_bytes=$((64 * 1024 * 1024))
+candidate_node_max_file_bytes=$((256 * 1024 * 1024))
+
+file_size_bytes() {
+    local path="$1"
+    local size
+    size="$(wc -c < "$path")"
+    size="${size//[[:space:]]/}"
+    [[ "$size" =~ ^[0-9]+$ ]] || die "could not determine candidate input size: $path"
+    printf '%s\n' "$size"
+}
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(cd "$script_dir/.." && pwd -P)"
 output_dir="/private/tmp"
@@ -85,9 +100,10 @@ fi
 [[ -f "$node_source" ]] || die "Node source is not a file: $node_source"
 [[ ! -L "$node_source" ]] || die 'Node source must not be a symbolic link'
 node_source="$(cd "$(dirname "$node_source")" && pwd -P)/$(basename "$node_source")"
-node_size="$(wc -c < "$node_source" | tr -d '[:space:]')"
-[[ "$node_size" =~ ^[0-9]+$ ]] || die 'could not determine the standalone node.exe size'
-(( node_size <= 256 * 1024 * 1024 )) || die 'Node source is unexpectedly large; pass only the standalone node.exe, never the Hermes runtime tree'
+node_size="$(file_size_bytes "$node_source")"
+# Keep this equal to LifeOSCandidateNodeMaxFileBytes in Deployment.Common.ps1;
+# the candidate verifier grants this larger bound only to node-runtime/node.exe.
+(( node_size <= candidate_node_max_file_bytes )) || die 'Node source is unexpectedly large; pass only the standalone node.exe, never the Hermes runtime tree'
 python3 - "$node_source" <<'PY'
 import sys
 from pathlib import Path
@@ -132,10 +148,20 @@ copy_file() {
     local relative_destination="$2"
     [[ -f "$source" ]] || die "required release input is missing: $source"
     [[ ! -L "$source" ]] || die "release input must not be a symbolic link: $source"
+    local max_bytes="$candidate_max_file_bytes"
+    if [[ "$relative_destination" == 'node-runtime/node.exe' ]]; then
+        max_bytes="$candidate_node_max_file_bytes"
+    fi
+    local source_size
+    source_size="$(file_size_bytes "$source")"
+    (( source_size <= max_bytes )) || die "candidate input exceeds its bounded size: $relative_destination"
     local destination="$release_tmp/$relative_destination"
     mkdir -p "$(dirname "$destination")"
     cp -p "$source" "$destination"
     [[ -f "$destination" && ! -L "$destination" ]] || die "failed to create a regular candidate file: $relative_destination"
+    local destination_size
+    destination_size="$(file_size_bytes "$destination")"
+    (( destination_size <= max_bytes )) || die "staged candidate file exceeds its bounded size: $relative_destination"
 }
 
 echo "Building contracts from source SHA $source_sha..."
@@ -166,6 +192,7 @@ api_dist_files=(
     history.js
     ingest-secret.js
     json-boundary.js
+    local-auth.js
     nutrition-photo.js
     open-food-facts.js
     projection.js
@@ -235,6 +262,8 @@ import sys
 from pathlib import Path
 
 source_path, destination_path = map(Path, sys.argv[1:])
+if source_path.stat().st_size > 64 * 1024 * 1024:
+    raise SystemExit("source API package metadata exceeds the candidate file bound")
 source = json.loads(source_path.read_text(encoding="utf-8"))
 if source.get("name") != "@iphone-life-os/api" or source.get("version") != "0.1.0":
     raise SystemExit("source API package metadata is not the reviewed release")
@@ -253,7 +282,35 @@ release = {
     },
 }
 destination_path.write_text(json.dumps(release, separators=(",", ":")) + "\n", encoding="utf-8")
+if destination_path.stat().st_size > 64 * 1024 * 1024:
+    raise SystemExit("staged API package metadata exceeds the candidate file bound")
 PY
+
+# Validate the staged package, never workspace module resolution or operator
+# credentials. NODE_ENV=test prevents executable module imports starting writers.
+node_binary="$(command -v node)"
+env -i NODE_ENV=test "$node_binary" --input-type=module - "$release_tmp" <<'JS'
+import { readdir } from 'node:fs/promises';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+const root = process.argv[2];
+async function modules(directory) {
+    for (const entry of (await readdir(directory, {withFileTypes: true})).sort((a, b) => a.name.localeCompare(b.name))) {
+        const file = path.join(directory, entry.name);
+        if (entry.isDirectory()) await modules(file);
+        else if (/\.(?:js|cjs)$/.test(entry.name)) await import(pathToFileURL(file).href);
+    }
+}
+try {
+    for (const relative of ['api/dist', 'api/node_modules/@iphone-life-os/contracts/dist', 'api/node_modules/zod']) {
+        await modules(path.join(root, relative));
+    }
+} catch {
+    // Module exceptions can contain source or environment values. Never echo them.
+    console.error('Staged JavaScript import closure failed.');
+    process.exitCode = 1;
+}
+JS
 
 gateway_files=(
     main.py
@@ -324,6 +381,9 @@ for path in root.rglob("*"):
             or any(part in {"", ".", ".."} for part in relative.split("/"))
         ):
             raise SystemExit(f"candidate path is unsafe: {relative}")
+        max_bytes = 256 * 1024 * 1024 if relative == "node-runtime/node.exe" else 64 * 1024 * 1024
+        if path.stat().st_size > max_bytes:
+            raise SystemExit(f"candidate file exceeds its bounded size: {relative}")
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         entries.append((relative, digest))
 entries.sort(key=lambda item: item[0])

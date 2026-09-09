@@ -25,15 +25,9 @@ function Get-CandidateRelativePath {
 
 function Assert-CandidatePeFile {
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Name)
-    $stream = $null
-    try {
-        $stream = [IO.File]::OpenRead($Path)
-        $bytes = New-Object byte[] 2
-        if ($stream.Read($bytes, 0, 2) -ne 2 -or $bytes[0] -ne 0x4d -or $bytes[1] -ne 0x5a) {
-            throw "$Name is not a Windows PE executable."
-        }
-    } finally {
-        if ($null -ne $stream) { $stream.Dispose() }
+    $bytes = Read-LifeOSPrefixBytes -Path $Path -Count 2 -Description $Name
+    if ($bytes.Length -ne 2 -or $bytes[0] -ne 0x4d -or $bytes[1] -ne 0x5a) {
+        throw "$Name is not a Windows PE executable."
     }
 }
 
@@ -82,6 +76,7 @@ $expectedFiles = @(
     'api/dist/history.js'
     'api/dist/ingest-secret.js'
     'api/dist/json-boundary.js'
+    'api/dist/local-auth.js'
     'api/dist/nutrition-photo.js'
     'api/dist/open-food-facts.js'
     'api/dist/projection.js'
@@ -158,18 +153,41 @@ foreach ($relativePath in $expectedFiles) {
     $expectedSet[$relativePath] = $true
 }
 
-$allItems = @(Get-ChildItem -LiteralPath $rootFull -Recurse -Force -ErrorAction Stop)
+$allowedDirectories = @{}
+foreach ($relativePath in $expectedFiles) {
+    $parent = Split-Path -Parent $relativePath
+    while (-not [string]::IsNullOrEmpty($parent)) {
+        $allowedDirectories[$parent.Replace('\', '/')] = $true
+        $parent = Split-Path -Parent $parent
+    }
+}
+# Every candidate limit is derived from the reviewed file allowlist. The
+# shared breadth-first walker counts files, directories, and bytes before any
+# later hashing or manifest parsing, and rejects reparses before enqueueing.
+$maxCandidateFiles = [int]$expectedFiles.Count + 1 # allow CANDIDATE-MANIFEST.sha256
+$maxCandidateDirectories = [int]$allowedDirectories.Count + 1 # allow the root
+$maxCandidateFileBytes = [long]$script:LifeOSRecoveryMaxFileBytes
+$maxCandidateNodeFileBytes = [long]$script:LifeOSCandidateNodeMaxFileBytes
+# The only candidate file allowed above the general 64 MiB bound is the
+# explicitly allowlisted standalone node runtime. Keep the aggregate bound
+# equally tight: one node runtime plus the general bound for every other file.
+$maxCandidateBytes = [long]($maxCandidateFiles - 1) * $maxCandidateFileBytes + $maxCandidateNodeFileBytes
+$allItems = @(Get-LifeOSBoundedTreeItem -Root $rootFull -MaxFiles $maxCandidateFiles -MaxDirectories $maxCandidateDirectories -MaxBytes $maxCandidateBytes -MaxFileBytes $maxCandidateFileBytes -LargeFileRelativePath 'node-runtime/node.exe' -LargeFileMaxBytes $maxCandidateNodeFileBytes)
 $actualFiles = New-Object System.Collections.ArrayList
 $actualDirectories = New-Object System.Collections.ArrayList
+$actualFileIdentities = @{}
 foreach ($item in $allItems) {
-    $linkType = if ($null -ne $item.PSObject.Properties['LinkType']) { $item.LinkType } else { $null }
-    $target = if ($null -ne $item.PSObject.Properties['Target']) { $item.Target } else { $null }
-    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $null -ne $linkType -or $null -ne $target) {
-        throw "Candidate contains a reparse point or symbolic link: $($item.FullName)"
-    }
     $relativePath = Get-CandidateRelativePath -Path $item.FullName -RootPath $rootFull
     if ($item.PSIsContainer) { [void]$actualDirectories.Add($relativePath) }
-    else { [void]$actualFiles.Add($relativePath) }
+    else {
+        $itemMaxBytes = if ($relativePath -ceq 'node-runtime/node.exe') { $maxCandidateNodeFileBytes } else { $maxCandidateFileBytes }
+        if ([long]$item.Length -gt $itemMaxBytes) {
+            throw "Candidate file exceeds its bounded size: $relativePath"
+        }
+        [void]$actualFiles.Add($relativePath)
+        if ($actualFileIdentities.ContainsKey($relativePath)) { throw "Candidate contains a duplicate path: $relativePath" }
+        $actualFileIdentities[$relativePath] = New-LifeOSTreeItemIdentity -Item $item -Description 'Candidate file inventory item'
+    }
 }
 
 $actualFileSet = @{}
@@ -189,14 +207,6 @@ if (-not $actualFileSet.ContainsKey('CANDIDATE-MANIFEST.sha256')) {
     throw 'Candidate manifest is missing.'
 }
 
-$allowedDirectories = @{}
-foreach ($relativePath in $expectedFiles) {
-    $parent = Split-Path -Parent $relativePath
-    while (-not [string]::IsNullOrEmpty($parent)) {
-        $allowedDirectories[$parent.Replace('\', '/')] = $true
-        $parent = Split-Path -Parent $parent
-    }
-}
 foreach ($relativePath in $actualDirectories) {
     if (-not $allowedDirectories.ContainsKey($relativePath)) {
         throw "Candidate contains an unexpected directory: $relativePath"
@@ -204,29 +214,45 @@ foreach ($relativePath in $actualDirectories) {
 }
 
 $sourceShaPath = Join-Path $rootFull 'SOURCE_SHA.txt'
-$sourceShaText = [IO.File]::ReadAllText($sourceShaPath)
+$sourceShaItem = Get-Item -LiteralPath $sourceShaPath -Force -ErrorAction Stop
+if ($sourceShaItem.PSIsContainer -or [long]$sourceShaItem.Length -gt $maxCandidateFileBytes) {
+    throw 'SOURCE_SHA.txt exceeds the candidate file bound.'
+}
+$sourceShaText = Read-LifeOSCappedFileText -Path $sourceShaPath -MaxBytes $maxCandidateFileBytes -Description 'SOURCE_SHA.txt'
 if ($sourceShaText -notmatch ('^' + [regex]::Escape($expectedSha) + "`r?`n?$")) {
     throw 'SOURCE_SHA.txt does not contain exactly the expected full source SHA.'
 }
 
 $manifestPath = Join-Path $rootFull 'CANDIDATE-MANIFEST.sha256'
-$manifestText = [IO.File]::ReadAllText($manifestPath)
+$candidateManifestMaxBytes = [long]($expectedFiles.Count + 1) * 16 * 1024
+$manifestItem = Get-Item -LiteralPath $manifestPath -Force -ErrorAction Stop
+if ($manifestItem.PSIsContainer -or [long]$manifestItem.Length -gt $candidateManifestMaxBytes) {
+    throw 'Candidate manifest exceeds its allowlist-derived parse bound.'
+}
+$manifestText = Read-LifeOSCappedFileText -Path $manifestPath -MaxBytes $candidateManifestMaxBytes -Description 'Candidate manifest'
 if ($manifestText.IndexOf([char]0xfeff) -ge 0 -or $manifestText -notmatch "`r?`n$") {
     throw 'Candidate manifest must be UTF-8 text without a BOM and end with one newline.'
 }
 $manifestPaths = New-Object System.Collections.ArrayList
 $manifestHashes = @{}
-foreach ($line in @([IO.File]::ReadAllLines($manifestPath))) {
-    if ($line -notmatch '^(?<hash>[0-9a-f]{64})  \./(?<path>[A-Za-z0-9@][A-Za-z0-9@._/-]*)$') {
-        throw "Candidate manifest line is not canonical: $line"
+$manifestReader = [IO.StringReader]::new($manifestText)
+try {
+    while ($true) {
+        $line = $manifestReader.ReadLine()
+        if ($null -eq $line) { break }
+        if ($line -notmatch '^(?<hash>[0-9a-f]{64})  \./(?<path>[A-Za-z0-9@][A-Za-z0-9@._/-]*)$') {
+            throw "Candidate manifest line is not canonical: $line"
+        }
+        $relativePath = [string]$Matches['path']
+        if ($relativePath -match '(^|/)(?:\.{1,2})(?:/|$)|//|/$' -or $relativePath -eq 'CANDIDATE-MANIFEST.sha256') {
+            throw "Candidate manifest path is unsafe: $relativePath"
+        }
+        if ($manifestHashes.ContainsKey($relativePath)) { throw "Candidate manifest contains a duplicate: $relativePath" }
+        $manifestHashes[$relativePath] = [string]$Matches['hash']
+        [void]$manifestPaths.Add($relativePath)
     }
-    $relativePath = [string]$Matches['path']
-    if ($relativePath -match '(^|/)(?:\.{1,2})(?:/|$)|//|/$' -or $relativePath -eq 'CANDIDATE-MANIFEST.sha256') {
-        throw "Candidate manifest path is unsafe: $relativePath"
-    }
-    if ($manifestHashes.ContainsKey($relativePath)) { throw "Candidate manifest contains a duplicate: $relativePath" }
-    $manifestHashes[$relativePath] = [string]$Matches['hash']
-    [void]$manifestPaths.Add($relativePath)
+} finally {
+    $manifestReader.Dispose()
 }
 if ((@(Sort-CandidatePaths $manifestPaths) -join "`n") -ne (@($manifestPaths) -join "`n")) {
     throw 'Candidate manifest paths are not sorted deterministically.'
@@ -237,8 +263,12 @@ if ($manifestKey -ne $actualKey) {
 }
 foreach ($relativePath in $manifestPaths) {
     $candidatePath = Join-Path $rootFull ($relativePath.Replace('/', '\'))
-    $actualHash = (Get-FileHash -LiteralPath $candidatePath -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($actualHash -cne [string]$manifestHashes[$relativePath]) {
+    if (-not $actualFileIdentities.ContainsKey($relativePath)) {
+        throw "Candidate manifest file was not present in the frozen inventory: $relativePath"
+    }
+    Assert-LifeOSTreeItemIdentity -Path $candidatePath -Expected $actualFileIdentities[$relativePath] -Description "Candidate file $relativePath" | Out-Null
+    $actualDigest = Get-LifeOSFileDigest -Path $candidatePath -Description "Candidate file $relativePath" -ExpectedFileId ([string]$actualFileIdentities[$relativePath].FileId)
+    if ([string]$actualDigest.Sha256 -cne [string]$manifestHashes[$relativePath]) {
         throw "Candidate manifest hash mismatch: $relativePath"
     }
 }
@@ -246,7 +276,7 @@ foreach ($relativePath in $manifestPaths) {
 Assert-CandidatePeFile -Path (Join-Path $rootFull 'node-runtime\node.exe') -Name 'Node runtime'
 Assert-CandidatePeFile -Path (Join-Path $rootFull 'service-host\LifeOS.ServiceHost.exe') -Name 'Service host'
 
-$apiPackage = Get-Content -LiteralPath (Join-Path $rootFull 'api\package.json') -Raw | ConvertFrom-Json -ErrorAction Stop
+$apiPackage = Read-LifeOSBoundedJsonFile -Path (Join-Path $rootFull 'api\package.json') -MaxBytes $script:LifeOSGenerationManifestMaxBytes -Description 'Candidate API package metadata'
 Assert-ExactJsonPropertySet -Object $apiPackage -ExpectedNames @('name', 'version', 'private', 'type', 'dependencies') -Label 'Candidate API package metadata'
 if ($apiPackage.name -isnot [string] -or [string]$apiPackage.name -cne '@iphone-life-os/api' -or
     $apiPackage.version -isnot [string] -or [string]$apiPackage.version -cne '0.1.0' -or

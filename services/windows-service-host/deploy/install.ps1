@@ -27,12 +27,14 @@ param(
     [string]$EnableBankingPrivateKeySource,
     [string]$EnableBankingCertificateSource,
     [string]$EnableBankingApiBaseUrl,
-    [string]$EnableBankingRedirectUri
+    [string]$EnableBankingRedirectUri,
+    [switch]$DefineOnly
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Deployment.Common.ps1')
+$script:LifeOSInstallScriptRoot = $PSScriptRoot
 
 Assert-SafeTaskName $LegacyTaskName
 Assert-SafeTaskName $CodexTaskName
@@ -45,7 +47,8 @@ function Add-ManifestItem {
 
 function Save-InstallManifest {
     param([Parameter(Mandatory)][object]$Manifest, [Parameter(Mandatory)][string]$Path)
-    Write-JsonAtomic $Path $Manifest
+    [void](Assert-LifeOSGenerationManifestCheckpointCapacity $Manifest)
+    Write-JsonAtomic $Path $Manifest -MaxBytes $script:LifeOSGenerationManifestMaxBytes
 }
 
 function New-ManifestIntent {
@@ -58,7 +61,9 @@ function New-ManifestIntent {
         [Parameter(Mandatory)][string]$Destination,
         [string]$Backup,
         [Parameter(Mandatory)][bool]$PriorExists,
-        [Parameter(Mandatory)][bool]$Changed
+        [Parameter(Mandatory)][bool]$Changed,
+        [AllowNull()][System.Collections.IDictionary]$PendingFields = $null,
+        [AllowNull()][System.Collections.IDictionary]$CompletionFields = $null
     )
     $item = [ordered]@{
         kind = $Kind
@@ -69,6 +74,23 @@ function New-ManifestIntent {
         changed = $Changed
         phase = 'pending'
     }
+    if ($null -ne $PendingFields) {
+        foreach ($name in $PendingFields.Keys) { $item[[string]$name] = $PendingFields[$name] }
+    }
+    $completedItem = [ordered]@{}
+    foreach ($name in $item.Keys) { $completedItem[$name] = $item[$name] }
+    $completedItem['phase'] = 'complete'
+    if ($null -ne $CompletionFields) {
+        foreach ($name in $CompletionFields.Keys) { $completedItem[[string]$name] = $CompletionFields[$name] }
+    }
+    # Complete-ManifestIntent may add these fields after a verified copy. Size
+    # the preflight against their largest valid representation before a target
+    # is changed, while the writer still enforces the actual 16 MiB bound.
+    if (-not $completedItem.Contains('sourceSha256')) { $completedItem['sourceSha256'] = 'f' * 64 }
+    if (-not $completedItem.Contains('sourceLength')) { $completedItem['sourceLength'] = [long]::MaxValue }
+    $pendingCandidate = New-LifeOSGenerationManifestCandidate -Manifest $Manifest -BackupItem $item
+    $completedCandidate = New-LifeOSGenerationManifestCandidate -Manifest $Manifest -BackupItem $completedItem
+    [void](Assert-LifeOSGenerationManifestCheckpointCapacity -Manifest $Manifest -FutureCheckpoints @($pendingCandidate, $completedCandidate))
     Add-ManifestItem $List $item
     Save-InstallManifest $Manifest $ManifestPath
     return $item
@@ -89,32 +111,49 @@ function Complete-ManifestIntent {
     Save-InstallManifest $Manifest $ManifestPath
 }
 
-function Migrate-LegacyDataFile {
-    param(
-        [Parameter(Mandatory)][string]$Source,
-        [Parameter(Mandatory)][string]$Destination,
-        [Parameter(Mandatory)][string]$BackupName,
-        [Parameter(Mandatory)][string]$Kind,
-        [Parameter(Mandatory)][long]$MaxBytes,
-        [Parameter(Mandatory)][string]$BackupDirectory,
-        [Parameter(Mandatory)][System.Collections.IList]$ManifestBackups,
-        [Parameter(Mandatory)][object]$Manifest,
-        [Parameter(Mandatory)][string]$ManifestPath
-    )
-    if (-not (Test-Path -LiteralPath $Source)) { return }
-    $sourceInfo = Assert-BoundedFile $Source $MaxBytes ("Legacy {0} source" -f $Kind)
-    $destinationExists = Test-Path -LiteralPath $Destination
-    if ($destinationExists -and -not (Test-Path -LiteralPath $Destination -PathType Leaf)) {
-        throw ("Legacy {0} destination is not a file." -f $Kind)
+function Assert-AuthorityJsonBounds {
+    param($Value, [int]$Depth = 0, [ref]$Nodes)
+    $Nodes.Value++
+    if ($Depth -gt 64 -or $Nodes.Value -gt 100000) { throw 'Authority JSON structural bound exceeded.' }
+    if ($Value -is [double] -and ([double]::IsNaN($Value) -or [double]::IsInfinity($Value))) { throw 'Authority JSON contains non-finite numbers.' }
+    if ($Value -is [System.Management.Automation.PSCustomObject]) {
+        foreach ($property in $Value.PSObject.Properties) { Assert-AuthorityJsonBounds $property.Value ($Depth + 1) $Nodes }
+    } elseif ($Value -is [array]) {
+        foreach ($element in $Value) { Assert-AuthorityJsonBounds $element ($Depth + 1) $Nodes }
     }
-    $destinationHash = if ($destinationExists) { Get-FileSha256 $Destination } else { '' }
-    $changed = -not ($destinationExists -and $sourceInfo.Sha256 -eq $destinationHash)
-    $intent = New-ManifestIntent -List $ManifestBackups -Manifest $Manifest -ManifestPath $ManifestPath -Kind $Kind -Source $Source -Destination $Destination -Backup (Join-Path $BackupDirectory $BackupName) -PriorExists $destinationExists -Changed $changed
-    $intent['maxBytes'] = $MaxBytes
-    $intent['sourceLength'] = [long]$sourceInfo.Length
-    Save-InstallManifest $Manifest $ManifestPath
-    $result = Copy-FileVerifiedAtomic -Source $Source -Destination $Destination -BackupDirectory $BackupDirectory -BackupName $BackupName -MaxBytes $MaxBytes
-    Complete-ManifestIntent $intent $Manifest $ManifestPath $result
+}
+
+function Start-AttributedCodexCollector {
+    param([string]$TaskName, [uri]$UsageUri, [int]$TimeoutSeconds = 45)
+    $before = Get-ScheduledTaskInfo -TaskName $TaskName -TaskPath '\' -ErrorAction Stop
+    $initial = Get-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction Stop
+    if ([string]$initial.State -ne 'Ready') { throw 'Collector is not idle before attribution.' }
+    $startedAt = Get-Date
+    Start-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction Stop
+    $deadline = $startedAt.AddSeconds($TimeoutSeconds)
+    $sawRunning = $false
+    $observedRun = $null
+    do {
+        $task = Get-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction Stop
+        $info = Get-ScheduledTaskInfo -TaskName $TaskName -TaskPath '\' -ErrorAction Stop
+        if ($sawRunning -and $info.LastRunTime -ne $observedRun) { throw 'Collector run changed during attribution.' }
+        if ([string]$task.State -eq 'Running' -and $info.LastRunTime -gt $before.LastRunTime) { $sawRunning = $true; $observedRun = $info.LastRunTime }
+        # A cached result, queued task, 0x41301, or missed fast run is not proof.
+        if ($sawRunning -and [string]$task.State -eq 'Ready' -and
+            $info.LastRunTime -gt $before.LastRunTime -and $info.LastRunTime -ge $startedAt.AddSeconds(-1)) {
+            $confirm = Get-ScheduledTaskInfo -TaskName $TaskName -TaskPath '\' -ErrorAction Stop
+            $terminal = Get-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction Stop
+            if ([string]$terminal.State -ne 'Ready' -or $confirm.LastRunTime -ne $info.LastRunTime -or
+                $confirm.LastTaskResult -ne $info.LastTaskResult) { throw 'Collector terminal attribution changed.' }
+            $exitCode = [long]$confirm.LastTaskResult
+            if ($exitCode -eq 2) { return [pscustomobject]@{ status='provider_unavailable'; exitCode=2; observation='unverified'; terminalCompleted=$true; lastRunTime=$info.LastRunTime.ToUniversalTime().ToString('o') } }
+            if ($exitCode -ne 0) { throw "Collector terminal failure: $exitCode" }
+            if (-not (Wait-CodexUsageObservation $UsageUri $TimeoutSeconds $startedAt)) { throw 'Collector ingestion remains unverified.' }
+            return [pscustomobject]@{ status='observed'; exitCode=0; observation='observed'; terminalCompleted=$true; lastRunTime=$info.LastRunTime.ToUniversalTime().ToString('o') }
+        }
+        Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $deadline)
+    throw 'Collector terminal completed observation missing; cutover refused.'
 }
 
 function Copy-ApiReleaseBundle {
@@ -189,7 +228,7 @@ function Copy-GatewayCodeBundle {
         }
         $bundleFiles = @(Get-ChildItem -LiteralPath $temp -File | Where-Object { $_.Name -ne 'gateway-release.manifest.json' } | ForEach-Object {
             [ordered]@{ path = $_.Name; sha256 = Get-FileSha256 $_.FullName; length = $_.Length }
-        })
+        }) -MaxBytes $script:LifeOSGenerationManifestMaxBytes
         # v18 is the reviewed gateway bundle contract. Its file list is
         # unchanged from v17; the version marks the launcher no longer
         # shelling out to Tailscale and reading the SYSTEM-written snapshot
@@ -204,7 +243,7 @@ function Copy-GatewayCodeBundle {
             launcherSha256 = Get-FileSha256 (Join-Path $temp 'gateway_launcher.py')
             bundleFiles = $bundleFiles
         })
-        $writtenManifest = Get-Content -LiteralPath $releaseManifestPath -Raw | ConvertFrom-Json -ErrorAction Stop
+        $writtenManifest = Read-LifeOSBoundedJsonFile -Path $releaseManifestPath -MaxBytes $script:LifeOSGenerationManifestMaxBytes -Description 'Gateway release manifest'
         if ([string]$writtenManifest.bundleVersion -ne 'v18') { throw 'Gateway release manifest version is not v18.' }
         foreach ($bundleFile in @($writtenManifest.bundleFiles)) {
             $bundlePath = Join-Path $temp ([string]$bundleFile.path)
@@ -283,17 +322,7 @@ function Initialize-SupplementCatalog {
         }
         # Journal the replacement before moving the staged file so a failure
         # during the move still leaves enough information for rollback.
-        $catalogIntent = [ordered]@{
-            kind = 'supplement-catalog'
-            source = $CatalogPath
-            destination = $CatalogPath
-            backup = $backup
-            priorExists = $catalogPriorExists
-            changed = $true
-            phase = 'pending'
-        }
-        Add-ManifestItem $ManifestBackups $catalogIntent
-        Save-InstallManifest $Manifest $ManifestPath
+        $catalogIntent = New-ManifestIntent -List $ManifestBackups -Manifest $Manifest -ManifestPath $ManifestPath -Kind 'supplement-catalog' -Source $CatalogPath -Destination $CatalogPath -Backup $backup -PriorExists $catalogPriorExists -Changed $true
         Move-Item -LiteralPath $temporaryCatalog -Destination $CatalogPath -Force
         Assert-ExistingFile $CatalogPath 'Supplement catalog database'
         $catalogIntent['phase'] = 'complete'
@@ -315,7 +344,7 @@ function Get-ChildRuntimeStage {
     $pyvenv = Join-Path $sourceRoot 'pyvenv.cfg'
     if ($sourceRuntime.IsVirtualEnvironment) {
         Assert-ExistingFile $pyvenv 'Python venv metadata'
-        $cfg = Get-Content -LiteralPath $pyvenv -Raw -ErrorAction Stop
+        $cfg = Read-LifeOSCappedFileText -Path $pyvenv -MaxBytes $script:LifeOSRecoveryMaxFileBytes -Description 'Python venv metadata'
         $homeMatch = [regex]::Match($cfg, '(?m)^\s*home\s*=\s*(?<home>[^\r\n]+)\s*$')
         if (-not $homeMatch.Success) { throw "Python venv has no absolute home entry: $pyvenv" }
         # `$HOME` is a read-only automatic variable in Windows PowerShell;
@@ -340,7 +369,7 @@ function Get-ChildRuntimeStage {
             $venvResult = Copy-TreeVerifiedAtomic $sourceRoot $venvTarget $BackupDirectory 'previous-python-venv'
             $targetCfg = Join-Path $venvTarget 'pyvenv.cfg'
             Assert-ExistingFile $targetCfg 'Staged pyvenv.cfg'
-            $updated = Get-Content -LiteralPath $targetCfg -Raw
+            $updated = Read-LifeOSCappedFileText -Path $targetCfg -MaxBytes $script:LifeOSRecoveryMaxFileBytes -Description 'Staged pyvenv.cfg'
             $updated = [regex]::Replace($updated, '(?m)^\s*home\s*=\s*[^\r\n]+\s*$', ('home = ' + $baseTarget))
             $baseTargetInterpreter = if ($homeRuntime.Layout -eq 'root') {
                 Join-Path $baseTarget 'python.exe'
@@ -369,8 +398,15 @@ function Get-ChildRuntimeStage {
                     Remove-Item -LiteralPath $activationScript -Force
                 }
             }
-            foreach ($metadata in (Get-ChildItem -LiteralPath $venvTarget -Recurse -Force -File | Where-Object { $_.Extension -in @('.cfg', '.ini', '.txt', '.cmd', '.bat', '.ps1') })) {
-                $content = [IO.File]::ReadAllText($metadata.FullName)
+            # Walk the staged venv incrementally through the shared bounded,
+            # reparse-rejecting inventory. A recursive Get-ChildItem array and
+            # ReadAllText would let one large tree or metadata file escape the
+            # deployment resource contract.
+            Get-LifeOSBoundedTreeItem -Root $venvTarget |
+                Where-Object { -not $_.PSIsContainer -and $_.Extension -in @('.cfg', '.ini', '.txt', '.cmd', '.bat', '.ps1') } |
+                ForEach-Object {
+                $metadata = $_
+                $content = Read-LifeOSCappedFileText -Path $metadata.FullName -MaxBytes $script:LifeOSRecoveryMaxFileBytes -Description "Staged Python metadata $($metadata.Name)"
                 $content = $content.Replace($sourceRoot, $venvTarget).Replace($homeRoot, $baseTarget)
                 [IO.File]::WriteAllText($metadata.FullName, $content, [Text.UTF8Encoding]::new($false))
                 if ($content -match '(?i)[A-Za-z]:\\Users\\') { throw "Staged Python metadata retains a user-profile path: $($metadata.Name)" }
@@ -435,6 +471,8 @@ function Get-ApiHostConfig {
     )
     $systemRoot = if ([string]::IsNullOrWhiteSpace($env:SystemRoot)) { 'C:\Windows' } else { $env:SystemRoot }
     $environment = [ordered]@{
+        LIFEOS_LOCAL_API_ENABLED = 'true'
+        LIFEOS_LOCAL_API_SECRET_FILE = (Join-Path $script:LifeOSDefaultPaths.SecretRoot 'local-api.secret')
         NODE_ENV = 'production'
         PORT = 8787
         USAGE_STORE_PATH = $UsageHistory
@@ -516,6 +554,8 @@ function Get-GatewayHostConfig {
         $pythonDirectory
     }
     $environment = [ordered]@{
+        LIFEOS_LOCAL_API_ENABLED = 'true'
+        LIFEOS_LOCAL_API_SECRET_FILE = (Join-Path $script:LifeOSDefaultPaths.SecretRoot 'local-api.secret')
         SYSTEMROOT = $systemRoot
         TEMP = $TempDirectory
         TMP = $TempDirectory
@@ -553,13 +593,16 @@ function Get-GatewayHostConfig {
     }
 }
 
+function Invoke-LifeOSInstall {
 Assert-WindowsAdministrator
 $deploymentMutex = Enter-LifeOSDeploymentTransaction
 $deploymentCompleted = $false
 $deploymentRollbackSucceeded = $false
+$deploymentRecoveryCompleted = $false
 try {
 $paths = Get-LifeOSDefaultPaths
 $operatorSid = Get-InteractiveOperatorSid
+$previousGeneration = Get-LifeOSPreviousInstalledGeneration -MarkerState $deploymentMutex.PreviousState -ManifestPath $deploymentMutex.PreviousManifestPath -OperatorSid $operatorSid -ExpectedGeneration ([string]$deploymentMutex.PreviousGeneration)
 $tailscaleEdgeTokenPath = Assert-TailscaleEdgeTokenSource -Path $TailscaleEdgeTokenSource -ExpectedPath (Get-LifeOSTailscaleEdgeTokenPath $paths.SecretRoot) -OperatorSid $operatorSid
 $preflightArgs = @{
     ServiceHostBinarySource = $ServiceHostBinarySource
@@ -575,10 +618,12 @@ $preflightArgs = @{
     LegacyTaskName = $LegacyTaskName
     CodexTaskName = $CodexTaskName
 }
-& (Join-Path $PSScriptRoot 'preflight.ps1') @preflightArgs | Out-Host
+& (Join-Path $script:LifeOSInstallScriptRoot 'preflight.ps1') @preflightArgs | Out-Host
 
 $hostSource = Resolve-ServiceHostBinary $ServiceHostBinarySource $paths.ServiceHostPath
 $nodeSource = Resolve-NodeRuntimeSource $NodeRuntimeSource $ApiSource
+$nodeLargeFileRelativePath = 'node.exe'
+$nodeLargeFileMaxBytes = [long]$script:LifeOSCandidateNodeMaxFileBytes
 $pythonRuntime = Resolve-PythonRuntimeSource $PythonRuntimeSource $GatewaySource
 $pythonSource = $pythonRuntime.Root
 $gatewayEntrySource = Resolve-GatewayEntryPoint $GatewayEntryPoint $GatewaySource
@@ -628,9 +673,10 @@ $tailscaleSnapshotPath = Join-Path $stateDirectory 'tailscale-state.json'
 $hostTarget = Join-Path $paths.InstallRoot 'host\LifeOS.ServiceHost.exe'
 $apiTarget = Join-Path $paths.InstallRoot 'api'
 $gatewayTarget = Join-Path $paths.InstallRoot 'gateway'
-$launcherSource = Join-Path $PSScriptRoot 'gateway_launcher.py'
+$installedCodePresent = Test-Path -LiteralPath (Join-Path $gatewayTarget 'gateway-release.manifest.json') -PathType Leaf
+$launcherSource = Join-Path $script:LifeOSInstallScriptRoot 'gateway_launcher.py'
 Assert-ExistingFile $launcherSource 'Gateway launcher'
-$snapshotScriptSource = Join-Path $PSScriptRoot 'tailscale_snapshot.ps1'
+$snapshotScriptSource = Join-Path $script:LifeOSInstallScriptRoot 'tailscale_snapshot.ps1'
 Assert-ExistingFile $snapshotScriptSource 'Tailscale snapshot script'
 # SYSTEM runs this script with -ExecutionPolicy Bypass every minute, so write
 # access to it is SYSTEM code execution. Stage it inside the host directory,
@@ -645,6 +691,7 @@ $apiLogs = Join-Path $paths.LogRoot 'api'
 $gatewayLogs = Join-Path $paths.LogRoot 'gateway'
 $claudeSecret = Join-Path $paths.SecretRoot 'claude-ingest.secret'
 $codexSecret = Join-Path $paths.SecretRoot 'codex-ingest.secret'
+$localApiSecret = Join-Path $paths.SecretRoot 'local-api.secret'
 $clipperSecret = Join-Path $paths.SecretRoot 'clipper-ingest.secret'
 $googleAIStudioApiKey = Join-Path $paths.SecretRoot 'google-ai-studio.key'
 $enableBankingPrivateKey = Join-Path $paths.SecretRoot 'enable-banking.private-key'
@@ -667,6 +714,10 @@ foreach ($serviceName in @('LifeOSAPI', 'LifeOSGateway')) {
 $operatorName = Get-InteractiveOperatorName
 $manifest = [ordered]@{
     schemaVersion = 2
+    collectorTransition = $null
+    transactionId = $deploymentMutex.TransactionId
+    generation = [Guid]::NewGuid().ToString()
+    manifestPath = (Get-FullPath $manifestPath)
     createdAt = (Get-Date).ToUniversalTime().ToString('o')
     operatorSid = $operatorSid
     legacyTask = [ordered]@{ Name = $LegacyTaskName; Exists = $legacy.Exists; Enabled = $legacy.Enabled; State = $legacy.State; TaskPath = $legacy.TaskPath; Backup = $legacy.Backup }
@@ -708,7 +759,7 @@ $manifest = [ordered]@{
         hostDirectory = (Join-Path $paths.InstallRoot 'host')
         apiTemp = $apiTemp; gatewayTemp = $gatewayTemp; gatewayDocuments = (Join-Path $gatewayData 'documents')
         apiData = $apiData; gatewayData = $gatewayData; apiLogs = $apiLogs; gatewayLogs = $gatewayLogs
-        secretRoot = $paths.SecretRoot; claudeSecret = $claudeSecret; codexSecret = $codexSecret
+        localApiSecret = $localApiSecret; secretRoot = $paths.SecretRoot; claudeSecret = $claudeSecret; codexSecret = $codexSecret
         clipperSecret = $clipperSecret; googleAIStudioApiKey = $googleAIStudioApiKey
         enableBankingPrivateKey = $enableBankingPrivateKey; enableBankingCertificate = $enableBankingCertificate
         tailscaleEdgeToken = $tailscaleEdgeTokenPath
@@ -721,7 +772,11 @@ $manifest = [ordered]@{
     aclSnapshots = New-Object System.Collections.ArrayList
     tailscaleStatusBefore = $tailscaleStatusBefore
 }
+if ($null -ne $previousGeneration -and $null -ne $previousGeneration.Reference) {
+    $manifest['priorInstalledGeneration'] = $previousGeneration.Reference
+}
 Save-InstallManifest $manifest $manifestPath
+Bind-LifeOSDeploymentManifest $deploymentMutex $manifest $manifestPath
 Set-AclSnapshotContext -Manifest $manifest -ManifestPath $manifestPath -BackupDirectory $backupDirectory
 # Capture ACLs of pre-existing deployment targets before any replacement. A
 # later snapshot of a newly-created path is still useful for a retry, while
@@ -733,8 +788,11 @@ foreach ($aclTarget in @($hostTarget, $apiTarget, $gatewayTarget, $nodeTarget, $
 $legacyTaskMutated = $false
 $hostStage = $null
 try {
+    Stop-DeploymentTaskBarrier $manifest $manifestPath
     foreach ($serviceName in @('LifeOSAPI', 'LifeOSGateway')) { Stop-LifeOSService $serviceName }
 
+    $legacyCutover = Stop-LegacyGatewayForCutover -TaskSnapshot $legacy -ListenerSnapshot $manifest.legacyListener -Manifest $manifest -ManifestPath $manifestPath -TaskName $LegacyTaskName -TaskPath ([string]$legacy.TaskPath) -Port 8421
+    $legacyTaskMutated = [bool]$legacyCutover.TaskMutated
 $apiIntent = New-ManifestIntent -List $manifest.backups -Manifest $manifest -ManifestPath $manifestPath -Kind 'api-release' -Source $apiRoot -Destination $apiTarget -Backup (Join-Path $backupDirectory 'previous-api-release') -PriorExists (Test-Path -LiteralPath $apiTarget -PathType Container) -Changed $true
 $apiStage = Copy-ApiReleaseBundle $apiRoot $apiTarget $backupDirectory 'previous-api-release'
 Complete-ManifestIntent $apiIntent $manifest $manifestPath $apiStage
@@ -770,8 +828,8 @@ try {
 
 # Node must be staged before the collector task is registered; a clean host
 # has no node.exe at the original source path.
-$nodeIntent = New-ManifestIntent -List $manifest.backups -Manifest $manifest -ManifestPath $manifestPath -Kind 'node-runtime' -Source $nodeSource -Destination $nodeTarget -Backup (Join-Path $backupDirectory 'previous-node') -PriorExists (Test-Path -LiteralPath $nodeTarget -PathType Container) -Changed (-not (Compare-TreeManifest $nodeSource $nodeTarget))
-$nodeStage = Copy-TreeVerifiedAtomic $nodeSource $nodeTarget $backupDirectory 'previous-node'
+$nodeIntent = New-ManifestIntent -List $manifest.backups -Manifest $manifest -ManifestPath $manifestPath -Kind 'node-runtime' -Source $nodeSource -Destination $nodeTarget -Backup (Join-Path $backupDirectory 'previous-node') -PriorExists (Test-Path -LiteralPath $nodeTarget -PathType Container) -Changed (-not (Compare-TreeManifest $nodeSource $nodeTarget -LargeFileRelativePath $nodeLargeFileRelativePath -LargeFileMaxBytes $nodeLargeFileMaxBytes))
+$nodeStage = Copy-TreeVerifiedAtomic $nodeSource $nodeTarget $backupDirectory 'previous-node' -LargeFileRelativePath $nodeLargeFileRelativePath -LargeFileMaxBytes $nodeLargeFileMaxBytes
 Complete-ManifestIntent $nodeIntent $manifest $manifestPath $nodeStage
 
 # Register the stopped SCM objects before creating any service-readable
@@ -806,14 +864,24 @@ Set-DirectoryTraversalAcl $nodeTarget $operatorSid @($apiSid) -RootOnly -Inherit
 Set-DirectoryTraversalAcl (Join-Path $paths.RuntimeRoot 'python312') $operatorSid @($gatewaySid) -RootOnly -InheritToChildren
 if ($null -ne $pythonStage.VenvTarget) { Set-DirectoryTraversalAcl $pythonStage.VenvTarget $operatorSid @($gatewaySid) -RootOnly -InheritToChildren }
 
-# Lock parent roots before sensitive children are created.  Every child then
-# gets its own service-specific ACL before migration writes any bytes.
-Set-DirectoryTraversalAcl $paths.DataRoot $operatorSid @($apiSid, $gatewaySid)
-Set-DirectoryTraversalAcl $paths.LogRoot $operatorSid @($apiSid, $gatewaySid)
+# Lock shared data/log traversal parents at their roots only.  These parents
+# deliberately do not grant inheritable service access: only the named API and
+# gateway subtrees receive service-specific inheritance below.
+Set-DirectoryTraversalAcl $paths.DataRoot $operatorSid @($apiSid, $gatewaySid) -RootOnly
+Set-DirectoryTraversalAcl $paths.LogRoot $operatorSid @($apiSid, $gatewaySid) -RootOnly
 Set-DirectoryTraversalAcl $paths.SecretRoot $operatorSid @($apiSid, $gatewaySid)
 Set-DirectoryTraversalAcl $configDirectory $operatorSid @($apiSid, $gatewaySid)
-foreach ($directory in @($apiData, $apiTemp, $apiLogs)) { Ensure-Directory $directory; Set-RestrictedAcl $directory $operatorSid @() @($apiSid) }
-foreach ($directory in @($gatewayData, $gatewayTemp, (Join-Path $gatewayData 'documents'), $gatewayLogs)) { Ensure-Directory $directory; Set-RestrictedAcl $directory $operatorSid @() @($gatewaySid) }
+# These are the only trees where a service creates durable children.  Keep
+# SYSTEM's management grant inheritable for recursive verification, and scope
+# a possible service-owned child to the same service that receives Modify.
+foreach ($directory in @($apiData, $apiTemp, $apiLogs)) {
+    Ensure-Directory $directory
+    Set-RestrictedAcl $directory $operatorSid @() @($apiSid) -AllowedOwnerSids @($apiSid) -InheritableSystemFullControl
+}
+foreach ($directory in @($gatewayData, $gatewayTemp, (Join-Path $gatewayData 'documents'), $gatewayLogs)) {
+    Ensure-Directory $directory
+    Set-RestrictedAcl $directory $operatorSid @() @($gatewaySid) -AllowedOwnerSids @($gatewaySid) -InheritableSystemFullControl
+}
 $hostDirectory = Split-Path -Parent $hostTarget
 # Prepare the shared host boundary before creating the executable staging
 # file.  Its inheritable child grants become the final PE ACL without a
@@ -822,10 +890,12 @@ Set-DirectoryTraversalAcl $hostDirectory $operatorSid @($apiSid, $gatewaySid) -R
 # The gateway may read its Tailscale snapshot and nothing more. Only the
 # operator, SYSTEM, and Administrators can write the directory, so the SYSTEM
 # task remains the single writer of that identity assertion. SYSTEM's grant is
-# inheritable here — unlike every other Set-RestrictedAcl caller, the intended
-# writer of this directory *is* SYSTEM, and without an inheritable ACE
-# tailscale-state.json would carry no SYSTEM entry at all and the writer's
-# atomic replace would survive only on FILE_DELETE_CHILD from the parent.
+# inheritable here because the intended writer of this directory *is* SYSTEM,
+# and without an inheritable ACE tailscale-state.json would carry no SYSTEM
+# entry at all and the writer's atomic replace would survive only on
+# FILE_DELETE_CHILD from the parent. The service data/log trees above use the
+# same management inheritance for a different reason: their future
+# service-created children must remain recursively verifiable.
 Ensure-Directory $stateDirectory
 Set-RestrictedAcl -Path $stateDirectory -OperatorSid $operatorSid -ReadSids @($gatewaySid) -InheritableSystemFullControl
 Assert-NoBroadAcl $stateDirectory
@@ -841,21 +911,170 @@ $manifest.supplementCatalogInitialized = $catalogInitialized
 Save-InstallManifest $manifest $manifestPath
 
 $legacyData = Join-Path $LegacyGatewaySource 'data'
-$legacyCalendar = Join-Path $legacyData 'calendar.json'
-if (Test-Path -LiteralPath $legacyCalendar -PathType Leaf) {
-    $destination = Join-Path $gatewayData 'calendar.json'
-    $priorExists = Test-Path -LiteralPath $destination -PathType Leaf
-    $changed = -not ($priorExists -and (Get-FileSha256 $legacyCalendar) -eq (Get-FileSha256 $destination))
-    $intent = New-ManifestIntent -List $manifest.backups -Manifest $manifest -ManifestPath $manifestPath -Kind 'calendar-data' -Source $legacyCalendar -Destination $destination -Backup (Join-Path $backupDirectory 'previous-calendar.json') -PriorExists $priorExists -Changed $changed
-    $result = Copy-FileVerifiedAtomic $legacyCalendar $destination $backupDirectory 'previous-calendar.json'
-    Complete-ManifestIntent $intent $manifest $manifestPath $result
+# Explicit authority inventory: tombstones/idempotency are embedded in the state
+# envelopes; never infer additional authority from arbitrary legacy filenames.
+$authorityFiles = [ordered]@{
+    'calendar.json' = 256 * 1024
+    'calendar.json.state.json' = 6 * 1024 * 1024
+    'calendar.json.meta.json' = 4 * 1024 * 1024
+    'calendar.json.retry.json' = 512
+    'finance-summary.json' = 256 * 1024
+    # Mirrors EnableBankingService.MAX_FINANCE_STATE_SIZE.
+    'finance-summary.json.state.json' = 6 * 1024 * 1024
+    'finance-summary.json.meta.json' = 4 * 1024 * 1024
+    'enablebanking-connections.json' = 256 * 1024
+    'enablebanking-revocation.json' = 8 * 1024 * 1024
+    'enablebanking-revoked.json' = 64 * 1024
+    # These two files are explicitly supported Enable Banking runtime
+    # sidecars. Their presence may evolve after an older manifest was written,
+    # but they remain bounded and part of the authority inventory.
+    'enablebanking-partial.json' = 256 * 1024
+    'enablebanking-runtime.json' = 4 * 1024
+    # Gateway-owned manual-import state is allowed to appear after an older
+    # install and remains covered by the gatewayData ACL/authority inventory.
+    'finance-imported.json' = 8 * 1024 * 1024
+    'documents.json' = 256 * 1024
 }
-$legacyEnableBankingConnections = Join-Path $legacyData 'enablebanking-connections.json'
-Migrate-LegacyDataFile -Source $legacyEnableBankingConnections -Destination (Join-Path $gatewayData 'enablebanking-connections.json') -BackupName 'previous-enablebanking-connections.json' -Kind 'enablebanking-connections' -MaxBytes (256 * 1024) -BackupDirectory $backupDirectory -ManifestBackups $manifest.backups -Manifest $manifest -ManifestPath $manifestPath
-$legacyFinanceSummary = Join-Path $legacyData 'finance-summary.json'
-Migrate-LegacyDataFile -Source $legacyFinanceSummary -Destination (Join-Path $gatewayData 'finance-summary.json') -BackupName 'previous-finance-summary.json' -Kind 'finance-summary' -MaxBytes (1 * 1024 * 1024) -BackupDirectory $backupDirectory -ManifestBackups $manifest.backups -Manifest $manifest -ManifestPath $manifestPath
+$authoritySidecars = @('enablebanking-partial.json', 'enablebanking-runtime.json')
+$authoritySidecars += 'finance-imported.json'
+$legacyAllowedEntries = @($authorityFiles.Keys) + @('documents', 'usage-history.jsonl', 'claude-ingest.secret')
+$gatewayAllowedEntries = @($authorityFiles.Keys) + @('documents', 'tmp', 'supplements.sqlite3')
+$authorityNameSet = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+foreach ($name in $authorityFiles.Keys) { [void]$authorityNameSet.Add([string]$name) }
+foreach ($rootRecord in @(
+    [pscustomobject]@{ Path = $legacyData; Allowed = $legacyAllowedEntries },
+    [pscustomobject]@{ Path = $gatewayData; Allowed = $gatewayAllowedEntries }
+)) {
+    $root = [string]$rootRecord.Path
+    if (-not (Test-Path -LiteralPath $root)) { continue }
+    Assert-ExistingDirectory $root 'Authority inventory root'
+    $allowedSet = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($allowed in @($rootRecord.Allowed)) { [void]$allowedSet.Add([string]$allowed) }
+    $inventoryState = [pscustomobject]@{ Count = 0; Bytes = [long]0 }
+    Get-ChildItem -LiteralPath $root -Force -ErrorAction Stop | ForEach-Object {
+        $entry = $_
+        $inventoryState.Count++
+        if ($inventoryState.Count -gt 256) { throw 'Authority inventory root contains too many entries.' }
+        if (-not $allowedSet.Contains([string]$entry.Name)) {
+            throw "Unclassified legacy authority file or sidecar requires an explicit migration rule: $($entry.Name)"
+        }
+        if ($authorityNameSet.Contains([string]$entry.Name) -and $entry.PSIsContainer) {
+            throw "Authority inventory entry is not a regular file: $($entry.Name)"
+        }
+        if ($entry.Name -in @('documents', 'tmp') -and -not $entry.PSIsContainer) {
+            throw "Authority inventory entry must be a directory: $($entry.Name)"
+        }
+        if ($entry.Name -in @('usage-history.jsonl', 'claude-ingest.secret', 'supplements.sqlite3') -and $entry.PSIsContainer) {
+            throw "Authority inventory entry must be a regular file: $($entry.Name)"
+        }
+        if (-not $entry.PSIsContainer) {
+            $entryLength = [long]$entry.Length
+            if ($entryLength -lt 0 -or $entryLength -gt $script:LifeOSRecoveryMaxFileBytes -or
+                $entryLength -gt $script:LifeOSRecoveryMaxTreeBytes - $inventoryState.Bytes) {
+                throw "Authority inventory exceeds its bounded byte size: $($entry.Name)"
+            }
+            $inventoryState.Bytes += $entryLength
+        }
+    }
+}
+$authorityInventory = New-Object 'System.Collections.Generic.List[object]'
+$installedNames = @($authorityFiles.Keys | Where-Object { Test-Path -LiteralPath (Join-Path $gatewayData $_) -PathType Leaf })
+$legacyNames = @($authorityFiles.Keys | Where-Object { Test-Path -LiteralPath (Join-Path $legacyData $_) -PathType Leaf })
+$expectedNames = @()
+$versionedAuthority = $false
+if ($null -ne $previousGeneration) {
+    $hasPriorInstalledReference = $null -ne $previousGeneration.InstalledManifest
+    $authorityManifest = if ($hasPriorInstalledReference) { $previousGeneration.InstalledManifest } else { $previousGeneration.Manifest }
+    $previousAuthority = @($authorityManifest.backups | Where-Object { $_.kind -eq 'authority-set' })
+    if ($previousAuthority.Count -gt 1) { throw 'Installed generation has multiple classified authority sets.' }
+    if ($hasPriorInstalledReference) {
+        if ($previousAuthority.Count -ne 1 -or -not (Test-AuthorityRecoveryBaseline $previousAuthority[0])) {
+            throw 'Prior installed generation has no complete authority baseline.'
+        }
+        $expectedNames = @($previousAuthority[0].afterTree | Where-Object { $_.path -in @($authorityFiles.Keys) } | ForEach-Object { $_.path })
+        $versionedAuthority = $true
+    } elseif ($deploymentMutex.PreviousState -eq 'recovered' -and $previousAuthority.Count -eq 1) {
+        # A recovery can finish before the authority intent has durable,
+        # complete before/after trees. That terminal marker is safe evidence
+        # that recovery ran, but it is not a baseline for the next install.
+        if (-not (Test-AuthorityRecoveryBaseline $previousAuthority[0])) {
+            $previousAuthority = @()
+        }
+    }
+    if ($previousAuthority.Count -eq 0) {
+        if ($deploymentMutex.PreviousState -ne 'recovered') { throw 'Installed generation has no classified authority set.' }
+        # The current roots still have to pass Get-AuthorityInstallMode below;
+        # only the stale, unusable recovered manifest binding is discarded.
+    } elseif (-not $hasPriorInstalledReference) {
+        $expectedTree = if ($deploymentMutex.PreviousState -eq 'recovered') { $previousAuthority[0].beforeTree } else { $previousAuthority[0].afterTree }
+        $expectedNames = @($expectedTree | Where-Object { $_.path -in @($authorityFiles.Keys) } | ForEach-Object { $_.path })
+        $versionedAuthority = $deploymentMutex.PreviousState -ne 'recovered' -or (Get-JournalProperty $previousGeneration.Manifest 'installMode') -in @('upgrade', 'repair')
+    }
+}
+$manifest['installMode'] = Get-AuthorityInstallMode -Installed $installedNames -Legacy $legacyNames -Expected $expectedNames -Versioned $versionedAuthority -CodePresent $installedCodePresent -SupportedEvolution $authoritySidecars
+$preserveInstalledAuthority = $manifest.installMode -in @('upgrade', 'repair')
+foreach ($name in $authorityFiles.Keys) {
+    $source = Join-Path $legacyData $name
+    $destination = Join-Path $gatewayData $name
+    if (Test-Path -LiteralPath $destination) {
+        [void](Assert-BoundedFile $destination $authorityFiles[$name] 'Installed authority')
+    }
+    if (-not (Test-Path -LiteralPath $source)) { continue }
+    $info = Assert-BoundedFile $source $authorityFiles[$name] 'Legacy authority'
+    $json = Read-LifeOSCappedFileText -Path $source -MaxBytes $authorityFiles[$name] -Description "Legacy authority $name"
+    if ($json.TrimStart() -notmatch '^[{\[]') { throw "Invalid authority JSON container: $name" }
+    $decoded = $json | ConvertFrom-Json -ErrorAction Stop
+    if ($null -eq $decoded) { throw "Empty authority JSON: $name" }
+    $nodes = 0
+    Assert-AuthorityJsonBounds $decoded 0 ([ref]$nodes)
+    [void]$authorityInventory.Add([ordered]@{ name = $name; sha256 = $info.Sha256; length = $info.Length; maxBytes = $authorityFiles[$name] })
+}
+# One canonical gatewayData intent keeps companion files in one recovery unit.
+# Existing authority wins as a complete set: never backfill an old retry or
+# revocation companion into a newer installed envelope on reinstall.
+$authorityBeforeTree = @(Get-TreeManifest $gatewayData)
+$authorityAfterTreeByPath = [ordered]@{}
+foreach ($treeEntry in $authorityBeforeTree) { $authorityAfterTreeByPath[[string]$treeEntry.path] = $treeEntry }
+if (-not $preserveInstalledAuthority) {
+    foreach ($entry in $authorityInventory) {
+        $authorityAfterTreeByPath[[string]$entry.name] = [ordered]@{
+            path = [string]$entry.name
+            sha256 = [string]$entry.sha256
+            length = [long]$entry.length
+        }
+    }
+}
+$authorityAfterTree = @($authorityAfterTreeByPath.GetEnumerator() | Sort-Object -Property Key | ForEach-Object { $_.Value })
+$authorityPendingFields = [ordered]@{
+    authorityFiles = @($authorityInventory.ToArray())
+    migrationMode = if ($preserveInstalledAuthority) { 'preserve-installed' } else { 'legacy-import' }
+    beforeTree = $authorityBeforeTree
+}
+$authorityCompletionFields = [ordered]@{
+    authorityFiles = @($authorityInventory.ToArray())
+    migrationMode = $authorityPendingFields.migrationMode
+    beforeTree = $authorityBeforeTree
+    afterTree = $authorityAfterTree
+    # Complete-ManifestIntent records the post-migration usage authority after
+    # the copy. Reserve the largest valid hash representation before mutation.
+    usageAfterSha256 = 'f' * 64
+}
+$authorityIntent = New-ManifestIntent -List $manifest.backups -Manifest $manifest -ManifestPath $manifestPath -Kind 'authority-set' -Source $legacyData -Destination $gatewayData -Backup (Join-Path $backupDirectory 'previous-authority-set') -PriorExists $true -Changed (-not $preserveInstalledAuthority) -PendingFields $authorityPendingFields -CompletionFields $authorityCompletionFields
+if (-not $preserveInstalledAuthority) {
+    Copy-Item -LiteralPath $gatewayData -Destination $authorityIntent.backup -Recurse -Force -ErrorAction Stop
+    if (-not (Compare-TreeManifest $gatewayData $authorityIntent.backup)) { throw 'Authority backup verification failed.' }
+    foreach ($entry in $authorityInventory) {
+        $source = Join-Path $legacyData $entry.name
+        if ((Get-FileSha256 $source) -ne $entry.sha256) { throw 'Quiesced authority changed during migration.' }
+        [void](Copy-FileVerifiedAtomic -Source $source -Destination (Join-Path $gatewayData $entry.name) -BackupDirectory $backupDirectory -BackupName ('previous-' + $entry.name) -MaxBytes $entry.maxBytes)
+        if ((Get-FileSha256 (Join-Path $gatewayData $entry.name)) -ne $entry.sha256) { throw 'Migrated authority differs from journal inventory.' }
+    }
+}
+$authorityIntent['afterTree'] = @(Get-TreeManifest $gatewayData)
+$authorityIntent['phase'] = 'complete'
+Save-InstallManifest $manifest $manifestPath
 $legacyDocuments = Join-Path $legacyData 'documents'
-if (Test-Path -LiteralPath $legacyDocuments -PathType Container) {
+if (-not $preserveInstalledAuthority -and (Test-Path -LiteralPath $legacyDocuments -PathType Container)) {
     $destination = Join-Path $gatewayData 'documents'
     $priorExists = Test-Path -LiteralPath $destination -PathType Container
     $changed = -not (Compare-TreeManifest $legacyDocuments $destination)
@@ -864,12 +1083,28 @@ if (Test-Path -LiteralPath $legacyDocuments -PathType Container) {
     Complete-ManifestIntent $intent $manifest $manifestPath $result
 }
 $legacyUsage = Join-Path $legacyData 'usage-history.jsonl'
-if (Test-Path -LiteralPath $legacyUsage -PathType Leaf) {
+if (-not (Test-Path -LiteralPath $usageHistory) -and (Test-Path -LiteralPath $legacyUsage -PathType Leaf)) {
     $priorExists = Test-Path -LiteralPath $usageHistory -PathType Leaf
     $changed = -not ($priorExists -and (Get-FileSha256 $legacyUsage) -eq (Get-FileSha256 $usageHistory))
     $intent = New-ManifestIntent -List $manifest.backups -Manifest $manifest -ManifestPath $manifestPath -Kind 'usage-history' -Source $legacyUsage -Destination $usageHistory -Backup (Join-Path $backupDirectory 'previous-usage-history.jsonl') -PriorExists $priorExists -Changed $changed
     $result = Copy-FileVerifiedAtomic $legacyUsage $usageHistory $backupDirectory 'previous-usage-history.jsonl'
     Complete-ManifestIntent $intent $manifest $manifestPath $result
+}
+# The local bearer is independent of every provider/ingest credential. Protect
+# the empty staging file before creating any bytes, then grant the two runtime readers.
+if (Test-Path -LiteralPath $localApiSecret) {
+    [void](Get-LocalApiBearerHeaders $localApiSecret)
+    $localIntent = New-ManifestIntent -List $manifest.backups -Manifest $manifest -ManifestPath $manifestPath -Kind 'generated-secret' -Destination $localApiSecret -PriorExists $true -Changed $false
+    $localIntent['sourceSha256'] = Get-FileSha256 $localApiSecret
+    $localIntent['phase'] = 'complete'
+    Save-InstallManifest $manifest $manifestPath
+} else {
+    $localIntent = New-ManifestIntent -List $manifest.backups -Manifest $manifest -ManifestPath $manifestPath -Kind 'generated-secret' -Destination $localApiSecret -Backup (Join-Path $backupDirectory 'previous-local-api.secret') -PriorExists $false -Changed $true
+    $localValue = New-RandomSecret
+    try { $localResult = Write-SecretAtomic $localApiSecret $localValue $backupDirectory 'previous-local-api.secret' }
+    finally { $localValue = $null }
+    $localIntent['sourceSha256'] = Get-FileSha256 $localApiSecret
+    Complete-ManifestIntent $localIntent $manifest $manifestPath $localResult
 }
 $legacyClaude = Join-Path $legacyData 'claude-ingest.secret'
 $claudePriorExists = Test-Path -LiteralPath $claudeSecret -PathType Leaf
@@ -977,17 +1212,25 @@ if ($null -ne $hostStage.StagedPath) {
 Complete-ManifestIntent $hostIntent $manifest $manifestPath $hostStage
 New-ServiceOrConfigure 'LifeOSAPI' $hostTarget 'auto' $apiAccount @() -ExpectedExistingBinary $serviceRegistrationTarget
 New-ServiceOrConfigure 'LifeOSGateway' $hostTarget 'delayed-auto' $gatewayAccount @('LifeOSAPI', $TailscaleServiceName, 'Schedule') -ExpectedExistingBinary $serviceRegistrationTarget
-Assert-RestrictedAcl $apiTarget $operatorSid @($apiSid) @() -AllowInherited
-Assert-RestrictedAcl $gatewayTarget $operatorSid @($gatewaySid) @() -AllowInherited
-Assert-RestrictedAcl $nodeTarget $operatorSid @($apiSid) @() -AllowInherited
-Assert-RestrictedAcl (Join-Path $paths.RuntimeRoot 'python312') $operatorSid @($gatewaySid) @() -AllowInherited
+Assert-RestrictedAcl $apiTarget $operatorSid @($apiSid) @() -AllowInherited -Recurse
+Assert-RestrictedAcl $gatewayTarget $operatorSid @($gatewaySid) @() -AllowInherited -Recurse
+Assert-RestrictedAcl $nodeTarget $operatorSid @($apiSid) @() -AllowInherited -Recurse
+Assert-RestrictedAcl (Join-Path $paths.RuntimeRoot 'python312') $operatorSid @($gatewaySid) @() -AllowInherited -Recurse
 if ($null -ne $pythonStage.VenvTarget) { Assert-RestrictedAcl $pythonStage.VenvTarget $operatorSid @($gatewaySid) @() -AllowInherited }
+Assert-RestrictedAcl $apiData $operatorSid @() @($apiSid) -AllowedOwnerSids @($apiSid) -AllowInherited -Recurse
+Assert-RestrictedAcl $gatewayData $operatorSid @() @($gatewaySid) -AllowedOwnerSids @($gatewaySid) -AllowInherited -Recurse
+Assert-RestrictedAcl $apiLogs $operatorSid @() @($apiSid) -AllowedOwnerSids @($apiSid) -AllowInherited -Recurse
+Assert-RestrictedAcl $gatewayLogs $operatorSid @() @($gatewaySid) -AllowedOwnerSids @($gatewaySid) -AllowInherited -Recurse
+Assert-LifeOSExpectedImmediateChildren -Root $paths.DataRoot -ExpectedChildren ([ordered]@{ api = $apiSid; gateway = $gatewaySid }) -RequireAll
+Assert-LifeOSExpectedImmediateChildren -Root $paths.LogRoot -ExpectedChildren ([ordered]@{ api = $apiSid; gateway = $gatewaySid }) -RequireAll
 Set-RestrictedAcl $apiConfig $operatorSid @($apiSid) @() -File
 Set-RestrictedAcl $gatewayServiceConfig $operatorSid @($gatewaySid) @() -File
 Set-RestrictedAcl $gatewayConfig $operatorSid @($gatewaySid) @() -File
 Set-DirectoryTraversalAcl $paths.SecretRoot $operatorSid @($apiSid, $gatewaySid)
 Set-SecretAcl $claudeSecret $operatorSid @($apiSid, $gatewaySid)
 Set-SecretAcl $codexSecret $operatorSid @($apiSid)
+Set-SecretAcl $localApiSecret $operatorSid @($apiSid, $gatewaySid)
+Assert-NoBroadAcl $localApiSecret
 Set-SecretAcl $tailscaleEdgeTokenPath $operatorSid @($gatewaySid)
 Assert-NoBroadAcl $claudeSecret
 Assert-NoBroadAcl $codexSecret
@@ -1009,12 +1252,34 @@ if (Test-Path -LiteralPath $enableBankingCertificate -PathType Leaf) {
     Assert-NoBroadAcl $enableBankingCertificate
 }
 if (Test-Path -LiteralPath $supplementCatalog -PathType Leaf) {
-    Set-RestrictedAcl $supplementCatalog $operatorSid @() @($gatewaySid) -File
+    # The catalog is a gateway-owned writable file inside gatewayData. Scope
+    # its owner exception to the gateway Modify role; file ACLs do not need an
+    # inheritable SYSTEM grant because no children are created beneath them.
+    Set-RestrictedAcl $supplementCatalog $operatorSid @() @($gatewaySid) -File -AllowedOwnerSids @($gatewaySid)
     Assert-NoBroadAcl $supplementCatalog
 }
 
+$installedIntegrity = [ordered]@{
+    schemaVersion = 1
+    host = Get-LifeOSFileIntegrity -Path $hostTarget -Description 'Installed service host'
+    api = Get-LifeOSTreeIntegrity -Path $apiTarget -Description 'Installed API release'
+    gateway = Get-LifeOSTreeIntegrity -Path $gatewayTarget -Description 'Installed gateway release'
+    node = Get-LifeOSTreeIntegrity -Path $nodeTarget -Description 'Installed Node runtime' -LargeFileRelativePath $nodeLargeFileRelativePath -LargeFileMaxBytes $nodeLargeFileMaxBytes
+    pythonBase = Get-LifeOSTreeIntegrity -Path (Join-Path $paths.RuntimeRoot 'python312') -Description 'Installed Python base runtime'
+    apiConfig = Get-LifeOSFileIntegrity -Path $apiConfig -Description 'Installed API service config'
+    gatewayConfig = Get-LifeOSFileIntegrity -Path $gatewayServiceConfig -Description 'Installed gateway service config'
+    gatewayAppConfig = Get-LifeOSFileIntegrity -Path $gatewayConfig -Description 'Installed gateway application config'
+    snapshotScript = Get-LifeOSFileIntegrity -Path $snapshotScriptTarget -Description 'Installed Tailscale snapshot script'
+}
+if ($null -ne $pythonStage.VenvTarget -and (Test-Path -LiteralPath $pythonStage.VenvTarget -PathType Container)) {
+    $installedIntegrity['pythonVenv'] = Get-LifeOSTreeIntegrity -Path $pythonStage.VenvTarget -Description 'Installed Python virtual environment'
+}
+$manifest['installedIntegrity'] = $installedIntegrity
 Save-InstallManifest $manifest $manifestPath
 
+    $authorityIntent['afterTree'] = @(Get-TreeManifest $gatewayData)
+    $authorityIntent['usageAfterSha256'] = if (Test-Path -LiteralPath $usageHistory -PathType Leaf) { Get-FileSha256 $usageHistory } else { '' }
+    Save-InstallManifest $manifest $manifestPath
     # Register the collector only after its runtime, API release, secrets,
     # configuration, ACLs, and data stores are all ready. Keeping this inside
     # the cutover transaction restores the prior definition on failure.
@@ -1022,30 +1287,36 @@ Save-InstallManifest $manifest $manifestPath
     Register-TailscaleSnapshotTask -TaskName $TailscaleSnapshotTaskName -ScriptPath $snapshotScriptTarget -TailscaleExecutable $tailscale -OutputPath $tailscaleSnapshotPath
     Start-LifeOSService 'LifeOSAPI'
     if (-not (Wait-LoopbackHealth ([uri]'http://127.0.0.1:8787/health') 45)) { throw 'LifeOSAPI did not pass its loopback health check.' }
-    $codexVerification = Start-CodexCollectorAndVerify -TaskName $CodexTaskName -UsageUri ([uri]'http://127.0.0.1:8787/api/usage') -AllowProviderUnavailable
+    if (-not (Wait-LoopbackReadiness ([uri]'http://127.0.0.1:8787/ready') 45)) { throw 'LifeOSAPI did not pass its loopback readiness check.' }
+    $manifest['collectorTransition'] = [ordered]@{ phase = 'running'; usageBefore = (Get-RecoveryArtifactState $usageHistory); startedAtUtc = (Get-Date).ToUniversalTime().ToString('o') }
+    Save-InstallManifest $manifest $manifestPath
+    $codexVerification = Start-AttributedCodexCollector -TaskName $CodexTaskName -UsageUri ([uri]'http://127.0.0.1:8787/api/usage')
+    $manifest.collectorTransition['phase'] = 'terminal'
+    $manifest.collectorTransition['usageAfter'] = Get-RecoveryArtifactState $usageHistory
+    $manifest.collectorTransition['acknowledged'] = ($codexVerification.status -eq 'observed')
+    Save-CollectorReceipt $manifest
     $manifest.codexCollectorVerification = [ordered]@{
+        terminalCompleted = [bool]$codexVerification.terminalCompleted
+        lastRunTime = [string]$codexVerification.lastRunTime
         status = [string]$codexVerification.status
         exitCode = [int]$codexVerification.exitCode
         observation = [string]$codexVerification.observation
         verifiedAt = (Get-Date).ToUniversalTime().ToString('o')
     }
     Save-InstallManifest $manifest $manifestPath
-    $legacyCutover = Stop-LegacyGatewayForCutover -TaskSnapshot $legacy -ListenerSnapshot $manifest.legacyListener -Manifest $manifest -ManifestPath $manifestPath -TaskName $LegacyTaskName -TaskPath ([string]$legacy.TaskPath) -Port 8421
-    $legacyTaskMutated = [bool]$legacyCutover.TaskMutated
     # Configure is idempotent and records the authenticated post-mutation
     # state before the gateway is started, so a later failure cannot remove a
     # route that appeared concurrently or was not created by this install.
     $serveStatus = Configure-TailscaleServe $tailscale
     $manifest.tailscaleStatusAfter = $serveStatus
     Save-InstallManifest $manifest $manifestPath
-    # The snapshot must be taken after Serve is configured and immediately
-    # before the gateway starts: the launcher rejects a snapshot that predates
-    # the route or is older than 90 seconds. The identity is re-derived here
-    # from the installer's own elevated Tailscale query, never from the file.
-    $tailscaleIdentity = Get-TailscaleIdentityFacts $tailscale
-    Start-TailscaleSnapshotTaskAndVerify -TaskName $TailscaleSnapshotTaskName -OutputPath $tailscaleSnapshotPath -ExpectedDnsName $tailscaleIdentity.DnsName -ExpectedLoginName $tailscaleIdentity.LoginName
+    # Use the same fail-closed pre-start boundary as recovery. It publishes a
+    # fresh snapshot immediately before the gateway process is started and
+    # restores the periodic SYSTEM writer after a successful install.
+    Invoke-LifeOSBeforeGatewayStart -TaskName $TailscaleSnapshotTaskName -TaskPath '\' -OutputPath $tailscaleSnapshotPath -TailscaleExecutable $tailscale -RestoreTaskEnabled
     Start-LifeOSService 'LifeOSGateway'
     if (-not (Wait-LoopbackHealth ([uri]'http://127.0.0.1:8421/health') 45)) { throw 'LifeOSGateway did not pass its loopback health check.' }
+    if (-not (Wait-LoopbackReadiness ([uri]'http://127.0.0.1:8421/ready') 45)) { throw 'LifeOSGateway did not pass its loopback readiness check.' }
     $serveStatus = Configure-TailscaleServe $tailscale
     $manifest.tailscaleStatusAfter = $serveStatus
     $manifest.cutoverCompletedAt = (Get-Date).ToUniversalTime().ToString('o')
@@ -1062,17 +1333,35 @@ Save-InstallManifest $manifest $manifestPath
     foreach ($serviceName in @('LifeOSGateway', 'LifeOSAPI')) {
         try { Stop-LifeOSService $serviceName } catch { $deploymentRollbackSucceeded = $false; Write-Warning ("Could not stop {0} during rollback: {1}" -f $serviceName, $_.Exception.Message) }
     }
-    try {
-        Restore-CodexCollectorTask $codexTask $CodexTaskName
-    } catch {
-        $deploymentRollbackSucceeded = $false
-        Write-Warning ("Could not restore Codex collector task: {0}" -f $_.Exception.Message)
+    if (-not $deploymentRollbackSucceeded) { throw 'Writer shutdown failed; recovery_required.' }
+    # Discard unsaved in-memory mutations before the barrier journals its own
+    # progress. A failed save must not silently replace the rollback baseline.
+    $recoveryManifest = Read-LifeOSBoundedJsonFile -Path $manifestPath -MaxBytes $script:LifeOSGenerationManifestMaxBytes -Description 'Recovery manifest'
+    $manifest = $recoveryManifest
+    Stop-DeploymentTaskBarrier $manifest $manifestPath
+    # Uncertain/changed authority must never be rolled back by generic restore.
+    $resumeJournal = Read-RecoveryJournal $recoveryManifest
+    if ($null -eq $resumeJournal) {
+    foreach ($item in @($recoveryManifest.backups | Where-Object { $_.kind -eq 'authority-set' })) {
+        if ($item.phase -ne 'complete' -or $null -eq $item.PSObject.Properties['afterTree'] -or
+            ((@(Get-TreeManifest $item.destination) | ConvertTo-Json -Depth 8 -Compress) -ne
+             (@($item.afterTree) | ConvertTo-Json -Depth 8 -Compress))) {
+            $deploymentRollbackSucceeded = $false
+            throw 'Authority provenance changed or incomplete; recovery_required. Writers remain stopped.'
+        }
+        $usagePath = [string]$manifest.paths.usageHistory
+        $usageHash = if (Test-Path -LiteralPath $usagePath -PathType Leaf) { Get-FileSha256 $usagePath } else { '' }
+        if ($null -eq $item.PSObject.Properties['usageAfterSha256'] -or ($usageHash -ne [string]$item.usageAfterSha256 -and -not (Test-CollectorUsagePreserved $recoveryManifest))) {
+            $deploymentRollbackSucceeded = $false
+            throw 'Usage authority changed or has no provenance; recovery_required.'
+        }
+        if ($item.changed -and (-not (Test-Path -LiteralPath $item.backup -PathType Container) -or
+            ((@(Get-TreeManifest $item.backup) | ConvertTo-Json -Depth 8 -Compress) -ne
+             (@($item.beforeTree) | ConvertTo-Json -Depth 8 -Compress)))) {
+            $deploymentRollbackSucceeded = $false
+            throw 'Authority backup provenance invalid; recovery_required.'
+        }
     }
-    try {
-        Restore-TailscaleSnapshotTask $snapshotTask $TailscaleSnapshotTaskName
-    } catch {
-        $deploymentRollbackSucceeded = $false
-        Write-Warning ("Could not restore Tailscale snapshot task: {0}" -f $_.Exception.Message)
     }
     try {
         Restore-ManifestArtifacts $manifest $backupDirectory
@@ -1081,11 +1370,13 @@ Save-InstallManifest $manifest $manifestPath
         Write-Warning ("Could not restore all deployment artifacts: {0}" -f $_.Exception.Message)
     }
     try {
-        Restore-AclSnapshots $manifest
+        Invoke-RecoveryStage $manifest 'Restore-AclSnapshots' { Restore-AclSnapshots $manifest }
     } catch {
         $deploymentRollbackSucceeded = $false
         Write-Warning ("Could not restore ACL snapshots: {0}" -f $_.Exception.Message)
     }
+    if (-not $deploymentRollbackSucceeded) { throw 'Artifact or ACL recovery failed; writers remain stopped.' }
+    Enable-RecoveryWriterRestoration $manifest
     $legacyWasMutated = $legacyTaskMutated
     if ($null -ne $manifest.PSObject.Properties['legacyListener']) {
         $legacyWasMutated = $legacyWasMutated -or [bool]$manifest.legacyListener.TaskMutated -or [bool]$manifest.legacyListener.Stopped
@@ -1096,32 +1387,109 @@ Save-InstallManifest $manifest $manifestPath
             if ($null -ne $manifest.PSObject.Properties['legacyListener'] -and [bool]$manifest.legacyListener.Exists) {
                 Restore-LegacyGatewayListener -TaskSnapshot $legacy -ListenerSnapshot $manifest.legacyListener -TaskName $LegacyTaskName -TaskPath ([string]$legacy.TaskPath) -Port 8421
             }
+            Reconcile-LifeOSScheduledTaskSnapshotState $legacy $LegacyTaskName
         } catch {
             $deploymentRollbackSucceeded = $false
             Write-Warning ("Could not restore legacy task/listener: {0}" -f $_.Exception.Message)
         }
     }
-    foreach ($serviceName in @('LifeOSGateway', 'LifeOSAPI')) {
-        try {
-            Restore-LifeOSServiceSnapshot $serviceSnapshots[$serviceName]
-        } catch {
-            $deploymentRollbackSucceeded = $false
-            Write-Warning ("Could not restore service {0}: {1}" -f $serviceName, $_.Exception.Message)
-        }
-    }
     try {
         $tailscaleExpectedAfter = ''
-        if ($manifest.Keys -contains 'tailscaleStatusAfter') { $tailscaleExpectedAfter = [string]$manifest.tailscaleStatusAfter }
-        Restore-TailscaleServeSnapshot -TailscaleExecutable $tailscale -Json $tailscaleStatusBefore -ExpectedAfterJson $tailscaleExpectedAfter
+        if ($null -ne $manifest.PSObject.Properties['tailscaleStatusAfter']) { $tailscaleExpectedAfter = [string]$manifest.tailscaleStatusAfter }
+        Invoke-RecoveryStage $manifest 'Restore-TailscaleServeSnapshot' { Restore-TailscaleServeSnapshot -TailscaleExecutable $tailscale -Json $tailscaleStatusBefore -ExpectedAfterJson $tailscaleExpectedAfter }
     } catch {
         $deploymentRollbackSucceeded = $false
         Write-Warning ("Could not restore Tailscale Serve state: {0}" -f $_.Exception.Message)
     }
+    if (-not $deploymentRollbackSucceeded) { throw 'Recovery incomplete; scheduled writers remain disabled.' }
+
+    $gatewayNeedsSnapshot = [string](Get-SnapshotValue $serviceSnapshots['LifeOSGateway'] 'State' '') -ceq 'Running'
+    $hasSnapshotContract = $null -ne $manifest.PSObject.Properties['snapshotTask'] -and
+        $null -ne $manifest.paths.PSObject.Properties['stateDirectory'] -and
+        $null -ne $manifest.paths.PSObject.Properties['tailscaleSnapshot'] -and
+        $null -ne $manifest.paths.PSObject.Properties['tailscaleSnapshotScript'] -and
+        $null -ne $manifest.paths.PSObject.Properties['tailscaleExecutable']
+    if ($gatewayNeedsSnapshot -and -not $hasSnapshotContract) {
+        throw 'Recovery cannot start the gateway without a transaction-owned Tailscale snapshot contract.'
+    }
+    if ($gatewayNeedsSnapshot) {
+        $snapshotTaskPath = [string]$snapshotTask.TaskPath
+        if ($null -ne $manifest.snapshotTask.PSObject.Properties['TaskPath']) {
+            $snapshotTaskPath = [string]$manifest.snapshotTask.TaskPath
+        }
+        $stoppedSnapshotTask = [pscustomobject]@{ Exists = $true; Enabled = $false; State = 'Stopped'; TaskPath = $snapshotTaskPath }
+        try {
+            Invoke-RecoveryStage $manifest 'Restore-TailscaleSnapshotTask' {
+                Restore-TailscaleSnapshotTask -Snapshot $snapshotTask -TaskName $TailscaleSnapshotTaskName -KeepStopped
+            } -LiveAction {
+                Reconcile-LifeOSScheduledTaskSnapshotState $stoppedSnapshotTask $TailscaleSnapshotTaskName
+            } -Postcondition {
+                Reconcile-LifeOSScheduledTaskSnapshotState $stoppedSnapshotTask $TailscaleSnapshotTaskName
+            }
+        } catch {
+            $deploymentRollbackSucceeded = $false
+            Write-Warning ("Could not publish a fresh Tailscale snapshot before gateway recovery: {0}" -f $_.Exception.Message)
+        }
+    }
+    if (-not $deploymentRollbackSucceeded) { throw 'Recovery incomplete; scheduled writers remain disabled.' }
+
+    try {
+        Restore-LifeOSServiceSnapshots -Snapshots $serviceSnapshots -Manifest $manifest -ContinueOnFailure -VerifyHealth -BeforeGatewayStart {
+            Invoke-LifeOSBeforeGatewayStart -TaskName $TailscaleSnapshotTaskName -TaskPath $snapshotTaskPath -OutputPath ([string]$manifest.paths.tailscaleSnapshot) -TailscaleExecutable $tailscale
+        }
+    } catch {
+        $deploymentRollbackSucceeded = $false
+        Write-Warning ("Could not restore or reconcile services: {0}" -f $_.Exception.Message)
+    }
+    if (-not $deploymentRollbackSucceeded) { throw 'Service recovery failed; writers remain stopped.' }
+
+    Stop-DeploymentTaskBarrier $manifest $manifestPath
+    # The barrier can run again after a completed journal stage. Reconcile the
+    # live service state explicitly so a retry never treats a stopped service
+    # as proof that the durable service-state stage is satisfied.
+    try {
+        Restore-LifeOSServiceSnapshots -Snapshots $serviceSnapshots -Manifest $manifest -ContinueOnFailure -VerifyHealth -BeforeGatewayStart {
+            Invoke-LifeOSBeforeGatewayStart -TaskName $TailscaleSnapshotTaskName -TaskPath $snapshotTaskPath -OutputPath ([string]$manifest.paths.tailscaleSnapshot) -TailscaleExecutable $tailscale
+        }
+    } catch {
+        $deploymentRollbackSucceeded = $false
+        Write-Warning ("Could not re-reconcile services after the writer barrier: {0}" -f $_.Exception.Message)
+    }
+    if (-not $deploymentRollbackSucceeded) { throw 'Service recovery failed after the writer barrier; writers remain stopped.' }
+
+    try {
+        Invoke-RecoveryStage $manifest 'Restore-CodexCollectorTask' { Restore-CodexCollectorTask $codexTask $CodexTaskName } -Postcondition { Reconcile-LifeOSScheduledTaskSnapshotState $codexTask $CodexTaskName }
+    } catch {
+        $deploymentRollbackSucceeded = $false
+        Write-Warning ("Could not restore Codex collector task: {0}" -f $_.Exception.Message)
+    }
+    try {
+        Invoke-RecoveryStage $manifest 'Restore-TailscaleSnapshotTask' { Restore-TailscaleSnapshotTask $snapshotTask $TailscaleSnapshotTaskName } -LiveAction { Restore-TailscaleSnapshotTask $snapshotTask $TailscaleSnapshotTaskName } -Postcondition { Reconcile-LifeOSScheduledTaskSnapshotState $snapshotTask $TailscaleSnapshotTaskName }
+    } catch {
+        $deploymentRollbackSucceeded = $false
+        Write-Warning ("Could not restore Tailscale snapshot task: {0}" -f $_.Exception.Message)
+    }
+    if (-not $deploymentRollbackSucceeded) { throw 'Task recovery failed; services remain stopped.' }
+    try {
+        if ($legacyWasMutated) { Reconcile-LifeOSScheduledTaskSnapshotState $legacy $LegacyTaskName }
+        Reconcile-LifeOSScheduledTaskSnapshotState $codexTask $CodexTaskName
+        Reconcile-LifeOSScheduledTaskSnapshotState $snapshotTask $TailscaleSnapshotTaskName
+    } catch {
+        $deploymentRollbackSucceeded = $false
+        Write-Warning ("Could not reconcile scheduled task state: {0}" -f $_.Exception.Message)
+    }
+    if (-not $deploymentRollbackSucceeded) { throw 'Task recovery state verification failed; services remain stopped.' }
+    $recoveryArchivePath = Complete-LifeOSRecoveryState $manifest
+    $deploymentRecoveryCompleted = $true
     throw
 }
 } finally {
-    Exit-LifeOSDeploymentTransaction $deploymentMutex -Completed:($deploymentCompleted -or $deploymentRollbackSucceeded)
+    if ($deploymentRecoveryCompleted) { $deploymentMutex.Recovery = $true }
+    Exit-LifeOSDeploymentTransaction $deploymentMutex -Completed:($deploymentCompleted -or $deploymentRecoveryCompleted)
 }
 
 Write-Host ("Install manifest: {0}" -f (Join-Path $backupDirectory 'manifest.json'))
 Write-Host 'No reboot was requested.'
+}
+
+if (-not $DefineOnly) { Invoke-LifeOSInstall }

@@ -18,6 +18,7 @@ import json
 import os
 import re
 import secrets
+import stat
 import time
 import unicodedata
 import uuid
@@ -36,7 +37,134 @@ BUSINESS_TIME_ZONE = ZoneInfo("Europe/Berlin")
 
 
 class EnableBankingUnavailable(Exception):
-    """The provider was unavailable or returned data that failed validation."""
+    """Sanitized, machine-readable refresh failure; never contains provider bodies."""
+
+    def __init__(self, message: str, *, reason: str = "malformed") -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+class ConnectionStoreUnavailable(EnableBankingUnavailable):
+    """A bounded, path-independent failure for the durable connection store."""
+
+    def __init__(self) -> None:
+        super().__init__("finance connection storage unavailable", reason="storage")
+
+
+# A missing connection store is an empty first-use state.  JSON ``null`` and
+# every other decoded value are existing, untrusted bytes and must remain a
+# storage error so a later save cannot overwrite evidence it did not validate.
+ABSENT = object()
+
+WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
+
+
+def _bounded_file_identity(value: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
+    """Return identity and mutation facts for one bounded file observation."""
+    return (
+        int(value.st_dev),
+        int(value.st_ino),
+        int(value.st_size),
+        int(value.st_mode),
+        int(value.st_mtime_ns),
+        int(value.st_ctime_ns),
+        int(getattr(value, "st_file_attributes", 0)),
+    )
+
+
+def _bounded_file_is_reparse(value: os.stat_result) -> bool:
+    return stat.S_ISLNK(value.st_mode) or bool(
+        int(getattr(value, "st_file_attributes", 0))
+        & WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT
+    )
+
+
+def _bounded_file_path_identity_chain(
+    path: Path,
+) -> tuple[tuple[str, tuple[int, int, int, int, int, int, int]], ...]:
+    """Capture existing path components without resolving a reparse point."""
+    current = Path(os.path.abspath(os.fspath(path)))
+    leaf = current
+    chain: list[tuple[str, tuple[int, int, int, int, int, int, int]]] = []
+    while True:
+        try:
+            observed = os.lstat(current)
+        except FileNotFoundError:
+            break
+        if _bounded_file_is_reparse(observed) and (os.name == "nt" or current == leaf):
+            raise OSError(errno.ELOOP, "bounded file path contains a reparse point")
+        chain.append(
+            (
+                os.path.normcase(os.path.abspath(os.fspath(current))),
+                _bounded_file_identity(observed),
+            )
+        )
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return tuple(reversed(chain))
+
+
+def _read_bounded_file_bytes(path: Path, maximum_bytes: int) -> bytes | None:
+    """Read one regular file through an identity-bound descriptor."""
+    if maximum_bytes <= 0:
+        raise ValueError("bounded file limit must be positive")
+    descriptor: int | None = None
+    try:
+        before_chain = _bounded_file_path_identity_chain(path)
+        if not before_chain:
+            return None
+        before = os.lstat(path)
+        before_identity = _bounded_file_identity(before)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or _bounded_file_is_reparse(before)
+            or before.st_size < 0
+            or before.st_size > maximum_bytes
+        ):
+            raise OSError(errno.EFBIG, "bounded file exceeds its limit")
+
+        flags = os.O_RDONLY
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        flags |= getattr(os, "O_BINARY", 0)
+        descriptor = os.open(os.fspath(path), flags)
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _bounded_file_is_reparse(opened)
+            or _bounded_file_identity(opened) != before_identity
+            or opened.st_size > maximum_bytes
+        ):
+            raise OSError(errno.EAGAIN, "bounded file identity changed")
+
+        body = bytearray()
+        while len(body) < maximum_bytes:
+            chunk = os.read(descriptor, min(64 * 1024, maximum_bytes - len(body)))
+            if not chunk:
+                break
+            body.extend(chunk)
+        if len(body) == maximum_bytes and os.read(descriptor, 1):
+            raise OSError(errno.EFBIG, "bounded file exceeds its limit")
+
+        after = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(after.st_mode)
+            or _bounded_file_is_reparse(after)
+            or _bounded_file_identity(after) != before_identity
+            or len(body) != before.st_size
+        ):
+            raise OSError(errno.EAGAIN, "bounded file changed while reading")
+        if _bounded_file_path_identity_chain(path) != before_chain:
+            raise OSError(errno.EAGAIN, "bounded file path changed while reading")
+        return bytes(body)
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
 
 class UnknownInstitution(Exception):
@@ -45,6 +173,9 @@ class UnknownInstitution(Exception):
 
 class ProviderSessionNotFound(EnableBankingUnavailable):
     """The provider no longer has the opaque session."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, reason="consent")
 
 
 @dataclass(frozen=True)
@@ -57,6 +188,18 @@ class CallbackResult:
 
 class EnableBankingService:
     """Single-process Enable Banking AIS lifecycle with fail-closed mapping."""
+
+    # The personal gateway has one registered production API and one registered
+    # callback. Keep these destinations explicit: a syntactically valid HTTPS
+    # value is not an acceptable substitute for an allowlisted origin.
+    ALLOWED_API_BASE_URLS = frozenset({"https://api.enablebanking.com"})
+    ALLOWED_CONSENT_ORIGIN = "https://auth.enablebanking.com"
+    ALLOWED_CONSENT_NETLOC = ALLOWED_CONSENT_ORIGIN.removeprefix("https://")
+    ALLOWED_REDIRECT_URIS = frozenset({
+        "https://geonqserver.tail5f8789.ts.net:8420/finance/callback",
+    })
+    CONSENT_PATH = "/ais/start"
+    MAX_CONSENT_QUERY_FIELDS = 4
 
     BODY_LIMIT = 4 * 1024
     MAX_RESPONSE_SIZE = 64 * 1024
@@ -89,12 +232,18 @@ class EnableBankingService:
     # including JSON framing and maximum-length validated identifiers.
     MAX_REVOCATION_TOMBSTONES = 128
     MAX_REVOCATION_TOMBSTONE_SIZE = 64 * 1024
+    CONNECTION_STORE_MAX_BYTES = 256 * 1024
     MAX_FINANCE_JOURNAL_RECORDS = 10_000
     MAX_FINANCE_REVISION = 9_007_199_254_740_991
     MAX_CALLBACK_QUERY_SIZE = 4 * 1024
     MAX_CALLBACK_FIELDS = 8
+    # Callback requests are coalesced in-process. The first request owns the
+    # provider exchange; later requests share its bounded outcome future
+    # rather than retaining one task or payload per duplicate.
+    MAX_CALLBACK_WAITERS = 32
     REQUEST_TIMEOUT = httpx.Timeout(5.0, connect=2.0)
     TOTAL_TIMEOUT = 8.0
+    CALLBACK_OUTCOME_TIMEOUT = TOTAL_TIMEOUT * 3
     FLOW_TTL_SECONDS = 60 * 60
     MAX_FLOWS = 32
     JWT_TTL_SECONDS = 300
@@ -144,6 +293,15 @@ class EnableBankingService:
             validate_persisted_finance_payload or validate_finance_payload
         )
         self._max_safe_cents = max_safe_cents
+        self._refresh_task: asyncio.Task | None = None
+        self._refresh_accounts = 0
+        self._cache_blocked = False
+        self._consent_version = 0
+        self._refresh_version = 0
+        self._refresh_observations: list[dict] = []
+        self._refresh_failures: list[str] = []
+        self._refresh_providers: dict[str, str] = {}
+        self._refresh_expiry: datetime | None = None
         self.consent_lock = asyncio.Lock()
         self.connections_lock = asyncio.Lock()
         self.consent_flows: dict[str, dict] = {}
@@ -154,11 +312,12 @@ class EnableBankingService:
         }
 
     @staticmethod
-    def _safe_https_url(value: object) -> bool:
+    def _safe_https_url(value: object, *, allow_query: bool = False) -> bool:
         if not isinstance(value, str) or not value or len(value) > 2048:
             return False
         try:
             parsed = urlsplit(value)
+            parsed.port  # Reject malformed ports before any URL is used.
         except ValueError:
             return False
         return (
@@ -166,27 +325,36 @@ class EnableBankingService:
             and bool(parsed.hostname)
             and parsed.username is None
             and parsed.password is None
-            and not parsed.query
+            and (allow_query or not parsed.query)
             and not parsed.fragment
             and not any(ord(char) < 0x21 or ord(char) == 0x7F for char in value)
         )
 
     @classmethod
     def _safe_consent_url(cls, value: object) -> bool:
-        if not isinstance(value, str) or not value or len(value) > 2048:
+        if not cls._safe_https_url(value, allow_query=True):
             return False
         try:
             parsed = urlsplit(value)
+            query = parse_qsl(
+                parsed.query,
+                keep_blank_values=True,
+                strict_parsing=True,
+                max_num_fields=cls.MAX_CONSENT_QUERY_FIELDS,
+            )
         except ValueError:
             return False
         return (
-            parsed.scheme == "https"
-            and bool(parsed.hostname)
-            and parsed.username is None
-            and parsed.password is None
-            and not parsed.fragment
-            and not any(ord(char) < 0x21 or ord(char) == 0x7F for char in value)
+            parsed.netloc == cls.ALLOWED_CONSENT_NETLOC
+            and parsed.path == cls.CONSENT_PATH
+            and len(query) == 1
+            and query[0][0] == "sessionid"
+            and bool(cls.PROVIDER_ID_PATTERN.fullmatch(query[0][1]))
         )
+
+    @classmethod
+    def _safe_redirect_uri(cls, value: object) -> bool:
+        return cls._safe_https_url(value) and value in cls.ALLOWED_REDIRECT_URIS
 
     @classmethod
     def _credentials(cls) -> dict | None:
@@ -200,9 +368,9 @@ class EnableBankingService:
         values = {name: os.environ.get(name) for name in names}
         if not all(isinstance(value, str) and value.strip() for value in values.values()):
             return None
-        if not cls._safe_https_url(values["ENABLE_BANKING_API_BASE_URL"]):
+        if values["ENABLE_BANKING_API_BASE_URL"] not in cls.ALLOWED_API_BASE_URLS:
             return None
-        if not cls._safe_https_url(values["ENABLE_BANKING_REDIRECT_URI"]):
+        if not cls._safe_redirect_uri(values["ENABLE_BANKING_REDIRECT_URI"]):
             return None
         try:
             for name in ("ENABLE_BANKING_PRIVATE_KEY_PATH", "ENABLE_BANKING_CERTIFICATE_PATH"):
@@ -215,7 +383,7 @@ class EnableBankingService:
             "app_id": values["ENABLE_BANKING_APP_ID"],
             "private_key_path": values["ENABLE_BANKING_PRIVATE_KEY_PATH"],
             "certificate_path": values["ENABLE_BANKING_CERTIFICATE_PATH"],
-            "api_base_url": values["ENABLE_BANKING_API_BASE_URL"].rstrip("/"),
+            "api_base_url": values["ENABLE_BANKING_API_BASE_URL"],
             "redirect_uri": values["ENABLE_BANKING_REDIRECT_URI"],
         }
 
@@ -229,10 +397,11 @@ class EnableBankingService:
     @staticmethod
     def _read_bounded_json_file(path: Path, maximum_bytes: int) -> object | None:
         try:
-            if not path.is_file() or path.is_symlink() or path.stat().st_size > maximum_bytes:
+            body = _read_bounded_file_bytes(path, maximum_bytes)
+            if body is None:
                 return None
             return json.loads(
-                path.read_text(encoding="utf-8"),
+                body.decode("utf-8"),
                 object_pairs_hook=EnableBankingService._reject_duplicate_keys,
                 parse_constant=EnableBankingService._reject_nonfinite_constant,
             )
@@ -396,9 +565,10 @@ class EnableBankingService:
         except FileNotFoundError:
             return None
         raw = self._read_bounded_json_file(path, self.MAX_FINANCE_STATE_SIZE)
-        if not isinstance(raw, dict) or set(raw) != {
-            "schemaVersion", "summary", "metadata",
-        } or raw["schemaVersion"] != self.FINANCE_STATE_SCHEMA_VERSION:
+        if not isinstance(raw, dict) or set(raw) not in (
+            {"schemaVersion", "summary", "metadata"},
+            {"schemaVersion", "summary", "metadata", "runtime"},
+        ) or raw["schemaVersion"] != self.FINANCE_STATE_SCHEMA_VERSION:
             raise EnableBankingUnavailable("finance state unavailable")
         summary = raw["summary"]
         if not isinstance(summary, dict):
@@ -704,10 +874,85 @@ class EnableBankingService:
 
     def _load_connections(self) -> list[dict]:
         self._recover_pending_revocation()
-        raw = self._read_bounded_json_file(self._connections_path(), 256 * 1024)
-        if not isinstance(raw, dict) or set(raw) != {"connections"} or not isinstance(raw["connections"], list):
+        raw = self._read_connection_store()
+        if raw is ABSENT:
             return []
-        return self._validate_connection_records(raw["connections"])
+        try:
+            if not isinstance(raw, dict) or set(raw) != {"connections"} or not isinstance(raw["connections"], list):
+                raise ValueError("connection store shape")
+            return self._validate_connection_records(raw["connections"])
+        except Exception as exc:
+            if isinstance(exc, ConnectionStoreUnavailable):
+                raise
+            raise ConnectionStoreUnavailable() from exc
+
+    def _read_connection_store(self) -> object:
+        """Read the connection store without treating corruption as absence.
+
+        Only ENOENT at the initial lstat is an empty-store condition. Every
+        other failure is a storage failure so callers cannot overwrite bytes
+        they were unable to authenticate and parse.
+        """
+        path = self._connections_path()
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            return ABSENT
+        except OSError as exc:
+            raise ConnectionStoreUnavailable() from exc
+
+        descriptor: int | None = None
+        try:
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+                raise OSError(errno.ELOOP, "connection store is not a regular file")
+            if metadata.st_size < 0 or metadata.st_size > self.CONNECTION_STORE_MAX_BYTES:
+                raise OSError(errno.EFBIG, "connection store exceeds its bound")
+            nofollow = getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(path, os.O_RDONLY | nofollow)
+            opened = os.fstat(descriptor)
+            if (
+                stat.S_ISLNK(opened.st_mode)
+                or not stat.S_ISREG(opened.st_mode)
+                or opened.st_dev != metadata.st_dev
+                or opened.st_ino != metadata.st_ino
+                or opened.st_size != metadata.st_size
+                or opened.st_size > self.CONNECTION_STORE_MAX_BYTES
+            ):
+                raise OSError(errno.ELOOP, "connection store identity changed")
+
+            body = bytearray()
+            while True:
+                chunk = os.read(descriptor, min(64 * 1024, self.CONNECTION_STORE_MAX_BYTES + 1 - len(body)))
+                if not chunk:
+                    break
+                body.extend(chunk)
+                if len(body) > self.CONNECTION_STORE_MAX_BYTES:
+                    raise OSError(errno.EFBIG, "connection store exceeds its bound")
+            after = os.fstat(descriptor)
+            if (
+                after.st_dev != metadata.st_dev
+                or after.st_ino != metadata.st_ino
+                or after.st_size != metadata.st_size
+                or len(body) != metadata.st_size
+            ):
+                raise OSError(errno.EAGAIN, "connection store changed while reading")
+        except (OSError, UnicodeError, ValueError, OverflowError, RecursionError) as exc:
+            raise ConnectionStoreUnavailable() from exc
+        finally:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+
+        try:
+            return json.loads(
+                bytes(body).decode("utf-8"),
+                object_pairs_hook=self._reject_duplicate_keys,
+                parse_constant=self._reject_nonfinite_constant,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, OverflowError, RecursionError) as exc:
+            raise ConnectionStoreUnavailable() from exc
 
     def _save_connection(self, connection: dict) -> None:
         if self._is_revoked_connection(connection["connectionId"]):
@@ -727,6 +972,10 @@ class EnableBankingService:
 
     def load_cached_summary(self) -> dict | None:
         try:
+            runtime = self.runtime_status()
+            expiry = runtime["consentExpiresAt"]
+            if self._cache_blocked or runtime["blocked"] or expiry is None or datetime.fromisoformat(expiry.replace("Z", "+00:00")) <= datetime.now(timezone.utc):
+                return None
             committed = self._read_summary_state()
             if committed is not None:
                 value, _metadata = committed
@@ -1033,7 +1282,10 @@ class EnableBankingService:
         maximum_bytes: int,
     ) -> object:
         if upstream.status_code not in expected_statuses:
-            raise EnableBankingUnavailable("unexpected provider status")
+            reason = "auth" if upstream.status_code in {401, 403} else (
+                "transport" if upstream.status_code == 429 or upstream.status_code >= 500 else "malformed"
+            )
+            raise EnableBankingUnavailable("unexpected provider status", reason=reason)
         declared = upstream.headers.get("content-length")
         if declared is not None:
             try:
@@ -1069,14 +1321,38 @@ class EnableBankingService:
         raise ValueError("non-finite provider json number")
 
     def _read_private_key(self, path: str) -> bytes:
+        # Windows mode bits do not establish ACL protection; the installer owns ACLs.
+        def valid(metadata):
+            return (stat.S_ISREG(metadata.st_mode)
+                    and 0 < metadata.st_size <= self.SECRET_FILE_MAX_BYTES
+                    and (os.name != "posix" or metadata.st_mode & 0o077 == 0))
+
+        descriptor = None
         try:
-            with open(path, "rb") as handle:
+            before = os.lstat(path)
+            if not valid(before):
+                raise ValueError("unsafe key")
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                                 | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
+            opened = os.fstat(descriptor)
+            if not valid(opened) or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
+                raise ValueError("changed key")
+            with os.fdopen(descriptor, "rb") as handle:
+                descriptor = None
                 value = handle.read(self.SECRET_FILE_MAX_BYTES + 1)
-        except OSError as exc:
-            raise EnableBankingUnavailable("private key unreadable") from exc
-        if not value or len(value) > self.SECRET_FILE_MAX_BYTES:
-            raise EnableBankingUnavailable("private key unusable")
-        return value
+                after = os.fstat(handle.fileno())
+            current = os.lstat(path)
+            if (not valid(after) or not valid(current) or len(value) != opened.st_size
+                    or (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
+                    != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+                    or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)):
+                raise ValueError("changed key")
+            return value
+        except (OSError, ValueError) as exc:
+            raise EnableBankingUnavailable("private key unusable", reason="configuration") from exc
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
 
     def _build_jwt(self, app_id: str, private_key: bytes) -> str:
         try:
@@ -1362,11 +1638,222 @@ class EnableBankingService:
         # state is added to the map.
         return self.SESSION_STATUS_MAP.get(str(raw or "").strip().upper(), "error")
 
+    @staticmethod
+    def _callback_code_digest(code: str) -> str:
+        """Identify a callback code without retaining the secret code itself."""
+        return hashlib.sha256(code.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _callback_operation_result(operation: dict) -> CallbackResult | None:
+        result = operation.get("result")
+        return result if isinstance(result, CallbackResult) else None
+
+    @staticmethod
+    def _resolve_callback_operation(operation: dict, result: CallbackResult) -> CallbackResult:
+        """Set the first callback outcome exactly once and wake its waiters."""
+        existing = EnableBankingService._callback_operation_result(operation)
+        if existing is not None:
+            return existing
+        operation["result"] = result
+        outcome = operation.get("outcome")
+        if isinstance(outcome, asyncio.Future) and not outcome.done():
+            outcome.set_result(result)
+        return result
+
+    @staticmethod
+    def _new_callback_operation(code_digest: str) -> dict:
+        return {
+            "code_digest": code_digest,
+            "outcome": asyncio.get_running_loop().create_future(),
+            "task": None,
+            "waiters": 0,
+            "result": None,
+        }
+
+    def _complete_callback_locked(
+        self,
+        flow: dict,
+        *,
+        state: str,
+        result: CallbackResult,
+    ) -> CallbackResult:
+        """Commit a callback lifecycle result while consent_lock is held.
+
+        Expiry and revocation are monotonic terminal decisions. A provider
+        response or an exchange exception that arrives after either one may
+        complete the shared outcome, but cannot change the flow back to an
+        active/error/linked state or replace the earlier result.
+        """
+        current = flow.get("state")
+        if current == "revoked" and state != "revoked":
+            state = "revoked"
+            result = CallbackResult(valid=True, linked=False)
+        elif current == "expired" and state not in {"expired", "revoked"}:
+            state = "expired"
+            result = CallbackResult(valid=True, linked=False)
+        flow["state"] = state
+        if state in {"error", "expired", "revoked"}:
+            flow["session_id"] = None
+        operation = flow.get("_callback_operation")
+        if isinstance(operation, dict):
+            return self._resolve_callback_operation(operation, result)
+        return result
+
+    async def _wait_for_callback_outcome(self, operation: dict) -> CallbackResult:
+        """Wait for the one flow outcome without letting waiter cancellation cancel it."""
+        outcome = operation["outcome"]
+        try:
+            if outcome.done():
+                result = outcome.result()
+            else:
+                result = await asyncio.wait_for(
+                    asyncio.shield(outcome),
+                    timeout=self.CALLBACK_OUTCOME_TIMEOUT,
+                )
+            return result if isinstance(result, CallbackResult) else CallbackResult(valid=True)
+        except asyncio.TimeoutError:
+            # The provider exchange has its own bounded timeout. This second
+            # bound prevents a malformed test/client integration from retaining
+            # an HTTP waiter forever while leaving the single owner operation
+            # to finish and publish its durable state.
+            return CallbackResult(valid=True, linked=False)
+        finally:
+            async with self.consent_lock:
+                operation["waiters"] = max(int(operation.get("waiters", 0)) - 1, 0)
+
+    async def _run_callback_operation(
+        self,
+        connection_id: str,
+        institution_id: str,
+        code: str,
+        operation: dict,
+    ) -> None:
+        """Perform one claimed exchange and publish one lifecycle outcome."""
+        try:
+            credentials = self._credentials()
+            if credentials is None:
+                raise EnableBankingUnavailable("finance connect unavailable")
+            async with self._http_client() as client:
+                session_response = await self._exchange_code(
+                    client, credentials, await self._bearer(credentials), code
+                )
+            session_id = session_response["session_id"]
+            if "status" in session_response:
+                session_state = self._session_state(session_response.get("status"))
+                if session_state != "linked":
+                    async with self.consent_lock:
+                        flow = self.consent_flows.get(connection_id)
+                        if (
+                            flow is not None
+                            and flow.get("_callback_operation") is operation
+                        ):
+                            self._complete_callback_locked(
+                                flow,
+                                state=session_state,
+                                result=CallbackResult(valid=True, linked=False),
+                            )
+                            self._prune_flows()
+                        else:
+                            self._resolve_callback_operation(
+                                operation,
+                                CallbackResult(valid=True, linked=False),
+                            )
+                    return
+
+            connection = {
+                "connectionId": connection_id,
+                "institutionId": institution_id,
+                "sessionId": session_id,
+                "linkedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            }
+            # Revoke uses the same consent -> connections lock order. The
+            # live flow check and tombstone check immediately before the save
+            # prevent a callback that exchanged a code during revoke from
+            # resurrecting an opaque provider session locally.
+            async with self.consent_lock:
+                flow = self.consent_flows.get(connection_id)
+                if (
+                    flow is None
+                    or flow.get("_callback_operation") is not operation
+                ):
+                    self._resolve_callback_operation(
+                        operation,
+                        CallbackResult(valid=True, linked=False),
+                    )
+                    return
+                if flow["state"] not in self.ACTIVE_STATES:
+                    self._resolve_callback_operation(
+                        operation,
+                        CallbackResult(valid=True, linked=False),
+                    )
+                    return
+                async with self.connections_lock:
+                    if self._is_revoked_connection(connection_id):
+                        self._complete_callback_locked(
+                            flow,
+                            state="revoked",
+                            result=CallbackResult(valid=True, linked=False),
+                        )
+                        self._prune_flows()
+                        return
+                    self._save_connection(connection)
+                    flow["session_id"] = session_id
+                    self._complete_callback_locked(
+                        flow,
+                        state="linked",
+                        result=CallbackResult(valid=True, linked=True),
+                    )
+                    self._prune_flows()
+        except asyncio.CancelledError:
+            # Callback owners are shielded from waiter cancellation. If the
+            # operation itself is cancelled during shutdown, make the
+            # cancellation terminal unless revoke/expiry already selected a
+            # stronger outcome.
+            async with self.consent_lock:
+                flow = self.consent_flows.get(connection_id)
+                if (
+                    flow is not None
+                    and flow.get("_callback_operation") is operation
+                ):
+                    self._complete_callback_locked(
+                        flow,
+                        state="error",
+                        result=CallbackResult(valid=True, linked=False),
+                    )
+                    self._prune_flows()
+                else:
+                    self._resolve_callback_operation(
+                        operation,
+                        CallbackResult(valid=True, linked=False),
+                    )
+        except Exception:
+            async with self.consent_lock:
+                flow = self.consent_flows.get(connection_id)
+                if (
+                    flow is not None
+                    and flow.get("_callback_operation") is operation
+                ):
+                    self._complete_callback_locked(
+                        flow,
+                        state="error",
+                        result=CallbackResult(valid=True, linked=False),
+                    )
+                    self._prune_flows()
+                else:
+                    self._resolve_callback_operation(
+                        operation,
+                        CallbackResult(valid=True, linked=False),
+                    )
+
     def _expire_flows(self) -> None:
         now = time.monotonic()
         for flow in self.consent_flows.values():
             if flow["state"] in self.ACTIVE_STATES and now - flow["started"] > self.FLOW_TTL_SECONDS:
-                flow["state"] = "expired"
+                self._complete_callback_locked(
+                    flow,
+                    state="expired",
+                    result=CallbackResult(valid=True, linked=False),
+                )
 
     def _prune_flows(self) -> None:
         terminal = [
@@ -1504,6 +1991,8 @@ class EnableBankingService:
                 except Exception:
                     return 503, {"error": "temporary_error"}
 
+                self._consent_version += 1
+                self._remove_file_durably(self._partial_path())
                 existing_flow = self.consent_flows.get(connection["connectionId"])
                 if existing_flow is None:
                     self.consent_flows[connection["connectionId"]] = {
@@ -1516,8 +2005,11 @@ class EnableBankingService:
                     }
                 for flow in self.consent_flows.values():
                     if flow.get("institutionId") == institution_id:
-                        flow["state"] = "revoked"
-                        flow["session_id"] = None
+                        self._complete_callback_locked(
+                            flow,
+                            state="revoked",
+                            result=CallbackResult(valid=True, linked=False),
+                        )
                 self._prune_flows()
         return 200, {"state": "revoked"}
 
@@ -1591,8 +2083,11 @@ class EnableBankingService:
             async with self.consent_lock:
                 existing = self.consent_flows.get(connection_id)
                 if existing is not None:
-                    existing["state"] = "revoked"
-                    existing["session_id"] = None
+                    self._complete_callback_locked(
+                        existing,
+                        state="revoked",
+                        result=CallbackResult(valid=True, linked=False),
+                    )
                     self._prune_flows()
             return {"state": "revoked"}
         persisted = next(
@@ -1636,10 +2131,17 @@ class EnableBankingService:
                 return {"state": cached_state if cached_state is not None else "error"}
             if revoked:
                 state = "revoked"
+            elif existing is not None and existing["state"] in {"expired", "revoked"}:
+                state = existing["state"]
             if existing is not None:
-                existing["state"] = state
-                if state == "revoked":
-                    existing["session_id"] = None
+                if state in {"expired", "revoked", "error"}:
+                    self._complete_callback_locked(
+                        existing,
+                        state=state,
+                        result=CallbackResult(valid=True, linked=False),
+                    )
+                else:
+                    existing["state"] = state
                 self._prune_flows()
             elif state != "error":
                 self.consent_flows[connection_id] = {
@@ -1650,6 +2152,15 @@ class EnableBankingService:
                     "authorization_id": connection_id,
                     "session_id": session_id,
                 }
+        if state in {"expired", "revoked"}:
+            self._consent_version += 1
+            self._cache_blocked = True
+            self._remove_file_durably(self._partial_path())
+            previous = self.runtime_status()
+            self._atomic_write_json(self._runtime_path(), {
+                **previous, "blocked": True, "failure": "consent", "lastFailureReason": "consent",
+                "lastFailure": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            })
         return {"state": state}
 
     async def callback(self, query: str) -> CallbackResult:
@@ -1676,73 +2187,81 @@ class EnableBankingService:
         error = values.get("error", "")
         if not state or len(state) > 512 or bool(error) == bool(code):
             return CallbackResult(valid=False)
+
+        code_digest = self._callback_code_digest(code) if code else ""
         async with self.consent_lock:
             self._expire_flows()
-            match = next(
-                (
-                    connection_id for connection_id, flow in self.consent_flows.items()
-                    if flow["state"] in self.ACTIVE_STATES
-                    and hmac.compare_digest(str(flow.get("csrf_state") or ""), state)
-                ),
-                None,
-            )
-            matched_flow = dict(self.consent_flows[match]) if match is not None else None
-        if match is None:
-            return CallbackResult(valid=False)
-        credentials = self._credentials()
-        if error or credentials is None:
-            async with self.consent_lock:
-                if self.consent_flows.get(match, {}).get("state") in self.ACTIVE_STATES:
-                    self.consent_flows[match]["state"] = "error"
-                    self._prune_flows()
-            return CallbackResult(valid=True, linked=False)
-        try:
-            async with self._http_client() as client:
-                session_response = await self._exchange_code(
-                    client, credentials, await self._bearer(credentials), code
+            match = None
+            matched_flow = None
+            for connection_id, flow in self.consent_flows.items():
+                if not hmac.compare_digest(str(flow.get("csrf_state") or ""), state):
+                    continue
+                operation = flow.get("_callback_operation")
+                if flow["state"] in self.ACTIVE_STATES:
+                    match = connection_id
+                    matched_flow = flow
+                    break
+                if (
+                    isinstance(operation, dict)
+                    and self._callback_operation_result(operation) is not None
+                    and hmac.compare_digest(
+                        str(operation.get("code_digest") or ""), code_digest
+                    )
+                ):
+                    # A replay of the same callback receives the already
+                    # committed result; a different code cannot reuse the
+                    # consumed CSRF flow.
+                    return self._callback_operation_result(operation) or CallbackResult(
+                        valid=True,
+                        linked=False,
+                    )
+            if match is None or matched_flow is None:
+                return CallbackResult(valid=False)
+
+            operation = matched_flow.get("_callback_operation")
+            if error:
+                if isinstance(operation, dict):
+                    existing = self._callback_operation_result(operation)
+                    if existing is not None:
+                        return existing
+                else:
+                    operation = self._new_callback_operation("")
+                    matched_flow["_callback_operation"] = operation
+                result = self._complete_callback_locked(
+                    matched_flow,
+                    state="error",
+                    result=CallbackResult(valid=True, linked=False),
                 )
-            session_id = session_response["session_id"]
-            if "status" in session_response:
-                session_state = self._session_state(session_response.get("status"))
-                if session_state != "linked":
-                    async with self.consent_lock:
-                        flow = self.consent_flows.get(match)
-                        if flow is not None and flow["state"] in self.ACTIVE_STATES:
-                            flow["state"] = session_state
-                            flow["session_id"] = None
-                            self._prune_flows()
+                self._prune_flows()
+                return result
+
+            if isinstance(operation, dict):
+                if not hmac.compare_digest(
+                    str(operation.get("code_digest") or ""), code_digest
+                ):
+                    # A valid CSRF state is not permission to exchange a
+                    # second authorization code for the same flow.
                     return CallbackResult(valid=True, linked=False)
-            connection = {
-                "connectionId": match,
-                "institutionId": matched_flow["institutionId"],
-                "sessionId": session_id,
-                "linkedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-            }
-            # Revoke uses the same consent -> connections lock order. The
-            # live flow check and tombstone check immediately before the save
-            # prevent a callback that exchanged a code during revoke from
-            # resurrecting an opaque provider session locally.
-            async with self.consent_lock:
-                flow = self.consent_flows.get(match)
-                if flow is None or flow["state"] not in self.ACTIVE_STATES:
+                existing = self._callback_operation_result(operation)
+                if existing is not None:
+                    return existing
+                if int(operation.get("waiters", 0)) >= self.MAX_CALLBACK_WAITERS:
                     return CallbackResult(valid=True, linked=False)
-                async with self.connections_lock:
-                    if self._is_revoked_connection(match):
-                        flow["state"] = "revoked"
-                        flow["session_id"] = None
-                        self._prune_flows()
-                        return CallbackResult(valid=True, linked=False)
-                    self._save_connection(connection)
-                    flow["session_id"] = session_id
-                    flow["state"] = "linked"
-                    self._prune_flows()
-        except Exception:
-            async with self.consent_lock:
-                if self.consent_flows.get(match, {}).get("state") in self.ACTIVE_STATES:
-                    self.consent_flows[match]["state"] = "error"
-                    self._prune_flows()
-            return CallbackResult(valid=True, linked=False)
-        return CallbackResult(valid=True, linked=True)
+                operation["waiters"] = int(operation.get("waiters", 0)) + 1
+            else:
+                operation = self._new_callback_operation(code_digest)
+                operation["waiters"] = 1
+                matched_flow["_callback_operation"] = operation
+                operation["task"] = asyncio.create_task(
+                    self._run_callback_operation(
+                        match,
+                        str(matched_flow["institutionId"]),
+                        code,
+                        operation,
+                    )
+                )
+
+        return await self._wait_for_callback_outcome(operation)
 
     @staticmethod
     def _money_to_cents(amount: object, currency: object, max_safe_cents: int) -> int:
@@ -2001,144 +2520,176 @@ class EnableBankingService:
     ) -> tuple[list[dict], list[dict]]:
         session = await self._get_session(client, credentials, token, connection["sessionId"])
         if str(session.get("status") or "").upper() != "AUTHORIZED":
-            raise EnableBankingUnavailable("provider session is not authorized")
+            raise EnableBankingUnavailable("provider session is not authorized", reason="consent")
+        access = session.get("access")
+        if not isinstance(access, dict):
+            raise EnableBankingUnavailable("invalid provider access", reason="consent")
+        valid_until = access.get("valid_until")
+        try:
+            expiry = datetime.fromisoformat(valid_until.replace("Z", "+00:00"))
+            if expiry.tzinfo is None or expiry <= datetime.now(timezone.utc):
+                raise ValueError("expired")
+            self._refresh_expiry = min(self._refresh_expiry, expiry) if self._refresh_expiry else expiry
+        except (AttributeError, TypeError, ValueError):
+            raise EnableBankingUnavailable("provider consent expired or invalid", reason="consent")
         session_accounts = session.get("accounts")
         if not isinstance(session_accounts, list) or not session_accounts:
             raise EnableBankingUnavailable("provider session has no accounts")
         account_rows: list[dict] = []
         transaction_rows: list[dict] = []
         for index, account in enumerate(session_accounts, start=1):
-            uid = self._account_uid(account)
-            if uid is None:
-                raise EnableBankingUnavailable("provider session contains an invalid account")
-            details = account if isinstance(account, dict) else {}
-            if not details.get("name") or not details.get("currency"):
-                fetched = await self._get_account_json(
-                    client, credentials, token, uid, "details"
+            account_start = len(account_rows)
+            account_transactions: list[dict] = []
+            try:
+                uid = self._account_uid(account)
+                if uid is None:
+                    raise EnableBankingUnavailable("provider session contains an invalid account")
+                details = account if isinstance(account, dict) else {}
+                if not details.get("name") or not details.get("currency"):
+                    fetched = await self._get_account_json(
+                        client, credentials, token, uid, "details"
+                    )
+                    if fetched:
+                        details = fetched
+                currency = details.get("currency")
+                if not isinstance(currency, str) or not currency.strip():
+                    raise EnableBankingUnavailable("provider account has no valid currency")
+                currency_code = currency.strip().upper()
+                if not re.fullmatch(r"[A-Z]{3}", currency_code):
+                    raise EnableBankingUnavailable("provider account has an invalid currency")
+                account_name = self._provider_text(details.get("name"), maximum=96)
+                account_label = f"{connection['institutionId']} · {account_name or f'Account {index}'}"
+                source = f"enablebanking:{connection['institutionId']}"
+                account_id = "ebacct-" + hashlib.sha256(
+                    f"{connection['institutionId']}|{uid}".encode("utf-8")
+                ).hexdigest()[:40]
+                if currency_code != "EUR":
+                    # Keep the account in the observed account list so a mixed-currency
+                    # wallet does not disappear or black out its EUR accounts. The
+                    # balance is intentionally omitted: LifeOS has no FX conversion
+                    # authority, so this account must never enter an EUR aggregate.
+                    account_rows.append({
+                        "availability": "unavailable",
+                        "id": account_id,
+                        "name": account_label,
+                        "detail": f"{currency_code} · Enable Banking",
+                        "source": source,
+                        "provenance": {
+                            "source": source,
+                            "observedAt": observed_at,
+                            "freshness": "unknown",
+                            "quality": "unavailable",
+                            "connectorState": "unavailable",
+                        },
+                    })
+                    self._refresh_accounts += 1
+                    self._refresh_observations.append({"account": account_rows[-1], "transactions": None, "failure": None})
+                    continue
+                balances = await self._get_account_json(
+                    client, credentials, token, uid, "balances"
                 )
-                if fetched:
-                    details = fetched
-            currency = details.get("currency")
-            if not isinstance(currency, str) or not currency.strip():
-                raise EnableBankingUnavailable("provider account has no valid currency")
-            currency_code = currency.strip().upper()
-            if not re.fullmatch(r"[A-Z]{3}", currency_code):
-                raise EnableBankingUnavailable("provider account has an invalid currency")
-            account_name = self._provider_text(details.get("name"), maximum=96)
-            account_label = f"{connection['institutionId']} · {account_name or f'Account {index}'}"
-            source = f"enablebanking:{connection['institutionId']}"
-            account_id = "ebacct-" + hashlib.sha256(
-                f"{connection['institutionId']}|{uid}".encode("utf-8")
-            ).hexdigest()[:40]
-            if currency_code != "EUR":
-                # Keep the account in the observed account list so a mixed-currency
-                # wallet does not disappear or black out its EUR accounts. The
-                # balance is intentionally omitted: LifeOS has no FX conversion
-                # authority, so this account must never enter an EUR aggregate.
+                balance_items = balances.get("balances")
+                if not isinstance(balance_items, list):
+                    raise EnableBankingUnavailable("provider account has no valid balances")
+                preferred = sorted(
+                    (item for item in balance_items if isinstance(item, dict)),
+                    key=lambda item: 0 if item.get("balance_type") == "CLAV" else 1,
+                )
+                balance_cents = None
+                for item in preferred:
+                    amount = item.get("balance_amount")
+                    if not isinstance(amount, dict):
+                        continue
+                    try:
+                        balance_cents = self._money_to_cents(
+                            amount.get("amount"), amount.get("currency"), self._max_safe_cents
+                        )
+                    except EnableBankingUnavailable:
+                        continue
+                    break
+                if balance_cents is None:
+                    raise EnableBankingUnavailable("provider account has no valid EUR balance")
+                provenance = {
+                    "source": source,
+                    "observedAt": observed_at,
+                    "freshness": "fresh",
+                    "quality": "observed",
+                    "connectorState": "healthy",
+                }
                 account_rows.append({
-                    "availability": "unavailable",
+                    "availability": "observed",
                     "id": account_id,
                     "name": account_label,
-                    "detail": f"{currency_code} · Enable Banking",
+                    "detail": "EUR · Enable Banking",
+                    "balanceCents": balance_cents,
                     "source": source,
-                    "provenance": {
-                        "source": source,
-                        "observedAt": observed_at,
-                        "freshness": "unknown",
-                        "quality": "unavailable",
-                        "connectorState": "unavailable",
-                    },
+                    "provenance": provenance,
                 })
-                continue
-            balances = await self._get_account_json(
-                client, credentials, token, uid, "balances"
-            )
-            balance_items = balances.get("balances")
-            if not isinstance(balance_items, list):
-                raise EnableBankingUnavailable("provider account has no valid balances")
-            preferred = sorted(
-                (item for item in balance_items if isinstance(item, dict)),
-                key=lambda item: 0 if item.get("balance_type") == "CLAV" else 1,
-            )
-            balance_cents = None
-            for item in preferred:
-                amount = item.get("balance_amount")
-                if not isinstance(amount, dict):
-                    continue
-                try:
-                    balance_cents = self._money_to_cents(
-                        amount.get("amount"), amount.get("currency"), self._max_safe_cents
-                    )
-                except EnableBankingUnavailable:
-                    continue
-                break
-            if balance_cents is None:
-                raise EnableBankingUnavailable("provider account has no valid EUR balance")
-            provenance = {
-                "source": source,
-                "observedAt": observed_at,
-                "freshness": "fresh",
-                "quality": "observed",
-                "connectorState": "healthy",
-            }
-            account_rows.append({
-                "availability": "observed",
-                "id": account_id,
-                "name": account_label,
-                "detail": "EUR · Enable Banking",
-                "balanceCents": balance_cents,
-                "source": source,
-                "provenance": provenance,
-            })
-            date_to = datetime.now(timezone.utc).date()
-            date_from = date_to - timedelta(days=180)
-            transaction_params = {
-                "date_from": date_from.isoformat(),
-                "date_to": date_to.isoformat(),
-            }
-            continuation_key: str | None = None
-            seen_continuations: set[str] = set()
-            account_transaction_count = 0
-            for _ in range(self.MAX_TRANSACTION_PAGES):
-                page_params = {
-                    **transaction_params,
-                    **({"continuation_key": continuation_key} if continuation_key is not None else {}),
+                date_to = datetime.now(timezone.utc).date()
+                date_from = date_to - timedelta(days=180)
+                transaction_params = {
+                    "date_from": date_from.isoformat(),
+                    "date_to": date_to.isoformat(),
                 }
-                transaction_payload = await self._get_account_json(
-                    client, credentials, token, uid, "transactions", params=page_params
-                )
-                transactions = transaction_payload.get("transactions")
-                if not isinstance(transactions, list):
-                    raise EnableBankingUnavailable("invalid transaction page")
-                account_transaction_count += len(transactions)
-                if account_transaction_count > self.MAX_TRANSACTIONS_PER_ACCOUNT:
-                    raise EnableBankingUnavailable("transaction history exceeds bound")
-                for transaction in transactions:
-                    normalized = self._normalize_transaction(
-                        transaction,
-                        institution_id=connection["institutionId"],
-                        account_label=account_label,
-                        account_uid=uid,
-                        observed_at=observed_at,
+                continuation_key: str | None = None
+                seen_continuations: set[str] = set()
+                account_transaction_count = 0
+                for _ in range(self.MAX_TRANSACTION_PAGES):
+                    page_params = {
+                        **transaction_params,
+                        **({"continuation_key": continuation_key} if continuation_key is not None else {}),
+                    }
+                    transaction_payload = await self._get_account_json(
+                        client, credentials, token, uid, "transactions", params=page_params
                     )
-                    if normalized is not None:
-                        transaction_rows.append(normalized)
-                next_continuation = transaction_payload.get("continuation_key")
-                if next_continuation is None:
-                    break
-                if (
-                    not isinstance(next_continuation, str)
-                    or not next_continuation
-                    or len(next_continuation) > 512
-                    or any(ord(char) < 0x21 or ord(char) == 0x7F for char in next_continuation)
-                    or next_continuation in seen_continuations
-                ):
-                    raise EnableBankingUnavailable("invalid transaction continuation")
-                seen_continuations.add(next_continuation)
-                continuation_key = next_continuation
-            else:
-                raise EnableBankingUnavailable("transaction pagination exceeds bound")
-        if not account_rows:
+                    transactions = transaction_payload.get("transactions")
+                    if not isinstance(transactions, list):
+                        raise EnableBankingUnavailable("invalid transaction page")
+                    account_transaction_count += len(transactions)
+                    if account_transaction_count > self.MAX_TRANSACTIONS_PER_ACCOUNT:
+                        raise EnableBankingUnavailable("transaction history exceeds bound")
+                    for transaction in transactions:
+                        normalized = self._normalize_transaction(
+                            transaction,
+                            institution_id=connection["institutionId"],
+                            account_label=account_label,
+                            account_uid=uid,
+                            observed_at=observed_at,
+                        )
+                        if normalized is not None:
+                            account_transactions.append(normalized)
+                    next_continuation = transaction_payload.get("continuation_key")
+                    if next_continuation is None:
+                        break
+                    if (
+                        not isinstance(next_continuation, str)
+                        or not next_continuation
+                        or len(next_continuation) > 512
+                        or any(ord(char) < 0x21 or ord(char) == 0x7F for char in next_continuation)
+                        or next_continuation in seen_continuations
+                    ):
+                        raise EnableBankingUnavailable("invalid transaction continuation")
+                    seen_continuations.add(next_continuation)
+                    continuation_key = next_continuation
+                else:
+                    raise EnableBankingUnavailable("transaction pagination exceeds bound")
+                account_transactions = self._deduplicate_transactions(account_transactions)
+                self._refresh_accounts += 1
+                transaction_rows.extend(account_transactions)
+                self._refresh_observations.append({"account": account_rows[-1], "transactions": account_transactions, "failure": None})
+            except (EnableBankingUnavailable, httpx.HTTPError, TimeoutError, asyncio.CancelledError) as exc:
+                reason = "transport" if isinstance(exc, asyncio.CancelledError) else self._failure_reason(exc)
+                if reason == "consent":
+                    raise
+                self._refresh_failures.append(reason)
+                self._refresh_providers[connection["institutionId"]] = reason
+                if len(account_rows) > account_start:
+                    self._refresh_observations.append({
+                        "account": account_rows[-1], "transactions": None, "failure": reason,
+                    })
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
+        if not account_rows and not self._refresh_failures:
             raise EnableBankingUnavailable("no usable EUR account balances")
         return account_rows, self._deduplicate_transactions(transaction_rows)
 
@@ -2174,29 +2725,199 @@ class EnableBankingService:
             raise EnableBankingUnavailable("aggregate overflow")
         return result
 
+    def _partial_path(self) -> Path:
+        return self._data_dir() / "enablebanking-partial.json"
+
+    @staticmethod
+    def _failure_reason(exc: Exception) -> str:
+        if isinstance(exc, EnableBankingUnavailable):
+            return exc.reason
+        return "transport" if isinstance(exc, (httpx.HTTPError, TimeoutError)) else "storage"
+
+    def _preserve_partial_observations(self, reason: str) -> None:
+        # This journal is deliberately separate from the complete summary and
+        # its revision/idempotency contract. None means no complete EUR ledger;
+        # [] means a successfully exhausted, empty ledger.
+        accounts = self._deduplicate_accounts([item["account"] for item in self._refresh_observations])
+        transactions = self._deduplicate_transactions([
+            row for item in self._refresh_observations for row in (item["transactions"] or [])
+        ])
+        observed_at = max(row["provenance"]["observedAt"] for row in accounts)
+        # Apply the same schema and sensitive-value scan as complete commits.
+        # This validation envelope is never published; aggregates stay absent.
+        envelope = {"generatedAt": observed_at, "currency": "EUR"}
+        for key in ("monthlyIncome", "fixedCosts", "discretionaryBuffer", "spent", "savingsGoal", "saved"):
+            envelope[key] = self._metric(None, source="no-authorized-finance-source", observed_at=observed_at)
+        for key, rows, source in (
+            ("accounts", accounts, "derived-account-snapshot"),
+            ("transactions", transactions, "derived-transaction-snapshot"),
+        ):
+            envelope[key] = {
+                "availability": "observed", key: rows,
+                "provenance": {
+                    "source": source, "observedAt": observed_at,
+                    "freshness": "fresh", "quality": "observed", "connectorState": "healthy",
+                },
+            }
+        if not self._validate_finance_payload(envelope):
+            raise EnableBankingUnavailable("invalid partial observations")
+        value = {
+            "schemaVersion": 1, "partial": True, "failure": reason,
+            "providers": self._refresh_providers,
+            "observations": self._refresh_observations,
+        }
+        body = json.dumps(value, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        if len(body) > self.MAX_FINANCE_SUMMARY_SIZE:
+            raise EnableBankingUnavailable("partial observations exceed bound")
+        self._atomic_write_json(self._partial_path(), value)
+
+    def _runtime_path(self) -> Path:
+        return self._data_dir() / "enablebanking-runtime.json"
+
+    def runtime_status(self) -> dict:
+        """Bounded operational metadata, without session IDs or provider text."""
+        committed = self._read_bounded_json_file(self._summary_state_path(), self.MAX_FINANCE_STATE_SIZE)
+        committed_runtime = committed.get("runtime") if isinstance(committed, dict) else None
+        value = self._read_bounded_json_file(self._runtime_path(), 4096)
+        if isinstance(committed_runtime, dict):
+            # The commit owns successful status; the sidecar owns subsequent
+            # failures. Both timestamps are generated locally under one task.
+            if not isinstance(value, dict) or max(value.get("lastSuccess") or "", value.get("lastFailure") or "") < committed_runtime.get("lastSuccess", ""):
+                self._read_summary_state()  # Validate the authoritative envelope.
+                value = committed_runtime
+        if value is None and not self._runtime_path().exists():
+            return {"lastSuccess": None, "lastFailure": None, "failure": None,
+                    "partial": False, "completedAccounts": 0, "blocked": False,
+                    "providers": {}, "lastFailureReason": None, "consentExpiresAt": None}
+        if not isinstance(value, dict) or set(value) != {
+            "lastSuccess", "lastFailure", "failure", "partial", "completedAccounts", "blocked", "providers", "lastFailureReason", "consentExpiresAt"
+        }:
+            raise EnableBankingUnavailable("invalid runtime status")
+        reasons = {None, "transport", "auth", "consent", "malformed", "configuration", "storage"}
+        if value["failure"] not in reasons or value["lastFailureReason"] not in reasons:
+            raise EnableBankingUnavailable("invalid runtime failure")
+        if type(value["partial"]) is not bool or type(value["blocked"]) is not bool or type(value["completedAccounts"]) is not int or not 0 <= value["completedAccounts"] <= 10000:
+            raise EnableBankingUnavailable("invalid runtime coverage")
+        if not isinstance(value["providers"], dict) or any(
+            key not in self.KNOWN_INSTITUTION_IDS or state not in (reasons - {None}) | {"pending", "observed", "partial"}
+            for key, state in value["providers"].items()
+        ):
+            raise EnableBankingUnavailable("invalid runtime providers")
+        for key in ("lastSuccess", "lastFailure", "consentExpiresAt"):
+            if value[key] is not None:
+                if key == "consentExpiresAt":
+                    try:
+                        stamp = datetime.fromisoformat(value[key].replace("Z", "+00:00"))
+                        if stamp.tzinfo is None:
+                            raise ValueError("naive expiry")
+                    except (AttributeError, TypeError, ValueError):
+                        raise EnableBankingUnavailable("invalid consent expiry")
+                else:
+                    self._validate_revoked_at(value[key])
+        expiry = value["consentExpiresAt"]
+        if not value["blocked"] and expiry is not None and datetime.fromisoformat(expiry.replace("Z", "+00:00")) <= datetime.now(timezone.utc):
+            self._consent_version += 1
+            self._cache_blocked = True
+            value = {
+                **value, "blocked": True, "failure": "consent", "lastFailureReason": "consent",
+                "lastFailure": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            }
+            self._atomic_write_json(self._runtime_path(), value)
+            self._remove_file_durably(self._partial_path())
+        return value
+
     async def refresh_summary(self) -> dict:
+        """Join one bounded refresh; a disconnected waiter cannot cancel it."""
+        if self._refresh_task is None or self._refresh_task.done():
+            self._refresh_task = asyncio.create_task(self._refresh_recorded())
+            # Retrieve failures even when every HTTP waiter disconnects.
+            self._refresh_task.add_done_callback(lambda task: None if task.cancelled() else task.exception())
+        return await asyncio.shield(self._refresh_task)
+
+    async def _refresh_recorded(self) -> dict:
+        previous = self.runtime_status()
+        self._refresh_version = self._consent_version
+        self._refresh_observations = []
+        self._refresh_failures = []
+        self._refresh_accounts = 0
+        self._refresh_providers = {}
+        self._refresh_expiry = None
+        try:
+            async with asyncio.timeout(60):
+                summary = await self._refresh_summary_once()
+        except (EnableBankingUnavailable, httpx.HTTPError, TimeoutError, OSError) as exc:
+            # No awaits through failure finalization: read the latest consent
+            # decision instead of overwriting it with pre-request status.
+            previous = self.runtime_status()
+            reason = self._failure_reason(exc)
+            if self._consent_version != self._refresh_version:
+                reason = "consent"
+            if previous["blocked"] or (self._refresh_expiry is not None
+                    and self._refresh_expiry <= datetime.now(timezone.utc)):
+                reason = "consent"
+            self._cache_blocked = reason == "consent"
+            if not self._cache_blocked and self._refresh_observations:
+                try:
+                    self._preserve_partial_observations(reason)
+                except (EnableBankingUnavailable, OSError) as preservation_error:
+                    reason = self._failure_reason(preservation_error)
+            elif self._cache_blocked:
+                self._remove_file_durably(self._partial_path())
+            for institution, state in self._refresh_providers.items():
+                if state == "pending":
+                    self._refresh_providers[institution] = reason
+                    break
+            self._atomic_write_json(self._runtime_path(), {
+                **previous, "lastFailure": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "failure": reason, "lastFailureReason": reason,
+                "providers": self._refresh_providers, "partial": bool(self._refresh_observations),
+                "completedAccounts": self._refresh_accounts,
+                "blocked": previous["blocked"] or reason == "consent",
+            })
+            raise EnableBankingUnavailable("banking refresh failed", reason=reason) from exc
+        # Success status is part of the summary's atomic envelope. The sidecar
+        # is only a compatibility projection after that commit.
+        try:
+            self._atomic_write_json(self._runtime_path(), self.runtime_status())
+        except OSError:
+            pass
+        self._cache_blocked = False
+        return summary
+
+    async def _refresh_summary_once(self) -> dict:
         credentials = self._credentials()
         if credentials is None:
-            raise EnableBankingUnavailable("missing Enable Banking configuration")
+            raise EnableBankingUnavailable("missing Enable Banking configuration", reason="configuration")
         async with self.connections_lock:
             connections = self._load_connections()
         if not connections:
-            raise EnableBankingUnavailable("no linked connections")
+            raise EnableBankingUnavailable("no linked connections", reason="consent")
         observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         all_accounts: list[dict] = []
         all_transactions: list[dict] = []
         async with self._http_client() as client:
             token = await self._bearer(credentials)
+            self._refresh_providers = {connection["institutionId"]: "pending" for connection in connections}
             for connection in connections:
-                accounts, transactions = await self._fetch_connection(
-                    client,
-                    credentials,
-                    token,
-                    connection,
-                    observed_at=observed_at,
-                )
+                if self._is_revoked_connection(connection["connectionId"]) or self.consent_flows.get(connection["connectionId"], {}).get("state") in {"expired", "revoked"}:
+                    raise EnableBankingUnavailable("consent unavailable", reason="consent")
+                try:
+                    accounts, transactions = await self._fetch_connection(
+                        client, credentials, token, connection, observed_at=observed_at,
+                    )
+                except (EnableBankingUnavailable, httpx.HTTPError, TimeoutError) as exc:
+                    reason = self._failure_reason(exc)
+                    self._refresh_providers[connection["institutionId"]] = reason
+                    if reason == "consent":
+                        raise
+                    self._refresh_failures.append(reason)
+                    continue
+                if self._refresh_providers[connection["institutionId"]] == "pending":
+                    self._refresh_providers[connection["institutionId"]] = "partial" if any(row["availability"] != "observed" for row in accounts) else "observed"
                 all_accounts.extend(accounts)
                 all_transactions.extend(transactions)
+        if self._refresh_failures:
+            raise EnableBankingUnavailable("incomplete banking observation", reason=self._refresh_failures[0])
         if not all_accounts:
             raise EnableBankingUnavailable("no linked account data")
         all_accounts = self._deduplicate_accounts(all_accounts)
@@ -2307,13 +3028,28 @@ class EnableBankingService:
         async with self.connections_lock:
             # Do not publish a provider response fetched for a connection set
             # that was concurrently relinked or revoked.
+            if self._refresh_expiry is None or self._refresh_expiry <= datetime.now(timezone.utc):
+                raise EnableBankingUnavailable("consent expired during refresh", reason="consent")
+            current_runtime = self.runtime_status()
+            if self._consent_version != self._refresh_version or any(
+                self.consent_flows.get(connection["connectionId"], {}).get("state") in {"expired", "revoked"}
+                for connection in connections
+            ):
+                raise EnableBankingUnavailable("consent changed during refresh", reason="consent")
             if self._load_connections() != connections:
-                raise EnableBankingUnavailable("connections changed during refresh")
+                raise EnableBankingUnavailable("connections changed during refresh", reason="consent")
             metadata = self._next_summary_metadata(summary)
             state = {
                 "schemaVersion": self.FINANCE_STATE_SCHEMA_VERSION,
                 "summary": summary,
                 "metadata": metadata,
+                "runtime": {
+                    **current_runtime, "lastSuccess": summary["generatedAt"], "failure": None,
+                    "partial": any(row["availability"] != "observed" for row in all_accounts),
+                    "completedAccounts": self._refresh_accounts, "blocked": False,
+                    "providers": self._refresh_providers,
+                    "consentExpiresAt": self._refresh_expiry.isoformat().replace("+00:00", "Z") if self._refresh_expiry else None,
+                },
             }
             state_body = json.dumps(state, separators=(",", ":"), sort_keys=True, allow_nan=False).encode("utf-8")
             if len(state_body) > self.MAX_FINANCE_STATE_SIZE:
@@ -2322,6 +3058,10 @@ class EnableBankingService:
             # and metadata files are compatibility projections; a crash between
             # either projection rename cannot expose a torn Finance snapshot.
             self._atomic_write_json(self._summary_state_path(), state)
-            self._atomic_write_json(self._summary_metadata_path(), metadata)
-            self._atomic_write_json(self._summary_path(), summary)
+            try:
+                self._remove_file_durably(self._partial_path())
+                self._atomic_write_json(self._summary_metadata_path(), metadata)
+                self._atomic_write_json(self._summary_path(), summary)
+            except OSError:
+                pass  # Authoritative state is committed; projections are disposable.
         return summary
