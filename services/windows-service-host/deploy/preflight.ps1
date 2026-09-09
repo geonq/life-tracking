@@ -1,5 +1,7 @@
 [CmdletBinding()]
 param(
+    [Parameter(Mandatory)][string]$CandidateRoot,
+    [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{40}$')][string]$ExpectedSourceSha,
     [string]$ServiceHostBinarySource,
     [string]$ApiSource = 'D:\Hermes\lifeos-api',
     [string]$GatewaySource = 'D:\Hermes\lifeos-server',
@@ -19,6 +21,13 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Deployment.Common.ps1')
+
+# Candidate verification is read-only and must happen before any source
+# resolution, listener inspection, task export, or other deployment decision.
+# ExpectedSourceSha is an independently supplied release value; SOURCE_SHA.txt
+# is checked against it by the candidate verifier and is never used to choose
+# the expected identity.
+$candidateRootFull = Assert-LifeOSCandidateRoot -Root $CandidateRoot -ExpectedSourceSha $ExpectedSourceSha -DeploymentScriptRoot $PSScriptRoot -VerifyCandidate
 
 function Assert-SafeServiceName {
     param([Parameter(Mandatory)][string]$Name)
@@ -72,6 +81,7 @@ Assert-ExistingFile $behaviorDeploymentTest 'Deployment behavioral test'
 $legacyServeDeploymentTest = Join-Path $PSScriptRoot 'tests\Deployment.LegacyServe.Tests.ps1'
 Assert-ExistingFile $legacyServeDeploymentTest 'Legacy Serve deployment test'
 $hostSource = Resolve-ServiceHostBinary $ServiceHostBinarySource $paths.ServiceHostPath
+$null = Assert-LifeOSCandidateSourceBindings -CandidateRoot $candidateRootFull -ApiRoot $apiRoot -GatewayRoot $GatewaySource -NodeRuntimeRoot $nodeSource -ServiceHostBinary $hostSource -GatewayEntryPoint $gatewayEntry -DeploymentScriptRoot $PSScriptRoot
 $tailscale = Resolve-TailscaleExecutable $TailscaleExecutable
 $tailscaleStatus = Get-TailscaleStatusJson $tailscale
 $tailscaleDecision = Get-TailscaleServeDecision $tailscaleStatus

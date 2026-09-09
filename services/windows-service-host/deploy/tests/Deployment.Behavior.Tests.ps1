@@ -657,36 +657,116 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
 }
 
 & {
-    # Keep the larger allowance scoped to the one reviewed runtime path. Use
-    # small fixture limits so the boundary behavior is exercised without
-    # allocating 64/256 MiB on the deployment test host.
+    # Keep the two larger allowances scoped to the exact reviewed candidate
+    # paths. Use small fixture limits so candidate enumeration, manifest hash,
+    # atomic copy, and recovery boundaries are exercised without allocating
+    # 64/256 MiB on the deployment test host.
     $temp = Join-Path ([IO.Path]::GetTempPath()) ('lifeos-file-limit-contract-' + [Guid]::NewGuid().ToString('N'))
     $candidate = Join-Path $temp 'candidate'
     $nodeDirectory = Join-Path $candidate 'node-runtime'
-    Ensure-Directory $nodeDirectory
+    $hostDirectory = Join-Path $candidate 'service-host'
+    $copyBackup = Join-Path $temp 'copy-backup'
+    Ensure-Directory $nodeDirectory; Ensure-Directory $hostDirectory; Ensure-Directory $copyBackup
     try {
         $node = Join-Path $nodeDirectory 'node.exe'
+        $candidateHost = Join-Path $hostDirectory 'LifeOS.ServiceHost.exe'
         [IO.File]::WriteAllBytes($node, [byte[]]@(1, 2, 3, 4, 5, 6, 7, 8))
-        $candidateItems = @(Get-LifeOSBoundedTreeItem -Root $candidate -MaxFiles 4 -MaxDirectories 4 -MaxBytes 8 -MaxFileBytes 4 -LargeFileRelativePath 'node-runtime/node.exe' -LargeFileMaxBytes 8)
-        Assert-Behavior ($candidateItems.Count -eq 2) 'the exact candidate Node path may use its scoped larger file bound.'
+        [IO.File]::WriteAllBytes($candidateHost, [byte[]]@(8, 7, 6, 5, 4, 3, 2, 1))
+        $contracts = [ordered]@{
+            'node-runtime/node.exe' = 8
+            'service-host/LifeOS.ServiceHost.exe' = 8
+        }
+        $candidateItems = @(Get-LifeOSBoundedTreeItem -Root $candidate -MaxFiles 8 -MaxDirectories 8 -MaxBytes 16 -MaxFileBytes 4 -LargeFileContracts $contracts)
+        Assert-Behavior ($candidateItems.Count -eq 4) 'the exact candidate Node and service-host paths may use their scoped larger bounds.'
+        $candidateIndex = Get-TreeManifestIndex -Root $candidate -MaxFiles 8 -MaxDirectories 8 -MaxBytes 16 -MaxFileBytes 4 -LargeFileContracts $contracts
+        $serviceHostEntries = @($candidateIndex.Entries | Where-Object {
+            ([string]$_.path).Replace('\', '/') -ceq 'service-host/LifeOS.ServiceHost.exe'
+        })
+        Assert-Behavior ($candidateIndex.FileCount -eq 2 -and $serviceHostEntries.Count -eq 1) 'the exact contract map reaches manifest hashing.'
+        $copyDestination = Join-Path $temp 'copied-candidate'
+        $oldCopyMax = $script:LifeOSRecoveryMaxFileBytes
+        $script:LifeOSRecoveryMaxFileBytes = 4
+        try {
+            $copyResult = Copy-TreeVerifiedAtomic -Source $candidate -Destination $copyDestination -BackupDirectory $copyBackup -LargeFileContracts $contracts
+        } finally { $script:LifeOSRecoveryMaxFileBytes = $oldCopyMax }
+        Assert-Behavior ($copyResult.Changed -and (Get-Item -LiteralPath (Join-Path (Join-Path $copyDestination 'service-host') 'LifeOS.ServiceHost.exe')).Length -eq 8) 'the exact contract map reaches atomic tree copy and post-copy hashing.'
         [IO.File]::WriteAllBytes($node, [byte[]]@(1, 2, 3, 4, 5, 6, 7, 8, 9))
         Assert-BehaviorThrows {
-            @(Get-LifeOSBoundedTreeItem -Root $candidate -MaxFiles 4 -MaxDirectories 4 -MaxBytes 9 -MaxFileBytes 4 -LargeFileRelativePath 'node-runtime/node.exe' -LargeFileMaxBytes 8)
+            @(Get-LifeOSBoundedTreeItem -Root $candidate -MaxFiles 8 -MaxDirectories 8 -MaxBytes 17 -MaxFileBytes 4 -LargeFileContracts $contracts)
         } 'the scoped Node exception still rejects a file above its larger bound.'
         [IO.File]::WriteAllBytes($node, [byte[]]@(1, 2, 3, 4, 5, 6, 7, 8))
+        [IO.File]::WriteAllBytes($candidateHost, [byte[]]@(1, 2, 3, 4, 5, 6, 7, 8, 9))
+        Assert-BehaviorThrows {
+            @(Get-LifeOSBoundedTreeItem -Root $candidate -MaxFiles 8 -MaxDirectories 8 -MaxBytes 17 -MaxFileBytes 4 -LargeFileContracts $contracts)
+        } 'the scoped service-host exception still rejects a file above its larger bound.'
+        [IO.File]::WriteAllBytes($candidateHost, [byte[]]@(8, 7, 6, 5, 4, 3, 2, 1))
 
         $other = Join-Path $candidate 'other.bin'
         [IO.File]::WriteAllBytes($other, [byte[]]@(1, 2, 3, 4))
-        $generalBoundaryItems = @(Get-LifeOSBoundedTreeItem -Root $candidate -MaxFiles 4 -MaxDirectories 4 -MaxBytes 12 -MaxFileBytes 4 -LargeFileRelativePath 'node-runtime/node.exe' -LargeFileMaxBytes 8)
-        Assert-Behavior ($generalBoundaryItems.Count -eq 3) 'a non-Node file at the general boundary remains accepted.'
-        [IO.File]::WriteAllBytes($other, [byte[]]@(1, 2, 3, 4, 5))
+        $generalBoundaryItems = @(Get-LifeOSBoundedTreeItem -Root $candidate -MaxFiles 8 -MaxDirectories 8 -MaxBytes 20 -MaxFileBytes 4 -LargeFileContracts $contracts)
+        Assert-Behavior ($generalBoundaryItems.Count -eq 5) 'an ordinary file at the general boundary remains accepted.'
+        [IO.File]::WriteAllBytes($other, [byte[]]@(1, 2, 3, 4))
+        $misleadingDirectory = Join-Path $candidate 'other-service-host'
+        Ensure-Directory $misleadingDirectory
+        $misleadingHost = Join-Path $misleadingDirectory 'LifeOS.ServiceHost.exe'
+        [IO.File]::WriteAllBytes($misleadingHost, [byte[]]@(1, 2, 3, 4))
+        $acceptedMisleadingBasename = $true
+        try {
+            @(Get-LifeOSBoundedTreeItem -Root $candidate -MaxFiles 8 -MaxDirectories 8 -MaxBytes 24 -MaxFileBytes 4 -LargeFileContracts $contracts) | Out-Null
+        } catch { $acceptedMisleadingBasename = $false }
+        Assert-Behavior $acceptedMisleadingBasename 'a same-basename service host at the ordinary bound remains readable outside the exact contract path.'
+        [IO.File]::WriteAllBytes($misleadingHost, [byte[]]@(1, 2, 3, 4, 5))
         Assert-BehaviorThrows {
-            @(Get-LifeOSBoundedTreeItem -Root $candidate -MaxFiles 4 -MaxDirectories 4 -MaxBytes 13 -MaxFileBytes 4 -LargeFileRelativePath 'node-runtime/node.exe' -LargeFileMaxBytes 8)
-        } 'a non-Node candidate file remains at the general bound.'
+            @(Get-LifeOSBoundedTreeItem -Root $candidate -MaxFiles 8 -MaxDirectories 8 -MaxBytes 25 -MaxFileBytes 4 -LargeFileContracts $contracts)
+        } 'a same-basename service host outside the exact candidate path remains at the ordinary bound.'
 
-        Assert-Behavior ((Get-LifeOSRecoveryFileMaxBytes (Join-Path (Join-Path $temp 'node') 'node.exe') -AllowNodeRuntime) -eq 256 * 1024 * 1024) 'installed Node recovery files use the larger bound.'
-        Assert-Behavior ((Get-LifeOSRecoveryFileMaxBytes (Join-Path (Join-Path $temp 'previous-node') 'node.exe') -AllowNodeRuntime) -eq 256 * 1024 * 1024) 'Node rollback backups use the larger bound.'
-        Assert-Behavior ((Get-LifeOSRecoveryFileMaxBytes (Join-Path $temp 'other.exe')) -eq 64 * 1024 * 1024) 'unrelated recovery files retain the 64 MiB bound.'
+        $oldRecoveryMax = $script:LifeOSRecoveryMaxFileBytes
+        $oldHostMax = $script:LifeOSCandidateServiceHostMaxFileBytes
+        try {
+            $script:LifeOSRecoveryMaxFileBytes = 4
+            $script:LifeOSCandidateServiceHostMaxFileBytes = 8
+            $hostTarget = Join-Path (Join-Path $temp 'installed-host') 'LifeOS.ServiceHost.exe'
+            $hostBackup = Join-Path (Join-Path $temp 'host-backup') 'LifeOS.ServiceHost.exe'
+            Ensure-Directory (Split-Path -Parent $hostTarget); Ensure-Directory (Split-Path -Parent $hostBackup)
+            [IO.File]::WriteAllBytes($hostTarget, [byte[]]@(9, 9, 9, 9, 9, 9, 9, 9))
+            [IO.File]::WriteAllBytes($hostBackup, [byte[]]@(1, 1, 1, 1, 1, 1, 1, 1))
+            $nodeTarget = Join-Path (Join-Path $temp 'installed-node') 'node.exe'
+            Ensure-Directory (Split-Path -Parent $nodeTarget)
+            $recoveryManifest = [pscustomobject]@{
+                paths = [pscustomobject]@{ host = $hostTarget; node = (Split-Path -Parent $nodeTarget) }
+                backups = @(
+                    [pscustomobject]@{ kind = 'host-binary'; destination = $hostTarget; backup = $hostBackup }
+                    [pscustomobject]@{ kind = 'node-runtime'; destination = (Split-Path -Parent $nodeTarget); backup = (Join-Path $temp 'node-backup') }
+                )
+            }
+            Assert-Behavior ((Get-LifeOSRecoveryFileMaxBytes $hostTarget -AllowServiceHostBinary -Manifest $recoveryManifest) -eq 8) 'the manifest-bound service host uses the finite host recovery limit.'
+            Assert-Behavior ((Get-LifeOSRecoveryFileMaxBytes $nodeTarget -AllowNodeRuntime -Manifest $recoveryManifest) -eq 256 * 1024 * 1024) 'the manifest-bound Node runtime uses the finite Node recovery limit.'
+            Assert-Behavior ((Get-LifeOSRecoveryFileMaxBytes (Join-Path (Join-Path $temp 'other') 'LifeOS.ServiceHost.exe')) -eq 4) 'unrelated recovery files retain the ordinary bound.'
+            Assert-BehaviorThrows { Get-LifeOSRecoveryFileMaxBytes (Join-Path (Join-Path $temp 'other') 'LifeOS.ServiceHost.exe') -AllowServiceHostBinary -Manifest $recoveryManifest } 'a same-basename host cannot opt into the host recovery limit.'
+            Assert-BehaviorThrows { Get-LifeOSRecoveryFileMaxBytes (Join-Path (Join-Path $temp 'other') 'node.exe') -AllowNodeRuntime -Manifest $recoveryManifest } 'a same-basename Node file cannot opt into the Node recovery limit.'
+
+            $installTarget = Join-Path (Join-Path $temp 'atomic-install') 'LifeOS.ServiceHost.exe'
+            $installBackup = Join-Path $temp 'atomic-install-backup'
+            Ensure-Directory $installBackup
+            $copyResult = Copy-FileVerifiedAtomic -Source $candidateHost -Destination $installTarget -BackupDirectory $installBackup -MaxBytes 8
+            Assert-Behavior ($copyResult.Changed -and (Get-Item -LiteralPath $installTarget).Length -eq 8) 'service-host install copy enforces and preserves the finite bound.'
+            [IO.File]::WriteAllBytes($candidateHost, [byte[]]@(1, 2, 3, 4, 5, 6, 7, 8, 9))
+            Assert-BehaviorThrows { Copy-FileVerifiedAtomic -Source $candidateHost -Destination $installTarget -BackupDirectory $installBackup -MaxBytes 8 } 'oversized service-host install input is rejected before copy.'
+            Assert-Behavior ((Get-Item -LiteralPath $installTarget).Length -eq 8) 'rejected service-host install input leaves its destination unchanged.'
+            [IO.File]::WriteAllBytes($candidateHost, [byte[]]@(8, 7, 6, 5, 4, 3, 2, 1))
+
+            $rollbackArtifact = [pscustomobject]@{ kind = 'host-binary'; destination = $hostTarget; backup = $hostBackup; changed = $true; phase = 'complete'; priorExists = $true }
+            $rollbackWork = Join-Path $temp 'rollback-work'; Ensure-Directory $rollbackWork
+            Restore-Artifact $rollbackArtifact $rollbackWork -AllowServiceHostBinary -Manifest $recoveryManifest
+            Assert-Behavior ([IO.File]::ReadAllBytes($hostTarget).Length -eq 8) 'service-host rollback restores the manifest-bound backup.'
+            [IO.File]::WriteAllBytes($hostBackup, [byte[]]@(1, 1, 1, 1, 1, 1, 1, 1, 1))
+            $oversizedRollbackWork = Join-Path $temp 'rollback-work-oversized'; Ensure-Directory $oversizedRollbackWork
+            Assert-BehaviorThrows { Restore-Artifact $rollbackArtifact $oversizedRollbackWork -AllowServiceHostBinary -Manifest $recoveryManifest } 'oversized service-host rollback input is rejected before destination mutation.'
+            Assert-Behavior ([IO.File]::ReadAllBytes($hostTarget).Length -eq 8) 'rejected service-host rollback input leaves the installed host unchanged.'
+        } finally {
+            $script:LifeOSRecoveryMaxFileBytes = $oldRecoveryMax
+            $script:LifeOSCandidateServiceHostMaxFileBytes = $oldHostMax
+        }
     } finally {
         Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
     }

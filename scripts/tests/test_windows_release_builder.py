@@ -122,33 +122,45 @@ class WindowsReleaseBuilderTests(unittest.TestCase):
         common = COMMON.read_text(encoding="utf-8")
 
         self.assertIn("candidate_node_max_file_bytes=$((256 * 1024 * 1024))", builder)
+        self.assertIn("candidate_service_host_max_file_bytes=$((256 * 1024 * 1024))", builder)
         self.assertIn("(( node_size <= candidate_node_max_file_bytes ))", builder)
         self.assertIn("$script:LifeOSCandidateNodeMaxFileBytes = 256 * 1024 * 1024", common)
+        self.assertIn("$script:LifeOSCandidateServiceHostMaxFileBytes = 256 * 1024 * 1024", common)
         self.assertIn(
             "$maxCandidateNodeFileBytes = [long]$script:LifeOSCandidateNodeMaxFileBytes",
             verifier,
         )
         self.assertIn(
-            "$maxCandidateBytes = [long]($maxCandidateFiles - 1) * $maxCandidateFileBytes + $maxCandidateNodeFileBytes",
+            "$maxCandidateServiceHostFileBytes = [long]$script:LifeOSCandidateServiceHostMaxFileBytes",
+            verifier,
+        )
+        self.assertIn(
+            "$maxCandidateBytes = [long]($expectedFiles.Count - 2) * $maxCandidateFileBytes + $maxCandidateNodeFileBytes + $maxCandidateServiceHostFileBytes",
             verifier,
         )
         self.assertIn(
             "$itemMaxBytes = if ($relativePath -ceq 'node-runtime/node.exe')",
             verifier,
         )
+        self.assertIn("$relativePath -ceq 'service-host/LifeOS.ServiceHost.exe'", verifier)
+        self.assertIn("'service-host/LifeOS.ServiceHost.exe' = $maxCandidateServiceHostFileBytes", verifier)
 
     def test_builder_applies_the_same_narrow_per_file_bounds_before_copy_and_hash(self) -> None:
         builder = BUILDER.read_text(encoding="utf-8")
         self.assertIn("candidate_max_file_bytes=$((64 * 1024 * 1024))", builder)
         self.assertIn("candidate_node_max_file_bytes=$((256 * 1024 * 1024))", builder)
-        self.assertIn("if [[ \"$relative_destination\" == 'node-runtime/node.exe' ]]", builder)
+        self.assertIn("candidate_service_host_max_file_bytes=$((256 * 1024 * 1024))", builder)
+        self.assertIn("service-host/LifeOS.ServiceHost.exe)", builder)
+        self.assertIn("node-runtime/node.exe)", builder)
+        self.assertIn("service-host/LifeOS.ServiceHost.exe)", builder)
+        self.assertIn("candidate_file_max_bytes", builder)
         self.assertIn('source_size="$(file_size_bytes "$source")"', builder)
         self.assertIn("candidate input exceeds its bounded size", builder)
         self.assertIn("source API package metadata exceeds the candidate file bound", builder)
         self.assertIn("staged API package metadata exceeds the candidate file bound", builder)
         self.assertIn("candidate file exceeds its bounded size: {relative}", builder)
         self.assertIn(
-            'max_bytes = 256 * 1024 * 1024 if relative == "node-runtime/node.exe" else 64 * 1024 * 1024',
+            'elif relative == "service-host/LifeOS.ServiceHost.exe":',
             builder,
         )
         copy_body = builder.split("copy_file() {", 1)[1].split("echo \"Building contracts", 1)[0]

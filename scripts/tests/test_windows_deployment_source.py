@@ -816,23 +816,53 @@ def test_install_preflight_invocation_uses_named_parameter_splat() -> None:
     assert match is not None
     assert not re.search(r"\$preflightArgs\s*=\s*@\(", install)
     body = match.group("body")
-    for parameter in (
-        "ServiceHostBinarySource",
-        "ApiSource",
-        "GatewaySource",
-        "LegacyGatewaySource",
-        "NodeRuntimeSource",
-        "PythonRuntimeSource",
-        "GatewayEntryPoint",
-        "TailscaleExecutable",
-        "TailscaleServiceName",
-        "LegacyTaskName",
-        "CodexTaskName",
-    ):
-        assert re.search(rf"(?m)^\s+{parameter}\s*=\s*\${parameter}\s*$", body)
+    expected_bindings = {
+        "CandidateRoot": "candidateRootFull",
+        "ExpectedSourceSha": "ExpectedSourceSha",
+    }
+    expected_bindings.update({
+        parameter: parameter for parameter in (
+            "ServiceHostBinarySource",
+            "ApiSource",
+            "GatewaySource",
+            "LegacyGatewaySource",
+            "NodeRuntimeSource",
+            "PythonRuntimeSource",
+            "GatewayEntryPoint",
+            "TailscaleExecutable",
+            "TailscaleServiceName",
+            "LegacyTaskName",
+            "CodexTaskName",
+        )
+    })
+    for parameter, variable in expected_bindings.items():
+        assert re.search(rf"(?m)^\s+{parameter}\s*=\s*\${variable}\s*$", body)
     assert "$preflightNamedArgs = [regex]::Match" in static
     assert "Preflight must be invoked with a named hashtable splat." in static
     assert "Preflight arguments must not use an array splat." in static
+
+
+def test_install_and_preflight_require_an_independently_verified_candidate() -> None:
+    common = read("Deployment.Common.ps1")
+    install = read("install.ps1")
+    preflight = read("preflight.ps1")
+    verifier = read("verify-candidate.ps1")
+
+    assert "function Assert-LifeOSCandidateRoot" in common
+    assert "function Assert-LifeOSCandidateSourceBindings" in common
+    assert "-ExpectedSourceSha $ExpectedSourceSha" in common
+    assert "SOURCE_SHA.txt" in verifier
+    assert "-VerifyCandidate" in install
+    assert "-VerifyCandidate" in preflight
+    assert "-DeploymentScriptRoot $PSScriptRoot" in install
+    assert "-DeploymentScriptRoot $PSScriptRoot" in preflight
+    assert "CandidateRoot = $candidateRootFull" in install
+    assert "ExpectedSourceSha = $ExpectedSourceSha" in install
+    assert "[string]$CandidateRoot" in preflight
+    assert "[string]$ExpectedSourceSha" in preflight
+    assert "Assert-LifeOSCandidateSourceBindings" in preflight
+    assert "LegacyGatewaySource" in preflight
+    assert "ExpectedSourceSha" in install.split("function Invoke-LifeOSInstall", 1)[1].split("$deploymentMutex", 1)[0]
 
 
 def test_empty_listener_query_is_narrow_and_preflight_stays_isolated() -> None:
@@ -1489,13 +1519,15 @@ def test_candidate_verifier_uses_allowlist_derived_bounded_inventory() -> None:
     assert manifest_guard < manifest_read
     assert '$maxCandidateFiles = [int]$expectedFiles.Count + 1' in candidate
     assert '$maxCandidateDirectories = [int]$allowedDirectories.Count + 1' in candidate
-    assert '$maxCandidateBytes = [long]($maxCandidateFiles - 1) * $maxCandidateFileBytes + $maxCandidateNodeFileBytes' in candidate
+    assert '$maxCandidateBytes = [long]($expectedFiles.Count - 2) * $maxCandidateFileBytes + $maxCandidateNodeFileBytes + $maxCandidateServiceHostFileBytes' in candidate
     assert '$candidateManifestMaxBytes = [long]($expectedFiles.Count + 1) * 16 * 1024' in candidate
     assert 'MaxDirectories $maxCandidateDirectories' in candidate
     assert 'MaxBytes $maxCandidateBytes' in candidate
     assert 'MaxFileBytes $maxCandidateFileBytes' in candidate
-    assert "-LargeFileRelativePath 'node-runtime/node.exe'" in candidate
-    assert '-LargeFileMaxBytes $maxCandidateNodeFileBytes' in candidate
+    assert "'node-runtime/node.exe' = $maxCandidateNodeFileBytes" in candidate
+    assert "'service-host/LifeOS.ServiceHost.exe' = $maxCandidateServiceHostFileBytes" in candidate
+    assert '-LargeFileContracts $largeFileContracts' in candidate
+    assert "$relativePath -ceq 'service-host/LifeOS.ServiceHost.exe'" in candidate
     assert 'Get-ChildItem -LiteralPath $rootFull -Recurse' not in candidate
     assert 'Read-LifeOSPrefixBytes -Path $Path -Count 2' in candidate
     assert 'Read-LifeOSCappedFileText -Path $manifestPath' in candidate
@@ -1769,12 +1801,24 @@ def test_recovery_inventory_uses_bounded_hash_sets_without_per_file_full_scans()
     assert "function Get-LifeOSDefaultLargeFileRelativePath" in common
     assert "function Get-LifeOSBoundedFileMaxBytes" in common
     assert "function Get-LifeOSRecoveryFileMaxBytes" in common
+    manifest_index = common.split("function Get-TreeManifestIndex", 1)[1].split("function Get-TreeManifest {", 1)[0]
+    assert "-LargeFileContracts $effectiveLargeFileContracts" in manifest_index
+    recovery_index = common.split("function Get-RecoveryTreeManifestIndex", 1)[1].split("function Compare-TreeManifest", 1)[0]
+    assert "[System.Collections.IDictionary]$LargeFileContracts" in recovery_index
+    assert "-LargeFileContracts $LargeFileContracts" in recovery_index
+    compare = common.split("function Compare-TreeManifest", 1)[1].split("function New-BackupDirectory", 1)[0]
+    assert "Get-TreeManifest $Source -LargeFileContracts $LargeFileContracts" in compare
+    copy_tree = common.split("function Copy-TreeVerifiedAtomic", 1)[1].split("function New-RandomSecret", 1)[0]
+    assert "-LargeFileContracts $LargeFileContracts" in copy_tree
     staging = common.split('function Get-LifeOSNodeRuntimeStagingRelativePaths', 1)[1].split('function Assert-LifeOSLargeFileContract', 1)[0]
     assert 'Test-LifeOSNodeRuntimeArtifactPath -Manifest $Manifest -Path $destination)' in staging
     assert 'Assert-LifeOSNodeRuntimeStagingRelativePath $relativeStage' in staging
     assert "relativeStage + '/node.exe'" not in staging
-    assert "LargeFileRelativePath 'node-runtime/node.exe'" in read('verify-candidate.ps1')
+    assert "'node-runtime/node.exe' = $maxCandidateNodeFileBytes" in read('verify-candidate.ps1')
+    assert "'service-host/LifeOS.ServiceHost.exe' = $maxCandidateServiceHostFileBytes" in read('verify-candidate.ps1')
     assert "LargeFileRelativePath $nodeLargeFileRelativePath" in read('install.ps1')
+    assert "-MaxBytes $hostMaxFileBytes" in read('install.ps1')
+    assert "AllowServiceHostBinary" in common
     assert 'function Assert-RecoveryInventoryBounds' in common
     assert 'function Get-RecoveryTreeManifestIndex' in common
     assert 'function Get-RecoveryCanonicalTreeRoots' in common

@@ -168,11 +168,17 @@ $maxCandidateFiles = [int]$expectedFiles.Count + 1 # allow CANDIDATE-MANIFEST.sh
 $maxCandidateDirectories = [int]$allowedDirectories.Count + 1 # allow the root
 $maxCandidateFileBytes = [long]$script:LifeOSRecoveryMaxFileBytes
 $maxCandidateNodeFileBytes = [long]$script:LifeOSCandidateNodeMaxFileBytes
+$maxCandidateServiceHostFileBytes = [long]$script:LifeOSCandidateServiceHostMaxFileBytes
 # The only candidate file allowed above the general 64 MiB bound is the
-# explicitly allowlisted standalone node runtime. Keep the aggregate bound
-# equally tight: one node runtime plus the general bound for every other file.
-$maxCandidateBytes = [long]($maxCandidateFiles - 1) * $maxCandidateFileBytes + $maxCandidateNodeFileBytes
-$allItems = @(Get-LifeOSBoundedTreeItem -Root $rootFull -MaxFiles $maxCandidateFiles -MaxDirectories $maxCandidateDirectories -MaxBytes $maxCandidateBytes -MaxFileBytes $maxCandidateFileBytes -LargeFileRelativePath 'node-runtime/node.exe' -LargeFileMaxBytes $maxCandidateNodeFileBytes)
+# explicitly allowlisted standalone node runtime and self-contained service
+# host. Keep the aggregate bound equally tight: ordinary files plus exactly
+# one Node runtime and one service host.
+$maxCandidateBytes = [long]($expectedFiles.Count - 2) * $maxCandidateFileBytes + $maxCandidateNodeFileBytes + $maxCandidateServiceHostFileBytes
+$largeFileContracts = [ordered]@{
+    'node-runtime/node.exe' = $maxCandidateNodeFileBytes
+    'service-host/LifeOS.ServiceHost.exe' = $maxCandidateServiceHostFileBytes
+}
+$allItems = @(Get-LifeOSBoundedTreeItem -Root $rootFull -MaxFiles $maxCandidateFiles -MaxDirectories $maxCandidateDirectories -MaxBytes $maxCandidateBytes -MaxFileBytes $maxCandidateFileBytes -LargeFileContracts $largeFileContracts)
 $actualFiles = New-Object System.Collections.ArrayList
 $actualDirectories = New-Object System.Collections.ArrayList
 $actualFileIdentities = @{}
@@ -180,7 +186,13 @@ foreach ($item in $allItems) {
     $relativePath = Get-CandidateRelativePath -Path $item.FullName -RootPath $rootFull
     if ($item.PSIsContainer) { [void]$actualDirectories.Add($relativePath) }
     else {
-        $itemMaxBytes = if ($relativePath -ceq 'node-runtime/node.exe') { $maxCandidateNodeFileBytes } else { $maxCandidateFileBytes }
+        $itemMaxBytes = if ($relativePath -ceq 'node-runtime/node.exe') {
+            $maxCandidateNodeFileBytes
+        } elseif ($relativePath -ceq 'service-host/LifeOS.ServiceHost.exe') {
+            $maxCandidateServiceHostFileBytes
+        } else {
+            $maxCandidateFileBytes
+        }
         if ([long]$item.Length -gt $itemMaxBytes) {
             throw "Candidate file exceeds its bounded size: $relativePath"
         }

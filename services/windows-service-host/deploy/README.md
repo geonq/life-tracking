@@ -97,9 +97,10 @@ The builder runs the reviewed contracts/API builds and self-contained
 `win-x64` service-host publish, then stages only the explicit API/contracts/
 `zod`, gateway, deployment, test, `node.exe`, and service-host allowlist. It
 does not copy `node_modules`, a Python environment, runtime data, or secrets.
-The standalone `node.exe` is bounded to 256 MiB; candidate verification
-grants that larger bound only to `node-runtime/node.exe` and keeps the general
-candidate file bound at 64 MiB.
+The standalone `node.exe` and self-contained service host are each bounded to
+256 MiB; candidate verification grants those larger bounds only to
+`node-runtime/node.exe` and `service-host/LifeOS.ServiceHost.exe`. All other
+candidate files remain bounded at 64 MiB.
 
 The output is `lifeos-release-<full-source-sha>/`, a flat-content
 `lifeos-release-<full-source-sha>.zip`, and its `.sha256` sidecar. Existing
@@ -115,10 +116,12 @@ API package metadata:
 
 ```powershell
 $release = 'D:\staging\lifeos-release-<full-source-sha>'
-$sha = (Get-Content -LiteralPath (Join-Path $release 'SOURCE_SHA.txt') -Raw).Trim()
+# Supply this from the trusted build/release record or independently verified
+# archive metadata. Never derive the expected identity from SOURCE_SHA.txt.
+$expectedSourceSha = '<full-source-sha-from-trusted-release-record>'
 & (Join-Path $release 'deploy\verify-candidate.ps1') `
   -Root $release `
-  -ExpectedSourceSha $sha
+  -ExpectedSourceSha $expectedSourceSha
 ```
 
 Use the candidate paths explicitly for deployment. Keep the existing legacy
@@ -128,6 +131,8 @@ read from the machine-owned source rather than from the staged code tree:
 ```powershell
 $deploy = Join-Path $release 'deploy'
 & (Join-Path $deploy 'preflight.ps1') `
+  -CandidateRoot $release `
+  -ExpectedSourceSha $expectedSourceSha `
   -ApiSource (Join-Path $release 'api') `
   -GatewaySource (Join-Path $release 'gateway') `
   -LegacyGatewaySource 'D:\Hermes\lifeos-server' `
@@ -150,10 +155,15 @@ directory; raw API keys or private key contents are not accepted as parameters.
 
 ```powershell
 & "$deploy\install.ps1" `
-  -ServiceHostBinarySource 'D:\staging\LifeOS.ServiceHost.exe' `
-  -NodeRuntimeSource 'D:\staging\node' `
+  -CandidateRoot $release `
+  -ExpectedSourceSha $expectedSourceSha `
+  -ApiSource (Join-Path $release 'api') `
+  -GatewaySource (Join-Path $release 'gateway') `
+  -LegacyGatewaySource 'D:\Hermes\lifeos-server' `
+  -ServiceHostBinarySource (Join-Path $release 'service-host\LifeOS.ServiceHost.exe') `
+  -NodeRuntimeSource (Join-Path $release 'node-runtime') `
   -PythonRuntimeSource 'D:\Hermes\lifeos-server\.venv' `
-  -GatewayEntryPoint 'D:\Hermes\lifeos-server\main.py' `
+  -GatewayEntryPoint (Join-Path $release 'gateway\main.py') `
   -ClipperIngestSecretSource 'D:\staging\clipper-ingest.secret' `
   -GoogleAIStudioApiKeySource 'D:\staging\google-ai-studio.key' `
   -CodexExecutablePath 'C:\Program Files\OpenAI\Codex\codex.cmd' `
@@ -203,12 +213,19 @@ locations). The reviewed gateway entry point is the exact `main.py` file; pass
 `-GatewayEntryPoint` when it is not at the gateway source root.
 
 ```powershell
-$deploy = 'D:\Hermes\lifeos-services\deploy'
+$release = 'D:\staging\lifeos-release-<full-source-sha>'
+$expectedSourceSha = '<full-source-sha-from-trusted-release-record>'
+$deploy = Join-Path $release 'deploy'
 & "$deploy\preflight.ps1" `
-  -ServiceHostBinarySource 'D:\staging\LifeOS.ServiceHost.exe' `
-  -NodeRuntimeSource 'D:\staging\node' `
+  -CandidateRoot $release `
+  -ExpectedSourceSha $expectedSourceSha `
+  -ApiSource (Join-Path $release 'api') `
+  -GatewaySource (Join-Path $release 'gateway') `
+  -LegacyGatewaySource 'D:\Hermes\lifeos-server' `
+  -ServiceHostBinarySource (Join-Path $release 'service-host\LifeOS.ServiceHost.exe') `
+  -NodeRuntimeSource (Join-Path $release 'node-runtime') `
   -PythonRuntimeSource 'D:\Hermes\lifeos-server\.venv' `
-  -GatewayEntryPoint 'D:\Hermes\lifeos-server\main.py' `
+  -GatewayEntryPoint (Join-Path $release 'gateway\main.py') `
   -TailscaleEdgeTokenSource 'D:\Hermes\lifeos-secrets\tailscale-edge.token'
 ```
 
@@ -252,10 +269,15 @@ bearer values, usernames, tailnet hostnames, or IP addresses to these scripts.
 
 ```powershell
 & "$deploy\install.ps1" `
-  -ServiceHostBinarySource 'D:\staging\LifeOS.ServiceHost.exe' `
-  -NodeRuntimeSource 'D:\staging\node' `
+  -CandidateRoot $release `
+  -ExpectedSourceSha $expectedSourceSha `
+  -ApiSource (Join-Path $release 'api') `
+  -GatewaySource (Join-Path $release 'gateway') `
+  -LegacyGatewaySource 'D:\Hermes\lifeos-server' `
+  -ServiceHostBinarySource (Join-Path $release 'service-host\LifeOS.ServiceHost.exe') `
+  -NodeRuntimeSource (Join-Path $release 'node-runtime') `
   -PythonRuntimeSource 'D:\Hermes\lifeos-server\.venv' `
-  -GatewayEntryPoint 'D:\Hermes\lifeos-server\main.py' `
+  -GatewayEntryPoint (Join-Path $release 'gateway\main.py') `
   -TailscaleEdgeTokenSource 'D:\Hermes\lifeos-secrets\tailscale-edge.token'
 
 & "$deploy\verify.ps1"

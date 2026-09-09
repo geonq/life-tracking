@@ -26,6 +26,21 @@ die() {
 # allowance; every other candidate file is capped at 64 MiB.
 candidate_max_file_bytes=$((64 * 1024 * 1024))
 candidate_node_max_file_bytes=$((256 * 1024 * 1024))
+candidate_service_host_max_file_bytes=$((256 * 1024 * 1024))
+
+candidate_file_max_bytes() {
+    case "$1" in
+        node-runtime/node.exe)
+            printf '%s\n' "$candidate_node_max_file_bytes"
+            ;;
+        service-host/LifeOS.ServiceHost.exe)
+            printf '%s\n' "$candidate_service_host_max_file_bytes"
+            ;;
+        *)
+            printf '%s\n' "$candidate_max_file_bytes"
+            ;;
+    esac
+}
 
 file_size_bytes() {
     local path="$1"
@@ -148,10 +163,8 @@ copy_file() {
     local relative_destination="$2"
     [[ -f "$source" ]] || die "required release input is missing: $source"
     [[ ! -L "$source" ]] || die "release input must not be a symbolic link: $source"
-    local max_bytes="$candidate_max_file_bytes"
-    if [[ "$relative_destination" == 'node-runtime/node.exe' ]]; then
-        max_bytes="$candidate_node_max_file_bytes"
-    fi
+    local max_bytes
+    max_bytes="$(candidate_file_max_bytes "$relative_destination")"
     local source_size
     source_size="$(file_size_bytes "$source")"
     (( source_size <= max_bytes )) || die "candidate input exceeds its bounded size: $relative_destination"
@@ -381,7 +394,12 @@ for path in root.rglob("*"):
             or any(part in {"", ".", ".."} for part in relative.split("/"))
         ):
             raise SystemExit(f"candidate path is unsafe: {relative}")
-        max_bytes = 256 * 1024 * 1024 if relative == "node-runtime/node.exe" else 64 * 1024 * 1024
+        if relative == "node-runtime/node.exe":
+            max_bytes = 256 * 1024 * 1024
+        elif relative == "service-host/LifeOS.ServiceHost.exe":
+            max_bytes = 256 * 1024 * 1024
+        else:
+            max_bytes = 64 * 1024 * 1024
         if path.stat().st_size > max_bytes:
             raise SystemExit(f"candidate file exceeds its bounded size: {relative}")
         digest = hashlib.sha256(path.read_bytes()).hexdigest()

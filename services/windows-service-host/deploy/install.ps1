@@ -1,5 +1,7 @@
 [CmdletBinding()]
 param(
+    [string]$CandidateRoot,
+    [string]$ExpectedSourceSha,
     [string]$ServiceHostBinarySource,
     [string]$ApiSource = 'D:\Hermes\lifeos-api',
     [string]$GatewaySource = 'D:\Hermes\lifeos-server',
@@ -607,6 +609,14 @@ function Get-GatewayHostConfig {
 
 function Invoke-LifeOSInstall {
 Assert-WindowsAdministrator
+# Verify the immutable candidate identity before acquiring the deployment
+# transaction or creating any marker/backup state. The expected SHA is an
+# independently supplied release value; it is never derived from the
+# candidate's SOURCE_SHA.txt.
+if ([string]::IsNullOrWhiteSpace($CandidateRoot) -or [string]::IsNullOrWhiteSpace($ExpectedSourceSha)) {
+    throw 'CandidateRoot and ExpectedSourceSha are required for an install; use -DefineOnly only for source inspection.'
+}
+$candidateRootFull = Assert-LifeOSCandidateRoot -Root $CandidateRoot -ExpectedSourceSha $ExpectedSourceSha -DeploymentScriptRoot $PSScriptRoot -VerifyCandidate
 $deploymentMutex = Enter-LifeOSDeploymentTransaction
 $deploymentCompleted = $false
 $deploymentRollbackSucceeded = $false
@@ -636,6 +646,8 @@ if ($codexPathProvided) {
 $previousGeneration = Get-LifeOSPreviousInstalledGeneration -MarkerState $deploymentMutex.PreviousState -ManifestPath $deploymentMutex.PreviousManifestPath -OperatorSid $operatorSid -ExpectedGeneration ([string]$deploymentMutex.PreviousGeneration)
 $tailscaleEdgeTokenPath = Assert-TailscaleEdgeTokenSource -Path $TailscaleEdgeTokenSource -ExpectedPath (Get-LifeOSTailscaleEdgeTokenPath $paths.SecretRoot) -OperatorSid $operatorSid
 $preflightArgs = @{
+    CandidateRoot = $candidateRootFull
+    ExpectedSourceSha = $ExpectedSourceSha
     ServiceHostBinarySource = $ServiceHostBinarySource
     ApiSource = $ApiSource
     GatewaySource = $GatewaySource
@@ -655,6 +667,7 @@ $hostSource = Resolve-ServiceHostBinary $ServiceHostBinarySource $paths.ServiceH
 $nodeSource = Resolve-NodeRuntimeSource $NodeRuntimeSource $ApiSource
 $nodeLargeFileRelativePath = 'node.exe'
 $nodeLargeFileMaxBytes = [long]$script:LifeOSCandidateNodeMaxFileBytes
+$hostMaxFileBytes = [long]$script:LifeOSCandidateServiceHostMaxFileBytes
 $pythonRuntime = Resolve-PythonRuntimeSource $PythonRuntimeSource $GatewaySource
 $pythonSource = $pythonRuntime.Root
 $gatewayEntrySource = Resolve-GatewayEntryPoint $GatewayEntryPoint $GatewaySource
@@ -833,7 +846,11 @@ $gatewayIntent = New-ManifestIntent -List $manifest.backups -Manifest $manifest 
 $gatewayStage = Copy-GatewayCodeBundle $GatewaySource $gatewayEntrySource $gatewayTarget $launcherSource $backupDirectory 'previous-gateway-release'
 Complete-ManifestIntent $gatewayIntent $manifest $manifestPath $gatewayStage
 $hostPriorExists = Test-Path -LiteralPath $hostTarget -PathType Leaf
-$hostChanged = -not ($hostPriorExists -and (Get-FileSha256 $hostSource) -eq (Get-FileSha256 $hostTarget))
+# The service host is the second explicitly allowlisted large candidate file.
+# Reject it before any hash/copy operation can consume an oversized payload.
+$hostSourceInfo = Assert-BoundedFile -Path $hostSource -MaxBytes $hostMaxFileBytes -Name 'Service host source'
+$hostSourceHash = [string]$hostSourceInfo.Sha256
+$hostChanged = -not ($hostPriorExists -and $hostSourceHash -eq (Get-FileSha256 $hostTarget))
 $hostIntent = New-ManifestIntent -List $manifest.backups -Manifest $manifest -ManifestPath $manifestPath -Kind 'host-binary' -Source $hostSource -Destination $hostTarget -Backup (Join-Path $backupDirectory ('previous-' + [IO.Path]::GetFileName($hostTarget))) -PriorExists $hostPriorExists -Changed $hostChanged
 $hostStage = $null
 $pythonStage = Get-ChildRuntimeStage $pythonSource $paths.RuntimeRoot $backupDirectory $manifest $manifestPath
@@ -938,7 +955,7 @@ Complete-ManifestIntent $snapshotScriptIntent $manifest $manifestPath $snapshotS
 # The staged script inherited the hardened host-directory DACL; confirm it
 # rather than assuming inheritance succeeded.
 Assert-RestrictedAcl $snapshotScriptTarget $operatorSid @($apiSid, $gatewaySid) @() -AllowInherited
-$hostStage = Copy-FileVerifiedAtomic $hostSource $hostTarget $backupDirectory -DeferMove
+$hostStage = Copy-FileVerifiedAtomic $hostSource $hostTarget $backupDirectory -MaxBytes $hostMaxFileBytes -DeferMove
 $catalogInitialized = Initialize-SupplementCatalog -PythonExecutable $pythonStage.PythonPath -GatewayDirectory $gatewayTarget -CatalogPath $supplementCatalog -BackupDirectory $backupDirectory -ManifestBackups $manifest.backups -Manifest $manifest -ManifestPath $manifestPath
 $manifest.supplementCatalogInitialized = $catalogInitialized
 Save-InstallManifest $manifest $manifestPath

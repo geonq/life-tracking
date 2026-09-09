@@ -37,6 +37,11 @@ $script:LifeOSRecoveryMaxFileBytes = 64 * 1024 * 1024
 # Keep its larger runtime bound separate from the 64 MiB recovery/file bound so
 # other candidate files and all recovery artifacts retain the smaller ceiling.
 $script:LifeOSCandidateNodeMaxFileBytes = 256 * 1024 * 1024
+# The self-contained win-x64 service host is a second explicitly allowlisted
+# candidate file. Keep its finite bound separate from both ordinary files and
+# the Node runtime so a same-basename file elsewhere cannot opt in.
+$script:LifeOSCandidateServiceHostMaxFileBytes = 256 * 1024 * 1024
+$script:LifeOSCandidateServiceHostRelativePath = 'service-host/LifeOS.ServiceHost.exe'
 $script:LifeOSRecoveryMaxInventoryBytes = 512 * 1024 * 1024
 $script:LifeOSRecoveryMaxPathLength = 4096
 $script:LifeOSDeploymentMarkerMaxBytes = 64 * 1024
@@ -1027,17 +1032,27 @@ function Stop-DeploymentTaskBarrier {
 }
 
 function Get-RecoveryArtifactState {
-    param([string]$Path, [switch]$AllowNodeRuntime)
+    param(
+        [string]$Path,
+        [switch]$AllowNodeRuntime,
+        [switch]$AllowServiceHostBinary,
+        [psobject]$Manifest
+    )
+    if ($AllowNodeRuntime -and $AllowServiceHostBinary) { throw 'Recovery artifact cannot use two large-file contracts.' }
+    if ($AllowServiceHostBinary -and ($null -eq $Manifest -or -not (Test-LifeOSServiceHostArtifactPath -Manifest $Manifest -Path $Path))) {
+        throw 'Service-host recovery bound requires an exact manifest-bound artifact path.'
+    }
     if (-not (Test-Path -LiteralPath $Path)) { return 'absent' }
     Assert-NoReparsePath $Path
     if (Test-Path -LiteralPath $Path -PathType Leaf) {
         $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
-        $maxFileBytes = Get-LifeOSRecoveryFileMaxBytes -Path $Path -AllowNodeRuntime:$AllowNodeRuntime
+        $maxFileBytes = Get-LifeOSRecoveryFileMaxBytes -Path $Path -AllowNodeRuntime:$AllowNodeRuntime -AllowServiceHostBinary:$AllowServiceHostBinary -Manifest $Manifest
         if ([long]$item.Length -gt $maxFileBytes) {
             throw 'Recovery artifact exceeds its bounded file size.'
         }
         return 'file:' + (Get-FileSha256 $Path)
     }
+    if ($AllowServiceHostBinary) { throw 'Service-host recovery contract cannot be applied to a directory.' }
     $largeFileRelativePath = if ($AllowNodeRuntime) { 'node.exe' } else { '' }
     $largeFileMaxBytes = if ($AllowNodeRuntime) { [long]$script:LifeOSCandidateNodeMaxFileBytes } else { [long]0 }
     return 'tree:' + (@(Get-TreeManifest $Path -LargeFileRelativePath $largeFileRelativePath -LargeFileMaxBytes $largeFileMaxBytes) | ConvertTo-Json -Depth 8 -Compress)
@@ -2088,6 +2103,65 @@ function Resolve-ServiceHostBinary {
     return (Get-FullPath $candidate)
 }
 
+function Assert-LifeOSCandidateRoot {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$ExpectedSourceSha,
+        [string]$DeploymentScriptRoot,
+        [switch]$VerifyCandidate
+    )
+    if ($ExpectedSourceSha -notmatch '\A[0-9a-fA-F]{40}\z') {
+        throw 'Expected source SHA must be a full 40-character hexadecimal Git object id supplied by a trusted release record.'
+    }
+    $rootFull = Get-FullPath $Root
+    Assert-ExistingDirectory $rootFull 'LifeOS candidate root'
+    $expectedName = 'lifeos-release-' + $ExpectedSourceSha.ToLowerInvariant()
+    if (([IO.DirectoryInfo]$rootFull).Name -cne $expectedName) {
+        throw 'Candidate directory name must be lifeos-release-<full-source-sha>.'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($DeploymentScriptRoot)) {
+        $expectedDeployRoot = Get-FullPath (Join-Path $rootFull 'deploy')
+        if ((Get-FullPath $DeploymentScriptRoot) -ine $expectedDeployRoot) {
+            throw 'Deployment scripts must execute from the exact deploy directory inside the verified candidate.'
+        }
+    }
+    $candidateVerifier = Join-Path $rootFull 'deploy\verify-candidate.ps1'
+    Assert-ExistingFile $candidateVerifier 'Candidate verifier'
+    if ($VerifyCandidate) {
+        & $candidateVerifier -Root $rootFull -ExpectedSourceSha $ExpectedSourceSha | Out-Host
+    }
+    return $rootFull
+}
+
+function Assert-LifeOSCandidateSourceBindings {
+    param(
+        [Parameter(Mandatory)][string]$CandidateRoot,
+        [Parameter(Mandatory)][string]$ApiRoot,
+        [Parameter(Mandatory)][string]$GatewayRoot,
+        [Parameter(Mandatory)][string]$NodeRuntimeRoot,
+        [Parameter(Mandatory)][string]$ServiceHostBinary,
+        [Parameter(Mandatory)][string]$GatewayEntryPoint,
+        [Parameter(Mandatory)][string]$DeploymentScriptRoot
+    )
+    $rootFull = Get-FullPath $CandidateRoot
+    $bindings = @(
+        [pscustomobject]@{ Name = 'API source'; Actual = $ApiRoot; Relative = 'api' },
+        [pscustomobject]@{ Name = 'gateway source'; Actual = $GatewayRoot; Relative = 'gateway' },
+        [pscustomobject]@{ Name = 'Node runtime source'; Actual = $NodeRuntimeRoot; Relative = 'node-runtime' },
+        [pscustomobject]@{ Name = 'service host source'; Actual = $ServiceHostBinary; Relative = 'service-host\LifeOS.ServiceHost.exe' },
+        [pscustomobject]@{ Name = 'gateway entry point'; Actual = $GatewayEntryPoint; Relative = 'gateway\main.py' },
+        [pscustomobject]@{ Name = 'deployment script root'; Actual = $DeploymentScriptRoot; Relative = 'deploy' }
+    )
+    foreach ($binding in $bindings) {
+        $expected = Get-FullPath (Join-Path $rootFull $binding.Relative)
+        $actual = Get-FullPath $binding.Actual
+        if ($actual -ine $expected) {
+            throw "$($binding.Name) is not bound to the verified candidate: expected $expected, got $actual."
+        }
+    }
+    return $rootFull
+}
+
 function Resolve-TailscaleExecutable {
     param([string]$Requested)
     if (-not [string]::IsNullOrWhiteSpace($Requested)) {
@@ -2226,6 +2300,34 @@ function Test-LifeOSNodeRuntimeArtifactPath {
     return $false
 }
 
+function Test-LifeOSServiceHostArtifactPath {
+    param(
+        [Parameter(Mandatory)][psobject]$Manifest,
+        [Parameter(Mandatory)][string]$Path
+    )
+    $pathFull = (Get-FullPath $Path).TrimEnd('\')
+    $rootSet = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $manifestPaths = Get-JournalProperty $Manifest 'paths'
+    $manifestHost = Get-JournalProperty $manifestPaths 'host'
+    if ($manifestHost -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$manifestHost)) {
+        [void]$rootSet.Add((Get-FullPath ([string]$manifestHost)).TrimEnd('\'))
+    }
+    $manifestBackups = Get-JournalProperty $Manifest 'backups'
+    foreach ($artifact in @($manifestBackups)) {
+        if ($null -eq $artifact -or (Get-JournalProperty $artifact 'kind') -cne 'host-binary') { continue }
+        foreach ($field in @('destination', 'backup')) {
+            $pathValue = Get-JournalProperty $artifact $field
+            if ($pathValue -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$pathValue)) {
+                [void]$rootSet.Add((Get-FullPath ([string]$pathValue)).TrimEnd('\'))
+            }
+        }
+    }
+    foreach ($expectedPath in $rootSet) {
+        if ($pathFull -ieq $expectedPath) { return $true }
+    }
+    return $false
+}
+
 function Assert-LifeOSNodeRuntimeStagingRelativePath {
     param([Parameter(Mandatory)][string]$RelativePath)
     if ($RelativePath -notmatch '\A(?:[A-Za-z0-9@._-]+/)*\.rollback-restore-[0-9a-fA-F-]+-[0-9]+(?:/node\.exe)?\z') {
@@ -2280,10 +2382,24 @@ function Assert-LifeOSLargeFileContract {
         [Parameter(Mandatory)][long]$MaxBytes,
         [Parameter(Mandatory)][long]$DefaultMaxBytes
     )
-    if ($RelativePath -notin @('node.exe', 'node-runtime/node.exe') -or
-        $MaxBytes -le $DefaultMaxBytes -or
+    if ($MaxBytes -le $DefaultMaxBytes) {
+        throw 'Large-file contract must be strictly larger than the ordinary file bound.'
+    }
+    if ($RelativePath -in @('node.exe', 'node-runtime/node.exe')) {
+        if ($MaxBytes -gt $script:LifeOSCandidateNodeMaxFileBytes) {
+            throw 'Large-file contract exceeds the reviewed standalone Node runtime bound.'
+        }
+        return
+    }
+    if ([string]$RelativePath -ieq [string]$script:LifeOSCandidateServiceHostRelativePath) {
+        if ($MaxBytes -gt $script:LifeOSCandidateServiceHostMaxFileBytes) {
+            throw 'Large-file contract exceeds the reviewed service-host bound.'
+        }
+        return
+    }
+    if ($RelativePath -notmatch '\A(?:[A-Za-z0-9@._-]+/)*\.rollback-restore-[0-9a-fA-F-]+-[0-9]+(?:/node\.exe)?\z' -or
         $MaxBytes -gt $script:LifeOSCandidateNodeMaxFileBytes) {
-        throw 'Large-file contract is not the reviewed standalone Node runtime exception.'
+        throw 'Large-file contract is not an exact reviewed runtime or recovery exception.'
     }
 }
 
@@ -2294,55 +2410,77 @@ function Get-LifeOSBoundedFileMaxBytes {
         [Parameter(Mandatory)][long]$DefaultMaxBytes,
         [string]$LargeFileRelativePath = '',
         [long]$LargeFileMaxBytes = 0,
-        [string[]]$LargeFileRelativePaths = @()
+        [string[]]$LargeFileRelativePaths = @(),
+        [System.Collections.IDictionary]$LargeFileContracts = $null
     )
     if ($DefaultMaxBytes -le 0) { throw 'Default bounded file limit is invalid.' }
-    $contractPaths = New-Object 'System.Collections.Generic.List[string]'
-    if (-not [string]::IsNullOrWhiteSpace($LargeFileRelativePath)) {
-        [void]$contractPaths.Add($LargeFileRelativePath)
-    }
+    $legacyContractPaths = New-Object 'System.Collections.Generic.List[string]'
+    if (-not [string]::IsNullOrWhiteSpace($LargeFileRelativePath)) { [void]$legacyContractPaths.Add($LargeFileRelativePath) }
     if ($null -ne $LargeFileRelativePaths) {
         foreach ($relativePath in $LargeFileRelativePaths) {
-            if (-not [string]::IsNullOrWhiteSpace([string]$relativePath)) { [void]$contractPaths.Add([string]$relativePath) }
+            if (-not [string]::IsNullOrWhiteSpace([string]$relativePath)) { [void]$legacyContractPaths.Add([string]$relativePath) }
         }
     }
-    $effectiveMaxBytes = $LargeFileMaxBytes
-    if ($contractPaths.Count -gt 0 -and $effectiveMaxBytes -eq 0) {
-        $effectiveMaxBytes = $script:LifeOSCandidateNodeMaxFileBytes
+    $hasExplicitContracts = $null -ne $LargeFileContracts -and $LargeFileContracts.Count -gt 0
+    if ($hasExplicitContracts -and $legacyContractPaths.Count -gt 0) {
+        throw 'Large-file contracts must use either the exact contract map or the legacy single-bound arguments.'
     }
-    if ($contractPaths.Count -eq 0) {
+    $contracts = [ordered]@{}
+    if ($hasExplicitContracts) {
+        foreach ($key in $LargeFileContracts.Keys) {
+            $relativePath = [string]$key
+            if ([string]::IsNullOrWhiteSpace($relativePath) -or $contracts.Contains($relativePath)) {
+                throw 'Large-file contract map contains a duplicate or empty path.'
+            }
+            $contracts[$relativePath] = [long]$LargeFileContracts[$key]
+        }
+    } elseif ($legacyContractPaths.Count -gt 0) {
+        $effectiveMaxBytes = if ($LargeFileMaxBytes -eq 0) { [long]$script:LifeOSCandidateNodeMaxFileBytes } else { $LargeFileMaxBytes }
+        foreach ($relativePath in $legacyContractPaths) {
+            if ($contracts.Contains([string]$relativePath)) { throw 'Large-file contract contains a duplicate path.' }
+            $contracts[[string]$relativePath] = $effectiveMaxBytes
+        }
+    } else {
         if ($LargeFileMaxBytes -ne 0) { throw 'Large-file byte limit has no relative path.' }
         $defaultRelativePath = Get-LifeOSDefaultLargeFileRelativePath -Root $Root
-        if ([string]::IsNullOrWhiteSpace($defaultRelativePath)) { return $DefaultMaxBytes }
-        [void]$contractPaths.Add($defaultRelativePath)
-        $effectiveMaxBytes = $script:LifeOSCandidateNodeMaxFileBytes
-    }
-    foreach ($relativePath in $contractPaths) {
-        if ([string]$relativePath -in @('node.exe', 'node-runtime/node.exe')) {
-            Assert-LifeOSLargeFileContract -RelativePath ([string]$relativePath) -MaxBytes $effectiveMaxBytes -DefaultMaxBytes $DefaultMaxBytes
-        } else {
-            Assert-LifeOSNodeRuntimeStagingRelativePath ([string]$relativePath)
-            if ($effectiveMaxBytes -le $DefaultMaxBytes -or $effectiveMaxBytes -gt $script:LifeOSCandidateNodeMaxFileBytes) {
-                throw 'Large-file contract is not the reviewed standalone Node runtime exception.'
-            }
+        if (-not [string]::IsNullOrWhiteSpace($defaultRelativePath)) {
+            $contracts[$defaultRelativePath] = [long]$script:LifeOSCandidateNodeMaxFileBytes
         }
     }
+    foreach ($relativePath in $contracts.Keys) {
+        Assert-LifeOSLargeFileContract -RelativePath ([string]$relativePath) -MaxBytes ([long]$contracts[$relativePath]) -DefaultMaxBytes $DefaultMaxBytes
+    }
     $relativePath = Get-LifeOSTreeRelativePath -Root $Root -Path $Path
-    foreach ($contractPath in $contractPaths) {
-        if ($relativePath -ieq [string]$contractPath) { return $effectiveMaxBytes }
+    foreach ($contractPath in $contracts.Keys) {
+        if ($relativePath -ieq [string]$contractPath) { return [long]$contracts[$contractPath] }
     }
     return $DefaultMaxBytes
 }
 
 function Get-LifeOSRecoveryFileMaxBytes {
-    param([Parameter(Mandatory)][string]$Path, [switch]$AllowNodeRuntime)
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [switch]$AllowNodeRuntime,
+        [switch]$AllowServiceHostBinary,
+        [psobject]$Manifest
+    )
+    if ($AllowNodeRuntime -and $AllowServiceHostBinary) { throw 'Recovery file cannot use two large-file contracts.' }
     $fullPath = Get-FullPath $Path
     $leaf = [IO.Path]::GetFileName($fullPath)
     # The caller must prove that this exact path belongs to the manifest's
-    # node-runtime artifact. This switch only selects the bound after that
-    # proof; a path named node.exe elsewhere remains at 64 MiB.
-    if ($AllowNodeRuntime -and $leaf -ieq 'node.exe') {
+    # runtime artifact. The switch only selects the bound after that proof; a
+    # same-basename file elsewhere remains at 64 MiB.
+    if ($AllowNodeRuntime) {
+        if ($leaf -ine 'node.exe' -or $null -eq $Manifest -or -not (Test-LifeOSNodeRuntimeArtifactPath -Manifest $Manifest -Path $fullPath)) {
+            throw 'Node-runtime recovery bound requires an exact manifest-bound artifact path.'
+        }
         return $script:LifeOSCandidateNodeMaxFileBytes
+    }
+    if ($AllowServiceHostBinary) {
+        if ($null -eq $Manifest -or -not (Test-LifeOSServiceHostArtifactPath -Manifest $Manifest -Path $fullPath)) {
+            throw 'Service-host recovery bound requires an exact manifest-bound artifact path.'
+        }
+        return $script:LifeOSCandidateServiceHostMaxFileBytes
     }
     return $script:LifeOSRecoveryMaxFileBytes
 }
@@ -2356,7 +2494,8 @@ function Get-LifeOSBoundedTreeItem {
         [long]$MaxFileBytes = $script:LifeOSRecoveryMaxFileBytes,
         [string]$LargeFileRelativePath = '',
         [long]$LargeFileMaxBytes = 0,
-        [string[]]$LargeFileRelativePaths = @()
+        [string[]]$LargeFileRelativePaths = @(),
+        [System.Collections.IDictionary]$LargeFileContracts = $null
     )
     if ($MaxFiles -le 0 -or $MaxDirectories -le 0 -or $MaxBytes -le 0 -or $MaxFileBytes -le 0) {
         throw 'Bounded tree resource limits are invalid.'
@@ -2413,7 +2552,7 @@ function Get-LifeOSBoundedTreeItem {
                     $state.Files = [int]$state.Files + 1
                     if ($state.Files -gt $MaxFiles) { throw 'Bounded tree contains too many files.' }
                     $length = [long]$item.Length
-                    $itemMaxBytes = Get-LifeOSBoundedFileMaxBytes -Root $rootFull -Path $fullName -DefaultMaxBytes $MaxFileBytes -LargeFileRelativePath $LargeFileRelativePath -LargeFileMaxBytes $LargeFileMaxBytes -LargeFileRelativePaths $LargeFileRelativePaths
+                    $itemMaxBytes = Get-LifeOSBoundedFileMaxBytes -Root $rootFull -Path $fullName -DefaultMaxBytes $MaxFileBytes -LargeFileRelativePath $LargeFileRelativePath -LargeFileMaxBytes $LargeFileMaxBytes -LargeFileRelativePaths $LargeFileRelativePaths -LargeFileContracts $LargeFileContracts
                     if ($length -lt 0 -or $length -gt $itemMaxBytes -or $length -gt ($MaxBytes - $state.Bytes)) {
                         throw "Bounded tree exceeds its byte limit: $fullName"
                     }
@@ -2443,7 +2582,8 @@ function Get-TreeManifestIndex {
         [long]$MaxFileBytes = $script:LifeOSRecoveryMaxFileBytes,
         [string]$LargeFileRelativePath = '',
         [long]$LargeFileMaxBytes = 0,
-        [string[]]$LargeFileRelativePaths = @()
+        [string[]]$LargeFileRelativePaths = @(),
+        [System.Collections.IDictionary]$LargeFileContracts = $null
     )
     if ($MaxFiles -le 0 -or $MaxDirectories -le 0 -or $MaxBytes -le 0 -or $MaxFileBytes -le 0) {
         throw 'Tree manifest resource bounds are invalid.'
@@ -2453,7 +2593,12 @@ function Get-TreeManifestIndex {
     $rootComparison = $rootFull.TrimEnd('\')
     $effectiveLargeFileRelativePath = $LargeFileRelativePath
     $effectiveLargeFileMaxBytes = $LargeFileMaxBytes
-    if ([string]::IsNullOrWhiteSpace($effectiveLargeFileRelativePath)) {
+    $effectiveLargeFileContracts = $LargeFileContracts
+    if ($null -ne $LargeFileContracts -and $LargeFileContracts.Count -gt 0) {
+        if (-not [string]::IsNullOrWhiteSpace($LargeFileRelativePath) -or $LargeFileRelativePaths.Count -gt 0 -or $LargeFileMaxBytes -ne 0) {
+            throw 'Large-file contracts must use either the exact contract map or the legacy single-bound arguments.'
+        }
+    } elseif ([string]::IsNullOrWhiteSpace($effectiveLargeFileRelativePath)) {
         if ($LargeFileMaxBytes -ne 0) { throw 'Large-file byte limit has no relative path.' }
         $effectiveLargeFileRelativePath = Get-LifeOSDefaultLargeFileRelativePath -Root $rootFull
         if (-not [string]::IsNullOrWhiteSpace($effectiveLargeFileRelativePath)) {
@@ -2466,7 +2611,7 @@ function Get-TreeManifestIndex {
     $items = New-Object 'System.Collections.Generic.List[object]'
     $byPath = [System.Collections.Generic.Dictionary[string,object]]::new([StringComparer]::OrdinalIgnoreCase)
     [long]$totalBytes = 0
-    Get-LifeOSBoundedTreeItem -Root $rootFull -MaxFiles $MaxFiles -MaxDirectories $MaxDirectories -MaxBytes $MaxBytes -MaxFileBytes $MaxFileBytes -LargeFileRelativePath $effectiveLargeFileRelativePath -LargeFileMaxBytes $effectiveLargeFileMaxBytes -LargeFileRelativePaths $LargeFileRelativePaths |
+    Get-LifeOSBoundedTreeItem -Root $rootFull -MaxFiles $MaxFiles -MaxDirectories $MaxDirectories -MaxBytes $MaxBytes -MaxFileBytes $MaxFileBytes -LargeFileRelativePath $effectiveLargeFileRelativePath -LargeFileMaxBytes $effectiveLargeFileMaxBytes -LargeFileRelativePaths $LargeFileRelativePaths -LargeFileContracts $effectiveLargeFileContracts |
         Where-Object { -not $_.PSIsContainer } | ForEach-Object {
         if ($items.Count -ge $MaxFiles) { throw 'Tree manifest contains too many files.' }
         $item = $_
@@ -2484,7 +2629,7 @@ function Get-TreeManifestIndex {
             throw "Tree manifest path is too long: $($item.FullName)"
         }
         $enumeratedLength = [long]$item.Length
-        $itemMaxBytes = Get-LifeOSBoundedFileMaxBytes -Root $rootFull -Path $item.FullName -DefaultMaxBytes $MaxFileBytes -LargeFileRelativePath $effectiveLargeFileRelativePath -LargeFileMaxBytes $effectiveLargeFileMaxBytes -LargeFileRelativePaths $LargeFileRelativePaths
+        $itemMaxBytes = Get-LifeOSBoundedFileMaxBytes -Root $rootFull -Path $item.FullName -DefaultMaxBytes $MaxFileBytes -LargeFileRelativePath $effectiveLargeFileRelativePath -LargeFileMaxBytes $effectiveLargeFileMaxBytes -LargeFileRelativePaths $LargeFileRelativePaths -LargeFileContracts $effectiveLargeFileContracts
         if ($enumeratedLength -lt 0 -or $enumeratedLength -gt $itemMaxBytes -or $enumeratedLength -gt $MaxBytes - $totalBytes) {
             throw "Tree manifest exceeds its bounded byte size: $($item.FullName)"
         }
@@ -2515,6 +2660,7 @@ function Get-TreeManifestIndex {
         LargeFileRelativePath = $effectiveLargeFileRelativePath
         LargeFileMaxBytes = $effectiveLargeFileMaxBytes
         LargeFileRelativePaths = @($LargeFileRelativePaths)
+        LargeFileContracts = $effectiveLargeFileContracts
     })
 }
 
@@ -2527,9 +2673,10 @@ function Get-TreeManifest {
         [long]$MaxFileBytes = $script:LifeOSRecoveryMaxFileBytes,
         [string]$LargeFileRelativePath = '',
         [long]$LargeFileMaxBytes = 0,
-        [string[]]$LargeFileRelativePaths = @()
+        [string[]]$LargeFileRelativePaths = @(),
+        [System.Collections.IDictionary]$LargeFileContracts = $null
     )
-    $index = Get-TreeManifestIndex -Root $Root -MaxFiles $MaxFiles -MaxDirectories $MaxDirectories -MaxBytes $MaxBytes -MaxFileBytes $MaxFileBytes -LargeFileRelativePath $LargeFileRelativePath -LargeFileMaxBytes $LargeFileMaxBytes -LargeFileRelativePaths $LargeFileRelativePaths
+    $index = Get-TreeManifestIndex -Root $Root -MaxFiles $MaxFiles -MaxDirectories $MaxDirectories -MaxBytes $MaxBytes -MaxFileBytes $MaxFileBytes -LargeFileRelativePath $LargeFileRelativePath -LargeFileMaxBytes $LargeFileMaxBytes -LargeFileRelativePaths $LargeFileRelativePaths -LargeFileContracts $LargeFileContracts
     return @($index.Entries)
 }
 
@@ -2552,10 +2699,11 @@ function Get-LifeOSTreeIntegrity {
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][string]$Description,
         [string]$LargeFileRelativePath = '',
-        [long]$LargeFileMaxBytes = 0
+        [long]$LargeFileMaxBytes = 0,
+        [System.Collections.IDictionary]$LargeFileContracts = $null
     )
     Assert-ExistingDirectory $Path $Description
-    $index = Get-TreeManifestIndex -Root $Path -LargeFileRelativePath $LargeFileRelativePath -LargeFileMaxBytes $LargeFileMaxBytes
+    $index = Get-TreeManifestIndex -Root $Path -LargeFileRelativePath $LargeFileRelativePath -LargeFileMaxBytes $LargeFileMaxBytes -LargeFileContracts $LargeFileContracts
     $serialized = $index.Entries | ConvertTo-Json -Depth 8 -Compress
     $bytes = [Text.UTF8Encoding]::new($false).GetBytes([string]$serialized)
     $hasher = [Security.Cryptography.SHA256]::Create()
@@ -2574,14 +2722,21 @@ function Get-RecoveryTreeManifestIndex {
         [Parameter(Mandatory)][System.Collections.IDictionary]$Cache,
         [Parameter(Mandatory)][ref]$TotalBytes,
         [switch]$AllowNodeRuntime,
-        [string[]]$LargeFileRelativePaths = @()
+        [string[]]$LargeFileRelativePaths = @(),
+        [System.Collections.IDictionary]$LargeFileContracts = $null
     )
     $rootFull = (Get-FullPath $Root).TrimEnd('\')
+    if ($AllowNodeRuntime -and $null -ne $LargeFileContracts -and $LargeFileContracts.Count -gt 0) {
+        throw 'Recovery tree index cannot combine the Node runtime switch with an explicit large-file contract map.'
+    }
     $largeFileRelativePath = if ($AllowNodeRuntime) { 'node.exe' } else { '' }
     $largeFileMaxBytes = if ($AllowNodeRuntime) { [long]$script:LifeOSCandidateNodeMaxFileBytes } else { [long]0 }
     $largeFilePaths = @($LargeFileRelativePaths | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Sort-Object -Unique)
-    $policyKey = if ($AllowNodeRuntime) { 'node-runtime' } else { 'default' }
-    $cacheKey = $rootFull + '|policy=' + $policyKey + '|paths=' + ($largeFilePaths -join ',')
+    $contractKey = if ($null -ne $LargeFileContracts -and $LargeFileContracts.Count -gt 0) {
+        @($LargeFileContracts.Keys | Sort-Object | ForEach-Object { '{0}={1}' -f [string]$_, [long]$LargeFileContracts[$_] }) -join ','
+    } else { '' }
+    $policyKey = if ($AllowNodeRuntime) { 'node-runtime' } elseif ($contractKey) { 'contracts' } else { 'default' }
+    $cacheKey = $rootFull + '|policy=' + $policyKey + '|paths=' + ($largeFilePaths -join ',') + '|contracts=' + $contractKey
     if (Test-Path -LiteralPath $rootFull -PathType Container) {
         # A derived child view is still a filesystem authority. Validate its
         # complete path before trusting entries inherited from a cached parent.
@@ -2596,9 +2751,14 @@ function Get-RecoveryTreeManifestIndex {
     foreach ($cachedKey in @($Cache.Keys)) {
         $cachedIndex = $Cache[$cachedKey]
         if ($null -eq $cachedIndex -or $null -eq $cachedIndex.PSObject.Properties['Root']) { continue }
+        $cachedContracts = if ($null -ne $cachedIndex.PSObject.Properties['LargeFileContracts']) { $cachedIndex.LargeFileContracts } else { $null }
+        $cachedContractKey = if ($null -ne $cachedContracts -and $cachedContracts.Count -gt 0) {
+            @($cachedContracts.Keys | Sort-Object | ForEach-Object { '{0}={1}' -f [string]$_, [long]$cachedContracts[$_] }) -join ','
+        } else { '' }
         if ([string]$cachedIndex.LargeFileRelativePath -cne $largeFileRelativePath -or
             [long]$cachedIndex.LargeFileMaxBytes -ne $largeFileMaxBytes -or
-            ((@($cachedIndex.LargeFileRelativePaths) -join ',') -cne ($largeFilePaths -join ','))) { continue }
+            ((@($cachedIndex.LargeFileRelativePaths) -join ',') -cne ($largeFilePaths -join ',') -or
+            $cachedContractKey -ne $contractKey)) { continue }
         $cachedRoot = ([string]$cachedIndex.Root).TrimEnd('\')
         $cachedPrefix = $cachedRoot + '\'
         if (-not $rootFull.StartsWith($cachedPrefix, [StringComparison]::OrdinalIgnoreCase)) { continue }
@@ -2623,12 +2783,13 @@ function Get-RecoveryTreeManifestIndex {
             LargeFileRelativePath = $largeFileRelativePath
             LargeFileMaxBytes = $largeFileMaxBytes
             LargeFileRelativePaths = @($largeFilePaths)
+            LargeFileContracts = $LargeFileContracts
         }
         $Cache[$cacheKey] = $derived
         return $derived
     }
 
-    $index = Get-TreeManifestIndex -Root $rootFull -MaxFiles $script:LifeOSRecoveryMaxFileUnits -MaxBytes $script:LifeOSRecoveryMaxTreeBytes -MaxFileBytes $script:LifeOSRecoveryMaxFileBytes -LargeFileRelativePath $largeFileRelativePath -LargeFileMaxBytes $largeFileMaxBytes -LargeFileRelativePaths $largeFilePaths
+    $index = Get-TreeManifestIndex -Root $rootFull -MaxFiles $script:LifeOSRecoveryMaxFileUnits -MaxBytes $script:LifeOSRecoveryMaxTreeBytes -MaxFileBytes $script:LifeOSRecoveryMaxFileBytes -LargeFileRelativePath $largeFileRelativePath -LargeFileMaxBytes $largeFileMaxBytes -LargeFileRelativePaths $largeFilePaths -LargeFileContracts $LargeFileContracts
     $TotalBytes.Value += [long]$index.TotalBytes
     if ($TotalBytes.Value -gt $script:LifeOSRecoveryMaxInventoryBytes) {
         throw 'Recovery inventory exceeds its bounded byte size.'
@@ -2642,9 +2803,18 @@ function Compare-TreeManifest {
         [Parameter(Mandatory)][string]$Source,
         [Parameter(Mandatory)][string]$Destination,
         [string]$LargeFileRelativePath = '',
-        [long]$LargeFileMaxBytes = 0
+        [long]$LargeFileMaxBytes = 0,
+        [System.Collections.IDictionary]$LargeFileContracts = $null
     )
     if (-not (Test-Path -LiteralPath $Destination -PathType Container)) { return $false }
+    if ($null -ne $LargeFileContracts -and $LargeFileContracts.Count -gt 0) {
+        if (-not [string]::IsNullOrWhiteSpace($LargeFileRelativePath) -or $LargeFileMaxBytes -ne 0) {
+            throw 'Large-file contracts must use either the exact contract map or the legacy single-bound arguments.'
+        }
+        $left = @(Get-TreeManifest $Source -LargeFileContracts $LargeFileContracts | ConvertTo-Json -Depth 8 -Compress)
+        $right = @(Get-TreeManifest $Destination -LargeFileContracts $LargeFileContracts | ConvertTo-Json -Depth 8 -Compress)
+        return (($left -join '') -eq ($right -join ''))
+    }
     $effectiveLargeFileRelativePath = $LargeFileRelativePath
     $effectiveLargeFileMaxBytes = $LargeFileMaxBytes
     if ([string]::IsNullOrWhiteSpace($effectiveLargeFileRelativePath)) {
@@ -2692,8 +2862,11 @@ function Restore-Artifact {
     param(
         [Parameter(Mandatory)][psobject]$Artifact,
         [Parameter(Mandatory)][string]$BackupDirectory,
-        [switch]$AllowNodeRuntime
+        [switch]$AllowNodeRuntime,
+        [switch]$AllowServiceHostBinary,
+        [psobject]$Manifest
     )
+    if ($AllowNodeRuntime -and $AllowServiceHostBinary) { throw 'Rollback artifact cannot use two large-file contracts.' }
     $destination = [string]$Artifact.destination
     $backup = [string]$Artifact.backup
     if ([string]::IsNullOrWhiteSpace($destination)) { return }
@@ -2714,6 +2887,12 @@ function Restore-Artifact {
     }
     if (-not $changed) { return }
     Assert-SafeAbsolutePath $destination 'Rollback destination'
+    if ($AllowNodeRuntime -and ($null -eq $Manifest -or -not (Test-LifeOSNodeRuntimeArtifactPath -Manifest $Manifest -Path $destination))) {
+        throw 'Node-runtime rollback bound requires an exact manifest-bound destination.'
+    }
+    if ($AllowServiceHostBinary -and ($null -eq $Manifest -or -not (Test-LifeOSServiceHostArtifactPath -Manifest $Manifest -Path $destination))) {
+        throw 'Service-host rollback bound requires an exact manifest-bound destination.'
+    }
     if ([string]::IsNullOrWhiteSpace($backup) -or -not (Test-Path -LiteralPath $backup)) {
         # A copy helper restores its original destination on an in-process
         # failure and may consume its temporary backup before the outer catch
@@ -2728,12 +2907,13 @@ function Restore-Artifact {
     $largeFileMaxBytes = if ($AllowNodeRuntime) { [long]$script:LifeOSCandidateNodeMaxFileBytes } else { [long]0 }
     $backupIsLeaf = Test-Path -LiteralPath $backup -PathType Leaf
     if ($backupIsLeaf) {
-        $maxFileBytes = Get-LifeOSRecoveryFileMaxBytes -Path $backup -AllowNodeRuntime:$AllowNodeRuntime
+        $maxFileBytes = Get-LifeOSRecoveryFileMaxBytes -Path $backup -AllowNodeRuntime:$AllowNodeRuntime -AllowServiceHostBinary:$AllowServiceHostBinary -Manifest $Manifest
         $backupLength = [long](Get-Item -LiteralPath $backup -Force -ErrorAction Stop).Length
         if ($backupLength -lt 0 -or $backupLength -gt $maxFileBytes) {
             throw "Rollback file exceeds its bounded size: $backup"
         }
     } else {
+        if ($AllowServiceHostBinary) { throw 'Service-host rollback artifact must be an exact file.' }
         [void](Get-TreeManifest $backup -LargeFileRelativePath $largeFileRelativePath -LargeFileMaxBytes $largeFileMaxBytes)
     }
     $parent = Split-Path -Parent $destination
@@ -3258,7 +3438,8 @@ function Assert-RecoveryProgressCapacity {
         if ($null -eq $unit) { throw 'Recovery progress unit index is out of bounds.' }
         $unitDestination = [string](Get-JournalProperty $unit 'destination')
         $allowNodeRuntime = Test-LifeOSNodeRuntimeArtifactPath -Manifest $Manifest -Path $unitDestination
-        $current = Get-RecoveryArtifactState $unitDestination -AllowNodeRuntime:$allowNodeRuntime
+        $allowServiceHostBinary = Test-LifeOSServiceHostArtifactPath -Manifest $Manifest -Path $unitDestination
+        $current = Get-RecoveryArtifactState $unitDestination -AllowNodeRuntime:$allowNodeRuntime -AllowServiceHostBinary:$allowServiceHostBinary -Manifest $Manifest
         Assert-RecoveryUnitState $unit $current
         $phases = @()
         $currentPhase = [string](Get-JournalProperty $unit 'phase')
@@ -3659,7 +3840,8 @@ function Read-RecoveryJournal {
         if ($writersReleased -and (Test-RecoveryAuthorityPath $Manifest $unit.destination)) { continue }
         $unitDestination = Get-FullPath $unit.destination
         $allowNodeRuntime = Test-LifeOSNodeRuntimeArtifactPath -Manifest $Manifest -Path $unitDestination
-        $current = if ($indexedStates.ContainsKey($unitDestination)) { $indexedStates[$unitDestination] } else { Get-RecoveryArtifactState $unitDestination -AllowNodeRuntime:$allowNodeRuntime }
+        $allowServiceHostBinary = Test-LifeOSServiceHostArtifactPath -Manifest $Manifest -Path $unitDestination
+        $current = if ($indexedStates.ContainsKey($unitDestination)) { $indexedStates[$unitDestination] } else { Get-RecoveryArtifactState $unitDestination -AllowNodeRuntime:$allowNodeRuntime -AllowServiceHostBinary:$allowServiceHostBinary -Manifest $Manifest }
         Assert-RecoveryUnitState $unit $current
     }
     return $journal
@@ -3786,13 +3968,15 @@ function Restore-ManifestArtifacts {
                 }
                 $source = if ([string]::IsNullOrWhiteSpace($backup)) { '' } elseif ($relative) { Join-Path $backup $relative } else { $backup }
                 $sourceAllowsNodeRuntime = $source -and (Test-LifeOSNodeRuntimeArtifactPath -Manifest $Manifest -Path $source)
-                $post = if ($source -and (Test-Path -LiteralPath $source -PathType Leaf)) { Get-RecoveryArtifactState $source -AllowNodeRuntime:$sourceAllowsNodeRuntime } else { 'absent' }
+                $sourceAllowsServiceHostBinary = $source -and (Test-LifeOSServiceHostArtifactPath -Manifest $Manifest -Path $source)
+                $post = if ($source -and (Test-Path -LiteralPath $source -PathType Leaf)) { Get-RecoveryArtifactState $source -AllowNodeRuntime:$sourceAllowsNodeRuntime -AllowServiceHostBinary:$sourceAllowsServiceHostBinary -Manifest $Manifest } else { 'absent' }
                 if ($artifact.priorExists -and -not $isTree -and $post -eq 'absent') {
                     if ($artifact.phase -eq 'pending') { continue }
                     throw 'Recovery backup missing for prior artifact.'
                 }
                 $targetAllowsNodeRuntime = Test-LifeOSNodeRuntimeArtifactPath -Manifest $Manifest -Path $target
-                $units[$target] = [ordered]@{ destination=$target; backup=$source; pre=(Get-RecoveryArtifactState $target -AllowNodeRuntime:$targetAllowsNodeRuntime); post=$post; phase='pending' }
+                $targetAllowsServiceHostBinary = Test-LifeOSServiceHostArtifactPath -Manifest $Manifest -Path $target
+                $units[$target] = [ordered]@{ destination=$target; backup=$source; pre=(Get-RecoveryArtifactState $target -AllowNodeRuntime:$targetAllowsNodeRuntime -AllowServiceHostBinary:$targetAllowsServiceHostBinary -Manifest $Manifest); post=$post; phase='pending' }
             }
         }
         $canonicalTreeRoots = @(Get-RecoveryCanonicalTreeRoots -Roots $treeRoots)
@@ -3821,17 +4005,19 @@ function Restore-ManifestArtifacts {
     $unitIndex = 0
     foreach ($unit in @($journal.units)) {
         $allowNodeRuntime = Test-LifeOSNodeRuntimeArtifactPath -Manifest $Manifest -Path $unit.destination
-        $current = Get-RecoveryArtifactState $unit.destination -AllowNodeRuntime:$allowNodeRuntime
+        $allowServiceHostBinary = Test-LifeOSServiceHostArtifactPath -Manifest $Manifest -Path $unit.destination
+        $current = Get-RecoveryArtifactState $unit.destination -AllowNodeRuntime:$allowNodeRuntime -AllowServiceHostBinary:$allowServiceHostBinary -Manifest $Manifest
         Assert-RecoveryUnitState $unit $current
         if ($current -ne $unit.post) {
             Append-RecoveryProgress -Manifest $Manifest -Journal $journal -UnitIndex $unitIndex -Phase 'restoring'
             if ($unit.post -ne 'absent') {
                 $backupAllowsNodeRuntime = Test-LifeOSNodeRuntimeArtifactPath -Manifest $Manifest -Path $unit.backup
-                if ((Get-RecoveryArtifactState $unit.backup -AllowNodeRuntime:$backupAllowsNodeRuntime) -ne $unit.post) { throw 'Recovery unit backup changed.' }
+                $backupAllowsServiceHostBinary = Test-LifeOSServiceHostArtifactPath -Manifest $Manifest -Path $unit.backup
+                if ((Get-RecoveryArtifactState $unit.backup -AllowNodeRuntime:$backupAllowsNodeRuntime -AllowServiceHostBinary:$backupAllowsServiceHostBinary -Manifest $Manifest) -ne $unit.post) { throw 'Recovery unit backup changed.' }
             }
             $restore = [pscustomobject]@{ recoveryStagePath=$unit.stagingPath; destination=$unit.destination; backup=$(if ($unit.post -eq 'absent') { '' } else { $unit.backup }); changed=$true; priorExists=($unit.post -ne 'absent'); phase='complete' }
-            Restore-Artifact $restore $BackupDirectory -AllowNodeRuntime:$allowNodeRuntime
-            if ((Get-RecoveryArtifactState $unit.destination -AllowNodeRuntime:$allowNodeRuntime) -ne $unit.post) { throw 'Recovery unit post-state verification failed.' }
+            Restore-Artifact $restore $BackupDirectory -AllowNodeRuntime:$allowNodeRuntime -AllowServiceHostBinary:$allowServiceHostBinary -Manifest $Manifest
+            if ((Get-RecoveryArtifactState $unit.destination -AllowNodeRuntime:$allowNodeRuntime -AllowServiceHostBinary:$allowServiceHostBinary -Manifest $Manifest) -ne $unit.post) { throw 'Recovery unit post-state verification failed.' }
         }
         if (Test-Path -LiteralPath $unit.stagingPath) {
             Assert-NoReparsePath $unit.stagingPath
@@ -3910,11 +4096,12 @@ function Copy-TreeVerifiedAtomic {
         [Parameter(Mandatory)][string]$BackupDirectory,
         [string]$BackupName,
         [string]$LargeFileRelativePath = '',
-        [long]$LargeFileMaxBytes = 0
+        [long]$LargeFileMaxBytes = 0,
+        [System.Collections.IDictionary]$LargeFileContracts = $null
     )
     Assert-ExistingDirectory $Source 'Tree source'
-    $sourceManifest = @(Get-TreeManifest $Source -LargeFileRelativePath $LargeFileRelativePath -LargeFileMaxBytes $LargeFileMaxBytes)
-    if (Compare-TreeManifest $Source $Destination -LargeFileRelativePath $LargeFileRelativePath -LargeFileMaxBytes $LargeFileMaxBytes) {
+    $sourceManifest = @(Get-TreeManifest $Source -LargeFileRelativePath $LargeFileRelativePath -LargeFileMaxBytes $LargeFileMaxBytes -LargeFileContracts $LargeFileContracts)
+    if (Compare-TreeManifest $Source $Destination -LargeFileRelativePath $LargeFileRelativePath -LargeFileMaxBytes $LargeFileMaxBytes -LargeFileContracts $LargeFileContracts) {
         return [pscustomobject]@{ Destination = $Destination; Backup = $null; Manifest = $sourceManifest; Changed = $false }
     }
     $destinationParent = Split-Path -Parent (Get-FullPath $Destination)
@@ -3923,7 +4110,7 @@ function Copy-TreeVerifiedAtomic {
     $backup = $null
     try {
         Copy-Item -LiteralPath $Source -Destination $temp -Recurse -Force
-        if (-not (Compare-TreeManifest $Source $temp -LargeFileRelativePath $LargeFileRelativePath -LargeFileMaxBytes $LargeFileMaxBytes)) { throw "Tree hash verification failed for $Source." }
+        if (-not (Compare-TreeManifest $Source $temp -LargeFileRelativePath $LargeFileRelativePath -LargeFileMaxBytes $LargeFileMaxBytes -LargeFileContracts $LargeFileContracts)) { throw "Tree hash verification failed for $Source." }
         if (Test-Path -LiteralPath $Destination -PathType Container) {
             Assert-NoReparsePath $Destination
             $backupLeaf = if ([string]::IsNullOrWhiteSpace($BackupName)) { 'previous-' + [IO.Path]::GetFileName($Destination) } else { $BackupName }
@@ -3932,7 +4119,7 @@ function Copy-TreeVerifiedAtomic {
             Move-Item -LiteralPath $Destination -Destination $backup
         }
         Move-Item -LiteralPath $temp -Destination $Destination
-        if (-not (Compare-TreeManifest $Source $Destination -LargeFileRelativePath $LargeFileRelativePath -LargeFileMaxBytes $LargeFileMaxBytes)) { throw "Staged tree verification failed for $Destination." }
+        if (-not (Compare-TreeManifest $Source $Destination -LargeFileRelativePath $LargeFileRelativePath -LargeFileMaxBytes $LargeFileMaxBytes -LargeFileContracts $LargeFileContracts)) { throw "Staged tree verification failed for $Destination." }
     } catch {
         if ($null -ne $backup -and (Test-Path -LiteralPath $backup)) {
             Move-CurrentOutOfTheWay $Destination $BackupDirectory

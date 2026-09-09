@@ -34,12 +34,14 @@ $preflightNamedArgs = [regex]::Match(
 if (-not $preflightNamedArgs.Success) { throw 'FAIL: Preflight must be invoked with a named hashtable splat.' }
 if ($installText -match '(?m)\$preflightArgs\s*=\s*@\(') { throw 'FAIL: Preflight arguments must not use an array splat.' }
 foreach ($parameter in @(
+    'CandidateRoot', 'ExpectedSourceSha',
     'ServiceHostBinarySource', 'ApiSource', 'GatewaySource', 'LegacyGatewaySource',
     'NodeRuntimeSource', 'PythonRuntimeSource', 'GatewayEntryPoint',
     'TailscaleExecutable', 'TailscaleEdgeTokenSource', 'TailscaleServiceName',
     'LegacyTaskName', 'CodexTaskName'
 )) {
-    $parameterPattern = '(?m)^\s+{0}\s*=\s+\${0}\s*$' -f [regex]::Escape($parameter)
+    $boundVariable = if ($parameter -eq 'CandidateRoot') { 'candidateRootFull' } else { $parameter }
+    $parameterPattern = '(?m)^\s+{0}\s*=\s+\${1}\s*$' -f [regex]::Escape($parameter), [regex]::Escape($boundVariable)
     if ($preflightNamedArgs.Groups['body'].Value -notmatch $parameterPattern) {
         throw "FAIL: Preflight parameter is not bound by name: $parameter"
     }
@@ -60,6 +62,12 @@ Assert-Text 'https=8420' 'Serve uses port 8420.'
 Assert-Text 'usage-history\.jsonl' 'Usage history migration is present.'
 Assert-Text 'Copy-FileVerifiedAtomic' 'Atomic hash-verified file migration is present.'
 Assert-Text 'Enter-LifeOSDeploymentTransaction' 'Install acquires the OS deployment transaction lock.'
+Assert-Text 'function Assert-LifeOSCandidateRoot' 'Install has a shared candidate-root verification gate.'
+Assert-Text 'function Assert-LifeOSCandidateSourceBindings' 'Install binds runtime inputs to the verified candidate paths.'
+Assert-Text '-VerifyCandidate' 'Install and preflight run the candidate verifier before deployment work.'
+Assert-Text 'CandidateRoot = \$candidateRootFull' 'Install forwards the verified candidate root to preflight.'
+Assert-Text 'ExpectedSourceSha = \$ExpectedSourceSha' 'Install forwards the independently supplied source SHA to preflight.'
+Assert-Text 'Assert-LifeOSCandidateSourceBindings' 'Preflight verifies exact candidate source mappings.'
 Assert-Text 'Exit-LifeOSDeploymentTransaction' 'Install releases the OS deployment transaction lock.'
 Assert-Text 'WaitOne\(0\)' 'Concurrent deployment fails fast instead of racing tree scans.'
 Assert-Text 'Could not hash tree item' 'Tree hash failures expose the exact failing path.'
@@ -268,11 +276,19 @@ Assert-Text "@\('-I', '-c'" 'Staged Python imports run in isolated mode.'
 Assert-Text 'function Resolve-PythonRuntimeSource' 'Python runtime resolution is centralized.'
 Assert-NotText '\$home\s*=' 'Deployment scripts do not assign the read-only PowerShell HOME variable.'
 Assert-Text '\$script:LifeOSCandidateNodeMaxFileBytes = 256 \* 1024 \* 1024' 'The allowlisted standalone Node runtime has an explicit 256 MiB bound.'
+Assert-Text '\$script:LifeOSCandidateServiceHostMaxFileBytes = 256 \* 1024 \* 1024' 'The allowlisted self-contained service host has an explicit 256 MiB bound.'
 Assert-Text '\$maxCandidateNodeFileBytes = \[long\]\$script:LifeOSCandidateNodeMaxFileBytes' 'Candidate verification consumes the explicit Node runtime bound.'
-Assert-Text 'LargeFileRelativePath ''node-runtime/node\.exe''' 'Candidate verification scopes the larger bound to the standalone Node path.'
+Assert-Text 'node-runtime/node\.exe.*\$maxCandidateNodeFileBytes' 'Candidate verification scopes the larger bound to the standalone Node path.'
+Assert-Text 'service-host/LifeOS\.ServiceHost\.exe.*\$maxCandidateServiceHostFileBytes' 'Candidate verification scopes the larger bound to the exact service-host path.'
 Assert-Text 'LargeFileRelativePath \$nodeLargeFileRelativePath' 'Installation passes the explicit Node runtime file contract.'
 Assert-Text 'function Get-LifeOSBoundedFileMaxBytes' 'Tree scans resolve per-file limits by relative path.'
 Assert-Text 'function Get-LifeOSRecoveryFileMaxBytes' 'Recovery resolves the Node exception for exact runtime files.'
+Assert-Text 'AllowServiceHostBinary' 'Recovery resolves the service-host exception only from manifest provenance.'
+Assert-Text '-LargeFileContracts \$effectiveLargeFileContracts' 'Manifest hashing receives the exact candidate contract map.'
+Assert-Text '-LargeFileContracts \$LargeFileContracts' 'Recovery tree indexing preserves an explicit contract map.'
+Assert-Text 'Copy-TreeVerifiedAtomic' 'Tree copy remains covered by the bounded manifest path.'
+Assert-Text 'Copy-FileVerifiedAtomic \$hostSource \$hostTarget \$backupDirectory -MaxBytes \$hostMaxFileBytes' 'Service-host install copy applies the finite host bound.'
+Assert-Text 'same-basename service host' 'Behavioral coverage rejects misleading service-host paths.'
 Assert-Text 'Get-LifeOSRecoveryFileMaxBytes -Path \$Path' 'Recovery artifact state uses the path-aware file limit.'
 Assert-Text 'linkType -ne ''HardLink''' 'Runtime manifests allow safe hardlinks but reject path-redirection links.'
 Assert-Text 'activationScriptNames' 'Deployed Python venvs omit profile-bound activation helpers.'
