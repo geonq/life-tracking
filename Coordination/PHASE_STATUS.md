@@ -1,44 +1,48 @@
 # PHASE STATUS — LifeOS
 
-Updated 2026-09-08 09:40 Europe/Berlin.
+Updated 2026-09-09 06:50 Europe/Berlin.
 
-- Overall: **NO-GO / design overhaul and hardening in progress**.
+- Overall: **NO-GO pending external acceptance gates; source review is GO.**
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- HEAD: `1f13b4b`; worktree contains the active implementation batch.
-- Plan: `tasks/design-overhaul-plan.md`, 116 lines.
-- Astra Medium design review: complete; 12 actionable design/state rules
-  incorporated into the plan.
-- Active workers: Luna Max foundation/Advisor removal and Luna Max Windows
-  hardening. Astra is reserved for batched code review after implementation.
+- Commits: `69439f8`, `0493b39`, and `e215c01`.
+- Final design and training plans are in `tasks/`; all coordination files stay
+  under 200 lines.
 
-## Completed foundation evidence
+## Completed source work
 
-Earlier passes implemented substantial finance, HealthKit projection,
-Calendar sync/security, widget, automation, banking, and Windows source work.
-Recent reports include API 179 tests/build/typecheck, gateway 442 tests,
-focused iOS 79/79, and focused macOS/widget 52/52. These counts must be rerun
-against the post-redesign worktree. The full logic suite last had one existing
-fixture-host failure after reaching 1,329 tests.
+1. SF Pro/system typography, shared visual primitives, responsive geometry,
+   motion ownership, widget backing, and Advisor removal.
+2. Calendar scrolling/paging/editing/trackpad magnification and repaired
+   Finance, Recovery, Biology, and Nutrition states.
+3. Local-first workout templates/sessions/sets/history/PRs/reports plus
+   read-only Apple Health evidence and truthful Zepp boundaries.
+4. Enable Banking/live Finance plus manual Trade Republic import and durable
+   imported-finance sync.
+5. HealthKit refresh/status App Intents for native Shortcut composition.
+6. API/gateway queues/auth/bounded reads and Windows manifest, ACL, recovery,
+   inventory, and Node-runtime hardening.
 
-## Current phase — design foundation and release blockers
+## Verification status
 
-1. Remove Advisor from app, contracts, API, gateway, intents, deep links, and
-   Xcode membership while preserving nutrition photo tracking.
-2. Replace all custom fonts with the SF Pro/system typography facade and
-   centralize page/card/status/button/sheet contracts.
-3. Repair Calendar scroll ownership, late-day reachability, and Mac pinch zoom.
-4. Rebuild Finance/Fitness/Nutrition hierarchy, states, and interaction logic.
-5. Verify every widget over dark, transparent/tinted, and grey-wallpaper modes.
-6. Resolve Windows Serve validation, rollback args, inventory evolution,
-   recovery poisoning, and partial snapshot acceptance.
-7. Review in batches with Astra Medium and integrate with Luna Max.
+- API: 124/124 tests and TypeScript typecheck pass.
+- Windows deployment source: 55/55; release builder: 12/12.
+- Python AST, shell syntax, Swift parse, and `git diff --check` pass.
+- Astra Medium backend final review: GO; no P0/P1/P2 findings remain.
+- Gateway pytest and Windows PowerShell/Pester are unavailable in this
+  environment. Unsigned Xcode builds stall before compilation here.
 
-## External gates
+## Remaining gates
 
-Physical iPhone 17 HealthKit/Zepp samples, Personal Team App Group/signing,
-WidgetKit clear/tinted rendering, morning sync/USB refresh, Enable Banking
-consent/readback, Windows PowerShell/service/Tailscale runtime, and full
-cross-device durable receipt/adoption remain unverified until exercised.
+- Complete unsigned iOS and macOS builds, then run available simulator tests.
+- Inspect real Mac pinch/hover behavior, iPhone scroll/keyboard/dismissal, and
+  widget clear/tinted/grey-wallpaper states.
+- Exercise HealthKit/Zepp sync, Shortcuts, Enable Banking consent/readback,
+  Windows services/recovery, and Personal Team installation.
+- Keep manual platform actions visible: iPhone trust/developer mode, signing
+  renewal, and the user-tapped Zepp sync step.
 
-Source tests, `/health`, a notification, or an unsigned build do not prove
-those gates.
+## Operating rule
+
+Commit and push each coherent code/doc group with exact paths. Update this
+file, `HANDOFF.md`, and `DECISIONS.md` after each final group. Do not reset or
+bulk-clean the dirty worktree.

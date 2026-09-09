@@ -1,62 +1,62 @@
-# HANDOFF — life-tracking (LifeOS native app)
+# HANDOFF — LifeOS native app
 
-Updated 2026-09-08 09:40 Europe/Berlin.
+Updated 2026-09-09 06:50 Europe/Berlin.
 
 ## Current verdict
 
-**NO-GO for completion.** The source foundation is broad, but the supplied
-screenshots show a release-blocking visual quality gap. Advisor is explicitly
-being removed; calorie photo tracking is the only permitted in-app AI flow.
-No Codex/Claude watcher or overnight scheduler is active.
-
-The implementation contract is [`tasks/design-overhaul-plan.md`](../tasks/design-overhaul-plan.md),
-currently 116 lines. Astra Medium reviewed it and required measurable reference
-states, shared component contracts, per-mode finance availability, explicit
-calendar gesture ownership, nutrition draft semantics, and visual evidence.
+**NO-GO for completion until the external acceptance gates are exercised.**
+Source review is complete; unsigned Xcode compilation is blocked by a local
+pre-compilation stall. Advisor and all
+generic in-app AI are removed; calorie photo tracking is the only permitted AI
+flow. No usage watcher or overnight scheduler is part of the product.
 
 ## Source state
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- HEAD: `1f13b4b` (`Refine LifeOS design acceptance rules`).
-- The worktree intentionally contains the earlier app/backend implementation
-  batch. Do not reset or discard another worker's changes.
-- Foundation/Advisor-removal and Windows-hardening Luna Max lanes are active;
-  their file scopes are disjoint. Review and commit each batch before starting
-  the next overlapping UI lane.
+- Commits: `69439f8` (design/widgets), `0493b39` (training/automation), and
+  `e215c01` (backend/Windows).
+- The worktree is clean after these bounded commits and must not be reset or
+  cleaned wholesale.
+- `design.md`, `tasks/design-overhaul-plan.md`, and `tasks/training-plan.md`
+  are the design and execution sources.
+- The final source is committed in bounded groups; keep future changes equally
+  attributable.
 
-## Existing evidence to rerun after the redesign
+## Implemented product slices
 
-- Focused unsigned iOS UI verification: 79/79 tests; iPhone 17 simulator build.
-- Focused unsigned macOS/widget verification: 52/52 tests and builds.
-- API: 179 tests plus build/typecheck passed in the latest backend review.
-- Gateway: 442 Python tests passed in the latest hardening report.
-- A later full iOS logic run reached 1,329 tests with one fixture-host failure;
-  rerun after Advisor removal and inspect that failure rather than hiding it.
-- `git diff --check` passed before the current worker batch.
+- SF Pro/system typography, shared dark design tokens, refined cards/statuses,
+  responsive layouts, motion hooks, and transparent grey-wallpaper widgets.
+- Calendar mobile scrolling, late-day reachability, paging, editing, and Mac
+  trackpad magnification ownership.
+- Finance availability states, chart modes, live Enable Banking path, and
+  manual Trade Republic import with durable sync semantics.
+- Fitness biology/recovery/nutrition hierarchy and local-first workout
+  templates, custom exercises, sessions, sets, history, PRs, and reports.
+- Read-only Apple Health workout evidence; Zepp remains a sync source and no
+  proprietary Zepp metric is fabricated or treated as guaranteed.
+- Morning HealthKit refresh and connection-status App Intents for Shortcuts.
+- Hardened API/gateway state readers, queues, local auth, Windows manifests,
+  ACL/recovery contracts, bounded inventory, and exact Node staging handling.
 
-## Product boundaries
+## Verification
 
-- Use SF Pro/system fonts only; remove Inter/Space Grotesk registrations.
-- Keep the brand blue ramp from `colors.md`; estimates/projections green and
-  calories orange, with adjacent blue accents separated by hue/value.
-- Preserve real banking, HealthKit/Zepp, Calendar sync, WidgetKit, and
-  Trade Republic import semantics. Never invent provider data.
-- Keep Personal Team signing, physical HealthKit/Zepp, widget appearance,
-  live bank consent, Windows PowerShell, and Tailscale runtime as external
-  evidence gates.
+- API: 124/124 Vitest tests; TypeScript typecheck passes.
+- Windows source: 55/55 checks; release builder: 12/12; Python AST, shell
+  syntax, Swift parse, and `git diff --check` pass.
+- Astra Medium backend re-review: GO after the final bounded-reader and Node
+  recovery fixes.
+- Gateway pytest behavior suite is unavailable on this Mac because the active
+  Python interpreters do not have the project test dependencies.
+- Unsigned Xcode builds stall before compilation in this environment; do not
+  claim a passing final build until the command exits successfully.
 
-## Ordered work
+## Remaining acceptance gates
 
-1. Finish typography foundation and complete Advisor deletion.
-2. Fix Calendar iPhone scroll geometry and Mac trackpad magnification.
-3. Redesign Finance, Recovery, Biology, and Nutrition against the plan.
-4. Rework shell, widgets, and motion; capture state/interaction evidence.
-5. Resolve the five Windows deployment review blockers.
-6. Run batched Astra Medium code review, then final Luna integration.
-
-## Safety and release discipline
-
-Keep secrets out of source, prompts, logs, and archives. Use unsigned Xcode
-checks for simulator/macOS work. Update this handoff, `PHASE_STATUS.md`, and
-`DECISIONS.md` after each coherent batch, then commit. Do not claim hardware,
-provider, or remote runtime gates from source tests alone.
+- iPhone 17: HealthKit permissions/data, Zepp sync, scroll/keyboard/dismissal,
+  and Shortcuts execution.
+- Mac: real trackpad pinch/zoom, hover/motion feel, and visual state review.
+- Widgets: dark, clear/transparent, tinted, and grey-wallpaper rendering.
+- Enable Banking consent/readback, Windows PowerShell/Pester/service runtime,
+  and backend recovery on the always-on server.
+- Personal Team signing/install and seven-day renewal remain manual platform
+  steps; no public Zepp API permits a guaranteed LifeOS-controlled sync click.
