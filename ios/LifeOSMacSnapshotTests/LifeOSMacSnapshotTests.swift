@@ -479,7 +479,7 @@ final class LifeOSMacSnapshotTests: XCTestCase {
                 onOpenConnections: nil,
                 selectedRange: .constant(.month),
                 selectedNetWorthPoint: .constant(nil),
-                initialEntry: nil,
+                selectedEntry: .constant(nil),
                 heroNamespace: nil,
                 onClose: {}
             ),
@@ -494,7 +494,7 @@ final class LifeOSMacSnapshotTests: XCTestCase {
                 onOpenConnections: nil,
                 selectedRange: .constant(.month),
                 selectedNetWorthPoint: .constant(nil),
-                initialEntry: nil,
+                selectedEntry: .constant(nil),
                 heroNamespace: nil,
                 onClose: {}
             ),
@@ -516,7 +516,7 @@ final class LifeOSMacSnapshotTests: XCTestCase {
                 onOpenConnections: nil,
                 selectedRange: .constant(.month),
                 selectedNetWorthPoint: .constant(nil),
-                initialEntry: .wealth,
+                selectedEntry: .constant(.wealth),
                 heroNamespace: nil,
                 onClose: {}
             ),
@@ -535,7 +535,7 @@ final class LifeOSMacSnapshotTests: XCTestCase {
                 onOpenConnections: nil,
                 selectedRange: .constant(.month),
                 selectedNetWorthPoint: .constant(nil),
-                initialEntry: .spendingAbroad,
+                selectedEntry: .constant(.spendingAbroad),
                 heroNamespace: nil,
                 onClose: {}
             ),
@@ -554,7 +554,7 @@ final class LifeOSMacSnapshotTests: XCTestCase {
                 onOpenConnections: nil,
                 selectedRange: .constant(.month),
                 selectedNetWorthPoint: .constant(nil),
-                initialEntry: .travel,
+                selectedEntry: .constant(.travel),
                 heroNamespace: nil,
                 onClose: {}
             ),

@@ -12,6 +12,7 @@ import XCTest
 ///   .netWorthProjectionForTesting`) must refuse to fabricate a trend when
 ///   there is no real observed history.
 @available(iOS 17.0, macOS 14.0, *)
+@MainActor
 final class FinanceChartModeWiringTests: XCTestCase {
 
     // MARK: - RF-08: bar bucket honesty through the real adapter
@@ -167,6 +168,79 @@ final class FinanceChartModeWiringTests: XCTestCase {
     func testSelectionCodecRejectsMalformedID() {
         XCTAssertNil(FinanceChartSelectionCodec.date(fromID: "not-an-id"))
         XCTAssertNil(FinanceChartSelectionCodec.date(fromID: ""))
+    }
+
+    func testFinanceRoutePolicyAcceptsRepeatedRouteWhenGenerationChanges() {
+        let first = FinanceInitialRouteIntent(route: .cashFlow, generation: 1)
+        let repeated = FinanceInitialRouteIntent(route: .cashFlow, generation: 2)
+        let cleared = FinanceInitialRouteIntent(route: nil, generation: 3)
+
+        XCTAssertTrue(FinanceInitialRoutePolicy.shouldApply(first, after: nil))
+        XCTAssertFalse(FinanceInitialRoutePolicy.shouldApply(first, after: first))
+        XCTAssertTrue(FinanceInitialRoutePolicy.shouldApply(repeated, after: first))
+        XCTAssertEqual(
+            FinanceInitialRoutePolicy.action(for: cleared, after: repeated),
+            .clear
+        )
+        XCTAssertEqual(
+            FinanceInitialRoutePolicy.selectedDetail(for: .clear, current: .income),
+            .income
+        )
+    }
+
+    func testFinanceSceneStateKeepsSelectionAcrossClearAndRemountEvent() throws {
+        let state = FinancePresentationState(selectedDetail: .income, selectedRange: .week, selectedChartMode: .bar, showAnalytics: true, analyticsSelectedEntry: .travel)
+        state.receiveExternalRoute(.cashFlow)
+        let first = try XCTUnwrap(state.externalRouteIntent)
+        state.selectedDetail = .income
+        state.receiveExternalRoute(nil)
+        let cleared = try XCTUnwrap(state.externalRouteIntent)
+
+        XCTAssertEqual(state.selectedDetail, .income)
+        XCTAssertEqual(state.selectedRange, .week)
+        XCTAssertEqual(state.selectedChartMode, .bar)
+        XCTAssertTrue(state.showAnalytics)
+        XCTAssertEqual(state.analyticsSelectedEntry, .travel)
+        XCTAssertGreaterThan(cleared.generation, first.generation)
+        XCTAssertEqual(
+            FinanceInitialRoutePolicy.action(for: cleared, after: first),
+            .clear
+        )
+    }
+
+    func testPointSelectionPreservesVisibleSampleAndFallsBackOnlyWhenMissing() {
+        XCTAssertEqual(
+            FinancePointSelectionPolicy.preservedPointID(
+                selectedID: "selected",
+                availableIDs: ["older", "selected", "latest"],
+                latestID: "latest"
+            ),
+            "selected"
+        )
+        XCTAssertEqual(
+            FinancePointSelectionPolicy.preservedPointID(
+                selectedID: "gone",
+                availableIDs: ["older", "latest"],
+                latestID: "latest"
+            ),
+            "latest"
+        )
+        XCTAssertEqual(
+            FinancePointSelectionPolicy.preservedPointID(
+                selectedID: nil,
+                availableIDs: ["latest"],
+                latestID: "latest"
+            ),
+            "latest"
+        )
+    }
+
+    func testFinanceAnalyticsEntryIsHeldByPresentationState() {
+        let state = FinancePresentationState()
+        state.analyticsSelectedEntry = .wealth
+        XCTAssertEqual(state.analyticsSelectedEntry, .wealth)
+        state.analyticsSelectedEntry = .travel
+        XCTAssertEqual(state.analyticsSelectedEntry, .travel)
     }
 
     // MARK: - RF-07: projection wiring never fabricates a trend

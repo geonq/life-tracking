@@ -8,12 +8,37 @@ import AppKit
 #endif
 import os
 
-private enum CalendarDisplayMode: Hashable {
+enum CalendarDisplayMode: Hashable {
     case timeline
     case month
     #if os(iOS)
     case week
     #endif
+}
+
+/// Calendar's durable interaction state is owned by the containing scene.
+/// Draft editors, search, pairing, and scroll requests stay local because they
+/// are transient presentations and must not survive a module switch or scene
+/// restoration.
+@MainActor
+public final class CalendarPresentationState: ObservableObject {
+    @Published var selectedDate: Date
+    @Published var headerDate: Date
+    @Published var displayMode: CalendarDisplayMode
+    @Published var monthExpanded: Bool
+    @Published var hourHeight: CGFloat
+
+    public init(
+        selectedDate: Date = .now,
+        startsInMonthMode: Bool = false,
+        hourHeight: CGFloat = 54
+    ) {
+        self.selectedDate = selectedDate
+        self.headerDate = selectedDate
+        self.displayMode = startsInMonthMode ? .month : .timeline
+        self.monthExpanded = false
+        self.hourHeight = hourHeight
+    }
 }
 
 /// Debug-only timing for the parent work that can otherwise look like a
@@ -236,16 +261,13 @@ typealias CalendarEditorRetryHandler = (@escaping CalendarEditorCompletion) -> V
 
 public struct CalendarView: View {
     @ObservedObject private var coordinator: CalendarCoordinator
-    @State private var selectedDate: Date
-    @State private var headerDate: Date
+    @StateObject private var presentationState: CalendarPresentationState
     /// Recurrence expansion is a snapshot concern, not a paging concern.
     /// Keeping it keyed to the durable source prevents every one-day swipe
     /// from re-expanding the full multi-year recurrence window on the main
     /// actor while the pager is trying to accept the next gesture.
     @State private var materializedDisplayItems: [CalendarItem]
     @State private var materializedDisplayItemsSourceKey: String
-    @State private var displayMode: CalendarDisplayMode = .timeline
-    @State private var monthExpanded = false
     @State private var editorPresentation: CalendarEditorPresentation?
     @State private var anchoredEditorPresentation: CalendarEditorPresentation?
     @State private var timedCreationPreview: CalendarTimedCreationPreview?
@@ -257,31 +279,57 @@ public struct CalendarView: View {
     @State private var editorAnchorFrame: CGRect?
     @State private var editorPresentationGeneration = 0
 #endif
-    @State private var hourHeight: CGFloat = 54
     @Binding private var requestNewEvent: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Namespace private var calendarMonthNamespace
     private let externalSelectedDate: Date?
     private let calendar: Calendar
 
+    private var selectedDate: Date {
+        get { presentationState.selectedDate }
+        nonmutating set { presentationState.selectedDate = newValue }
+    }
+
+    private var headerDate: Date {
+        get { presentationState.headerDate }
+        nonmutating set { presentationState.headerDate = newValue }
+    }
+
+    private var displayMode: CalendarDisplayMode {
+        get { presentationState.displayMode }
+        nonmutating set { presentationState.displayMode = newValue }
+    }
+
+    private var monthExpanded: Bool {
+        get { presentationState.monthExpanded }
+        nonmutating set { presentationState.monthExpanded = newValue }
+    }
+
+    private var hourHeight: CGFloat {
+        get { presentationState.hourHeight }
+        nonmutating set { presentationState.hourHeight = newValue }
+    }
+
     public init(
         selectedDate: Date? = nil,
         calendar: Calendar = .current,
         coordinator: CalendarCoordinator,
         startsInMonthMode: Bool = false,
-        requestNewEvent: Binding<Bool> = .constant(false)
+        requestNewEvent: Binding<Bool> = .constant(false),
+        presentationState: CalendarPresentationState? = nil
     ) {
         let initialDate = selectedDate ?? .now
         let initialItems = coordinator.snapshot.items.filter { !$0.isDeleted }
-        _selectedDate = State(initialValue: initialDate)
-        _headerDate = State(initialValue: initialDate)
+        _presentationState = StateObject(wrappedValue: presentationState ?? CalendarPresentationState(
+            selectedDate: initialDate,
+            startsInMonthMode: startsInMonthMode
+        ))
         _materializedDisplayItems = State(
             initialValue: Self.expandDisplayItems(initialItems, calendar: calendar)
         )
         _materializedDisplayItemsSourceKey = State(
             initialValue: Self.displayItemsSourceKey(for: initialItems)
         )
-        _displayMode = State(initialValue: startsInMonthMode ? .month : .timeline)
         _requestNewEvent = requestNewEvent
         self.externalSelectedDate = selectedDate
         self.calendar = calendar
@@ -455,7 +503,7 @@ public struct CalendarView: View {
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 0) {
                 CalendarCompactMonth(
-                    selectedDate: $selectedDate,
+                    selectedDate: $presentationState.selectedDate,
                     calendar: calendar,
                     items: displayItems
                 )
@@ -835,7 +883,7 @@ public struct CalendarView: View {
                 calendarMacPrimaryHeader
 
                 HStack {
-                    Picker("Calendar view", selection: $displayMode) {
+                    Picker("Calendar view", selection: $presentationState.displayMode) {
                         Text(timelinePickerLabel).tag(CalendarDisplayMode.timeline)
                         Text("Month").tag(CalendarDisplayMode.month)
                     }

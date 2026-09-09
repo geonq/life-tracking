@@ -146,6 +146,11 @@ struct OverviewView: View {
     private var regularDashboard: some View {
         let supportingSections = visibleSections.filter { $0.kind != .llm }
         VStack(alignment: .leading, spacing: 0) {
+            if showsUpdatingNotice {
+                updatingRow
+                    .padding(.bottom, LifeOSTokens.overviewCardGap + 4)
+            }
+
             if let usage = visibleSections.first(where: { $0.kind == .llm }) {
                 sectionRow(usage, featured: true)
                     .transition(reduceMotion ? .identity : .opacity)
@@ -216,6 +221,31 @@ struct OverviewView: View {
         }
         .frame(maxWidth: 720, alignment: .leading)
         .accessibilityIdentifier("overview-no-source")
+    }
+
+    private var showsUpdatingNotice: Bool {
+        usageState == .loading || clipperState == .loading || financeState == .loading
+    }
+
+    private var updatingRow: some View {
+        LifeOSCard(
+            level: .surface,
+            cornerRadius: LifeOSTokens.Radius.control,
+            padding: LifeOSTokens.Space.sm
+        ) {
+            HStack(spacing: LifeOSTokens.Space.sm) {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(LifeOSTokens.accent)
+                Text("Updating connected sources…")
+                    .lifeOSTypography(.body, weight: .medium)
+                    .foregroundStyle(LifeOSTokens.primaryText)
+                Spacer(minLength: 0)
+            }
+            .frame(minHeight: 28, alignment: .leading)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("overview-updating")
     }
 
     private var noSourceStatusBlock: some View {
@@ -419,8 +449,18 @@ struct OverviewView: View {
             clipperState: clipperState,
             hasRefreshDueSection: visibleSections.contains {
                 $0.provenance.quality == .observed && $0.provenance.connector == .refreshDue
-            }
+            },
+            usageState: usageState,
+            hasPartialUsage: usageHasPartialCoverage
         )
+    }
+
+    private var usageHasPartialCoverage: Bool {
+        guard !usageSnapshots.isEmpty else { return false }
+        return usageSnapshots.contains { snapshot in
+            snapshot.provenance.quality == .observed
+                && snapshot.windows.contains { $0.usedPercent == nil }
+        }
     }
 
     private var healthIntegrityStatusPresent: Bool {
@@ -448,7 +488,7 @@ struct OverviewView: View {
                 .foregroundStyle(.primary)
 
             HStack(spacing: 8) {
-                Text("A quiet view of what matters now")
+                Text(overviewDateLabel)
                     .lifeOSTypography(.body)
                     .foregroundStyle(LifeOSTokens.secondaryText)
                 statusBadge
@@ -463,7 +503,7 @@ struct OverviewView: View {
                     .foregroundStyle(.primary)
                 Spacer(minLength: 8)
             }
-            Text("A quiet view of what matters now")
+            Text(overviewDateLabel)
                 .lifeOSTypography(.body)
                 .foregroundStyle(LifeOSTokens.secondaryText)
                 .lineLimit(2)
@@ -473,6 +513,10 @@ struct OverviewView: View {
 #endif
     }
 
+    private var overviewDateLabel: String {
+        Date.now.formatted(date: .complete, time: .omitted)
+    }
+
     private var statusBadge: some View {
         // §4.2 dot + overline — no tinted capsule. Color is a signal:
         // warning for demo/stale/partial, tertiary when unavailable,
@@ -480,10 +524,13 @@ struct OverviewView: View {
         let isDemo = snapshotStatusLabel.hasPrefix("DEMO")
         let isStale = snapshotStatusLabel.hasPrefix("STALE")
         let needsReview = snapshotStatusLabel.hasPrefix("PARTIAL")
+        let isUpdating = snapshotStatusLabel == "UPDATING DATA"
         let unavailable = snapshotStatusLabel == "DATA UNAVAILABLE"
-        let color = isDemo || isStale || needsReview
+        let color = isUpdating
+            ? LifeOSTokens.info
+            : (isDemo || isStale || needsReview
             ? LifeOSTokens.warning
-            : (unavailable ? LifeOSTokens.tertiaryText : LifeOSTokens.success)
+            : (unavailable ? LifeOSTokens.tertiaryText : LifeOSTokens.success))
         return HStack(spacing: 6) {
             Circle()
                 .fill(color)
@@ -509,20 +556,16 @@ struct OverviewView: View {
                     // route-level animation is owned by LifeOSApp.
                     showingUsage = true
                 } label: {
-                    let card = OverviewMetricCard(
+                    OverviewMetricCard(
                         section: section,
                         featured: featured,
                         usageSnapshots: usageSnapshots,
                         usageAnalytics: usageAnalytics,
                         fitnessSnapshot: fitnessSnapshot,
                         financeSummary: financeSummary,
-                        financeState: financeState
+                        financeState: financeState,
+                        usageHasPartialCoverage: usageHasPartialCoverage
                     )
-                    if openDestination == nil {
-                        zoomSource(card, id: section.kind.rawValue)
-                    } else {
-                        card
-                    }
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("account-usage-link")
@@ -535,7 +578,8 @@ struct OverviewView: View {
                     usageAnalytics: usageAnalytics,
                     fitnessSnapshot: fitnessSnapshot,
                     financeSummary: financeSummary,
-                    financeState: financeState
+                    financeState: financeState,
+                    usageHasPartialCoverage: usageHasPartialCoverage
                 )
             }
         case .clipper:
@@ -588,39 +632,82 @@ struct OverviewView: View {
                 )
             }
         case .finance:
-            if openDestination != nil {
-                Button { openDestination?(.finance) } label: {
+            financeSectionRow(section)
+        }
+    }
+
+    @ViewBuilder
+    private func financeSectionRow(_ section: OverviewSection) -> some View {
+        if let openDestination {
+            VStack(alignment: .leading, spacing: 8) {
+                Button { openDestination(.finance) } label: {
                     OverviewMetricCard(
                         section: section,
                         usageSnapshots: usageSnapshots,
                         fitnessSnapshot: fitnessSnapshot,
                         financeSummary: financeSummary,
-                        financeState: financeState,
-                        onOpenWealth: {
-                            if reduceMotion {
-                                selectedDetail = .financeWealth
-                            } else {
-                                withAnimation(LifeOSMotion.heroMorph) {
-                                    selectedDetail = .financeWealth
-                                }
-                            }
-                        },
-                        wealthHeroNamespace: reduceMotion ? nil : cardNamespace
+                        financeState: financeState
                     )
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("overview-finance-link")
                 .accessibilityHint("Opens Finance")
-            } else {
-                OverviewMetricCard(
-                    section: section,
-                    usageSnapshots: usageSnapshots,
-                    fitnessSnapshot: fitnessSnapshot,
-                    financeSummary: financeSummary,
-                    financeState: financeState
-                )
+
+                financeWealthLink
             }
+        } else {
+            OverviewMetricCard(
+                section: section,
+                usageSnapshots: usageSnapshots,
+                fitnessSnapshot: fitnessSnapshot,
+                financeSummary: financeSummary,
+                financeState: financeState
+            )
         }
+    }
+
+    @ViewBuilder
+    private var financeWealthLink: some View {
+        Button {
+            if reduceMotion {
+                selectedDetail = .financeWealth
+            } else {
+                withAnimation(LifeOSMotion.heroMorph) {
+                    selectedDetail = .financeWealth
+                }
+            }
+        } label: {
+            HStack(spacing: 8) {
+                LifeOSIcon(.investments)
+                    .foregroundStyle(LifeOSTokens.Module.finance)
+                    .frame(width: 14, height: 14)
+                Text("Wealth")
+                    .lifeOSTypography(.metadata, weight: .medium)
+                    .foregroundStyle(.primary)
+                Spacer(minLength: 6)
+                if let cents = financeSummary?.wealth?.observedValueCents {
+                    Text(OverviewCurrencyFormatter.eur(cents: cents))
+                        .lifeOSTypography(.metadata, weight: .semibold)
+                        .monospacedDigit()
+                } else {
+                    Text("Unavailable")
+                        .lifeOSTypography(.metadata)
+                        .foregroundStyle(LifeOSTokens.tertiaryText)
+                }
+                LifeOSIcon(.chevronRight)
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .frame(width: 10, height: 10)
+            }
+            .padding(.vertical, 8)
+            .padding(.horizontal, 10)
+            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .financeWealthHeroSource(namespace: reduceMotion ? nil : cardNamespace, reduceMotion: reduceMotion)
+        .accessibilityIdentifier("overview-finance-wealth-link")
+        .accessibilityLabel("Wealth")
+        .accessibilityValue(financeSummary?.wealth?.observedValueCents.map { OverviewCurrencyFormatter.eur(cents: $0) } ?? "Unavailable")
+        .accessibilityHint("Opens the Finance wealth surface")
     }
 
     /// Tags the clipper card as the source of an iOS 18 zoom navigation transition.
@@ -669,6 +756,8 @@ enum OverviewLayoutContract {
     static let maxContentWidth: CGFloat = 1120
     static let twoColumnBreakpoint: CGFloat = 720
     static let columnMinimumWidth: CGFloat = 320
+    static let threeColumnBreakpoint: CGFloat = 960
+    static let threeColumnMinimumWidth: CGFloat = 288
     static let columnSpacing: CGFloat = LifeOSTokens.overviewCardGap + 4
 
     static func measuredContentWidth(availableWidth: CGFloat) -> CGFloat {
@@ -690,6 +779,18 @@ enum OverviewLayoutContract {
             ? columnMinimumWidth * 2 + columnSpacing
             : 0
     }
+
+    /// Supporting cards use three columns only when the measured width keeps
+    /// every card at the documented minimum. The older two-column helper above
+    /// remains the compatibility check used by the existing snapshot contract.
+    static func supportingColumnCount(for contentWidth: CGFloat, itemCount: Int) -> Int {
+        guard itemCount > 0 else { return 0 }
+        let width = measuredContentWidth(availableWidth: contentWidth)
+        guard width >= twoColumnBreakpoint else { return 1 }
+        let canUseThree = width >= threeColumnBreakpoint
+            && (width - columnSpacing * 2) / 3 >= threeColumnMinimumWidth
+        return min(canUseThree ? 3 : 2, itemCount)
+    }
 }
 
 /// Measures the width proposed by the existing Home content container and
@@ -709,10 +810,6 @@ private struct OverviewSupportingLayout: Layout {
         return OverviewLayoutContract.measuredContentWidth(availableWidth: intrinsicWidth)
     }
 
-    private func columnCount(for width: CGFloat, subviewCount: Int) -> Int {
-        min(OverviewLayoutContract.columnCount(for: width), max(subviewCount, 1))
-    }
-
     func sizeThatFits(
         proposal: ProposedViewSize,
         subviews: Subviews,
@@ -721,43 +818,18 @@ private struct OverviewSupportingLayout: Layout {
         guard !subviews.isEmpty else { return .zero }
 
         let width = width(for: proposal, subviews: subviews)
-        let count = columnCount(for: width, subviewCount: subviews.count)
+        let count = OverviewLayoutContract.supportingColumnCount(for: width, itemCount: subviews.count)
         let spacing = OverviewLayoutContract.columnSpacing
-        let columnWidth = count == 2
-            ? max(1, (width - spacing) / 2)
-            : max(1, width)
+        let columnWidth = max(1, (width - spacing * CGFloat(count - 1)) / CGFloat(count))
         let sizes = subviews.map {
             $0.sizeThatFits(.init(width: columnWidth, height: nil))
         }
 
-        var height: CGFloat = 0
-        var rowHeight: CGFloat = 0
-        var rowItemCount = 0
-        for index in sizes.indices {
-            let isFullWidthFinalItem = count == 2
-                && !subviews.count.isMultiple(of: 2)
-                && index == sizes.count - 1
-
-            if isFullWidthFinalItem {
-                if rowItemCount > 0 {
-                    height += rowHeight + spacing
-                    rowHeight = 0
-                    rowItemCount = 0
-                }
-                let finalSize = subviews[index].sizeThatFits(.init(width: width, height: nil))
-                height += finalSize.height
-            } else {
-                rowHeight = max(rowHeight, sizes[index].height)
-                rowItemCount += 1
-                if rowItemCount == count || index == sizes.count - 1 {
-                    height += rowHeight
-                    if index < sizes.count - 1 { height += spacing }
-                    rowHeight = 0
-                    rowItemCount = 0
-                }
-            }
+        var rowHeights = Array(repeating: CGFloat.zero, count: (sizes.count + count - 1) / count)
+        for (index, size) in sizes.enumerated() {
+            rowHeights[index / count] = max(rowHeights[index / count], size.height)
         }
-
+        let height = rowHeights.reduce(0, +) + spacing * CGFloat(max(0, rowHeights.count - 1))
         return CGSize(width: width, height: height)
     }
 
@@ -770,51 +842,35 @@ private struct OverviewSupportingLayout: Layout {
         guard !subviews.isEmpty else { return }
 
         let width = OverviewLayoutContract.measuredContentWidth(availableWidth: bounds.width)
-        let count = columnCount(for: width, subviewCount: subviews.count)
+        let count = OverviewLayoutContract.supportingColumnCount(for: width, itemCount: subviews.count)
         let spacing = OverviewLayoutContract.columnSpacing
-        let columnWidth = count == 2
-            ? max(1, (width - spacing) / 2)
-            : max(1, width)
+        let columnWidth = max(1, (width - spacing * CGFloat(count - 1)) / CGFloat(count))
         let sizes = subviews.map {
             $0.sizeThatFits(.init(width: columnWidth, height: nil))
         }
 
-        var y = bounds.minY
-        var rowHeight: CGFloat = 0
-        var rowItemCount = 0
+        var rowHeights = Array(repeating: CGFloat.zero, count: (sizes.count + count - 1) / count)
+        for (index, size) in sizes.enumerated() {
+            rowHeights[index / count] = max(rowHeights[index / count], size.height)
+        }
+
+        var rowOrigins = Array(repeating: bounds.minY, count: rowHeights.count)
+        for index in rowHeights.indices.dropFirst() {
+            rowOrigins[index] = rowOrigins[index - 1] + rowHeights[index - 1] + spacing
+        }
+
         for index in subviews.indices {
-            let isFullWidthFinalItem = count == 2
-                && !subviews.count.isMultiple(of: 2)
-                && index == subviews.count - 1
-
-            if isFullWidthFinalItem {
-                if rowItemCount > 0 { y += rowHeight + spacing }
-                let finalSize = subviews[index].sizeThatFits(.init(width: width, height: nil))
-                subviews[index].place(
-                    at: CGPoint(x: bounds.minX, y: y),
-                    anchor: .topLeading,
-                    proposal: .init(width: width, height: finalSize.height)
-                )
-                continue
-            }
-
             let column = index % count
+            let row = index / count
             let size = sizes[index]
             subviews[index].place(
                 at: CGPoint(
                     x: bounds.minX + CGFloat(column) * (columnWidth + spacing),
-                    y: y
+                    y: rowOrigins[row]
                 ),
                 anchor: .topLeading,
                 proposal: .init(width: columnWidth, height: size.height)
             )
-            rowHeight = max(rowHeight, size.height)
-            rowItemCount += 1
-            if rowItemCount == count {
-                y += rowHeight + spacing
-                rowHeight = 0
-                rowItemCount = 0
-            }
         }
     }
 }
@@ -882,11 +938,12 @@ enum OverviewHomeStatusPolicy {
         clipperState: ClipperLoadState,
         healthState: FitnessSourceState.Status,
         healthIntegrityIssue: Bool,
-        financeState: FinanceLoadState
+        financeState: FinanceLoadState,
+        partialUsage: Bool = false
     ) -> Bool {
         switch section {
         case .llm:
-            return quality == .demo || connector == .refreshDue || sectionState == .partial
+            return quality == .demo || connector == .refreshDue || sectionState == .partial || partialUsage
         case .clipper:
             return quality == .demo || connector == .refreshDue || sectionState == .partial || clipperState == .stale
         case .health:
@@ -919,13 +976,18 @@ enum OverviewHomeStatusPolicy {
         financeState: FinanceLoadState,
         financeHasObservedValue: Bool,
         clipperState: ClipperLoadState,
-        hasRefreshDueSection: Bool
+        hasRefreshDueSection: Bool,
+        usageState: UsageLoadState? = nil,
+        hasPartialUsage: Bool = false
     ) -> String {
         if qualities.allSatisfy({ $0 == .demo }) { return "DEMO FIXTURES · NOT LIVE DATA" }
+        if usageState == .loading || financeState == .loading || clipperState == .loading {
+            return "UPDATING DATA"
+        }
         if healthState == .stale || financeState == .stale {
             return "STALE DATA · REFRESH REQUIRED"
         }
-        if healthIntegrityIssue {
+        if healthIntegrityIssue || hasPartialUsage {
             return "PARTIAL DATA · REVIEW SOURCE"
         }
         let healthConnected = healthState == .connected || healthState == .stale
@@ -964,16 +1026,7 @@ private struct OverviewMetricCard: View {
     let fitnessSnapshot: FitnessSnapshot
     let financeSummary: FinanceSummary?
     let financeState: FinanceLoadState
-    /// RF-20: non-nil only for the Finance card, and only when a wealth
-    /// observation exists to route to. A nested `Button` inside the card's
-    /// own whole-card `Button` is deliberate — SwiftUI hit-tests innermost
-    /// views first, so this row remains independently tappable without
-    /// changing the outer card's existing "open Finance" behavior.
-    let onOpenWealth: (() -> Void)?
-    /// Threaded from `OverviewView.cardNamespace`, `nil` under Reduce Motion.
-    /// Only the Wealth row uses it (`matchedTransitionSource`) — the card's
-    /// own whole-card tap keeps its existing plain-push behavior.
-    let wealthHeroNamespace: Namespace.ID?
+    let usageHasPartialCoverage: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
 
@@ -981,8 +1034,8 @@ private struct OverviewMetricCard: View {
          usageAnalytics: [UsageAnalyticsSnapshot] = [],
          clipperState: ClipperLoadState = .unavailable, clipperSnapshot: ClipperSnapshot? = nil,
          fitnessSnapshot: FitnessSnapshot = .unavailable, financeSummary: FinanceSummary? = nil,
-         financeState: FinanceLoadState = .unavailable, onOpenWealth: (() -> Void)? = nil,
-         wealthHeroNamespace: Namespace.ID? = nil) {
+         financeState: FinanceLoadState = .unavailable,
+         usageHasPartialCoverage: Bool = false) {
         self.section = section
         self.featured = featured
         self.usageSnapshots = usageSnapshots
@@ -992,8 +1045,7 @@ private struct OverviewMetricCard: View {
         self.fitnessSnapshot = fitnessSnapshot
         self.financeSummary = financeSummary
         self.financeState = financeState
-        self.onOpenWealth = onOpenWealth
-        self.wealthHeroNamespace = wealthHeroNamespace
+        self.usageHasPartialCoverage = usageHasPartialCoverage
     }
 
     private var title: String {
@@ -1039,6 +1091,9 @@ private struct OverviewMetricCard: View {
             case .unavailable, .observed: break
             }
         }
+        if section.kind == .llm && usageHasPartialCoverage && section.provenance.quality == .observed {
+            return "Partial observed · some provider windows unavailable"
+        }
         return switch section.provenance.quality {
         case .demo: "Demo fixture · not live"
         case .unavailable:
@@ -1072,7 +1127,8 @@ private struct OverviewMetricCard: View {
             clipperState: clipperState,
             healthState: fitnessSnapshot.source.status,
             healthIntegrityIssue: healthIntegrityIssue,
-            financeState: financeState
+            financeState: financeState,
+            partialUsage: usageHasPartialCoverage
         ) {
             return LifeOSTokens.warning
         }
@@ -1137,11 +1193,13 @@ private struct OverviewMetricCard: View {
                         .lifeOSTypography(.cardTitle)
                 .tracking(-0.1)
                         .foregroundStyle(.primary)
-                        .lineLimit(1)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                     Text(description)
                         .lifeOSTypography(.body)
                         .foregroundStyle(LifeOSTokens.secondaryText)
-                        .lineLimit(featured ? 1 : 2)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 8)
                 if isPlainDemoStatus {
@@ -1255,7 +1313,7 @@ private struct OverviewMetricCard: View {
         switch section.kind {
         case .clipper:
             VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 14) {
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 8) {
                     ValueMetric(value: clipperHomeMetricValue(containing: "Views"), label: "Views today")
                     ValueMetric(value: clipperHomeMetricValue(containing: "Subscribers"), label: "Subscribers")
                     ValueMetric(value: clipperHomeMetricValue(containing: "Revenue"), label: "Revenue")
@@ -1308,7 +1366,6 @@ private struct OverviewMetricCard: View {
                     OverviewChartUnavailable(detail: "Finance summary is not connected.")
                         .frame(minHeight: 58)
                 }
-                financeWealthRow
             }
         case .llm:
             EmptyView()
@@ -1380,53 +1437,6 @@ private struct OverviewMetricCard: View {
         }
     }
 
-    /// RF-20: wealth is a distinct source from `financeOverviewMetrics` above
-    /// (bank cash flow) — `FinanceWealthSnapshot.observedValueCents` never
-    /// derives from transactions or account balances. `nil` here means no
-    /// wealth observation exists, and the row renders an honest unavailable
-    /// state rather than a zero.
-    private var financeWealthCents: Int? {
-        financeSummary?.wealth?.observedValueCents
-    }
-
-    @ViewBuilder
-    private var financeWealthRow: some View {
-        if let onOpenWealth {
-            Button(action: onOpenWealth) {
-                HStack(spacing: 8) {
-                    LifeOSIcon(.investments)
-                        .foregroundStyle(LifeOSTokens.Module.finance)
-                        .frame(width: 14, height: 14)
-                    Text("Wealth")
-                        .lifeOSTypography(.metadata, weight: .medium)
-                        .foregroundStyle(.primary)
-                    Spacer(minLength: 6)
-                    if let financeWealthCents {
-                        Text(overviewCurrency(cents: financeWealthCents))
-                            .lifeOSTypography(.metadata, weight: .semibold)
-                            .monospacedDigit()
-                    } else {
-                        Text("Unavailable")
-                            .lifeOSTypography(.metadata)
-                            .foregroundStyle(LifeOSTokens.tertiaryText)
-                    }
-                    LifeOSIcon(.chevronRight)
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
-                        .frame(width: 10, height: 10)
-                }
-                .padding(.vertical, 8)
-                .padding(.horizontal, 10)
-                .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-            }
-            .buttonStyle(.plain)
-            .financeWealthHeroSource(namespace: wealthHeroNamespace, reduceMotion: reduceMotion)
-            .accessibilityIdentifier("overview-finance-wealth-link")
-            .accessibilityLabel("Wealth")
-            .accessibilityValue(financeWealthCents != nil ? overviewCurrency(cents: financeWealthCents!) : "Unavailable")
-            .accessibilityHint("Opens the Finance wealth surface")
-        }
-    }
-
     private var overviewFallbackMetrics: some View {
         LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 8) {
             ForEach(section.metrics.filter { $0.value != nil }) { metric in
@@ -1459,6 +1469,7 @@ private struct OverviewMetricCard: View {
     private func overviewCurrency(cents: Int) -> String {
         OverviewCurrencyFormatter.eur(cents: cents)
     }
+
 }
 
 private struct OverviewDisplayMetric: Identifiable {

@@ -288,4 +288,15 @@ final class SettingsConnectionLifecycleTests: XCTestCase {
         XCTAssertTrue(empty.summary.contains("scope=not_checked"))
         XCTAssertTrue(empty.text.contains("scope=not_checked"))
     }
+
+    func testSettingsLayoutRemainsReadableAtNarrowWidths() {
+        XCTAssertEqual(SettingsLayout.maxContentWidth, 640)
+        XCTAssertEqual(SettingsLayout.detailMaxWidth, 640)
+        XCTAssertEqual(SettingsLayout.rowMinimumHeight, 56)
+        XCTAssertEqual(SettingsLayout.rowInset, 12)
+        XCTAssertEqual(SettingsLayout.contentWidth(for: 359), 359)
+        XCTAssertEqual(SettingsLayout.contentWidth(for: 480), 480)
+        XCTAssertEqual(SettingsLayout.contentWidth(for: 719), 640)
+        XCTAssertEqual(SettingsLayout.contentWidth(for: 960), 640)
+    }
 }

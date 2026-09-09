@@ -844,6 +844,107 @@ public enum FitnessWidgetEntryPoint: Hashable, Sendable {
     case healthMetric(FitnessHealthMetric)
 }
 
+/// A deep link is an input to Fitness, not the owner's selection state. Keep
+/// the complete input together so a scene can apply a changed route once while
+/// ordinary conditional remounts leave the user's selection alone.
+struct FitnessInitialRouteIntent: Equatable {
+    let section: FitnessSection?
+    let nutritionEntryPoint: FitnessNutritionEntryPoint?
+    let fitnessEntryPoint: FitnessWidgetEntryPoint?
+    let generation: UInt64
+
+    init(
+        section: FitnessSection?,
+        nutritionEntryPoint: FitnessNutritionEntryPoint?,
+        fitnessEntryPoint: FitnessWidgetEntryPoint?,
+        generation: UInt64 = 0
+    ) {
+        self.section = section
+        self.nutritionEntryPoint = nutritionEntryPoint
+        self.fitnessEntryPoint = fitnessEntryPoint
+        self.generation = generation
+    }
+
+    var isEmpty: Bool {
+        section == nil && nutritionEntryPoint == nil && fitnessEntryPoint == nil
+    }
+}
+
+enum FitnessInitialRouteAction: Equatable {
+    case ignore
+    case clear
+    case apply(FitnessInitialRouteIntent)
+}
+
+enum FitnessInitialRoutePolicy {
+    static func action(
+        for intent: FitnessInitialRouteIntent,
+        after lastConsumedIntent: FitnessInitialRouteIntent?
+    ) -> FitnessInitialRouteAction {
+        if let lastConsumedIntent,
+           intent.generation <= lastConsumedIntent.generation {
+            return .ignore
+        }
+        return intent.isEmpty ? .clear : .apply(intent)
+    }
+
+    static func shouldApply(
+        _ intent: FitnessInitialRouteIntent,
+        after lastAppliedIntent: FitnessInitialRouteIntent?
+    ) -> Bool {
+        if case .apply = action(for: intent, after: lastAppliedIntent) { return true }
+        return false
+    }
+
+    static func selectedSection(
+        for action: FitnessInitialRouteAction,
+        current: FitnessSection
+    ) -> FitnessSection {
+        guard case .apply(let intent) = action,
+              let section = intent.section else { return current }
+        return section
+    }
+}
+
+/// Fitness navigation state is owned by the shell scene. The Fitness tree is
+/// intentionally mounted only while its module is selected, so this object
+/// keeps the selected section/date and the current deep-link entry context
+/// alive without keeping another live HealthKit or training view running.
+@MainActor
+public final class FitnessPresentationState: ObservableObject {
+    @Published var selectedSection: FitnessSection
+    @Published var selectedDate: Date
+    @Published var nutritionEntryPoint: FitnessNutritionEntryPoint?
+    @Published var fitnessEntryPoint: FitnessWidgetEntryPoint?
+    @Published fileprivate(set) var externalRouteIntent: FitnessInitialRouteIntent?
+    fileprivate var lastConsumedExternalRouteIntent: FitnessInitialRouteIntent?
+    private var nextExternalRouteGeneration: UInt64 = 0
+
+    public init(
+        selectedSection: FitnessSection = .today,
+        selectedDate: Date = .now,
+        nutritionEntryPoint: FitnessNutritionEntryPoint? = nil,
+        fitnessEntryPoint: FitnessWidgetEntryPoint? = nil
+    ) {
+        self.selectedSection = selectedSection
+        self.selectedDate = selectedDate
+        self.nutritionEntryPoint = nutritionEntryPoint
+        self.fitnessEntryPoint = fitnessEntryPoint
+        self.externalRouteIntent = nil
+    }
+
+    func receiveExternalRoute(_ destination: LifeOSDeepLink?) {
+        nextExternalRouteGeneration += 1
+        let isFitnessRoute = destination?.module == .fitness
+        externalRouteIntent = FitnessInitialRouteIntent(
+            section: isFitnessRoute ? destination?.fitnessSection : nil,
+            nutritionEntryPoint: isFitnessRoute ? destination?.nutritionEntryPoint : nil,
+            fitnessEntryPoint: isFitnessRoute ? destination?.fitnessEntryPoint : nil,
+            generation: nextExternalRouteGeneration
+        )
+    }
+}
+
 // MARK: - Fitness root
 
 public struct FitnessView: View {
@@ -858,7 +959,7 @@ public struct FitnessView: View {
     /// Fitness only dismisses its source explainer and asks the shell to take
     /// that action; it never constructs another HealthKit client or store.
     private let onSourceReview: (() -> Void)?
-    private let initialSection: FitnessSection
+    private let initialSection: FitnessSection?
     private let initialNutritionEntryPoint: FitnessNutritionEntryPoint?
     private let initialFitnessEntryPoint: FitnessWidgetEntryPoint?
     /// The app shell injects its single durable training coordinator. Optional
@@ -866,8 +967,7 @@ public struct FitnessView: View {
     /// callers fall back to the training view's own StateObject only when they
     /// actually open the Training section.
     private let trainingCoordinator: FitnessTrainingCoordinator?
-    @State private var selectedSection: FitnessSection
-    @State private var selectedDate: Date
+    @StateObject private var presentationState: FitnessPresentationState
     @State private var showingSourceGate = false
     @State private var reviewSourceAfterDismiss = false
     @StateObject private var journalStore: FitnessJournalStore
@@ -877,8 +977,18 @@ public struct FitnessView: View {
     @Environment(\.openSettings) private var openSettings
 #endif
 
+    private var selectedSection: FitnessSection {
+        get { presentationState.selectedSection }
+        nonmutating set { presentationState.selectedSection = newValue }
+    }
+
+    private var selectedDate: Date {
+        get { presentationState.selectedDate }
+        nonmutating set { presentationState.selectedDate = newValue }
+    }
+
     private var detailEntryPointUsesParentScroll: Bool {
-        initialFitnessEntryPoint?.coreRoute != nil
+        presentationState.fitnessEntryPoint?.coreRoute != nil
     }
 
     private var fitnessContentTopPadding: CGFloat {
@@ -889,17 +999,29 @@ public struct FitnessView: View {
         snapshotProvider?(selectedDate) ?? snapshot
     }
 
+    private var initialRouteIntent: FitnessInitialRouteIntent {
+        if let externalRouteIntent = presentationState.externalRouteIntent {
+            return externalRouteIntent
+        }
+        return FitnessInitialRouteIntent(
+            section: initialSection,
+            nutritionEntryPoint: initialNutritionEntryPoint,
+            fitnessEntryPoint: initialFitnessEntryPoint
+        )
+    }
+
     public init(
         snapshot: FitnessSnapshot = .unavailable,
         snapshotProvider: ((Date) -> FitnessSnapshot)? = nil,
-        initialSection: FitnessSection = .today,
+        initialSection: FitnessSection? = nil,
         initialNutritionEntryPoint: FitnessNutritionEntryPoint? = nil,
         initialFitnessEntryPoint: FitnessWidgetEntryPoint? = nil,
         selectedDate: Date = .now,
         usesVisualFixtures: Bool = false,
         onSourceReview: (() -> Void)? = nil,
         journalStore: FitnessJournalStore? = nil,
-        trainingCoordinator: FitnessTrainingCoordinator? = nil
+        trainingCoordinator: FitnessTrainingCoordinator? = nil,
+        presentationState: FitnessPresentationState? = nil
     ) {
         let fixtureMode = FitnessJournalFixturePolicy.isFixtureMode(
             usesVisualFixtures: usesVisualFixtures,
@@ -913,8 +1035,12 @@ public struct FitnessView: View {
         self.initialNutritionEntryPoint = initialNutritionEntryPoint
         self.initialFitnessEntryPoint = initialFitnessEntryPoint
         self.trainingCoordinator = trainingCoordinator
-        _selectedSection = State(initialValue: initialSection)
-        _selectedDate = State(initialValue: selectedDate)
+        _presentationState = StateObject(wrappedValue: presentationState ?? FitnessPresentationState(
+            selectedSection: initialSection ?? .today,
+            selectedDate: selectedDate,
+            nutritionEntryPoint: initialNutritionEntryPoint,
+            fitnessEntryPoint: initialFitnessEntryPoint
+        ))
         let seededRecords = snapshot.journalRecords.map { record in
             var copy = record
             // Visual fixtures are date-scoped to the review date so the same
@@ -933,8 +1059,8 @@ public struct FitnessView: View {
     public var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                FitnessHeader(selectedDate: $selectedDate, source: resolvedSnapshot.source, onSourceTap: { showingSourceGate = true })
-                FitnessSectionPicker(selection: $selectedSection)
+                FitnessHeader(selectedDate: $presentationState.selectedDate, source: resolvedSnapshot.source, onSourceTap: { showingSourceGate = true })
+                FitnessSectionPicker(selection: $presentationState.selectedSection)
                 if usesVisualFixtures || resolvedSnapshot.source.status == .demo {
                     FitnessFixtureBanner()
                 }
@@ -950,11 +1076,11 @@ public struct FitnessView: View {
                             bottomPadding: 28
                         ) {
                             FitnessSectionContent(
-                                section: selectedSection,
+                                section: presentationState.selectedSection,
                                 snapshot: resolvedSnapshot,
-                                selectedDate: $selectedDate,
-                                nutritionEntryPoint: initialNutritionEntryPoint,
-                                fitnessEntryPoint: initialFitnessEntryPoint,
+                                selectedDate: $presentationState.selectedDate,
+                                nutritionEntryPoint: presentationState.nutritionEntryPoint,
+                                fitnessEntryPoint: presentationState.fitnessEntryPoint,
                                 trainingCoordinator: trainingCoordinator,
                                 journalStore: journalStore,
                                 usesVisualFixtures: usesVisualFixtures,
@@ -963,7 +1089,7 @@ public struct FitnessView: View {
                         }
                     }
                     .scrollIndicators(.hidden)
-                    .onChange(of: selectedSection) { oldSection, newSection in
+                    .onChange(of: presentationState.selectedSection) { oldSection, newSection in
                         guard oldSection != newSection else { return }
                         if LifeOSMotion.reduceMotion {
                             scrollProxy.scrollTo(Self.contentTopID, anchor: .top)
@@ -978,15 +1104,11 @@ public struct FitnessView: View {
         }
         .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
         .tint(LifeOSTokens.accent)
-        .onChange(of: initialSection) { _, newSection in
-            guard selectedSection != newSection else { return }
-            if LifeOSMotion.reduceMotion {
-                selectedSection = newSection
-            } else {
-                withAnimation(LifeOSMotion.snappy) {
-                    selectedSection = newSection
-                }
-            }
+        .onAppear {
+            applyInitialRouteIfNeeded()
+        }
+        .onChange(of: presentationState.externalRouteIntent) { _, _ in
+            applyInitialRouteIfNeeded(animated: true)
         }
         .sheet(isPresented: $showingSourceGate, onDismiss: {
             guard reviewSourceAfterDismiss else { return }
@@ -1000,6 +1122,40 @@ public struct FitnessView: View {
                 .presentationDetents([.medium])
         }
         .accessibilityIdentifier("fitness-view")
+    }
+
+    private func applyInitialRouteIfNeeded(animated: Bool = false) {
+        let intent = initialRouteIntent
+        let action = FitnessInitialRoutePolicy.action(
+            for: intent,
+            after: presentationState.lastConsumedExternalRouteIntent
+        )
+        guard action != .ignore else { return }
+        presentationState.lastConsumedExternalRouteIntent = intent
+
+        guard case .apply(let appliedIntent) = action else {
+            // A route clear only ends the old event. The scene-owned section,
+            // date, and entry state remain intact for the next mount.
+            return
+        }
+
+        let requestedSection = FitnessInitialRoutePolicy.selectedSection(
+            for: action,
+            current: selectedSection
+        )
+        if selectedSection != requestedSection {
+            if animated && !LifeOSMotion.reduceMotion {
+                withAnimation(LifeOSMotion.snappy) {
+                    selectedSection = requestedSection
+                }
+            } else {
+                LifeOSMotion.withoutAnimation {
+                    selectedSection = requestedSection
+                }
+            }
+        }
+        presentationState.nutritionEntryPoint = appliedIntent.nutritionEntryPoint
+        presentationState.fitnessEntryPoint = appliedIntent.fitnessEntryPoint
     }
 
     /// Keep all Health setup decisions in the app shell. When a standalone

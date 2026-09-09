@@ -23,13 +23,13 @@ import SwiftUI
 /// IBAN/MCC-derived country guess, no trip model, no synthesized totals or
 /// counts. Building the travel *feature* half (a map, trip counts, manual
 /// trip entry) is a product-scope decision for geonq, not this tranche.
-struct FinanceAnalyticsView: View {
-    enum Entry: String, CaseIterable, Identifiable, Hashable {
+public struct FinanceAnalyticsView: View {
+    public enum Entry: String, CaseIterable, Identifiable, Hashable {
         case wealth
         case spendingAbroad
         case travel
 
-        var id: String { rawValue }
+        public var id: String { rawValue }
 
         var title: String {
             switch self {
@@ -71,19 +71,17 @@ struct FinanceAnalyticsView: View {
     let onOpenConnections: (() -> Void)?
     @Binding var selectedRange: FinanceRange
     @Binding var selectedNetWorthPoint: String?
-    let initialEntry: Entry?
+    @Binding private var selectedEntry: Entry?
     /// `nil` under Reduce Motion — see `FinanceHeroMorphTag`.
     let heroNamespace: Namespace.ID?
     let onClose: () -> Void
-
-    @State private var selectedEntry: Entry?
 
     init(
         snapshot: FinanceDisplaySnapshot,
         onOpenConnections: (() -> Void)?,
         selectedRange: Binding<FinanceRange>,
         selectedNetWorthPoint: Binding<String?>,
-        initialEntry: Entry?,
+        selectedEntry: Binding<Entry?>,
         heroNamespace: Namespace.ID?,
         onClose: @escaping () -> Void
     ) {
@@ -91,13 +89,12 @@ struct FinanceAnalyticsView: View {
         self.onOpenConnections = onOpenConnections
         _selectedRange = selectedRange
         _selectedNetWorthPoint = selectedNetWorthPoint
-        self.initialEntry = initialEntry
+        _selectedEntry = selectedEntry
         self.heroNamespace = heroNamespace
         self.onClose = onClose
-        _selectedEntry = State(initialValue: initialEntry)
     }
 
-    var body: some View {
+    public var body: some View {
         ScrollView {
             LifeOSResponsiveContentContainer(topPadding: 16, bottomPadding: 16) {
                 VStack(alignment: .leading, spacing: 16) {
@@ -112,9 +109,6 @@ struct FinanceAnalyticsView: View {
         }
         .scrollIndicators(.hidden)
         .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
-        .onChange(of: initialEntry) { _, entry in
-            selectedEntry = entry
-        }
         .accessibilityIdentifier("finance-analytics")
     }
 

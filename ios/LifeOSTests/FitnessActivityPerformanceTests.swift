@@ -2,6 +2,7 @@ import Foundation
 import XCTest
 @testable import LifeOS
 
+@MainActor
 final class FitnessActivityPerformanceTests: XCTestCase {
     func testFitnessDateNavigationKeepsLocalDayAcrossBerlinSpringForward() throws {
         var calendar = Calendar(identifier: .gregorian)
@@ -112,6 +113,73 @@ final class FitnessActivityPerformanceTests: XCTestCase {
                 layoutReady: true
             ),
             .clear
+        )
+    }
+
+    func testFitnessInitialRoutePolicyAppliesChangedIntentsOnly() {
+        let training = FitnessInitialRouteIntent(
+            section: .training,
+            nutritionEntryPoint: nil,
+            fitnessEntryPoint: nil,
+            generation: 1
+        )
+        let repeatedTraining = FitnessInitialRouteIntent(
+            section: .training,
+            nutritionEntryPoint: nil,
+            fitnessEntryPoint: nil,
+            generation: 2
+        )
+        let nutrition = FitnessInitialRouteIntent(
+            section: .nutrition,
+            nutritionEntryPoint: .goals,
+            fitnessEntryPoint: nil,
+            generation: 3
+        )
+        let empty = FitnessInitialRouteIntent(
+            section: nil,
+            nutritionEntryPoint: nil,
+            fitnessEntryPoint: nil,
+            generation: 4
+        )
+
+        XCTAssertTrue(FitnessInitialRoutePolicy.shouldApply(training, after: nil))
+        XCTAssertFalse(FitnessInitialRoutePolicy.shouldApply(training, after: training))
+        XCTAssertTrue(FitnessInitialRoutePolicy.shouldApply(repeatedTraining, after: training))
+        XCTAssertTrue(FitnessInitialRoutePolicy.shouldApply(nutrition, after: repeatedTraining))
+        XCTAssertFalse(FitnessInitialRoutePolicy.shouldApply(empty, after: training))
+        XCTAssertEqual(
+            FitnessInitialRoutePolicy.action(for: empty, after: nutrition),
+            .clear
+        )
+        XCTAssertEqual(
+            FitnessInitialRoutePolicy.selectedSection(for: .clear, current: .nutrition),
+            .nutrition
+        )
+    }
+
+    func testFitnessSceneStateKeepsSectionAcrossClearAndAcceptsRepeatedRoute() throws {
+        let state = FitnessPresentationState(selectedSection: .nutrition)
+        state.receiveExternalRoute(.fitnessTraining)
+        let first = try XCTUnwrap(state.externalRouteIntent)
+
+        // The user changes the section while the original route value is still
+        // present, then leaves Fitness so the route is cleared while it is
+        // unmounted.
+        state.selectedSection = .nutrition
+        state.receiveExternalRoute(nil)
+        let cleared = try XCTUnwrap(state.externalRouteIntent)
+        XCTAssertEqual(state.selectedSection, .nutrition)
+        XCTAssertEqual(
+            FitnessInitialRoutePolicy.action(for: cleared, after: first),
+            .clear
+        )
+
+        state.receiveExternalRoute(.fitnessTraining)
+        let repeated = try XCTUnwrap(state.externalRouteIntent)
+        XCTAssertGreaterThan(repeated.generation, cleared.generation)
+        XCTAssertEqual(
+            FitnessInitialRoutePolicy.action(for: repeated, after: first),
+            .apply(repeated)
         )
     }
 

@@ -17,6 +17,17 @@ private enum LifeOSAppTab: Hashable, CaseIterable {
         }
     }
 
+    init?(identifier: String) {
+        switch identifier {
+        case "home": self = .home
+        case "calendar": self = .calendar
+        case "finance": self = .finance
+        case "fitness": self = .fitness
+        case "more": self = .more
+        default: return nil
+        }
+    }
+
     /// Keep the compact nav on one stable SF Symbol per route. Selection is
     /// expressed by weight, color, and the selected surface rather than by
     /// swapping the symbol's silhouette.
@@ -25,8 +36,8 @@ private enum LifeOSAppTab: Hashable, CaseIterable {
         case .home: "house"
         case .calendar: "calendar"
         case .finance: "creditcard"
-        case .fitness: "figure.run"
-        case .more: "ellipsis.circle"
+        case .fitness: "heart"
+        case .more: "ellipsis"
         }
     }
 
@@ -46,10 +57,6 @@ struct LifeOSApp: App {
     @State private var homeFitnessSnapshot: FitnessSnapshot
     private let fitnessObservationSyncClient: TailscaleSyncClient?
 #endif
-    @State private var selection: LifeOSAppTab = .home
-    @State private var showingUsage = false
-    @State private var requestingNewCalendarEvent = false
-    @State private var selectedModuleRoute: LifeOSDeepLink?
     @State private var initialLiveLoadFinished = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
@@ -144,115 +151,20 @@ struct LifeOSApp: App {
 
     var body: some Scene {
         WindowGroup {
-            VStack(alignment: .leading, spacing: 0) {
-                ZStack(alignment: .topLeading) {
-                    switch selection {
-                    case .home:
-                        if showingUsage {
-                            UsageView(
-                                snapshots: usesVisualFixtures ? DemoDataProvider.providers : usageCoordinator.providers,
-                                analytics: usesVisualFixtures ? DemoUsageAnalytics.snapshots : usageCoordinator.analytics,
-                                state: usesVisualFixtures ? .demo : usageCoordinator.state,
-                                refreshAction: usesVisualFixtures ? nil : { await usageCoordinator.refresh() },
-                                onBack: {
-                                    withAnimation(reduceMotion ? nil : LifeOSMotion.heroMorph) {
-                                        showingUsage = false
-                                        selectedModuleRoute = nil
-                                    }
-                                }
-                            )
-                        } else {
-                            OverviewView(
-                                snapshot: usesVisualFixtures
-                                    ? DemoDataProvider.overview
-                                    : OverviewSnapshot.production(clipper: clipperCoordinator.snapshot),
-                                usageSnapshots: usesVisualFixtures ? DemoDataProvider.providers : usageCoordinator.providers,
-                                usageAnalytics: usesVisualFixtures ? DemoUsageAnalytics.snapshots : usageCoordinator.analytics,
-                                usageState: usesVisualFixtures ? .demo : usageCoordinator.state,
-                                refreshAction: usesVisualFixtures ? nil : {
-                                    await calendarCoordinator.manualRefresh()
-                                    await usageCoordinator.refresh()
-                                    await financeCoordinator.refresh()
-                                    await clipperCoordinator.refresh()
-                                },
-                                clipperRefreshAction: usesVisualFixtures ? nil : { await clipperCoordinator.refresh() },
-                                clipperState: usesVisualFixtures ? .demo : clipperCoordinator.state,
-                                fitnessSnapshot: usesVisualFixtures ? .demo : homeFitnessSnapshot,
-                                financeSummary: usesVisualFixtures ? nil : financeCoordinator.summary,
-                                financeState: usesVisualFixtures ? .demo : financeCoordinator.state,
-                                openDestination: navigate,
-                                showingUsage: $showingUsage
-                            )
-                        }
-                    case .calendar:
-                        CalendarView(coordinator: calendarCoordinator, requestNewEvent: $requestingNewCalendarEvent)
-                    case .finance:
-                        FinanceView(
-                            summary: financeCoordinator.summary,
-                            usesVisualFixtures: usesVisualFixtures,
-                            initialDetail: financeDetailRoute,
-                            onOpenConnections: { navigate(.settings) },
-                            onRefresh: usesVisualFixtures ? nil : { await financeCoordinator.refresh() }
-                        )
-                    case .fitness:
-                        FitnessView(
-                            snapshot: usesVisualFixtures ? .demo : .unavailable,
-                            snapshotProvider: fitnessSnapshotProvider,
-                            initialSection: selectedModuleRoute?.fitnessSection ?? .today,
-                            initialNutritionEntryPoint: selectedModuleRoute?.nutritionEntryPoint,
-                            initialFitnessEntryPoint: selectedModuleRoute?.fitnessEntryPoint,
-                            usesVisualFixtures: usesVisualFixtures,
-                            onSourceReview: { navigate(.settings) },
-                            trainingCoordinator: fitnessTrainingCoordinator
-                        )
-                    case .more:
-                        LifeOSMoreModulesView(
-                            initialModule: secondaryModuleRoute,
-                            initialRoute: selectedModuleRoute,
-                            usesVisualFixtures: usesVisualFixtures,
-                            destinationForModule: moreDestination
-                        )
-                    }
-                }
-                // Only route content participates in the tab transition. The
-                // bar remains a single stable sibling, so an animated route
-                // change cannot briefly install two bars or move its inset.
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .id(selection)
-                .transition(reduceMotion ? .opacity : tabContentTransition)
-                .animation(reduceMotion ? nil : LifeOSMotion.tabCrossfade, value: selection)
-
-                if !showingUsage {
-                    CompactTabBar(selection: $selection) { tab in
-                        // A manual tab change starts a fresh top-level route.
-                        // Deep links supply their own route context immediately
-                        // before changing selection, so they do not pass here.
-                        selectedModuleRoute = nil
-                        showingUsage = false
-                        requestingNewCalendarEvent = false
-                    }
-                    .background {
-                        Rectangle()
-                            .fill(.ultraThinMaterial)
-                            .ignoresSafeArea(edges: .bottom)
-                    }
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
+            LifeOSIOSSceneRoot(
+                calendarCoordinator: calendarCoordinator,
+                usageCoordinator: usageCoordinator,
+                financeCoordinator: financeCoordinator,
+                clipperCoordinator: clipperCoordinator,
+                fitnessTrainingCoordinator: fitnessTrainingCoordinator,
+                usesVisualFixtures: usesVisualFixtures,
+                homeFitnessSnapshot: $homeFitnessSnapshot,
+                fitnessSnapshotProvider: fitnessSnapshotProvider,
+                destinationForModule: moreDestination
+            )
+            .frame(minWidth: 390, minHeight: 600)
             .tint(LifeOSTokens.accent)
             .preferredColorScheme(forcedColorScheme)
-            .animation(reduceMotion ? nil : LifeOSMotion.ease, value: calendarCoordinator.snapshot.items.count)
-            .onOpenURL { url in
-                switch LifeOSNavigationRoute(url: url) {
-                case .existing(let destination): navigate(destination)
-                case .home:
-                    selectTab(.home)
-                    selectedModuleRoute = nil
-                    showingUsage = false
-                    requestingNewCalendarEvent = false
-                }
-            }
             .task {
                 if !usesVisualFixtures {
                     await calendarCoordinator.load()
@@ -581,78 +493,8 @@ struct LifeOSApp: App {
     }
 #endif
 
-    private var tabContentTransition: AnyTransition {
-        .opacity
-    }
-
-    private func navigate(_ destination: LifeOSDeepLink) {
-        selectedModuleRoute = destination
-        switch destination {
-        case .usage:
-            selectTab(.home)
-            showingUsage = true
-        case .newCalendarEvent:
-            showingUsage = false
-            selectTab(.calendar)
-            requestingNewCalendarEvent = true
-        case .calendar:
-            showingUsage = false
-            selectTab(.calendar)
-        case .finance, .financeSpend, .financeCashFlow:
-            showingUsage = false
-            selectTab(.finance)
-        case .fitness, .fitnessTraining, .fitnessNutrition, .fitnessNutritionGoals, .fitnessNutritionImport,
-             .fitnessNutritionCamera, .fitnessNutritionBarcode, .fitnessNutritionAIProposal,
-             .fitnessNutritionSearch, .fitnessNetEnergy, .fitnessDailyOverview,
-             .fitnessStrain, .fitnessRecovery, .fitnessSleep, .fitnessRespiration,
-             .fitnessHealthMonitor,
-             .fitnessHeartRate, .fitnessHRV, .fitnessSpO2, .fitnessTemperature,
-             .fitnessSleepDuration, .fitnessStress, .fitnessEnergyReserve:
-            showingUsage = false
-            selectTab(.fitness)
-        case .tasks:
-            showingUsage = false
-            // Tasks has no standalone product surface yet; keep old links
-            // useful by landing on the calendar where time-based work lives.
-            selectTab(.calendar)
-        case .tax, .settings:
-            // More remains the only iOS entry point for secondary modules.
-            // Their existing views are pushed by `moreDestination`.
-            showingUsage = false
-            selectTab(.more)
-        }
-    }
-
-    private func selectTab(_ tab: LifeOSAppTab) {
-        selection = tab
-    }
-
-    private var secondaryModuleRoute: LifeOSModule? {
-        switch selectedModuleRoute?.module {
-        case .tax, .settings: selectedModuleRoute?.module
-        default: nil
-        }
-    }
-
-    private var financeDetailRoute: FinanceDetailRoute? {
-        switch selectedModuleRoute {
-        case .financeSpend: .spend
-        case .financeCashFlow: .cashFlow
-        default: nil
-        }
-    }
-
     private func moreDestination(_ module: LifeOSModule, route: LifeOSDeepLink?) -> AnyView {
         switch module {
-        case .aiUsage:
-            return AnyView(
-                UsageView(
-                    snapshots: usesVisualFixtures ? DemoDataProvider.providers : usageCoordinator.providers,
-                    analytics: usesVisualFixtures ? DemoUsageAnalytics.snapshots : usageCoordinator.analytics,
-                    state: usesVisualFixtures ? .demo : usageCoordinator.state,
-                    refreshAction: usesVisualFixtures ? nil : { await usageCoordinator.refresh() }
-                )
-            )
         case .tax:
             return AnyView(TaxDocumentsView())
         case .settings:
@@ -706,6 +548,367 @@ struct LifeOSApp: App {
         // Refresh status after the explicit action so the row reflects the
         // typed per-metric sharing state observed by the controller.
         await healthKitController.refreshStatus()
+    }
+}
+
+private struct LifeOSIOSSceneRoot: View {
+    @ObservedObject private var calendarCoordinator: CalendarCoordinator
+    @ObservedObject private var usageCoordinator: UsageCoordinator
+    @ObservedObject private var financeCoordinator: FinanceCoordinator
+    @ObservedObject private var clipperCoordinator: ClipperCoordinator
+    @ObservedObject private var fitnessTrainingCoordinator: FitnessTrainingCoordinator
+    @Binding private var homeFitnessSnapshot: FitnessSnapshot
+    private let usesVisualFixtures: Bool
+    private let fitnessSnapshotProvider: ((Date) -> FitnessSnapshot)?
+    private let destinationForModule: (LifeOSModule, LifeOSDeepLink?) -> AnyView
+
+    @State private var selection: LifeOSAppTab = .home
+    @State private var showingUsage = false
+    @State private var requestingNewCalendarEvent = false
+    @State private var selectedModuleRoute: LifeOSDeepLink?
+    @State private var showingDestinationUnavailable = false
+    @State private var unavailableOriginTab: LifeOSAppTab = .home
+    @State private var unavailableOriginRoute: LifeOSDeepLink?
+    @State private var unavailableOriginShowingUsage = false
+    @State private var didRestoreSceneState = false
+    @SceneStorage("LifeOS.iOS.tab.v1") private var restoredTabIdentifier = LifeOSAppTab.home.identifier
+    @SceneStorage("LifeOS.iOS.route.v1") private var restoredRouteIdentifier = ""
+    @SceneStorage("LifeOS.iOS.showingUsage.v1") private var restoredShowingUsage = false
+    @StateObject private var calendarPresentationState: CalendarPresentationState
+    @StateObject private var financePresentationState: FinancePresentationState
+    @StateObject private var fitnessPresentationState: FitnessPresentationState
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var routeTransition: AnyTransition {
+        reduceMotion ? .identity : .opacity
+    }
+
+    init(
+        calendarCoordinator: CalendarCoordinator,
+        usageCoordinator: UsageCoordinator,
+        financeCoordinator: FinanceCoordinator,
+        clipperCoordinator: ClipperCoordinator,
+        fitnessTrainingCoordinator: FitnessTrainingCoordinator,
+        usesVisualFixtures: Bool,
+        homeFitnessSnapshot: Binding<FitnessSnapshot>,
+        fitnessSnapshotProvider: ((Date) -> FitnessSnapshot)?,
+        destinationForModule: @escaping (LifeOSModule, LifeOSDeepLink?) -> AnyView
+    ) {
+        self.calendarCoordinator = calendarCoordinator
+        self.usageCoordinator = usageCoordinator
+        self.financeCoordinator = financeCoordinator
+        self.clipperCoordinator = clipperCoordinator
+        self.fitnessTrainingCoordinator = fitnessTrainingCoordinator
+        self.usesVisualFixtures = usesVisualFixtures
+        self._homeFitnessSnapshot = homeFitnessSnapshot
+        self.fitnessSnapshotProvider = fitnessSnapshotProvider
+        self.destinationForModule = destinationForModule
+        _calendarPresentationState = StateObject(wrappedValue: CalendarPresentationState())
+        _financePresentationState = StateObject(wrappedValue: FinancePresentationState())
+        _fitnessPresentationState = StateObject(wrappedValue: FitnessPresentationState())
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ZStack(alignment: .topLeading) {
+                if showingDestinationUnavailable {
+                    LifeOSDestinationUnavailableView(
+                        onBack: restoreUnavailableOrigin,
+                        onHome: {
+                            showingDestinationUnavailable = false
+                            clearSelectedModuleRoute()
+                            showingUsage = false
+                            requestingNewCalendarEvent = false
+                            clearUnavailableOrigin()
+                            selectTab(.home)
+                        }
+                    )
+                    .transition(routeTransition)
+                } else {
+                    detail
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .animation(reduceMotion ? nil : LifeOSMotion.tabCrossfade, value: selection)
+            .animation(reduceMotion ? nil : LifeOSMotion.tabCrossfade, value: showingUsage)
+            .animation(reduceMotion ? nil : LifeOSMotion.tabCrossfade, value: selectedModuleRoute)
+            .animation(reduceMotion ? nil : LifeOSMotion.tabCrossfade, value: showingDestinationUnavailable)
+
+            if !showingUsage {
+                CompactTabBar(selection: $selection) { tab in
+                    clearSelectedModuleRoute()
+                    showingUsage = false
+                    requestingNewCalendarEvent = false
+                    showingDestinationUnavailable = false
+                    clearUnavailableOrigin()
+                    selection = tab
+                }
+                .background {
+                    Rectangle()
+                        .fill(.ultraThinMaterial)
+                        .ignoresSafeArea(edges: .bottom)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
+        .tint(LifeOSTokens.accent)
+        .animation(reduceMotion ? nil : LifeOSMotion.ease, value: calendarCoordinator.snapshot.items.count)
+        .onOpenURL { url in
+            switch LifeOSNavigationRoute(url: url) {
+            case .existing(let destination): navigate(destination)
+            case .home:
+                showingDestinationUnavailable = false
+                clearUnavailableOrigin()
+                selectTab(.home)
+                clearSelectedModuleRoute()
+                showingUsage = false
+                requestingNewCalendarEvent = false
+            case .destinationUnavailable:
+                guard !showingDestinationUnavailable else { break }
+                unavailableOriginTab = selection
+                unavailableOriginRoute = selectedModuleRoute
+                unavailableOriginShowingUsage = showingUsage
+                clearSelectedModuleRoute()
+                showingUsage = false
+                requestingNewCalendarEvent = false
+                showingDestinationUnavailable = true
+            }
+        }
+        .onAppear { restoreSceneStateIfNeeded() }
+        .onChange(of: selection) { _, _ in persistSceneState() }
+        .onChange(of: selectedModuleRoute) { _, _ in persistSceneState() }
+        .onChange(of: showingUsage) { _, _ in persistSceneState() }
+        .onChange(of: requestingNewCalendarEvent) { _, requested in
+            guard !requested, selectedModuleRoute == .newCalendarEvent else { return }
+            // The calendar consumes this binding immediately. Replace the
+            // transient command with its ordinary route before persistence so
+            // relaunch cannot open another editor.
+            selectedModuleRoute = .calendar
+            persistSceneState()
+        }
+    }
+
+    @ViewBuilder
+    private var detail: some View {
+        switch selection {
+        case .home:
+            if showingUsage {
+                UsageView(
+                    snapshots: usesVisualFixtures ? DemoDataProvider.providers : usageCoordinator.providers,
+                    analytics: usesVisualFixtures ? DemoUsageAnalytics.snapshots : usageCoordinator.analytics,
+                    state: usesVisualFixtures ? .demo : usageCoordinator.state,
+                    refreshAction: usesVisualFixtures ? nil : { await usageCoordinator.refresh() },
+                    onBack: {
+                        withAnimation(reduceMotion ? nil : LifeOSMotion.heroMorph) {
+                            showingUsage = false
+                            selectedModuleRoute = nil
+                        }
+                    }
+                )
+                .transition(routeTransition)
+            } else {
+                OverviewView(
+                    snapshot: usesVisualFixtures
+                        ? DemoDataProvider.overview
+                        : OverviewSnapshot.production(clipper: clipperCoordinator.snapshot),
+                    usageSnapshots: usesVisualFixtures ? DemoDataProvider.providers : usageCoordinator.providers,
+                    usageAnalytics: usesVisualFixtures ? DemoUsageAnalytics.snapshots : usageCoordinator.analytics,
+                    usageState: usesVisualFixtures ? .demo : usageCoordinator.state,
+                    refreshAction: usesVisualFixtures ? nil : {
+                        await calendarCoordinator.manualRefresh()
+                        await usageCoordinator.refresh()
+                        await financeCoordinator.refresh()
+                        await clipperCoordinator.refresh()
+                    },
+                    clipperRefreshAction: usesVisualFixtures ? nil : { await clipperCoordinator.refresh() },
+                    clipperState: usesVisualFixtures ? .demo : clipperCoordinator.state,
+                    fitnessSnapshot: usesVisualFixtures ? .demo : homeFitnessSnapshot,
+                    financeSummary: usesVisualFixtures ? nil : financeCoordinator.summary,
+                    financeState: usesVisualFixtures ? .demo : financeCoordinator.state,
+                    openDestination: navigate,
+                    showingUsage: $showingUsage
+                )
+                .transition(routeTransition)
+            }
+        case .calendar:
+            CalendarView(
+                coordinator: calendarCoordinator,
+                requestNewEvent: $requestingNewCalendarEvent,
+                presentationState: calendarPresentationState
+            )
+            .transition(routeTransition)
+        case .finance:
+            FinanceView(
+                summary: financeCoordinator.summary,
+                usesVisualFixtures: usesVisualFixtures,
+                initialDetail: financeDetailRoute,
+                onOpenConnections: { navigate(.settings) },
+                onRefresh: usesVisualFixtures ? nil : { await financeCoordinator.refresh() },
+                observationState: usesVisualFixtures ? .demo : financeCoordinator.observationState,
+                errorMessage: usesVisualFixtures ? nil : financeCoordinator.errorMessage,
+                presentationState: financePresentationState
+            )
+            .transition(routeTransition)
+        case .fitness:
+            FitnessView(
+                snapshot: usesVisualFixtures ? .demo : .unavailable,
+                snapshotProvider: fitnessSnapshotProvider,
+                initialSection: selectedModuleRoute?.fitnessSection,
+                initialNutritionEntryPoint: selectedModuleRoute?.nutritionEntryPoint,
+                initialFitnessEntryPoint: selectedModuleRoute?.fitnessEntryPoint,
+                usesVisualFixtures: usesVisualFixtures,
+                onSourceReview: { navigate(.settings) },
+                trainingCoordinator: fitnessTrainingCoordinator,
+                presentationState: fitnessPresentationState
+            )
+            .transition(routeTransition)
+        case .more:
+            LifeOSMoreModulesView(
+                initialModule: secondaryModuleRoute,
+                initialRoute: selectedModuleRoute,
+                usesVisualFixtures: usesVisualFixtures,
+                destinationForModule: destinationForModule
+            )
+            .transition(routeTransition)
+        }
+    }
+
+    private func restoreSceneStateIfNeeded() {
+        guard !didRestoreSceneState else { return }
+        didRestoreSceneState = true
+        LifeOSMotion.withoutAnimation {
+            guard let tab = LifeOSAppTab(identifier: restoredTabIdentifier) else { return }
+            selection = tab
+            selectedModuleRoute = nil
+            showingUsage = restoredShowingUsage && tab == .home
+            requestingNewCalendarEvent = false
+            showingDestinationUnavailable = false
+            guard let route = LifeOSNavigationRoute(restorationKey: restoredRouteIdentifier) else { return }
+            switch route {
+            case .home, .destinationUnavailable:
+                break
+            case .existing(let destination):
+                let restoredDestination: LifeOSDeepLink = destination == .newCalendarEvent ? .calendar : destination
+                selectedModuleRoute = restoredDestination
+                recordModuleRouteIntent(restoredDestination)
+                showingUsage = restoredDestination == .usage
+                switch restoredDestination.module {
+                case .home: selection = .home
+                case .calendar: selection = .calendar
+                case .finance: selection = .finance
+                case .fitness: selection = .fitness
+                case .tax, .settings: selection = .more
+                default: selection = tab
+                }
+            }
+        }
+    }
+
+    private func persistSceneState() {
+        guard didRestoreSceneState else { return }
+        restoredTabIdentifier = selection.identifier
+        restoredRouteIdentifier = selectedModuleRoute?.restorationKey ?? ""
+        restoredShowingUsage = showingUsage
+    }
+
+    private func restoreUnavailableOrigin() {
+        let originTab = unavailableOriginTab
+        let originRoute = unavailableOriginRoute
+        let originShowingUsage = unavailableOriginShowingUsage
+        showingDestinationUnavailable = false
+        selection = originTab
+        let restoredRoute = originRoute == .newCalendarEvent ? .calendar : originRoute
+        selectedModuleRoute = restoredRoute
+        recordModuleRouteIntent(restoredRoute)
+        showingUsage = originShowingUsage
+        requestingNewCalendarEvent = false
+        clearUnavailableOrigin()
+    }
+
+    private func navigate(_ destination: LifeOSDeepLink) {
+        showingDestinationUnavailable = false
+        clearUnavailableOrigin()
+        selectedModuleRoute = destination
+        recordModuleRouteIntent(destination)
+        switch destination {
+        case .usage:
+            selectTab(.home)
+            showingUsage = true
+        case .newCalendarEvent:
+            showingUsage = false
+            selectTab(.calendar)
+            requestingNewCalendarEvent = true
+        case .calendar:
+            showingUsage = false
+            selectTab(.calendar)
+        case .finance, .financeSpend, .financeCashFlow:
+            showingUsage = false
+            selectTab(.finance)
+        case .fitness, .fitnessTraining, .fitnessNutrition, .fitnessNutritionGoals, .fitnessNutritionImport,
+             .fitnessNutritionCamera, .fitnessNutritionBarcode, .fitnessNutritionAIProposal,
+             .fitnessNutritionSearch, .fitnessNetEnergy, .fitnessDailyOverview,
+             .fitnessStrain, .fitnessRecovery, .fitnessSleep, .fitnessRespiration,
+             .fitnessHealthMonitor, .fitnessHeartRate, .fitnessHRV, .fitnessSpO2, .fitnessTemperature,
+             .fitnessSleepDuration, .fitnessStress, .fitnessEnergyReserve:
+            showingUsage = false
+            selectTab(.fitness)
+        case .tasks:
+            showingUsage = false
+            selectTab(.calendar)
+        case .tax, .settings:
+            showingUsage = false
+            selectTab(.more)
+        }
+    }
+
+    private func selectTab(_ tab: LifeOSAppTab) {
+        showingDestinationUnavailable = false
+        clearUnavailableOrigin()
+        selection = tab
+    }
+
+    private func clearSelectedModuleRoute() {
+        selectedModuleRoute = nil
+        recordModuleRouteIntent(nil)
+    }
+
+    private func recordModuleRouteIntent(_ destination: LifeOSDeepLink?) {
+        let financeRoute: FinanceDetailRoute?
+        if destination?.module == .finance {
+            switch destination {
+            case .financeSpend: financeRoute = .spend
+            case .financeCashFlow: financeRoute = .cashFlow
+            default: financeRoute = nil
+            }
+        } else {
+            financeRoute = nil
+        }
+        financePresentationState.receiveExternalRoute(financeRoute)
+        fitnessPresentationState.receiveExternalRoute(
+            destination?.module == .fitness ? destination : nil
+        )
+    }
+
+    private func clearUnavailableOrigin() {
+        unavailableOriginTab = .home
+        unavailableOriginRoute = nil
+        unavailableOriginShowingUsage = false
+    }
+
+    private var secondaryModuleRoute: LifeOSModule? {
+        switch selectedModuleRoute?.module {
+        case .tax, .settings: selectedModuleRoute?.module
+        default: nil
+        }
+    }
+
+    private var financeDetailRoute: FinanceDetailRoute? {
+        switch selectedModuleRoute {
+        case .financeSpend: .spend
+        case .financeCashFlow: .cashFlow
+        default: nil
+        }
     }
 }
 

@@ -114,14 +114,14 @@ struct LifeOSMacApp: App {
 
     var body: some Scene {
         WindowGroup {
-            LifeOSMacRootView(
+            LifeOSMacSceneRoot(
                 calendarCoordinator: calendarCoordinator,
-                usesVisualFixtures: usesVisualFixtures,
                 usageCoordinator: usageCoordinator,
                 financeCoordinator: financeCoordinator,
                 clipperCoordinator: clipperCoordinator,
                 fitnessTrainingCoordinator: fitnessTrainingCoordinator,
-                fitnessObservation: fitnessObservationCoordinator.observation
+                fitnessObservation: fitnessObservationCoordinator.observation,
+                usesVisualFixtures: usesVisualFixtures
             )
                 // Keep the narrow acceptance viewport reachable. The root
                 // layout collapses its sidebar below 900pt, so the window
@@ -224,6 +224,69 @@ struct LifeOSMacApp: App {
     }
 }
 
+struct LifeOSMacSceneState {
+    let module: LifeOSModule
+    let route: LifeOSDeepLink?
+    let showingUsage: Bool
+    let sidebarCollapsed: Bool
+    let sidebarWidth: Double
+}
+
+private struct LifeOSMacSceneRoot: View {
+    let calendarCoordinator: CalendarCoordinator
+    let usageCoordinator: UsageCoordinator
+    let financeCoordinator: FinanceCoordinator
+    let clipperCoordinator: ClipperCoordinator
+    let fitnessTrainingCoordinator: FitnessTrainingCoordinator
+    let fitnessObservation: FitnessObservationEnvelope?
+    let usesVisualFixtures: Bool
+    @SceneStorage("LifeOS.mac.module.v1") private var restoredModuleIdentifier = LifeOSModule.home.rawValue
+    @SceneStorage("LifeOS.mac.route.v1") private var restoredRouteIdentifier = ""
+    @SceneStorage("LifeOS.mac.showingUsage.v1") private var restoredShowingUsage = false
+    @SceneStorage("LifeOS.mac.sidebarCollapsed.v1") private var restoredSidebarCollapsed = false
+    @SceneStorage("LifeOS.mac.sidebarWidth.v1") private var restoredSidebarWidth = 224.0
+
+    var body: some View {
+        let module = LifeOSModule(rawValue: restoredModuleIdentifier).flatMap {
+            LifeOSModule.macPrimaryModules.contains($0) ? $0 : nil
+        } ?? .home
+        let moduleBinding = $restoredModuleIdentifier
+        let routeBinding = $restoredRouteIdentifier
+        let usageBinding = $restoredShowingUsage
+        let collapsedBinding = $restoredSidebarCollapsed
+        let widthBinding = $restoredSidebarWidth
+
+        LifeOSMacRootView(
+            calendarCoordinator: calendarCoordinator,
+            usesVisualFixtures: usesVisualFixtures,
+            usageCoordinator: usageCoordinator,
+            financeCoordinator: financeCoordinator,
+            clipperCoordinator: clipperCoordinator,
+            fitnessTrainingCoordinator: fitnessTrainingCoordinator,
+            fitnessObservation: fitnessObservation,
+            initialModule: module,
+            initialRoute: restoredRoute,
+            initiallyShowingUsage: restoredShowingUsage && module == .home,
+            initialSidebarCollapsed: restoredSidebarCollapsed,
+            initialSidebarWidth: restoredSidebarWidth,
+            onSceneStateChange: { state in
+                moduleBinding.wrappedValue = state.module.rawValue
+                routeBinding.wrappedValue = state.route?.restorationKey ?? ""
+                usageBinding.wrappedValue = state.showingUsage
+                collapsedBinding.wrappedValue = state.sidebarCollapsed
+                widthBinding.wrappedValue = state.sidebarWidth
+            }
+        )
+    }
+
+    private var restoredRoute: LifeOSDeepLink? {
+        guard case .existing(let route) = LifeOSNavigationRoute(restorationKey: restoredRouteIdentifier) else {
+            return nil
+        }
+        return route == .newCalendarEvent ? .calendar : route
+    }
+}
+
 /// The macOS shell keeps the primary navigation persistent. This is intentionally
 /// a SwiftUI layout so snapshots and the actual app share the same structure.
 @MainActor
@@ -240,8 +303,18 @@ struct LifeOSMacRootView: View {
     @State private var showingUsage: Bool
     @State private var requestingNewCalendarEvent = false
     @State private var sidebarCollapsed = false
+    @State private var sidebarWidth: Double = 224
     @State private var hoveredSidebarModule: LifeOSModule?
     @State private var showingCommandPalette = false
+    @State private var showingDestinationUnavailable = false
+    @State private var unavailableOriginModule: LifeOSModule = .home
+    @State private var unavailableOriginRoute: LifeOSDeepLink?
+    @State private var unavailableOriginShowingUsage = false
+    @State private var sidebarResizeStart: CGFloat?
+    @StateObject private var calendarPresentationState: CalendarPresentationState
+    @StateObject private var financePresentationState: FinancePresentationState
+    @StateObject private var fitnessPresentationState: FitnessPresentationState
+    private let onSceneStateChange: ((LifeOSMacSceneState) -> Void)?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @MainActor
@@ -255,7 +328,10 @@ struct LifeOSMacRootView: View {
         fitnessObservation: FitnessObservationEnvelope? = nil,
         initialModule: LifeOSModule = .home,
         initialRoute: LifeOSDeepLink? = nil,
-        initiallyShowingUsage: Bool = false
+        initiallyShowingUsage: Bool = false,
+        initialSidebarCollapsed: Bool = false,
+        initialSidebarWidth: Double = 224,
+        onSceneStateChange: ((LifeOSMacSceneState) -> Void)? = nil
     ) {
         self.calendarCoordinator = calendarCoordinator
         self.usesVisualFixtures = usesVisualFixtures
@@ -268,11 +344,31 @@ struct LifeOSMacRootView: View {
         _selection = State(initialValue: initialModule)
         _selectedRoute = State(initialValue: initialRoute)
         _showingUsage = State(initialValue: initiallyShowingUsage || initialRoute == .usage)
+        _sidebarCollapsed = State(initialValue: initialSidebarCollapsed)
+        _sidebarWidth = State(initialValue: initialSidebarWidth)
+        _calendarPresentationState = StateObject(wrappedValue: CalendarPresentationState())
+        let financePresentationState = FinancePresentationState()
+        let fitnessPresentationState = FitnessPresentationState()
+        if let initialRoute {
+            financePresentationState.receiveExternalRoute(Self.financeRoute(for: initialRoute))
+            fitnessPresentationState.receiveExternalRoute(
+                initialRoute.module == .fitness ? initialRoute : nil
+            )
+        }
+        _financePresentationState = StateObject(wrappedValue: financePresentationState)
+        _fitnessPresentationState = StateObject(wrappedValue: fitnessPresentationState)
+        self.onSceneStateChange = onSceneStateChange
     }
 
     private func rootLayout(isCompact: Bool) -> some View {
         HStack(spacing: 0) {
-            sidebar(isCompact: isCompact)
+            ZStack(alignment: .trailing) {
+                sidebar(isCompact: isCompact)
+                if !isCompact && !sidebarCollapsed {
+                    sidebarResizeHandle
+                }
+            }
+            .frame(width: effectiveSidebarWidth(isCompact: isCompact))
             Rectangle()
                 .fill(LifeOSTokens.hairlineBorder)
                 .frame(width: 1)
@@ -305,14 +401,33 @@ struct LifeOSMacRootView: View {
                             navigate(to: destination)
                         case .home:
                             select(.home)
+                        case .destinationUnavailable:
+                            guard !showingDestinationUnavailable else { break }
+                            unavailableOriginModule = selection
+                            unavailableOriginRoute = selectedRoute
+                            unavailableOriginShowingUsage = showingUsage
+                            clearSelectedRoute()
+                            showingUsage = false
+                            requestingNewCalendarEvent = false
+                            showingDestinationUnavailable = true
                         }
                     }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(LifeOSTokens.screenCanvas)
+        .onChange(of: selection) { _, _ in reportSceneState() }
+        .onChange(of: selectedRoute) { _, _ in reportSceneState() }
+        .onChange(of: showingUsage) { _, _ in reportSceneState() }
+        .onChange(of: sidebarCollapsed) { _, _ in reportSceneState() }
+        .onChange(of: sidebarWidth) { _, _ in reportSceneState() }
+        .onChange(of: requestingNewCalendarEvent) { _, requested in
+            guard !requested, selectedRoute == .newCalendarEvent else { return }
+            selectedRoute = .calendar
+            reportSceneState()
+        }
         .sheet(isPresented: $showingCommandPalette) {
-            LifeOSMacCommandPalette(selection: $selection, selectedRoute: $selectedRoute)
+            LifeOSMacCommandPalette(onSelect: { module in select(module) })
                 .frame(width: 560, height: 420)
         }
     }
@@ -321,6 +436,37 @@ struct LifeOSMacRootView: View {
         GeometryReader { proxy in
             rootLayout(isCompact: proxy.size.width < 900)
         }
+    }
+
+    private var resolvedSidebarWidth: CGFloat {
+        let value = CGFloat(sidebarWidth)
+        guard value.isFinite else { return 224 }
+        return min(max(value, 200), 260)
+    }
+
+    private func effectiveSidebarWidth(isCompact: Bool) -> CGFloat {
+        sidebarCollapsed || isCompact ? 68 : resolvedSidebarWidth
+    }
+
+    private var sidebarResizeHandle: some View {
+        Rectangle()
+            .fill(LifeOSTokens.hairlineBorder.opacity(0.001))
+            .frame(width: 8)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 1)
+                    .onChanged { value in
+                        let start = sidebarResizeStart ?? resolvedSidebarWidth
+                        sidebarResizeStart = start
+                        sidebarWidth = Double(min(max(start + value.translation.width, 200), 260))
+                    }
+                    .onEnded { _ in sidebarResizeStart = nil }
+            )
+            .accessibilityElement()
+            .accessibilityLabel("Sidebar width")
+            .accessibilityValue(Text("\(Int(resolvedSidebarWidth)) points"))
+            .accessibilityHint("Drag to resize between 200 and 260 points")
+            .accessibilityIdentifier("mac-sidebar-resize")
     }
 
     private func sidebar(isCompact: Bool) -> some View {
@@ -339,9 +485,9 @@ struct LifeOSMacRootView: View {
                 Spacer(minLength: 0)
                 if !isCompact {
                     Button {
-                    withAnimation(reduceMotion ? nil : LifeOSMotion.snappy) {
-                        sidebarCollapsed.toggle()
-                    }
+                        withAnimation(reduceMotion ? nil : LifeOSMotion.snappy) {
+                            sidebarCollapsed.toggle()
+                        }
                     } label: {
                         LifeOSIcon(sidebarCollapsed ? .chevronRight : .chevronLeft)
                             .frame(width: 16, height: 16)
@@ -369,7 +515,7 @@ struct LifeOSMacRootView: View {
                 .padding(.horizontal, 8)
                 .padding(.bottom, 10)
         }
-        .frame(width: collapsed ? 68 : 228)
+        .frame(width: effectiveSidebarWidth(isCompact: isCompact))
         .frame(maxHeight: .infinity, alignment: .topLeading)
         .background(LifeOSTokens.canvas)
         .accessibilityIdentifier("mac-persistent-sidebar")
@@ -427,97 +573,106 @@ struct LifeOSMacRootView: View {
             .accessibilityIdentifier("mac-command-palette-trigger")
         }
         .padding(.horizontal, isCompact ? 12 : 18)
-        .frame(height: isCompact ? 48 : 56)
+        .frame(height: 56)
         .background(LifeOSTokens.canvas)
         .accessibilityIdentifier("mac-global-top-bar")
     }
 
     @ViewBuilder
     private var detail: some View {
-        switch selection {
-        case .home:
-            if showingUsage {
-                UsageView(
-                    snapshots: usesVisualFixtures ? DemoDataProvider.providers : usageCoordinator.providers,
-                    analytics: usesVisualFixtures ? DemoUsageAnalytics.snapshots : usageCoordinator.analytics,
-                    state: usesVisualFixtures ? .demo : usageCoordinator.state,
-                    refreshAction: usesVisualFixtures ? nil : { await usageCoordinator.refresh() }
+        if showingDestinationUnavailable {
+            LifeOSDestinationUnavailableView(
+                onBack: restoreUnavailableOrigin,
+                onHome: { select(.home) }
+            )
+        } else {
+            switch selection {
+            case .home:
+                if showingUsage {
+                    UsageView(
+                        snapshots: usesVisualFixtures ? DemoDataProvider.providers : usageCoordinator.providers,
+                        analytics: usesVisualFixtures ? DemoUsageAnalytics.snapshots : usageCoordinator.analytics,
+                        state: usesVisualFixtures ? .demo : usageCoordinator.state,
+                        refreshAction: usesVisualFixtures ? nil : { await usageCoordinator.refresh() }
+                    )
+                    .transition(reduceMotion ? .identity : .opacity)
+                } else {
+                    OverviewView(
+                        snapshot: usesVisualFixtures
+                            ? DemoDataProvider.overview
+                            : OverviewSnapshot.production(clipper: clipperCoordinator.snapshot),
+                        usageSnapshots: usesVisualFixtures ? DemoDataProvider.providers : usageCoordinator.providers,
+                        usageAnalytics: usesVisualFixtures ? DemoUsageAnalytics.snapshots : usageCoordinator.analytics,
+                        usageState: usesVisualFixtures ? .demo : usageCoordinator.state,
+                        refreshAction: usesVisualFixtures ? nil : {
+                            await calendarCoordinator.manualRefresh()
+                            await usageCoordinator.refresh()
+                            await financeCoordinator.refresh()
+                            await clipperCoordinator.refresh()
+                        },
+                        clipperRefreshAction: usesVisualFixtures ? nil : { await clipperCoordinator.refresh() },
+                        clipperState: usesVisualFixtures ? .demo : clipperCoordinator.state,
+                        financeSummary: usesVisualFixtures ? nil : financeCoordinator.summary,
+                        financeState: usesVisualFixtures ? .demo : financeCoordinator.state,
+                        openDestination: navigate,
+                        showingUsage: $showingUsage
+                    )
+                    .transition(reduceMotion ? .identity : .opacity)
+                }
+            case .calendar:
+                CalendarView(
+                    coordinator: calendarCoordinator,
+                    requestNewEvent: $requestingNewCalendarEvent,
+                    presentationState: calendarPresentationState
                 )
-                .transition(reduceMotion ? .identity : .opacity)
-            } else {
-                OverviewView(
-                    snapshot: usesVisualFixtures
-                        ? DemoDataProvider.overview
-                        : OverviewSnapshot.production(clipper: clipperCoordinator.snapshot),
-                    usageSnapshots: usesVisualFixtures ? DemoDataProvider.providers : usageCoordinator.providers,
-                    usageAnalytics: usesVisualFixtures ? DemoUsageAnalytics.snapshots : usageCoordinator.analytics,
-                    usageState: usesVisualFixtures ? .demo : usageCoordinator.state,
-                    refreshAction: usesVisualFixtures ? nil : {
-                        await calendarCoordinator.manualRefresh()
-                        await usageCoordinator.refresh()
-                        await financeCoordinator.refresh()
-                        await clipperCoordinator.refresh()
+                    .transition(reduceMotion ? .identity : .opacity)
+            case .finance:
+                FinanceView(
+                    summary: financeCoordinator.summary,
+                    usesVisualFixtures: usesVisualFixtures,
+                    initialDetail: financeDetailRoute,
+                    onOpenConnections: { navigate(to: .settings) },
+                    onRefresh: usesVisualFixtures ? nil : { await financeCoordinator.refresh() },
+                    observationState: usesVisualFixtures ? .demo : financeCoordinator.observationState,
+                    errorMessage: usesVisualFixtures ? nil : financeCoordinator.errorMessage,
+                    presentationState: financePresentationState
+                )
+                    .transition(reduceMotion ? .identity : .opacity)
+            case .fitness:
+                FitnessView(
+                    snapshot: usesVisualFixtures ? .demo : .unavailable,
+                    snapshotProvider: usesVisualFixtures ? nil : { date in
+                        fitnessObservation?.snapshot(for: date) ?? .unavailable
                     },
-                    clipperRefreshAction: usesVisualFixtures ? nil : { await clipperCoordinator.refresh() },
-                    clipperState: usesVisualFixtures ? .demo : clipperCoordinator.state,
-                    financeSummary: usesVisualFixtures ? nil : financeCoordinator.summary,
-                    financeState: usesVisualFixtures ? .demo : financeCoordinator.state,
-                    openDestination: navigate,
-                    showingUsage: $showingUsage
+                    initialSection: selectedRoute?.fitnessSection,
+                    initialNutritionEntryPoint: selectedRoute?.nutritionEntryPoint,
+                    initialFitnessEntryPoint: selectedRoute?.fitnessEntryPoint,
+                    usesVisualFixtures: usesVisualFixtures,
+                    trainingCoordinator: fitnessTrainingCoordinator,
+                    presentationState: fitnessPresentationState
                 )
                 .transition(reduceMotion ? .identity : .opacity)
-            }
-        case .calendar:
-            CalendarView(coordinator: calendarCoordinator, requestNewEvent: $requestingNewCalendarEvent)
-                .transition(reduceMotion ? .identity : .opacity)
-        case .finance:
-            FinanceView(
-                summary: financeCoordinator.summary,
-                usesVisualFixtures: usesVisualFixtures,
-                initialDetail: financeDetailRoute
-            )
-                .transition(reduceMotion ? .identity : .opacity)
-        case .fitness:
-            FitnessView(
-                snapshot: usesVisualFixtures ? .demo : .unavailable,
-                snapshotProvider: usesVisualFixtures ? nil : { date in
-                    fitnessObservation?.snapshot(for: date) ?? .unavailable
-                },
-                initialSection: selectedRoute?.fitnessSection ?? .today,
-                initialNutritionEntryPoint: selectedRoute?.nutritionEntryPoint,
-                initialFitnessEntryPoint: selectedRoute?.fitnessEntryPoint,
-                usesVisualFixtures: usesVisualFixtures,
-                trainingCoordinator: fitnessTrainingCoordinator
-            )
-            .transition(reduceMotion ? .identity : .opacity)
-        case .tax:
-            TaxDocumentsView()
-                .transition(reduceMotion ? .identity : .opacity)
-        case .aiUsage:
-            UsageView(
-                snapshots: usesVisualFixtures ? DemoDataProvider.providers : usageCoordinator.providers,
-                analytics: usesVisualFixtures ? DemoUsageAnalytics.snapshots : usageCoordinator.analytics,
-                state: usesVisualFixtures ? .demo : usageCoordinator.state,
-                refreshAction: usesVisualFixtures ? nil : { await usageCoordinator.refresh() }
-            )
-            .transition(reduceMotion ? .identity : .opacity)
-        case .settings:
-            NavigationStack {
-                SettingsView(
-                    usageCoordinator: usageCoordinator,
-                    financeCoordinator: financeCoordinator,
-                    clipperCoordinator: clipperCoordinator,
+            case .tax:
+                TaxDocumentsView()
+                    .transition(reduceMotion ? .identity : .opacity)
+            case .settings:
+                NavigationStack {
+                    SettingsView(
+                        usageCoordinator: usageCoordinator,
+                        financeCoordinator: financeCoordinator,
+                        clipperCoordinator: clipperCoordinator,
+                        usesVisualFixtures: usesVisualFixtures
+                    )
+                }
+                    .transition(reduceMotion ? .identity : .opacity)
+            default:
+                LifeOSModuleLandingView(
+                    module: selection,
+                    route: selectedRoute,
                     usesVisualFixtures: usesVisualFixtures
                 )
-            }
                 .transition(reduceMotion ? .identity : .opacity)
-        default:
-            LifeOSModuleLandingView(
-                module: selection,
-                route: selectedRoute,
-                usesVisualFixtures: usesVisualFixtures
-            )
-            .transition(reduceMotion ? .identity : .opacity)
+            }
         }
     }
 
@@ -569,9 +724,34 @@ struct LifeOSMacRootView: View {
         }
     }
 
+    private func reportSceneState() {
+        onSceneStateChange?(LifeOSMacSceneState(
+            module: selection,
+            route: selectedRoute == .newCalendarEvent ? .calendar : selectedRoute,
+            showingUsage: showingUsage,
+            sidebarCollapsed: sidebarCollapsed,
+            sidebarWidth: sidebarWidth
+        ))
+    }
+
+    private func restoreUnavailableOrigin() {
+        let originModule = unavailableOriginModule
+        let originRoute = unavailableOriginRoute
+        let originShowingUsage = unavailableOriginShowingUsage
+        showingDestinationUnavailable = false
+        selection = originModule
+        selectedRoute = originRoute == .newCalendarEvent ? .calendar : originRoute
+        recordModuleRouteIntent(selectedRoute)
+        showingUsage = originShowingUsage
+        requestingNewCalendarEvent = false
+        clearUnavailableOrigin()
+    }
+
     private func select(_ module: LifeOSModule) {
         performNavigationChange {
-            selectedRoute = nil
+            showingDestinationUnavailable = false
+            clearUnavailableOrigin()
+            clearSelectedRoute()
             showingUsage = false
             requestingNewCalendarEvent = false
             selection = module
@@ -580,7 +760,10 @@ struct LifeOSMacRootView: View {
 
     private func navigate(to destination: LifeOSDeepLink) {
         performNavigationChange {
+            showingDestinationUnavailable = false
+            clearUnavailableOrigin()
             selectedRoute = destination
+            recordModuleRouteIntent(destination)
             switch destination {
             case .usage:
                 selection = .home
@@ -605,11 +788,36 @@ struct LifeOSMacRootView: View {
             withAnimation(LifeOSMotion.easeNavigate, update)
         }
     }
+
+    private func clearUnavailableOrigin() {
+        unavailableOriginModule = .home
+        unavailableOriginRoute = nil
+        unavailableOriginShowingUsage = false
+    }
+
+    private func clearSelectedRoute() {
+        selectedRoute = nil
+        recordModuleRouteIntent(nil)
+    }
+
+    private static func financeRoute(for destination: LifeOSDeepLink?) -> FinanceDetailRoute? {
+        switch destination {
+        case .financeSpend: .spend
+        case .financeCashFlow: .cashFlow
+        default: nil
+        }
+    }
+
+    private func recordModuleRouteIntent(_ destination: LifeOSDeepLink?) {
+        financePresentationState.receiveExternalRoute(Self.financeRoute(for: destination))
+        fitnessPresentationState.receiveExternalRoute(
+            destination?.module == .fitness ? destination : nil
+        )
+    }
 }
 
 private struct LifeOSMacCommandPalette: View {
-    @Binding var selection: LifeOSModule
-    @Binding var selectedRoute: LifeOSDeepLink?
+    let onSelect: (LifeOSModule) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
 
@@ -640,8 +848,7 @@ private struct LifeOSMacCommandPalette: View {
                 VStack(spacing: 2) {
                     ForEach(modules) { module in
                         Button {
-                            selection = module
-                            selectedRoute = nil
+                            onSelect(module)
                             dismiss()
                         } label: {
                             HStack(spacing: 10) {

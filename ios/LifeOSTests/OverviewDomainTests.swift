@@ -245,6 +245,32 @@ final class OverviewDomainTests: XCTestCase {
             ),
             "DATA UNAVAILABLE"
         )
+        XCTAssertEqual(
+            OverviewHomeStatusPolicy.snapshotStatusLabel(
+                qualities: unavailableSections,
+                healthState: .unavailable,
+                healthIntegrityIssue: false,
+                financeState: .unavailable,
+                financeHasObservedValue: false,
+                clipperState: .unavailable,
+                hasRefreshDueSection: false,
+                usageState: .loading
+            ),
+            "UPDATING DATA"
+        )
+        XCTAssertEqual(
+            OverviewHomeStatusPolicy.snapshotStatusLabel(
+                qualities: [.observed, .unavailable, .unavailable, .unavailable],
+                healthState: .unavailable,
+                healthIntegrityIssue: false,
+                financeState: .unavailable,
+                financeHasObservedValue: false,
+                clipperState: .unavailable,
+                hasRefreshDueSection: false,
+                hasPartialUsage: true
+            ),
+            "PARTIAL DATA · REVIEW SOURCE"
+        )
     }
 
     func testOverviewCurrencyFormatterUsesLocaleAwareDecimalEUR() {
@@ -259,6 +285,30 @@ final class OverviewDomainTests: XCTestCase {
         XCTAssertEqual(OverviewUsageTrendPresentation.label(for: .demo), "Demo fixture · not live")
         XCTAssertEqual(OverviewUsageTrendPresentation.label(for: .estimated), "Estimated activity")
         XCTAssertFalse(OverviewUsageTrendPresentation.isRenderable(for: .unavailable))
+    }
+
+    func testOverviewSupportingColumnsFollowDocumentedWidthThresholds() {
+        XCTAssertEqual(OverviewLayoutContract.supportingColumnCount(for: 359, itemCount: 4), 1)
+        XCTAssertEqual(OverviewLayoutContract.supportingColumnCount(for: 719.99, itemCount: 4), 1)
+        XCTAssertEqual(OverviewLayoutContract.supportingColumnCount(for: 720, itemCount: 4), 2)
+        XCTAssertEqual(OverviewLayoutContract.supportingColumnCount(for: 959.99, itemCount: 4), 2)
+        XCTAssertEqual(OverviewLayoutContract.supportingColumnCount(for: 960, itemCount: 4), 3)
+        XCTAssertEqual(OverviewLayoutContract.supportingColumnCount(for: 1_120, itemCount: 4), 3)
+        XCTAssertEqual(OverviewLayoutContract.supportingColumnCount(for: 1_120, itemCount: 2), 2)
+        XCTAssertEqual(OverviewLayoutContract.supportingColumnCount(for: 1_120, itemCount: 0), 0)
+    }
+
+    func testShellRouteRestorationPreservesDeepLinkAndRejectsUnknownDestination() throws {
+        let deepLinks: [LifeOSDeepLink] = [.usage, .calendar, .financeCashFlow, .fitnessNutritionAIProposal, .settings]
+        for link in deepLinks {
+            let restored = try XCTUnwrap(LifeOSDeepLink(restorationKey: link.restorationKey))
+            XCTAssertEqual(restored, link)
+            XCTAssertEqual(LifeOSNavigationRoute(restorationKey: link.restorationKey), .existing(link))
+        }
+
+        let invalid = LifeOSNavigationRoute(url: URL(string: "lifeos://unsupported/destination")!)
+        XCTAssertEqual(invalid, .destinationUnavailable)
+        XCTAssertNil(invalid.restorationKey)
     }
 
     private func makeClipperSnapshot(quality: String = "observed", amountCents: Int = 8_420,

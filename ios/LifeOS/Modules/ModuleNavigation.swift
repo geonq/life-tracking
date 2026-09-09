@@ -15,7 +15,6 @@ public enum LifeOSModule: String, CaseIterable, Hashable, Identifiable, Sendable
     case tasks
     case grocery
     case shopping
-    case aiUsage = "ai-usage"
     case fitness
     case reports
     case settings
@@ -35,7 +34,6 @@ public enum LifeOSModule: String, CaseIterable, Hashable, Identifiable, Sendable
         case .tasks: "Tasks"
         case .grocery: "Grocery"
         case .shopping: "Shopping"
-        case .aiUsage: "Usage"
         case .fitness: "Fitness"
         case .reports: "Reports"
         case .settings: "Settings"
@@ -55,7 +53,6 @@ public enum LifeOSModule: String, CaseIterable, Hashable, Identifiable, Sendable
         case .tasks: .tasks
         case .grocery: .grocery
         case .shopping: .shopping
-        case .aiUsage: .usage
         case .fitness: .fitness
         case .reports: .reports
         case .settings: .settings
@@ -70,7 +67,6 @@ public enum LifeOSModule: String, CaseIterable, Hashable, Identifiable, Sendable
         case .fitness: LifeOSTokens.Module.fitness
         case .tasks, .grocery, .shopping: LifeOSTokens.Module.tasks
         case .tax, .business, .documents: LifeOSTokens.Module.tax
-        case .aiUsage: LifeOSTokens.Module.usage
         case .reports: LifeOSTokens.Module.business
         case .settings: LifeOSTokens.secondaryText
         }
@@ -89,7 +85,6 @@ public enum LifeOSModule: String, CaseIterable, Hashable, Identifiable, Sendable
         case .tasks: "The next actions that need your attention"
         case .grocery: "A disposable list for the weekly shop"
         case .shopping: "Wishlist, comparisons, and purchases"
-        case .aiUsage: "Usage, limits, and provider history"
         case .fitness: "Health signals, recovery, and nutrition"
         case .reports: "Structured summaries across LifeOS"
         case .settings: "Privacy, sync, and app configuration"
@@ -100,7 +95,7 @@ public enum LifeOSModule: String, CaseIterable, Hashable, Identifiable, Sendable
     /// modules use the honest shell below until their data contracts land.
     public var hasWorkingView: Bool {
         switch self {
-        case .home, .calendar, .finance, .fitness, .tax, .aiUsage, .settings: true
+        case .home, .calendar, .finance, .fitness, .tax, .settings: true
         default: false
         }
     }
@@ -164,17 +159,39 @@ public extension LifeOSModule {
 enum LifeOSNavigationRoute: Equatable {
     case existing(LifeOSDeepLink)
     case home
+    case destinationUnavailable
 
     init(url: URL) {
         if let route = LifeOSDeepLink(url: url) {
             self = .existing(route)
-        } else { self = .home }
+        } else {
+            self = .destinationUnavailable
+        }
+    }
+
+    init?(restorationKey: String) {
+        guard !restorationKey.isEmpty else { return nil }
+        if restorationKey == "home" {
+            self = .home
+        } else if let route = LifeOSDeepLink(restorationKey: restorationKey) {
+            self = .existing(route)
+        } else {
+            return nil
+        }
+    }
+
+    var restorationKey: String? {
+        switch self {
+        case .existing(let route): route.restorationKey
+        case .home: "home"
+        case .destinationUnavailable: nil
+        }
     }
 
     var module: LifeOSModule {
         switch self {
         case .existing(let route): route.module
-        case .home: .home
+        case .home, .destinationUnavailable: .home
         }
     }
 
@@ -185,7 +202,132 @@ enum LifeOSNavigationRoute: Equatable {
     }
 }
 
+/// Shown when an external link does not resolve to a supported LifeOS route.
+/// The shell owns recovery so this view never guesses a module or presents a
+/// loading state for an address it cannot interpret.
+struct LifeOSDestinationUnavailableView: View {
+    let onBack: () -> Void
+    let onHome: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            LifeOSIcon(.warning)
+                .foregroundStyle(LifeOSTokens.warning)
+                .frame(width: 24, height: 24)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Destination unavailable")
+                    .lifeOSTypography(.cardTitle, weight: .semibold)
+                    .foregroundStyle(LifeOSTokens.primaryText)
+                Text("This link does not match a supported LifeOS destination.")
+                    .lifeOSTypography(.body)
+                    .foregroundStyle(LifeOSTokens.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack(spacing: 10) {
+                Button("Back", action: onBack)
+                    .buttonStyle(LifeOSButtonStyle(.secondary))
+                    .accessibilityIdentifier("destination-unavailable-back")
+                Button("Home", action: onHome)
+                    .buttonStyle(LifeOSButtonStyle(.primary))
+                    .accessibilityIdentifier("destination-unavailable-home")
+            }
+        }
+        .padding(20)
+        .frame(maxWidth: 440, alignment: .leading)
+        .background(LifeOSTokens.surface, in: LifeOSTokens.cardShape)
+        .overlay(LifeOSTokens.cardShape.stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        .padding(24)
+        .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("destination-unavailable")
+    }
+}
+
 public extension LifeOSDeepLink {
+    /// A stable, local-only key for scene restoration. This is deliberately
+    /// separate from URL parsing so persisted state never needs to retain a
+    /// full external URL or any query data.
+    var restorationKey: String {
+        switch self {
+        case .usage: "usage"
+        case .calendar: "calendar"
+        // Creating an event is a one-shot intent. Persist the normal calendar
+        // route after the shell consumes it so a terminated scene never
+        // reopens an editor from stale restoration state.
+        case .newCalendarEvent: "calendar"
+        case .tax: "tax"
+        case .finance: "finance"
+        case .financeSpend: "finance-spend"
+        case .financeCashFlow: "finance-cash-flow"
+        case .fitness: "fitness"
+        case .fitnessTraining: "fitness-training"
+        case .fitnessDailyOverview: "fitness-daily-overview"
+        case .fitnessStrain: "fitness-strain"
+        case .fitnessRecovery: "fitness-recovery"
+        case .fitnessSleep: "fitness-sleep"
+        case .fitnessHealthMonitor: "fitness-health-monitor"
+        case .fitnessRespiration: "fitness-respiration"
+        case .fitnessHeartRate: "fitness-heart-rate"
+        case .fitnessHRV: "fitness-hrv"
+        case .fitnessSpO2: "fitness-spo2"
+        case .fitnessTemperature: "fitness-temperature"
+        case .fitnessSleepDuration: "fitness-sleep-duration"
+        case .fitnessNutrition: "fitness-nutrition"
+        case .fitnessNutritionGoals: "fitness-nutrition-goals"
+        case .fitnessNutritionImport: "fitness-nutrition-import"
+        case .fitnessNutritionCamera: "fitness-nutrition-camera"
+        case .fitnessNutritionBarcode: "fitness-nutrition-barcode"
+        case .fitnessNutritionAIProposal: "fitness-nutrition-ai-proposal"
+        case .fitnessNutritionSearch: "fitness-nutrition-search"
+        case .fitnessNetEnergy: "fitness-net-energy"
+        case .fitnessStress: "fitness-stress"
+        case .fitnessEnergyReserve: "fitness-energy-reserve"
+        case .tasks: "tasks"
+        case .settings: "settings"
+        }
+    }
+
+    init?(restorationKey: String) {
+        switch restorationKey {
+        case "usage": self = .usage
+        case "calendar": self = .calendar
+        case "new-calendar-event": self = .newCalendarEvent
+        case "tax": self = .tax
+        case "finance": self = .finance
+        case "finance-spend": self = .financeSpend
+        case "finance-cash-flow": self = .financeCashFlow
+        case "fitness": self = .fitness
+        case "fitness-training": self = .fitnessTraining
+        case "fitness-daily-overview": self = .fitnessDailyOverview
+        case "fitness-strain": self = .fitnessStrain
+        case "fitness-recovery": self = .fitnessRecovery
+        case "fitness-sleep": self = .fitnessSleep
+        case "fitness-health-monitor": self = .fitnessHealthMonitor
+        case "fitness-respiration": self = .fitnessRespiration
+        case "fitness-heart-rate": self = .fitnessHeartRate
+        case "fitness-hrv": self = .fitnessHRV
+        case "fitness-spo2": self = .fitnessSpO2
+        case "fitness-temperature": self = .fitnessTemperature
+        case "fitness-sleep-duration": self = .fitnessSleepDuration
+        case "fitness-nutrition": self = .fitnessNutrition
+        case "fitness-nutrition-goals": self = .fitnessNutritionGoals
+        case "fitness-nutrition-import": self = .fitnessNutritionImport
+        case "fitness-nutrition-camera": self = .fitnessNutritionCamera
+        case "fitness-nutrition-barcode": self = .fitnessNutritionBarcode
+        case "fitness-nutrition-ai-proposal": self = .fitnessNutritionAIProposal
+        case "fitness-nutrition-search": self = .fitnessNutritionSearch
+        case "fitness-net-energy": self = .fitnessNetEnergy
+        case "fitness-stress": self = .fitnessStress
+        case "fitness-energy-reserve": self = .fitnessEnergyReserve
+        case "tasks": self = .tasks
+        case "settings": self = .settings
+        default: return nil
+        }
+    }
+
     var module: LifeOSModule {
         switch self {
         case .usage: .home

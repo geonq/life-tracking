@@ -1141,6 +1141,19 @@ struct AppGroupSettingsSnapshot: Equatable, Sendable {
     }
 }
 
+enum SettingsLayout {
+    static let maxContentWidth: CGFloat = 640
+    static let detailMaxWidth: CGFloat = 640
+    static let rowMinimumHeight: CGFloat = 56
+    static let rowInset: CGFloat = 12
+    static let sectionGap: CGFloat = 24
+
+    static func contentWidth(for outerWidth: CGFloat, horizontalPadding: CGFloat = 0) -> CGFloat {
+        guard outerWidth.isFinite else { return 0 }
+        return min(max(0, outerWidth - max(0, horizontalPadding) * 2), maxContentWidth)
+    }
+}
+
 /// Settings is for infrequent setup and trust decisions. Product data views
 /// stay focused; connections, credentials status, and device permissions live
 /// here instead of becoming extra primary destinations.
@@ -1183,11 +1196,11 @@ struct SettingsView: View {
     private var categories: [SettingsCategory] {
         [
             .init(id: "providers", title: "Usage providers", subtitle: "Observed provider usage and connection status", readiness: .providers(usageSettings.readiness), icon: .usage, color: LifeOSTokens.Module.usage),
-            .init(id: "finance", title: "Bank connections", subtitle: "Sparkasse, Revolut Personal / Business, Trade Republic, and consent", readiness: .finance(financeSettings.readiness), icon: .bankConnections, color: LifeOSTokens.Module.finance),
-            .init(id: "clipper", title: "Clipper", subtitle: "Transit capture via the Windows gateway source", readiness: clipperReadiness, icon: .clipper, color: LifeOSTokens.Module.business),
-            .init(id: "health", title: "Health & devices", subtitle: "Helio → Zepp → Apple Health / HealthKit", readiness: .healthRead(healthReadAccess.state), icon: .health, color: LifeOSTokens.Module.fitness),
-            .init(id: "sync", title: "Sync & storage", subtitle: "Tailscale device identity, Windows authority, and local data", readiness: .identityPending, icon: .refresh, color: LifeOSTokens.Module.tax),
-            .init(id: "privacy", title: "Privacy & security", subtitle: "Local safeguards, signing, and unresolved server gates", readiness: .localSafeguards, icon: .security, color: LifeOSTokens.warning)
+            .init(id: "finance", title: "Bank connections", subtitle: "Bank accounts and consent", readiness: .finance(financeSettings.readiness), icon: .bankConnections, color: LifeOSTokens.Module.finance),
+            .init(id: "clipper", title: "Clipper", subtitle: "Transit capture from the connected source", readiness: clipperReadiness, icon: .clipper, color: LifeOSTokens.Module.business),
+            .init(id: "health", title: "Health & devices", subtitle: "Health sources and permissions", readiness: .healthRead(healthReadAccess.state), icon: .health, color: LifeOSTokens.Module.fitness),
+            .init(id: "sync", title: "Sync & storage", subtitle: "Connect devices and review local storage", readiness: .identityPending, icon: .refresh, color: LifeOSTokens.Module.tax),
+            .init(id: "privacy", title: "Privacy & security", subtitle: "Review local safeguards and data controls", readiness: .localSafeguards, icon: .security, color: LifeOSTokens.warning)
         ]
     }
 
@@ -1243,18 +1256,23 @@ struct SettingsView: View {
 
     var body: some View {
         ScrollView {
-            LifeOSResponsiveContentContainer {
-                VStack(alignment: .leading, spacing: 20) {
+                LifeOSResponsiveContentContainer(maxReadableWidth: SettingsLayout.maxContentWidth) {
+                VStack(alignment: .leading, spacing: SettingsLayout.sectionGap) {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("Keep setup out of the daily workflow")
+                        Text("Connections and controls")
                             .lifeOSTypography(.sectionTitle, weight: .bold)
-                        Text("Connections and security-sensitive configuration are managed here. LifeOS stays honest about what is and is not connected.")
+                        Text("Review sources, permissions, and recovery actions without leaving the daily workflow.")
                             .lifeOSTypography(.body)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                             .fixedSize(horizontal: false, vertical: true)
                     }
 
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 390, maximum: 600), spacing: 12)], spacing: 12) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text("Connections")
+                            .lifeOSTypography(.body, weight: .semibold)
+                            .foregroundStyle(LifeOSTokens.secondaryText)
+                            .padding(.horizontal, SettingsLayout.rowInset)
+                            .padding(.bottom, 8)
                         NavigationLink {
                             ProviderConnectionsSettingsView(
                                 snapshot: usageSettings,
@@ -1317,6 +1335,14 @@ struct SettingsView: View {
                         .buttonStyle(.plain)
                         .accessibilityIdentifier("settings-category-health")
 
+                        Divider()
+                            .overlay(LifeOSTokens.hairlineBorder)
+                            .padding(.vertical, 12)
+                        Text("Sync & devices")
+                            .lifeOSTypography(.body, weight: .semibold)
+                            .foregroundStyle(LifeOSTokens.secondaryText)
+                            .padding(.horizontal, SettingsLayout.rowInset)
+                            .padding(.bottom, 8)
                         NavigationLink {
                             SyncStorageSettingsView(usesVisualFixtures: usesVisualFixtures)
                         } label: {
@@ -1325,6 +1351,14 @@ struct SettingsView: View {
                         .buttonStyle(.plain)
                         .accessibilityIdentifier("settings-category-sync")
 
+                        Divider()
+                            .overlay(LifeOSTokens.hairlineBorder)
+                            .padding(.vertical, 12)
+                        Text("Privacy & data")
+                            .lifeOSTypography(.body, weight: .semibold)
+                            .foregroundStyle(LifeOSTokens.secondaryText)
+                            .padding(.horizontal, SettingsLayout.rowInset)
+                            .padding(.bottom, 8)
                         NavigationLink {
                             PrivacySecuritySettingsView()
                         } label: {
@@ -1467,24 +1501,20 @@ private struct SettingsHubCard: View {
                 .frame(width: 14, height: 14)
                 .accessibilityHidden(true)
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, minHeight: 124, alignment: .leading)
+        .padding(.horizontal, SettingsLayout.rowInset)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, minHeight: SettingsLayout.rowMinimumHeight, alignment: .leading)
         .background(
-            LinearGradient(
-                colors: [LifeOSTokens.surface, category.color.opacity(isHovering || isFocused ? 0.06 : 0.022)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            ),
-            in: LifeOSTokens.cardShape
+            (isHovering || isFocused ? LifeOSTokens.raised : LifeOSTokens.surface),
+            in: RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
         )
         .overlay(
-            LifeOSTokens.cardShape.stroke(
+            RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous).stroke(
                 isHovering || isFocused ? category.color.opacity(0.48) : LifeOSTokens.quietBorder,
                 lineWidth: isHovering || isFocused ? 1 : 0.75
             )
         )
-        .contentShape(LifeOSTokens.cardShape)
-        .scaleEffect(!reduceMotion && (isHovering || isFocused) ? 1.008 : 1)
+        .contentShape(RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous))
         .animation(reduceMotion ? nil : LifeOSMotion.springSnappy, value: isHovering || isFocused)
         .accessibilityValue(Text(category.readiness.title))
         .accessibilityHint(Text("Opens \(category.title) settings"))
@@ -1597,7 +1627,7 @@ struct ProviderConnectionsSettingsView: View {
 
                 TruthfulSetupNote(text: "Provider rows reflect only UsageCoordinator observations and connector state. Provider keys remain on the Windows Hermes server; there is no paste, reveal, or copy path for raw keys. Revoke and reauthorization remain gateway-owned; this client never receives a raw token.")
             }
-            .frame(maxWidth: 760, alignment: .leading)
+            .frame(maxWidth: SettingsLayout.detailMaxWidth, alignment: .leading)
             .padding(LifeOSTokens.pagePadding)
         }
         .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
@@ -1609,11 +1639,12 @@ struct ProviderConnectionsSettingsView: View {
         let freshness = "Freshness: \(freshnessTitle(provider.freshness))"
         let connector = "Connector: \(connectorTitle(provider.connector))"
         let lifecycle = "Lifecycle: \(provider.lifecycle.title)"
+        let lastRead = "Last successful read: \(observedAtLabel(provider.observedAt))"
         switch provider.state {
         case .observed:
-            return "\(lifecycle) · \(source) · \(freshness) · \(connector)"
+            return "\(lifecycle) · \(source) · \(lastRead) · \(freshness) · \(connector)"
         case .partial:
-            return "\(lifecycle) · \(source) · \(freshness) · some windows are unavailable"
+            return "\(lifecycle) · \(source) · \(lastRead) · \(freshness) · some windows are unavailable"
         case .stale:
             return "\(lifecycle) · \(source) · last observed \(observedAtLabel(provider.observedAt)) · \(connector)"
         case .unavailable:
@@ -1843,7 +1874,7 @@ struct ClipperConnectionSettingsView: View {
 
                 TruthfulSetupNote(text: "Rows reflect only ClipperCoordinator observations. No demo or placeholder transit data exists outside explicit fixture builds; unavailable means not connected.")
             }
-            .frame(maxWidth: 760, alignment: .leading)
+            .frame(maxWidth: SettingsLayout.detailMaxWidth, alignment: .leading)
             .padding(LifeOSTokens.pagePadding)
         }
         .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
@@ -2342,7 +2373,7 @@ private struct FinanceConnectionsSettingsView: View {
             VStack(alignment: .leading, spacing: 18) {
                 SettingsIntro(
                     title: "Bank & finance connections",
-                    message: "Connectors are disabled by default. Explicit consent and the reviewed Windows gateway are required before account observations can appear."
+                    message: "Review bank connectors and consent. Account observations appear only after the supported consent flow succeeds."
                 )
 
                 SettingsSection(title: "Finance source", icon: .finance) {
@@ -2371,16 +2402,16 @@ private struct FinanceConnectionsSettingsView: View {
                     }
                 }
 
-                SettingsSection(title: "Gateway preflight", icon: .security) {
+                SettingsSection(title: "Connection check", icon: .security) {
                     VStack(alignment: .leading, spacing: 10) {
                         SettingsStatusRow(
-                            title: "Read-only secure gateway check",
+                            title: "Check this connection",
                             detail: gatewayPreflightDetail,
                             status: gatewayPreflightTitle,
                             icon: gatewayPreflight == .reachable ? .verified : .security,
                             statusColor: gatewayPreflight == .reachable ? LifeOSTokens.success : LifeOSTokens.warning,
                             iconColor: gatewayPreflight == .reachable ? LifeOSTokens.success : LifeOSTokens.warning,
-                            iconAccessibilityLabel: "Secure gateway preflight"
+                            iconAccessibilityLabel: "Connection check"
                         )
 
                         Button {
@@ -2486,7 +2517,7 @@ private struct FinanceConnectionsSettingsView: View {
 
                 TruthfulSetupNote(text: "The catalog names the exact external gate; it does not claim that a bank is connected. Secrets and consent flows remain outside this client, and no bank transaction data is fabricated.")
             }
-            .frame(maxWidth: 760, alignment: .leading)
+            .frame(maxWidth: SettingsLayout.detailMaxWidth, alignment: .leading)
             .padding(LifeOSTokens.pagePadding)
         }
         .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
@@ -2668,15 +2699,15 @@ private struct HealthDevicesSettingsView: View {
             VStack(alignment: .leading, spacing: 18) {
                 SettingsIntro(
                     title: "Health & devices",
-                    message: "Helio Strap is the sensor authority. LifeOS keeps the Zepp and Apple Health transport boundary visible until a reviewed adapter supplies real source evidence."
+                    message: "Choose health sources and permissions. LifeOS shows each source state until a real observation is available."
                 )
 
-                SettingsSection(title: "Authority chain", icon: .health) {
+                SettingsSection(title: "Source path", icon: .health) {
                     VStack(alignment: .leading, spacing: 12) {
                         Text(snapshot.authorityChain.map(\.title).joined(separator: "  →  "))
                             .lifeOSTypography(.body, weight: .semibold)
                             .fixedSize(horizontal: false, vertical: true)
-                        Text("Helio Strap measures. Zepp and Apple Health / HealthKit are transport and permission layers; neither is presented as the sensor.")
+                        Text("Each source and permission state is shown separately so an empty or restricted source is not mistaken for a successful read.")
                             .lifeOSTypography(.body)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
                             .fixedSize(horizontal: false, vertical: true)
@@ -2865,7 +2896,7 @@ private struct HealthDevicesSettingsView: View {
 
                 TruthfulSetupNote(text: "HealthKit reads and separately confirmed writes are iPhone-only. Writes are limited to explicit manual values and every save is rechecked. Battery, firmware, pairing, reboot, configuration, private BLE control, and a verified Zepp launch route remain unavailable or Zepp-only until a supported interface is proven. Demo fixtures remain separate from observed device data.")
             }
-            .frame(maxWidth: 760, alignment: .leading)
+            .frame(maxWidth: SettingsLayout.detailMaxWidth, alignment: .leading)
             .padding(LifeOSTokens.pagePadding)
         }
         .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
@@ -3071,7 +3102,7 @@ private struct SyncStorageSettingsContent: View {
             VStack(alignment: .leading, spacing: 18) {
                 SettingsIntro(
                     title: "Sync & storage",
-                    message: "The loopback-only Windows gateway is configured to require Tailscale device identity through Tailscale Serve. The current session is shown below only after a read-only preflight. LifeOS sends no bearer or token."
+                    message: "Connect LifeOS to your Windows computer through the approved private network. The status below tells you whether the next sync can run."
                 )
 
                 SettingsSection(title: "Tailscale sync", icon: .security) {
@@ -3258,7 +3289,7 @@ private struct SyncStorageSettingsContent: View {
                     diagnostics: SettingsRedactedDiagnostics(gateway: connectionPreflight)
                 )
             }
-            .frame(maxWidth: 760, alignment: .leading)
+            .frame(maxWidth: SettingsLayout.detailMaxWidth, alignment: .leading)
             .padding(LifeOSTokens.pagePadding)
         }
         .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
@@ -3443,7 +3474,7 @@ private struct PrivacySecuritySettingsView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .frame(maxWidth: 760, alignment: .leading)
+            .frame(maxWidth: SettingsLayout.detailMaxWidth, alignment: .leading)
             .padding(LifeOSTokens.pagePadding)
         }
         .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
@@ -3522,10 +3553,13 @@ private struct SettingsStatusRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .lifeOSTypography(.body, weight: .semibold)
+                    .fixedSize(horizontal: false, vertical: true)
                 Text(detail)
                     .lifeOSTypography(.body)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+            .layoutPriority(1)
             Spacer(minLength: 8)
             // §4.2: semantic dot + axis text instead of colored text alone.
             HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -3540,9 +3574,12 @@ private struct SettingsStatusRow: View {
                     // both appearances without relying on color alone.
                     .foregroundStyle(LifeOSTokens.metadataText)
                     .multilineTextAlignment(.trailing)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
+        .padding(.horizontal, SettingsLayout.rowInset)
         .padding(.vertical, 10)
+        .frame(minHeight: SettingsLayout.rowMinimumHeight, alignment: .leading)
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("settings-status-\(accessibilityID)")
         .accessibilityLabel(Text("\(title) · \(status)\(iconAccessibilityLabel.map { " · \($0)" } ?? "")"))

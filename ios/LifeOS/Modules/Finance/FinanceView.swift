@@ -190,6 +190,120 @@ private struct FinanceContentWidthPreferenceKey: PreferenceKey {
     }
 }
 
+struct FinanceInitialRouteIntent: Equatable {
+    let route: FinanceDetailRoute?
+    let generation: UInt64
+
+    init(route: FinanceDetailRoute?, generation: UInt64 = 0) {
+        self.route = route
+        self.generation = generation
+    }
+
+    var isEmpty: Bool { route == nil }
+}
+
+enum FinanceInitialRouteAction: Equatable {
+    case ignore
+    case clear
+    case apply(FinanceDetailRoute)
+}
+
+enum FinanceInitialRoutePolicy {
+    static func action(
+        for intent: FinanceInitialRouteIntent,
+        after lastConsumedIntent: FinanceInitialRouteIntent?
+    ) -> FinanceInitialRouteAction {
+        if let lastConsumedIntent,
+           intent.generation <= lastConsumedIntent.generation {
+            return .ignore
+        }
+        guard let route = intent.route else { return .clear }
+        return .apply(route)
+    }
+
+    static func shouldApply(
+        _ intent: FinanceInitialRouteIntent,
+        after lastConsumedIntent: FinanceInitialRouteIntent?
+    ) -> Bool {
+        if case .apply = action(for: intent, after: lastConsumedIntent) { return true }
+        return false
+    }
+
+    static func selectedDetail(
+        for action: FinanceInitialRouteAction,
+        current: FinanceDetail
+    ) -> FinanceDetail {
+        guard case .apply(let route) = action else { return current }
+        switch route {
+        case .income: return .income
+        case .cashFlow: return .cashFlow
+        case .netWorth: return .netWorth
+        case .spend, .wealth: return .spend
+        }
+    }
+}
+
+/// Presentation state owned by the surrounding scene. Finance is mounted
+/// conditionally by both shells, so keeping these selections in the view
+/// would discard them whenever the user visits another module.
+@MainActor
+public final class FinancePresentationState: ObservableObject {
+    @Published var selectedDetail: FinanceDetail
+    @Published var selectedRange: FinanceRange
+    @Published var selectedChartMode: FinanceChartMode
+    @Published var selectedSpendPoint: String?
+    @Published var selectedIncomePoint: String?
+    @Published var selectedCashFlowPoint: String?
+    @Published var selectedNetWorthPoint: String?
+    @Published var selectedCategoryID: String?
+    @Published var selectedCategorySource: String?
+    @Published var selectedIncomeCategoryID: String?
+    @Published var showAnalytics: Bool
+    @Published var analyticsSelectedEntry: FinanceAnalyticsView.Entry?
+    @Published fileprivate(set) var externalRouteIntent: FinanceInitialRouteIntent?
+    fileprivate var lastConsumedExternalRouteIntent: FinanceInitialRouteIntent?
+    private var nextExternalRouteGeneration: UInt64 = 0
+
+    public init(
+        selectedDetail: FinanceDetail = .spend,
+        selectedRange: FinanceRange = .month,
+        selectedChartMode: FinanceChartMode = .line,
+        showAnalytics: Bool = false,
+        analyticsSelectedEntry: FinanceAnalyticsView.Entry? = nil
+    ) {
+        self.selectedDetail = selectedDetail
+        self.selectedRange = selectedRange
+        self.selectedChartMode = selectedChartMode
+        self.showAnalytics = showAnalytics
+        self.analyticsSelectedEntry = analyticsSelectedEntry
+        self.externalRouteIntent = nil
+    }
+
+    func receiveExternalRoute(_ route: FinanceDetailRoute?) {
+        nextExternalRouteGeneration += 1
+        externalRouteIntent = FinanceInitialRouteIntent(
+            route: route,
+            generation: nextExternalRouteGeneration
+        )
+    }
+}
+
+/// Keeps a chart's selected sample stable when the source refreshes or a
+/// different range is selected. A new default is used only after the old ID
+/// has disappeared from the visible series.
+enum FinancePointSelectionPolicy {
+    static func preservedPointID(
+        selectedID: String?,
+        availableIDs: Set<String>,
+        latestID: String?
+    ) -> String? {
+        guard let selectedID, availableIDs.contains(selectedID) else {
+            return latestID
+        }
+        return selectedID
+    }
+}
+
 // MARK: - Finance screen contract
 
 /// Finance is intentionally a view over injected observations. The native app does not
@@ -205,16 +319,7 @@ public struct FinanceView: View {
     private let requestedObservationState: FinanceObservationState?
     private let financeErrorMessage: String?
 
-    @State private var selectedDetail: FinanceDetail = .spend
-    @State private var selectedRange: FinanceRange = .month
-    @State private var selectedChartMode: FinanceChartMode = .line
-    @State private var selectedSpendPoint: String?
-    @State private var selectedIncomePoint: String?
-    @State private var selectedCashFlowPoint: String?
-    @State private var selectedNetWorthPoint: String?
-    @State private var selectedCategoryID: String?
-    @State private var selectedCategorySource: String?
-    @State private var selectedIncomeCategoryID: String?
+    @StateObject private var presentationState: FinancePresentationState
     @State private var isRefreshing = false
     @State private var measuredFinanceContentWidth: CGFloat = 0
     /// RF-03/RF-20: the Analytics & Tools surface is an in-place hero morph
@@ -222,13 +327,59 @@ public struct FinanceView: View {
     /// Motion §A (`03-motion-revolut.md`). It shares `selectedRange` and
     /// `selectedNetWorthPoint` with the main detail panel (RF-21) rather than
     /// keeping a parallel selection model.
-    @State private var showAnalytics = false
-    @State private var analyticsInitialEntry: FinanceAnalyticsView.Entry?
     @Namespace private var financeHeroNamespace
     @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
     @Environment(\.lifeOSReduceMotion) private var requestedReduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     private var reduceMotion: Bool { systemReduceMotion || requestedReduceMotion }
+    private var selectedDetail: FinanceDetail {
+        get { presentationState.selectedDetail }
+        nonmutating set { presentationState.selectedDetail = newValue }
+    }
+    private var selectedRange: FinanceRange {
+        get { presentationState.selectedRange }
+        nonmutating set { presentationState.selectedRange = newValue }
+    }
+    private var selectedChartMode: FinanceChartMode {
+        get { presentationState.selectedChartMode }
+        nonmutating set { presentationState.selectedChartMode = newValue }
+    }
+    private var selectedSpendPoint: String? {
+        get { presentationState.selectedSpendPoint }
+        nonmutating set { presentationState.selectedSpendPoint = newValue }
+    }
+    private var selectedIncomePoint: String? {
+        get { presentationState.selectedIncomePoint }
+        nonmutating set { presentationState.selectedIncomePoint = newValue }
+    }
+    private var selectedCashFlowPoint: String? {
+        get { presentationState.selectedCashFlowPoint }
+        nonmutating set { presentationState.selectedCashFlowPoint = newValue }
+    }
+    private var selectedNetWorthPoint: String? {
+        get { presentationState.selectedNetWorthPoint }
+        nonmutating set { presentationState.selectedNetWorthPoint = newValue }
+    }
+    private var selectedCategoryID: String? {
+        get { presentationState.selectedCategoryID }
+        nonmutating set { presentationState.selectedCategoryID = newValue }
+    }
+    private var selectedCategorySource: String? {
+        get { presentationState.selectedCategorySource }
+        nonmutating set { presentationState.selectedCategorySource = newValue }
+    }
+    private var selectedIncomeCategoryID: String? {
+        get { presentationState.selectedIncomeCategoryID }
+        nonmutating set { presentationState.selectedIncomeCategoryID = newValue }
+    }
+    private var showAnalytics: Bool {
+        get { presentationState.showAnalytics }
+        nonmutating set { presentationState.showAnalytics = newValue }
+    }
+    private var analyticsSelectedEntry: FinanceAnalyticsView.Entry? {
+        get { presentationState.analyticsSelectedEntry }
+        nonmutating set { presentationState.analyticsSelectedEntry = newValue }
+    }
     private var financeContentWidth: CGFloat {
         FinanceResponsiveLayoutContract.measuredContentWidth(
             availableWidth: measuredFinanceContentWidth
@@ -247,6 +398,11 @@ public struct FinanceView: View {
         )
     }
 
+    private var routeIntent: FinanceInitialRouteIntent {
+        presentationState.externalRouteIntent
+            ?? FinanceInitialRouteIntent(route: initialDetail)
+    }
+
     /// A small public route value keeps deep-link callers independent from the private
     /// chart-selection model used by the view.
     public init(
@@ -258,7 +414,8 @@ public struct FinanceView: View {
         onRefresh: (() async -> Void)? = nil,
         observationState: FinanceObservationState? = nil,
         errorMessage: String? = nil,
-        initialChartMode: FinanceChartMode? = nil
+        initialChartMode: FinanceChartMode? = nil,
+        presentationState: FinancePresentationState? = nil
     ) {
         self.summary = summary
         self.transactions = transactions
@@ -268,15 +425,19 @@ public struct FinanceView: View {
         self.onRefresh = onRefresh
         self.requestedObservationState = observationState
         self.financeErrorMessage = errorMessage
+        let requestedDetail: FinanceDetail
         switch initialDetail {
-        case .income: _selectedDetail = State(initialValue: .income)
-        case .cashFlow: _selectedDetail = State(initialValue: .cashFlow)
-        case .netWorth: _selectedDetail = State(initialValue: .netWorth)
-        case .spend, .wealth, nil: _selectedDetail = State(initialValue: .spend)
+        case .income: requestedDetail = .income
+        case .cashFlow: requestedDetail = .cashFlow
+        case .netWorth: requestedDetail = .netWorth
+        case .spend, .wealth, nil: requestedDetail = .spend
         }
-        _selectedChartMode = State(initialValue: initialChartMode ?? .line)
-        _showAnalytics = State(initialValue: initialDetail == .wealth)
-        _analyticsInitialEntry = State(initialValue: initialDetail == .wealth ? .wealth : nil)
+        _presentationState = StateObject(wrappedValue: presentationState ?? FinancePresentationState(
+            selectedDetail: requestedDetail,
+            selectedChartMode: initialChartMode ?? .line,
+            showAnalytics: initialDetail == .wealth,
+            analyticsSelectedEntry: initialDetail == .wealth ? .wealth : nil
+        ))
     }
 
     public var body: some View {
@@ -290,13 +451,13 @@ public struct FinanceView: View {
         )
 
         ZStack {
-            if showAnalytics {
+            if presentationState.showAnalytics {
                 FinanceAnalyticsView(
                     snapshot: snapshot,
                     onOpenConnections: onOpenConnections,
-                    selectedRange: $selectedRange,
-                    selectedNetWorthPoint: $selectedNetWorthPoint,
-                    initialEntry: analyticsInitialEntry,
+                    selectedRange: $presentationState.selectedRange,
+                    selectedNetWorthPoint: $presentationState.selectedNetWorthPoint,
+                    selectedEntry: $presentationState.analyticsSelectedEntry,
                     heroNamespace: reduceMotion ? nil : financeHeroNamespace,
                     onClose: { closeAnalytics() }
                 )
@@ -308,28 +469,24 @@ public struct FinanceView: View {
         }
         .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
         .onAppear {
+            applyInitialDetailIfNeeded()
             selectLatestPoints(in: snapshot)
         }
         .task {
             guard !usesVisualFixtures, summary == nil, let onRefresh else { return }
             await refresh(using: onRefresh)
         }
-        .onChange(of: selectedRange) { _, _ in
+        .onChange(of: presentationState.selectedRange) { _, _ in
             selectLatestPoints(in: snapshot)
         }
-        .onChange(of: initialDetail) { _, route in
-            let requestedDetail = detail(for: route)
-            if route == .wealth {
-                openAnalytics(entry: .wealth)
-            } else if selectedDetail != requestedDetail {
-                if reduceMotion {
-                    selectedDetail = requestedDetail
-                } else {
-                    withAnimation(LifeOSMotion.snappy) {
-                        selectedDetail = requestedDetail
-                    }
-                }
-            }
+        .onChange(of: summary) { _, _ in
+            selectLatestPoints(in: snapshot)
+        }
+        .onChange(of: transactions) { _, _ in
+            selectLatestPoints(in: snapshot)
+        }
+        .onChange(of: presentationState.externalRouteIntent) { _, _ in
+            applyInitialDetailIfNeeded(animated: true)
             selectLatestPoints(in: snapshot)
         }
         .accessibilityIdentifier("finance-view")
@@ -409,8 +566,57 @@ public struct FinanceView: View {
         .accessibilityHint("Opens wealth, spending abroad, and travel analyses")
     }
 
+    private func applyInitialDetailIfNeeded() {
+        applyInitialDetailIfNeeded(animated: false)
+    }
+
+    private func applyInitialDetailIfNeeded(animated: Bool) {
+        let intent = routeIntent
+        let action = FinanceInitialRoutePolicy.action(
+            for: intent,
+            after: presentationState.lastConsumedExternalRouteIntent
+        )
+        guard action != .ignore else { return }
+        presentationState.lastConsumedExternalRouteIntent = intent
+
+        guard case .apply(let route) = action else {
+            // A route clear is an event boundary only. Retain the detail,
+            // Analytics entry, chart mode, range, and point selections.
+            return
+        }
+
+        if route == .wealth {
+            openAnalytics(entry: .wealth)
+            return
+        }
+
+        // A shell deep link to a main detail must leave Analytics before
+        // changing the selected chart; otherwise the new detail is hidden
+        // behind the retained Analytics surface.
+        if presentationState.showAnalytics {
+            LifeOSMotion.withoutAnimation {
+                presentationState.showAnalytics = false
+            }
+        }
+        let requestedDetail = FinanceInitialRoutePolicy.selectedDetail(
+            for: action,
+            current: selectedDetail
+        )
+        if selectedDetail != requestedDetail {
+            if animated && !reduceMotion {
+                withAnimation(LifeOSMotion.snappy) {
+                    selectedDetail = requestedDetail
+                }
+            } else {
+                LifeOSMotion.withoutAnimation {
+                    selectedDetail = requestedDetail
+                }
+            }
+        }
+    }
+
     private func openAnalytics(entry: FinanceAnalyticsView.Entry?) {
-        analyticsInitialEntry = entry
+        analyticsSelectedEntry = entry
         guard !showAnalytics else { return }
         if reduceMotion {
             showAnalytics = true
@@ -532,9 +738,9 @@ public struct FinanceView: View {
     private func financeCategoriesCard(snapshot: FinanceDisplaySnapshot) -> some View {
         FinanceCategoriesCard(
             snapshot: snapshot,
-            selectedCategoryID: $selectedCategoryID,
-            selectedSourceID: $selectedCategorySource,
-            selectedIncomeCategoryID: $selectedIncomeCategoryID,
+            selectedCategoryID: $presentationState.selectedCategoryID,
+            selectedSourceID: $presentationState.selectedCategorySource,
+            selectedIncomeCategoryID: $presentationState.selectedIncomeCategoryID,
             selectedRange: selectedRange
         )
     }
@@ -543,12 +749,12 @@ public struct FinanceView: View {
         VStack(alignment: .leading, spacing: 12) {
             FinanceSectionHeader(title: "Details", subtitle: "Trend context for this period", icon: .views, accent: LifeOSTokens.Module.finance)
             FinanceDetailSelector(
-                selection: $selectedDetail,
+                selection: $presentationState.selectedDetail,
                 availableWidth: financeContentWidth
             )
 
             FinanceRangePills(
-                selection: $selectedRange,
+                selection: $presentationState.selectedRange,
                 availableRanges: snapshot.availableRanges(for: selectedDetail)
             )
             detailCard(snapshot: snapshot)
@@ -617,12 +823,12 @@ public struct FinanceView: View {
                 subtitle: "Across connected accounts",
                 metric: snapshot.spent,
                 points: snapshot.points(for: .spend, range: selectedRange),
-                selectedPoint: $selectedSpendPoint,
+                selectedPoint: $presentationState.selectedSpendPoint,
                 isDemo: snapshot.isDemo,
                 availabilityIdentity: "\(selectedDetail.rawValue)|\(selectedRange.rawValue)",
                 chartState: snapshot.chartState(for: .spend, range: selectedRange, mode: selectedChartMode),
                 emptyDetail: "Spend history will appear after a reviewed account connection is available.",
-                mode: $selectedChartMode,
+                mode: $presentationState.selectedChartMode,
                 barBuckets: snapshot.barBuckets(for: .spend, range: selectedRange),
                 ringCategories: snapshot.categories,
                 ringCenterTitle: "Spend",
@@ -634,12 +840,12 @@ public struct FinanceView: View {
                 subtitle: "Deposits across connected accounts",
                 metric: snapshot.income,
                 points: snapshot.points(for: .income, range: selectedRange),
-                selectedPoint: $selectedIncomePoint,
+                selectedPoint: $presentationState.selectedIncomePoint,
                 isDemo: snapshot.isDemo,
                 availabilityIdentity: "\(selectedDetail.rawValue)|\(selectedRange.rawValue)",
                 chartState: snapshot.chartState(for: .income, range: selectedRange, mode: selectedChartMode),
                 emptyDetail: "Income history will appear after a reviewed account connection is available.",
-                mode: $selectedChartMode,
+                mode: $presentationState.selectedChartMode,
                 barBuckets: snapshot.barBuckets(for: .income, range: selectedRange),
                 ringCategories: snapshot.incomeCategories,
                 ringCenterTitle: "Income",
@@ -651,7 +857,7 @@ public struct FinanceView: View {
                 subtitle: "Money in minus money out",
                 metric: snapshot.cashFlow,
                 points: snapshot.points(for: .cashFlow, range: selectedRange),
-                selectedPoint: $selectedCashFlowPoint,
+                selectedPoint: $presentationState.selectedCashFlowPoint,
                 isDemo: snapshot.isDemo,
                 availabilityIdentity: "\(selectedDetail.rawValue)|\(selectedRange.rawValue)",
                 chartState: snapshot.chartState(for: .cashFlow, range: selectedRange),
@@ -671,7 +877,7 @@ public struct FinanceView: View {
                 subtitle: "Balance trend",
                 metric: snapshot.netWorth,
                 points: netWorthPoints,
-                selectedPoint: $selectedNetWorthPoint,
+                selectedPoint: $presentationState.selectedNetWorthPoint,
                 isDemo: snapshot.isDemo,
                 availabilityIdentity: "\(selectedDetail.rawValue)|\(selectedRange.rawValue)",
                 chartState: snapshot.chartState(for: .netWorth, range: selectedRange),
@@ -694,10 +900,30 @@ public struct FinanceView: View {
     private func selectLatestPoints(in snapshot: FinanceDisplaySnapshot) {
         // Initial/range-driven defaults are data synchronization, not user motion.
         LifeOSMotion.withoutAnimation {
-            selectedSpendPoint = snapshot.points(for: .spend, range: selectedRange).last?.id
-            selectedIncomePoint = snapshot.points(for: .income, range: selectedRange).last?.id
-            selectedCashFlowPoint = snapshot.points(for: .cashFlow, range: selectedRange).last?.id
-            selectedNetWorthPoint = snapshot.points(for: .netWorth, range: selectedRange).last?.id
+            let spend = snapshot.points(for: .spend, range: selectedRange)
+            let income = snapshot.points(for: .income, range: selectedRange)
+            let cashFlow = snapshot.points(for: .cashFlow, range: selectedRange)
+            let netWorth = snapshot.points(for: .netWorth, range: selectedRange)
+            selectedSpendPoint = FinancePointSelectionPolicy.preservedPointID(
+                selectedID: selectedSpendPoint,
+                availableIDs: Set(spend.map(\.id)),
+                latestID: spend.last?.id
+            )
+            selectedIncomePoint = FinancePointSelectionPolicy.preservedPointID(
+                selectedID: selectedIncomePoint,
+                availableIDs: Set(income.map(\.id)),
+                latestID: income.last?.id
+            )
+            selectedCashFlowPoint = FinancePointSelectionPolicy.preservedPointID(
+                selectedID: selectedCashFlowPoint,
+                availableIDs: Set(cashFlow.map(\.id)),
+                latestID: cashFlow.last?.id
+            )
+            selectedNetWorthPoint = FinancePointSelectionPolicy.preservedPointID(
+                selectedID: selectedNetWorthPoint,
+                availableIDs: Set(netWorth.map(\.id)),
+                latestID: netWorth.last?.id
+            )
         }
     }
 
@@ -4005,7 +4231,7 @@ struct FinanceCategory: Identifiable {
     }
 }
 
-enum FinanceDetail: String, CaseIterable, Hashable {
+public enum FinanceDetail: String, CaseIterable, Hashable {
     case spend
     case income
     case cashFlow
@@ -4027,7 +4253,7 @@ private enum FinanceTransactionSeries {
     case cashFlow
 }
 
-enum FinanceRange: String, CaseIterable, Hashable {
+public enum FinanceRange: String, CaseIterable, Hashable {
     case week
     case month
     case halfYear
