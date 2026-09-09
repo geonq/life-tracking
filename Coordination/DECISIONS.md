@@ -1,6 +1,6 @@
 # DECISIONS — LifeOS native app
 
-Updated 2026-09-09 06:50 Europe/Berlin.
+Updated 2026-09-09 07:15 Europe/Berlin.
 
 ## Product and design
 

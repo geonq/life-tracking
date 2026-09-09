@@ -1,6 +1,6 @@
 # HANDOFF — LifeOS native app
 
-Updated 2026-09-09 06:50 Europe/Berlin.
+Updated 2026-09-09 07:15 Europe/Berlin.
 
 ## Current verdict
 
@@ -13,8 +13,8 @@ flow. No usage watcher or overnight scheduler is part of the product.
 ## Source state
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- Commits: `69439f8` (design/widgets), `0493b39` (training/automation), and
-  `e215c01` (backend/Windows).
+- Commits: `69439f8` (design/widgets), `0493b39` (training/automation),
+  `e215c01` (backend/Windows), and `38b05c7` (handoff/release state).
 - The worktree is clean after these bounded commits and must not be reset or
   cleaned wholesale.
 - `design.md`, `tasks/design-overhaul-plan.md`, and `tasks/training-plan.md`
@@ -45,10 +45,13 @@ flow. No usage watcher or overnight scheduler is part of the product.
   syntax, Swift parse, and `git diff --check` pass.
 - Astra Medium backend re-review: GO after the final bounded-reader and Node
   recovery fixes.
+- Astra Medium Swift/product re-review: GO after the final training, signing,
+  completion-state, and design-contract fixes.
 - Gateway pytest behavior suite is unavailable on this Mac because the active
   Python interpreters do not have the project test dependencies.
 - Unsigned Xcode builds stall before compilation in this environment; do not
   claim a passing final build until the command exits successfully.
+- Latest sanitized progress reply: [GitHub issue comment](https://github.com/geonq/life-tracking/issues/2#issuecomment-5596190145).
 
 ## Remaining acceptance gates
 
