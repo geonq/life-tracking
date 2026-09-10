@@ -985,6 +985,11 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
     $oldManifestMaxBytes = $script:LifeOSGenerationManifestMaxBytes
     $temp = Join-Path ([IO.Path]::GetTempPath()) ('lifeos-checkpoint-capacity-' + [Guid]::NewGuid().ToString('N'))
     Ensure-Directory $temp
+    # Write-JsonAtomic is being exercised as a bounded writer here. Keep its
+    # ACL side effect behind the same test seam used by the other recovery
+    # fixtures; the real ACL adapter is covered by the dedicated Windows
+    # deployment behavior and host preflight suites.
+    function Set-RestrictedAcl { param($Path, $OperatorSid, $ReadSids, $ModifySids, [switch]$File, [switch]$SkipSnapshot, [string[]]$AllowedOwnerSids, [switch]$InheritableSystemFullControl) }
     try {
         $marker = [ordered]@{
             schemaVersion = 2; state = 'active'; transactionId = '11111111-1111-1111-1111-111111111111'; generation = 'generation'; operatorSid = 'fixture'
