@@ -147,6 +147,11 @@ try {
     } 'LIFEOS_TAILSCALE_EDGE_TOKEN source file is missing' $fixtureToken
     $invalidToken = Join-Path $tokenRoot 'invalid.token'
     [IO.File]::WriteAllBytes($invalidToken, [Text.Encoding]::ASCII.GetBytes((('i' * 31) -join '') + "`n"))
+    # Windows may update the newly-created temp directory metadata after the
+    # first handle-based read. Let that filesystem transition settle so the
+    # assertion reaches the invalid-byte branch rather than a correct,
+    # transient stability rejection.
+    Start-Sleep -Milliseconds 100
     Assert-BehaviorThrowsSafe { Assert-TailscaleEdgeTokenBytes $invalidToken } 'LIFEOS_TAILSCALE_EDGE_TOKEN source is invalid' $fixtureToken
 } finally {
     Remove-Item -LiteralPath $tokenRoot -Recurse -Force -ErrorAction SilentlyContinue
