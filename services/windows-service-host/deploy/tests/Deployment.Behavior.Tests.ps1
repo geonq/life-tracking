@@ -448,7 +448,7 @@ function Copy-BehaviorServiceSnapshot {
     $copy = [ordered]@{}
     foreach ($key in $Snapshot.Keys) {
         $value = $Snapshot[$key]
-        $copy[$key] = if ($value -is [Array]) { @($value) } else { $value }
+        $copy[$key] = if ($value -is [Array]) { ,([object[]]$value) } else { $value }
     }
     return $copy
 }
