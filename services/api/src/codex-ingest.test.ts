@@ -225,12 +225,16 @@ describe('sanitized Codex collector boundary', () => {
     const previousClaude = process.env.CLAUDE_INGEST_ENABLED;
     const previousCodexFile = process.env.CODEX_INGEST_SECRET_FILE;
     const previousClaudeFile = process.env.CLAUDE_INGEST_SECRET_FILE;
+    const previousStore = process.env.USAGE_STORE_PATH;
+    const previousClipper = process.env.CLIPPER_STORE_PATH;
     const directory = await mkdtemp(join(tmpdir(), 'usage-readiness-'));
     try {
       process.env.CODEX_INGEST_ENABLED = 'true';
       process.env.CLAUDE_INGEST_ENABLED = 'true';
       process.env.CODEX_INGEST_SECRET_FILE = join(directory, 'codex');
       process.env.CLAUDE_INGEST_SECRET_FILE = join(directory, 'claude');
+      process.env.USAGE_STORE_PATH = join(directory, 'history.jsonl');
+      process.env.CLIPPER_STORE_PATH = join(directory, 'clipper.json');
       await writeFile(process.env.CODEX_INGEST_SECRET_FILE, 'x'.repeat(32), { mode: 0o600 });
       expect(await validateStartupConfiguration()).toBe(false);
       await writeFile(process.env.CLAUDE_INGEST_SECRET_FILE, 'y'.repeat(32), { mode: 0o600 });
@@ -240,12 +244,15 @@ describe('sanitized Codex collector boundary', () => {
       if (previousClaude === undefined) delete process.env.CLAUDE_INGEST_ENABLED; else process.env.CLAUDE_INGEST_ENABLED = previousClaude;
       if (previousCodexFile === undefined) delete process.env.CODEX_INGEST_SECRET_FILE; else process.env.CODEX_INGEST_SECRET_FILE = previousCodexFile;
       if (previousClaudeFile === undefined) delete process.env.CLAUDE_INGEST_SECRET_FILE; else process.env.CLAUDE_INGEST_SECRET_FILE = previousClaudeFile;
+      if (previousStore === undefined) delete process.env.USAGE_STORE_PATH; else process.env.USAGE_STORE_PATH = previousStore;
+      if (previousClipper === undefined) delete process.env.CLIPPER_STORE_PATH; else process.env.CLIPPER_STORE_PATH = previousClipper;
     }
   });
 
   it('fails readiness for unsafe/relative/corrupt stores without creating or truncating history', async () => {
     const previous = {
       usage: process.env.USAGE_STORE_PATH,
+      clipper: process.env.CLIPPER_STORE_PATH,
       codex: process.env.CODEX_INGEST_ENABLED,
       claude: process.env.CLAUDE_INGEST_ENABLED,
       statusline: process.env.CLAUDE_STATUSLINE_ENABLED,
@@ -261,6 +268,7 @@ describe('sanitized Codex collector boundary', () => {
       expect(await validateStartupConfiguration()).toBe(false);
       const safePath = join(directory, 'history.jsonl');
       process.env.USAGE_STORE_PATH = safePath;
+      process.env.CLIPPER_STORE_PATH = join(directory, 'clipper.json');
       expect(await validateStartupConfiguration()).toBe(true);
       await writeFile(safePath, '{not-json}\n', { mode: 0o600 });
       await chmod(safePath, 0o600);
@@ -302,6 +310,7 @@ describe('sanitized Codex collector boundary', () => {
       expect(await readFile(target, 'utf8')).toContain('"usedPercent":1');
     } finally {
       if (previous.usage === undefined) delete process.env.USAGE_STORE_PATH; else process.env.USAGE_STORE_PATH = previous.usage;
+      if (previous.clipper === undefined) delete process.env.CLIPPER_STORE_PATH; else process.env.CLIPPER_STORE_PATH = previous.clipper;
       if (previous.codex === undefined) delete process.env.CODEX_INGEST_ENABLED; else process.env.CODEX_INGEST_ENABLED = previous.codex;
       if (previous.claude === undefined) delete process.env.CLAUDE_INGEST_ENABLED; else process.env.CLAUDE_INGEST_ENABLED = previous.claude;
       if (previous.statusline === undefined) delete process.env.CLAUDE_STATUSLINE_ENABLED; else process.env.CLAUDE_STATUSLINE_ENABLED = previous.statusline;

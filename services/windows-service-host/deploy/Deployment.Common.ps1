@@ -382,7 +382,7 @@ function Read-LifeOSCappedFileBytes {
         if ([string][LifeOSNativeFileIdentity]::Get($stream.SafeFileHandle) -cne [string]$beforeLeaf.FileId) {
             throw "$Description identity changed while it was being read."
         }
-        Assert-LifeOSPathIdentityChain -Expected $beforeChain -Description $Description
+        Assert-LifeOSPathIdentityChain -Expected $beforeChain -Description $Description | Out-Null
         $result = New-Object byte[] $offset
         if ($offset -gt 0) { [Array]::Copy($buffer, $result, $offset) }
         return ,$result
@@ -1185,7 +1185,11 @@ function Get-LifeOSPathIdentityChain {
         })
     }
     if ($chain.Count -le 0) { throw "$Description has no existing path components." }
-    return ,$chain.ToArray()
+    # Emit one identity record per pipeline item. Every caller captures this
+    # function with @(...), which keeps one-component paths indexable while
+    # preserving every ancestor on multi-component paths. A unary comma here
+    # would make @(...) contain one nested object[] under Windows PowerShell 5.1.
+    return $chain.ToArray()
 }
 
 function Assert-LifeOSPathIdentityChain {
@@ -1206,7 +1210,7 @@ function Assert-LifeOSPathIdentityChain {
             throw "$Description ancestor identity changed."
         }
     }
-    return ,$actual
+    return $actual
 }
 
 function Assert-ExistingDirectory {

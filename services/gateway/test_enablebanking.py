@@ -3,6 +3,7 @@ import copy
 import hashlib
 import json
 import os
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -80,6 +81,182 @@ def service(tmp_path, monkeypatch):
 
 def run(coro):
     return asyncio.run(coro)
+
+
+def test_async_runtime_status_offloads_delayed_protected_storage(tmp_path, monkeypatch):
+    adapter = service(tmp_path, monkeypatch)
+    started = threading.Event()
+    release = threading.Event()
+    worker_names = []
+    expected = {"blocked": False, "failure": None}
+
+    def delayed_runtime_status():
+        worker_names.append(threading.current_thread().name)
+        started.set()
+        release.wait(timeout=1)
+        return expected
+
+    monkeypatch.setattr(adapter, "runtime_status", delayed_runtime_status)
+
+    async def scenario():
+        task = asyncio.create_task(adapter.runtime_status_async())
+        deadline = time.monotonic() + 1
+        ticks = 0
+        while not started.is_set() and time.monotonic() < deadline:
+            ticks += 1
+            await asyncio.sleep(0)
+        assert started.is_set()
+        # The delayed protected operation must leave the event loop runnable.
+        while not task.done() and ticks < 10:
+            ticks += 1
+            await asyncio.sleep(0)
+        release.set()
+        assert await task == expected
+        assert ticks >= 2
+        assert len(worker_names) == 1
+        assert worker_names[0].startswith("lifeos-protected-storage_")
+
+    run(scenario())
+
+
+def test_repeated_cancellation_keeps_domain_lock_until_storage_finishes(monkeypatch):
+    domain_lock = asyncio.Lock()
+    first_started = threading.Event()
+    second_requested = threading.Event()
+    second_entered = threading.Event()
+    release_first = threading.Event()
+    first_finished = threading.Event()
+    active = 0
+    maximum_active = 0
+    active_lock = threading.Lock()
+    events = []
+
+    def first_write():
+        nonlocal active, maximum_active
+        with active_lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+            events.append("first-start")
+        first_started.set()
+        assert release_first.wait(timeout=2)
+        with active_lock:
+            active -= 1
+            events.append("first-finish")
+        first_finished.set()
+        return "first"
+
+    def second_write():
+        nonlocal active, maximum_active
+        with active_lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+            events.append("second-start")
+        with active_lock:
+            active -= 1
+            events.append("second-finish")
+        return "second"
+
+    async def writer(operation):
+        async with domain_lock:
+            return await enablebanking.run_protected_storage(operation)
+
+    async def scenario():
+        first = asyncio.create_task(writer(first_write))
+        deadline = time.monotonic() + 1
+        while not first_started.is_set() and time.monotonic() < deadline:
+            await asyncio.sleep(0.001)
+        assert first_started.is_set()
+
+        async def waiting_writer():
+            second_requested.set()
+            async with domain_lock:
+                second_entered.set()
+                return await enablebanking.run_protected_storage(second_write)
+
+        second = asyncio.create_task(waiting_writer())
+        while not second_requested.is_set():
+            await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not second_entered.is_set()
+
+        first.cancel()
+        await asyncio.sleep(0)
+        first.cancel()
+        await asyncio.sleep(0)
+        assert not first.done()
+        assert not first_finished.is_set()
+        assert not second_entered.is_set()
+
+        release_first.set()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert first_finished.is_set()
+        assert await asyncio.wait_for(second, timeout=1) == "second"
+        assert second_entered.is_set()
+        assert maximum_active == 1
+        assert events == ["first-start", "first-finish", "second-start", "second-finish"]
+
+    run(scenario())
+
+
+def test_protected_storage_rejects_when_admission_budget_is_full(monkeypatch):
+    slots = threading.BoundedSemaphore(1)
+    started = threading.Event()
+    release = threading.Event()
+    monkeypatch.setattr(enablebanking, "_PROTECTED_STORAGE_SLOTS", slots)
+
+    def delayed_write():
+        started.set()
+        assert release.wait(timeout=2)
+        return "done"
+
+    async def scenario():
+        first = asyncio.create_task(enablebanking.run_protected_storage(delayed_write))
+        deadline = time.monotonic() + 1
+        while not started.is_set() and time.monotonic() < deadline:
+            await asyncio.sleep(0.001)
+        assert started.is_set()
+        with pytest.raises(enablebanking.ProtectedStorageOverloaded):
+            await enablebanking.run_protected_storage(lambda: "rejected")
+        release.set()
+        assert await first == "done"
+
+    run(scenario())
+
+
+def test_protected_storage_shutdown_drains_without_cancelling(monkeypatch):
+    calls = []
+
+    class FakeExecutor:
+        def shutdown(self, *, wait, cancel_futures):
+            calls.append((wait, cancel_futures))
+
+    monkeypatch.setattr(enablebanking, "_PROTECTED_STORAGE_EXECUTOR", FakeExecutor())
+    monkeypatch.setattr(enablebanking, "_PROTECTED_STORAGE_EXECUTOR_CLOSED", False)
+
+    enablebanking.shutdown_protected_storage_executor()
+    enablebanking.shutdown_protected_storage_executor()
+
+    assert calls == [(True, False)]
+
+
+def test_protected_storage_submission_failure_is_typed_and_releases_slot(monkeypatch):
+    class ClosedExecutor:
+        def submit(self, *_args, **_kwargs):
+            raise RuntimeError("cannot schedule new futures after shutdown")
+
+    slots = threading.BoundedSemaphore(1)
+    monkeypatch.setattr(enablebanking, "_PROTECTED_STORAGE_SLOTS", slots)
+    monkeypatch.setattr(enablebanking, "_PROTECTED_STORAGE_EXECUTOR", ClosedExecutor())
+    monkeypatch.setattr(enablebanking, "_PROTECTED_STORAGE_EXECUTOR_CLOSED", False)
+
+    async def scenario():
+        with pytest.raises(enablebanking.ProtectedStorageUnavailable):
+            await enablebanking.run_protected_storage(lambda: "never runs")
+
+    run(scenario())
+    assert slots.acquire(blocking=False), "submission failure must return admission capacity"
+    slots.release()
 
 
 def test_credentials_accept_exact_allowlisted_https_destinations(tmp_path, monkeypatch):

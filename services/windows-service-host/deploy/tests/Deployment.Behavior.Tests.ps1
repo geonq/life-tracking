@@ -408,6 +408,34 @@ Assert-BehaviorThrows { Get-LifeOSPreviousInstalledGeneration -MarkerState 'acti
     }
 }
 
+& {
+    # Parse the actual installer in definition-only mode and stage the same
+    # bounded gateway release helper used by installation. This catches a
+    # PowerShell 5.1 parse regression where -MaxBytes was attached to the
+    # bundleFiles array expression instead of the JSON writer call.
+    $temp = Join-Path ([IO.Path]::GetTempPath()) ('lifeos-gateway-bundle-' + [Guid]::NewGuid().ToString('N'))
+    $gatewaySource = Join-Path $temp 'gateway-source'
+    $gatewayDestination = Join-Path $temp 'gateway-stage'
+    $backupDirectory = Join-Path $temp 'backup'
+    Ensure-Directory $gatewaySource; Ensure-Directory $backupDirectory
+    try {
+        foreach ($name in @('main.py', 'gateway_launcher.py', 'enablebanking.py', 'supplement_catalog.py', 'supplement_catalog_schema.sql', 'supplement_catalog_seed.sql')) {
+            [IO.File]::WriteAllText((Join-Path $gatewaySource $name), "fixture-$name")
+        }
+        . (Join-Path $deploy 'install.ps1') -DefineOnly
+        $stage = Copy-GatewayCodeBundle -GatewaySource $gatewaySource -GatewayEntryPoint (Join-Path $gatewaySource 'main.py') -Destination $gatewayDestination -LauncherSource (Join-Path $gatewaySource 'gateway_launcher.py') -BackupDirectory $backupDirectory
+        $releaseManifest = Read-LifeOSBoundedJsonFile -Path (Join-Path $gatewayDestination 'gateway-release.manifest.json') -MaxBytes $script:LifeOSGenerationManifestMaxBytes -Description 'gateway bundle fixture manifest'
+        $bundleFiles = @($releaseManifest.bundleFiles)
+        $bundleNames = @($bundleFiles | ForEach-Object { [string]$_.path })
+        $expectedBundleNames = @('main.py', 'gateway_launcher.py', 'enablebanking.py', 'supplement_catalog.py', 'supplement_catalog_schema.sql', 'supplement_catalog_seed.sql')
+        $missingBundleNames = @($expectedBundleNames | Where-Object { $_ -notin $bundleNames })
+        Assert-Behavior ($stage.Changed -and [string]$releaseManifest.bundleVersion -ceq 'v18' -and $bundleFiles.Count -eq 6 -and
+            $missingBundleNames.Count -eq 0) 'the parsed gateway bundle helper stages every file and publishes a bounded v18 manifest.'
+    } finally {
+        Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 $emptyServiceArguments = Get-LifeOSServiceConfigArguments -Name 'LifeOSAPI' -BinaryPath '"D:\host.exe"' -StartName 'NT SERVICE\LifeOSAPI' -StartMode 'auto' -Dependencies @()
 Assert-Behavior ($emptyServiceArguments[6] -ceq 'password=' -and $emptyServiceArguments[7] -ceq '""' -and
     $emptyServiceArguments[10] -ceq 'depend=' -and $emptyServiceArguments[11] -ceq '/') 'empty service values retain explicit native argv slots.'
@@ -620,6 +648,20 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
         $bounded = Join-Path $root 'bounded.txt'
         [IO.File]::WriteAllText($bounded, '0123456789')
         Assert-BehaviorThrows { Read-LifeOSCappedFileText -Path $bounded -MaxBytes 4 -Description 'oversized candidate text' } 'a capped whole-file reader rejects growth beyond its bound.'
+
+        $nestedCandidateDirectory = Join-Path $root 'nested\candidate\payload'
+        Ensure-Directory $nestedCandidateDirectory
+        $nestedCandidate = Join-Path $nestedCandidateDirectory 'SOURCE_SHA.txt'
+        [IO.File]::WriteAllText($nestedCandidate, 'stable-source-sha')
+        $nestedChain = @(Get-LifeOSPathIdentityChain -Path $nestedCandidate -Description 'nested candidate source SHA')
+        Assert-Behavior ($nestedChain.Count -gt 1 -and $nestedChain[0] -isnot [Array] -and
+            $nestedChain[$nestedChain.Count - 1].Path -ieq (Get-FullPath $nestedCandidate)) 'nested candidate paths return a flat identity chain with the leaf last.'
+        Assert-Behavior ((Read-LifeOSCappedFileText -Path $nestedCandidate -MaxBytes 64 -Description 'nested candidate source SHA') -ceq 'stable-source-sha') 'a stable nested candidate SOURCE_SHA file passes the capped reader.'
+        $nestedReplacement = Join-Path $nestedCandidateDirectory 'SOURCE_SHA.replacement'
+        [IO.File]::WriteAllText($nestedReplacement, 'replacement-source-sha')
+        Remove-Item -LiteralPath $nestedCandidate -Force
+        Move-Item -LiteralPath $nestedReplacement -Destination $nestedCandidate -Force
+        Assert-BehaviorThrows { Assert-LifeOSPathIdentityChain -Expected $nestedChain -Description 'nested candidate source SHA replacement' } 'an identity/path change on a nested candidate file is rejected.'
 
         $hardLink = Join-Path $root 'hardlink.txt'
         $hardLinkCreated = $false

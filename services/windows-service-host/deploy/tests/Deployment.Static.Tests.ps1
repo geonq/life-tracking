@@ -159,6 +159,10 @@ Assert-Text 'SetDacl' 'The native ACL boundary applies DACLs through the validat
 Assert-Text 'function Get-LifeOSFileDigest' 'File hashes and lengths come from one validated handle-bound stream.'
 Assert-Text 'function Read-LifeOSPrefixBytes' 'Bounded prefix reads use the validated file handle.'
 Assert-Text 'function Get-LifeOSPathIdentityChain' 'Reads bind every existing path ancestor.'
+Assert-Text 'return \$chain\.ToArray\(\)' 'Path identity chains emit individual records for PowerShell collection capture.'
+Assert-NotText 'return ,\$chain\.ToArray\(\)' 'Path identity chains do not return a nested array under PowerShell 5.1.'
+Assert-NotText 'return ,\$actual' 'Path identity validation does not return a nested revalidation array.'
+Assert-Text 'Assert-LifeOSPathIdentityChain -Expected \$beforeChain -Description \$Description \| Out-Null' 'Capped readers suppress validator output so only the requested bytes escape.'
 Assert-Text '\[IO\.Directory\]::EnumerateFileSystemEntries' 'Tree enumeration uses an unsorted .NET enumerator.'
 Assert-Text '\$enumerator\.MoveNext\(\)' 'Tree enumeration advances one child at a time before retaining it.'
 Assert-Text '\$enumerator\.Dispose\(\)' 'Tree enumeration disposes its incremental enumerator.'
@@ -280,6 +284,7 @@ Assert-Text '\$script:LifeOSCandidateServiceHostMaxFileBytes = 256 \* 1024 \* 10
 Assert-Text '\$maxCandidateNodeFileBytes = \[long\]\$script:LifeOSCandidateNodeMaxFileBytes' 'Candidate verification consumes the explicit Node runtime bound.'
 Assert-Text 'node-runtime/node\.exe.*\$maxCandidateNodeFileBytes' 'Candidate verification scopes the larger bound to the standalone Node path.'
 Assert-Text 'service-host/LifeOS\.ServiceHost\.exe.*\$maxCandidateServiceHostFileBytes' 'Candidate verification scopes the larger bound to the exact service-host path.'
+Assert-Text 'Write-JsonAtomic -Path \$releaseManifestPath -Value \(\[ordered\]@\{' 'Gateway release manifests use the real atomic JSON writer call.'
 Assert-Text 'LargeFileRelativePath \$nodeLargeFileRelativePath' 'Installation passes the explicit Node runtime file contract.'
 Assert-Text 'function Get-LifeOSBoundedFileMaxBytes' 'Tree scans resolve per-file limits by relative path.'
 Assert-Text 'function Get-LifeOSRecoveryFileMaxBytes' 'Recovery resolves the Node exception for exact runtime files.'
@@ -616,6 +621,18 @@ Write-Host 'PASS: transaction-owned recovery static assertions'
 
 # Scope these assertions to production bodies; test fixtures must not satisfy them.
 $commonText = Get-Content -LiteralPath (Join-Path $root 'Deployment.Common.ps1') -Raw
+$gatewayBundleBody = ($installText -split 'function Copy-GatewayCodeBundle', 2)[1] -split 'function Initialize-SupplementCatalog', 2
+$bundleFilesAssignment = [regex]::Match($gatewayBundleBody[0], '(?ms)\$bundleFiles\s*=\s*@\(.*?\}\)(?<tail>[^\r\n]*)')
+if (-not $bundleFilesAssignment.Success -or $bundleFilesAssignment.Groups['tail'].Value -match '-MaxBytes') {
+    throw 'FAIL: Gateway bundle byte bounds must not be attached to the bundleFiles array expression.'
+}
+if ($gatewayBundleBody[0] -notmatch '(?ms)Write-JsonAtomic\s+-Path\s+\$releaseManifestPath\s+-Value\s+\(\[ordered\]@\{.*?bundleFiles\s*=\s*\$bundleFiles.*?\}\)\s+-MaxBytes\s+\$script:LifeOSGenerationManifestMaxBytes') {
+    throw 'FAIL: Gateway release manifest must pass its byte bound to Write-JsonAtomic.'
+}
+$chainCallLines = @($commonText -split "`r?`n" | Where-Object { $_ -match 'Get-LifeOSPathIdentityChain -Path' })
+if ($chainCallLines.Count -lt 10 -or @($chainCallLines | Where-Object { $_ -notmatch '@\(.*Get-LifeOSPathIdentityChain -Path' }).Count -gt 0) {
+    throw 'FAIL: Every path identity chain caller must capture the flat pipeline contract with @(...).'
+}
 
 $durableBody = ($commonText -split 'function Write-LifeOSDurableBytes', 2)[1] -split 'function Write-JsonAtomic', 2
 if ($durableBody[0].IndexOf('$stream.Flush($true)', [StringComparison]::Ordinal) -lt 0 -or

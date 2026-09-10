@@ -16,6 +16,7 @@ import {
 } from './server.js';
 
 import { authorizeLocalApi } from './local-auth.js';
+import { ClipperStore } from './clipper-store.js';
 
 const LOCAL_SECRET = 'local-service-test-credential-'.repeat(2);
 const localHeaders = () => ({ authorization: `Bearer ${LOCAL_SECRET}` });
@@ -30,15 +31,31 @@ const SENSITIVE_LOCAL_ROUTES: ReadonlyArray<readonly [string, string]> = [
   ['POST', '/nutrition/photo-proposal'],
 ];
 let localDirectory: string;
+const TEST_ENV_KEYS = [
+  'LIFEOS_LOCAL_API_ENABLED', 'LIFEOS_LOCAL_API_SECRET', 'LIFEOS_LOCAL_API_SECRET_FILE',
+  'USAGE_STORE_PATH', 'CLIPPER_STORE_PATH',
+  'CODEX_LIVE_ENABLED', 'CODEX_INGEST_ENABLED', 'CODEX_INGEST_SECRET_FILE',
+  'CLAUDE_INGEST_ENABLED', 'CLAUDE_INGEST_SECRET', 'CLAUDE_INGEST_SECRET_FILE', 'CLAUDE_STATUSLINE_TOKEN',
+  'CLIPPER_INGEST_ENABLED', 'CLIPPER_INGEST_SECRET_FILE',
+  'LIFEOS_API_MODE', 'NODE_ENV',
+];
+let environmentBeforeTest: Record<string, string | undefined>;
 beforeEach(async () => {
+  environmentBeforeTest = Object.fromEntries(TEST_ENV_KEYS.map(key => [key, process.env[key]]));
   localDirectory = await mkdtemp(join(tmpdir(), 'lifeos-local-auth-'));
   const path = join(localDirectory, 'secret');
   await writeFile(path, LOCAL_SECRET, { mode: 0o600 });
   vi.stubEnv('LIFEOS_LOCAL_API_ENABLED', 'true');
   vi.stubEnv('LIFEOS_LOCAL_API_SECRET_FILE', path);
+  vi.stubEnv('USAGE_STORE_PATH', join(localDirectory, 'history'));
+  vi.stubEnv('CLIPPER_STORE_PATH', join(localDirectory, 'clipper.json'));
 });
 afterEach(async () => {
   vi.unstubAllEnvs();
+  for (const key of TEST_ENV_KEYS) {
+    const value = environmentBeforeTest[key];
+    if (value === undefined) delete process.env[key]; else process.env[key] = value;
+  }
   await rm(localDirectory, { recursive: true, force: true });
 });
 
@@ -135,6 +152,62 @@ describe('HTTP API', () => {
 
     expect(await callWithLength('1')).toEqual({ status: 400, body: '{"error":"invalid_request"}' });
     expect(await callWithLength('2e0')).toEqual({ status: 400, body: '{"error":"invalid_request"}' });
+  });
+
+  it('keeps barcode input errors client-visible and maps provider states to bounded statuses', async () => {
+    const outcomes: Array<Error | Record<string, unknown>> = [
+      new Error('invalid_barcode'),
+      { state: 'unavailable', reason: 'upstream_unavailable' },
+      { state: 'unavailable', reason: 'configuration_unavailable' },
+      { state: 'unavailable', reason: 'upstream_rate_limited', retryAfterSeconds: 17 },
+      { state: 'found', barcode: '3017620422003' },
+    ];
+    const lookup = vi.fn(async (_input: string) => {
+      const outcome = outcomes.shift();
+      if (outcome === undefined) throw new Error('unexpected_barcode_test_call');
+      if (outcome instanceof Error) throw outcome;
+      return outcome;
+    });
+    const server = createApiServer(
+      async () => ({ connectorState: 'unavailable', windows: [] }),
+      { lookup } as never,
+    );
+    await listenApiServer(server);
+    try {
+      const address = server.address(); if (!address || typeof address === 'string') throw Error('no address');
+      const call = (path: string) => new Promise<{ status: number; body: any; retryAfter?: string }>((resolve, reject) => {
+        const req = request({ host: LOOPBACK_HOST, port: address.port, path, method: 'GET' }, response => {
+          let value = '';
+          response.on('data', chunk => value += chunk);
+          response.on('end', () => resolve({
+            status: response.statusCode!,
+            body: JSON.parse(value),
+            retryAfter: response.headers['retry-after'] as string | undefined,
+          }));
+        });
+        req.on('error', reject);
+        req.end();
+      });
+
+      await expect(call('/api/nutrition/barcode/not-a-barcode')).resolves.toMatchObject({
+        status: 400, body: { error: 'invalid_barcode' },
+      });
+      await expect(call('/api/nutrition/barcode/3017620422003')).resolves.toMatchObject({
+        status: 503, body: { error: 'provider_unavailable' },
+      });
+      await expect(call('/api/nutrition/barcode/3017620422003')).resolves.toMatchObject({
+        status: 503, body: { error: 'provider_unavailable' },
+      });
+      await expect(call('/nutrition/barcode/3017620422003')).resolves.toEqual({
+        status: 429, body: { error: 'rate_limited' }, retryAfter: '17',
+      });
+      await expect(call('/api/nutrition/barcode/3017620422003')).resolves.toMatchObject({
+        status: 200, body: { state: 'found', barcode: '3017620422003' },
+      });
+      expect(lookup).toHaveBeenCalledWith('3017620422003');
+    } finally {
+      await closeApiServer(server);
+    }
   });
 
   it('preserves direct Codex capture time through the usage response', async () => {
@@ -690,7 +763,7 @@ describe('dedicated local service authentication', () => {
     const res = { statusCode: 200, setHeader: () => undefined, end: (value: string) => { body = value; } };
     const live = vi.fn(async () => ({ connectorState: 'unavailable' as const, windows: [] }));
     const generate = vi.fn(async () => ({ accepted: true }));
-    await app(req, res as never, live, undefined, undefined, { generate } as never);
+    await app(req, res as never, live, undefined, new ClipperStore(join(localDirectory, 'clipper.json')), { generate } as never);
     return { status: res.statusCode, body: JSON.parse(body), live, generate };
   }
   const valid = () => ['Authorization', `Bearer ${LOCAL_SECRET}`];

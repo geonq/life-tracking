@@ -11,6 +11,9 @@ never persisted or returned to the client.
 from __future__ import annotations
 
 import asyncio
+import atexit
+import base64
+from concurrent.futures import ThreadPoolExecutor
 import errno
 import hashlib
 import hmac
@@ -19,6 +22,8 @@ import os
 import re
 import secrets
 import stat
+import subprocess
+import threading
 import time
 import unicodedata
 import uuid
@@ -34,6 +39,147 @@ import httpx
 
 
 BUSINESS_TIME_ZONE = ZoneInfo("Europe/Berlin")
+
+
+# Protected storage can invoke Windows PowerShell for ACL validation. Keep
+# complete storage units away from the event loop and bound admission before
+# submitting to ThreadPoolExecutor. The executor's internal queue is therefore
+# never allowed to contain more than this fixed active-plus-queued budget.
+PROTECTED_STORAGE_MAX_WORKERS = 4
+PROTECTED_STORAGE_MAX_QUEUE = 4
+PROTECTED_STORAGE_MAX_IN_FLIGHT = (
+    PROTECTED_STORAGE_MAX_WORKERS + PROTECTED_STORAGE_MAX_QUEUE
+)
+_PROTECTED_STORAGE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=PROTECTED_STORAGE_MAX_WORKERS,
+    thread_name_prefix="lifeos-protected-storage",
+)
+_PROTECTED_STORAGE_SLOTS = threading.BoundedSemaphore(PROTECTED_STORAGE_MAX_IN_FLIGHT)
+_PROTECTED_STORAGE_STATE_LOCK = threading.Lock()
+_PROTECTED_STORAGE_EXECUTOR_CLOSED = False
+
+
+class ProtectedStorageCapacityError(RuntimeError):
+    """Base for bounded protected-storage admission/lifecycle failures."""
+
+
+class ProtectedStorageOverloaded(ProtectedStorageCapacityError):
+    """The protected-storage active-plus-queued budget is currently full."""
+
+    def __init__(self) -> None:
+        super().__init__("protected storage is busy")
+
+
+class ProtectedStorageUnavailable(ProtectedStorageCapacityError):
+    """Protected storage has been closed for process shutdown."""
+
+    def __init__(self) -> None:
+        super().__init__("protected storage is unavailable")
+
+
+def shutdown_protected_storage_executor(*, wait: bool = True) -> None:
+    """Close the storage executor without cancelling submitted operations.
+
+    Shutdown is one-way. New work is rejected before submission, while
+    already submitted work is allowed to drain because ``cancel_futures`` is
+    deliberately false. The default blocking shutdown is appropriate for
+    process teardown and preserves the storage transaction boundary.
+    """
+    global _PROTECTED_STORAGE_EXECUTOR_CLOSED
+    with _PROTECTED_STORAGE_STATE_LOCK:
+        if _PROTECTED_STORAGE_EXECUTOR_CLOSED:
+            return
+        _PROTECTED_STORAGE_EXECUTOR_CLOSED = True
+        executor = _PROTECTED_STORAGE_EXECUTOR
+    executor.shutdown(wait=wait, cancel_futures=False)
+
+
+atexit.register(shutdown_protected_storage_executor)
+
+
+def _release_protected_storage_slot_once(release_lock: threading.Lock, released: list[bool]) -> None:
+    """Release a reservation exactly once across worker and event-loop paths."""
+    with release_lock:
+        if released[0]:
+            return
+        released[0] = True
+    _PROTECTED_STORAGE_SLOTS.release()
+
+
+async def run_protected_storage(operation: Callable[..., object], /, *args, **kwargs):
+    """Run one complete protected-storage unit on the bounded executor.
+
+    Callers keep their domain lock while awaiting this boundary.  That makes a
+    read/repair or read/modify/write transaction one serialized unit while the
+    ACL probe and file operations stay off the asyncio event loop. This is
+    intentionally different from ``asyncio.to_thread``: the custom
+    executor is admitted through a fixed active-plus-queued budget.
+    """
+    loop = asyncio.get_running_loop()
+    release_lock = threading.Lock()
+    released = [False]
+    slot_reserved = [False]
+
+    def release_slot() -> None:
+        if not slot_reserved[0]:
+            return
+        _release_protected_storage_slot_once(release_lock, released)
+
+    def invoke() -> object:
+        try:
+            return operation(*args, **kwargs)
+        finally:
+            # This is the normal release path. The future callback below is a
+            # fallback for a future cancelled before a queued call starts.
+            release_slot()
+
+    try:
+        # Shutdown and submission share one state lock. This closes the race
+        # where shutdown marks the executor closed after admission but before
+        # run_in_executor submits the operation, which would otherwise leak a
+        # raw executor RuntimeError outside the typed service boundary.
+        with _PROTECTED_STORAGE_STATE_LOCK:
+            if _PROTECTED_STORAGE_EXECUTOR_CLOSED:
+                raise ProtectedStorageUnavailable()
+            if not _PROTECTED_STORAGE_SLOTS.acquire(blocking=False):
+                raise ProtectedStorageOverloaded()
+            slot_reserved[0] = True
+            try:
+                operation_future = loop.run_in_executor(_PROTECTED_STORAGE_EXECUTOR, invoke)
+            except RuntimeError as exc:
+                raise ProtectedStorageUnavailable() from exc
+            operation_future.add_done_callback(lambda _future: release_slot())
+    except BaseException:
+        release_slot()
+        raise
+    try:
+        # A cancelled request must not release its domain lock while the
+        # underlying read/repair or mutation is still executing in a worker.
+        # The storage operation has its own bounded subprocess/file deadlines,
+        # so waiting for completion preserves serialization without creating
+        # an unbounded cancellation backlog.
+        return await asyncio.shield(operation_future)
+    except asyncio.CancelledError:
+        # Cancellation is recorded by entering this branch, but every further
+        # cancellation is also ignored until the executor future is actually
+        # done. This keeps the caller's domain lock held for the full storage
+        # transaction, even when shutdown or a client disconnect cancels the
+        # task repeatedly.
+        while not operation_future.done():
+            try:
+                await asyncio.shield(operation_future)
+            except asyncio.CancelledError:
+                continue
+            except BaseException:
+                # The operation's exception is drained below; cancellation of
+                # the request remains the result exposed to its caller.
+                break
+        if operation_future.done():
+            try:
+                operation_future.exception()
+            except BaseException:
+                pass
+        raise
 
 
 class EnableBankingUnavailable(Exception):
@@ -72,6 +218,16 @@ def _bounded_file_identity(value: os.stat_result) -> tuple[int, int, int, int, i
     )
 
 
+def _bounded_path_component_identity(value: os.stat_result) -> tuple[int, int, int, int]:
+    """Return identity that remains stable while a directory's contents change."""
+    return (
+        int(value.st_dev),
+        int(value.st_ino),
+        int(value.st_mode),
+        int(getattr(value, "st_file_attributes", 0)),
+    )
+
+
 def _bounded_file_is_reparse(value: os.stat_result) -> bool:
     return stat.S_ISLNK(value.st_mode) or bool(
         int(getattr(value, "st_file_attributes", 0))
@@ -81,22 +237,25 @@ def _bounded_file_is_reparse(value: os.stat_result) -> bool:
 
 def _bounded_file_path_identity_chain(
     path: Path,
-) -> tuple[tuple[str, tuple[int, int, int, int, int, int, int]], ...]:
+) -> tuple[tuple[str, tuple[int, int, int, int]], ...]:
     """Capture existing path components without resolving a reparse point."""
     current = Path(os.path.abspath(os.fspath(path)))
     leaf = current
-    chain: list[tuple[str, tuple[int, int, int, int, int, int, int]]] = []
+    chain: list[tuple[str, tuple[int, int, int, int]]] = []
     while True:
         try:
             observed = os.lstat(current)
         except FileNotFoundError:
             break
-        if _bounded_file_is_reparse(observed) and (os.name == "nt" or current == leaf):
+        is_fixed_system_alias = os.name != "nt" and current in {Path("/var"), Path("/tmp")}
+        if _bounded_file_is_reparse(observed) and (
+            current == leaf or os.name == "nt" or not is_fixed_system_alias
+        ):
             raise OSError(errno.ELOOP, "bounded file path contains a reparse point")
         chain.append(
             (
                 os.path.normcase(os.path.abspath(os.fspath(current))),
-                _bounded_file_identity(observed),
+                _bounded_path_component_identity(observed),
             )
         )
         parent = current.parent
@@ -104,6 +263,305 @@ def _bounded_file_path_identity_chain(
             break
         current = parent
     return tuple(reversed(chain))
+
+
+_WINDOWS_BROAD_ACL_TRUSTEES = frozenset({
+    "WD",  # Everyone
+    "AU",  # Authenticated Users
+    "BU",  # Built-in Users
+    "IU",  # Interactive
+    "AN",  # Anonymous
+    "NU",  # Network
+    "AC",  # All application packages
+    "S-1-1-0",
+    "S-1-5-11",
+    "S-1-5-32-545",
+    "S-1-5-32-546",
+    "S-1-5-4",
+    "S-1-5-7",
+    "S-1-5-2",
+    "S-1-5-19",
+    "S-1-5-20",
+})
+_WINDOWS_SDDL_WRITE_RIGHTS = frozenset({
+    "FA", "FW", "GA", "GW", "CC", "DC", "DT", "WD", "AD", "WE", "WA", "SD", "WO", "WP", "SW", "WDAC",
+})
+_WINDOWS_SDDL_READ_ONLY_RIGHTS = frozenset({
+    "FR", "FX", "GR", "GX", "RC", "RD", "RA", "RE", "RP", "LC", "LO", "CR",
+})
+_WINDOWS_SDDL_ALIASES = {
+    "SY": "S-1-5-18",
+    "BA": "S-1-5-32-544",
+    "WD": "S-1-1-0",
+    "AU": "S-1-5-11",
+    "BU": "S-1-5-32-545",
+    "IU": "S-1-5-4",
+    "AN": "S-1-5-7",
+    "NU": "S-1-5-2",
+    "AC": "S-1-15-2-1",
+}
+_WINDOWS_CANONICAL_BROAD_ACL_TRUSTEES = frozenset(
+    _WINDOWS_SDDL_ALIASES.get(value, value)
+    for value in _WINDOWS_BROAD_ACL_TRUSTEES
+)
+_WINDOWS_ACL_QUERY_TIMEOUT_SECONDS = 5
+_WINDOWS_ACL_QUERY_MAX_BYTES = 256 * 1024
+_MANAGEMENT_CONFIG_MAX_BYTES = 64 * 1024
+
+
+def _canonical_windows_sid(value: str, *, allow_aliases: bool = True) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().upper()
+    if allow_aliases and normalized in _WINDOWS_SDDL_ALIASES:
+        return _WINDOWS_SDDL_ALIASES[normalized]
+    if re.fullmatch(r"S-1-(?:\d+)(?:-\d+)+", normalized) is None:
+        return None
+    parts = normalized.split("-")
+    try:
+        canonical_parts = [parts[0], parts[1]] + [str(int(part, 10)) for part in parts[2:]]
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return "-".join(canonical_parts)
+
+
+def _sddl_rights_grant_write(rights: str) -> bool:
+    normalized = rights.upper()
+    if not normalized:
+        return False
+    if normalized.startswith("0X"):
+        return True
+    tokens = [normalized[index:index + 2] for index in range(0, len(normalized), 2)]
+    if "" in tokens or "".join(tokens) != normalized:
+        return True
+    return any(
+        token in _WINDOWS_SDDL_WRITE_RIGHTS or token not in _WINDOWS_SDDL_READ_ONLY_RIGHTS
+        for token in tokens
+    )
+
+
+def validate_windows_acl_sddl(
+    sddl: str,
+    current_sid: str,
+    management_sid: str | None = None,
+) -> None:
+    """Validate the mutation boundary mirrored by the deployment ACL verifier.
+
+    ``Assert-RestrictedAcl`` and ``Assert-NoBroadAcl`` in the Windows
+    deployment protect the managed storage root. Runtime cannot use an
+    ancestor-relative handle in this Python stack, so it checks every existing
+    component's DACL before a path-based operation: broad trustees and every
+    other trustee must be unable to mutate the component. Read-only broad
+    inheritance is harmless for replacement and remains compatible with
+    normal Windows system ancestors.
+    """
+    owner_match = re.search(r"(?:^|:)O:([^G]+)G:", sddl, flags=re.IGNORECASE)
+    dacl_match = re.search(r"D:(.*?)(?::S:|$)", sddl, flags=re.IGNORECASE)
+    if owner_match is None or dacl_match is None:
+        raise OSError(errno.EACCES, "unsafe_storage_contract")
+    owner_raw = owner_match.group(1).strip().upper()
+    owner = _canonical_windows_sid(owner_raw)
+    current = _canonical_windows_sid(current_sid, allow_aliases=False)
+    management = (
+        None
+        if management_sid is None
+        else _canonical_windows_sid(management_sid, allow_aliases=False)
+    )
+    if (
+        owner is None
+        or current is None
+        or (management_sid is not None and management is None)
+        or owner in _WINDOWS_CANONICAL_BROAD_ACL_TRUSTEES
+    ):
+        raise OSError(errno.EACCES, "unsafe_storage_contract")
+    # This is the same management boundary as Assert-RestrictedAcl: SYSTEM,
+    # local Administrators, the running service/operator identity, and the
+    # installer-recorded management SID. The observed owner is never added.
+    trusted = {"S-1-5-18", "S-1-5-32-544", current}
+    if management is not None:
+        trusted.add(management)
+    if owner not in trusted:
+        raise OSError(errno.EACCES, "unsafe_storage_contract")
+    aces = re.findall(r"\(([^()]*)\)", dacl_match.group(1))
+    if not aces:
+        raise OSError(errno.EACCES, "unsafe_storage_contract")
+    for raw_ace in aces:
+        fields = raw_ace.split(";")
+        if len(fields) != 6:
+            raise OSError(errno.EACCES, "unsafe_storage_contract")
+        ace_type = fields[0].upper()
+        trustee_raw = fields[5].strip().upper()
+        trustee = _canonical_windows_sid(trustee_raw)
+        if ace_type in {"D", "OD"}:
+            raise OSError(errno.EACCES, "unsafe_storage_contract")
+        if ace_type not in {"A", "OA"}:
+            raise OSError(errno.EACCES, "unsafe_storage_contract")
+        if not trustee_raw:
+            raise OSError(errno.EACCES, "unsafe_storage_contract")
+        # Read-only inherited access may exist on ordinary Windows system
+        # ancestors. It cannot replace a directory. Any write-capable ACE,
+        # including one for a broad or unknown trustee, must be explicit.
+        if _sddl_rights_grant_write(fields[2]) and (
+            trustee is None
+            or trustee in _WINDOWS_CANONICAL_BROAD_ACL_TRUSTEES
+            or trustee not in trusted
+        ):
+            raise OSError(errno.EACCES, "unsafe_storage_contract")
+
+
+def _read_management_sid_config(path: Path) -> str | None:
+    try:
+        identity_chain = _bounded_file_path_identity_chain(path)
+        if not identity_chain:
+            return None
+        metadata = os.lstat(path)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or _bounded_file_is_reparse(metadata)
+            or metadata.st_size > _MANAGEMENT_CONFIG_MAX_BYTES
+        ):
+            return None
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        descriptor = os.open(path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or _bounded_file_is_reparse(opened)
+                or _bounded_file_identity(opened) != _bounded_file_identity(metadata)
+            ):
+                return None
+            body = bytearray()
+            while len(body) <= _MANAGEMENT_CONFIG_MAX_BYTES:
+                chunk = os.read(descriptor, min(64 * 1024, _MANAGEMENT_CONFIG_MAX_BYTES + 1 - len(body)))
+                if not chunk:
+                    break
+                body.extend(chunk)
+            if len(body) > _MANAGEMENT_CONFIG_MAX_BYTES:
+                return None
+            finished = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(finished.st_mode)
+                or _bounded_file_is_reparse(finished)
+                or _bounded_file_identity(finished) != _bounded_file_identity(opened)
+                or len(body) != opened.st_size
+            ):
+                return None
+            if _bounded_file_path_identity_chain(path) != identity_chain:
+                return None
+        finally:
+            os.close(descriptor)
+        decoded = json.loads(bytes(body).decode("utf-8"))
+        if not isinstance(decoded, dict):
+            return None
+        candidate = decoded.get("managementSid")
+        if not isinstance(candidate, str) or candidate != candidate.strip():
+            return None
+        return _canonical_windows_sid(candidate, allow_aliases=False)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError):
+        return None
+
+
+def _configured_management_sid() -> str | None:
+    """Read the installer-recorded management SID through the existing config contract."""
+    raw_path = os.environ.get("LIFEOS_GATEWAY_CONFIG_PATH")
+    if not isinstance(raw_path, str) or not raw_path:
+        return None
+    config_path = Path(os.path.abspath(raw_path))
+    if (
+        config_path.name.casefold() != "gateway.app.json"
+        or config_path.parent.name.casefold() != "config"
+        or config_path.parent.parent.name.casefold() != "host"
+    ):
+        return None
+    return _read_management_sid_config(config_path.with_name("LifeOSGateway.json"))
+
+
+def _windows_acl_sddl(paths: tuple[str, ...]) -> tuple[str, tuple[str, ...]]:
+    if not paths or any(not isinstance(path, str) or not path for path in paths):
+        raise OSError(errno.EACCES, "unsafe_storage_contract")
+    serialized_paths = json.dumps(paths, separators=(",", ":"))
+    if len(serialized_paths.encode("utf-8")) > _WINDOWS_ACL_QUERY_MAX_BYTES:
+        raise OSError(errno.EACCES, "unsafe_storage_contract")
+    system_root = os.environ.get("SystemRoot") or os.environ.get("SYSTEMROOT")
+    if not system_root:
+        raise OSError(errno.EACCES, "unsafe_storage_contract")
+    powershell = Path(system_root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    script = (
+        "$ErrorActionPreference = 'Stop'; "
+        "$paths = ConvertFrom-Json -InputObject $env:LIFEOS_ACL_QUERY_PATHS; "
+        "$currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value; "
+        "$entries = @($paths | ForEach-Object { $path = [string]$_; $acl = Get-Acl -LiteralPath $path -ErrorAction Stop; [pscustomobject]@{ path = $path; sddl = [string]$acl.Sddl } }); "
+        "[Console]::Out.WriteLine(([pscustomobject]@{ sid = $currentSid; entries = $entries } | ConvertTo-Json -Compress -Depth 4))"
+    )
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    environment = {
+        "SystemRoot": system_root,
+        "SYSTEMROOT": system_root,
+        "LIFEOS_ACL_QUERY_PATHS": serialized_paths,
+    }
+    try:
+        completed = subprocess.run(
+            [
+                os.fspath(powershell),
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-EncodedCommand",
+                encoded,
+            ],
+            capture_output=True,
+            check=True,
+            env=environment,
+            text=True,
+            timeout=_WINDOWS_ACL_QUERY_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        raise OSError(errno.EACCES, "unsafe_storage_contract") from exc
+    if len(completed.stdout.encode("utf-8")) > _WINDOWS_ACL_QUERY_MAX_BYTES:
+        raise OSError(errno.EACCES, "unsafe_storage_contract")
+    try:
+        result = json.loads(completed.stdout.strip())
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise OSError(errno.EACCES, "unsafe_storage_contract") from exc
+    if not isinstance(result, dict) or not isinstance(result.get("sid"), str):
+        raise OSError(errno.EACCES, "unsafe_storage_contract")
+    entries = result.get("entries")
+    if not isinstance(entries, list) or len(entries) != len(paths):
+        raise OSError(errno.EACCES, "unsafe_storage_contract")
+    sddls: list[str] = []
+    for index, entry in enumerate(entries):
+        if (
+            not isinstance(entry, dict)
+            or entry.get("path") != paths[index]
+            or not isinstance(entry.get("sddl"), str)
+        ):
+            raise OSError(errno.EACCES, "unsafe_storage_contract")
+        sddls.append(entry["sddl"])
+    return result["sid"], tuple(sddls)
+
+
+def assert_protected_storage_path(
+    path: Path,
+    identity_chain: tuple[tuple[str, tuple[int, int, int, int]], ...] | None = None,
+) -> None:
+    """Require the complete existing path chain to block untrusted replacement.
+
+    POSIX callers use an open directory descriptor for writes and do not need
+    this path-based fallback. Windows callers have no openat/renameat boundary
+    in the current stack, so every path component is checked against the same
+    managed ACL contract before each path operation.
+    """
+    if os.name != "nt":
+        return
+    if identity_chain is None:
+        identity_chain = _bounded_file_path_identity_chain(path)
+    if not identity_chain or _bounded_file_path_identity_chain(path) != identity_chain:
+        raise OSError(errno.EAGAIN, "unsafe_storage_contract")
+    current_sid, sddls = _windows_acl_sddl(tuple(component for component, _ in identity_chain))
+    management_sid = _configured_management_sid()
+    for sddl in sddls:
+        validate_windows_acl_sddl(sddl, current_sid, management_sid)
 
 
 def _read_bounded_file_bytes(path: Path, maximum_bytes: int) -> bytes | None:
@@ -115,6 +573,7 @@ def _read_bounded_file_bytes(path: Path, maximum_bytes: int) -> bytes | None:
         before_chain = _bounded_file_path_identity_chain(path)
         if not before_chain:
             return None
+        assert_protected_storage_path(path, before_chain)
         before = os.lstat(path)
         before_identity = _bounded_file_identity(before)
         if (
@@ -302,6 +761,11 @@ class EnableBankingService:
         self._refresh_failures: list[str] = []
         self._refresh_providers: dict[str, str] = {}
         self._refresh_expiry: datetime | None = None
+        # Async domain locks serialize Finance mutations at the request layer;
+        # this re-entrant lock also serializes the complete storage units that
+        # run on worker threads and keeps synchronous test/public helpers safe
+        # when an async refresh is active.
+        self._protected_storage_lock = threading.RLock()
         self.consent_lock = asyncio.Lock()
         self.connections_lock = asyncio.Lock()
         self.consent_flows: dict[str, dict] = {}
@@ -310,6 +774,32 @@ class EnableBankingService:
             "token": None,
             "expires_at": 0.0,
         }
+
+    async def _run_storage(self, operation: Callable[..., object], /, *args, **kwargs):
+        """Run one Finance storage transaction off the event loop."""
+        def guarded_operation():
+            with self._protected_storage_lock:
+                return operation(*args, **kwargs)
+
+        return await run_protected_storage(guarded_operation)
+
+    async def _credentials_async(self) -> dict | None:
+        return await self._run_storage(self._credentials)
+
+    async def _read_private_key_async(self, path: str) -> bytes:
+        return await self._run_storage(self._read_private_key, path)
+
+    async def runtime_status_async(self) -> dict:
+        """Return runtime state without running ACL/file I/O on asyncio."""
+        return await self._run_storage(self.runtime_status)
+
+    async def load_cached_summary_async(self) -> dict | None:
+        """Load and validate the cache as one protected storage unit."""
+        return await self._run_storage(self.load_cached_summary)
+
+    async def summary_revision_async(self) -> int | None:
+        """Read the durable revision without blocking the event loop."""
+        return await self._run_storage(self.summary_revision)
 
     @staticmethod
     def _safe_https_url(value: object, *, allow_query: bool = False) -> bool:
@@ -377,7 +867,15 @@ class EnableBankingService:
             # and is not a runtime mTLS credential.
             for name in ("ENABLE_BANKING_PRIVATE_KEY_PATH",):
                 path = Path(values[name])
-                if not path.is_file() or path.is_symlink() or path.stat().st_size > cls.SECRET_FILE_MAX_BYTES:
+                identity_chain = _bounded_file_path_identity_chain(path)
+                assert_protected_storage_path(path, identity_chain)
+                metadata = os.lstat(path)
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or _bounded_file_is_reparse(metadata)
+                    or metadata.st_size > cls.SECRET_FILE_MAX_BYTES
+                    or _bounded_file_path_identity_chain(path) != identity_chain
+                ):
                     return None
         except (OSError, ValueError):
             return None
@@ -410,10 +908,26 @@ class EnableBankingService:
             return None
 
     def _atomic_write_json(self, path: Path, payload: object) -> None:
-        directory = self._data_dir()
-        directory.mkdir(parents=True, exist_ok=True)
-        temporary = directory / f".{path.name}.{secrets.token_hex(8)}.tmp"
+        path = Path(os.path.abspath(os.fspath(path)))
+        directory = path.parent
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        parent_chain = _bounded_file_path_identity_chain(directory)
+        target_chain = _bounded_file_path_identity_chain(path)
+        try:
+            target_metadata = os.lstat(path)
+        except FileNotFoundError:
+            target_metadata = None
+        if target_metadata is not None and (
+            not stat.S_ISREG(target_metadata.st_mode)
+            or _bounded_file_is_reparse(target_metadata)
+        ):
+            raise OSError(errno.ELOOP, "atomic write target is not a regular file")
+
+        temporary_name = f".{path.name}.{secrets.token_hex(8)}.tmp"
+        temporary = directory / temporary_name
         descriptor: int | None = None
+        directory_descriptor: int | None = None
+        absolute_path_bound = False
         try:
             body = json.dumps(
                 payload,
@@ -421,38 +935,104 @@ class EnableBankingService:
                 sort_keys=True,
                 allow_nan=False,
             ).encode("utf-8")
-            descriptor = os.open(
-                temporary,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                0o600,
+            if os.name != "nt":
+                if not hasattr(os, "O_DIRECTORY"):
+                    raise OSError(errno.ENOTSUP, "descriptor-relative atomic write unavailable")
+                fixed_system_alias = directory in {Path("/var"), Path("/tmp")}
+                if _bounded_file_path_identity_chain(directory) != parent_chain:
+                    raise OSError(errno.EAGAIN, "atomic write directory changed")
+                # Ordinary paths use the final component captured before
+                # open(). /var and /tmp are the only fixed aliases we follow;
+                # capture their resolved target before opening the descriptor.
+                expected_directory = (
+                    _bounded_path_component_identity(os.stat(directory))
+                    if fixed_system_alias
+                    else parent_chain[-1][1]
+                )
+                directory_descriptor = os.open(
+                    directory,
+                    os.O_RDONLY
+                    | os.O_DIRECTORY
+                    | (0 if fixed_system_alias else getattr(os, "O_NOFOLLOW", 0))
+                    | getattr(os, "O_CLOEXEC", 0),
+                )
+                opened_directory = os.fstat(directory_descriptor)
+                if (
+                    not stat.S_ISDIR(opened_directory.st_mode)
+                    or _bounded_file_is_reparse(opened_directory)
+                    or _bounded_path_component_identity(opened_directory) != expected_directory
+                ):
+                    raise OSError(errno.EAGAIN, "atomic write directory changed")
+            else:
+                assert_protected_storage_path(directory, parent_chain)
+                absolute_path_bound = True
+            flags = (
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0)
             )
+            if directory_descriptor is not None:
+                # The open directory descriptor is the authority for the
+                # temporary entry; the absolute parent path is never reused.
+                descriptor = os.open(temporary_name, flags, 0o600, dir_fd=directory_descriptor)
+            else:
+                descriptor = os.open(temporary, flags, 0o600)
             with os.fdopen(descriptor, "wb") as handle:
                 descriptor = None
                 handle.write(body)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary, path)
-            if os.name != "nt" and hasattr(os, "O_DIRECTORY"):
-                directory_descriptor: int | None = None
+            if (
+                _bounded_file_path_identity_chain(directory) != parent_chain
+                or _bounded_file_path_identity_chain(path) != target_chain
+            ):
+                raise OSError(errno.EAGAIN, "atomic write path changed")
+            if directory_descriptor is not None:
+                os.replace(
+                    temporary_name,
+                    path.name,
+                    src_dir_fd=directory_descriptor,
+                    dst_dir_fd=directory_descriptor,
+                )
+                committed = os.stat(path.name, dir_fd=directory_descriptor, follow_symlinks=False)
+            else:
+                assert_protected_storage_path(directory, parent_chain)
+                os.replace(temporary, path)
+                committed = os.lstat(path)
+            if not stat.S_ISREG(committed.st_mode) or _bounded_file_is_reparse(committed):
+                raise OSError(errno.ELOOP, "atomic write target changed")
+            if _bounded_file_path_identity_chain(directory) != parent_chain:
+                raise OSError(errno.EAGAIN, "atomic write directory changed")
+            if directory_descriptor is not None:
                 try:
-                    directory_descriptor = os.open(
-                        directory,
-                        os.O_RDONLY | os.O_DIRECTORY,
-                    )
                     os.fsync(directory_descriptor)
                 except OSError as exc:
                     if exc.errno not in {errno.EINVAL, errno.ENOTSUP, errno.EISDIR}:
                         raise
-                finally:
-                    if directory_descriptor is not None:
-                        os.close(directory_descriptor)
         finally:
             if descriptor is not None:
                 os.close(descriptor)
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
+            if directory_descriptor is not None:
+                try:
+                    os.unlink(temporary_name, dir_fd=directory_descriptor)
+                except FileNotFoundError:
+                    pass
+            elif absolute_path_bound:
+                # Node-style path operations have no handle-relative cleanup
+                # boundary on Windows. Revalidate the complete contract
+                # before unlinking; if it changed, leave the old temp file for
+                # trusted recovery rather than unlinking through a new path.
+                try:
+                    assert_protected_storage_path(directory, parent_chain)
+                    if _bounded_file_path_identity_chain(directory) != parent_chain:
+                        raise OSError(errno.EAGAIN, "atomic write directory changed")
+                    temporary.unlink()
+                except (FileNotFoundError, OSError, ValueError):
+                    pass
+            if directory_descriptor is not None:
+                os.close(directory_descriptor)
 
     def _connections_path(self) -> Path:
         return self._data_dir() / "enablebanking-connections.json"
@@ -868,6 +1448,12 @@ class EnableBankingService:
             self._atomic_write_json(self._summary_path(), summary)
         self._remove_file_durably(self._revocation_state_path())
 
+    def _commit_revocation_state(self, state: dict) -> None:
+        """Durably record and apply one revoke without splitting the storage unit."""
+        self._atomic_write_json(self._revocation_state_path(), state)
+        self._apply_revocation_state(state)
+        self._remove_file_durably(self._partial_path())
+
     def _recover_pending_revocation(self) -> None:
         state = self._read_pending_revocation()
         if state is not None:
@@ -970,6 +1556,27 @@ class EnableBankingService:
         ]
         existing.append(connection)
         self._atomic_write_json(self._connections_path(), {"connections": existing[-32:]})
+
+    def _save_connection_if_active(self, connection: dict) -> bool:
+        """Check the tombstone and publish one callback connection atomically."""
+        if self._is_revoked_connection(connection["connectionId"]):
+            return False
+        self._save_connection(connection)
+        return True
+
+    def _status_storage_snapshot(self, connection_id: str) -> tuple[list[dict], bool]:
+        """Read the connection and revocation stores as one protected unit."""
+        connections = self._load_connections()
+        return connections, self._is_revoked_connection(connection_id)
+
+    def _persist_consent_blocked_runtime(self) -> None:
+        """Persist an expired/revoked consent decision as one storage unit."""
+        self._remove_file_durably(self._partial_path())
+        previous = self.runtime_status()
+        self._atomic_write_json(self._runtime_path(), {
+            **previous, "blocked": True, "failure": "consent", "lastFailureReason": "consent",
+            "lastFailure": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        })
 
     def load_cached_summary(self) -> dict | None:
         try:
@@ -1334,6 +1941,7 @@ class EnableBankingService:
 
         descriptor = None
         try:
+            before_chain = _bounded_file_path_identity_chain(Path(path))
             before = os.lstat(path)
             if not valid(before):
                 raise ValueError("unsafe key")
@@ -1350,7 +1958,8 @@ class EnableBankingService:
             if (not valid(after) or not valid(current) or len(value) != opened.st_size
                     or (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
                     != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
-                    or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)):
+                    or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)
+                    or _bounded_file_path_identity_chain(Path(path)) != before_chain):
                 raise ValueError("changed key")
             return value
         except (OSError, ValueError) as exc:
@@ -1390,7 +1999,7 @@ class EnableBankingService:
             return str(self._jwt_cache["token"])
         token = self._build_jwt(
             credentials["app_id"],
-            self._read_private_key(credentials["private_key_path"]),
+            await self._read_private_key_async(credentials["private_key_path"]),
         )
         self._jwt_cache = {
             "app_id": credentials["app_id"],
@@ -1735,7 +2344,7 @@ class EnableBankingService:
     ) -> None:
         """Perform one claimed exchange and publish one lifecycle outcome."""
         try:
-            credentials = self._credentials()
+            credentials = await self._credentials_async()
             if credentials is None:
                 raise EnableBankingUnavailable("finance connect unavailable")
             async with self._http_client() as client:
@@ -1793,7 +2402,11 @@ class EnableBankingService:
                     )
                     return
                 async with self.connections_lock:
-                    if self._is_revoked_connection(connection_id):
+                    saved = await self._run_storage(
+                        self._save_connection_if_active,
+                        connection,
+                    )
+                    if not saved:
                         self._complete_callback_locked(
                             flow,
                             state="revoked",
@@ -1801,7 +2414,6 @@ class EnableBankingService:
                         )
                         self._prune_flows()
                         return
-                    self._save_connection(connection)
                     flow["session_id"] = session_id
                     self._complete_callback_locked(
                         flow,
@@ -1954,8 +2566,7 @@ class EnableBankingService:
             self._expire_flows()
             async with self.connections_lock:
                 try:
-                    self._recover_pending_revocation()
-                    connections = self._load_connections()
+                    connections = await self._run_storage(self._load_connections)
                 except Exception:
                     return 503, {"error": "temporary_error"}
                 connection = next(
@@ -1968,10 +2579,14 @@ class EnableBankingService:
                 if connection is None:
                     return 404, {"error": "not_connected"}
                 try:
-                    state = self._prepare_revocation_state(institution_id, connections)
+                    state = await self._run_storage(
+                        self._prepare_revocation_state,
+                        institution_id,
+                        connections,
+                    )
                 except Exception:
                     return 503, {"error": "temporary_error"}
-                credentials = self._credentials()
+                credentials = await self._credentials_async()
                 if credentials is None:
                     return 503, {"error": "temporary_error"}
                 try:
@@ -1991,13 +2606,11 @@ class EnableBankingService:
                     # The intent is durable before either projection is
                     # changed. Any interrupted application is completed by the
                     # next read, including its sanitized tombstone.
-                    self._atomic_write_json(self._revocation_state_path(), state)
-                    self._apply_revocation_state(state)
+                    await self._run_storage(self._commit_revocation_state, state)
                 except Exception:
                     return 503, {"error": "temporary_error"}
 
                 self._consent_version += 1
-                self._remove_file_durably(self._partial_path())
                 existing_flow = self.consent_flows.get(connection["connectionId"])
                 if existing_flow is None:
                     self.consent_flows[connection["connectionId"]] = {
@@ -2019,7 +2632,7 @@ class EnableBankingService:
         return 200, {"state": "revoked"}
 
     async def start(self, institution_id: str) -> tuple[int, dict]:
-        credentials = self._credentials()
+        credentials = await self._credentials_async()
         if credentials is None:
             return 503, {"error": "finance_connect_unavailable"}
         if not self.INSTITUTION_ID_PATTERN.fullmatch(institution_id):
@@ -2080,8 +2693,13 @@ class EnableBankingService:
         if cached_state in {"expired", "revoked"}:
             return {"state": cached_state}
         try:
-            connections = self._load_connections()
-            revoked = self._is_revoked_connection(connection_id)
+            async with self.connections_lock:
+                connections, revoked = await self._run_storage(
+                    self._status_storage_snapshot,
+                    connection_id,
+                )
+        except ProtectedStorageCapacityError:
+            raise
         except Exception:
             return {"state": cached_state if cached_state is not None else "error"}
         if revoked:
@@ -2104,7 +2722,7 @@ class EnableBankingService:
             cached_state = "linked"
         if cached_state in {"linked", "error"} and persisted is None:
             return {"state": cached_state}
-        credentials = self._credentials()
+        credentials = await self._credentials_async()
         if credentials is None:
             return {"state": cached_state if cached_state is not None else "error"}
         if flow is not None and not flow.get("session_id"):
@@ -2131,7 +2749,13 @@ class EnableBankingService:
             # A provider response fetched before revoke must not overwrite the
             # durable revoked decision when it completes afterward.
             try:
-                revoked = self._is_revoked_connection(connection_id)
+                async with self.connections_lock:
+                    revoked = await self._run_storage(
+                        self._is_revoked_connection,
+                        connection_id,
+                    )
+            except ProtectedStorageCapacityError:
+                raise
             except Exception:
                 return {"state": cached_state if cached_state is not None else "error"}
             if revoked:
@@ -2160,12 +2784,8 @@ class EnableBankingService:
         if state in {"expired", "revoked"}:
             self._consent_version += 1
             self._cache_blocked = True
-            self._remove_file_durably(self._partial_path())
-            previous = self.runtime_status()
-            self._atomic_write_json(self._runtime_path(), {
-                **previous, "blocked": True, "failure": "consent", "lastFailureReason": "consent",
-                "lastFailure": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-            })
+            async with self.connections_lock:
+                await self._run_storage(self._persist_consent_blocked_runtime)
         return {"state": state}
 
     async def callback(self, query: str) -> CallbackResult:
@@ -2831,6 +3451,75 @@ class EnableBankingService:
             self._remove_file_durably(self._partial_path())
         return value
 
+    def _finalize_refresh_failure(self, previous: dict, reason: str) -> str:
+        """Persist one refresh failure, including partial state, atomically."""
+        self._cache_blocked = reason == "consent"
+        if not self._cache_blocked and self._refresh_observations:
+            try:
+                self._preserve_partial_observations(reason)
+            except (EnableBankingUnavailable, OSError) as preservation_error:
+                reason = self._failure_reason(preservation_error)
+        elif self._cache_blocked:
+            self._remove_file_durably(self._partial_path())
+        for institution, state in self._refresh_providers.items():
+            if state == "pending":
+                self._refresh_providers[institution] = reason
+                break
+        self._atomic_write_json(self._runtime_path(), {
+            **previous, "lastFailure": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "failure": reason, "lastFailureReason": reason,
+            "providers": self._refresh_providers, "partial": bool(self._refresh_observations),
+            "completedAccounts": self._refresh_accounts,
+            "blocked": previous["blocked"] or reason == "consent",
+        })
+        return reason
+
+    def _finalize_refresh_success(self) -> None:
+        """Publish the compatibility runtime projection after a committed refresh."""
+        try:
+            self._atomic_write_json(self._runtime_path(), self.runtime_status())
+        except OSError:
+            pass
+
+    def _commit_refresh_summary(self, summary: dict, connections: list[dict]) -> None:
+        """Validate the linearization point and publish one refresh transaction."""
+        if self._refresh_expiry is None or self._refresh_expiry <= datetime.now(timezone.utc):
+            raise EnableBankingUnavailable("consent expired during refresh", reason="consent")
+        current_runtime = self.runtime_status()
+        if self._consent_version != self._refresh_version or any(
+            self.consent_flows.get(connection["connectionId"], {}).get("state") in {"expired", "revoked"}
+            for connection in connections
+        ):
+            raise EnableBankingUnavailable("consent changed during refresh", reason="consent")
+        if self._load_connections() != connections:
+            raise EnableBankingUnavailable("connections changed during refresh", reason="consent")
+        metadata = self._next_summary_metadata(summary)
+        state = {
+            "schemaVersion": self.FINANCE_STATE_SCHEMA_VERSION,
+            "summary": summary,
+            "metadata": metadata,
+            "runtime": {
+                **current_runtime, "lastSuccess": summary["generatedAt"], "failure": None,
+                "partial": any(row["availability"] != "observed" for row in summary["accounts"]["accounts"]),
+                "completedAccounts": self._refresh_accounts, "blocked": False,
+                "providers": self._refresh_providers,
+                "consentExpiresAt": self._refresh_expiry.isoformat().replace("+00:00", "Z") if self._refresh_expiry else None,
+            },
+        }
+        state_body = json.dumps(state, separators=(",", ":"), sort_keys=True, allow_nan=False).encode("utf-8")
+        if len(state_body) > self.MAX_FINANCE_STATE_SIZE:
+            raise EnableBankingUnavailable("finance state exceeds response bound")
+        # The state envelope is the single commit point. The historical body
+        # and metadata files are compatibility projections; a crash between
+        # either projection rename cannot expose a torn Finance snapshot.
+        self._atomic_write_json(self._summary_state_path(), state)
+        try:
+            self._remove_file_durably(self._partial_path())
+            self._atomic_write_json(self._summary_metadata_path(), metadata)
+            self._atomic_write_json(self._summary_path(), summary)
+        except OSError:
+            pass  # Authoritative state is committed; projections are disposable.
+
     async def refresh_summary(self) -> dict:
         """Join one bounded refresh; a disconnected waiter cannot cancel it."""
         if self._refresh_task is None or self._refresh_task.done():
@@ -2840,7 +3529,7 @@ class EnableBankingService:
         return await asyncio.shield(self._refresh_task)
 
     async def _refresh_recorded(self) -> dict:
-        previous = self.runtime_status()
+        previous = await self.runtime_status_async()
         self._refresh_version = self._consent_version
         self._refresh_observations = []
         self._refresh_failures = []
@@ -2853,48 +3542,31 @@ class EnableBankingService:
         except (EnableBankingUnavailable, httpx.HTTPError, TimeoutError, OSError) as exc:
             # No awaits through failure finalization: read the latest consent
             # decision instead of overwriting it with pre-request status.
-            previous = self.runtime_status()
+            previous = await self.runtime_status_async()
             reason = self._failure_reason(exc)
             if self._consent_version != self._refresh_version:
                 reason = "consent"
             if previous["blocked"] or (self._refresh_expiry is not None
                     and self._refresh_expiry <= datetime.now(timezone.utc)):
                 reason = "consent"
-            self._cache_blocked = reason == "consent"
-            if not self._cache_blocked and self._refresh_observations:
-                try:
-                    self._preserve_partial_observations(reason)
-                except (EnableBankingUnavailable, OSError) as preservation_error:
-                    reason = self._failure_reason(preservation_error)
-            elif self._cache_blocked:
-                self._remove_file_durably(self._partial_path())
-            for institution, state in self._refresh_providers.items():
-                if state == "pending":
-                    self._refresh_providers[institution] = reason
-                    break
-            self._atomic_write_json(self._runtime_path(), {
-                **previous, "lastFailure": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                "failure": reason, "lastFailureReason": reason,
-                "providers": self._refresh_providers, "partial": bool(self._refresh_observations),
-                "completedAccounts": self._refresh_accounts,
-                "blocked": previous["blocked"] or reason == "consent",
-            })
+            reason = await self._run_storage(
+                self._finalize_refresh_failure,
+                previous,
+                reason,
+            )
             raise EnableBankingUnavailable("banking refresh failed", reason=reason) from exc
         # Success status is part of the summary's atomic envelope. The sidecar
         # is only a compatibility projection after that commit.
-        try:
-            self._atomic_write_json(self._runtime_path(), self.runtime_status())
-        except OSError:
-            pass
+        await self._run_storage(self._finalize_refresh_success)
         self._cache_blocked = False
         return summary
 
     async def _refresh_summary_once(self) -> dict:
-        credentials = self._credentials()
+        credentials = await self._credentials_async()
         if credentials is None:
             raise EnableBankingUnavailable("missing Enable Banking configuration", reason="configuration")
         async with self.connections_lock:
-            connections = self._load_connections()
+            connections = await self._run_storage(self._load_connections)
         if not connections:
             raise EnableBankingUnavailable("no linked connections", reason="consent")
         observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -2904,7 +3576,11 @@ class EnableBankingService:
             token = await self._bearer(credentials)
             self._refresh_providers = {connection["institutionId"]: "pending" for connection in connections}
             for connection in connections:
-                if self._is_revoked_connection(connection["connectionId"]) or self.consent_flows.get(connection["connectionId"], {}).get("state") in {"expired", "revoked"}:
+                revoked = await self._run_storage(
+                    self._is_revoked_connection,
+                    connection["connectionId"],
+                )
+                if revoked or self.consent_flows.get(connection["connectionId"], {}).get("state") in {"expired", "revoked"}:
                     raise EnableBankingUnavailable("consent unavailable", reason="consent")
                 try:
                     accounts, transactions = await self._fetch_connection(
@@ -3033,40 +3709,9 @@ class EnableBankingService:
         async with self.connections_lock:
             # Do not publish a provider response fetched for a connection set
             # that was concurrently relinked or revoked.
-            if self._refresh_expiry is None or self._refresh_expiry <= datetime.now(timezone.utc):
-                raise EnableBankingUnavailable("consent expired during refresh", reason="consent")
-            current_runtime = self.runtime_status()
-            if self._consent_version != self._refresh_version or any(
-                self.consent_flows.get(connection["connectionId"], {}).get("state") in {"expired", "revoked"}
-                for connection in connections
-            ):
-                raise EnableBankingUnavailable("consent changed during refresh", reason="consent")
-            if self._load_connections() != connections:
-                raise EnableBankingUnavailable("connections changed during refresh", reason="consent")
-            metadata = self._next_summary_metadata(summary)
-            state = {
-                "schemaVersion": self.FINANCE_STATE_SCHEMA_VERSION,
-                "summary": summary,
-                "metadata": metadata,
-                "runtime": {
-                    **current_runtime, "lastSuccess": summary["generatedAt"], "failure": None,
-                    "partial": any(row["availability"] != "observed" for row in all_accounts),
-                    "completedAccounts": self._refresh_accounts, "blocked": False,
-                    "providers": self._refresh_providers,
-                    "consentExpiresAt": self._refresh_expiry.isoformat().replace("+00:00", "Z") if self._refresh_expiry else None,
-                },
-            }
-            state_body = json.dumps(state, separators=(",", ":"), sort_keys=True, allow_nan=False).encode("utf-8")
-            if len(state_body) > self.MAX_FINANCE_STATE_SIZE:
-                raise EnableBankingUnavailable("finance state exceeds response bound")
-            # The state envelope is the single commit point. The historical body
-            # and metadata files are compatibility projections; a crash between
-            # either projection rename cannot expose a torn Finance snapshot.
-            self._atomic_write_json(self._summary_state_path(), state)
-            try:
-                self._remove_file_durably(self._partial_path())
-                self._atomic_write_json(self._summary_metadata_path(), metadata)
-                self._atomic_write_json(self._summary_path(), summary)
-            except OSError:
-                pass  # Authoritative state is committed; projections are disposable.
+            await self._run_storage(
+                self._commit_refresh_summary,
+                summary,
+                connections,
+            )
         return summary

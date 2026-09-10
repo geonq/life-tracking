@@ -235,7 +235,7 @@ function Copy-GatewayCodeBundle {
         }
         $bundleFiles = @(Get-ChildItem -LiteralPath $temp -File | Where-Object { $_.Name -ne 'gateway-release.manifest.json' } | ForEach-Object {
             [ordered]@{ path = $_.Name; sha256 = Get-FileSha256 $_.FullName; length = $_.Length }
-        }) -MaxBytes $script:LifeOSGenerationManifestMaxBytes
+        })
         # v18 is the reviewed gateway bundle contract. Its file list is
         # unchanged from v17; the version marks the launcher no longer
         # shelling out to Tailscale and reading the SYSTEM-written snapshot
@@ -244,12 +244,12 @@ function Copy-GatewayCodeBundle {
         # list and per-file hashes inside the staged bundle so the transferred
         # release is reproducible and cannot silently omit a reviewed module.
         $releaseManifestPath = Join-Path $temp 'gateway-release.manifest.json'
-        Write-JsonAtomic $releaseManifestPath ([ordered]@{
+        Write-JsonAtomic -Path $releaseManifestPath -Value ([ordered]@{
             bundleVersion = 'v18'
             mainSha256 = Get-FileSha256 (Join-Path $temp 'main.py')
             launcherSha256 = Get-FileSha256 (Join-Path $temp 'gateway_launcher.py')
             bundleFiles = $bundleFiles
-        })
+        }) -MaxBytes $script:LifeOSGenerationManifestMaxBytes
         $writtenManifest = Read-LifeOSBoundedJsonFile -Path $releaseManifestPath -MaxBytes $script:LifeOSGenerationManifestMaxBytes -Description 'Gateway release manifest'
         if ([string]$writtenManifest.bundleVersion -ne 'v18') { throw 'Gateway release manifest version is not v18.' }
         foreach ($bundleFile in @($writtenManifest.bundleFiles)) {

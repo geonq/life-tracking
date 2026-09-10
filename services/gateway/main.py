@@ -25,9 +25,11 @@ Serve layer and its OS-bound local hop.
 import asyncio
 import base64
 import binascii
+import errno
 import json
 import hashlib
 import hmac
+import inspect
 import math
 import mimetypes
 import os
@@ -36,13 +38,22 @@ import stat
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 from urllib.parse import urlsplit
 
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response
 
-from enablebanking import EnableBankingService
+from enablebanking import (
+    EnableBankingService,
+    EnableBankingUnavailable,
+    ProtectedStorageOverloaded,
+    ProtectedStorageUnavailable,
+    assert_protected_storage_path,
+    run_protected_storage,
+    validate_windows_acl_sddl,
+)
 from supplement_catalog import SupplementCatalogInvalidQuery, SupplementCatalogService, SupplementCatalogUnavailable
 
 
@@ -519,8 +530,28 @@ fitness_observation_lock = asyncio.Lock()
 calendar_revision = 0
 documents_revision = 0
 
+
+async def _run_gateway_storage(operation: Callable[..., object], /, *args, **kwargs):
+    """Run one lock-protected gateway storage unit off the asyncio loop."""
+    return await run_protected_storage(operation, *args, **kwargs)
+
+
 app = FastAPI(title="LifeOS Sync Server")
 app.router.redirect_slashes = False
+
+
+@app.exception_handler(ProtectedStorageOverloaded)
+@app.exception_handler(ProtectedStorageUnavailable)
+async def protected_storage_capacity_error(
+    _request: Request,
+    _exc: ProtectedStorageOverloaded | ProtectedStorageUnavailable,
+) -> JSONResponse:
+    """Return one bounded response for protected-storage capacity failures."""
+    return JSONResponse(
+        {"error": "storage_busy"},
+        status_code=503,
+        headers={"Cache-Control": "no-store", "Retry-After": "1"},
+    )
 
 
 @app.middleware("http")
@@ -713,6 +744,10 @@ def _read_ingest_secret() -> str | None:
 def _read_strict_secret(path: Path) -> str | None:
     descriptor: int | None = None
     try:
+        before_chain = _state_path_identity_chain(path)
+        if not before_chain:
+            return None
+        assert_protected_storage_path(path, before_chain)
         before = os.lstat(path)
         if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode) or before.st_size > CLAUDE_INGEST_SECRET_MAX_BYTES:
             return None
@@ -732,7 +767,9 @@ def _read_strict_secret(path: Path) -> str | None:
         value = os.read(descriptor, CLAUDE_INGEST_SECRET_MAX_BYTES + 1)
         if len(value) != after.st_size:
             return None
-    except (OSError, ValueError):
+        if _state_path_identity_chain(path) != before_chain:
+            return None
+    except (_CalendarStateUnavailable, OSError, ValueError):
         return None
     finally:
         if descriptor is not None:
@@ -762,6 +799,28 @@ def _service_secret() -> str | None:
         if forbidden is not None and hmac.compare_digest(secret, forbidden):
             return None
     return secret
+
+
+async def _service_secret_async() -> str | None:
+    """Read the local service capability without blocking an async route."""
+    return await _run_gateway_storage(_service_secret)
+
+
+async def _enable_banking_storage_value(async_name: str, sync_name: str):
+    """Read one Enable Banking storage value without bypassing its boundary.
+
+    The synchronous fallback keeps narrow test doubles and older adapters
+    compatible while still ensuring a real synchronous reader runs on the
+    bounded executor.
+    """
+    async_reader = getattr(enable_banking, async_name, None)
+    if callable(async_reader):
+        value = async_reader()
+        return await value if inspect.isawaitable(value) else value
+    sync_reader = getattr(enable_banking, sync_name, None)
+    if not callable(sync_reader):
+        return None
+    return await _run_gateway_storage(sync_reader)
 
 
 CLAUDE_INGEST_WINDOWS = {"five_hour", "seven_day"}
@@ -1697,51 +1756,29 @@ enable_banking = EnableBankingService(
 
 async def _read_bounded_finance_request(request: Request) -> bytes:
     """Read the mutating Finance JSON request without accepting an unbounded body."""
-    try:
-        async with asyncio.timeout(8.0):
-            length_values = _raw_header_values(request, "content-length")
-            if len(length_values) > 1:
-                raise ValueError("duplicate content length")
-            raw_length = _calendar_header(request, "content-length")
-            if raw_length is not None:
-                try:
-                    content_length = int(raw_length)
-                except ValueError as exc:
-                    raise ValueError("invalid content length") from exc
-                if content_length < 0 or content_length > enable_banking.BODY_LIMIT:
-                    raise ValueError("finance request too large")
-            body = bytearray()
-            async for chunk in request.stream():
-                if len(body) + len(chunk) > enable_banking.BODY_LIMIT:
-                    raise ValueError("finance request too large")
-                body.extend(chunk)
-            return bytes(body)
-    except TimeoutError as exc:
-        raise TimeoutError("finance request timeout") from exc
+    return await _read_bounded_request_body(
+        request,
+        maximum=enable_banking.BODY_LIMIT,
+        timeout=8.0,
+        error_factory=lambda status_code: _bounded_http_error(
+            status_code,
+            too_large_detail="finance request too large",
+            timeout_detail="finance request timeout",
+        ),
+    )
 
 
 async def _read_bounded_fitness_observation_request(request: Request) -> bytes:
-    try:
-        async with asyncio.timeout(FITNESS_OBSERVATION_BODY_TIMEOUT):
-            length_values = _raw_header_values(request, "content-length")
-            if len(length_values) > 1:
-                raise HTTPException(status_code=400, detail="duplicate content length")
-            raw_length = _calendar_header(request, "content-length")
-            if raw_length is not None:
-                try:
-                    content_length = int(raw_length)
-                except ValueError as exc:
-                    raise HTTPException(status_code=400, detail="invalid content length") from exc
-                if content_length < 0 or content_length > FITNESS_OBSERVATION_MAX_BODY_SIZE:
-                    raise HTTPException(status_code=413, detail="fitness observation body exceeds limit")
-            body = bytearray()
-            async for chunk in request.stream():
-                if len(body) + len(chunk) > FITNESS_OBSERVATION_MAX_BODY_SIZE:
-                    raise HTTPException(status_code=413, detail="fitness observation body exceeds limit")
-                body.extend(chunk)
-            return bytes(body)
-    except TimeoutError as exc:
-        raise HTTPException(status_code=408, detail="fitness observation request timeout") from exc
+    return await _read_bounded_request_body(
+        request,
+        maximum=FITNESS_OBSERVATION_MAX_BODY_SIZE,
+        timeout=FITNESS_OBSERVATION_BODY_TIMEOUT,
+        error_factory=lambda status_code: _bounded_http_error(
+            status_code,
+            too_large_detail="fitness observation body exceeds limit",
+            timeout_detail="fitness observation request timeout",
+        ),
+    )
 
 
 def _finance_consent_response(payload: dict, status_code: int, *, revision: int | None = None) -> Response:
@@ -1787,6 +1824,9 @@ async def post_finance_connect(request: Request) -> Response:
             object_pairs_hook=_reject_duplicate_keys,
             parse_constant=_reject_nonfinite_constant,
         )
+    except HTTPException as exc:
+        error = "request_too_large" if exc.status_code == 413 else "request_timeout" if exc.status_code == 408 else "invalid_request"
+        return _finance_consent_response({"error": error}, exc.status_code)
     except (TimeoutError, OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
         return _finance_consent_response({"error": "invalid_request"}, 400)
     institution_id = payload.get("institutionId") if isinstance(payload, dict) else None
@@ -1844,11 +1884,62 @@ async def ws_changes(websocket: WebSocket) -> None:
 
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
     """Publish one bounded file atomically and durably where the OS permits."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    path = Path(os.path.abspath(os.fspath(path)))
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    parent_chain = _state_path_identity_chain(parent)
+    target_chain = _state_path_identity_chain(path)
+    try:
+        target_metadata = os.lstat(path)
+    except FileNotFoundError:
+        target_metadata = None
+    if target_metadata is not None and (
+        not stat.S_ISREG(target_metadata.st_mode)
+        or _state_is_reparse(target_metadata)
+    ):
+        raise OSError(errno.ELOOP, "atomic write target is not a regular file")
+
+    temporary_name = f".{path.name}.{uuid.uuid4().hex}.tmp"
+    tmp = parent / temporary_name
+    absolute_path_bound = False
     try:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        descriptor = os.open(tmp, flags, 0o600)
+        descriptor = None
+        directory = None
+        if os.name != "nt":
+            if not hasattr(os, "O_DIRECTORY"):
+                raise OSError(errno.ENOTSUP, "descriptor-relative atomic write unavailable")
+            directory_flags = os.O_RDONLY | os.O_DIRECTORY
+            fixed_system_alias = parent in {Path("/var"), Path("/tmp")}
+            if _state_path_identity_chain(parent) != parent_chain:
+                raise OSError(errno.EAGAIN, "atomic write directory changed")
+            # Ordinary paths use the final component captured before open().
+            # /var and /tmp are the only fixed aliases intentionally followed;
+            # capture their resolved target before opening the descriptor.
+            expected_parent = (
+                _state_path_component_identity(os.stat(parent))
+                if fixed_system_alias
+                else parent_chain[-1][1]
+            )
+            directory_flags |= (0 if fixed_system_alias else getattr(os, "O_NOFOLLOW", 0)) | getattr(os, "O_CLOEXEC", 0)
+            directory = os.open(parent, directory_flags)
+            opened_parent = os.fstat(directory)
+            if (
+                not stat.S_ISDIR(opened_parent.st_mode)
+                or _state_is_reparse(opened_parent)
+                or _state_path_component_identity(opened_parent) != expected_parent
+            ):
+                raise OSError(errno.EAGAIN, "atomic write directory changed")
+        else:
+            assert_protected_storage_path(parent, parent_chain)
+            absolute_path_bound = True
+        temporary_flags = flags | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        if directory is not None:
+            # Keep every POSIX operation anchored to the open directory. The
+            # mutable absolute parent path is not used for temp creation.
+            descriptor = os.open(temporary_name, temporary_flags, 0o600, dir_fd=directory)
+        else:
+            descriptor = os.open(tmp, temporary_flags, 0o600)
         try:
             with os.fdopen(descriptor, "wb") as handle:
                 descriptor = -1
@@ -1858,22 +1949,44 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
         finally:
             if descriptor != -1:
                 os.close(descriptor)
-        os.replace(tmp, path)  # atomic on Windows (ReplaceFileW) and POSIX
-        if hasattr(os, "O_DIRECTORY"):
+        if _state_path_identity_chain(parent) != parent_chain or _state_path_identity_chain(path) != target_chain:
+            raise OSError(errno.EAGAIN, "atomic write path changed")
+        if directory is not None:
+            os.replace(temporary_name, path.name, src_dir_fd=directory, dst_dir_fd=directory)
+            committed = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+        else:
+            assert_protected_storage_path(parent, parent_chain)
+            os.replace(tmp, path)
+            committed = os.lstat(path)
+        if not stat.S_ISREG(committed.st_mode) or _state_is_reparse(committed):
+            raise OSError(errno.ELOOP, "atomic write target changed")
+        if _state_path_identity_chain(parent) != parent_chain:
+            raise OSError(errno.EAGAIN, "atomic write directory changed")
+        if directory is not None:
             try:
-                directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-            except OSError:
-                directory = -1
-            if directory != -1:
-                try:
-                    os.fsync(directory)
-                finally:
-                    os.close(directory)
+                os.fsync(directory)
+            except OSError as exc:
+                if exc.errno not in {errno.EINVAL, errno.ENOTSUP, errno.EISDIR}:
+                    raise
     finally:
-        try:
-            tmp.unlink()
-        except FileNotFoundError:
-            pass
+        if 'directory' in locals() and directory not in (None, -1):
+            try:
+                try:
+                    os.unlink(temporary_name, dir_fd=directory)
+                except FileNotFoundError:
+                    pass
+            finally:
+                os.close(directory)
+        elif absolute_path_bound:
+            # A path-based Windows cleanup is allowed only while the complete
+            # protected contract still names the same storage boundary.
+            try:
+                assert_protected_storage_path(parent, parent_chain)
+                if _state_path_identity_chain(parent) != parent_chain:
+                    raise OSError(errno.EAGAIN, "atomic write directory changed")
+                tmp.unlink()
+            except (FileNotFoundError, OSError, ValueError):
+                pass
 
 
 class _CalendarStateUnavailable(Exception):
@@ -1913,17 +2026,27 @@ def _state_stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int
     )
 
 
+def _state_path_component_identity(value: os.stat_result) -> tuple[int, int, int, int]:
+    """Return identity that remains stable while a directory's contents change."""
+    return (
+        int(value.st_dev),
+        int(value.st_ino),
+        int(value.st_mode),
+        int(getattr(value, "st_file_attributes", 0)),
+    )
+
+
 def _state_is_reparse(value: os.stat_result) -> bool:
     return stat.S_ISLNK(value.st_mode) or bool(
         int(getattr(value, "st_file_attributes", 0)) & WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT
     )
 
 
-def _state_path_identity_chain(path: Path) -> tuple[tuple[str, tuple[int, int, int, int, int, int, int]], ...]:
+def _state_path_identity_chain(path: Path) -> tuple[tuple[str, tuple[int, int, int, int]], ...]:
     """Capture existing path components without resolving a reparse point."""
     current = Path(os.path.abspath(os.fspath(path)))
     leaf = current
-    chain: list[tuple[str, tuple[int, int, int, int, int, int, int]]] = []
+    chain: list[tuple[str, tuple[int, int, int, int]]] = []
     while True:
         try:
             observed = os.lstat(current)
@@ -1934,12 +2057,15 @@ def _state_path_identity_chain(path: Path) -> tuple[tuple[str, tuple[int, int, i
         # POSIX development paths may contain a system ancestor symlink such
         # as /var -> /private/var. Reject the configured leaf everywhere and
         # reject every reparse component on Windows.
-        if _state_is_reparse(observed) and (os.name == "nt" or current == leaf):
+        is_fixed_system_alias = os.name != "nt" and current in {Path("/var"), Path("/tmp")}
+        if _state_is_reparse(observed) and (
+            current == leaf or os.name == "nt" or not is_fixed_system_alias
+        ):
             raise _CalendarStateUnavailable
         chain.append(
             (
                 os.path.normcase(os.path.abspath(os.fspath(current))),
-                _state_stat_identity(observed),
+                _state_path_component_identity(observed),
             )
         )
         parent = current.parent
@@ -1950,7 +2076,7 @@ def _state_path_identity_chain(path: Path) -> tuple[tuple[str, tuple[int, int, i
 
 
 def _assert_state_path_identity_chain(
-    expected: tuple[tuple[str, tuple[int, int, int, int, int, int, int]], ...],
+    expected: tuple[tuple[str, tuple[int, int, int, int]], ...],
     path: Path,
 ) -> None:
     if _state_path_identity_chain(path) != expected:
@@ -1972,6 +2098,7 @@ def _read_bounded_state_file(path: Path, maximum: int) -> bytes | None:
         before_chain = _state_path_identity_chain(path)
         if not before_chain:
             return None
+        assert_protected_storage_path(path, before_chain)
         before = path.lstat()
         before_identity = _state_stat_identity(before)
         if (
@@ -2580,27 +2707,16 @@ def _finance_imported_response(
 
 
 async def _read_bounded_finance_imported_request(request: Request) -> bytes:
-    try:
-        async with asyncio.timeout(FINANCE_IMPORTED_BODY_TIMEOUT):
-            length_values = _raw_header_values(request, "content-length")
-            if len(length_values) > 1:
-                raise HTTPException(status_code=400, detail="duplicate content length")
-            raw_length = _calendar_header(request, "content-length")
-            if raw_length is not None:
-                try:
-                    content_length = int(raw_length)
-                except ValueError as exc:
-                    raise HTTPException(status_code=400, detail="invalid content length") from exc
-                if content_length < 0 or content_length > FINANCE_IMPORTED_MAX_BODY_SIZE:
-                    raise HTTPException(status_code=413, detail="imported finance request exceeds limit")
-            body = bytearray()
-            async for chunk in request.stream():
-                if len(body) + len(chunk) > FINANCE_IMPORTED_MAX_BODY_SIZE:
-                    raise HTTPException(status_code=413, detail="imported finance request exceeds limit")
-                body.extend(chunk)
-            return bytes(body)
-    except TimeoutError as exc:
-        raise HTTPException(status_code=408, detail="imported finance request timeout") from exc
+    return await _read_bounded_request_body(
+        request,
+        maximum=FINANCE_IMPORTED_MAX_BODY_SIZE,
+        timeout=FINANCE_IMPORTED_BODY_TIMEOUT,
+        error_factory=lambda status_code: _bounded_http_error(
+            status_code,
+            too_large_detail="imported finance request exceeds limit",
+            timeout_detail="imported finance request timeout",
+        ),
+    )
 
 
 def _calendar_integer(value: str) -> int:
@@ -3067,28 +3183,72 @@ def _raw_header_values(request: Request, name: str) -> list[bytes]:
     return []
 
 
-async def _read_calendar_body(request: Request) -> bytes:
+def _bounded_http_error(status_code: int, *, too_large_detail: str, timeout_detail: str) -> HTTPException:
+    detail = (
+        too_large_detail if status_code == 413
+        else timeout_detail if status_code == 408
+        else "invalid content length"
+    )
+    return HTTPException(status_code=status_code, detail=detail)
+
+
+async def _read_bounded_request_body(
+    request: Request,
+    *,
+    maximum: int,
+    timeout: float,
+    error_factory: Callable[[int], Exception],
+) -> bytes:
+    """Read one bounded request and require Content-Length to match the stream.
+
+    A missing Content-Length remains valid for streamed/native callers. When it
+    is present, one strict decimal declaration is required and the consumed
+    byte count must match it before any route parser sees the body.
+    """
     try:
-        async with asyncio.timeout(CALENDAR_BODY_TIMEOUT):
+        async with asyncio.timeout(timeout):
             length_values = _raw_header_values(request, "content-length")
             if len(length_values) > 1:
-                raise HTTPException(status_code=400, detail="duplicate content length")
-            raw_length = _calendar_header(request, "content-length")
-            if raw_length is not None:
+                raise error_factory(400)
+
+            declared_length: int | None = None
+            if length_values:
                 try:
-                    content_length = int(raw_length)
-                except ValueError as exc:
-                    raise HTTPException(status_code=400, detail="invalid content length") from exc
-                if content_length < 0 or content_length > CALENDAR_MAX_BODY_SIZE:
-                    raise HTTPException(status_code=413, detail="calendar body exceeds limit")
+                    raw_length = length_values[0].decode("ascii")
+                except UnicodeDecodeError as exc:
+                    raise error_factory(400) from exc
+                if re.fullmatch(r"[0-9]+", raw_length) is None:
+                    raise error_factory(400)
+                try:
+                    declared_length = int(raw_length)
+                except (OverflowError, ValueError) as exc:
+                    raise error_factory(400) from exc
+                if declared_length > maximum:
+                    raise error_factory(413)
+
             body = bytearray()
             async for chunk in request.stream():
-                if len(body) + len(chunk) > CALENDAR_MAX_BODY_SIZE:
-                    raise HTTPException(status_code=413, detail="calendar body exceeds limit")
+                if len(body) + len(chunk) > maximum:
+                    raise error_factory(413)
                 body.extend(chunk)
+            if declared_length is not None and declared_length != len(body):
+                raise error_factory(400)
             return bytes(body)
     except TimeoutError as exc:
-        raise HTTPException(status_code=408, detail="calendar request timeout") from exc
+        raise error_factory(408) from exc
+
+
+async def _read_calendar_body(request: Request) -> bytes:
+    return await _read_bounded_request_body(
+        request,
+        maximum=CALENDAR_MAX_BODY_SIZE,
+        timeout=CALENDAR_BODY_TIMEOUT,
+        error_factory=lambda status_code: _bounded_http_error(
+            status_code,
+            too_large_detail="calendar body exceeds limit",
+            timeout_detail="calendar request timeout",
+        ),
+    )
 
 
 def _safe_document_id(value) -> str:
@@ -3252,6 +3412,241 @@ async def _read_bounded_upload(file: UploadFile) -> bytes:
     return bytes(body)
 
 
+def _read_and_repair_calendar_storage() -> tuple[bytes, int, bool, bool]:
+    """Read Calendar authority and repair its projections as one storage unit."""
+    body, _document, metadata = _load_calendar_state()
+    revision = metadata["revision"]
+    retry_intent = _read_calendar_retry_intent()
+    retry_matches = retry_intent is not None and (
+        retry_intent["revision"] == revision
+        and retry_intent["bodyDigest"] == _calendar_digest(body)
+    )
+    if retry_intent is not None and not retry_matches:
+        _clear_calendar_retry_intent()
+
+    # A state envelope is the authority. Rebuilding these compatibility
+    # projections on every authoritative read makes a failed post-commit
+    # projection self-healing even when the client does not replay PUT.
+    projection_pending = False
+    if _calendar_state_path().is_file():
+        projection_pending = not _repair_calendar_projections(body, metadata)
+        if projection_pending:
+            _write_calendar_retry_intent(revision, body)
+    return body, revision, retry_matches or projection_pending, projection_pending
+
+
+def _write_calendar_storage(
+    body: bytes,
+    if_match: str,
+    idempotency_key: str,
+    fingerprint: str,
+) -> tuple[Response, int | None, bool]:
+    """Apply one Calendar conditional write and projection repair transaction."""
+    current_body, _current_document, metadata = _load_calendar_state()
+    current_revision = metadata["revision"]
+    current_etag = _calendar_etag(current_revision, _calendar_digest(current_body))
+    previous = next((record for record in metadata["idempotency"] if record["key"] == idempotency_key), None)
+    if previous is not None:
+        if previous["fingerprint"] != fingerprint:
+            return _calendar_response(current_body, current_revision, status_code=409), None, False
+        # Replays are also the durable recovery path for a projection or
+        # broadcast interrupted after the original authority commit.
+        projection_pending = not _repair_calendar_projections(current_body, metadata)
+        response = _calendar_response(
+            current_body,
+            current_revision,
+            replay=True,
+            projection_pending=projection_pending,
+        )
+        if projection_pending:
+            _write_calendar_retry_intent(current_revision, current_body)
+        return response, current_revision, projection_pending
+
+    if if_match != current_etag:
+        return _calendar_response(current_body, current_revision, status_code=412), None, False
+    if current_revision >= CALENDAR_MAX_REVISION:
+        return _calendar_response(current_body, current_revision, status_code=503), None, False
+
+    revision = current_revision + 1
+    idempotency_record = {
+        "key": idempotency_key,
+        "fingerprint": fingerprint,
+        "revision": revision,
+    }
+    next_metadata = {
+        "schemaVersion": 1,
+        "domain": "calendar",
+        "authority": "gateway",
+        "revision": revision,
+        "bodyDigest": _calendar_digest(body),
+        "idempotency": _calendar_idempotency_window(
+            metadata["idempotency"], idempotency_record
+        ),
+        # The opaque Calendar document owns item tombstones. Keeping this
+        # list empty is deliberate: the gateway cannot invent a deletion
+        # timestamp or identity it did not receive from the client.
+        "tombstones": metadata["tombstones"],
+    }
+    try:
+        _calendar_metadata_bytes(next_metadata)
+        state_body = json.dumps({
+            "schemaVersion": CALENDAR_STATE_SCHEMA_VERSION,
+            "bodyBase64": base64.b64encode(body).decode("ascii"),
+            "metadata": next_metadata,
+        }, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError):
+        return _calendar_response(current_body, current_revision, status_code=503), None, False
+    if len(state_body) > CALENDAR_STATE_MAX_SIZE:
+        return _calendar_response(current_body, current_revision, status_code=503), None, False
+
+    # The retry intent is durable before the state commit. If state commit
+    # succeeds, it records exactly which authority revision must be projected
+    # and rebroadcast.
+    if not _write_calendar_retry_intent(revision, body):
+        return JSONResponse({"error": "calendar_unavailable"}, status_code=503), None, False
+    try:
+        # The state envelope is the single commit point. The historical body
+        # and metadata files are projections for migration/inspection; a crash
+        # between either projection rename leaves the committed envelope
+        # available and never exposes a torn pair.
+        _atomic_write_bytes(_calendar_state_path(), state_body)
+    except (OSError, ValueError):
+        return JSONResponse({"error": "calendar_unavailable"}, status_code=503), None, False
+
+    projection_pending = not _repair_calendar_projections(body, next_metadata)
+    response = _calendar_response(body, revision, projection_pending=projection_pending)
+    if projection_pending:
+        # Keep the marker even when the first repair attempt fails; the
+        # committed envelope remains the retry source.
+        _write_calendar_retry_intent(revision, body)
+    return response, revision, projection_pending
+
+
+def _store_document_upload(
+    doc_id: str,
+    meta: dict,
+    original_bytes: bytes,
+    suffix: str,
+) -> int:
+    """Publish one document and its index as one lock-protected storage unit."""
+    global documents_revision
+
+    try:
+        index, _existing_index_body = _load_document_index()
+    except _DocumentIndexError as exc:
+        raise HTTPException(status_code=503, detail="documents are unavailable") from exc
+
+    doc_dir = DOCUMENTS_DIR / doc_id
+    had_directory = doc_dir.exists()
+    if had_directory:
+        try:
+            existing_files = _document_original_files(doc_dir)
+        except _DocumentIndexError as exc:
+            raise HTTPException(status_code=503, detail="documents are unavailable") from exc
+    else:
+        existing_files = []
+    destination_name = _document_destination_name(suffix, existing_files)
+    destination = doc_dir / destination_name
+    next_index = [entry for entry in index if _document_index_id(entry.get("id")) != doc_id]
+    meta = dict(meta)
+    meta["_originalFile"] = destination_name
+    next_index.append(meta)
+    try:
+        next_index_body = _serialize_document_index(next_index)
+    except _DocumentIndexTooLarge as exc:
+        raise HTTPException(status_code=413, detail="document index exceeds limit") from exc
+    except _DocumentIndexError as exc:
+        raise HTTPException(status_code=503, detail="documents are unavailable") from exc
+
+    file_published = False
+    index_published = False
+    try:
+        doc_dir.mkdir(parents=True, exist_ok=True)
+        _atomic_write_bytes(destination, original_bytes)
+        file_published = True
+        # The index is the commit point. Files are published first so a crash
+        # between the two operations leaves the old index usable.
+        _atomic_write_bytes(DOCUMENTS_INDEX_PATH, next_index_body)
+        index_published = True
+    except (OSError, ValueError) as exc:
+        # `_atomic_write_bytes` can report a directory-fsync failure after the
+        # atomic replace. Re-read the bounded target to distinguish a committed
+        # index from a failed publication before rolling back.
+        if not index_published:
+            try:
+                index_published = _read_bounded_state_file(
+                    DOCUMENTS_INDEX_PATH,
+                    DOCUMENT_INDEX_MAX_SIZE,
+                ) == next_index_body
+            except (OSError, _CalendarStateUnavailable):
+                index_published = False
+        if index_published:
+            file_published = True
+        else:
+            try:
+                file_published = destination.is_file() and not destination.is_symlink()
+            except OSError:
+                file_published = False
+        if not index_published and file_published:
+            try:
+                destination.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if not index_published and not had_directory:
+            try:
+                doc_dir.rmdir()
+            except OSError:
+                pass
+        if not index_published:
+            raise HTTPException(status_code=503, detail="documents are unavailable") from exc
+
+    for prior in existing_files:
+        if prior != destination:
+            try:
+                prior.unlink(missing_ok=True)
+            except OSError:
+                # The committed index points at destination; an orphan is
+                # harmless and can be pruned by the next upload.
+                pass
+    documents_revision += 1
+    return documents_revision
+
+
+def _read_document_file_storage(safe_id: str) -> tuple[bytes, str]:
+    """Resolve and read one document through the bounded protected reader."""
+    doc_dir = DOCUMENTS_DIR / safe_id
+    if not doc_dir.exists():
+        raise HTTPException(status_code=404, detail="Unknown document id")
+    try:
+        index, _body = _load_document_index()
+        entry = next((item for item in index if _document_index_id(item.get("id")) == safe_id), None)
+        candidates = _document_original_files(doc_dir)
+    except _DocumentIndexError as exc:
+        raise HTTPException(status_code=503, detail="documents are unavailable") from exc
+    if entry is not None:
+        selected_name = entry.get("_originalFile")
+        if not _valid_document_index_filename(selected_name):
+            raise HTTPException(status_code=503, detail="documents are unavailable")
+        selected = doc_dir / selected_name
+        if selected not in candidates:
+            raise HTTPException(status_code=404, detail="Original file missing")
+    elif _body is not None:
+        raise HTTPException(status_code=404, detail="Unknown document id")
+    elif not candidates:
+        raise HTTPException(status_code=404, detail="Original file missing")
+    else:
+        selected = candidates[0]
+    try:
+        body = _read_bounded_state_file(selected, DOCUMENT_MAX_UPLOAD_SIZE)
+    except _BoundedFileTooLarge as exc:
+        raise HTTPException(status_code=413, detail="Document exceeds retrieval limit") from exc
+    except (_CalendarStateUnavailable, OSError) as exc:
+        raise HTTPException(status_code=503, detail="documents are unavailable") from exc
+    if body is None:
+        raise HTTPException(status_code=404, detail="Original file missing")
+    return body, selected.name
+
+
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
@@ -3259,36 +3654,18 @@ async def health() -> dict:
 
 @app.get("/calendar")
 async def get_calendar() -> Response:
-    revision = 0
-    should_rebroadcast = False
-    projection_pending = False
     async with calendar_lock:
         try:
-            body, _document, metadata = _load_calendar_state()
+            body, revision, should_rebroadcast, projection_pending = await _run_gateway_storage(
+                _read_and_repair_calendar_storage,
+            )
         except (HTTPException, _CalendarStateUnavailable, OSError, ValueError):
             return JSONResponse({"error": "calendar_unavailable"}, status_code=503)
-        revision = metadata["revision"]
-        retry_intent = _read_calendar_retry_intent()
-        retry_matches = retry_intent is not None and (
-            retry_intent["revision"] == revision
-            and retry_intent["bodyDigest"] == _calendar_digest(body)
-        )
-        if retry_intent is not None and not retry_matches:
-            _clear_calendar_retry_intent()
-
-        # A state envelope is the authority. Rebuilding these compatibility
-        # projections on every authoritative read makes a failed post-commit
-        # projection self-healing even when the client does not replay PUT.
-        if _calendar_state_path().is_file():
-            projection_pending = not _repair_calendar_projections(body, metadata)
-            if projection_pending:
-                _write_calendar_retry_intent(revision, body)
-            should_rebroadcast = retry_matches or projection_pending
 
     if should_rebroadcast:
         broadcasted = await _broadcast_calendar_revision(revision)
         if broadcasted and not projection_pending:
-            _clear_calendar_retry_intent()
+            await _run_gateway_storage(_clear_calendar_retry_intent)
     return _calendar_response(body, revision, projection_pending=projection_pending)
 
 
@@ -3313,98 +3690,24 @@ async def put_calendar(request: Request) -> Response:
         return JSONResponse({"error": "request_timeout" if exc.status_code == 408 else "body_too_large" if exc.status_code == 413 else "invalid_request"}, status_code=exc.status_code)
 
     fingerprint = hashlib.sha256(f"{if_match}\x00".encode("ascii") + body).hexdigest()
-    response: Response
-    response_revision: int
-    projection_pending = False
     async with calendar_lock:
         try:
-            current_body, _current_document, metadata = _load_calendar_state()
+            response, response_revision, projection_pending = await _run_gateway_storage(
+                _write_calendar_storage,
+                body,
+                if_match,
+                idempotency_key,
+                fingerprint,
+            )
         except (HTTPException, _CalendarStateUnavailable, OSError, ValueError):
             return JSONResponse({"error": "calendar_unavailable"}, status_code=503)
 
-        current_revision = metadata["revision"]
-        current_etag = _calendar_etag(current_revision, _calendar_digest(current_body))
-        previous = next((record for record in metadata["idempotency"] if record["key"] == idempotency_key), None)
-        if previous is not None:
-            if previous["fingerprint"] != fingerprint:
-                return _calendar_response(current_body, current_revision, status_code=409)
-            # Replays are also the durable recovery path for a projection or
-            # broadcast interrupted after the original authority commit.
-            response_revision = current_revision
-            projection_pending = not _repair_calendar_projections(current_body, metadata)
-            response = _calendar_response(
-                current_body,
-                current_revision,
-                replay=True,
-                projection_pending=projection_pending,
-            )
-            if projection_pending:
-                _write_calendar_retry_intent(current_revision, current_body)
-        else:
-            if if_match != current_etag:
-                return _calendar_response(current_body, current_revision, status_code=412)
-            if current_revision >= CALENDAR_MAX_REVISION:
-                return _calendar_response(current_body, current_revision, status_code=503)
-
-            revision = current_revision + 1
-            idempotency_record = {
-                "key": idempotency_key,
-                "fingerprint": fingerprint,
-                "revision": revision,
-            }
-            next_metadata = {
-                "schemaVersion": 1,
-                "domain": "calendar",
-                "authority": "gateway",
-                "revision": revision,
-                "bodyDigest": _calendar_digest(body),
-                "idempotency": _calendar_idempotency_window(
-                    metadata["idempotency"], idempotency_record
-                ),
-                # The opaque Calendar document owns item tombstones. Keeping this
-                # list empty is deliberate: the gateway cannot invent a deletion
-                # timestamp or identity it did not receive from the client.
-                "tombstones": metadata["tombstones"],
-            }
-            try:
-                metadata_body = _calendar_metadata_bytes(next_metadata)
-                state_body = json.dumps({
-                    "schemaVersion": CALENDAR_STATE_SCHEMA_VERSION,
-                    "bodyBase64": base64.b64encode(body).decode("ascii"),
-                    "metadata": next_metadata,
-                }, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
-            except (TypeError, ValueError):
-                return _calendar_response(current_body, current_revision, status_code=503)
-            if len(state_body) > CALENDAR_STATE_MAX_SIZE:
-                return _calendar_response(current_body, current_revision, status_code=503)
-
-            # The retry intent is durable before the state commit. If state
-            # commit succeeds, it records exactly which authority revision
-            # must be projected and rebroadcast. If state commit fails, the
-            # request still returns failure and the marker is harmlessly
-            # ignored until a matching authority revision exists.
-            if not _write_calendar_retry_intent(revision, body):
-                return JSONResponse({"error": "calendar_unavailable"}, status_code=503)
-            try:
-                # The state envelope is the single commit point. The historical
-                # body and metadata files are projections for migration/inspection;
-                # a crash between either projection rename leaves the committed
-                # envelope available and never exposes a torn pair.
-                _atomic_write_bytes(_calendar_state_path(), state_body)
-            except (OSError, ValueError):
-                return JSONResponse({"error": "calendar_unavailable"}, status_code=503)
-
-            response_revision = revision
-            projection_pending = not _repair_calendar_projections(body, next_metadata)
-            response = _calendar_response(body, revision, projection_pending=projection_pending)
-            if projection_pending:
-                # Keep the marker even when the first repair attempt fails;
-                # the committed envelope remains the retry source.
-                _write_calendar_retry_intent(revision, body)
-
-    broadcasted = await _broadcast_calendar_revision(response_revision)
+    if response_revision is not None:
+        broadcasted = await _broadcast_calendar_revision(response_revision)
+    else:
+        broadcasted = False
     if broadcasted and not projection_pending:
-        _clear_calendar_retry_intent()
+        await _run_gateway_storage(_clear_calendar_retry_intent)
     return response
 
 
@@ -3412,7 +3715,7 @@ async def put_calendar(request: Request) -> Response:
 async def list_documents() -> Response:
     async with documents_lock:
         try:
-            _index, body = _load_document_index()
+            _index, body = await _run_gateway_storage(_load_document_index)
         except _DocumentIndexError:
             return JSONResponse({"error": "documents_unavailable"}, status_code=503)
         if body is None:
@@ -3433,86 +3736,17 @@ async def upload_document(
     candidate_suffix = Path(file.filename or "").suffix.lower()
     suffix = candidate_suffix if candidate_suffix in DOCUMENT_ALLOWED_EXTENSIONS else ".bin"
 
-    global documents_revision
     async with documents_lock:
         try:
-            index, _existing_index_body = _load_document_index()
-        except _DocumentIndexError as exc:
-            raise HTTPException(status_code=503, detail="documents are unavailable") from exc
-
-        doc_dir = DOCUMENTS_DIR / doc_id
-        had_directory = doc_dir.exists()
-        if had_directory:
-            try:
-                existing_files = _document_original_files(doc_dir)
-            except _DocumentIndexError as exc:
-                raise HTTPException(status_code=503, detail="documents are unavailable") from exc
-        else:
-            existing_files = []
-        destination_name = _document_destination_name(suffix, existing_files)
-        destination = doc_dir / destination_name
-        next_index = [entry for entry in index if _document_index_id(entry.get("id")) != doc_id]
-        meta["_originalFile"] = destination_name
-        next_index.append(meta)
-        try:
-            next_index_body = _serialize_document_index(next_index)
-        except _DocumentIndexTooLarge as exc:
-            raise HTTPException(status_code=413, detail="document index exceeds limit") from exc
-        except _DocumentIndexError as exc:
-            raise HTTPException(status_code=503, detail="documents are unavailable") from exc
-
-        file_published = False
-        index_published = False
-        try:
-            doc_dir.mkdir(parents=True, exist_ok=True)
-            _atomic_write_bytes(destination, original_bytes)
-            file_published = True
-            # The index is the commit point. Files are published first so a
-            # crash between the two operations leaves the old index usable.
-            _atomic_write_bytes(DOCUMENTS_INDEX_PATH, next_index_body)
-            index_published = True
-        except (OSError, ValueError) as exc:
-            # `_atomic_write_bytes` can report a directory-fsync failure after
-            # its atomic replace. Re-read the bounded target to distinguish a
-            # committed index from a failed publication before rolling back.
-            if not index_published:
-                try:
-                    index_published = _read_bounded_state_file(
-                        DOCUMENTS_INDEX_PATH,
-                        DOCUMENT_INDEX_MAX_SIZE,
-                    ) == next_index_body
-                except (OSError, _CalendarStateUnavailable):
-                    index_published = False
-            if index_published:
-                file_published = True
-            else:
-                try:
-                    file_published = destination.is_file() and not destination.is_symlink()
-                except OSError:
-                    file_published = False
-            if not index_published and file_published:
-                try:
-                    destination.unlink(missing_ok=True)
-                except OSError:
-                    pass
-            if not index_published and not had_directory:
-                try:
-                    doc_dir.rmdir()
-                except OSError:
-                    pass
-            if not index_published:
-                raise HTTPException(status_code=503, detail="documents are unavailable") from exc
-
-        for prior in existing_files:
-            if prior != destination:
-                try:
-                    prior.unlink(missing_ok=True)
-                except OSError:
-                    # The committed index points at destination; an orphan is
-                    # harmless and can be pruned by the next upload.
-                    pass
-        documents_revision += 1
-        revision = documents_revision
+            revision = await _run_gateway_storage(
+                _store_document_upload,
+                doc_id,
+                meta,
+                original_bytes,
+                suffix,
+            )
+        except HTTPException:
+            raise
 
     try:
         # Persistence is already committed; bounded fan-out must not turn a
@@ -3527,37 +3761,14 @@ async def upload_document(
 async def get_document_file(doc_id: str) -> Response:
     safe_id = _safe_document_id(doc_id)
     async with documents_lock:
-        doc_dir = DOCUMENTS_DIR / safe_id
-        if not doc_dir.exists():
-            raise HTTPException(status_code=404, detail="Unknown document id")
         try:
-            index, _body = _load_document_index()
-            entry = next((item for item in index if _document_index_id(item.get("id")) == safe_id), None)
-            candidates = _document_original_files(doc_dir)
-        except _DocumentIndexError as exc:
-            raise HTTPException(status_code=503, detail="documents are unavailable") from exc
-        if entry is not None:
-            selected_name = entry.get("_originalFile")
-            if not _valid_document_index_filename(selected_name):
-                raise HTTPException(status_code=503, detail="documents are unavailable")
-            selected = doc_dir / selected_name
-            if selected not in candidates:
-                raise HTTPException(status_code=404, detail="Original file missing")
-        elif _body is not None:
-            raise HTTPException(status_code=404, detail="Unknown document id")
-        elif not candidates:
-            raise HTTPException(status_code=404, detail="Original file missing")
-        else:
-            selected = candidates[0]
-        try:
-            body = _read_bounded_state_file(selected, DOCUMENT_MAX_UPLOAD_SIZE)
-        except _BoundedFileTooLarge as exc:
-            raise HTTPException(status_code=413, detail="Document exceeds retrieval limit") from exc
-        except (_CalendarStateUnavailable, OSError) as exc:
-            raise HTTPException(status_code=503, detail="documents are unavailable") from exc
-        if body is None:
-            raise HTTPException(status_code=404, detail="Original file missing")
-    media_type = mimetypes.guess_type(selected.name)[0] or "application/octet-stream"
+            body, selected_name = await _run_gateway_storage(
+                _read_document_file_storage,
+                safe_id,
+            )
+        except HTTPException:
+            raise
+    media_type = mimetypes.guess_type(selected_name)[0] or "application/octet-stream"
     return Response(content=body, media_type=media_type)
 
 
@@ -3575,7 +3786,7 @@ async def _proxy_validated_json(
     request_timeout = USAGE_REQUEST_TIMEOUT if request_timeout is None else request_timeout
     total_timeout = USAGE_TOTAL_TIMEOUT if total_timeout is None else total_timeout
     error = json.dumps({"error": f"{error_label} unavailable"}, separators=(",", ":")).encode()
-    secret = _service_secret() if local_auth else None
+    secret = await _service_secret_async() if local_auth else None
     if local_auth and secret is None:
         return Response(content=error, media_type="application/json", status_code=503)
     headers = {"Authorization": f"Bearer {secret}"} if local_auth else {}
@@ -3620,27 +3831,12 @@ class _ClaudeIngestRequestError(Exception):
 
 
 async def _read_claude_ingest_body(request: Request) -> bytes:
-    try:
-        async with asyncio.timeout(CLAUDE_INGEST_BODY_TIMEOUT):
-            length_values = _raw_header_values(request, "content-length")
-            if len(length_values) > 1:
-                raise _ClaudeIngestRequestError(400)
-            raw_length = _calendar_header(request, "content-length")
-            if raw_length is not None:
-                try:
-                    content_length = int(raw_length)
-                except ValueError as exc:
-                    raise _ClaudeIngestRequestError(400) from exc
-                if content_length < 0 or content_length > CLAUDE_INGEST_MAX_BODY_SIZE:
-                    raise _ClaudeIngestRequestError(413)
-            body = bytearray()
-            async for chunk in request.stream():
-                if len(body) + len(chunk) > CLAUDE_INGEST_MAX_BODY_SIZE:
-                    raise _ClaudeIngestRequestError(413)
-                body.extend(chunk)
-            return bytes(body)
-    except TimeoutError as exc:
-        raise _ClaudeIngestRequestError(408) from exc
+    return await _read_bounded_request_body(
+        request,
+        maximum=CLAUDE_INGEST_MAX_BODY_SIZE,
+        timeout=CLAUDE_INGEST_BODY_TIMEOUT,
+        error_factory=_ClaudeIngestRequestError,
+    )
 
 
 def _claude_ingest_input_error(status_code: int) -> JSONResponse:
@@ -3651,7 +3847,7 @@ def _claude_ingest_input_error(status_code: int) -> JSONResponse:
 async def _proxy_claude_ingest(request: Request) -> Response:
     if _calendar_header(request, "content-type") != "application/json":
         return JSONResponse({"error": "invalid_request"}, status_code=415)
-    secret = _read_ingest_secret()
+    secret = await _run_gateway_storage(_read_ingest_secret)
     if secret is None:
         return JSONResponse({"error": "ingest_unavailable"}, status_code=503)
     try:
@@ -3744,27 +3940,12 @@ class _NutritionPhotoRequestError(Exception):
 
 
 async def _read_nutrition_photo_body(request: Request) -> bytes:
-    try:
-        async with asyncio.timeout(NUTRITION_PHOTO_BODY_TIMEOUT):
-            length_values = _raw_header_values(request, "content-length")
-            if len(length_values) > 1:
-                raise _NutritionPhotoRequestError(400)
-            raw_length = _calendar_header(request, "content-length")
-            if raw_length is not None:
-                try:
-                    content_length = int(raw_length)
-                except ValueError as exc:
-                    raise _NutritionPhotoRequestError(400) from exc
-                if content_length < 0 or content_length > NUTRITION_PHOTO_MAX_BODY_SIZE:
-                    raise _NutritionPhotoRequestError(413)
-            body = bytearray()
-            async for chunk in request.stream():
-                if len(body) + len(chunk) > NUTRITION_PHOTO_MAX_BODY_SIZE:
-                    raise _NutritionPhotoRequestError(413)
-                body.extend(chunk)
-            return bytes(body)
-    except TimeoutError as exc:
-        raise _NutritionPhotoRequestError(408) from exc
+    return await _read_bounded_request_body(
+        request,
+        maximum=NUTRITION_PHOTO_MAX_BODY_SIZE,
+        timeout=NUTRITION_PHOTO_BODY_TIMEOUT,
+        error_factory=_NutritionPhotoRequestError,
+    )
 
 
 def _photo_lineage(manifest: object) -> tuple[str, str, list[dict[str, str]]] | None:
@@ -4089,7 +4270,7 @@ async def post_nutrition_photo_proposal(request: Request) -> Response:
         error = "request_too_large" if exc.status_code == 413 else "request_timeout" if exc.status_code == 408 else "invalid_request"
         return JSONResponse({"error": error}, status_code=exc.status_code)
 
-    secret = _service_secret()
+    secret = await _service_secret_async()
     if secret is None:
         return JSONResponse({"error": "nutrition_unavailable"}, status_code=503)
     try:
@@ -4290,12 +4471,105 @@ def _apply_finance_imported_operations(snapshot: dict, operations: list[dict], n
     }
 
 
+def _read_finance_imported_storage() -> tuple[bytes, dict, dict]:
+    """Load the imported-finance authority as one protected storage unit."""
+    return _load_finance_imported_state()
+
+
+def _read_finance_imported_receipt_storage(idempotency_key: str) -> dict:
+    """Resolve one imported-finance receipt from one validated state read."""
+    _body, snapshot, metadata = _load_finance_imported_state()
+    record = next(
+        (item for item in metadata["idempotency"] if item["key"] == idempotency_key),
+        None,
+    )
+    return (
+        {"state": "committed", "revision": record["revision"]}
+        if record is not None
+        else {"state": "unknown", "revision": None}
+    )
+
+
+def _write_finance_imported_storage(
+    body: bytes,
+    parsed_request: dict,
+    fingerprint: str,
+    if_match: str,
+    idempotency_key: str,
+) -> Response:
+    """Apply one imported-finance delta while keeping read/modify/write atomic."""
+    current_body, current_snapshot, metadata = _load_finance_imported_state()
+    current_revision = current_snapshot["revision"]
+    current_etag = _finance_imported_etag(current_revision, _finance_imported_digest(current_body))
+    previous = next((record for record in metadata["idempotency"] if record["key"] == idempotency_key), None)
+    if previous is not None:
+        if previous["fingerprint"] != fingerprint:
+            return _finance_imported_response(current_body, current_revision, status_code=409, conflict=True)
+        return _finance_imported_response(current_body, current_revision, replay=True)
+    if if_match != current_etag or parsed_request["baseRevision"] != current_revision:
+        return _finance_imported_response(current_body, current_revision, status_code=412, conflict=True)
+    if current_revision >= FINANCE_IMPORTED_MAX_REVISION:
+        return _finance_imported_response(current_body, current_revision, status_code=503)
+
+    next_revision = current_revision + 1
+    try:
+        next_snapshot = _apply_finance_imported_operations(
+            current_snapshot,
+            parsed_request["operations"],
+            next_revision,
+        )
+    except _FinanceImportedOperationConflict as exc:
+        return _finance_imported_response(
+            current_body,
+            current_revision,
+            status_code=409,
+            conflict=True,
+            conflict_reason=exc.reason,
+        )
+    except _FinanceImportedLimitExceeded:
+        return JSONResponse({"error": "finance_imported_limit"}, status_code=413)
+    changed = next_snapshot["revision"] != current_revision
+    try:
+        next_body = current_body if not changed else _finance_imported_snapshot_bytes(next_snapshot)
+    except ValueError:
+        return JSONResponse({"error": "finance_imported_limit"}, status_code=413)
+    idempotency_record = {
+        "key": idempotency_key,
+        "fingerprint": fingerprint,
+        "revision": next_snapshot["revision"],
+    }
+    next_metadata = {
+        "schemaVersion": FINANCE_IMPORTED_SCHEMA_VERSION,
+        "domain": "finance",
+        "authority": "gateway",
+        "revision": next_snapshot["revision"],
+        "bodyDigest": _finance_imported_digest(next_body),
+        "idempotency": _finance_imported_idempotency_window(metadata["idempotency"], idempotency_record),
+    }
+    try:
+        # A no-op still publishes its bounded replay record atomically, so a
+        # retry cannot consume another revision after process restart.
+        next_metadata["bodyDigest"] = _finance_imported_digest(next_body)
+        state_body = _finance_imported_state_bytes(next_body, next_metadata)
+        _atomic_write_bytes(FINANCE_IMPORTED_PATH, state_body)
+    except (OSError, TypeError, ValueError, OverflowError, RecursionError):
+        return JSONResponse({"error": "finance_imported_unavailable"}, status_code=503)
+
+    return _finance_imported_response(
+        next_body,
+        next_snapshot["revision"],
+        noop=not changed,
+    )
+
+
 @app.get("/finance/imported")
 async def get_finance_imported() -> Response:
     """Return the bounded, gateway-authoritative manual-import ledger."""
     async with finance_imported_lock:
         try:
-            body, snapshot, _metadata = _load_finance_imported_state()
+            body, snapshot, _metadata = await _run_gateway_storage(
+                _read_finance_imported_storage,
+            )
         except (_FinanceImportedStateUnavailable, OSError, ValueError):
             return JSONResponse({"error": "finance_imported_unavailable"}, status_code=503)
         if snapshot["revision"] < 0 or len(body) > FINANCE_IMPORTED_MAX_RESPONSE_SIZE:
@@ -4310,22 +4584,12 @@ async def get_finance_imported_receipt(idempotency_key: str) -> Response:
         return JSONResponse({"error": "invalid_idempotency_key"}, status_code=400)
     async with finance_imported_lock:
         try:
-            _body, snapshot, metadata = _load_finance_imported_state()
+            payload = await _run_gateway_storage(
+                _read_finance_imported_receipt_storage,
+                idempotency_key,
+            )
         except (_FinanceImportedStateUnavailable, OSError, ValueError):
             return JSONResponse({"error": "finance_imported_unavailable"}, status_code=503)
-        record = next(
-            (item for item in metadata["idempotency"] if item["key"] == idempotency_key),
-            None,
-        )
-        payload = (
-            {"state": "committed", "revision": record["revision"]}
-            if record is not None
-            else {"state": "unknown", "revision": None}
-        )
-        # `snapshot` is read above as part of the validated state load. Do not
-        # return it here: the receipt endpoint is a narrow proof lookup and
-        # must not become a second ledger read contract.
-        _ = snapshot
         return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
 
@@ -4360,90 +4624,65 @@ async def put_finance_imported(request: Request) -> Response:
     fingerprint = hashlib.sha256(body).hexdigest()
     async with finance_imported_lock:
         try:
-            current_body, current_snapshot, metadata = _load_finance_imported_state()
+            response = await _run_gateway_storage(
+                _write_finance_imported_storage,
+                body,
+                parsed_request,
+                fingerprint,
+                if_match,
+                idempotency_key,
+            )
         except (_FinanceImportedStateUnavailable, OSError, ValueError):
             return JSONResponse({"error": "finance_imported_unavailable"}, status_code=503)
-
-        current_revision = current_snapshot["revision"]
-        current_etag = _finance_imported_etag(current_revision, _finance_imported_digest(current_body))
-        previous = next((record for record in metadata["idempotency"] if record["key"] == idempotency_key), None)
-        if previous is not None:
-            if previous["fingerprint"] != fingerprint:
-                return _finance_imported_response(current_body, current_revision, status_code=409, conflict=True)
-            return _finance_imported_response(current_body, current_revision, replay=True)
-        if if_match != current_etag or parsed_request["baseRevision"] != current_revision:
-            return _finance_imported_response(current_body, current_revision, status_code=412, conflict=True)
-        if current_revision >= FINANCE_IMPORTED_MAX_REVISION:
-            return _finance_imported_response(current_body, current_revision, status_code=503)
-
-        next_revision = current_revision + 1
-        try:
-            next_snapshot = _apply_finance_imported_operations(
-                current_snapshot,
-                parsed_request["operations"],
-                next_revision,
-            )
-        except _FinanceImportedOperationConflict as exc:
-            return _finance_imported_response(
-                current_body,
-                current_revision,
-                status_code=409,
-                conflict=True,
-                conflict_reason=exc.reason,
-            )
-        except _FinanceImportedLimitExceeded:
-            return JSONResponse({"error": "finance_imported_limit"}, status_code=413)
-        changed = next_snapshot["revision"] != current_revision
-        try:
-            next_body = current_body if not changed else _finance_imported_snapshot_bytes(next_snapshot)
-        except ValueError:
-            return JSONResponse({"error": "finance_imported_limit"}, status_code=413)
-        idempotency_record = {
-            "key": idempotency_key,
-            "fingerprint": fingerprint,
-            "revision": next_snapshot["revision"],
-        }
-        next_metadata = {
-            "schemaVersion": FINANCE_IMPORTED_SCHEMA_VERSION,
-            "domain": "finance",
-            "authority": "gateway",
-            "revision": next_snapshot["revision"],
-            "bodyDigest": _finance_imported_digest(next_body),
-            "idempotency": _finance_imported_idempotency_window(metadata["idempotency"], idempotency_record),
-        }
-        try:
-            # A no-op still publishes its bounded replay record atomically, so
-            # a retry cannot consume another revision after process restart.
-            next_metadata["bodyDigest"] = _finance_imported_digest(next_body)
-            state_body = _finance_imported_state_bytes(next_body, next_metadata)
-            _atomic_write_bytes(FINANCE_IMPORTED_PATH, state_body)
-        except (OSError, TypeError, ValueError, OverflowError, RecursionError):
-            return JSONResponse({"error": "finance_imported_unavailable"}, status_code=503)
-
-        return _finance_imported_response(
-            next_body,
-            next_snapshot["revision"],
-            noop=not changed,
-        )
+        return response
 
 
 @app.get("/finance/summary")
 async def get_finance_summary() -> Response:
     try:
         payload = await enable_banking.refresh_summary()
-    except Exception:
+    except (ProtectedStorageOverloaded, ProtectedStorageUnavailable):
+        raise
+    except EnableBankingUnavailable:
         # Keep the last validated banking observation available during a
         # provider outage. `load_cached_summary` preserves its source time and
         # converts only age-inconsistent observed provenance to stale/
         # refresh_due; malformed or incomplete cache state still fails closed.
-        payload = enable_banking.load_cached_summary()
-    revision_reader = getattr(enable_banking, "summary_revision", None)
-    revision = revision_reader() if callable(revision_reader) else None
-    response = _finance_consent_response(payload if payload is not None else {"error": "finance unavailable"}, 200 if payload is not None else 503, revision=revision if payload is not None else None)
-    status_reader = getattr(enable_banking, "runtime_status", None)
-    if callable(status_reader):
         try:
-            status = status_reader()
+            payload = await _enable_banking_storage_value(
+                "load_cached_summary_async",
+                "load_cached_summary",
+            )
+        except (ProtectedStorageOverloaded, ProtectedStorageUnavailable):
+            raise
+        except Exception:
+            payload = None
+    except Exception:
+        # An exception outside the typed refresh failure path has no recorded
+        # provenance. Serving the cache here would make a successful HTTP 200
+        # look like a truthful refresh result when it is not.
+        return _finance_consent_response({"error": "finance unavailable"}, 503)
+    if payload is not None:
+        try:
+            revision = await _enable_banking_storage_value(
+                "summary_revision_async",
+                "summary_revision",
+            )
+        except (ProtectedStorageOverloaded, ProtectedStorageUnavailable):
+            raise
+        except Exception:
+            return _finance_consent_response({"error": "finance unavailable"}, 503)
+    else:
+        revision = None
+    response = _finance_consent_response(payload if payload is not None else {"error": "finance unavailable"}, 200 if payload is not None else 503, revision=revision if payload is not None else None)
+    if getattr(enable_banking, "runtime_status_async", None) or getattr(enable_banking, "runtime_status", None):
+        try:
+            status = await _enable_banking_storage_value(
+                "runtime_status_async",
+                "runtime_status",
+            )
+        except (ProtectedStorageOverloaded, ProtectedStorageUnavailable):
+            raise
         except Exception:
             return _finance_consent_response({"error": "finance unavailable"}, 503)
         response.headers["X-LifeOS-Banking-State"] = "consent" if status["blocked"] else status["failure"] or ("partial" if status["partial"] else "healthy")
@@ -4454,50 +4693,86 @@ async def get_finance_summary() -> Response:
     return response
 
 
-@app.get("/fitness/observation")
-async def get_fitness_observation() -> Response:
-    async with fitness_observation_lock:
-        try:
-            body = _read_bounded_state_file(
-                FITNESS_OBSERVATION_PATH,
-                FITNESS_OBSERVATION_MAX_RESPONSE_SIZE,
-            )
-        except (_BoundedFileTooLarge, _CalendarStateUnavailable, OSError):
-            return JSONResponse({"error": "fitness_observation_unavailable"}, status_code=503)
-        if body is None:
-            return JSONResponse({"error": "fitness_observation_unavailable"}, status_code=503)
-        try:
-            payload = json.loads(
-                body.decode("utf-8"),
-                object_pairs_hook=_reject_duplicate_keys,
-                parse_constant=_reject_nonfinite_constant,
-                parse_int=_calendar_integer,
-            )
-        except (UnicodeDecodeError, UnicodeEncodeError, json.JSONDecodeError, ValueError, TypeError, OverflowError, RecursionError):
-            return JSONResponse({"error": "fitness_observation_unavailable"}, status_code=503)
-        now = datetime.now(timezone.utc)
+def _read_fitness_observation_storage() -> tuple[bytes, dict]:
+    """Read, validate, and canonicalize the fitness observation off-loop."""
+    body = _read_bounded_state_file(
+        FITNESS_OBSERVATION_PATH,
+        FITNESS_OBSERVATION_MAX_RESPONSE_SIZE,
+    )
+    if body is None:
+        raise _CalendarStateUnavailable
+    try:
+        payload = json.loads(
+            body.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite_constant,
+            parse_int=_calendar_integer,
+        )
+    except (UnicodeDecodeError, UnicodeEncodeError, json.JSONDecodeError, ValueError, TypeError, OverflowError, RecursionError) as exc:
+        raise _CalendarStateUnavailable from exc
+    now = datetime.now(timezone.utc)
+    if not _validate_fitness_observation_payload(
+        payload,
+        now=now,
+        enforce_freshness=False,
+        allow_non_observed=True,
+    ):
+        raise _CalendarStateUnavailable
+    generated_at = _parse_fitness_timestamp(payload["generatedAt"])
+    if generated_at is None:
+        raise _CalendarStateUnavailable
+    if payload["state"] == "observed" and now - generated_at > FITNESS_OBSERVATION_STALE_AFTER:
+        payload = _stale_fitness_observation(payload)
         if not _validate_fitness_observation_payload(
             payload,
             now=now,
             enforce_freshness=False,
             allow_non_observed=True,
         ):
-            return JSONResponse({"error": "fitness_observation_unavailable"}, status_code=503)
-        generated_at = _parse_fitness_timestamp(payload["generatedAt"])
-        if generated_at is None:
-            return JSONResponse({"error": "fitness_observation_unavailable"}, status_code=503)
-        if payload["state"] == "observed" and now - generated_at > FITNESS_OBSERVATION_STALE_AFTER:
-            payload = _stale_fitness_observation(payload)
-            if not _validate_fitness_observation_payload(
-                payload,
-                now=now,
-                enforce_freshness=False,
-                allow_non_observed=True,
-            ):
-                return JSONResponse({"error": "fitness_observation_unavailable"}, status_code=503)
+            raise _CalendarStateUnavailable
+    try:
+        response_body = _fitness_observation_bytes(payload)
+    except ValueError as exc:
+        raise _CalendarStateUnavailable from exc
+    return response_body, payload
+
+
+def _write_fitness_observation_storage(
+    payload: dict,
+    canonical_body: bytes,
+    now: datetime,
+) -> Response:
+    """Compare and publish one fitness observation as one protected unit."""
+    durable = _load_valid_fitness_observation(now=now)
+    if durable is not None:
         try:
-            response_body = _fitness_observation_bytes(payload)
-        except ValueError:
+            incoming_key = _fitness_observation_order_key(payload)
+            durable_key = _fitness_observation_order_key(durable)
+        except ValueError as exc:
+            raise _CalendarStateUnavailable from exc
+        if incoming_key < durable_key:
+            return _fitness_publication_response(result="ignored", reason="older_observation")
+        if incoming_key == durable_key:
+            try:
+                durable_body = _fitness_observation_bytes(durable)
+            except ValueError as exc:
+                raise _CalendarStateUnavailable from exc
+            return _fitness_publication_response(
+                result="already_current",
+                reason="idempotent_replay" if durable_body == canonical_body else "equal_generation",
+            )
+    _atomic_write_bytes(FITNESS_OBSERVATION_PATH, canonical_body)
+    return _fitness_publication_response(result="stored")
+
+
+@app.get("/fitness/observation")
+async def get_fitness_observation() -> Response:
+    async with fitness_observation_lock:
+        try:
+            response_body, payload = await _run_gateway_storage(
+                _read_fitness_observation_storage,
+            )
+        except (_BoundedFileTooLarge, _CalendarStateUnavailable, OSError):
             return JSONResponse({"error": "fitness_observation_unavailable"}, status_code=503)
     return Response(
         content=response_body,
@@ -4535,32 +4810,15 @@ async def post_fitness_observation(request: Request) -> Response:
     except ValueError:
         return JSONResponse({"error": "fitness_observation_invalid"}, status_code=422)
     async with fitness_observation_lock:
-        durable = _load_valid_fitness_observation(now=now)
-        if durable is not None:
-            try:
-                incoming_key = _fitness_observation_order_key(payload)
-                durable_key = _fitness_observation_order_key(durable)
-            except ValueError:
-                return JSONResponse({"error": "fitness_observation_unavailable"}, status_code=503)
-            if incoming_key < durable_key:
-                return _fitness_publication_response(
-                    result="ignored",
-                    reason="older_observation",
-                )
-            if incoming_key == durable_key:
-                try:
-                    durable_body = _fitness_observation_bytes(durable)
-                except ValueError:
-                    return JSONResponse({"error": "fitness_observation_unavailable"}, status_code=503)
-                return _fitness_publication_response(
-                    result="already_current",
-                    reason="idempotent_replay" if durable_body == canonical_body else "equal_generation",
-                )
         try:
-            _atomic_write_bytes(FITNESS_OBSERVATION_PATH, canonical_body)
-        except (OSError, ValueError):
+            return await _run_gateway_storage(
+                _write_fitness_observation_storage,
+                payload,
+                canonical_body,
+                now,
+            )
+        except (_CalendarStateUnavailable, OSError, ValueError):
             return JSONResponse({"error": "fitness_observation_unavailable"}, status_code=503)
-    return _fitness_publication_response(result="stored")
 
 
 @app.get("/clipper/summary")

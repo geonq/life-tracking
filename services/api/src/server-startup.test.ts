@@ -21,9 +21,11 @@ const connectionIsRefused = (port: number) => new Promise<boolean>(resolve => {
 describe('API startup lifecycle', () => {
   it('drains and closes the loopback listener on redirected stdin EOF without exiting Vitest', async () => {
     const previousStore = process.env.USAGE_STORE_PATH;
+    const previousClipper = process.env.CLIPPER_STORE_PATH;
     const directory = await mkdtemp(join(tmpdir(), 'usage-startup-'));
     const runtime = fakeRuntime();
     process.env.USAGE_STORE_PATH = join(directory, 'history.jsonl');
+    process.env.CLIPPER_STORE_PATH = join(directory, 'clipper.json');
     try {
       const started = await startApiServer({ port: 0, runtime });
       const address = started.server.address();
@@ -35,6 +37,7 @@ describe('API startup lifecycle', () => {
       expect(await connectionIsRefused(address.port)).toBe(true);
     } finally {
       if (previousStore === undefined) delete process.env.USAGE_STORE_PATH; else process.env.USAGE_STORE_PATH = previousStore;
+      if (previousClipper === undefined) delete process.env.CLIPPER_STORE_PATH; else process.env.CLIPPER_STORE_PATH = previousClipper;
     }
   });
 

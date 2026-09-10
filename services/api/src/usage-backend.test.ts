@@ -45,9 +45,9 @@ describe('usage contracts and projection',()=>{
  it('ignores an interrupted temporary publish and preserves the last committed state',async()=>{const dir=await mkdtemp(join(tmpdir(),'usage-recovery-')); const file=join(dir,'history.jsonl'); const store=new UsageHistory(file,100,2*60*60*1000,()=>Date.parse(t(2))); await store.add(entry(0,10),'capture-1'); const statePath=file+'.state.json'; const committed=await readFile(statePath); await writeFile(statePath+'.tmp-interrupted','{"schemaVersion":1,"rawBase64":'); expect((await store.list()).map(item=>item.usedPercent)).toEqual([10]); expect(await readFile(statePath)).toEqual(committed);});
  it('fails closed on oversized history without truncating it',async()=>{const dir=await mkdtemp(join(tmpdir(),'usage-oversize-')); const file=join(dir,'history.jsonl'); const oversized='x'.repeat(MAX_HISTORY_BYTES+1); await writeFile(file,oversized,{encoding:'utf8',mode:0o600}); const store=new UsageHistory(file,100,2*60*60*1000,()=>Date.parse(t(1))); await expect(store.list()).rejects.toThrow(); await expect(store.add(entry(0,10))).rejects.toThrow(); expect(await readFile(file,'utf8')).toBe(oversized);});
  it('refuses to start enabled Claude ingestion without a valid file secret',async()=>{
-  const previous={enabled:process.env.CLAUDE_INGEST_ENABLED,statusline:process.env.CLAUDE_STATUSLINE_ENABLED,file:process.env.CLAUDE_INGEST_SECRET_FILE,codex:process.env.CODEX_INGEST_ENABLED,codexFile:process.env.CODEX_INGEST_SECRET_FILE,store:process.env.USAGE_STORE_PATH};
+  const previous={enabled:process.env.CLAUDE_INGEST_ENABLED,statusline:process.env.CLAUDE_STATUSLINE_ENABLED,file:process.env.CLAUDE_INGEST_SECRET_FILE,codex:process.env.CODEX_INGEST_ENABLED,codexFile:process.env.CODEX_INGEST_SECRET_FILE,store:process.env.USAGE_STORE_PATH,clipper:process.env.CLIPPER_STORE_PATH};
   const directory=await mkdtemp(join(tmpdir(),'usage-ready-')); const secretPath=join(directory,'secret'); const storePath=join(directory,'history.jsonl');
-  process.env.CLAUDE_INGEST_ENABLED='true'; delete process.env.CLAUDE_STATUSLINE_ENABLED; delete process.env.CLAUDE_INGEST_SECRET_FILE; delete process.env.CODEX_INGEST_ENABLED; delete process.env.CODEX_INGEST_SECRET_FILE; process.env.USAGE_STORE_PATH=storePath;
+  process.env.CLAUDE_INGEST_ENABLED='true'; delete process.env.CLAUDE_STATUSLINE_ENABLED; delete process.env.CLAUDE_INGEST_SECRET_FILE; delete process.env.CODEX_INGEST_ENABLED; delete process.env.CODEX_INGEST_SECRET_FILE; process.env.USAGE_STORE_PATH=storePath; process.env.CLIPPER_STORE_PATH=join(directory,'clipper.json');
   try {
    expect(await validateStartupConfiguration()).toBe(false);
    process.env.CLAUDE_INGEST_SECRET_FILE=secretPath;
@@ -61,6 +61,7 @@ describe('usage contracts and projection',()=>{
    if(previous.codex===undefined)delete process.env.CODEX_INGEST_ENABLED;else process.env.CODEX_INGEST_ENABLED=previous.codex;
    if(previous.codexFile===undefined)delete process.env.CODEX_INGEST_SECRET_FILE;else process.env.CODEX_INGEST_SECRET_FILE=previous.codexFile;
    if(previous.store===undefined)delete process.env.USAGE_STORE_PATH;else process.env.USAGE_STORE_PATH=previous.store;
+   if(previous.clipper===undefined)delete process.env.CLIPPER_STORE_PATH;else process.env.CLIPPER_STORE_PATH=previous.clipper;
   }
  });
 });

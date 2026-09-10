@@ -376,9 +376,26 @@ async function lookupBarcode(req: IncomingMessage, res: ServerResponse, client: 
     return json(res, 400, { error: 'invalid_barcode' });
   }
   try {
-    return json(res, 200, await client.lookup(input));
-  } catch {
-    return json(res, 400, { error: 'invalid_barcode' });
+    const result = await client.lookup(input);
+    if (result.state === 'unavailable') {
+      if (result.reason === 'upstream_rate_limited') {
+        if (result.retryAfterSeconds !== undefined) res.setHeader('retry-after', String(result.retryAfterSeconds));
+        return json(res, 429, { error: 'rate_limited' });
+      }
+      return json(res, 503, { error: 'provider_unavailable' });
+    }
+    return json(res, 200, result);
+  } catch (error) {
+    // The adapter normally returns a typed unavailable result. Keep this
+    // fallback narrow so only its explicit input failure remains a client
+    // error; provider/configuration exceptions stay generic and bounded.
+    if (error instanceof Error && error.message === 'invalid_barcode') {
+      return json(res, 400, { error: 'invalid_barcode' });
+    }
+    if (error instanceof Error && error.message === 'upstream_rate_limited') {
+      return json(res, 429, { error: 'rate_limited' });
+    }
+    return json(res, 503, { error: 'provider_unavailable' });
   }
 }
 

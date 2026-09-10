@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { chmod, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { CLIPPER_MAX_BYTES, ClipperStore, ClipperStoreError, MAX_CLIPPER_QUEUE_DEPTH } from './clipper-store.js';
@@ -59,6 +59,18 @@ describe('ClipperStore', () => {
       await symlink(corruptPath, linkedPath);
       expect(await new ClipperStore(linkedPath).ready()).toBe(false);
     }
+  });
+
+  it('rejects a write below a mutable ancestor before creating a temporary file', async () => {
+    if (process.platform === 'win32') return;
+    const directory = await mkdtemp(join(tmpdir(), 'lifeos-clipper-contract-'));
+    const storage = join(directory, 'storage');
+    await mkdir(storage, { recursive: true, mode: 0o700 });
+    await chmod(directory, 0o777);
+    const store = new ClipperStore(join(storage, 'clipper.json'));
+
+    await expect(store.ingest('contract-rejection', JSON.stringify(snapshot))).rejects.toThrow();
+    expect(await readdir(storage)).toEqual([]);
   });
 
   it('accepts observed snapshots, replays identical keys, and rejects key reuse', async () => {

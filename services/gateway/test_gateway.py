@@ -233,6 +233,149 @@ def ingest_headers(**extra):
     return {**AUTH, "content-type": "application/json", **extra}
 
 
+def test_atomic_writer_publishes_an_ordinary_file_and_cleans_up(tmp_path):
+    target = tmp_path / "state.json"
+
+    main._atomic_write_bytes(target, b"bounded")
+
+    assert target.read_bytes() == b"bounded"
+    assert [entry.name for entry in tmp_path.iterdir()] == ["state.json"]
+    if os.name == "posix":
+        assert target.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("writer_kind", ["calendar", "enablebanking"])
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor-relative boundary")
+def test_atomic_writer_keeps_temp_publish_and_cleanup_on_the_open_directory(
+    tmp_path, monkeypatch, writer_kind
+):
+    storage = tmp_path / "storage"
+    displaced = tmp_path / "displaced-storage"
+    storage.mkdir()
+    original_open = os.open
+    swapped = False
+
+    def open_and_replace_ancestor(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+        if (
+            dir_fd is None
+            and not swapped
+            and os.path.abspath(os.fspath(path)) == os.path.abspath(os.fspath(storage))
+        ):
+            swapped = True
+            os.replace(storage, displaced)
+            storage.mkdir(mode=0o700)
+        return descriptor
+
+    monkeypatch.setattr(main.os, "open", open_and_replace_ancestor)
+    target = storage / "state.json"
+    if writer_kind == "calendar":
+        writer = lambda: main._atomic_write_bytes(target, b"bounded")
+    else:
+        import enablebanking
+
+        service = object.__new__(enablebanking.EnableBankingService)
+        writer = lambda: service._atomic_write_json(target, {"value": "bounded"})
+
+    with pytest.raises(OSError):
+        writer()
+
+    assert swapped
+    assert list(storage.iterdir()) == []
+    assert list(displaced.iterdir()) == []
+
+
+@pytest.mark.parametrize("writer_kind", ["calendar", "enablebanking"])
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor-relative boundary")
+def test_atomic_writer_rejects_parent_replacement_before_temp_creation(
+    tmp_path, monkeypatch, writer_kind
+):
+    storage = tmp_path / "storage"
+    displaced = tmp_path / "displaced-storage"
+    storage.mkdir()
+    original_open = os.open
+    swapped = False
+
+    def open_after_parent_replacement(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if (
+            dir_fd is None
+            and not swapped
+            and os.path.abspath(os.fspath(path)) == os.path.abspath(os.fspath(storage))
+        ):
+            swapped = True
+            os.replace(storage, displaced)
+            storage.mkdir(mode=0o700)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(main.os, "open", open_after_parent_replacement)
+    target = storage / "state.json"
+    if writer_kind == "calendar":
+        writer = lambda: main._atomic_write_bytes(target, b"bounded")
+    else:
+        import enablebanking
+
+        service = object.__new__(enablebanking.EnableBankingService)
+        writer = lambda: service._atomic_write_json(target, {"value": "bounded"})
+
+    with pytest.raises(OSError):
+        writer()
+
+    assert swapped
+    # The descriptor identity check runs before O_EXCL creates a temporary
+    # entry in the replacement directory.
+    assert list(storage.iterdir()) == []
+    assert list(displaced.iterdir()) == []
+
+
+def test_windows_storage_contract_rejects_untrusted_mutation_acl():
+    foreign = "S-1-5-21-400-500-600-700"
+    management = "S-1-5-21-100-200-300-400"
+    service = "S-1-5-80-111-222-333-444-555"
+    with pytest.raises(OSError, match="unsafe_storage_contract"):
+        main.validate_windows_acl_sddl(
+            f"O:{foreign}G:SYD:(A;;FA;;;{foreign})",
+            service,
+            management,
+        )
+
+    # Conditional and other unsupported ACE types must fail closed because
+    # this parser cannot prove their effective grant semantics.
+    with pytest.raises(OSError, match="unsafe_storage_contract"):
+        main.validate_windows_acl_sddl(
+            f"O:{service}G:SYD:(XA;;FA;;;{foreign})",
+            service,
+            management,
+        )
+
+    # The deployment contract permits the recorded operator SID and the
+    # current virtual service SID, but the observed owner is never trusted.
+    main.validate_windows_acl_sddl(
+        f"O:{management}G:SYD:(A;;FA;;;{management})(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;WD)",
+        service,
+        management,
+    )
+
+    # Read-only broad inheritance does not permit ancestor replacement and is
+    # compatible with ordinary Windows system ancestors.
+    main.validate_windows_acl_sddl("O:SYG:SYD:(A;;FR;;;WD)", "S-1-5-18")
+
+
+def test_protected_storage_overload_returns_safe_service_unavailable(monkeypatch):
+    async def overloaded(*args, **kwargs):
+        raise main.ProtectedStorageOverloaded()
+
+    monkeypatch.setattr(main, "_run_gateway_storage", overloaded)
+
+    response = client.get("/calendar", headers=AUTH)
+
+    assert response.status_code == 503
+    assert response.json() == {"error": "storage_busy"}
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["retry-after"] == "1"
+
+
 def test_usage_healthy_proxy():
     body = json.dumps(VALID).encode()
     with request_with(FakeResponse(body)):
@@ -1584,6 +1727,61 @@ def test_claude_ingest_body_deadline_returns_bounded_timeout(monkeypatch):
     assert response.body == b'{"error":"request_timeout"}'
 
 
+def test_bounded_request_readers_reconcile_content_length_before_parsing(monkeypatch):
+    import main
+
+    # Keep the matrix cheap while exercising the same boundary comparison used
+    # by each production-sized reader.
+    monkeypatch.setattr(main.EnableBankingService, "BODY_LIMIT", 4)
+    for name in (
+        "FITNESS_OBSERVATION_MAX_BODY_SIZE",
+        "FINANCE_IMPORTED_MAX_BODY_SIZE",
+        "CALENDAR_MAX_BODY_SIZE",
+        "CLAUDE_INGEST_MAX_BODY_SIZE",
+        "NUTRITION_PHOTO_MAX_BODY_SIZE",
+    ):
+        monkeypatch.setattr(main, name, 4)
+
+    class BodyRequest:
+        def __init__(self, body, lengths):
+            self.body = body
+            self.scope = {
+                "headers": [(b"content-length", str(length).encode("ascii")) for length in lengths]
+            }
+
+        async def stream(self):
+            yield self.body[:1]
+            yield self.body[1:]
+
+    readers = [
+        main._read_bounded_finance_request,
+        main._read_bounded_fitness_observation_request,
+        main._read_bounded_finance_imported_request,
+        main._read_calendar_body,
+        main._read_claude_ingest_body,
+        main._read_nutrition_photo_body,
+    ]
+    cases = [
+        ("declared longer than consumed", b"abc", [4], 400, None),
+        ("declared shorter than consumed", b"abcd", [3], 400, None),
+        ("duplicate declaration", b"abcd", [4, 4], 400, None),
+        ("malformed declaration", b"abcd", ["2e0"], 400, None),
+        ("absent declaration", b"abcd", [], None, b"abcd"),
+        ("exact boundary declaration", b"abcd", [4], None, b"abcd"),
+        ("oversized declaration", b"abcd", [5], 413, None),
+    ]
+
+    for reader in readers:
+        for label, body, lengths, expected_status, expected_body in cases:
+            request = BodyRequest(body, lengths)
+            if expected_status is not None:
+                with pytest.raises(Exception) as error:
+                    asyncio.run(reader(request))
+                assert getattr(error.value, "status_code", None) == expected_status, label
+            else:
+                assert asyncio.run(reader(request)) == expected_body, label
+
+
 @pytest.mark.parametrize("body", [
     b"not-json",
     b'{"rate_limits":{"five_hour":{"used_percentage":1,"used_percentage":2}}}',
@@ -1969,7 +2167,7 @@ def test_finance_summary_without_linked_connection_is_unavailable():
     assert response.headers["cache-control"] == "no-store"
 
 
-def test_finance_summary_returns_validated_cached_observation_on_refresh_failure(monkeypatch):
+def test_finance_summary_returns_validated_cached_observation_on_typed_refresh_failure(monkeypatch):
     observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     cached = copy.deepcopy(VALID_FINANCE)
     cached["generatedAt"] = observed_at
@@ -1978,10 +2176,19 @@ def test_finance_summary_returns_validated_cached_observation_on_refresh_failure
 
     class CachedFinance:
         async def refresh_summary(self):
-            raise RuntimeError("provider unavailable")
+            raise main.EnableBankingUnavailable("provider unavailable", reason="transport")
 
         def load_cached_summary(self):
             return cached
+
+        def runtime_status(self):
+            return {
+                "blocked": False,
+                "failure": "transport",
+                "partial": False,
+                "lastSuccess": observed_at,
+                "lastFailure": observed_at,
+            }
 
     monkeypatch.setattr(main, "enable_banking", CachedFinance())
     response = client.get("/finance/summary", headers=AUTH)
@@ -1989,6 +2196,42 @@ def test_finance_summary_returns_validated_cached_observation_on_refresh_failure
     assert response.status_code == 200
     assert response.json() == cached
     assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-lifeos-banking-state"] == "transport"
+    assert response.headers["x-lifeos-banking-partial"] == "false"
+
+
+def test_finance_summary_does_not_serve_cache_after_unexpected_refresh_exception(monkeypatch):
+    cached = copy.deepcopy(VALID_FINANCE)
+
+    class UnexpectedFinance:
+        async def refresh_summary(self):
+            raise RuntimeError("unexpected parsing or storage failure")
+
+        def load_cached_summary(self):
+            return cached
+
+    monkeypatch.setattr(main, "enable_banking", UnexpectedFinance())
+    response = client.get("/finance/summary", headers=AUTH)
+
+    assert response.status_code == 503
+    assert response.json() == {"error": "finance unavailable"}
+    assert "generatedAt" not in response.json()
+    assert "provenance" not in response.text
+
+
+@pytest.mark.parametrize("capacity_error", [main.ProtectedStorageOverloaded, main.ProtectedStorageUnavailable])
+def test_finance_summary_preserves_typed_storage_capacity_response(monkeypatch, capacity_error):
+    class BusyFinance:
+        async def refresh_summary(self):
+            raise capacity_error()
+
+    monkeypatch.setattr(main, "enable_banking", BusyFinance())
+    response = client.get("/finance/summary", headers=AUTH)
+
+    assert response.status_code == 503
+    assert response.json() == {"error": "storage_busy"}
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["retry-after"] == "1"
 
 
 def test_finance_response_bound_matches_native_read_limit():

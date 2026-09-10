@@ -1684,6 +1684,42 @@ def test_deployment_json_readers_reject_oversized_files_before_convert_from_json
     assert 'persisted authority completion is accepted by the bounded reader' in behavior
 
 
+def test_windows_powershell_51_path_chain_and_gateway_bundle_contracts_are_regressed() -> None:
+    common = read('Deployment.Common.ps1')
+    install = read('install.ps1')
+    static = read('tests/Deployment.Static.Tests.ps1')
+    behavior = read('tests/Deployment.Behavior.Tests.ps1')
+
+    chain = common.split('function Get-LifeOSPathIdentityChain', 1)[1].split('function Assert-LifeOSPathIdentityChain', 1)[0]
+    assert 'return $chain.ToArray()' in chain
+    assert 'return ,$chain.ToArray()' not in chain
+    validation = common.split('function Assert-LifeOSPathIdentityChain', 1)[1].split('function Assert-ExistingDirectory', 1)[0]
+    assert 'return $actual' in validation
+    assert 'return ,$actual' not in validation
+    for line in common.splitlines():
+        if 'Get-LifeOSPathIdentityChain -Path' in line:
+            assert '@(Get-LifeOSPathIdentityChain -Path' in line
+
+    gateway = install.split('function Copy-GatewayCodeBundle', 1)[1].split('function Initialize-SupplementCatalog', 1)[0]
+    bundle_assignment = re.search(r'\$bundleFiles\s*=\s*@\(.*?\}\)(?P<tail>[^\r\n]*)', gateway, re.S)
+    assert bundle_assignment and '-MaxBytes' not in bundle_assignment.group('tail')
+    assert re.search(
+        r'Write-JsonAtomic\s+-Path\s+\$releaseManifestPath\s+-Value\s+\(\[ordered\]@\{.*?'
+        r'bundleFiles\s*=\s*\$bundleFiles.*?\}\)\s+-MaxBytes\s+'
+        r'\$script:LifeOSGenerationManifestMaxBytes',
+        gateway,
+        re.S,
+    )
+    assert 'nested candidate paths return a flat identity chain with the leaf last.' in behavior
+    assert 'a stable nested candidate SOURCE_SHA file passes the capped reader.' in behavior
+    assert 'an identity/path change on a nested candidate file is rejected.' in behavior
+    assert 'Parse the actual installer in definition-only mode' in behavior
+    assert 'Copy-GatewayCodeBundle' in behavior
+    assert 'the parsed gateway bundle helper stages every file and publishes a bounded v18 manifest.' in behavior
+    assert 'Gateway bundle byte bounds must not be attached to the bundleFiles array expression.' in static
+    assert 'Gateway release manifest must pass its byte bound to Write-JsonAtomic.' in static
+
+
 def test_fresh_backend_identity_repairs_have_static_and_behavior_regressions() -> None:
     common = read('Deployment.Common.ps1')
     install = read('install.ps1')

@@ -9,7 +9,12 @@ import {
   type UsageHistoryEntry as Entry,
 } from '@iphone-life-os/contracts';
 import { parseStrictJSON } from './json-boundary.js';
-import { atomicWriteFile } from './atomic-file.js';
+import {
+  assertFilePathIdentityChain,
+  assertStoragePathContract,
+  atomicWriteFile,
+  captureFilePathIdentityChain,
+} from './atomic-file.js';
 
 /** Keep malformed or unexpectedly large history files from causing an unbounded allocation. */
 export const MAX_HISTORY_BYTES = 1 * 1024 * 1024;
@@ -260,6 +265,11 @@ export class UsageHistory {
   /** Read/validate the configured store without creating or replacing it. */
   async ready(): Promise<boolean> {
     try {
+      const parent = dirname(this.file);
+      const parentChain = await captureFilePathIdentityChain(parent);
+      if (parentChain[parentChain.length - 1]?.[0] === resolve(parent)) {
+        await assertStoragePathContract(parent, parentChain);
+      }
       await this.readState();
       return true;
     } catch {
@@ -311,7 +321,21 @@ export class UsageHistory {
   private decodeEntries(body: Buffer): Entry[] {
     try {
       const text = new TextDecoder('utf-8', { fatal: true }).decode(body);
-      return text.split(/\r?\n/).filter(Boolean).map(line => UsageHistoryEntry.parse(parseStrictJSON(line)));
+      const entries: Entry[] = [];
+      let nonEmptyLines = 0;
+      for (const line of text.split(/\r?\n/)) {
+        if (!line) continue;
+        nonEmptyLines += 1;
+        try {
+          entries.push(UsageHistoryEntry.parse(parseStrictJSON(line)));
+        } catch {
+          // One damaged JSONL record must not hide every valid observation.
+          // Keep an all-corrupt file fail-closed so a writer cannot silently
+          // replace a store whose contents are wholly untrusted.
+        }
+      }
+      if (nonEmptyLines > 0 && entries.length === 0) throw new Error('history has no valid entries');
+      return entries;
     } catch {
       throw new UsageHistoryError('storage_unavailable');
     }
@@ -341,6 +365,7 @@ export class UsageHistory {
   private async readBoundedFile(path: string, maximum: number): Promise<Buffer | undefined> {
     let descriptor: Awaited<ReturnType<typeof open>> | undefined;
     try {
+      const beforeChain = await captureFilePathIdentityChain(path);
       const before = await lstat(path);
       if (!before.isFile() || before.isSymbolicLink()
         || before.size > maximum) throw new Error('history_unavailable');
@@ -361,6 +386,7 @@ export class UsageHistory {
       if (!after.isFile() || after.isSymbolicLink()
         || after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size
         || offset > maximum) throw new Error('history_unavailable');
+      await assertFilePathIdentityChain(path, beforeChain);
       return Buffer.from(buffer.subarray(0, offset));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
