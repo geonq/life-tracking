@@ -617,7 +617,7 @@ Assert-Text 'recoveryArchivePath' 'Recovered markers bind the durable recovery a
 Assert-Text 'Stop-DeploymentTaskBarrier' 'Scheduled writers join the recovery barrier.'
 Assert-Text 'Get-TaskRecoveryIdentity' 'Task action/principal/path are verified before mutation.'
 Assert-Text 'function Reconcile-LifeOSScheduledTaskSnapshotState' 'Scheduled task state is reconciled after recovery retries.'
-Assert-Text '\[AllowEmptyString\].*\$MarkerState' 'Fresh installs explicitly allow an empty marker state.'
+Assert-Text '(?s)\[AllowEmptyString\].*?\$MarkerState' 'Fresh installs explicitly allow an empty marker state.'
 Assert-Text 'foreach \(\$key in \$Reference.Keys\)' 'Generation references validate dictionary keys.'
 Assert-Text 'Get-AuthorityInstallMode' 'Authority completeness is classified explicitly.'
 Assert-Text 'Test-CollectorUsagePreserved' 'Installer observations are preserved and attributed.'
