@@ -55,7 +55,7 @@ function Add-ManifestItem {
 function Save-InstallManifest {
     param([Parameter(Mandatory)][object]$Manifest, [Parameter(Mandatory)][string]$Path)
     [void](Assert-LifeOSGenerationManifestCheckpointCapacity $Manifest)
-    Write-JsonAtomic $Path $Manifest -MaxBytes $script:LifeOSGenerationManifestMaxBytes
+    Write-JsonAtomic $Path $Manifest -OperatorSid $Manifest.operatorSid -MaxBytes $script:LifeOSGenerationManifestMaxBytes
 }
 
 function New-ManifestIntent {

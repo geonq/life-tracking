@@ -657,6 +657,9 @@ if ($jsonAtomicBody[0].IndexOf('Write-LifeOSDurableBytes', [StringComparison]::O
     $jsonAtomicBody[0].Contains('[IO.File]::WriteAllBytes($temp, $bytes)')) {
     throw 'FAIL: JSON checkpoint bytes must be durably flushed before atomic replacement.'
 }
+Assert-Text 'Write-JsonAtomic \$Path \$Manifest -OperatorSid \$Manifest\.operatorSid' 'Install manifests retain the operator-bound ACL on every checkpoint.'
+Assert-Text 'Write-JsonAtomic \$path \$journal -OperatorSid \$Manifest\.operatorSid' 'Recovery journals retain the operator-bound ACL on every checkpoint.'
+Assert-Text 'Write-LifeOSDurableBytes \$snapshotPath' 'Leaf ACL snapshots are durably written after their restricted ACL is applied.'
 $boundedTreeBody = ($commonText -split 'function Get-LifeOSBoundedTreeItem', 2)[1] -split 'function Get-TreeManifestIndex', 2
 if ($boundedTreeBody[0] -match '\$unsafeTarget|\$target\s*=') {
     throw 'FAIL: bounded tree reparse checks must use LinkType and never compare Target as a link type.'

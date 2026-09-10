@@ -984,7 +984,7 @@ function Save-TaskRegistrationIntent {
     $record = @($context.Manifest.codexTask, $context.Manifest.snapshotTask) | Where-Object { $_.Name -eq $TaskName }
     if (@($record).Count -ne 1) { throw 'Task registration is not transaction owned.' }
     Set-JournalProperty $record 'installedIdentity' (Get-TaskRecoveryIdentity $Xml '\')
-    Write-JsonAtomic $context.ManifestPath $context.Manifest -MaxBytes $script:LifeOSGenerationManifestMaxBytes
+    Write-JsonAtomic $context.ManifestPath $context.Manifest -OperatorSid $context.Manifest.operatorSid -MaxBytes $script:LifeOSGenerationManifestMaxBytes
 }
 
 function Stop-DeploymentTaskBarrier {
@@ -1011,7 +1011,7 @@ function Stop-DeploymentTaskBarrier {
     }
     foreach ($unit in $validated) {
         Set-JournalProperty $unit.Record 'barrierPhase' 'stopping'
-        Write-JsonAtomic $ManifestPath $Manifest -MaxBytes $script:LifeOSGenerationManifestMaxBytes
+        Write-JsonAtomic $ManifestPath $Manifest -OperatorSid $Manifest.operatorSid -MaxBytes $script:LifeOSGenerationManifestMaxBytes
         try { Disable-ScheduledTask -TaskName $unit.Name -TaskPath $unit.Path -ErrorAction Stop | Out-Null }
         catch {
             if (@(Get-ScheduledTask -ErrorAction Stop | Where-Object { $_.TaskName -eq $unit.Name -and $_.TaskPath -eq $unit.Path }).Count -gt 0) { throw }
@@ -1038,7 +1038,7 @@ function Stop-DeploymentTaskBarrier {
         $remaining = @(Get-ScheduledTask -ErrorAction Stop | Where-Object { $_.TaskName -eq $unit.Name -and $_.TaskPath -eq $unit.Path })
         if ($remaining.Count -gt 0 -and (Get-TaskRecoveryIdentity (Export-ScheduledTask -TaskName $unit.Name -TaskPath $unit.Path -ErrorAction Stop) $unit.Path) -ne $unit.Identity) { throw 'Task identity changed during shutdown.' }
         Set-JournalProperty $unit.Record 'barrierPhase' 'stopped'
-        Write-JsonAtomic $ManifestPath $Manifest -MaxBytes $script:LifeOSGenerationManifestMaxBytes
+        Write-JsonAtomic $ManifestPath $Manifest -OperatorSid $Manifest.operatorSid -MaxBytes $script:LifeOSGenerationManifestMaxBytes
     }
 }
 
@@ -3021,11 +3021,11 @@ function Invoke-RecoveryStage {
         return
     }
     Set-JournalProperty $stages $Name 'restoring'
-    Write-JsonAtomic $path $journal -MaxBytes $script:LifeOSRecoveryJournalMaxBytes
+    Write-JsonAtomic $path $journal -OperatorSid $Manifest.operatorSid -MaxBytes $script:LifeOSRecoveryJournalMaxBytes
     & $Action
     if ($null -ne $Postcondition) { & $Postcondition }
     Set-JournalProperty $stages $Name 'complete'
-    Write-JsonAtomic $path $journal -MaxBytes $script:LifeOSRecoveryJournalMaxBytes
+    Write-JsonAtomic $path $journal -OperatorSid $Manifest.operatorSid -MaxBytes $script:LifeOSRecoveryJournalMaxBytes
 }
 
 function Restore-LifeOSServiceSnapshots {
@@ -3653,7 +3653,7 @@ function Enable-RecoveryWriterRestoration {
     # After this durable boundary no recovery attempt may restore authority
     # files again. Prior writers can acknowledge new observations immediately.
     Set-JournalProperty $journal 'writersReleased' $true
-    Write-JsonAtomic (Get-RecoveryJournalPath $Manifest) $journal -MaxBytes $script:LifeOSRecoveryJournalMaxBytes
+    Write-JsonAtomic (Get-RecoveryJournalPath $Manifest) $journal -OperatorSid $Manifest.operatorSid -MaxBytes $script:LifeOSRecoveryJournalMaxBytes
 }
 
 function Complete-LifeOSRecoveryState {
@@ -3894,7 +3894,7 @@ function Read-RecoveryJournal {
 function Save-CollectorReceipt {
     param($Manifest)
     $receipt = [ordered]@{ schemaVersion=1; transactionId=$Manifest.transactionId; generation=$Manifest.generation; operatorSid=$Manifest.operatorSid; manifestPath=$Manifest.manifestPath; transition=$Manifest.collectorTransition }
-    Write-JsonAtomic (Join-Path $Manifest.paths.backupDirectory 'collector-receipt.json') $receipt -MaxBytes $script:LifeOSCollectorReceiptMaxBytes
+    Write-JsonAtomic (Join-Path $Manifest.paths.backupDirectory 'collector-receipt.json') $receipt -OperatorSid $Manifest.operatorSid -MaxBytes $script:LifeOSCollectorReceiptMaxBytes
 }
 
 function Get-CollectorTransition {
@@ -4039,7 +4039,7 @@ function Restore-ManifestArtifacts {
         }
         $progressCapacity = Assert-RecoveryProgressCapacity -Manifest $Manifest -Journal $journal
         Assert-RecoveryJournalCheckpointCapacity -Manifest $Manifest -Journal $journal -FinalProgressSequence $progressCapacity.FinalSequence
-        Write-JsonAtomic $journalPath $journal -MaxBytes $script:LifeOSRecoveryJournalMaxBytes
+        Write-JsonAtomic $journalPath $journal -OperatorSid $Manifest.operatorSid -MaxBytes $script:LifeOSRecoveryJournalMaxBytes
         $journalCreated = $true
     }
     if (-not $journalCreated) {
@@ -4071,7 +4071,7 @@ function Restore-ManifestArtifacts {
         $unitIndex++
     }
     Set-JournalProperty $journal 'phase' 'artifacts-complete'
-    Write-JsonAtomic $journalPath $journal -MaxBytes $script:LifeOSRecoveryJournalMaxBytes
+    Write-JsonAtomic $journalPath $journal -OperatorSid $Manifest.operatorSid -MaxBytes $script:LifeOSRecoveryJournalMaxBytes
 }
 
 function Copy-FileVerifiedAtomic {
@@ -4839,15 +4839,17 @@ function Register-AclSnapshot {
             destination = $full
             entries = @($snapshotEntries.ToArray())
         }
-        Write-JsonAtomic $snapshotPath $snapshotDocument -MaxBytes $script:LifeOSGenerationManifestMaxBytes
+        Write-JsonAtomic $snapshotPath $snapshotDocument -OperatorSid $context.Manifest.operatorSid -MaxBytes $script:LifeOSGenerationManifestMaxBytes
         [void]$context.Manifest.aclSnapshots.Add([ordered]@{ destination = $full; backup = $snapshotPath; priorExists = $true; mode = 'tree' })
     } else {
         $acl = Get-Acl -LiteralPath $full -ErrorAction Stop
         $snapshotPath = Join-Path $context.BackupDirectory ('acl-' + ([Guid]::NewGuid().ToString('N')) + '.sddl')
-        [IO.File]::WriteAllText($snapshotPath, [string]$acl.Sddl, [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllBytes($snapshotPath, [byte[]]@())
+        Set-RestrictedAcl -Path $snapshotPath -OperatorSid $context.Manifest.operatorSid -File -SkipSnapshot
+        Write-LifeOSDurableBytes $snapshotPath ([Text.UTF8Encoding]::new($false).GetBytes([string]$acl.Sddl))
         [void]$context.Manifest.aclSnapshots.Add([ordered]@{ destination = $full; backup = $snapshotPath; priorExists = $true; mode = 'sddl' })
     }
-    Write-JsonAtomic $context.ManifestPath $context.Manifest -MaxBytes $script:LifeOSGenerationManifestMaxBytes
+    Write-JsonAtomic $context.ManifestPath $context.Manifest -OperatorSid $context.Manifest.operatorSid -MaxBytes $script:LifeOSGenerationManifestMaxBytes
 }
 
 function Restore-AclSnapshots {
