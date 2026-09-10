@@ -586,6 +586,13 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
             units = @([pscustomobject]@{ destination = $destination; backup = ''; pre = $stableState; post = $stableState; phase = 'complete'; stagingPath = (Join-Path $data '.rollback-restore-service-fixture-0') }); unitCount = 1; treeRoots = @($data); phase = 'artifacts-complete'; progressPath = (Get-RecoveryProgressPath $recoveryManifest)
         }
         function Assert-RestrictedAcl { param($Path, $OperatorSid, $ReadSids, $ModifySids, [switch]$AllowInherited) }
+        $realJsonWriter = ${function:Write-JsonAtomic}
+        function Write-JsonAtomic {
+            param([string]$Path, [object]$Value, [string]$OperatorSid, [long]$MaxBytes = 0)
+            # This fixture uses a non-SID operator label. Preserve the real
+            # durable journal bytes while its ACL adapter remains mocked.
+            & $realJsonWriter -Path $Path -Value $Value -MaxBytes $MaxBytes
+        }
         Write-JsonAtomic (Get-RecoveryJournalPath $recoveryManifest) $recoveryJournal -MaxBytes $script:LifeOSRecoveryJournalMaxBytes
         Assert-BehaviorThrows { Invoke-InstallerFailureThenRollback } 'actual installer failure after temporary registration enters rollback orchestration.'
         Assert-Behavior (-not (@($script:orchestrationServiceEvents | Where-Object { $_ -like 'start:*' }).Count)) 'recovery restores service configuration without starting either service.'
@@ -1294,7 +1301,7 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
         paths = [pscustomobject]@{ backupDirectory = $temp }; codexTask = $codexRecord; snapshotTask = $snapshotRecord
     }
     function Read-RecoveryJournal { param($Manifest) return $script:taskRetryJournal }
-    function Write-JsonAtomic { param($Path, $Value) }
+    function Write-JsonAtomic { param($Path, $Value, $OperatorSid, $MaxBytes) }
     function Get-ScheduledTask {
         [CmdletBinding()]
         param([string]$TaskName, [string]$TaskPath)
@@ -1424,7 +1431,7 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
     $manifest = [pscustomobject]@{ codexTask=$record; snapshotTask=[pscustomobject]@{ Name='LifeOSCodexCollector'; Exists=$false; TaskPath='\' } }
     function Get-ScheduledTask { param($TaskName, $TaskPath) if ($TaskName -ne 'LifeOSCodexCollector') { return [pscustomobject]@{ TaskName='LifeOSTailscaleSnapshot'; TaskPath='\'; State=$script:barrierState } } }
     function Export-ScheduledTask { param($TaskName, $TaskPath) if ($script:tamperedTask) { return $xml.Replace('HighestAvailable', 'LeastPrivilege') }; return $xml }
-    function Write-JsonAtomic { param($Path, $Value) $script:barrierEvents += 'journal' }
+    function Write-JsonAtomic { param($Path, $Value, $OperatorSid, $MaxBytes) $script:barrierEvents += 'journal' }
     function Disable-ScheduledTask { param($TaskName, $TaskPath) $script:barrierEvents += 'disable' }
     function Stop-ScheduledTask { param($TaskName, $TaskPath) $script:barrierEvents += 'stop'; $script:barrierState='Disabled' }
     function Get-ScheduledTaskInfo { param($TaskName, $TaskPath) $script:barrierEvents += 'terminal'; return [pscustomobject]@{ LastTaskResult=0 } }
@@ -1743,9 +1750,9 @@ Assert-BehaviorThrows { Assert-AclRoleRights 'read' ([long][Security.AccessContr
         Save-CollectorReceipt $manifest
         $realWrite = ${function:Write-JsonAtomic}
         function Write-JsonAtomic {
-            param($Path, $Value, $OperatorSid)
+            param($Path, $Value, $OperatorSid, $MaxBytes)
             if ($Path -eq $manifestPath) { throw 'fixture manifest write failure' }
-            & $realWrite $Path $Value
+            & $realWrite -Path $Path -Value $Value -OperatorSid $OperatorSid -MaxBytes $MaxBytes
         }
         Assert-BehaviorThrows { Write-JsonAtomic $manifestPath $manifest } 'collector manifest write fault is injected'
         $persisted = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
