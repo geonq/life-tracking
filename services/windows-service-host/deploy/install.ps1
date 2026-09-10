@@ -923,8 +923,15 @@ Set-AclSnapshotContext -Manifest $manifest -ManifestPath $manifestPath -BackupDi
 # Capture ACLs of pre-existing deployment targets before any replacement. A
 # later snapshot of a newly-created path is still useful for a retry, while
 # these early snapshots preserve the old target's ACL for rollback.
-foreach ($aclTarget in @($hostTarget, $apiTarget, $gatewayTarget, $nodeTarget, $paths.RuntimeRoot, $paths.DataRoot, $paths.LogRoot, $paths.SecretRoot, $configDirectory, $stateDirectory, $snapshotScriptTarget, $tailscaleEdgeTokenPath)) {
+foreach ($aclTarget in @($hostTarget, $apiTarget, $gatewayTarget, $nodeTarget, $paths.DataRoot, $paths.LogRoot, $paths.SecretRoot, $configDirectory, $stateDirectory, $snapshotScriptTarget, $tailscaleEdgeTokenPath)) {
     if (Test-Path -LiteralPath $aclTarget) { Register-AclSnapshot $aclTarget }
+}
+# The runtime parent may contain an older operator-managed Python install and
+# rollback generations that exceed the bounded full-tree snapshot budget. Its
+# root ACL is covered here; each managed child runtime is snapshotted when it
+# is provisioned with its own exact bounds.
+if (Test-Path -LiteralPath $paths.RuntimeRoot -PathType Container) {
+    Register-AclSnapshot $paths.RuntimeRoot -RootOnly
 }
 
 $legacyTaskMutated = $false

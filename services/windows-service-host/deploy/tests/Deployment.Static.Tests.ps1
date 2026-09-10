@@ -69,6 +69,7 @@ Assert-Text 'CandidateRoot = \$candidateRootFull' 'Install forwards the verified
 Assert-Text 'ExpectedSourceSha = \$ExpectedSourceSha' 'Install forwards the independently supplied source SHA to preflight.'
 Assert-Text 'Assert-LifeOSCandidateSourceBindings' 'Preflight verifies exact candidate source mappings.'
 Assert-Text 'Exit-LifeOSDeploymentTransaction' 'Install releases the OS deployment transaction lock.'
+Assert-Text 'Register-AclSnapshot \$paths\.RuntimeRoot -RootOnly' 'Legacy runtime parents use bounded root-only ACL snapshots.'
 Assert-Text 'WaitOne\(0\)' 'Concurrent deployment fails fast instead of racing tree scans.'
 Assert-Text 'Could not hash tree item' 'Tree hash failures expose the exact failing path.'
 Assert-InstallOrder '$deploymentMutex = Enter-LifeOSDeploymentTransaction' '$apiIntent = New-ManifestIntent' 'Deployment lock is acquired before mutations are journaled.'
