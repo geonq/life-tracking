@@ -667,7 +667,7 @@ if (-not $commonText.Contains('Executable = $false') -or -not $commonText.Contai
 $frozenTreeBody = ($commonText -split 'function Get-LifeOSFrozenTreeInventory', 2)[1] -split 'function Add-LifeOSManagedAccessRule', 2
 $managedAclBody = ($commonText -split 'function New-LifeOSManagedAcl', 2)[1] -split 'function Set-LifeOSAclWithBoundHandle', 2
 $traversalAclBody = ($commonText -split 'function Set-DirectoryTraversalAcl', 2)[1] -split 'function Assert-ExplicitAclAllowSet', 2
-$snapshotBody = ($commonText -split 'function Register-AclSnapshot', 2)[1] -split 'function Restore-AclSnapshots', 2
+$snapshotBody = ($commonText -split 'function Register-AclSnapshot', 2)[1] -split 'function Assert-NoBroadAcl', 2
 if (-not $frozenTreeBody[0].Contains('if (-not $File -and -not $RootOnly)') -or
     $frozenTreeBody[0].IndexOf('if (-not $File -and -not $RootOnly)') -gt $frozenTreeBody[0].IndexOf('Get-LifeOSBoundedTreeItem')) {
     throw 'FAIL: RootOnly tree inventory must stop before descendant enumeration.'
