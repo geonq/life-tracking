@@ -3713,17 +3713,21 @@ function Read-RecoveryJournal {
     # Windows PowerShell 5.1 unwraps one-item JSON arrays when they are
     # assigned to a property. Normalize that owned representation back to a
     # collection, while rejecting scalar unit values and empty inventories.
-    $treeRoots = if ($journal.treeRoots -is [string]) {
-        @([string]$journal.treeRoots)
-    } elseif ($journal.treeRoots -is [System.Collections.IEnumerable]) {
-        @($journal.treeRoots)
-    } else { throw 'Recovery journal tree-root collection is malformed.' }
-    $journalUnits = if ($journal.units -is [System.Collections.IEnumerable] -and $journal.units -isnot [string]) {
-        @($journal.units)
-    } elseif ($journal.units -is [System.Management.Automation.PSCustomObject] -or
-        $journal.units -is [System.Collections.IDictionary]) {
-        @($journal.units)
-    } else { throw 'Recovery journal unit collection is malformed.' }
+    $treeRoots = @(
+        if ($journal.treeRoots -is [string]) {
+            @([string]$journal.treeRoots)
+        } elseif ($journal.treeRoots -is [System.Collections.IEnumerable]) {
+            @($journal.treeRoots)
+        } else { throw 'Recovery journal tree-root collection is malformed.' }
+    )
+    $journalUnits = @(
+        if ($journal.units -is [System.Collections.IEnumerable] -and $journal.units -isnot [string]) {
+            @($journal.units)
+        } elseif ($journal.units -is [System.Management.Automation.PSCustomObject] -or
+            $journal.units -is [System.Collections.IDictionary]) {
+            @($journal.units)
+        } else { throw 'Recovery journal unit collection is malformed.' }
+    )
     if ($treeRoots.Count -eq 0 -or $journalUnits.Count -eq 0) { throw 'Recovery journal inventory is empty.' }
     Set-JournalProperty $journal 'treeRoots' $treeRoots
     Set-JournalProperty $journal 'units' $journalUnits
