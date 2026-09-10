@@ -754,6 +754,196 @@ final class CalendarLayoutTests: XCTestCase {
         XCTAssertEqual(CalendarTimelineScrollAnchor.id(for: retained.hour), "calendar-timeline-hour-8")
     }
 
+    @MainActor
+    func testCalendarPresentationStateRetainsTimelineAnchorAcrossRemount() {
+        let anchor = CalendarTimelineScrollAnchor(wallMinute: 22 * 60 + 45)
+        let state = CalendarPresentationState(
+            selectedDate: Date(timeIntervalSinceReferenceDate: 800_000_000),
+            timelineScrollAnchor: anchor
+        )
+
+        XCTAssertEqual(state.timelineScrollAnchor, anchor)
+        XCTAssertTrue(state.didRestoreTimelinePosition)
+    }
+
+    func testCalendarTimelineRestorationPolicyUsesRequestThenSceneAnchorThenDefault() {
+        var berlin = Calendar(identifier: .gregorian)
+        berlin.timeZone = TimeZone(identifier: "Europe/Berlin")!
+        let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        let retained = CalendarTimelineScrollAnchor(wallMinute: 22 * 60 + 45)
+        let requestAnchor = CalendarTimelineScrollAnchor(wallMinute: 7 * 60 + 15)
+        let request = CalendarTimelineScrollRequest(id: 4, anchor: requestAnchor)
+
+        XCTAssertEqual(
+            CalendarTimelineRestorationPolicy.anchor(
+                request: request,
+                retained: retained,
+                didRestore: true,
+                now: now,
+                calendar: berlin
+            ),
+            requestAnchor
+        )
+        XCTAssertEqual(
+            CalendarTimelineRestorationPolicy.anchor(
+                request: nil,
+                retained: retained,
+                didRestore: true,
+                now: now,
+                calendar: berlin
+            ),
+            retained
+        )
+        XCTAssertEqual(
+            CalendarTimelineRestorationPolicy.anchor(
+                request: nil,
+                retained: nil,
+                didRestore: false,
+                now: now,
+                calendar: berlin
+            ),
+            CalendarTimelineScrollAnchor.todayMinusTwoHours(now: now, calendar: berlin)
+        )
+    }
+
+    func testCalendarTimelineRestorationUsesMinutePreciseNativeOffsetAfterHourFallback() {
+        let anchor = CalendarTimelineScrollAnchor(wallMinute: 14 * 60 + 45)
+        let hourHeight = 54.0
+        let exactOffset = CalendarTimelineRestorationPolicy.nativeOffset(
+            for: anchor,
+            hourHeight: hourHeight
+        )
+
+        XCTAssertEqual(exactOffset ?? -1, 14.75 * hourHeight, accuracy: 0.0001)
+        XCTAssertFalse(
+            CalendarTimelineRestorationPolicy.isNativeOffsetSettled(
+                observedOffset: 14 * hourHeight,
+                targetOffset: exactOffset ?? 0
+            ),
+            "The coarse hour target must remain pending until the retained minute is reapplied"
+        )
+        XCTAssertTrue(
+            CalendarTimelineRestorationPolicy.isNativeOffsetSettled(
+                observedOffset: exactOffset ?? 0,
+                targetOffset: exactOffset ?? 0
+            )
+        )
+        XCTAssertNil(
+            CalendarTimelineRestorationPolicy.nativeOffset(for: anchor, hourHeight: 0),
+            "An invalid layout scale must not create a native restoration target"
+        )
+    }
+
+    func testCalendarTimelineRestorationClampsLateDayRequestToAttainableBottomEdge() {
+        let requestedOffset = 23.75 * 54.0
+        let adjustment = 18.0
+        let minimumNativeOffset = -24.0
+        let maximumNativeOffset = 1_000.0
+
+        let attainable = CalendarTimelineRestorationPolicy.attainableSemanticOffset(
+            requestedOffset: requestedOffset,
+            nativeOffsetAdjustment: adjustment,
+            minimumNativeOffset: minimumNativeOffset,
+            maximumNativeOffset: maximumNativeOffset
+        )
+
+        XCTAssertEqual(
+            attainable ?? -1,
+            maximumNativeOffset - adjustment,
+            accuracy: 0.0001,
+            "A requested late-day offset must settle at UIKit's attainable bottom edge"
+        )
+        XCTAssertGreaterThan(
+            requestedOffset + adjustment,
+            maximumNativeOffset,
+            "The fixture must exercise the native content-size clamp"
+        )
+    }
+
+    func testCalendarTimelineRestorationSettlesAgainstClampedTargetAndResumesTracking() {
+        let retained = CalendarTimelineScrollAnchor(wallMinute: 23 * 60 + 45)
+        let hourHeight = 54.0
+        let requestedOffset = retained.offset(hourHeight: hourHeight)
+        let adjustment = 18.0
+        let attainable = CalendarTimelineRestorationPolicy.attainableSemanticOffset(
+            requestedOffset: requestedOffset,
+            nativeOffsetAdjustment: adjustment,
+            minimumNativeOffset: -24.0,
+            maximumNativeOffset: 1_000.0
+        )!
+
+        XCTAssertFalse(
+            CalendarTimelineRestorationPolicy.isNativeOffsetSettled(
+                observedOffset: attainable,
+                targetOffset: requestedOffset
+            ),
+            "The original late-day request must not be treated as attainable"
+        )
+        XCTAssertTrue(
+            CalendarTimelineRestorationPolicy.isNativeOffsetSettled(
+                observedOffset: attainable,
+                targetOffset: attainable
+            ),
+            "The pending restoration must clear once the clamped native position is observed"
+        )
+        XCTAssertTrue(
+            CalendarTimelineRestorationPolicy.shouldRecordObservedOffset(
+                observedOffset: attainable,
+                retainedAnchor: retained,
+                hourHeight: hourHeight,
+                isRestoring: false,
+                isZooming: false
+            ),
+            "After the clamped target settles, a subsequent native observation can resume anchor tracking"
+        )
+    }
+
+    func testCalendarTimelineRestorationSuppressesTransientAndZoomOffsetsButKeepsUserTracking() {
+        let anchor = CalendarTimelineScrollAnchor(wallMinute: 14 * 60 + 45)
+        let hourHeight = 54.0
+        let exactOffset = anchor.offset(hourHeight: hourHeight)
+
+        XCTAssertFalse(
+            CalendarTimelineRestorationPolicy.shouldRecordObservedOffset(
+                observedOffset: 14 * hourHeight,
+                retainedAnchor: anchor,
+                hourHeight: hourHeight,
+                isRestoring: true,
+                isZooming: false
+            ),
+            "The initial 14:00 ScrollViewReader result must not overwrite 14:45"
+        )
+        XCTAssertFalse(
+            CalendarTimelineRestorationPolicy.shouldRecordObservedOffset(
+                observedOffset: exactOffset,
+                retainedAnchor: anchor,
+                hourHeight: hourHeight,
+                isRestoring: false,
+                isZooming: false
+            )
+        )
+        XCTAssertFalse(
+            CalendarTimelineRestorationPolicy.shouldRecordObservedOffset(
+                observedOffset: exactOffset + hourHeight,
+                retainedAnchor: anchor,
+                hourHeight: hourHeight,
+                isRestoring: false,
+                isZooming: true
+            ),
+            "Zoom owns the offset until its transaction settles"
+        )
+        XCTAssertTrue(
+            CalendarTimelineRestorationPolicy.shouldRecordObservedOffset(
+                observedOffset: exactOffset + hourHeight,
+                retainedAnchor: anchor,
+                hourHeight: hourHeight,
+                isRestoring: false,
+                isZooming: false
+            ),
+            "A later native user scroll must continue updating the scene-owned anchor"
+        )
+    }
+
     func testTodayVisibilityUsesTheSameDaySurfaceWindowAsHourSuppression() {
         let common = (
             dayCount: 7,

@@ -7,6 +7,21 @@ import AppKit
 import UIKit
 #endif
 
+/// Authored values that are shared by semantic color pairs, adaptive colors,
+/// and deterministic design-system tests. Keeping the contract values in one
+/// place prevents a light/dark token from drifting away from the palette.
+enum LifeOSPalette {
+    static let brandBlueHex: UInt32 = 0x0253C4
+    static let observedBlueHex: UInt32 = 0x5DA0FD
+    static let estimateGreenHex: UInt32 = 0x60D386
+    static let calorieOrangeHex: UInt32 = 0xFFB06E
+    static let proteinTealHex: UInt32 = 0x63D2D2
+    static let canvasDarkHex: UInt32 = 0x000000
+    static let canvasLightHex: UInt32 = 0xFAFAFA
+    static let transparentWidgetBackingOpacity: Double = 0.60
+    static let transparentWidgetSupportingHex: UInt32 = 0xE6E6E6
+}
+
 /// A platform-independent color pair. SwiftUI's adaptive `Color` provider is
 /// intentionally not introspectable in unit tests, so semantic pairs keep
 /// their authored sRGB values here as well as in the rendered tokens.
@@ -78,6 +93,39 @@ enum LifeOSContrast {
     }
 }
 
+/// The approved inner surface for full-color transparent widgets. WidgetKit
+/// supplies the wallpaper, so the black backing is composited over the
+/// wallpaper before contrast is evaluated. This keeps the policy deterministic
+/// without pretending a preview can prove the system's final rendering.
+enum LifeOSWidgetContrastPolicy {
+    static let backingOpacity = LifeOSPalette.transparentWidgetBackingOpacity
+    static let primaryForegroundHex: UInt32 = 0xFFFFFF
+    static let supportingForegroundHex = LifeOSPalette.transparentWidgetSupportingHex
+    static let reviewedGreyWallpapers: [UInt32] = [0x606060, 0x808080, 0xA0A0A0, 0xFFFFFF]
+
+    static func compositedBackingHex(over wallpaperHex: UInt32) -> UInt32 {
+        func channel(_ shift: UInt32) -> UInt32 {
+            let wallpaper = Double((wallpaperHex >> shift) & 0xFF)
+            let value = (wallpaper * (1 - backingOpacity)).rounded()
+            return UInt32(min(max(value, 0), 255))
+        }
+
+        return (channel(16) << 16) | (channel(8) << 8) | channel(0)
+    }
+
+    static func contrastRatio(foregroundHex: UInt32, over wallpaperHex: UInt32) -> Double {
+        LifeOSContrast.contrastRatio(
+            foreground: foregroundHex,
+            background: compositedBackingHex(over: wallpaperHex)
+        )
+    }
+
+    static func meetsTextContrast(over wallpaperHex: UInt32) -> Bool {
+        contrastRatio(foregroundHex: primaryForegroundHex, over: wallpaperHex) >= 4.5
+            && contrastRatio(foregroundHex: supportingForegroundHex, over: wallpaperHex) >= 4.5
+    }
+}
+
 /// The selected-navigation colors are kept as named sRGB contract values so
 /// tests can verify both appearance pairs without attempting to introspect a
 /// platform-specific adaptive `Color` provider.
@@ -93,9 +141,9 @@ enum LifeOSSelectedNavigationPalette {
 enum LifeOSSemanticColorPairs {
     static let primaryAction = LifeOSColorPair(
         darkForegroundHex: 0xFFFFFF,
-        darkBackgroundHex: 0x0253C4,
+        darkBackgroundHex: LifeOSPalette.brandBlueHex,
         lightForegroundHex: 0xFFFFFF,
-        lightBackgroundHex: 0x0253C4
+        lightBackgroundHex: LifeOSPalette.brandBlueHex
     )
     static let primaryActionHover = LifeOSColorPair(
         darkForegroundHex: 0xFFFFFF,
@@ -116,7 +164,7 @@ enum LifeOSSemanticColorPairs {
         lightBackgroundHex: LifeOSSelectedNavigationPalette.lightBackgroundHex
     )
     static let focus = LifeOSColorPair(
-        darkForegroundHex: 0x5DA0FD,
+        darkForegroundHex: LifeOSPalette.observedBlueHex,
         darkBackgroundHex: 0x131315,
         lightForegroundHex: 0x0253C4,
         lightBackgroundHex: 0xFFFFFF
@@ -128,19 +176,19 @@ enum LifeOSSemanticColorPairs {
         lightBackgroundHex: 0xFFFFFF
     )
     static let estimate = LifeOSColorPair(
-        darkForegroundHex: 0x60D386,
+        darkForegroundHex: LifeOSPalette.estimateGreenHex,
         darkBackgroundHex: 0x131315,
         lightForegroundHex: 0x01773B,
         lightBackgroundHex: 0xFFFFFF
     )
     static let calories = LifeOSColorPair(
-        darkForegroundHex: 0xFFB06E,
+        darkForegroundHex: LifeOSPalette.calorieOrangeHex,
         darkBackgroundHex: 0x131315,
         lightForegroundHex: 0xA25A03,
         lightBackgroundHex: 0xFFFFFF
     )
     static let protein = LifeOSColorPair(
-        darkForegroundHex: 0x63D2D2,
+        darkForegroundHex: LifeOSPalette.proteinTealHex,
         darkBackgroundHex: 0x131315,
         lightForegroundHex: 0x067878,
         lightBackgroundHex: 0xFFFFFF
@@ -307,9 +355,9 @@ public extension Color {
 
     // Brand canvases
     /// Neutral dark canvas #000000 (reserved for the tab-bar underlay).
-    static let lifeOSDarkCanvas = Color(hex: 0x000000)
+    static let lifeOSDarkCanvas = Color(hex: LifeOSPalette.canvasDarkHex)
     /// Neutral light canvas #FAFAFA.
-    static let lifeOSLightCanvas = Color(hex: 0xFAFAFA)
+    static let lifeOSLightCanvas = Color(hex: LifeOSPalette.canvasLightHex)
 
     /// Neutral structural roles used by the shared foundation.
     static let lifeOSDarkSurface = Color(hex: 0x131315)
@@ -355,17 +403,15 @@ public extension Color {
         lightRed: 0xD4/255, lightGreen: 0xD4/255, lightBlue: 0xD8/255
     )
 
-    /// Observed chart blue: #3085FD in dark mode and #0253C4 in light mode.
-    static let lifeOSObservedBlue = lifeOSAdaptiveColor(
-        darkRed: 0x30/255, darkGreen: 0x85/255, darkBlue: 0xFD/255,
-        lightRed: 0x02/255, lightGreen: 0x53/255, lightBlue: 0xC4/255
+    /// Observed chart blue: #5DA0FD in dark mode and #0253C4 in light mode.
+    static let lifeOSObservedBlue = lifeOSAdaptiveHex(
+        dark: LifeOSPalette.observedBlueHex,
+        light: LifeOSPalette.brandBlueHex
     )
 
-    /// Focus blue: #5DA0FD in dark mode and #0253C4 in light mode.
-    static let lifeOSFocusBlue = lifeOSAdaptiveColor(
-        darkRed: 0x5D/255, darkGreen: 0xA0/255, darkBlue: 0xFD/255,
-        lightRed: 0x02/255, lightGreen: 0x53/255, lightBlue: 0xC4/255
-    )
+    /// Focus blue shares the observed blue pair so focus and measured data
+    /// remain distinct from the filled action blue without drifting apart.
+    static let lifeOSFocusBlue = lifeOSObservedBlue
 
     // Explicit action, link, focus, and data-meaning roles. These are kept
     // separate from the general accent so a future screen cannot accidentally
@@ -451,9 +497,9 @@ public extension Color {
         lightRed: 0x89/255, lightGreen: 0x03/255, lightBlue: 0xA1/255
     )
 
-    static let lifeOSNeutralCanvas = lifeOSAdaptiveColor(
-        darkRed: 0x0A/255, darkGreen: 0x0A/255, darkBlue: 0x0B/255,
-        lightRed: 0xFA/255, lightGreen: 0xFA/255, lightBlue: 0xFA/255
+    static let lifeOSNeutralCanvas = lifeOSAdaptiveHex(
+        dark: LifeOSPalette.canvasDarkHex,
+        light: LifeOSPalette.canvasLightHex
     )
 
     static let lifeOSNeutralSurface = lifeOSAdaptiveColor(
@@ -549,6 +595,14 @@ public enum LifeOSTokens {
 #endif
     }
 
+    /// The canonical SF Symbol geometry. The visual glyph stays smaller than
+    /// its hit target so adjacent controls never compete for space.
+    public enum Icon {
+        public static let box: CGFloat = 24
+        public static let glyph: CGFloat = 17
+        public static let statusBox: CGFloat = 20
+    }
+
 #if os(macOS)
     /// macOS page gutter; wider windows use the 32pt breakpoint in the responsive metrics.
     public static let pageGutter: CGFloat = 24
@@ -599,8 +653,10 @@ public enum LifeOSTokens {
     /// The approved inner contrast surface for clear/accented widgets. It is
     /// independent of the WidgetKit container so grey wallpapers cannot erase
     /// the text hierarchy.
-    public static let widgetTransparentBacking = Color.lifeOSBlack.opacity(0.60)
-    public static let widgetTransparentSupporting = Color(hex: 0xE6E6E6)
+    public static let widgetTransparentBacking = Color.lifeOSBlack.opacity(
+        LifeOSWidgetContrastPolicy.backingOpacity
+    )
+    public static let widgetTransparentSupporting = Color(hex: LifeOSWidgetContrastPolicy.supportingForegroundHex)
     public static let widgetTransparentPanel = Color.lifeOSWhite.opacity(0.10)
 
     // Exact branded light/dark canvas, selected by the platform appearance.
@@ -827,6 +883,7 @@ public enum LifeOSMotion {
         case easeInOut(Double)
         case spring(response: Double, damping: Double)
         case interactive(response: Double, damping: Double)
+        case direct
 
         public var animation: Animation {
             switch self {
@@ -836,6 +893,8 @@ public enum LifeOSMotion {
                 return .spring(response: response, dampingFraction: damping)
             case let .interactive(response, damping):
                 return .interactiveSpring(response: response, dampingFraction: damping)
+            case .direct:
+                return .linear(duration: 0)
             }
         }
     }
@@ -844,11 +903,17 @@ public enum LifeOSMotion {
         public static let press = Curve.easeOut(0.08)
         public static let release = Curve.easeOut(0.14)
         public static let hover = Curve.easeOut(0.12)
-        public static let feedback = Curve.easeOut(0.12)
+        public static let feedback = Curve.easeOut(0.10)
         public static let primary = Curve.spring(response: 0.42, damping: 0.86)
         public static let snappy = Curve.spring(response: 0.24, damping: 0.90)
         public static let hero = Curve.spring(response: 0.32, damping: 0.92)
-        public static let tracking = Curve.interactive(response: 0.18, damping: 0.90)
+        /// Direct manipulation has no interpolation. The compatibility name
+        /// remains so existing callers cannot accidentally add spring lag.
+        public static let tracking = Curve.direct
+        public static let calendarSettle = Curve.spring(response: 0.28, damping: 0.92)
+        public static let tooltip = Curve.easeOut(0.08)
+        public static let sheet = Curve.easeOut(0.18)
+        public static let refresh = Curve.easeOut(0.10)
         public static let chart = Curve.easeOut(0.36)
         public static let ring = Curve.easeOut(0.42)
     }
@@ -918,7 +983,7 @@ public enum LifeOSMotion {
 
     /// Horizontal calendar pager settle (snap-back and page-commit). Snappy, non-bouncy —
     /// matches the native paging deceleration feel without overshoot.
-    public static let pagerSettle = Animation.easeOut(duration: 0.2)
+    public static let pagerSettle = Timing.calendarSettle.animation
 
     // MARK: Legacy aliases (call sites outside this workstream's file boundary still use
     // these names; see ios/LifeOS/CodexView.swift for migrated call sites). Prefer the
@@ -966,28 +1031,15 @@ extension View {
     /// border. No gradient, no material, no second stroke, no shadow, and no
     /// reduce-transparency branch (the surface is opaque).
     func flatCard(cornerRadius: CGFloat = LifeOSTokens.overviewCardCorner, featured: Bool = false) -> some View {
-        modifier(LifeOSFlatCardModifier(cornerRadius: cornerRadius, featured: featured))
-    }
-
-}
-
-private struct LifeOSFlatCardModifier: ViewModifier {
-    let cornerRadius: CGFloat
-    let featured: Bool
-
-    @Environment(\.displayScale) private var displayScale
-
-    private var shape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-    }
-
-    func body(content: Content) -> some View {
-        let hairlineWidth = displayScale.isFinite && displayScale > 0 ? 1 / displayScale : 1
-
-        content
-            .background(featured ? LifeOSTokens.raised : LifeOSTokens.surface, in: shape)
-            .overlay(shape.stroke(LifeOSTokens.hairlineBorder, lineWidth: hairlineWidth))
-            .contentShape(shape)
+        // Keep the compatibility modifier's historical zero-padding behavior
+        // while routing its rendering through the canonical card primitive.
+        LifeOSCard(
+            level: featured ? .raised : .surface,
+            cornerRadius: cornerRadius,
+            padding: 0
+        ) {
+            self
+        }
     }
 }
 
@@ -1065,7 +1117,7 @@ private struct LifeOSButtonBody: View {
             .onDisappear { hovered = false }
             .animation(
                 LifeOSMotion.curve(for: .hover, reduceMotion: reduceMotion)?.animation,
-                value: highlighted
+                value: hovered
             )
             .animation(
                 LifeOSMotion.curve(for: pressed ? .press : .release,

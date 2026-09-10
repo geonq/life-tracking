@@ -208,31 +208,174 @@ final class FinanceChartModeWiringTests: XCTestCase {
         )
     }
 
-    func testPointSelectionPreservesVisibleSampleAndFallsBackOnlyWhenMissing() {
+    func testPointSelectionPreservesExactSampleAndClearsWhenMissing() {
         XCTAssertEqual(
             FinancePointSelectionPolicy.preservedPointID(
                 selectedID: "selected",
-                availableIDs: ["older", "selected", "latest"],
-                latestID: "latest"
+                availableIDs: ["older", "selected", "latest"]
             ),
             "selected"
         )
-        XCTAssertEqual(
+        XCTAssertNil(
             FinancePointSelectionPolicy.preservedPointID(
                 selectedID: "gone",
-                availableIDs: ["older", "latest"],
-                latestID: "latest"
-            ),
-            "latest"
+                availableIDs: ["older", "latest"]
+            )
         )
-        XCTAssertEqual(
+        XCTAssertNil(
             FinancePointSelectionPolicy.preservedPointID(
                 selectedID: nil,
-                availableIDs: ["latest"],
-                latestID: "latest"
-            ),
-            "latest"
+                availableIDs: ["latest"]
+            )
         )
+    }
+
+    func testPointSelectionPreservesOnlySameModelAndRangeContext() {
+        let model = FinanceChartModelContext(
+            accountScope: "Revolut Personal",
+            currency: "EUR",
+            series: FinanceDetail.spend.rawValue,
+            model: "transaction-daily-aggregate",
+            provenance: "revolut_personal"
+        )
+        let base = FinanceChartSelectionContext(
+            modelContext: model,
+            range: .month,
+            mode: .line,
+            datasetRevision: FinanceChartDatasetRevision(pointCount: 2, fingerprint: 1)
+        )
+        let changedRange = FinanceChartSelectionContext(
+            modelContext: model,
+            range: .week,
+            mode: .line,
+            datasetRevision: base.datasetRevision
+        )
+        let changedDetail = FinanceChartSelectionContext(
+            modelContext: FinanceChartModelContext(
+                accountScope: model.accountScope,
+                currency: model.currency,
+                series: FinanceDetail.income.rawValue,
+                model: model.model,
+                provenance: model.provenance
+            ),
+            range: .month,
+            mode: .line,
+            datasetRevision: base.datasetRevision
+        )
+        let changedMode = FinanceChartSelectionContext(
+            modelContext: model,
+            range: .month,
+            mode: .bar,
+            datasetRevision: base.datasetRevision
+        )
+        let changedModel = FinanceChartSelectionContext(
+            modelContext: FinanceChartModelContext(
+                accountScope: "Sparkasse",
+                currency: model.currency,
+                series: model.series,
+                model: model.model,
+                provenance: model.provenance
+            ),
+            range: .month,
+            mode: .line,
+            datasetRevision: base.datasetRevision
+        )
+
+        XCTAssertEqual(
+            FinancePointSelectionPolicy.selectionAfterRefresh(
+                selectedID: "selected",
+                availableIDs: ["selected", "latest"],
+                previousContext: base,
+                currentContext: base
+            ),
+            "selected"
+        )
+        for context in [changedRange, changedDetail, changedMode, changedModel] {
+            XCTAssertNil(
+                FinancePointSelectionPolicy.selectionAfterRefresh(
+                    selectedID: "selected",
+                    availableIDs: ["selected", "latest"],
+                    previousContext: base,
+                    currentContext: context
+                )
+            )
+        }
+    }
+
+    func testProductionSnapshotAppendPreservesSelectedPointAcrossDatasetRevision() throws {
+        let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        let existing = try [
+            makeTransaction(cents: 5_000, daysBeforeNow: 2, now: now, isIncome: false),
+            makeTransaction(cents: 7_000, daysBeforeNow: 1, now: now, isIncome: false)
+        ]
+        let appended = try makeTransaction(cents: 3_000, daysBeforeNow: 0, now: now, isIncome: false)
+        let before = FinanceDisplaySnapshot(summary: nil, transactions: existing, usesVisualFixtures: false)
+        let after = FinanceDisplaySnapshot(summary: nil, transactions: existing + [appended], usesVisualFixtures: false)
+        let beforePoints = before.points(for: .spend, range: .max)
+        let afterPoints = after.points(for: .spend, range: .max)
+        let selectedID = try XCTUnwrap(beforePoints.first?.id)
+        let beforeContext = before.chartSelectionContext(for: .spend, range: .max, mode: .line)
+        let afterContext = after.chartSelectionContext(for: .spend, range: .max, mode: .line)
+
+        XCTAssertEqual(beforeContext.modelContext, afterContext.modelContext)
+        XCTAssertNotEqual(beforeContext.datasetRevision, afterContext.datasetRevision)
+        XCTAssertEqual(
+            FinancePointSelectionPolicy.selectionAfterRefresh(
+                selectedID: selectedID,
+                availableIDs: Set(afterPoints.map(\.id)),
+                previousContext: beforeContext,
+                currentContext: afterContext
+            ),
+            selectedID
+        )
+    }
+
+    func testProductionSnapshotRemovalClearsTheMissingSelectedPoint() throws {
+        let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        let retained = try makeTransaction(cents: 5_000, daysBeforeNow: 2, now: now, isIncome: false)
+        let removed = try makeTransaction(cents: 7_000, daysBeforeNow: 1, now: now, isIncome: false)
+        let before = FinanceDisplaySnapshot(summary: nil, transactions: [retained, removed], usesVisualFixtures: false)
+        let after = FinanceDisplaySnapshot(summary: nil, transactions: [retained], usesVisualFixtures: false)
+        let selectedID = try XCTUnwrap(before.points(for: .spend, range: .max).last?.id)
+        let beforeContext = before.chartSelectionContext(for: .spend, range: .max, mode: .line)
+        let afterContext = after.chartSelectionContext(for: .spend, range: .max, mode: .line)
+
+        XCTAssertEqual(beforeContext.modelContext, afterContext.modelContext)
+        XCTAssertNotEqual(beforeContext.datasetRevision, afterContext.datasetRevision)
+        XCTAssertNil(
+            FinancePointSelectionPolicy.selectionAfterRefresh(
+                selectedID: selectedID,
+                availableIDs: Set(after.points(for: .spend, range: .max).map(\.id)),
+                previousContext: beforeContext,
+                currentContext: afterContext
+            )
+        )
+    }
+
+    func testFinanceSceneStateRestoresRangePerDetail() {
+        let state = FinancePresentationState(selectedDetail: .spend, selectedRange: .week)
+
+        state.selectedDetail = .income
+        state.selectedRange = .year
+        state.selectedDetail = .spend
+        XCTAssertEqual(state.selectedRange, .week)
+
+        state.selectedDetail = .income
+        XCTAssertEqual(state.selectedRange, .year)
+    }
+
+    func testFinanceSceneStateNormalizesInitialNetWorthRange() {
+        let inferred = FinancePresentationState(selectedDetail: .netWorth, selectedRange: .year)
+        XCTAssertEqual(inferred.selectedRange, .year)
+        XCTAssertEqual(inferred.selectedNetWorthRange, .year)
+
+        let explicit = FinancePresentationState(
+            selectedDetail: .netWorth,
+            selectedRange: .week,
+            selectedNetWorthRange: .year
+        )
+        XCTAssertEqual(explicit.selectedRange, .year)
+        XCTAssertEqual(explicit.selectedNetWorthRange, .year)
     }
 
     func testFinanceAnalyticsEntryIsHeldByPresentationState() {
@@ -241,6 +384,38 @@ final class FinanceChartModeWiringTests: XCTestCase {
         XCTAssertEqual(state.analyticsSelectedEntry, .wealth)
         state.analyticsSelectedEntry = .travel
         XCTAssertEqual(state.analyticsSelectedEntry, .travel)
+    }
+
+    func testFinanceSceneStateRetainsMainScrollAnchorAcrossAnalyticsToggle() {
+        let state = FinancePresentationState(selectedDetail: .cashFlow, selectedRange: .halfYear)
+        state.rememberMainScrollAnchor(.analytics)
+        state.showAnalytics = true
+        state.showAnalytics = false
+
+        XCTAssertEqual(state.mainScrollAnchor, .analytics)
+        XCTAssertEqual(state.selectedDetail, .cashFlow)
+        XCTAssertEqual(state.selectedRange, .halfYear)
+    }
+
+    func testFinanceScrollRestorationChoosesLastSectionPastTop() {
+        let anchor = FinanceScrollRestorationPolicy.anchor(for: [
+            .header: -420,
+            .summary: -80,
+            .details: 18,
+            .accounts: 420
+        ])
+
+        XCTAssertEqual(anchor, .summary)
+    }
+
+    func testFinanceScrollRestorationFallsBackToFirstFiniteSection() {
+        let anchor = FinanceScrollRestorationPolicy.anchor(for: [
+            .header: 180,
+            .details: 640,
+            .accounts: .infinity
+        ])
+
+        XCTAssertEqual(anchor, .header)
     }
 
     // MARK: - RF-07: projection wiring never fabricates a trend

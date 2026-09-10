@@ -96,7 +96,7 @@ private struct LifeOSIconButtonStyle: ButtonStyle {
                 RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
                     .stroke(
                         isFocused ? LifeOSTokens.focusStroke : LifeOSTokens.essentialBorder,
-                        lineWidth: isFocused ? 2 : 0.5
+                        lineWidth: isFocused ? 2 : 1
                     )
             }
             .opacity(appearance.contentOpacity)
@@ -107,6 +107,13 @@ private struct LifeOSIconButtonStyle: ButtonStyle {
                     reduceMotion: reducedMotion
                 )?.animation,
                 value: pressed
+            )
+            .animation(
+                LifeOSMotion.curve(
+                    for: .hover,
+                    reduceMotion: reducedMotion
+                )?.animation,
+                value: isHovered
             )
     }
 }
@@ -137,6 +144,24 @@ public struct LifeOSIconButton: View {
         self.action = action
     }
 
+    /// Uses the shared semantic icon catalog while retaining the string-based
+    /// initializer for existing controls that are not yet migrated.
+    public init(
+        icon: LifeOSIconName,
+        accessibilityLabel: String? = nil,
+        size: CGFloat? = nil,
+        tint: Color = LifeOSTokens.primaryText,
+        action: @escaping () -> Void
+    ) {
+        self.init(
+            systemName: icon.systemImageName,
+            accessibilityLabel: accessibilityLabel ?? icon.accessibilityLabel,
+            size: size,
+            tint: tint,
+            action: action
+        )
+    }
+
     private var targetSize: CGFloat {
         LifeOSHitTarget.resolve(requestedSize ?? LifeOSTokens.Control.iconButton)
     }
@@ -145,8 +170,8 @@ public struct LifeOSIconButton: View {
         Button(action: action) {
             Image(systemName: systemName)
                 .symbolRenderingMode(.monochrome)
-                .font(.system(size: 17, weight: .medium, design: .default))
-                .frame(width: 20, height: 20)
+                .font(.system(size: LifeOSTokens.Icon.glyph, weight: .medium, design: .default))
+                .frame(width: LifeOSTokens.Icon.box, height: LifeOSTokens.Icon.box)
         }
         .buttonStyle(
             LifeOSIconButtonStyle(
@@ -330,14 +355,14 @@ public struct LifeOSSelector<ID: Hashable>: View {
     }
 
     private var intrinsicPillWidth: CGFloat {
-        let largestCellWidth = options.map { option in
+        let cellWidths = options.map { option in
             max(
                 LifeOSSelectorLayout.minimumCellWidth,
                 CGFloat(option.title.count) * selectorTextSize * 0.62 + LifeOSTokens.Space.xl
             )
-        }.max() ?? LifeOSSelectorLayout.minimumCellWidth
+        }
         let gap = CGFloat(max(0, options.count - 1)) * LifeOSTokens.Space.xxs
-        return largestCellWidth * CGFloat(max(1, options.count)) + gap
+        return cellWidths.reduce(0, +) + gap
     }
 
     /// Measures the actual system font once per layout pass. The fallback
@@ -397,12 +422,7 @@ public struct LifeOSSelector<ID: Hashable>: View {
                             maxWidth: .infinity,
                             minHeight: LifeOSTokens.Control.standardHeight
                         )
-                        .background(
-                            option.isEnabled && (option.id == selection || hoveredOption == option.id)
-                                ? LifeOSTokens.raised
-                                : (option.isEnabled ? .clear : LifeOSTokens.disabledFill),
-                            in: RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
-                        )
+                        .background { optionBackground(for: option) }
                         .overlay {
                             if focusedOption == option.id {
                                 RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
@@ -425,11 +445,21 @@ public struct LifeOSSelector<ID: Hashable>: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .animation(reduceMotion ? nil : LifeOSMotion.selector, value: selection)
-        .animation(
-            reduceMotion ? nil : LifeOSMotion.curve(for: .hover, reduceMotion: false)?.animation,
-            value: hoveredOption
-        )
+    }
+
+    private func optionBackground(for option: LifeOSSelectorOption<ID>) -> some View {
+        let isSelected = option.id == selection
+        let isHovered = hoveredOption == option.id
+        let fill = option.isEnabled && (isSelected || isHovered)
+            ? LifeOSTokens.raised
+            : (option.isEnabled ? Color.clear : LifeOSTokens.disabledFill)
+
+        return RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
+            .fill(fill)
+            // Only the highlight surface animates. The option label and its
+            // measured geometry remain stationary during selection.
+            .animation(reduceMotion ? nil : LifeOSMotion.selector, value: isSelected)
+            .animation(reduceMotion ? nil : LifeOSMotion.hover, value: isHovered)
     }
 
     private var menu: some View {
@@ -489,9 +519,10 @@ public struct LifeOSSelector<ID: Hashable>: View {
             availableWidth = width
         }
         .onPreferenceChange(LifeOSSelectorMeasuredWidthsKey.self) { widths in
-            guard let largest = widths.filter({ $0.isFinite }).max(), largest > 0 else { return }
+            let validWidths = widths.filter({ $0.isFinite && $0 > 0 })
+            guard !validWidths.isEmpty else { return }
             let gap = CGFloat(max(0, options.count - 1)) * LifeOSTokens.Space.xxs
-            let measured = largest * CGFloat(max(1, options.count)) + gap
+            let measured = validWidths.reduce(0, +) + gap
             guard measured.isFinite, abs(measured - measuredIntrinsicPillWidth) > 0.5 else { return }
             measuredIntrinsicPillWidth = measured
         }
@@ -1205,8 +1236,7 @@ public struct LifeOSSheet<Content: View, Footer: View>: View {
             Spacer(minLength: LifeOSTokens.Space.sm)
 
             LifeOSIconButton(
-                systemName: "xmark",
-                accessibilityLabel: "Close",
+                icon: .close,
                 action: dismissSheet
             )
         }

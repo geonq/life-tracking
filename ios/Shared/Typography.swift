@@ -21,23 +21,40 @@ public enum LifeOSTypography {
         case metadata
         case metric
         case metricCompact
+        case inlineMonitoringValue
         case button
 
         public var baseSize: CGFloat {
+#if os(macOS)
             switch self {
-            case .pageTitle: 28
-            case .sectionTitle: 20
-            case .cardTitle, .body: 17
+            case .pageTitle: 22
+            case .sectionTitle: 15
+            case .cardTitle: 14
+            case .body: 13
+            case .label, .button: 13
+            case .metadata: 12
+            case .metric: 28
+            case .metricCompact: 22
+            case .inlineMonitoringValue: 20
+            }
+#else
+            switch self {
+            case .pageTitle: 24
+            case .sectionTitle: 18
+            case .cardTitle: 16
+            case .body: 17
             case .label, .button: 15
             case .metadata: 13
-            case .metric: 36
+            case .metric: 30
             case .metricCompact: 24
+            case .inlineMonitoringValue: 22
             }
+#endif
         }
 
         public var defaultWeight: Font.Weight {
             switch self {
-            case .pageTitle: .bold
+            case .pageTitle, .inlineMonitoringValue: .semibold
             case .sectionTitle, .cardTitle, .metric, .metricCompact, .button: .semibold
             case .body, .metadata: .regular
             case .label: .medium
@@ -54,26 +71,30 @@ public enum LifeOSTypography {
             case .metadata: .footnote
             case .metric: .largeTitle
             case .metricCompact: .title2
+            case .inlineMonitoringValue: .title2
             case .button: .headline
             }
         }
 
         public var tracking: CGFloat {
             switch self {
-            case .pageTitle: -0.4
+            case .pageTitle: -0.3
             case .sectionTitle: -0.2
-            case .metric: -0.6
+            case .metric: -0.4
             case .metricCompact: -0.3
-            case .cardTitle, .body, .label, .metadata, .button: 0
+            case .cardTitle, .body, .label, .metadata, .inlineMonitoringValue, .button: 0
             }
         }
 
         public var lineSpacing: CGFloat {
-            self == .body ? 3 : 0
+            0
         }
 
         public var usesMonospacedDigits: Bool {
-            self == .metric || self == .metricCompact
+            switch self {
+            case .metric, .metricCompact, .inlineMonitoringValue: true
+            default: false
+            }
         }
     }
 

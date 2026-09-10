@@ -20,6 +20,7 @@ public enum LifeOSIconName: Sendable {
     case fitness
     case settings
     case more
+    case close
     case chevronLeft
     case chevronRight
     case zoomIn
@@ -55,7 +56,7 @@ public enum LifeOSIconName: Sendable {
 
     /// The exact SF Symbol used for this semantic icon. Keeping the mapping
     /// centralized prevents route-specific weight and glyph drift.
-    var systemImageName: String {
+    public var systemImageName: String {
         switch self {
         case .overview: "square.grid.2x2"
         case .home: "house"
@@ -76,6 +77,7 @@ public enum LifeOSIconName: Sendable {
         case .fitness: "heart"
         case .settings: "gearshape"
         case .more: "ellipsis"
+        case .close: "xmark"
         case .chevronLeft: "chevron.left"
         case .chevronRight: "chevron.right"
         case .zoomIn: "plus.magnifyingglass"
@@ -136,6 +138,7 @@ public enum LifeOSIconName: Sendable {
         case .fitness: "Fitness"
         case .settings: "Settings"
         case .more: "More"
+        case .close: "Close"
         case .chevronLeft: "Back"
         case .chevronRight: "Open"
         case .zoomIn: "Zoom in"
@@ -172,19 +175,82 @@ public enum LifeOSIconName: Sendable {
     }
 }
 
+/// Semantic icon geometry. The default keeps the existing 24-point box and
+/// 17-point glyph so existing callers retain their layout. Compact contexts
+/// choose a smaller visual symbol without shrinking the surrounding control's
+/// hit target.
+public enum LifeOSIconContext: Sendable {
+    case standard
+    case navigation
+    case card
+    case toolbar
+    case disclosure
+
+    public var box: CGFloat {
+#if os(macOS)
+        switch self {
+        case .standard: LifeOSTokens.Icon.box
+        case .navigation: LifeOSTokens.Icon.statusBox
+        case .card: LifeOSTokens.Icon.statusBox
+        case .toolbar, .disclosure: 18
+        }
+#else
+        switch self {
+        case .standard, .navigation, .toolbar: LifeOSTokens.Icon.box
+        case .card: LifeOSTokens.Icon.statusBox
+        case .disclosure: 20
+        }
+#endif
+    }
+
+    public var glyph: CGFloat {
+#if os(macOS)
+        switch self {
+        case .standard: LifeOSTokens.Icon.glyph
+        case .navigation: 15
+        case .card: 14
+        case .toolbar: 14
+        case .disclosure: 12
+        }
+#else
+        switch self {
+        case .standard: LifeOSTokens.Icon.glyph
+        case .navigation: 18
+        case .card: 14
+        case .toolbar: 17
+        case .disclosure: 14
+        }
+#endif
+    }
+
+    public var weight: Font.Weight {
+        switch self {
+        case .standard, .toolbar: .medium
+        case .navigation, .card, .disclosure: .regular
+        }
+    }
+}
+
 public struct LifeOSIcon: View {
     private let name: LifeOSIconName
+    private let context: LifeOSIconContext
     private let explicitAccessibilityLabel: String?
 
-    public init(_ name: LifeOSIconName, accessibilityLabel: String? = nil) {
+    public init(
+        _ name: LifeOSIconName,
+        accessibilityLabel: String? = nil,
+        context: LifeOSIconContext = .standard
+    ) {
         self.name = name
+        self.context = context
         self.explicitAccessibilityLabel = accessibilityLabel
     }
 
     public var body: some View {
         Image(systemName: name.systemImageName)
             .symbolRenderingMode(.monochrome)
-            .font(.system(size: 17, weight: .medium, design: .default))
+            .font(.system(size: context.glyph, weight: context.weight, design: .default))
+            .frame(width: context.box, height: context.box)
             .modifier(LifeOSIconAccessibilityModifier(label: explicitAccessibilityLabel))
     }
 }

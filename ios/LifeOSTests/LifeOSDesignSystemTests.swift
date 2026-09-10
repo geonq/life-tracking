@@ -5,7 +5,7 @@ import UIKit
 
 final class LifeOSDesignSystemTests: XCTestCase {
     func testTypographyFacadeExposesEveryContractRole() {
-        XCTAssertEqual(LifeOSTypography.Role.allCases.count, 9)
+        XCTAssertEqual(LifeOSTypography.Role.allCases.count, 10)
         XCTAssertEqual(
             Set(LifeOSTypography.Role.allCases),
             Set([
@@ -17,38 +17,110 @@ final class LifeOSDesignSystemTests: XCTestCase {
                 .metadata,
                 .metric,
                 .metricCompact,
+                .inlineMonitoringValue,
                 .button,
             ])
         )
     }
 
     func testTypographyRolesUseExactSystemSizesWeightsAndMetricDigits() {
-        XCTAssertEqual(LifeOSTypography.Role.pageTitle.baseSize, 28)
-        XCTAssertEqual(LifeOSTypography.Role.sectionTitle.baseSize, 20)
-        XCTAssertEqual(LifeOSTypography.Role.cardTitle.baseSize, 17)
+#if os(macOS)
+        XCTAssertEqual(LifeOSTypography.Role.pageTitle.baseSize, 22)
+        XCTAssertEqual(LifeOSTypography.Role.sectionTitle.baseSize, 15)
+        XCTAssertEqual(LifeOSTypography.Role.cardTitle.baseSize, 14)
+        XCTAssertEqual(LifeOSTypography.Role.body.baseSize, 13)
+        XCTAssertEqual(LifeOSTypography.Role.label.baseSize, 13)
+        XCTAssertEqual(LifeOSTypography.Role.metadata.baseSize, 12)
+        XCTAssertEqual(LifeOSTypography.Role.metric.baseSize, 28)
+        XCTAssertEqual(LifeOSTypography.Role.metricCompact.baseSize, 22)
+        XCTAssertEqual(LifeOSTypography.Role.inlineMonitoringValue.baseSize, 20)
+        XCTAssertEqual(LifeOSTypography.Role.button.baseSize, 13)
+#else
+        XCTAssertEqual(LifeOSTypography.Role.pageTitle.baseSize, 24)
+        XCTAssertEqual(LifeOSTypography.Role.sectionTitle.baseSize, 18)
+        XCTAssertEqual(LifeOSTypography.Role.cardTitle.baseSize, 16)
         XCTAssertEqual(LifeOSTypography.Role.body.baseSize, 17)
         XCTAssertEqual(LifeOSTypography.Role.label.baseSize, 15)
         XCTAssertEqual(LifeOSTypography.Role.metadata.baseSize, 13)
-        XCTAssertEqual(LifeOSTypography.Role.metric.baseSize, 36)
+        XCTAssertEqual(LifeOSTypography.Role.metric.baseSize, 30)
         XCTAssertEqual(LifeOSTypography.Role.metricCompact.baseSize, 24)
+        XCTAssertEqual(LifeOSTypography.Role.inlineMonitoringValue.baseSize, 22)
         XCTAssertEqual(LifeOSTypography.Role.button.baseSize, 15)
+#endif
+        XCTAssertEqual(LifeOSTypography.Role.pageTitle.defaultWeight, .semibold)
         XCTAssertTrue(LifeOSTypography.Role.metric.usesMonospacedDigits)
         XCTAssertTrue(LifeOSTypography.Role.metricCompact.usesMonospacedDigits)
+        XCTAssertTrue(LifeOSTypography.Role.inlineMonitoringValue.usesMonospacedDigits)
         XCTAssertFalse(LifeOSTypography.Role.body.usesMonospacedDigits)
+    }
+
+    func testCanonicalPaletteValuesStayDistinctAndSourcedFromOneContract() {
+        XCTAssertEqual(LifeOSPalette.brandBlueHex, 0x0253C4)
+        XCTAssertEqual(LifeOSPalette.observedBlueHex, 0x5DA0FD)
+        XCTAssertEqual(LifeOSPalette.estimateGreenHex, 0x60D386)
+        XCTAssertEqual(LifeOSPalette.calorieOrangeHex, 0xFFB06E)
+        XCTAssertEqual(LifeOSPalette.proteinTealHex, 0x63D2D2)
+        XCTAssertEqual(LifeOSPalette.canvasDarkHex, 0x000000)
+        XCTAssertEqual(LifeOSPalette.transparentWidgetSupportingHex, 0xE6E6E6)
+
+        XCTAssertEqual(
+            LifeOSSemanticColorPairs.primaryAction.darkBackgroundHex,
+            LifeOSPalette.brandBlueHex
+        )
+        XCTAssertEqual(
+            LifeOSSemanticColorPairs.focus.darkForegroundHex,
+            LifeOSPalette.observedBlueHex
+        )
+        XCTAssertEqual(
+            LifeOSSemanticColorPairs.estimate.darkForegroundHex,
+            LifeOSPalette.estimateGreenHex
+        )
+        XCTAssertEqual(
+            LifeOSSemanticColorPairs.calories.darkForegroundHex,
+            LifeOSPalette.calorieOrangeHex
+        )
+        XCTAssertEqual(
+            LifeOSSemanticColorPairs.protein.darkForegroundHex,
+            LifeOSPalette.proteinTealHex
+        )
     }
 
     @MainActor
     func testDynamicTypographyRolesKeepBaseSizesAnchorsAndMetricPolicy() {
+#if os(macOS)
+        let pageTitleSize: CGFloat = 22
+        let sectionTitleSize: CGFloat = 15
+        let cardTitleSize: CGFloat = 14
+        let bodySize: CGFloat = 13
+        let labelSize: CGFloat = 13
+        let metadataSize: CGFloat = 12
+        let metricSize: CGFloat = 28
+        let metricCompactSize: CGFloat = 22
+        let inlineMonitoringValueSize: CGFloat = 20
+        let buttonSize: CGFloat = 13
+#else
+        let pageTitleSize: CGFloat = 24
+        let sectionTitleSize: CGFloat = 18
+        let cardTitleSize: CGFloat = 16
+        let bodySize: CGFloat = 17
+        let labelSize: CGFloat = 15
+        let metadataSize: CGFloat = 13
+        let metricSize: CGFloat = 30
+        let metricCompactSize: CGFloat = 24
+        let inlineMonitoringValueSize: CGFloat = 22
+        let buttonSize: CGFloat = 15
+#endif
         let contracts: [(LifeOSTypography.Role, CGFloat, Font.TextStyle, Font.Weight, CGFloat, CGFloat, Bool)] = [
-            (.pageTitle, 28, .title, .bold, -0.4, 0, false),
-            (.sectionTitle, 20, .title2, .semibold, -0.2, 0, false),
-            (.cardTitle, 17, .headline, .semibold, 0, 0, false),
-            (.body, 17, .body, .regular, 0, 3, false),
-            (.label, 15, .subheadline, .medium, 0, 0, false),
-            (.metadata, 13, .footnote, .regular, 0, 0, false),
-            (.metric, 36, .largeTitle, .semibold, -0.6, 0, true),
-            (.metricCompact, 24, .title2, .semibold, -0.3, 0, true),
-            (.button, 15, .headline, .semibold, 0, 0, false),
+            (.pageTitle, pageTitleSize, .title, .semibold, -0.3, 0, false),
+            (.sectionTitle, sectionTitleSize, .title2, .semibold, -0.2, 0, false),
+            (.cardTitle, cardTitleSize, .headline, .semibold, 0, 0, false),
+            (.body, bodySize, .body, .regular, 0, 0, false),
+            (.label, labelSize, .subheadline, .medium, 0, 0, false),
+            (.metadata, metadataSize, .footnote, .regular, 0, 0, false),
+            (.metric, metricSize, .largeTitle, .semibold, -0.4, 0, true),
+            (.metricCompact, metricCompactSize, .title2, .semibold, -0.3, 0, true),
+            (.inlineMonitoringValue, inlineMonitoringValueSize, .title2, .semibold, 0, 0, true),
+            (.button, buttonSize, .headline, .semibold, 0, 0, false),
         ]
 
         XCTAssertEqual(Set(LifeOSTypography.Role.allCases), Set(contracts.map(\.0)))
@@ -226,6 +298,26 @@ final class LifeOSDesignSystemTests: XCTestCase {
         XCTAssertEqual(Color.lifeOSOnPrimaryAction, Color.white)
     }
 
+    func testTransparentWidgetBackingRemainsReadableOnReviewedGreyWallpapers() {
+        XCTAssertEqual(LifeOSWidgetContrastPolicy.backingOpacity, 0.60, accuracy: 0.0001)
+        XCTAssertEqual(LifeOSTokens.Radius.widget, 12)
+
+        for wallpaper in LifeOSWidgetContrastPolicy.reviewedGreyWallpapers {
+            let backing = LifeOSWidgetContrastPolicy.compositedBackingHex(over: wallpaper)
+            XCTAssertTrue(
+                LifeOSWidgetContrastPolicy.meetsTextContrast(over: wallpaper),
+                "Transparent widget text lost contrast over \(wallpaper) with backing \(backing)"
+            )
+            XCTAssertGreaterThanOrEqual(
+                LifeOSWidgetContrastPolicy.contrastRatio(
+                    foregroundHex: LifeOSWidgetContrastPolicy.supportingForegroundHex,
+                    over: wallpaper
+                ),
+                4.5
+            )
+        }
+    }
+
     func testHitTargetsAndSelectorFallbackStayBounded() {
         XCTAssertEqual(LifeOSHitTarget.resolve(), 44)
         XCTAssertEqual(LifeOSHitTarget.resolve(8), 44)
@@ -243,6 +335,20 @@ final class LifeOSDesignSystemTests: XCTestCase {
         XCTAssertEqual(LifeOSIconName.finance.systemImageName, "creditcard")
         XCTAssertEqual(LifeOSIconName.reports.systemImageName, "chart.bar.doc")
         XCTAssertEqual(LifeOSIconName.calendarPlus.systemImageName, "calendar.badge.plus")
+        XCTAssertEqual(LifeOSIconName.close.systemImageName, "xmark")
+        XCTAssertEqual(LifeOSTokens.Icon.box, 24)
+        XCTAssertEqual(LifeOSTokens.Icon.glyph, 17)
+        XCTAssertEqual(LifeOSIconContext.standard.box, 24)
+        XCTAssertEqual(LifeOSIconContext.standard.glyph, 17)
+        XCTAssertLessThan(LifeOSIconContext.disclosure.glyph, LifeOSIconContext.disclosure.box)
+#if os(macOS)
+        XCTAssertEqual(LifeOSIconContext.navigation.glyph, 15)
+        XCTAssertEqual(LifeOSIconContext.card.glyph, 14)
+        XCTAssertEqual(LifeOSIconContext.toolbar.box, 18)
+#else
+        XCTAssertEqual(LifeOSIconContext.navigation.glyph, 18)
+        XCTAssertEqual(LifeOSIconContext.toolbar.glyph, 17)
+#endif
 
         let iosRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -252,8 +358,39 @@ final class LifeOSDesignSystemTests: XCTestCase {
             encoding: .utf8
         )
         XCTAssertTrue(source.contains(".symbolRenderingMode(.monochrome)"))
+        XCTAssertTrue(source.contains(".font(.system(size: context.glyph, weight: context.weight, design: .default))"))
+        XCTAssertTrue(source.contains(".frame(width: context.box, height: context.box)"))
+        XCTAssertTrue(source.contains("public enum LifeOSIconContext"))
         XCTAssertFalse(source.contains(".renderingMode(.template)"))
         XCTAssertFalse(source.contains("case .assistant"))
+    }
+
+    func testUsageSourceKeepsCompactTruthfulSelectionAndControlContract() throws {
+        let iosRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: iosRoot.appendingPathComponent("LifeOS/CodexView.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains("private func availableRangeOrder(for snapshot: ProviderSnapshot)"))
+        XCTAssertTrue(source.contains("private func matchesQuality(_ candidate: UsageAnalyticsSnapshot"))
+        XCTAssertTrue(source.contains(".onChange(of: snapshots)"))
+        XCTAssertTrue(source.contains("@SceneStorage(\"LifeOS.usage.selectedProvider.v1\")"))
+        XCTAssertTrue(source.contains("@SceneStorage(\"LifeOS.usage.selectedGraph.v1\")"))
+        XCTAssertTrue(source.contains("@SceneStorage(\"LifeOS.usage.selectedRange.v1\")"))
+        XCTAssertTrue(source.contains(".lifeOSTypography(.inlineMonitoringValue)"))
+        XCTAssertTrue(source.contains("LifeOSTokens.estimate"))
+        XCTAssertTrue(source.contains("weekday(.abbreviated)"))
+        XCTAssertTrue(source.contains("LifeOSIcon(.chevronRight, context: .disclosure)"))
+        XCTAssertTrue(source.contains("LifeOSIcon(providerIcon(selectedProvider), context: .toolbar)"))
+        XCTAssertFalse(source.contains("private func preferredRange"))
+        XCTAssertFalse(source.contains(".textCase(.uppercase)"))
+        XCTAssertFalse(source.contains("enum UsageTab"))
+        XCTAssertFalse(source.contains("UsageLimitsCard"))
+        XCTAssertFalse(source.contains(".task(id: datasetID)"))
+        XCTAssertFalse(source.contains("secondaryTextCompat"))
     }
 
     func testResponsiveMetricsKeepMobileAndWideDesktopContracts() {
@@ -281,7 +418,7 @@ final class LifeOSDesignSystemTests: XCTestCase {
 
         let wideMac = LifeOSResponsiveMetrics(width: 1_600)
         XCTAssertEqual(wideMac.horizontalGutter, 32)
-        XCTAssertEqual(wideMac.sectionSpacing, 40)
+        XCTAssertEqual(wideMac.sectionSpacing, 48)
         XCTAssertEqual(wideMac.maxContentWidth, 1_120)
         XCTAssertEqual(wideMac.maxChartWidth, 1_440)
     }
@@ -331,87 +468,26 @@ final class LifeOSDesignSystemTests: XCTestCase {
             accessibilitySize: true
         ))
 
-        XCTAssertEqual(
-            FinanceResponsiveLayoutContract.metricColumnCount(contentWidth: 343, accessibilitySize: false),
-            1
-        )
-        XCTAssertEqual(
-            FinanceResponsiveLayoutContract.metricColumnCount(contentWidth: 720, accessibilitySize: false),
-            2
-        )
-        XCTAssertEqual(
-            FinanceResponsiveLayoutContract.metricColumnCount(contentWidth: 1_120, accessibilitySize: false),
-            3
-        )
-        XCTAssertEqual(
-            FinanceResponsiveLayoutContract.metricColumnCount(contentWidth: 1_120, accessibilitySize: true),
-            1
-        )
     }
 
-    func testFinanceDetailSelectorUsesMeasuredMenuFallbackBeforePillsCanOverflow() {
+    func testFinanceDetailSelectorKeepsTheSharedSelectorContract() {
         XCTAssertEqual(
             FinanceDetail.allCases.map(\.title),
-            ["Spend", "Income", "Cash flow", "Net worth"],
-            "The fallback must retain the same four detail identities and labels"
+            ["Spend", "Income", "Cash flow", "Net worth"]
         )
-        XCTAssertTrue(
-            FinanceDetailSelectorLayoutContract.usesMenu(
-                availableWidth: 343,
-                accessibilitySize: false
-            )
-        )
-        XCTAssertTrue(
-            FinanceDetailSelectorLayoutContract.usesMenu(
-                availableWidth: 359.9,
-                accessibilitySize: false
-            )
-        )
-        XCTAssertFalse(
-            FinanceDetailSelectorLayoutContract.usesMenu(
-                availableWidth: 360,
-                accessibilitySize: false
-            )
-        )
-        XCTAssertTrue(
-            FinanceDetailSelectorLayoutContract.usesMenu(
-                availableWidth: 520,
-                accessibilitySize: true
-            )
-        )
-        XCTAssertTrue(
-            FinanceDetailSelectorLayoutContract.usesMenu(
-                availableWidth: 520,
-                accessibilitySize: false,
-                pillIntrinsicWidth: 521
-            )
-        )
-        XCTAssertTrue(
-            FinanceDetailSelectorLayoutContract.usesMenu(
-                availableWidth: .nan,
-                accessibilitySize: false
-            )
-        )
-    }
-
-    func testFinanceDetailSelectorMeasuredPresentationHasOneBranchAtATime() {
-        XCTAssertTrue(
-            FinanceDetailSelectorLayoutContract.usesMenu(
+        XCTAssertEqual(
+            LifeOSSelectorLayout.usesMenu(
                 availableWidth: 359,
-                accessibilitySize: false
-            )
+                intrinsicPillWidth: 360
+            ),
+            true
         )
-        XCTAssertFalse(
-            FinanceDetailSelectorLayoutContract.usesMenu(
-                availableWidth: 1_120,
-                accessibilitySize: false
-            )
-        )
-        XCTAssertTrue(
-            FinanceDetailSelectorLayoutContract.usesMenu(
-                availableWidth: 1_120,
-                accessibilitySize: true
-            )
+        XCTAssertEqual(
+            LifeOSSelectorLayout.usesMenu(
+                availableWidth: 720,
+                intrinsicPillWidth: 360
+            ),
+            false
         )
     }
 
@@ -477,6 +553,8 @@ final class LifeOSDesignSystemTests: XCTestCase {
         XCTAssertFalse(tokensSource.contains("func lifeOSCard()"))
         XCTAssertFalse(tokensSource.contains("func glassCard("))
         XCTAssertFalse(tokensSource.contains("LifeOSCardModifier"))
+        XCTAssertFalse(tokensSource.contains("LifeOSFlatCardModifier"))
+        XCTAssertTrue(tokensSource.contains("padding: 0"))
     }
 
     func testFitnessCoreColumnsHonorSharedBreakpointAndAccessibilityFallback() {
@@ -529,20 +607,35 @@ final class LifeOSDesignSystemTests: XCTestCase {
 
         XCTAssertEqual(state.phase, .pressed)
         XCTAssertFalse(state.allowsDecorativeMotion)
+        XCTAssertFalse(state.allowsAnimatedStateTransition)
         XCTAssertTrue(state.allowsUserDrivenMotion)
         XCTAssertEqual(
             LifeOSInteractionAppearance.resolve(for: state).contentOpacity,
             0.78,
             accuracy: 0.0001
         )
+
+        let dragging = LifeOSInteractionState(phase: .dragging)
+        XCTAssertTrue(dragging.allowsUserDrivenMotion)
+        XCTAssertTrue(dragging.isDirectManipulation)
+        XCTAssertFalse(dragging.allowsAnimatedStateTransition)
+
+        let hovering = LifeOSInteractionState(phase: .hover)
+        XCTAssertFalse(hovering.isDirectManipulation)
+        XCTAssertTrue(hovering.allowsAnimatedStateTransition)
     }
 
     func testDirectionalClassifierWaitsForDistanceAndDominance() {
         XCTAssertEqual(LifeOSDirectionalClassifier.classify(CGSize(width: 7, height: 0)), .undecided)
         XCTAssertEqual(LifeOSDirectionalClassifier.classify(CGSize(width: 8, height: 0)), .horizontal)
+        XCTAssertEqual(LifeOSDirectionalClassifier.dominanceRatio, 1.3, accuracy: 0.0001)
+        XCTAssertEqual(LifeOSDirectionalClassifier.ambiguousVerticalDistance, 16)
         XCTAssertEqual(LifeOSDirectionalClassifier.classify(CGSize(width: 20, height: 10)), .horizontal)
         XCTAssertEqual(LifeOSDirectionalClassifier.classify(CGSize(width: 10, height: 20)), .vertical)
+        XCTAssertEqual(LifeOSDirectionalClassifier.classify(CGSize(width: 12, height: 10)), .undecided)
+        XCTAssertEqual(LifeOSDirectionalClassifier.classify(CGSize(width: 13, height: 13)), .vertical)
         XCTAssertEqual(LifeOSDirectionalClassifier.classify(CGSize(width: 10, height: 9)), .undecided)
+        XCTAssertEqual(LifeOSDirectionalClassifier.classify(horizontal: .nan, vertical: 20), .undecided)
     }
 
     func testCancellationIsExplicitAndDoesNotInventACommit() {
@@ -559,8 +652,12 @@ final class LifeOSDesignSystemTests: XCTestCase {
         XCTAssertEqual(LifeOSMotion.Timing.primary, .spring(response: 0.42, damping: 0.86))
         XCTAssertEqual(LifeOSMotion.Timing.snappy, .spring(response: 0.24, damping: 0.90))
         XCTAssertEqual(LifeOSMotion.Timing.hero, .spring(response: 0.32, damping: 0.92))
+        XCTAssertEqual(LifeOSMotion.Timing.calendarSettle, .spring(response: 0.28, damping: 0.92))
+        XCTAssertEqual(LifeOSMotion.Timing.tooltip, .easeOut(0.08))
+        XCTAssertEqual(LifeOSMotion.Timing.sheet, .easeOut(0.18))
+        XCTAssertEqual(LifeOSMotion.Timing.refresh, .easeOut(0.10))
         XCTAssertEqual(LifeOSMotion.Timing.ring, .easeOut(0.42))
-        XCTAssertEqual(LifeOSMotion.Timing.tracking, .interactive(response: 0.18, damping: 0.90))
+        XCTAssertEqual(LifeOSMotion.Timing.tracking, .direct)
         XCTAssertEqual(LifeOSMotion.Timing.chart, .easeOut(0.36))
         XCTAssertEqual(LifeOSMotion.spring, LifeOSMotion.primary)
         XCTAssertEqual(LifeOSMotion.springSnappy, LifeOSMotion.snappy)
@@ -585,7 +682,7 @@ final class LifeOSDesignSystemTests: XCTestCase {
         XCTAssertNil(LifeOSMotion.curve(for: .reveal, reduceMotion: true))
         XCTAssertNil(LifeOSMotion.curve(for: .cancel, reduceMotion: true))
         XCTAssertNil(LifeOSMotion.curve(for: .selection, reduceMotion: true))
-        XCTAssertEqual(LifeOSMotion.curve(for: .navigation, reduceMotion: true), .easeOut(0.12))
+        XCTAssertEqual(LifeOSMotion.curve(for: .navigation, reduceMotion: true), .easeOut(0.10))
         XCTAssertNil(LifeOSMotion.curve(for: .release, reduceMotion: true))
         XCTAssertEqual(LifeOSMotion.curve(for: .selection, reduceMotion: false), LifeOSMotion.Timing.snappy)
         XCTAssertEqual(LifeOSMotion.curve(for: .navigation, reduceMotion: false), LifeOSMotion.Timing.hero)

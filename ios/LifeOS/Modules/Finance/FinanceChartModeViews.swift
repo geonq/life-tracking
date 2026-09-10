@@ -4,9 +4,8 @@ import SwiftUI
 // MARK: - Chart mode (RF-08)
 //
 // A detail chart (spend/income) can be viewed as a line, a weekly bar chart,
-// or a category ring. This is a display preference only — it never changes
-// what data is considered "selected" (see `FinanceChartSelectionCodec` below),
-// which is what keeps a scrub selection alive across a mode switch (RF-14).
+// or a category ring. This is a display preference only; the scene-owned
+// Finance presentation state decides when a point selection is still valid.
 
 /// `public` because `FinanceView`'s public initializer exposes an
 /// `initialChartMode` deep-link/testing seam (mirroring `initialDetail`).
@@ -34,47 +33,19 @@ public enum FinanceChartMode: String, CaseIterable, Identifiable, Hashable {
     }
 }
 
-/// Styled identically to `FinanceRangePills` (§Motion E: the highlight travels
-/// via `matchedGeometryEffect`, the labels themselves never move).
+/// Uses the shared selector recipe so range and chart-mode controls have the
+/// same sizing, hover, focus, unavailable, and menu fallback behavior.
 struct FinanceChartModeSwitcher: View {
     @Binding var selection: FinanceChartMode
-    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
-    @Environment(\.lifeOSReduceMotion) private var requestedReduceMotion
-    private var reduceMotion: Bool { systemReduceMotion || requestedReduceMotion }
-    @Namespace private var namespace
 
     var body: some View {
-        HStack(spacing: 3) {
-            ForEach(FinanceChartMode.allCases) { mode in
-                Button {
-                    guard selection != mode else { return }
-                    // Animate the control, not the dataset replaced by this binding.
-                    selection = mode
-                } label: {
-                    Text(mode.title)
-                        .lifeOSTypography(.metadata, weight: selection == mode ? .semibold : .regular)
-                        .foregroundStyle(selection == mode ? .primary : LifeOSTokens.tertiaryText)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 6)
-                        .background {
-                            if selection == mode {
-                                Capsule()
-                                    .fill(LifeOSTokens.surface)
-                                    .overlay(Capsule().stroke(LifeOSTokens.hairlineBorder, lineWidth: 1))
-                                    .modifier(FinanceHeroMorphTag(id: "finance.chartMode.highlight", namespace: reduceMotion ? nil : namespace))
-                            }
-                        }
-                }
-                .buttonStyle(FinanceMotionControlStyle())
-                .accessibilityLabel(mode.accessibilityTitle)
-                .accessibilityValue(selection == mode ? "Selected" : "Available")
-            }
-        }
-        .padding(3)
-        .background(Color.primary.opacity(0.06), in: Capsule())
-        .accessibilityElement(children: .contain)
+        LifeOSSelector(
+            options: FinanceChartMode.allCases.map {
+                LifeOSSelectorOption(id: $0, title: $0.title)
+            },
+            selection: $selection
+        )
         .accessibilityLabel("Chart mode")
-        .animation(LifeOSMotion.curve(for: .selection, reduceMotion: reduceMotion)?.animation, value: selection)
         .accessibilityValue(selection.accessibilityTitle)
     }
 }
@@ -83,12 +54,8 @@ struct FinanceChartModeSwitcher: View {
 //
 // Both `FinanceChartPoint.id` (line mode) and the bar-mode selection id below
 // are encoded as "<seriesTitle>|<timeIntervalSinceReferenceDate>". A renderer
-// resolves a selection by trying an exact id match first (cheap, and exactly
-// what today's line chart already does), then falling back to decoding the
-// timestamp and snapping to the nearest real datum in ITS OWN dataset. That
-// fallback is what lets a selection made in one mode (or a stale selection
-// left over from before a tab switch) resolve sensibly in another mode
-// without ever fabricating a value or silently going blank.
+// resolves an inspection only by exact id; a mode or model transition must not
+// snap it to a different observation.
 
 enum FinanceChartSelectionCodec {
     static func id(seriesID: String, date: Date) -> String {
@@ -243,22 +210,10 @@ struct FinanceBarSelectionDetail: View {
     }
 
     private var bucket: LifeOSBarBucket? {
-        if let selectedBucketID {
-            if let exact = orderedBuckets.first(where: {
-                FinanceChartSelectionCodec.id(seriesID: seriesTitle, date: $0.weekStart) == selectedBucketID
-            }) {
-                return exact
-            }
-            if let date = FinanceChartSelectionCodec.date(fromID: selectedBucketID) {
-                if let containing = orderedBuckets.first(where: { date >= $0.weekStart && date < $0.weekEnd }) {
-                    return containing
-                }
-                return orderedBuckets.min { lhs, rhs in
-                    abs(lhs.weekStart.timeIntervalSince(date)) < abs(rhs.weekStart.timeIntervalSince(date))
-                }
-            }
-        }
-        return orderedBuckets.last
+        guard let selectedBucketID else { return nil }
+        return orderedBuckets.first(where: {
+            FinanceChartSelectionCodec.id(seriesID: seriesTitle, date: $0.weekStart) == selectedBucketID
+        })
     }
 
     var body: some View {

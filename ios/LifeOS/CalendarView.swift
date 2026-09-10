@@ -27,17 +27,22 @@ public final class CalendarPresentationState: ObservableObject {
     @Published var displayMode: CalendarDisplayMode
     @Published var monthExpanded: Bool
     @Published var hourHeight: CGFloat
+    @Published var timelineScrollAnchor: CalendarTimelineScrollAnchor?
+    @Published var didRestoreTimelinePosition: Bool
 
     public init(
         selectedDate: Date = .now,
         startsInMonthMode: Bool = false,
-        hourHeight: CGFloat = 54
+        hourHeight: CGFloat = 54,
+        timelineScrollAnchor: CalendarTimelineScrollAnchor? = nil
     ) {
         self.selectedDate = selectedDate
         self.headerDate = selectedDate
         self.displayMode = startsInMonthMode ? .month : .timeline
         self.monthExpanded = false
         self.hourHeight = hourHeight
+        self.timelineScrollAnchor = timelineScrollAnchor
+        self.didRestoreTimelinePosition = timelineScrollAnchor != nil
     }
 }
 
@@ -788,6 +793,8 @@ public struct CalendarView: View {
                 onHourHeightChange: calendarHourHeightChangeHandler,
                 scrollRequest: timelineScrollRequest,
                 onScrollRequestConsumed: consumeTimelineScrollRequest,
+                retainedTimelineAnchor: $presentationState.timelineScrollAnchor,
+                didRestoreTimelinePosition: $presentationState.didRestoreTimelinePosition,
                 monthNamespace: reduceMotion ? nil : calendarMonthNamespace,
                 monthExpanded: monthExpanded,
                 monthSelectedDate: headerDate,

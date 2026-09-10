@@ -62,6 +62,12 @@ public struct LifeOSInteractionState: Equatable, Sendable {
     public var isHovered: Bool { phase == .hover }
     public var isFocused: Bool { phase == .focus }
     public var isCancelled: Bool { phase == .cancelled }
+    public var isDirectManipulation: Bool {
+        phase == .dragging || phase == .scrubbing
+    }
+    public var allowsAnimatedStateTransition: Bool {
+        policy.allowsDecorativeMotion && !isDirectManipulation
+    }
     public var allowsDecorativeMotion: Bool { policy.allowsDecorativeMotion }
     public var allowsUserDrivenMotion: Bool { policy.allowsUserDrivenMotion }
 
@@ -125,10 +131,12 @@ public enum LifeOSGestureDirection: String, CaseIterable, Sendable {
 }
 
 /// Shared axis arbitration: movement must reach 8pt and one axis must be at
-/// least 1.15× the other before an axis is claimed.
+/// least 1.3× the other before an axis is claimed. Ambiguous movement defaults
+/// to vertical after 16pt so a calendar/timeline scroll remains the safe owner.
 public enum LifeOSDirectionalClassifier {
     public static let minimumDistance: CGFloat = 8
-    public static let dominanceRatio: CGFloat = 1.15
+    public static let dominanceRatio: CGFloat = 1.3
+    public static let ambiguousVerticalDistance: CGFloat = 16
 
     public static func classify(_ translation: CGSize) -> LifeOSGestureDirection {
         classify(horizontal: translation.width, vertical: translation.height)
@@ -137,7 +145,12 @@ public enum LifeOSDirectionalClassifier {
     public static func classify(horizontal: CGFloat, vertical: CGFloat) -> LifeOSGestureDirection {
         let horizontalDistance = abs(horizontal)
         let verticalDistance = abs(vertical)
-        guard hypot(horizontalDistance, verticalDistance) >= minimumDistance else {
+        guard horizontalDistance.isFinite, verticalDistance.isFinite else {
+            return .undecided
+        }
+
+        let travelDistance = hypot(horizontalDistance, verticalDistance)
+        guard travelDistance >= minimumDistance else {
             return .undecided
         }
 
@@ -147,7 +160,7 @@ public enum LifeOSDirectionalClassifier {
         if verticalDistance >= horizontalDistance * dominanceRatio {
             return .vertical
         }
-        return .undecided
+        return travelDistance >= ambiguousVerticalDistance ? .vertical : .undecided
     }
 }
 
@@ -200,7 +213,7 @@ public struct LifeOSInteractionModifier: ViewModifier {
                 }
             }
             .animation(
-                effectiveState.allowsDecorativeMotion ? LifeOSMotion.hover : nil,
+                effectiveState.allowsAnimatedStateTransition ? LifeOSMotion.hover : nil,
                 value: effectiveState.phase
             )
     }

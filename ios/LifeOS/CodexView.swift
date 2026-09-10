@@ -15,20 +15,23 @@ struct CodexView: View {
     }
 }
 
-// MARK: - Usage screen shell (02-charts-rings-widgets.md §0)
+// MARK: - Usage screen shell
 //
-// Layout: hero row -> metadata row -> honesty banner -> Graphs/Facts/Insights tabs.
-// Graphs tab: control row (Graph/Range/Account) + projection chart or token-activity chart.
-// Facts tab: key-value list, honest "Not available" for every unbacked field.
-// Insights tab: honest empty state, never fabricated.
-//
-// Model mix + heatmap (02 §4/§5) have no slot in the reference's top-level tabs; they are
-// kept as supplementary cards below the tab content so real functionality isn't dropped
-// silently (see Coordination/HANDOFF.md note from this workstream).
+// Usage is a monitoring surface: source context, provider-defined windows, one
+// chart inspection surface, then factual detail. The layout deliberately keeps
+// the quota signal and its provenance close together instead of presenting a
+// second dashboard hero.
 
 enum UsageGraphKind: String, CaseIterable, Hashable {
     case remaining = "Usage remaining"
     case tokenActivity = "Token activity"
+
+    var title: String {
+        switch self {
+        case .remaining: "Remaining"
+        case .tokenActivity: "Token activity"
+        }
+    }
 }
 
 enum UsageRange: String, CaseIterable, Hashable {
@@ -49,6 +52,13 @@ enum UsageRange: String, CaseIterable, Hashable {
         }
     }
 
+    var title: String {
+        switch self {
+        case .fiveHour: "5-hour"
+        case .sevenDay: "7-day"
+        }
+    }
+
     static func matching(durationMinutes: Int?) -> Self? {
         guard let durationMinutes else { return nil }
         return allCases.first { $0.durationMinutes == durationMinutes }
@@ -62,10 +72,12 @@ enum UsageRange: String, CaseIterable, Hashable {
     }
 }
 
-enum UsageTab: String, CaseIterable, Hashable {
-    case graphs = "Graphs"
-    case facts = "Facts"
-    case insights = "Insights"
+enum UsageLayoutContract {
+    static let maxContentWidth: CGFloat = 1_040
+    static let contentGap: CGFloat = 24
+    static let controlGap: CGFloat = 8
+    static let compactBreakpoint: CGFloat = 560
+    static let twoColumnBreakpoint: CGFloat = 720
 }
 
 struct UsageView: View {
@@ -75,11 +87,12 @@ struct UsageView: View {
     private let onBack: (() -> Void)?
     private let analytics: [UsageAnalyticsSnapshot]
 
-    @State private var selectedProvider: Provider
-    @State private var selectedTab: UsageTab = .graphs
-    @State private var selectedGraph: UsageGraphKind = .remaining
-    @State private var selectedRange: UsageRange = .fiveHour
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    // These selections belong to the scene, not to one mounted copy of the
+    // screen. Route changes can replace UsageView, but they must not reset the
+    // provider/window the user was inspecting.
+    @SceneStorage("LifeOS.usage.selectedProvider.v1") private var selectedProviderIdentifier = Provider.codex.rawValue
+    @SceneStorage("LifeOS.usage.selectedGraph.v1") private var selectedGraphIdentifier = UsageGraphKind.remaining.rawValue
+    @SceneStorage("LifeOS.usage.selectedRange.v1") private var selectedRangeIdentifier = UsageRange.fiveHour.rawValue
     @Environment(\.dismiss) private var dismiss
 
     init(
@@ -94,7 +107,42 @@ struct UsageView: View {
         self.refreshAction = refreshAction
         self.onBack = onBack
         self.analytics = analytics
-        _selectedProvider = State(initialValue: snapshots.first?.provider ?? .codex)
+    }
+
+    private var selectedProvider: Provider {
+        get { Provider(rawValue: selectedProviderIdentifier) ?? .codex }
+        nonmutating set { selectedProviderIdentifier = newValue.rawValue }
+    }
+
+    private var selectedGraph: UsageGraphKind {
+        get { UsageGraphKind(rawValue: selectedGraphIdentifier) ?? .remaining }
+        nonmutating set { selectedGraphIdentifier = newValue.rawValue }
+    }
+
+    private var selectedRange: UsageRange {
+        get { UsageRange(rawValue: selectedRangeIdentifier) ?? .fiveHour }
+        nonmutating set { selectedRangeIdentifier = newValue.rawValue }
+    }
+
+    private var selectedProviderBinding: Binding<Provider> {
+        Binding(
+            get: { selectedProvider },
+            set: { selectedProvider = $0 }
+        )
+    }
+
+    private var selectedGraphBinding: Binding<UsageGraphKind> {
+        Binding(
+            get: { selectedGraph },
+            set: { selectedGraph = $0 }
+        )
+    }
+
+    private var selectedRangeBinding: Binding<UsageRange> {
+        Binding(
+            get: { selectedRange },
+            set: { selectedRange = $0 }
+        )
     }
 
     private var activeSnapshot: ProviderSnapshot? {
@@ -117,41 +165,50 @@ struct UsageView: View {
 
     private var availableRanges: Set<UsageRange> {
         guard let activeSnapshot else { return [] }
-        let observedRanges = activeSnapshot.windows.compactMap { window -> UsageRange? in
-            guard window.usedPercent != nil else { return nil }
-            return UsageRange.matching(durationMinutes: window.durationMinutes)
-        }
-        let historicalRanges = analytics
-            .filter { candidate in
-                candidate.provider == activeSnapshot.provider && !candidate.history.isEmpty &&
-                    (activeSnapshot.provenance.quality == .demo
-                        ? candidate.provenance.quality == .demo
-                        : candidate.provenance.quality != .demo)
-            }
-            .compactMap { candidate in
-                UsageRange.allCases.first { $0.sourceWindowIDs.contains(candidate.windowID ?? "") }
-            }
-        return Set(observedRanges + historicalRanges)
+        return Set(availableRangeOrder(for: activeSnapshot))
     }
 
-    private func preferredRange(for snapshot: ProviderSnapshot?) -> UsageRange {
-        guard let snapshot else { return .fiveHour }
-        let candidates = snapshot.windows.compactMap { window -> UsageRange? in
-            guard window.usedPercent != nil else { return nil }
-            return UsageRange.matching(durationMinutes: window.durationMinutes)
+    private func availableRangeOrder(for snapshot: ProviderSnapshot) -> [UsageRange] {
+        var ranges: [UsageRange] = []
+        var seen = Set<UsageRange>()
+
+        func append(_ range: UsageRange?) {
+            guard let range, seen.insert(range).inserted else { return }
+            ranges.append(range)
         }
-        let observed = snapshot.windows.compactMap { window -> UsageRange? in
-            guard window.usedPercent != nil else { return nil }
-            return UsageRange.matching(durationMinutes: window.durationMinutes)
+
+        for window in snapshot.windows where window.usedPercent != nil {
+            append(UsageRange.matching(durationMinutes: window.durationMinutes))
         }
-        let historical = analytics
-            .filter { $0.provider == snapshot.provider && !$0.history.isEmpty }
-            .compactMap { candidate in
-                UsageRange.allCases.first { $0.sourceWindowIDs.contains(candidate.windowID ?? "") }
-            }
-        return observed.first(where: { $0 == .fiveHour }) ?? observed.first
-            ?? historical.first(where: { $0 == .fiveHour }) ?? historical.first
-            ?? candidates.first ?? .fiveHour
+
+        for candidate in analytics where matchesQuality(candidate, for: snapshot) {
+            append(UsageRange.allCases.first { $0.sourceWindowIDs.contains(candidate.windowID ?? "") })
+        }
+
+        return ranges
+    }
+
+    private func matchesQuality(_ candidate: UsageAnalyticsSnapshot, for snapshot: ProviderSnapshot) -> Bool {
+        guard candidate.provider == snapshot.provider, !candidate.history.isEmpty else { return false }
+        return snapshot.provenance.quality == .demo
+            ? candidate.provenance.quality == .demo
+            : candidate.provenance.quality != .demo
+    }
+
+    private func reconcileSelectedRange(for snapshot: ProviderSnapshot?) {
+        guard let snapshot else { return }
+        let ranges = availableRangeOrder(for: snapshot)
+        guard !ranges.contains(selectedRange) else { return }
+        selectedRange = ranges.first(where: { $0 == .fiveHour }) ?? ranges.first ?? .fiveHour
+    }
+
+    private func reconcileProviderAndRange(with snapshots: [ProviderSnapshot]) {
+        guard let provider = snapshots.first(where: { $0.provider == selectedProvider })?.provider
+                ?? snapshots.first?.provider else { return }
+        if provider != selectedProvider {
+            selectedProvider = provider
+        }
+        reconcileSelectedRange(for: snapshots.first { $0.provider == provider })
     }
 
     private func selectedWindow(in snapshot: ProviderSnapshot) -> UsageWindow? {
@@ -163,22 +220,25 @@ struct UsageView: View {
             LifeOSResponsiveContentContainer(
                 horizontalPadding: usageHorizontalPadding,
                 topPadding: usageTopPadding,
-                bottomPadding: usageBottomPadding
+                bottomPadding: usageBottomPadding,
+                maxReadableWidth: UsageLayoutContract.maxContentWidth
             ) {
-                VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: UsageLayoutContract.contentGap) {
 #if os(iOS)
                     backButton
 #endif
                     if let activeSnapshot {
-                        let window = selectedWindow(in: activeSnapshot)
-                        heroRow(window: window)
-                        metadataRow(activeSnapshot, window: window)
-                        honestyBanner(activeSnapshot, window: window)
-                        UsageLimitsCard(snapshot: activeSnapshot, selectedWindow: window)
-                        UsageTabBar(selection: $selectedTab)
-
-                        tabContent(activeSnapshot, window: window)
+                        usageHeader(activeSnapshot)
+                        sourceSummary(activeSnapshot)
+                        windowSummaries(activeSnapshot)
+                        monitoringSurface(activeSnapshot)
+                        UsageFactsView(snapshot: activeSnapshot, analytics: activeAnalytics)
+                        if let activeAnalytics,
+                           !activeAnalytics.modelBreakdowns.isEmpty || !activeAnalytics.heatmap.isEmpty {
+                            UsageSupplementaryAnalyticsView(analytics: activeAnalytics)
+                        }
                     } else {
+                        usageHeader(nil)
                         providerSwitcher
                         UsageEmptyState(
                             title: "Usage data unavailable",
@@ -186,11 +246,7 @@ struct UsageView: View {
                         )
                     }
                 }
-                // Keep the Usage reading column calm on very wide Mac windows.
-                // Controls and charts stay readable instead of stretching into
-                // a sparse 1,800px-wide dashboard.
-                .frame(maxWidth: LifeOSTokens.chartMaxWidth, alignment: .leading)
-                .frame(maxWidth: .infinity, alignment: .center)
+                .frame(maxWidth: UsageLayoutContract.maxContentWidth, alignment: .leading)
             }
         }
         .accessibilityIdentifier("usage-screen")
@@ -199,17 +255,165 @@ struct UsageView: View {
         .toolbar(.hidden, for: .navigationBar)
 #endif
         .tint(LifeOSTokens.accent)
-        .animation(reduceMotion ? nil : LifeOSMotion.primary, value: selectedProvider)
-        .animation(reduceMotion ? nil : LifeOSMotion.snappy, value: selectedTab)
         .refreshable { await refreshAction?() }
         .onAppear {
-            if !snapshots.contains(where: { $0.provider == selectedProvider }), let first = snapshots.first {
-                selectedProvider = first.provider
-            }
-            selectedRange = preferredRange(for: activeSnapshot)
+            reconcileProviderAndRange(with: snapshots)
         }
         .onChange(of: selectedProvider) { _, newProvider in
-            selectedRange = preferredRange(for: snapshots.first { $0.provider == newProvider })
+            reconcileSelectedRange(for: snapshots.first { $0.provider == newProvider })
+        }
+        .onChange(of: snapshots) { _, newSnapshots in
+            reconcileProviderAndRange(with: newSnapshots)
+        }
+    }
+
+    private func usageHeader(_ snapshot: ProviderSnapshot?) -> some View {
+        HStack(alignment: .center, spacing: LifeOSTokens.Space.md) {
+            VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
+                Text("Usage")
+                    .lifeOSTypography(.sectionTitle, weight: .semibold)
+                    .foregroundStyle(LifeOSTokens.primaryText)
+                Text(snapshot.map { "\($0.provider.displayName) · \(statusText(for: $0.provider))" } ?? "Provider monitoring")
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.secondaryText)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: LifeOSTokens.Space.sm)
+            heroActions
+        }
+        .frame(minHeight: 44, alignment: .center)
+        .accessibilityElement(children: .contain)
+    }
+
+    private func sourceSummary(_ snapshot: ProviderSnapshot) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: LifeOSTokens.Space.sm) {
+            Text(sourceLabel(for: snapshot))
+                .lifeOSTypography(.label, weight: .medium)
+                .foregroundStyle(sourceColor(for: snapshot))
+            Spacer(minLength: LifeOSTokens.Space.sm)
+            Text("Updated \(snapshot.provenance.observedAt.formatted(.dateTime.month(.abbreviated).day().hour().minute()))")
+                .lifeOSTypography(.metadata)
+                .foregroundStyle(LifeOSTokens.tertiaryText)
+                .multilineTextAlignment(.trailing)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private func sourceLabel(for snapshot: ProviderSnapshot) -> String {
+        switch snapshot.provenance.quality {
+        case .observed:
+            switch snapshot.provenance.connector {
+            case .healthy: "Observed · \(snapshot.provenance.source)"
+            case .refreshDue: "Refresh due · \(snapshot.provenance.source)"
+            case .reauthRequired: "Re-auth required · \(snapshot.provenance.source)"
+            case .rateLimited: "Rate limited · \(snapshot.provenance.source)"
+            case .revoked, .disabled, .unavailable, .error: "Unavailable · \(snapshot.provenance.source)"
+            }
+        case .estimated: "Estimate · non-official"
+        case .demo: "Demo · not live"
+        case .unavailable: "Not connected"
+        }
+    }
+
+    private func sourceColor(for snapshot: ProviderSnapshot) -> Color {
+        switch snapshot.provenance.quality {
+        case .observed where snapshot.provenance.connector == .healthy:
+            LifeOSTokens.secondaryText
+        case .estimated:
+            LifeOSTokens.estimate
+        case .demo, .observed:
+            LifeOSTokens.warningText
+        case .unavailable:
+            LifeOSTokens.tertiaryText
+        }
+    }
+
+    private func windowSummaries(_ snapshot: ProviderSnapshot) -> some View {
+        let windows = snapshot.windows.sorted {
+            ($0.durationMinutes ?? .max) < ($1.durationMinutes ?? .max)
+        }
+
+        return Group {
+            if windows.isEmpty {
+                UsageEmptyState(
+                    title: "No usage windows",
+                    detail: "The connected source has not supplied a quota window."
+                )
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .top, spacing: LifeOSTokens.Space.md) {
+                        ForEach(windows) { window in
+                            windowSummary(window, in: snapshot)
+                        }
+                    }
+                    VStack(alignment: .leading, spacing: LifeOSTokens.Space.sm) {
+                        ForEach(windows) { window in
+                            windowSummary(window, in: snapshot)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func windowSummary(_ window: UsageWindow, in snapshot: ProviderSnapshot) -> some View {
+        let range = UsageRange.matching(durationMinutes: window.durationMinutes)
+        let content = UsageWindowSummaryRow(window: window, state: stateFor(window, snapshot: snapshot))
+        if let range {
+            Button {
+                selectedRange = range
+            } label: {
+                content
+            }
+            .buttonStyle(.plain)
+            .accessibilityAddTraits(selectedRange == range ? .isSelected : [])
+            .accessibilityIdentifier("usage-window-\(range.rawValue)")
+        } else {
+            content
+        }
+    }
+
+    private func stateFor(_ window: UsageWindow, snapshot: ProviderSnapshot) -> UsageValueState {
+        UsageWindowStateResolver.state(for: window, snapshot: snapshot, loadState: state)
+    }
+
+    private func monitoringSurface(_ snapshot: ProviderSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: LifeOSTokens.Space.md) {
+            HStack(alignment: .firstTextBaseline, spacing: LifeOSTokens.Space.sm) {
+                Text(selectedGraph.title)
+                    .lifeOSTypography(.cardTitle)
+                    .foregroundStyle(LifeOSTokens.primaryText)
+                Spacer(minLength: LifeOSTokens.Space.sm)
+                Text(snapshot.provenance.source)
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .lineLimit(1)
+            }
+
+            controlRow
+
+            if let activeAnalytics {
+                switch selectedGraph {
+                case .remaining:
+                    UsageProjectionChart(
+                        provider: snapshot.provider,
+                        window: selectedWindow(in: snapshot),
+                        analytics: activeAnalytics
+                    )
+                case .tokenActivity:
+                    UsageTokenActivityView(
+                        provider: snapshot.provider,
+                        activity: activity(in: selectedWindow(in: snapshot), analytics: activeAnalytics)
+                    )
+                }
+            } else {
+                UsageEmptyState(
+                    title: "No chart observations",
+                    detail: "The source has not supplied history for this window, so LifeOS will not invent a plot."
+                )
+            }
         }
     }
 
@@ -240,8 +444,7 @@ struct UsageView: View {
 #if os(iOS)
     private var backButton: some View {
         Button { onBack?() ?? dismiss() } label: {
-            LifeOSIcon(.chevronLeft)
-                .frame(width: 15, height: 15)
+            LifeOSIcon(.chevronLeft, context: .toolbar)
                 .frame(width: 34, height: 34)
                 .background(Color.primary.opacity(0.055), in: Circle())
         }
@@ -259,8 +462,7 @@ struct UsageView: View {
             Button {
                 Task { await refreshAction?() }
             } label: {
-                LifeOSIcon(.refresh)
-                    .frame(width: 14, height: 14)
+                LifeOSIcon(.refresh, context: .toolbar)
                     .frame(width: 32, height: 32)
                     .background(Color.primary.opacity(0.055), in: Circle())
             }
@@ -272,226 +474,13 @@ struct UsageView: View {
             NavigationLink {
                 ProviderConnectionsSettingsView()
             } label: {
-                LifeOSIcon(.settings)
-                    .frame(width: 14, height: 14)
+                LifeOSIcon(.settings, context: .toolbar)
                     .frame(width: 32, height: 32)
                     .background(Color.primary.opacity(0.055), in: Circle())
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
             .accessibilityLabel("Usage settings")
-        }
-    }
-
-    // MARK: Hero row (§0.1)
-
-    private func heroRow(window: UsageWindow?) -> some View {
-        let remainingPercent = window?.usedPercent.map { 100 - $0 * 100 }
-        let valueState = UsageWindowStateResolver.state(
-            for: window, snapshot: activeSnapshot, loadState: state
-        )
-
-        return HStack(alignment: .top, spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    if let remainingPercent {
-                        Text("\(Int(remainingPercent.rounded()))")
-                            .lifeOSTypography(.metric)
-                            .tracking(-0.3)
-                            .monospacedDigit()
-                            .foregroundStyle(.primary)
-                            .numericTransition()
-                    } else {
-                        Text("—")
-                            .lifeOSTypography(.metric)
-                            .tracking(-0.3)
-                            .foregroundStyle(.primary)
-                    }
-                    Text(remainingPercent == nil ? valueState.label : "% remaining")
-                        .lifeOSTypography(.body)
-                        .fontWeight(.semibold)
-                        .foregroundStyle(remainingPercent == nil ? LifeOSTokens.tertiaryText : LifeOSTokens.accent)
-                    }
-                Text(window?.label ?? "Current window")
-                    .lifeOSTypography(.metadata)
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
-                HStack(spacing: 5) {
-                    Circle()
-                        .fill(stateColor(valueState))
-                        .frame(width: 6, height: 6)
-                    Text(valueState.label)
-                        .lifeOSTypography(.metadata)
-                        .fontWeight(.semibold)
-                        .foregroundStyle(stateColor(valueState))
-                }
-            }
-            Spacer(minLength: 12)
-            heroActions
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(remainingPercent.map {
-            "\(Int($0.rounded())) percent remaining, \(window?.label ?? "current window"), \(valueState.label)"
-        } ?? "Usage \(valueState.label.lowercased()), \(window?.label ?? "current window")")
-    }
-
-    // MARK: Metadata row (§0.2)
-
-    private func metadataRow(_ snapshot: ProviderSnapshot, window: UsageWindow?) -> some View {
-        ViewThatFits(in: .horizontal) {
-            // Keep the reference's three-fact row on wide surfaces. The minimum widths make
-            // ViewThatFits choose the readable compact layout before SwiftUI can squeeze a
-            // reset date or provenance value into an ellipsis on iPhone.
-            HStack(alignment: .top, spacing: 24) {
-                metadataItem(label: "Reset", value: resetText(window))
-                    .frame(width: 220, alignment: .leading)
-                metadataItem(label: "Banked resets", value: "Not available")
-                    .frame(width: 160, alignment: .leading)
-                metadataItem(label: "Freshness", value: freshnessText(snapshot, window: window))
-                    .frame(width: 180, alignment: .leading)
-            }
-
-            // Compact surfaces get one full-width reset fact, then two equal-width facts. This
-            // preserves all labels and values while allowing long dates to wrap naturally.
-            VStack(alignment: .leading, spacing: 10) {
-                metadataItem(label: "Reset", value: resetText(window))
-                HStack(alignment: .top, spacing: 16) {
-                    metadataItem(label: "Banked resets", value: "Not available")
-                    metadataItem(label: "Freshness", value: freshnessText(snapshot, window: window))
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .contain)
-    }
-
-    private func resetText(_ window: UsageWindow?) -> String {
-        guard let resetAt = window?.resetAt else { return "Not available" }
-        return resetAt.formatted(.dateTime.month(.abbreviated).day().year().hour().minute())
-    }
-
-    private func freshnessText(_ snapshot: ProviderSnapshot, window: UsageWindow?) -> String {
-        let provenance = window?.provenance ?? snapshot.provenance
-        switch provenance.freshness() {
-        case .fresh:
-            let minutes = max(0, Int(Date.now.timeIntervalSince(provenance.observedAt) / 60))
-            return minutes <= 1 ? "Just now" : "\(minutes) min ago"
-        case .aging:
-            let minutes = max(0, Int(Date.now.timeIntervalSince(provenance.observedAt) / 60))
-            return "\(minutes) min ago"
-        case .stale: return "Stale"
-        case .unavailable: return snapshot.provenance.quality == .demo ? "Demo · not live" : "Not available"
-        }
-    }
-
-    private func metadataItem(label: String, value: String) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(label)
-                .foregroundStyle(LifeOSTokens.secondaryTextCompat)
-                .lifeOSTypography(.label)
-                .textCase(.uppercase)
-                .tracking(0.6)
-            Text(value)
-                .foregroundStyle(.primary)
-                .lifeOSTypography(.body)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .combine)
-    }
-
-    // MARK: Honesty banner (§0.3)
-
-    private func honestyBanner(_ snapshot: ProviderSnapshot, window: UsageWindow?) -> some View {
-        let quality = window?.provenance?.quality ?? snapshot.provenance.quality
-        let valueState = UsageWindowStateResolver.state(for: window, snapshot: snapshot, loadState: state)
-        let notice: (title: String, detail: String)?
-        if state == .loading && window?.usedPercent == nil {
-            notice = ("Loading validated data", "Waiting for the provider source")
-        } else if window?.usedPercent == nil || quality == .unavailable {
-            notice = ("No validated data", "Not available for this window")
-        } else if valueState == .unavailable {
-            notice = ("Observation unavailable", "The connector did not provide a usable current value")
-        } else if valueState == .stale {
-            notice = ("Stale observation", "Last validated value is older than 15 minutes")
-        } else if window?.projection != nil {
-            let sample = window?.projection?.sampleSpan.map { " · \($0)" } ?? ""
-            notice = ("Observed usage · projection", "Current estimate is non-official\(sample)")
-        } else {
-            switch quality {
-            case .observed:
-                notice = nil
-            case .estimated:
-                let confidence = window?.projection?.confidence.map {
-                    " · confidence \(Int(($0 * 100).rounded()))%"
-                } ?? ""
-                notice = ("Derived estimate · non-official", "Projection only\(confidence)")
-            case .demo:
-                notice = ("Demo fixture · not live", "Synthetic values for visual QA")
-            case .unavailable:
-                notice = ("No validated data", "Not connected for this window")
-            }
-        }
-
-        return Group {
-            if let notice {
-                HStack(alignment: .top, spacing: 8) {
-                    LifeOSIcon(.usage)
-                        .frame(width: 14, height: 14)
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
-                        .padding(.top, 1)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(notice.title)
-                            .lifeOSTypography(.body)
-                            .fontWeight(.semibold)
-                            .foregroundStyle(.primary)
-                        Text(notice.detail)
-                            .lifeOSTypography(.metadata)
-                            .foregroundStyle(LifeOSTokens.tertiaryText)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    Spacer(minLength: 0)
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-                .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .accessibilityElement(children: .combine)
-            }
-        }
-    }
-
-    // MARK: Tab content
-
-    @ViewBuilder
-    private func tabContent(_ snapshot: ProviderSnapshot, window: UsageWindow?) -> some View {
-        switch selectedTab {
-        case .graphs:
-            graphsTab(snapshot, window: window)
-        case .facts:
-            UsageFactsView(snapshot: snapshot, analytics: activeAnalytics)
-        case .insights:
-            UsageInsightsView(analytics: activeAnalytics)
-        }
-    }
-
-    private func graphsTab(_ snapshot: ProviderSnapshot, window: UsageWindow?) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            controlRow
-
-            if let activeAnalytics {
-                switch selectedGraph {
-                case .remaining:
-                    UsageProjectionChart(provider: snapshot.provider, window: window, analytics: activeAnalytics)
-                case .tokenActivity:
-                    UsageTokenActivityView(provider: snapshot.provider, activity: activity(in: window, analytics: activeAnalytics))
-                }
-            } else {
-                UsageEmptyState(
-                    title: window?.usedPercent == nil ? "\(snapshot.provider.displayName) unavailable" : "Analytics unavailable",
-                    detail: window?.usedPercent == nil
-                        ? "No validated observation is connected for this provider."
-                        : "No activity or projection data was supplied; LifeOS will not invent one."
-                )
-            }
         }
     }
 
@@ -507,18 +496,26 @@ struct UsageView: View {
 
     private var controlRow: some View {
         ViewThatFits(in: .horizontal) {
-            // Three equal controls use the full wide content column instead of
-            // leaving an unused fourth adaptive-grid slot on large windows.
             HStack(alignment: .center, spacing: 10) {
                 graphControl
-                    .frame(width: 210)
+                    .frame(minWidth: 160, idealWidth: 180, maxWidth: 240, alignment: .leading)
                 rangeControl
-                    .frame(width: 240)
+                    .frame(minWidth: 160, idealWidth: 180, maxWidth: 240, alignment: .leading)
                 providerSwitcher
-                    .frame(maxWidth: 360)
+                    .frame(minWidth: 160, idealWidth: 220, maxWidth: 360, alignment: .leading)
                 Spacer(minLength: 0)
             }
 
+#if os(iOS)
+            VStack(alignment: .leading, spacing: UsageLayoutContract.controlGap) {
+                graphControl
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                rangeControl
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                providerSwitcher
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+#else
             LazyVGrid(
                 columns: [GridItem(.adaptive(minimum: 145, maximum: 360), alignment: .leading)],
                 alignment: .leading,
@@ -528,12 +525,13 @@ struct UsageView: View {
                 rangeControl
                 providerSwitcher
             }
+#endif
         }
     }
 
     private var graphControl: some View {
         controlMenu(label: "Graph") {
-            Picker("Graph", selection: $selectedGraph) {
+            Picker("Graph", selection: selectedGraphBinding) {
                 ForEach(UsageGraphKind.allCases, id: \.self) { kind in
                     Text(kind.rawValue).tag(kind)
                 }
@@ -543,7 +541,7 @@ struct UsageView: View {
 
     private var rangeControl: some View {
         controlMenu(label: "Range") {
-            Picker("Range", selection: $selectedRange) {
+            Picker("Range", selection: selectedRangeBinding) {
                 ForEach(UsageRange.allCases, id: \.self) { range in
                     Text(availableRanges.contains(range) ? range.rawValue : "\(range.rawValue) · Needs more history")
                         .tag(range)
@@ -559,24 +557,26 @@ struct UsageView: View {
 
     private var providerSwitcher: some View {
         Menu {
-            Picker("Provider", selection: $selectedProvider) {
+            Picker("Provider", selection: selectedProviderBinding) {
                 ForEach(Provider.allCases, id: \.self) { provider in
                     Text("\(provider.displayName) · \(statusText(for: provider))").tag(provider)
                 }
             }
         } label: {
             HStack(spacing: 4) {
-                LifeOSIcon(providerIcon(selectedProvider))
-                    .frame(width: 12, height: 12)
+                LifeOSIcon(providerIcon(selectedProvider), context: .toolbar)
                     .foregroundStyle(LifeOSTokens.accent)
                 Text("Provider · \(selectedProvider.displayName) · \(statusText(for: selectedProvider))")
                     .lifeOSTypography(.button)
                     .lineLimit(2)
-                    .minimumScaleFactor(0.85)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            .background(Color.primary.opacity(0.06), in: Capsule())
+            .background(LifeOSTokens.raised, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(LifeOSTokens.subtleBorder, lineWidth: 1)
+            }
             .frame(minHeight: LifeOSTokens.Control.standardHeight, alignment: .leading)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -612,15 +612,6 @@ struct UsageView: View {
         }
     }
 
-    private func stateColor(_ valueState: UsageValueState) -> Color {
-        switch valueState {
-        case .observed: return LifeOSTokens.success
-        case .estimated, .projected, .loading, .demo: return LifeOSTokens.info
-        case .stale: return LifeOSTokens.warning
-        case .error, .unavailable: return LifeOSTokens.danger
-        }
-    }
-
     @ViewBuilder
     private func controlMenu<Content: View>(label: String, @ViewBuilder content: () -> Content, valueText: () -> String) -> some View {
         Menu {
@@ -629,22 +620,22 @@ struct UsageView: View {
             HStack(spacing: 4) {
                 Text(label)
                     .lifeOSTypography(.label)
-                    .textCase(.uppercase)
-                    .tracking(0.6)
                     .foregroundStyle(.secondary)
                 Text(valueText())
                     .lifeOSTypography(.button)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
-                    .minimumScaleFactor(0.85)
-                LifeOSIcon(.chevronRight)
-                    .frame(width: 8, height: 8)
+                LifeOSIcon(.chevronRight, context: .disclosure)
                     .rotationEffect(.degrees(90))
                     .foregroundStyle(.secondary)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            .background(Color.primary.opacity(0.06), in: Capsule())
+            .background(LifeOSTokens.raised, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(LifeOSTokens.subtleBorder, lineWidth: 1)
+            }
             .frame(maxWidth: .infinity, alignment: .leading)
             .frame(minHeight: LifeOSTokens.Control.standardHeight, alignment: .leading)
         }
@@ -652,225 +643,26 @@ struct UsageView: View {
     }
 }
 
-private struct UsageInsightsView: View {
-    let analytics: UsageAnalyticsSnapshot?
+private struct UsageSupplementaryAnalyticsView: View {
+    let analytics: UsageAnalyticsSnapshot
 
     var body: some View {
-        if let analytics, (!analytics.modelBreakdowns.isEmpty || !analytics.heatmap.isEmpty) {
-            VStack(alignment: .leading, spacing: 12) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Additional views")
-                        .lifeOSTypography(.label, weight: .semibold)
-                    Text("Optional model and activity detail; the primary reading path stays in Graphs and Facts.")
-                        .lifeOSTypography(.metadata)
-                        .foregroundStyle(.secondary)
-                }
-                if !analytics.modelBreakdowns.isEmpty {
-                    UsageModelMixCard(models: analytics.modelBreakdowns)
-                }
-                if !analytics.heatmap.isEmpty {
-                    UsageHeatmapCard(cells: analytics.heatmap)
-                }
-            }
-        } else {
-            UsageEmptyState(
-                title: "No insights yet",
-                detail: "Insights requires more observed history than is currently available for this account."
-            )
-        }
-    }
-}
-
-// MARK: - Limits ring/bars card (02-charts-rings-widgets.md §1)
-//
-// The shortest-duration window gets a GlowRing (148pt detail-screen geometry); any additional
-// windows stack beneath as slim gradient bars (§1d). This preserves the real per-window
-// usedPercent data that `ProviderLimitsCard` used to show — the reference's hero number alone
-// only covers the single shortest window, and LifeOS has real data for more than one window
-// (e.g. demo fixtures ship a 5-hour AND a 7-day window) that would otherwise be dropped.
-
-struct UsageLimitsCard: View {
-    let snapshot: ProviderSnapshot
-    let selectedWindow: UsageWindow?
-
-    init(snapshot: ProviderSnapshot, selectedWindow: UsageWindow? = nil) {
-        self.snapshot = snapshot
-        self.selectedWindow = selectedWindow
-    }
-
-    private var sortedWindows: [UsageWindow] {
-        snapshot.windows.sorted {
-            ($0.durationMinutes ?? .max) < ($1.durationMinutes ?? .max)
-        }
-    }
-
-    private var ringWindow: UsageWindow? {
-        selectedWindow ?? sortedWindows.first { $0.usedPercent != nil }
-    }
-
-    private var barWindows: [UsageWindow] {
-        sortedWindows.filter { $0.id != ringWindow?.id }
-    }
-
-    var body: some View {
-        VStack(spacing: 14) {
-            if let ringWindow, let percent = ringWindow.usedPercent {
-                // Usage owns one blue visual language; provider identity is carried by
-                // the account switcher and labels, never by a provider-specific ring hue.
-                GlowRing(progress: percent, diameter: 148, lineWidth: 8) {
-                    VStack(spacing: 3) {
-                        Text("\(Int((percent * 100).rounded()))")
-                            .lifeOSTypography(.metric)
-                            .tracking(-0.3)
-                            .monospacedDigit()
-                            .numericTransition()
-                        Text("% used")
-                            .lifeOSTypography(.metadata, weight: .semibold)
-                            .foregroundStyle(.secondary)
-                        statusPill(percent: percent)
-                    }
-                }
-                Text(ringWindow.label)
-                    .lifeOSTypography(.metadata)
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
-            } else if let selectedWindow {
-                VStack(spacing: 5) {
-                    LifeOSIcon(.usage)
-                        .frame(width: 18, height: 18)
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
-                    Text("Not available")
-                        .lifeOSTypography(.metadata, weight: .semibold)
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
-                    Text(selectedWindow.label)
-                        .lifeOSTypography(.metadata)
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
-                }
-                .frame(height: 148)
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel("\(selectedWindow.label) usage not available")
-            } else if snapshot.windows.isEmpty {
-                Text("Not available")
-                    .lifeOSTypography(.metadata)
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
-            } else {
-                Text("Not available")
+        VStack(alignment: .leading, spacing: LifeOSTokens.Space.md) {
+            VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
+                Text("Additional observations")
+                    .lifeOSTypography(.cardTitle)
+                    .foregroundStyle(LifeOSTokens.primaryText)
+                Text("Observed breakdowns, when supplied by the provider")
                     .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
             }
-
-            if !barWindows.isEmpty {
-                VStack(alignment: .leading, spacing: 10) {
-                    ForEach(barWindows) { window in
-                        VStack(alignment: .leading, spacing: 5) {
-                            HStack {
-                                Text(window.label).lifeOSTypography(.metadata, weight: .semibold)
-                                Spacer()
-                                Text(window.usedPercent.map {
-                                    "\($0.formatted(.percent.precision(.fractionLength(0)))) used"
-                                } ?? "Not available")
-                                    .lifeOSTypography(.metadata).monospacedDigit()
-                                    .foregroundStyle(window.usedPercent == nil ? LifeOSTokens.tertiaryText : .primary)
-                            }
-                            if let percent = window.usedPercent {
-                                UsageSlimBar(value: percent)
-                            }
-                        }
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+            if !analytics.modelBreakdowns.isEmpty {
+                UsageModelMixCard(models: analytics.modelBreakdowns)
+            }
+            if !analytics.heatmap.isEmpty {
+                UsageHeatmapCard(cells: analytics.heatmap)
             }
         }
-        .frame(maxWidth: .infinity)
-        .flatCard(featured: true)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("\(snapshot.provider.displayName) usage limits")
-    }
-
-    /// §4.2 dot + overline — no tinted capsule. Color is the semantic signal.
-    private func statusPill(percent: Double) -> some View {
-        let (text, color): (String, Color) = percent < 0.7
-            ? ("Under normal", LifeOSTokens.success)
-            : percent < 0.9 ? ("Near limit", LifeOSTokens.warning) : ("Over limit", LifeOSTokens.danger)
-        return HStack(spacing: 6) {
-            Circle()
-                .fill(color)
-                .frame(width: 6, height: 6)
-            Text(text)
-                .lifeOSTypography(.label)
-                .tracking(0.8)
-                .textCase(.uppercase)
-                .foregroundStyle(color)
-                .lineLimit(1)
-        }
-        .accessibilityElement(children: .combine)
-    }
-}
-
-/// §1d — slim bar for non-primary windows: 4pt Capsule, solid accent fill on
-/// the hairline ring track (no gradient).
-private struct UsageSlimBar: View {
-    let value: Double
-
-    var body: some View {
-        GeometryReader { geometry in
-            ZStack(alignment: .leading) {
-                Capsule().fill(LifeOSTokens.Ring.track)
-                Capsule()
-                    .fill(LifeOSTokens.Series.observed)
-                    .frame(width: geometry.size.width * min(max(value, 0), 1))
-            }
-        }
-        .frame(height: 4)
-    }
-}
-
-// MARK: - Supporting shell views
-
-/// Segmented "Graphs / Facts / Insights" control. `SpringPillSelector` (LifeOSMotionKit)
-/// always fills the selected pill with the neutral `LifeOSTokens.surface`; the reference
-/// (§0.4) needs a colored `usage.primary` fill + white text for the selected segment
-/// specifically, so this reimplements the same motion contract (matchedGeometryEffect +
-/// `LifeOSMotion.snappy`, Reduce-Motion aware) with the reference's fill instead of
-/// wrapping the shared primitive.
-private struct UsageTabBar: View {
-    @Binding var selection: UsageTab
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Namespace private var namespace
-    private let highlightID = "usage.tabBar.highlight"
-
-    var body: some View {
-        HStack(spacing: 4) {
-            ForEach(UsageTab.allCases, id: \.self) { tab in
-                let isSelected = tab == selection
-                Button {
-                    if reduceMotion {
-                        selection = tab
-                    } else {
-                        withAnimation(LifeOSMotion.snappy) { selection = tab }
-                    }
-                } label: {
-            Text(tab.rawValue)
-                        .lifeOSTypography(.button)
-                        .foregroundStyle(isSelected ? Color.white : Color.secondary)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 7)
-                        .background {
-                            if isSelected {
-                                if reduceMotion {
-                                    Capsule().fill(LifeOSTokens.accent)
-                                } else {
-                                    Capsule().fill(LifeOSTokens.accent)
-                                        .matchedGeometryEffect(id: highlightID, in: namespace)
-                                }
-                            }
-                        }
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(3)
-        .background(Color.primary.opacity(0.05), in: Capsule())
-        .accessibilityElement(children: .contain)
     }
 }
 
@@ -891,6 +683,127 @@ struct UsageEmptyState: View {
     }
 }
 
+/// Compact quota summary used above the chart. The quota value is the primary
+/// signal; reset and provenance stay on the same card so the screen does not
+/// need a second hero or a decorative ring to explain the number.
+private struct UsageWindowSummaryRow: View {
+    let window: UsageWindow
+    let state: UsageValueState
+
+    private var remainingFraction: Double? {
+        window.usedPercent.map { min(max(1 - $0, 0), 1) }
+    }
+
+    private var remainingText: String {
+        remainingFraction.map { "\(Int(($0 * 100).rounded()))%" } ?? "—"
+    }
+
+    private var resetText: String {
+        guard let resetAt = window.resetAt else { return "Reset unavailable" }
+        let format: Date.FormatStyle = if let durationMinutes = window.durationMinutes, durationMinutes >= 24 * 60 {
+            .dateTime.weekday(.abbreviated).month(.abbreviated).day().hour().minute()
+        } else {
+            .dateTime.hour().minute()
+        }
+        return "Resets \(resetAt.formatted(format))"
+    }
+
+    private var stateColor: Color {
+        switch state {
+        case .observed:
+            LifeOSTokens.successText
+        case .estimated, .projected:
+            LifeOSTokens.estimate
+        case .demo:
+            LifeOSTokens.warningText
+        case .stale, .unavailable, .error, .loading:
+            LifeOSTokens.tertiaryText
+        }
+    }
+
+    private var valueColor: Color {
+        switch state {
+        case .estimated, .projected:
+            LifeOSTokens.estimate
+        default:
+            LifeOSTokens.primaryText
+        }
+    }
+
+    private var trackColor: Color {
+        switch state {
+        case .estimated, .projected:
+            LifeOSTokens.Series.estimate
+        case .demo, .observed:
+            LifeOSTokens.Series.actual
+        case .stale, .unavailable, .error, .loading:
+            LifeOSTokens.tertiaryText
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: LifeOSTokens.Space.xs) {
+            HStack(alignment: .firstTextBaseline, spacing: LifeOSTokens.Space.xs) {
+                Text(window.label)
+                    .lifeOSTypography(.label, weight: .medium)
+                    .foregroundStyle(LifeOSTokens.primaryText)
+                    .lineLimit(1)
+
+                Spacer(minLength: LifeOSTokens.Space.xs)
+
+                Text(remainingText)
+                    .lifeOSTypography(.inlineMonitoringValue)
+                    .foregroundStyle(valueColor)
+                Text("remaining")
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.secondaryText)
+            }
+
+            HStack(alignment: .center, spacing: LifeOSTokens.Space.xs) {
+                Text("Used")
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                GeometryReader { geometry in
+                    ZStack(alignment: .leading) {
+                        Capsule()
+                            .fill(LifeOSTokens.primaryText.opacity(0.10))
+                        if let remainingFraction {
+                            Capsule()
+                                .fill(trackColor)
+                                .frame(width: geometry.size.width * CGFloat(1 - remainingFraction))
+                        }
+                    }
+                }
+                .frame(height: 4)
+            }
+            .frame(height: 14)
+
+            HStack(alignment: .firstTextBaseline, spacing: LifeOSTokens.Space.xs) {
+                Text(state.label)
+                    .lifeOSTypography(.metadata, weight: .medium)
+                    .foregroundStyle(stateColor)
+                Spacer(minLength: LifeOSTokens.Space.xs)
+                Text(resetText)
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .multilineTextAlignment(.trailing)
+            }
+        }
+        .padding(.horizontal, LifeOSTokens.Space.sm)
+        .padding(.vertical, LifeOSTokens.Space.xs)
+        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 72, alignment: .leading)
+        .background(LifeOSTokens.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(LifeOSTokens.subtleBorder, lineWidth: 1)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(window.label), \(remainingText) remaining, \(state.label), \(resetText)")
+    }
+}
+
 // MARK: - Model mix (02 §4) — kept as a supplementary card, restyled to blue-forward tokens.
 
 struct UsageModelMixCard: View {
@@ -908,20 +821,11 @@ struct UsageModelMixCard: View {
 
 private struct ModelCompositionChart: View {
     let models: [UsageModelBreakdown]
-    @State private var revealed = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private let categoryOpacity = [1.0, 0.78, 0.58, 0.40, 0.24]
 
     private var legendCategories: [(label: String, value: Int)] {
         models.first?.categories ?? []
-    }
-
-    private var datasetID: String {
-        models.map { model in
-            let categories = model.categories.map { "\($0.label):\($0.value)" }.joined(separator: ",")
-            return "\(model.model)|\(categories)"
-        }.joined(separator: ";")
     }
 
     var body: some View {
@@ -967,7 +871,7 @@ private struct ModelCompositionChart: View {
                                 let share = model.totalTokens == 0 ? 0 : Double(category.value) / Double(model.totalTokens)
                                 Capsule()
                                     .fill(sampledColor(at: index))
-                                    .frame(width: revealed ? available * share : 0)
+                                    .frame(width: max(0, available * share))
                                     .accessibilityLabel("\(category.label), \(category.value.formatted(.number.notation(.compactName)))")
                             }
                         }
@@ -985,12 +889,6 @@ private struct ModelCompositionChart: View {
                 }
                 .accessibilityElement(children: .combine)
             }
-        }
-        .task(id: datasetID) {
-            revealed = false
-            guard !models.isEmpty else { return }
-            if reduceMotion { revealed = true }
-            else { withAnimation(LifeOSMotion.chartDraw) { revealed = true } }
         }
     }
 
@@ -1108,7 +1006,7 @@ struct UsageCardHeader: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 9) {
-            LifeOSIcon(icon)
+            LifeOSIcon(icon, context: .card)
                 .foregroundStyle(.secondary)
                 .frame(width: 16, height: 16)
                 .padding(.top, 2)
@@ -1158,12 +1056,4 @@ struct DashedLine: Shape {
         path.addLine(to: CGPoint(x: rect.maxX, y: rect.midY))
         return path
     }
-}
-
-extension LifeOSTokens {
-    /// `secondaryText` token referenced by 02-charts-rings-widgets.md doesn't exist yet in
-    /// DesignTokens.swift (that file is out of this workstream's edit boundary); this is a
-    /// local equivalent using the existing `.secondary` semantic color so the spec's intent
-    /// (label color distinct from value color) is honored without touching Shared/.
-    static var secondaryTextCompat: Color { Color.secondary }
 }

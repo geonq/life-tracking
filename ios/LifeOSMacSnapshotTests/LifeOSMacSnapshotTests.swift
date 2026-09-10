@@ -84,6 +84,156 @@ final class LifeOSMacSnapshotTests: XCTestCase {
         render(LifeOSMacRootView(calendarCoordinator: coordinator, usesVisualFixtures: true, usageCoordinator: UsageCoordinator()), named: "LifeOSMacRootView-overview")
     }
 
+    func testMacNavigationPolicyUsesDetailMotionOnlyForHomeUsage() {
+        let home = LifeOSMacRouteSnapshot(
+            module: .home,
+            route: nil,
+            showingUsage: false,
+            showingDestinationUnavailable: false
+        )
+        let usage = LifeOSMacRouteSnapshot(
+            module: .home,
+            route: .usage,
+            showingUsage: true,
+            showingDestinationUnavailable: false
+        )
+        let finance = LifeOSMacRouteSnapshot(
+            module: .finance,
+            route: .finance,
+            showingUsage: false,
+            showingDestinationUnavailable: false
+        )
+
+        XCTAssertEqual(
+            LifeOSMacNavigationTransitionPolicy.transition(from: home, to: usage),
+            .detail(.forward)
+        )
+        XCTAssertEqual(
+            LifeOSMacNavigationTransitionPolicy.transition(from: usage, to: home),
+            .detail(.backward)
+        )
+        XCTAssertEqual(
+            LifeOSMacNavigationTransitionPolicy.transition(from: home, to: finance),
+            .module
+        )
+        XCTAssertEqual(
+            LifeOSMacNavigationTransitionPolicy.transition(from: finance, to: finance),
+            .none
+        )
+    }
+
+    func testMacNavigationMotionContractKeepsEntryOffsetAndDurationsBounded() {
+        XCTAssertEqual(LifeOSMacNavigationTransition.detail(.forward).duration, 0.18, accuracy: 0.0001)
+        XCTAssertEqual(LifeOSMacNavigationTransition.module.duration, 0.12, accuracy: 0.0001)
+        XCTAssertEqual(LifeOSMacNavigationTransition.detail(.forward).outgoingDuration, 0.12, accuracy: 0.0001)
+        XCTAssertEqual(LifeOSMacNavigationDirection.forward.incomingOffset, 8, accuracy: 0.0001)
+        XCTAssertEqual(LifeOSMacNavigationDirection.backward.incomingOffset, -8, accuracy: 0.0001)
+    }
+
+    func testMacMountedIdentityStaysStableAcrossSameModuleDetailRoutes() {
+        let financeSpend = LifeOSMacRouteSnapshot(
+            module: .finance,
+            route: .financeSpend,
+            showingUsage: false,
+            showingDestinationUnavailable: false
+        )
+        let financeCashFlow = LifeOSMacRouteSnapshot(
+            module: .finance,
+            route: .financeCashFlow,
+            showingUsage: false,
+            showingDestinationUnavailable: false
+        )
+        let home = LifeOSMacRouteSnapshot(
+            module: .home,
+            route: nil,
+            showingUsage: false,
+            showingDestinationUnavailable: false
+        )
+        let usage = LifeOSMacRouteSnapshot(
+            module: .home,
+            route: .usage,
+            showingUsage: true,
+            showingDestinationUnavailable: false
+        )
+
+        XCTAssertEqual(financeSpend.mountedIdentity, financeCashFlow.mountedIdentity)
+        XCTAssertEqual(home.mountedIdentity, usage.mountedIdentity)
+        XCTAssertNotEqual(financeSpend.mountedIdentity, home.mountedIdentity)
+        XCTAssertNotEqual(
+            financeSpend.mountedIdentity,
+            LifeOSMacRouteSnapshot(
+                module: .finance,
+                route: nil,
+                showingUsage: false,
+                showingDestinationUnavailable: true
+            ).mountedIdentity
+        )
+    }
+
+    func testMacNavigationReversalKeepsMotionPolicyAndAvoidsSameModuleReplacement() {
+        let home = LifeOSMacRouteSnapshot(
+            module: .home,
+            route: nil,
+            showingUsage: false,
+            showingDestinationUnavailable: false
+        )
+        let usage = LifeOSMacRouteSnapshot(
+            module: .home,
+            route: .usage,
+            showingUsage: true,
+            showingDestinationUnavailable: false
+        )
+        let financeSpend = LifeOSMacRouteSnapshot(
+            module: .finance,
+            route: .financeSpend,
+            showingUsage: false,
+            showingDestinationUnavailable: false
+        )
+        let financeCashFlow = LifeOSMacRouteSnapshot(
+            module: .finance,
+            route: .financeCashFlow,
+            showingUsage: false,
+            showingDestinationUnavailable: false
+        )
+
+        XCTAssertEqual(
+            LifeOSMacNavigationTransitionPolicy.transition(from: home, to: usage),
+            .detail(.forward)
+        )
+        XCTAssertEqual(
+            LifeOSMacNavigationTransitionPolicy.transition(from: usage, to: home),
+            .detail(.backward)
+        )
+        XCTAssertEqual(
+            LifeOSMacNavigationTransitionPolicy.transition(from: financeSpend, to: financeCashFlow),
+            .none
+        )
+        XCTAssertEqual(
+            LifeOSMacNavigationTransitionPolicy.transition(from: financeCashFlow, to: financeSpend),
+            .none
+        )
+    }
+
+    func testMacRouteLifecycleUsesTheMountedCurrentLayerOnly() throws {
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let appSourceURL = testsDirectory
+            .deletingLastPathComponent()
+            .appendingPathComponent("LifeOSMac/LifeOSMacApp.swift")
+        let source = try String(contentsOf: appSourceURL, encoding: .utf8)
+
+        XCTAssertTrue(source.contains(".id(currentRouteSnapshot.mountedIdentity)"))
+        XCTAssertTrue(source.contains(".transition(currentRouteTransition)"))
+        XCTAssertTrue(source.contains("detail(for: currentRouteSnapshot, interactive: true)"))
+        XCTAssertTrue(source.contains("guard !reduceMotion, navigationTransition != .none else { return }"))
+        XCTAssertTrue(source.contains("generation == navigationGeneration"))
+        XCTAssertTrue(source.contains("outgoingTransitionProgress"))
+        XCTAssertTrue(source.contains("transition.outgoingAnimation"))
+        XCTAssertTrue(source.contains("Keep both Home detail surfaces mounted"))
+        XCTAssertFalse(source.contains("outgoingRouteLayer"))
+        XCTAssertFalse(source.contains("detail(for: outgoingRouteLayer"))
+        XCTAssertFalse(source.contains("currentRouteSnapshot.identity"))
+    }
+
     func testOverviewResponsiveLightDarkAndUnavailableEvidence() {
         for width in [760.0, 800.0, 900.0, 1_200.0, 1_512.0] {
             for scheme in [ColorScheme.light, ColorScheme.dark] {
@@ -118,7 +268,7 @@ final class LifeOSMacSnapshotTests: XCTestCase {
         let expectedContentWidths: [(outer: CGFloat, content: CGFloat, columns: Int)] = [
             (800, 752, 2),
             (900, 852, 2),
-            (1_200, 1_120, 2)
+            (1_200, 1_040, 2)
         ]
 
         for expected in expectedContentWidths {
@@ -140,7 +290,7 @@ final class LifeOSMacSnapshotTests: XCTestCase {
         // coupling the test to a particular sidebar implementation.
         XCTAssertEqual(OverviewLayoutContract.columnCount(for: 719.99), 1)
         XCTAssertEqual(OverviewLayoutContract.columnCount(for: 720), 2)
-        XCTAssertEqual(OverviewLayoutContract.maxContentWidth, 1_120)
+        XCTAssertEqual(OverviewLayoutContract.maxContentWidth, 1_040)
     }
 
     /// RF-20: the Finance card's Wealth row shows the real observed wealth

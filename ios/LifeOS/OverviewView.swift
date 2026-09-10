@@ -16,7 +16,6 @@ struct OverviewView: View {
     private let openDestination: ((LifeOSDeepLink) -> Void)?
     @Binding private var showingUsage: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Namespace private var cardNamespace
     @State private var selectedDetail: OverviewDetail?
 
     private enum OverviewDetail: Hashable {
@@ -80,20 +79,14 @@ struct OverviewView: View {
             .navigationDestination(item: $selectedDetail) { destination in
                 switch destination {
                 case .clipper:
-                    zoomTransitioned(
-                        ClipperAnalyticsView(
-                            section: clipperSection,
-                            snapshot: snapshot.clipperSnapshot,
-                            refreshAction: clipperRefreshAction,
-                            clipperState: clipperState
-                        ),
-                        sourceID: OverviewSectionKind.clipper.rawValue
+                    ClipperAnalyticsView(
+                        section: clipperSection,
+                        snapshot: snapshot.clipperSnapshot,
+                        refreshAction: clipperRefreshAction,
+                        clipperState: clipperState
                     )
                 case .financeWealth:
-                    zoomTransitioned(
-                        OverviewFinanceWealthDetail(financeSummary: financeSummary),
-                        sourceID: "finance-wealth"
-                    )
+                    OverviewFinanceWealthDetail(financeSummary: financeSummary)
                 }
             }
         }
@@ -101,23 +94,23 @@ struct OverviewView: View {
 
     private var responsiveHorizontalInset: CGFloat {
 #if os(macOS)
-        LifeOSTokens.overviewContentInset
+        LifeOSTokens.pageGutter
 #else
-        18
+        LifeOSTokens.pageGutter
 #endif
     }
 
     private var headerTopSpacing: CGFloat {
 #if os(macOS)
-        28
+        20
 #else
-        14
+        12
 #endif
     }
 
     private var headerBottomSpacing: CGFloat {
 #if os(macOS)
-        24
+        20
 #else
         16
 #endif
@@ -125,7 +118,7 @@ struct OverviewView: View {
 
     private var contentBottomPadding: CGFloat {
 #if os(macOS)
-        40
+        32
 #else
         24
 #endif
@@ -251,12 +244,12 @@ struct OverviewView: View {
     private var noSourceStatusBlock: some View {
         LifeOSCard(
             level: .surface,
-            cornerRadius: LifeOSTokens.Radius.card,
+            cornerRadius: LifeOSTokens.Radius.widget,
             padding: LifeOSTokens.Space.md
         ) {
             VStack(alignment: .leading, spacing: LifeOSTokens.Space.sm) {
                 HStack(alignment: .top, spacing: LifeOSTokens.Space.sm) {
-                    LifeOSIcon(.settings)
+                    LifeOSIcon(.settings, context: .card)
                         .foregroundStyle(LifeOSTokens.accent)
                         .frame(width: 24, height: 24)
 
@@ -289,7 +282,7 @@ struct OverviewView: View {
     private var noSourceModuleList: some View {
         LifeOSCard(
             level: .surface,
-            cornerRadius: LifeOSTokens.Radius.card,
+            cornerRadius: LifeOSTokens.Radius.widget,
             padding: 0
         ) {
             VStack(spacing: 0) {
@@ -328,7 +321,7 @@ struct OverviewView: View {
         showsChevron: Bool
     ) -> some View {
         HStack(spacing: LifeOSTokens.Space.sm) {
-            LifeOSIcon(noSourceModuleIcon(kind))
+            LifeOSIcon(noSourceModuleIcon(kind), context: .card)
                 .foregroundStyle(LifeOSTokens.secondaryText)
                 .frame(width: 24, height: 24)
 
@@ -346,7 +339,7 @@ struct OverviewView: View {
             Spacer(minLength: LifeOSTokens.Space.xs)
 
             if showsChevron {
-                LifeOSIcon(.chevronRight)
+                LifeOSIcon(.chevronRight, context: .disclosure)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                     .frame(width: 16, height: 16)
             }
@@ -369,15 +362,13 @@ struct OverviewView: View {
     private func openNoSourceModule(_ kind: OverviewSectionKind) {
         switch kind {
         case .llm:
-            showingUsage = true
-        case .clipper:
-            if reduceMotion {
-                selectedDetail = .clipper
+            if let openDestination {
+                openDestination(.usage)
             } else {
-                withAnimation(LifeOSMotion.heroMorph) {
-                    selectedDetail = .clipper
-                }
+                showingUsage = true
             }
+        case .clipper:
+            selectedDetail = .clipper
         case .health:
             openDestination?(.fitness)
         case .finance:
@@ -481,68 +472,82 @@ struct OverviewView: View {
     }
 
     private var header: some View {
-#if os(macOS)
-        VStack(alignment: .leading, spacing: 5) {
-            Text("Life OS")
-                .lifeOSTypography(.pageTitle, weight: .bold)
-                .foregroundStyle(.primary)
-
-            HStack(spacing: 8) {
+        HStack(alignment: .center, spacing: LifeOSTokens.Space.md) {
+            VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
+                Text("Home")
+                    .lifeOSTypography(.sectionTitle, weight: .semibold)
+                    .foregroundStyle(LifeOSTokens.primaryText)
                 Text(overviewDateLabel)
-                    .lifeOSTypography(.body)
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.secondaryText)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: LifeOSTokens.Space.sm)
+
+            if shouldShowStatusBadge {
                 statusBadge
             }
-        }
-        .accessibilityElement(children: .combine)
-#else
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Text("Life OS")
-                    .lifeOSTypography(.pageTitle, weight: .bold)
-                    .foregroundStyle(.primary)
-                Spacer(minLength: 8)
+            if refreshAction != nil {
+                LifeOSIconButton(
+                    icon: .refresh,
+                    accessibilityLabel: "Refresh Home",
+                    size: 32,
+                    tint: LifeOSTokens.secondaryText
+                ) {
+                    Task { await refreshAction?() }
+                }
             }
-            Text(overviewDateLabel)
-                .lifeOSTypography(.body)
-                .foregroundStyle(LifeOSTokens.secondaryText)
-                .lineLimit(2)
-            statusBadge
         }
-        .accessibilityElement(children: .combine)
-#endif
+        .frame(minHeight: 44, alignment: .center)
+        .accessibilityElement(children: .contain)
     }
 
     private var overviewDateLabel: String {
         Date.now.formatted(date: .complete, time: .omitted)
     }
 
+    private var shouldShowStatusBadge: Bool {
+        snapshotStatusLabel != "CONNECTED DATA"
+    }
+
     private var statusBadge: some View {
-        // §4.2 dot + overline — no tinted capsule. Color is a signal:
-        // warning for demo/stale/partial, tertiary when unavailable,
-        // success only when data is genuinely connected.
-        let isDemo = snapshotStatusLabel.hasPrefix("DEMO")
-        let isStale = snapshotStatusLabel.hasPrefix("STALE")
-        let needsReview = snapshotStatusLabel.hasPrefix("PARTIAL")
-        let isUpdating = snapshotStatusLabel == "UPDATING DATA"
-        let unavailable = snapshotStatusLabel == "DATA UNAVAILABLE"
+        let status = snapshotStatusLabel
+        let isDemo = status.hasPrefix("DEMO")
+        let isStale = status.hasPrefix("STALE")
+        let isPartial = status.hasPrefix("PARTIAL")
+        let isUpdating = status == "UPDATING DATA"
         let color = isUpdating
             ? LifeOSTokens.info
-            : (isDemo || isStale || needsReview
-            ? LifeOSTokens.warning
-            : (unavailable ? LifeOSTokens.tertiaryText : LifeOSTokens.success))
-        return HStack(spacing: 6) {
+            : (isDemo || isStale || isPartial ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)
+
+        return HStack(spacing: LifeOSTokens.Space.xs) {
             Circle()
                 .fill(color)
                 .frame(width: 6, height: 6)
-            Text(snapshotStatusLabel)
-                .lifeOSTypography(.label)
-                .tracking(0.8)
-                .textCase(.uppercase)
+            Text(homeStatusLabel)
+                .lifeOSTypography(.metadata, weight: .medium)
                 .foregroundStyle(color)
                 .lineLimit(1)
         }
         .accessibilityElement(children: .combine)
+    }
+
+    private var homeStatusLabel: String {
+        switch snapshotStatusLabel {
+        case let value where value.hasPrefix("DEMO"):
+            "Demo · not live"
+        case let value where value.hasPrefix("STALE"):
+            "Stale · refresh required"
+        case let value where value.hasPrefix("PARTIAL"):
+            "Partial · review source"
+        case "UPDATING DATA":
+            "Updating"
+        case "DATA UNAVAILABLE":
+            "Not connected"
+        default:
+            "Connected"
+        }
     }
 
     @ViewBuilder
@@ -551,10 +556,7 @@ struct OverviewView: View {
         case .llm:
             if openDestination != nil {
                 Button {
-                    // Usage is a top-level iOS route. Mutating the binding
-                    // directly keeps the action deterministic on device;
-                    // route-level animation is owned by LifeOSApp.
-                    showingUsage = true
+                    openDestination?(.usage)
                 } label: {
                     OverviewMetricCard(
                         section: section,
@@ -584,25 +586,16 @@ struct OverviewView: View {
             }
         case .clipper:
             Button {
-                if reduceMotion {
-                    selectedDetail = .clipper
-                } else {
-                    withAnimation(LifeOSMotion.heroMorph) {
-                        selectedDetail = .clipper
-                    }
-                }
+                selectedDetail = .clipper
             } label: {
-                zoomSource(
-                    OverviewMetricCard(
-                        section: section,
-                        usageSnapshots: usageSnapshots,
-                        clipperState: clipperState,
-                        clipperSnapshot: snapshot.clipperSnapshot,
-                        fitnessSnapshot: fitnessSnapshot,
-                        financeSummary: financeSummary,
-                        financeState: financeState
-                    ),
-                    id: section.kind.rawValue
+                OverviewMetricCard(
+                    section: section,
+                    usageSnapshots: usageSnapshots,
+                    clipperState: clipperState,
+                    clipperSnapshot: snapshot.clipperSnapshot,
+                    fitnessSnapshot: fitnessSnapshot,
+                    financeSummary: financeSummary,
+                    financeState: financeState
                 )
             }
             .buttonStyle(.plain)
@@ -669,16 +662,10 @@ struct OverviewView: View {
     @ViewBuilder
     private var financeWealthLink: some View {
         Button {
-            if reduceMotion {
-                selectedDetail = .financeWealth
-            } else {
-                withAnimation(LifeOSMotion.heroMorph) {
-                    selectedDetail = .financeWealth
-                }
-            }
+            selectedDetail = .financeWealth
         } label: {
             HStack(spacing: 8) {
-                LifeOSIcon(.investments)
+                LifeOSIcon(.investments, context: .card)
                     .foregroundStyle(LifeOSTokens.Module.finance)
                     .frame(width: 14, height: 14)
                 Text("Wealth")
@@ -694,7 +681,7 @@ struct OverviewView: View {
                         .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
-                LifeOSIcon(.chevronRight)
+                LifeOSIcon(.chevronRight, context: .disclosure)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
                     .frame(width: 10, height: 10)
             }
@@ -703,61 +690,23 @@ struct OverviewView: View {
             .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
         }
         .buttonStyle(.plain)
-        .financeWealthHeroSource(namespace: reduceMotion ? nil : cardNamespace, reduceMotion: reduceMotion)
         .accessibilityIdentifier("overview-finance-wealth-link")
         .accessibilityLabel("Wealth")
         .accessibilityValue(financeSummary?.wealth?.observedValueCents.map { OverviewCurrencyFormatter.eur(cents: $0) } ?? "Unavailable")
         .accessibilityHint("Opens the Finance wealth surface")
     }
 
-    /// Tags the clipper card as the source of an iOS 18 zoom navigation transition.
-    /// `matchedGeometryEffect` cannot animate across a `navigationDestination` boundary, so the
-    /// hero-morph into `ClipperAnalyticsView` needs the dedicated `matchedTransitionSource` API
-    /// instead. No-op on iOS 17 (falls back to a plain push) and on macOS, where
-    /// `NavigationTransition.zoom` is unavailable entirely.
-    @ViewBuilder
-    private func zoomSource<Content: View>(_ content: Content, id: String) -> some View {
-#if os(iOS)
-        if reduceMotion {
-            content
-        } else if #available(iOS 18.0, *) {
-            content.matchedTransitionSource(id: id, in: cardNamespace)
-        } else {
-            content
-        }
-#else
-        content
-#endif
-    }
-
-    /// Wraps a navigationDestination's content with the matching iOS 18 zoom transition. No-op
-    /// on iOS 17, where the destination keeps today's plain push behavior, and on macOS, where
-    /// `NavigationTransition.zoom` is unavailable entirely.
-    @ViewBuilder
-    private func zoomTransitioned<Content: View>(_ content: Content, sourceID: String) -> some View {
-#if os(iOS)
-        if reduceMotion {
-            content
-        } else if #available(iOS 18.0, *) {
-            content.navigationTransition(.zoom(sourceID: sourceID, in: cardNamespace))
-        } else {
-            content
-        }
-#else
-        content
-#endif
-    }
 }
 
 /// The Home dashboard's measured-width contract. The view receives the
 /// already-guttered width from `LifeOSResponsiveContentContainer`, so a
 /// sidebar or split-detail proposal naturally participates in the decision.
 enum OverviewLayoutContract {
-    static let maxContentWidth: CGFloat = 1120
+    static let maxContentWidth: CGFloat = 1040
     static let twoColumnBreakpoint: CGFloat = 720
-    static let columnMinimumWidth: CGFloat = 320
+    static let columnMinimumWidth: CGFloat = 300
     static let threeColumnBreakpoint: CGFloat = 960
-    static let threeColumnMinimumWidth: CGFloat = 288
+    static let threeColumnMinimumWidth: CGFloat = 300
     static let columnSpacing: CGFloat = LifeOSTokens.overviewCardGap + 4
 
     static func measuredContentWidth(availableWidth: CGFloat) -> CGFloat {
@@ -872,27 +821,6 @@ private struct OverviewSupportingLayout: Layout {
                 proposal: .init(width: columnWidth, height: size.height)
             )
         }
-    }
-}
-
-/// Tags the Finance card's Wealth row as the zoom source for
-/// `OverviewDetail.financeWealth`, mirroring `OverviewView.zoomSource` but
-/// callable from `OverviewMetricCard`, a different type in this file that
-/// can't reach `OverviewView`'s private members.
-private extension View {
-    @ViewBuilder
-    func financeWealthHeroSource(namespace: Namespace.ID?, reduceMotion: Bool) -> some View {
-#if os(iOS)
-        if reduceMotion || namespace == nil {
-            self
-        } else if #available(iOS 18.0, *), let namespace {
-            self.matchedTransitionSource(id: "finance-wealth", in: namespace)
-        } else {
-            self
-        }
-#else
-        self
-#endif
     }
 }
 
@@ -1057,15 +985,6 @@ private struct OverviewMetricCard: View {
         }
     }
 
-    private var description: String {
-        switch section.kind {
-        case .llm: "Limits and activity across connected models"
-        case .clipper: "Reach, audience and revenue across accounts"
-        case .health: "Recovery, sleep and daily signals"
-        case .finance: "Cash flow, spending and savings"
-        }
-    }
-
     private var sourceStatus: String {
         if section.kind == .health {
             if let integrityStatus = OverviewHomeStatusPolicy.healthIntegrityStatus(
@@ -1135,16 +1054,6 @@ private struct OverviewMetricCard: View {
         return LifeOSTokens.tertiaryText
     }
 
-    /// True only for the plain "demo fixture" case, never for a stale/partial/not-connected
-    /// status. The top-level header badge already states DEMO FIXTURES once; repeating the
-    /// full yellow "Demo fixture · not live" line on every single card is noise, so those
-    /// cards collapse to a small unobtrusive marker instead. Any other status (stale, partial,
-    /// not connected, permission needed) stays as full text — that's load-bearing per-card
-    /// information, not repetition.
-    private var isPlainDemoStatus: Bool {
-        sourceStatus == "Demo fixture · not live"
-    }
-
     private var healthIntegrityStatusPresent: Bool {
         OverviewHomeStatusPolicy.healthIntegrityStatus(
             source: fitnessSnapshot.source,
@@ -1169,66 +1078,34 @@ private struct OverviewMetricCard: View {
         }
     }
 
-    private var sectionAccent: Color {
-        switch section.kind {
-        case .llm: LifeOSTokens.Module.usage
-        case .clipper: LifeOSTokens.Module.business
-        case .health: LifeOSTokens.Module.fitness
-        case .finance: LifeOSTokens.Module.finance
-        }
-    }
-
     var body: some View {
-        VStack(alignment: .leading, spacing: featured ? 16 : 14) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
+        VStack(alignment: .leading, spacing: LifeOSTokens.Space.md) {
+            HStack(alignment: .center, spacing: LifeOSTokens.Space.sm) {
                 LifeOSIcon(sectionIcon)
-                    .foregroundStyle(sectionAccent)
-                    .frame(width: 18, height: 18)
-                    .alignmentGuide(.firstTextBaseline) { dimensions in
-                        dimensions[.bottom]
-                    }
+                    .foregroundStyle(LifeOSTokens.secondaryText)
+                    .frame(width: 20, height: 20)
 
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
                     Text(title)
-                        .lifeOSTypography(.cardTitle)
-                .tracking(-0.1)
-                        .foregroundStyle(.primary)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text(description)
-                        .lifeOSTypography(.body)
-                        .foregroundStyle(LifeOSTokens.secondaryText)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
+                        .lifeOSTypography(.label, weight: .semibold)
+                        .foregroundStyle(LifeOSTokens.primaryText)
                 }
-                Spacer(minLength: 8)
-                if isPlainDemoStatus {
-                    Circle()
-                        .fill(LifeOSTokens.warning)
-                        .frame(width: 6, height: 6)
-                        .accessibilityHidden(true)
-                }
-                LifeOSIcon(.chevronRight)
+                Spacer(minLength: LifeOSTokens.Space.sm)
+                LifeOSIcon(.chevronRight, context: .disclosure)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
-                    .frame(width: 12, height: 12)
-                    .alignmentGuide(.firstTextBaseline) { dimensions in
-                        dimensions[.bottom]
-                    }
+                    .frame(width: 16, height: 16)
             }
 
-            if !isPlainDemoStatus {
-                // §4.2 status indicator: semantic dot + axis text. Amber only
-                // when the source is genuinely stale/partial/demo.
+            if shouldShowSourceStatus {
                 HStack(spacing: 6) {
                     Circle()
                         .fill(sourceStatusColor)
                         .frame(width: 6, height: 6)
                     Text(sourceStatus)
                         .lifeOSTypography(.metadata)
-                        .tracking(0.2)
                         .foregroundStyle(sourceStatusColor)
-                        .lineLimit(section.kind == .health && healthIntegrityStatusPresent ? 2 : 1)
-                        .minimumScaleFactor(0.78)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .accessibilityElement(children: .combine)
             }
@@ -1239,13 +1116,13 @@ private struct OverviewMetricCard: View {
                 supportingBody
             }
         }
-        .padding(.horizontal, featured ? 18 : 18)
-        .padding(.vertical, featured ? 18 : 18)
+        .padding(.horizontal, LifeOSTokens.Space.md)
+        .padding(.vertical, featured ? LifeOSTokens.Space.md : 14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .flatCard(featured: featured)
+        .flatCard(cornerRadius: LifeOSTokens.Radius.widget, featured: featured)
         // §5.1 hover (macOS): border brightens to strongBorder; no offset lift.
         .overlay(cardShape.stroke(hovering ? LifeOSTokens.strongBorder : Color.clear, lineWidth: 1))
-        .animation(reduceMotion ? nil : LifeOSMotion.springSnappy, value: hovering)
+        .animation(reduceMotion ? nil : LifeOSMotion.hover, value: hovering)
 #if os(macOS)
         .onHover { hovering = $0 }
 #endif
@@ -1254,58 +1131,71 @@ private struct OverviewMetricCard: View {
     }
 
     private var cardShape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: LifeOSTokens.overviewCardCorner, style: .continuous)
+        RoundedRectangle(cornerRadius: LifeOSTokens.Radius.widget, style: .continuous)
+    }
+
+    private var shouldShowSourceStatus: Bool {
+        if section.provenance.quality == .demo { return false }
+        if section.provenance.quality != .observed { return true }
+        if section.provenance.connector != .healthy || section.state != .complete { return true }
+        if section.kind == .health && healthIntegrityStatusPresent { return true }
+        if section.kind == .finance && financeState == .stale { return true }
+        return section.kind == .clipper && clipperState == .stale
     }
 
     @ViewBuilder
     private var usageBody: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .lastTextBaseline, spacing: 10) {
+        VStack(alignment: .leading, spacing: LifeOSTokens.Space.sm) {
+            HStack(alignment: .firstTextBaseline, spacing: LifeOSTokens.Space.xs) {
                 if let remaining = leadUsageSnapshot?.smallestObservedWindow?.usedPercent.map({ 1 - $0 }) {
                     Text("\(Int((remaining * 100).rounded()))")
-                        .lifeOSTypography(.metric)
-                        .tracking(-0.3)
+                        .lifeOSTypography(.metricCompact)
                         .foregroundStyle(.primary)
                         .numericTransition()
                     Text("% remaining")
-                        .lifeOSTypography(.body)
+                        .lifeOSTypography(.metadata, weight: .medium)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
-                        .padding(.bottom, 6)
                 } else {
                     Text("—")
-                        .lifeOSTypography(.metric)
-                        .tracking(-0.3)
+                        .lifeOSTypography(.metricCompact)
                         .foregroundStyle(.primary)
                 }
-                Spacer(minLength: 4)
-                VStack(alignment: .trailing, spacing: 2) {
-                    Text(leadUsageSnapshot?.provider.displayName ?? "Usage")
-                        .lifeOSTypography(.body, weight: .semibold)
-                        .foregroundStyle(.primary)
-                    Text(usageTrendLabel)
-                        .lifeOSTypography(.metadata)
-                        .foregroundStyle(LifeOSTokens.secondaryText)
-                }
+                Spacer(minLength: LifeOSTokens.Space.sm)
+                Text(leadUsageSnapshot.map { "\($0.provider.displayName) · \($0.smallestObservedWindow?.label ?? "Window")" } ?? "No connected provider")
+                    .lifeOSTypography(.metadata, weight: .medium)
+                    .foregroundStyle(LifeOSTokens.secondaryText)
+                    .multilineTextAlignment(.trailing)
+                    .lineLimit(2)
             }
 
             if usageTrendPoints.count >= 2 {
                 OverviewSparkline(points: usageTrendPoints, tint: LifeOSTokens.Module.usage)
-                    .frame(height: 44)
+                    .frame(height: 36)
                     // This chart is a summary inside a tappable card. Its
                     // detail view owns chart scrubbing; letting this overlay
                     // hit-test would swallow the card's navigation tap.
                     .allowsHitTesting(false)
-            } else {
-                OverviewChartUnavailable(detail: usageChartDetail)
-                    .frame(minHeight: 44)
             }
 
-            HStack(spacing: 8) {
-                ForEach(Provider.allCases, id: \.self) { provider in
-                    UsageMiniRing(provider: provider, snapshot: usageSnapshots.first { $0.provider == provider })
-                }
-            }
+            Text(usageSummaryMetadata)
+                .lifeOSTypography(.metadata)
+                .foregroundStyle(LifeOSTokens.tertiaryText)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    private var usageSummaryMetadata: String {
+        guard let window = leadUsageSnapshot?.smallestObservedWindow else {
+            return "No validated usage window is connected."
+        }
+        let reset = window.resetAt.map {
+            "Resets \($0.formatted(.dateTime.month(.abbreviated).day().hour().minute()))"
+        }
+        let observed = leadUsageSnapshot.map {
+            "Updated \($0.provenance.observedAt.formatted(.dateTime.hour().minute()))"
+        }
+        return [reset, observed].compactMap { $0 }.joined(separator: " · ")
     }
 
     @ViewBuilder
@@ -1385,16 +1275,6 @@ private struct OverviewMetricCard: View {
         guard let analytics = leadUsageAnalytics,
               OverviewUsageTrendPresentation.isRenderable(for: analytics.provenance.quality) else { return [] }
         return OverviewChartProjection.usageRemaining(from: analytics, window: leadUsageSnapshot?.smallestObservedWindow)
-    }
-
-    private var usageTrendLabel: String {
-        OverviewUsageTrendPresentation.label(for: leadUsageAnalytics?.provenance.quality)
-    }
-
-    private var usageChartDetail: String {
-        guard leadUsageSnapshot != nil else { return "No provider observations are connected." }
-        guard leadUsageAnalytics != nil else { return "Usage history is unavailable for this provider window." }
-        return "Not enough observed history for a trend."
     }
 
     private var clipperTrend: OverviewClipperTrend? {
@@ -1485,17 +1365,10 @@ private struct OverviewDisplayMetric: Identifiable {
 private struct OverviewSparkline: View {
     let points: [OverviewChartPoint]
     let tint: Color
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var selectedDate: Date?
 
     private var orderedPoints: [OverviewChartPoint] {
         points.sorted { $0.date < $1.date }
-    }
-
-    private var chartDatasetID: String {
-        orderedPoints
-            .map { "\($0.date.timeIntervalSinceReferenceDate):\($0.value)" }
-            .joined(separator: "|")
     }
 
     private var selectedPoint: OverviewChartPoint? {
@@ -1631,13 +1504,6 @@ private struct OverviewSparkline: View {
                 }
             }
         }
-        .chartPlotStyle { plot in
-            LifeOSChartDrawReveal(content: plot.background(Color.clear))
-        }
-        .chartDrawOn(id: chartDatasetID)
-        .transaction { transaction in
-            if reduceMotion { transaction.animation = nil }
-        }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Trend")
         .accessibilityValue(trendAccessibilityValue)
@@ -1656,11 +1522,10 @@ private struct OverviewSparkline: View {
             }
             selectedDate = orderedPoints[nextIndex].date
         }
-        .task(id: chartDatasetID) {
-            if let selectedDate, !orderedPoints.contains(where: { $0.date == selectedDate }) {
+        .onChange(of: orderedPoints) { _, newPoints in
+            if let selectedDate, !newPoints.contains(where: { $0.date == selectedDate }) {
                 self.selectedDate = nil
             }
-            if reduceMotion { return }
         }
     }
 
@@ -1691,36 +1556,6 @@ private struct OverviewChartUnavailable: View {
     }
 }
 
-private struct UsageMiniRing: View {
-    let provider: Provider
-    let snapshot: ProviderSnapshot?
-    @ScaledMetric(relativeTo: .caption2) private var numberSize: CGFloat = 10
-
-    private var remaining: Double? {
-        snapshot?.smallestObservedWindow?.usedPercent.map { 1 - $0 }
-    }
-
-    var body: some View {
-        VStack(spacing: 3) {
-            // §5.1 mini rings: plain accent arc, no halo, hairline track.
-            GlowRing(progress: remaining ?? 0, diameter: 38, lineWidth: 3) {
-                Text(remaining.map { "\(Int(($0 * 100).rounded()))" } ?? "—")
-                    .font(.system(size: numberSize, weight: .bold, design: .default))
-                    .monospacedDigit()
-            }
-            Text(provider.displayName)
-                .lifeOSTypography(.metadata)
-                .foregroundStyle(LifeOSTokens.tertiaryText)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
-        }
-        .frame(maxWidth: .infinity)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(provider.displayName)
-        .accessibilityValue(remaining.map { "\(Int(($0 * 100).rounded())) percent remaining" } ?? "Not connected")
-    }
-}
-
 private struct ValueMetric: View {
     let value: String?
     let label: String
@@ -1728,16 +1563,15 @@ private struct ValueMetric: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(value ?? "—")
-                .lifeOSTypography(.body, weight: .semibold)
+                .lifeOSTypography(.button, weight: .semibold)
                 .monospacedDigit()
                 .foregroundStyle(.primary)
                 .lineLimit(1)
-                .minimumScaleFactor(0.72)
             Text(label)
                 .lifeOSTypography(.metadata)
-                .tracking(0.2)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
-                .lineLimit(1)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)

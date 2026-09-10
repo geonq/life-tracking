@@ -321,7 +321,7 @@ public struct SpringPillSelector<T: Hashable, Label: View>: View {
     }
 
     public var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: LifeOSTokens.Space.xxs) {
             ForEach(options, id: \.self) { option in
                 let isSelected = option == selection
                 Button {
@@ -341,7 +341,7 @@ public struct SpringPillSelector<T: Hashable, Label: View>: View {
                             transaction.animation = nil
                         }
                         .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
+                        .padding(.vertical, LifeOSTokens.Space.xxs)
                         .frame(minWidth: LifeOSTokens.Control.minimumTarget)
                         .frame(minHeight: LifeOSTokens.Control.minimumTarget)
                         .background {

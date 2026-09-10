@@ -11,6 +11,104 @@ import UIKit
 import AppKit
 #endif
 
+/// Chooses the semantic wall-time position for a newly mounted timeline.
+/// Explicit navigation wins once, then the scene-owned anchor restores the
+/// user's previous place. The fallback is only used for a genuinely new
+/// presentation and never stores a pixel offset.
+enum CalendarTimelineRestorationPolicy {
+    static let observedOffsetTolerance = 0.5
+    static let nativeOffsetSettledTolerance = 1.0
+
+    static func anchor(
+        request: CalendarTimelineScrollRequest?,
+        retained: CalendarTimelineScrollAnchor?,
+        didRestore: Bool,
+        now: Date,
+        calendar: Calendar
+    ) -> CalendarTimelineScrollAnchor {
+        if let request {
+            return request.anchor
+        }
+        if didRestore, let retained {
+            return retained
+        }
+        if let retained {
+            return retained
+        }
+        return CalendarTimelineScrollAnchor.todayMinusTwoHours(now: now, calendar: calendar)
+    }
+
+    /// Converts a retained wall-clock position into the continuous native
+    /// scroll coordinate. The hour anchor remains a coarse ScrollViewReader
+    /// fallback; this is the value that must be applied once UIKit has laid
+    /// out the real scroll view.
+    static func nativeOffset(
+        for anchor: CalendarTimelineScrollAnchor,
+        hourHeight: Double
+    ) -> Double? {
+        guard hourHeight.isFinite, hourHeight > 0 else { return nil }
+        let offset = anchor.offset(hourHeight: hourHeight)
+        return offset.isFinite ? offset : nil
+    }
+
+    /// Restoration and zoom transactions own the measured offset until their
+    /// native target has settled. This prevents the transient coarse hour
+    /// position from replacing a retained minute-precise anchor.
+    static func shouldRecordObservedOffset(
+        observedOffset: Double,
+        retainedAnchor: CalendarTimelineScrollAnchor?,
+        hourHeight: Double,
+        isRestoring: Bool,
+        isZooming: Bool,
+        tolerance: Double = observedOffsetTolerance
+    ) -> Bool {
+        guard !isRestoring,
+              !isZooming,
+              observedOffset.isFinite else { return false }
+        guard let retainedAnchor else {
+            return hourHeight.isFinite && hourHeight > 0
+        }
+        guard let retainedOffset = nativeOffset(for: retainedAnchor, hourHeight: hourHeight) else {
+            return false
+        }
+        return abs(observedOffset - retainedOffset) > max(0, tolerance)
+    }
+
+    static func isNativeOffsetSettled(
+        observedOffset: Double,
+        targetOffset: Double,
+        tolerance: Double = nativeOffsetSettledTolerance
+    ) -> Bool {
+        guard observedOffset.isFinite,
+              targetOffset.isFinite else { return false }
+        return abs(observedOffset - targetOffset) <= max(0, tolerance)
+    }
+
+    /// Returns the semantic offset UIKit can actually represent after its
+    /// content-inset bounds clamp the requested native offset. Keeping the
+    /// conversion here means restoration settles against the rendered native
+    /// position rather than an unattainable late-day request.
+    static func attainableSemanticOffset(
+        requestedOffset: Double,
+        nativeOffsetAdjustment: Double,
+        minimumNativeOffset: Double,
+        maximumNativeOffset: Double
+    ) -> Double? {
+        guard requestedOffset.isFinite,
+              nativeOffsetAdjustment.isFinite,
+              minimumNativeOffset.isFinite,
+              maximumNativeOffset.isFinite else { return nil }
+        let desiredNativeOffset = requestedOffset + nativeOffsetAdjustment
+        guard desiredNativeOffset.isFinite else { return nil }
+        let attainableNativeOffset = min(
+            max(desiredNativeOffset, minimumNativeOffset),
+            max(minimumNativeOffset, maximumNativeOffset)
+        )
+        let attainableSemanticOffset = attainableNativeOffset - nativeOffsetAdjustment
+        return attainableSemanticOffset.isFinite ? attainableSemanticOffset : nil
+    }
+}
+
 /// The SwiftUI coordinate space shared by the macOS timed-grid pointer and
 /// the native AppKit popover source view. Keeping this conversion pure makes
 /// the source frame independent of hosting-view origins and stale state.
@@ -655,9 +753,13 @@ public struct CalendarTimelineView: View {
     /// owns the persisted hour-height state after a zoom completes.
     public let onHourHeightChange: ((CGFloat) -> Void)?
     /// A one-shot programmatic wall-time navigation request. Retained scroll
-    /// state is handled by the timeline and never replays this command.
+    /// state is owned by the containing scene and never replays this command.
     public let scrollRequest: CalendarTimelineScrollRequest?
     public let onScrollRequestConsumed: ((Int) -> Void)?
+    /// Scene-owned semantic position. The timeline writes the latest wall-time
+    /// anchor here so leaving and returning to Calendar does not reset the day.
+    @Binding public var retainedTimelineAnchor: CalendarTimelineScrollAnchor?
+    @Binding public var didRestoreTimelinePosition: Bool
     public let monthNamespace: Namespace.ID?
     public let monthExpanded: Bool
     public let monthSelectedDate: Date?
@@ -671,7 +773,6 @@ public struct CalendarTimelineView: View {
     @State private var macZoomSession: CalendarTimelineZoomSession?
     @State private var pendingMacZoomOffset: CGFloat?
     @State private var macPreviewHourHeight: CGFloat?
-    @State private var macRetainedTimelineAnchor: CalendarTimelineScrollAnchor?
     @State private var macPreviousVerticalScrollElasticity: NSScrollView.Elasticity?
     @GestureState private var macMagnifyGestureActive = false
 #endif
@@ -701,6 +802,8 @@ public struct CalendarTimelineView: View {
                 onHourHeightChange: ((CGFloat) -> Void)? = nil,
                 scrollRequest: CalendarTimelineScrollRequest? = nil,
                 onScrollRequestConsumed: ((Int) -> Void)? = nil,
+                retainedTimelineAnchor: Binding<CalendarTimelineScrollAnchor?> = .constant(nil),
+                didRestoreTimelinePosition: Binding<Bool> = .constant(false),
                 monthNamespace: Namespace.ID? = nil,
                 monthExpanded: Bool = false,
                 monthSelectedDate: Date? = nil,
@@ -723,6 +826,8 @@ public struct CalendarTimelineView: View {
         self.onHourHeightChange = onHourHeightChange
         self.scrollRequest = scrollRequest
         self.onScrollRequestConsumed = onScrollRequestConsumed
+        self._retainedTimelineAnchor = retainedTimelineAnchor
+        self._didRestoreTimelinePosition = didRestoreTimelinePosition
         self.monthNamespace = monthNamespace
         self.monthExpanded = monthExpanded
         self.monthSelectedDate = monthSelectedDate
@@ -750,13 +855,15 @@ public struct CalendarTimelineView: View {
             onCommitDateChange: onCommitDateChange,
             onHourHeightChange: onHourHeightChange,
             scrollRequest: scrollRequest,
-                onScrollRequestConsumed: onScrollRequestConsumed,
-                monthNamespace: monthNamespace,
-                monthExpanded: monthExpanded,
-                monthSelectedDate: monthSelectedDate,
-                reduceMotion: reduceMotion,
-                layoutRevision: layoutRevision,
-                interactionSession: interactionSession
+            onScrollRequestConsumed: onScrollRequestConsumed,
+            retainedTimelineAnchor: $retainedTimelineAnchor,
+            didRestoreTimelinePosition: $didRestoreTimelinePosition,
+            monthNamespace: monthNamespace,
+            monthExpanded: monthExpanded,
+            monthSelectedDate: monthSelectedDate,
+            reduceMotion: reduceMotion,
+            layoutRevision: layoutRevision,
+            interactionSession: interactionSession
         )
 #else
         GeometryReader { viewport in
@@ -891,10 +998,10 @@ public struct CalendarTimelineView: View {
                             guard abs(macTimelineScrollOffset - offset) > 0.5 else { return }
                             macTimelineScrollOffset = offset
                             guard macZoomSession == nil else { return }
-                            macRetainedTimelineAnchor = CalendarTimelineScrollAnchor.from(
+                            storeTimelineAnchor(CalendarTimelineScrollAnchor.from(
                                 scrollOffset: Double(offset),
                                 hourHeight: Double(renderedHourHeight)
-                            )
+                            ))
                         }
                         .onChange(of: hourHeight) { previousHourHeight, updatedHourHeight in
                             if let previewHourHeight = macPreviewHourHeight,
@@ -923,10 +1030,10 @@ public struct CalendarTimelineView: View {
                                 magnification: Double(updatedHourHeight / previousHourHeight),
                                 viewportHeight: Double(timedViewportHeight)
                             )
-                            macRetainedTimelineAnchor = CalendarTimelineScrollAnchor.from(
+                            storeTimelineAnchor(CalendarTimelineScrollAnchor.from(
                                 scrollOffset: densityChange.scrollOffset,
                                 hourHeight: Double(updatedHourHeight)
-                            )
+                            ))
                             applyMacTimelineScrollOffset(
                                 CGFloat(densityChange.scrollOffset),
                                 hourHeight: updatedHourHeight,
@@ -946,7 +1053,7 @@ public struct CalendarTimelineView: View {
                             // position. It must never recenter to the morning.
                             guard macZoomSession == nil,
                                   scrollRequest == nil,
-                                  let retained = macRetainedTimelineAnchor else { return }
+                                  let retained = retainedTimelineAnchor else { return }
                             applyMacTimelineAnchor(
                                 retained,
                                 hourHeight: renderedHourHeight,
@@ -1148,10 +1255,10 @@ public struct CalendarTimelineView: View {
         restoreMacScrollViewState()
         macPreviewHourHeight = CGFloat(result.hourHeight)
         pendingMacZoomOffset = CGFloat(result.scrollOffset)
-        macRetainedTimelineAnchor = CalendarTimelineScrollAnchor.from(
+        storeTimelineAnchor(CalendarTimelineScrollAnchor.from(
             scrollOffset: result.scrollOffset,
             hourHeight: result.hourHeight
-        )
+        ))
         applyMacTimelineScrollOffset(
             CGFloat(result.scrollOffset),
             hourHeight: CGFloat(result.hourHeight),
@@ -1174,10 +1281,10 @@ public struct CalendarTimelineView: View {
         macPreviewHourHeight = nil
         pendingMacZoomOffset = nil
         restoreMacScrollViewState()
-        macRetainedTimelineAnchor = CalendarTimelineScrollAnchor.from(
+        storeTimelineAnchor(CalendarTimelineScrollAnchor.from(
             scrollOffset: restore.scrollOffset,
             hourHeight: restore.hourHeight
-        )
+        ))
         applyMacTimelineScrollOffset(
             CGFloat(restore.scrollOffset),
             hourHeight: CGFloat(restore.hourHeight),
@@ -1214,12 +1321,14 @@ public struct CalendarTimelineView: View {
         hourHeight: CGFloat,
         initial: Bool
     ) {
-        guard initial, macRetainedTimelineAnchor == nil else { return }
-        let anchor = scrollRequest?.anchor ?? CalendarTimelineScrollAnchor.todayMinusTwoHours(
+        guard initial else { return }
+        let anchor = CalendarTimelineRestorationPolicy.anchor(
+            request: scrollRequest,
+            retained: retainedTimelineAnchor,
+            didRestore: didRestoreTimelinePosition,
             now: .now,
             calendar: calendar
         )
-        macRetainedTimelineAnchor = anchor
         applyMacTimelineAnchor(anchor, hourHeight: hourHeight, scrollProxy: scrollProxy)
         if let request = scrollRequest {
             onScrollRequestConsumed?(request.id)
@@ -1231,7 +1340,7 @@ public struct CalendarTimelineView: View {
         hourHeight: CGFloat,
         scrollProxy: ScrollViewProxy
     ) {
-        macRetainedTimelineAnchor = anchor
+        storeTimelineAnchor(anchor)
         let offset = CGFloat(anchor.offset(hourHeight: Double(hourHeight)))
         macTimelineScrollOffset = offset
         applyMacTimelineScrollOffset(offset, hourHeight: hourHeight, scrollProxy: scrollProxy)
@@ -1243,6 +1352,15 @@ public struct CalendarTimelineView: View {
         }
         let documentMinY = scrollView.documentView?.bounds.minY ?? 0
         return max(0, scrollView.contentView.bounds.minY - documentMinY)
+    }
+
+    private func storeTimelineAnchor(_ anchor: CalendarTimelineScrollAnchor) {
+        if retainedTimelineAnchor != anchor {
+            retainedTimelineAnchor = anchor
+        }
+        if !didRestoreTimelinePosition {
+            didRestoreTimelinePosition = true
+        }
     }
 
     private func applyMacTimelineScrollOffset(
@@ -1347,6 +1465,27 @@ private struct CalendarPagerPendingSettle: Equatable {
     let normalizedVelocity: Double
 }
 
+private struct CalendarTimelineColumnContext {
+    let hourHeight: CGFloat
+    let visibleDayStarts: Set<Date>
+    let viewportHeight: CGFloat
+}
+
+private struct CalendarTimelineColumnViewModel: Identifiable {
+    let id: Date
+    let content: AnyView
+}
+
+private struct CalendarTimelineColumns: View {
+    let columns: [CalendarTimelineColumnViewModel]
+
+    var body: some View {
+        ForEach(columns) { column in
+            column.content
+        }
+    }
+}
+
 /// A continuous iPhone day strip, Notion-style. Instead of paging whole
 /// three-day windows, the strip materializes single-day columns around the
 /// anchor (two spare days on each side of the visible window) and slides them
@@ -1374,6 +1513,8 @@ private struct CalendarPagedTimeline: View {
     let onHourHeightChange: ((CGFloat) -> Void)?
     let scrollRequest: CalendarTimelineScrollRequest?
     let onScrollRequestConsumed: ((Int) -> Void)?
+    @Binding private var retainedTimelineAnchor: CalendarTimelineScrollAnchor?
+    @Binding private var didRestoreTimelinePosition: Bool
     let monthNamespace: Namespace.ID?
     let monthExpanded: Bool
     let monthSelectedDate: Date?
@@ -1400,12 +1541,7 @@ private struct CalendarPagedTimeline: View {
     /// pixels instead of jumping.
     @State private var liveStripDragOffset: CGFloat = 0
     @State private var fingerVelocity = CalendarPagerFingerVelocity()
-    /// One-time vertical positioning. Re-running the auto-scroll on every
-    /// settled swipe yanked the timeline back to the morning hours and broke
-    /// the "the next day was already there" illusion vertically.
-    @State private var didInitialVerticalScroll = false
     @State private var verticalScrollOffset: CGFloat = 0
-    @State private var retainedTimelineAnchor: CalendarTimelineScrollAnchor?
 #if os(iOS)
     /// iPhone density changes are transactional. The session owns the
     /// captured pre-pinch scale; the preview is rendered locally and the page
@@ -1428,6 +1564,8 @@ private struct CalendarPagedTimeline: View {
          onPreviewDateChange: ((Date) -> Void)?, onCommitDateChange: ((Date) -> Void)?,
          onHourHeightChange: ((CGFloat) -> Void)?,
          scrollRequest: CalendarTimelineScrollRequest?, onScrollRequestConsumed: ((Int) -> Void)?,
+         retainedTimelineAnchor: Binding<CalendarTimelineScrollAnchor?>,
+         didRestoreTimelinePosition: Binding<Bool>,
          monthNamespace: Namespace.ID?, monthExpanded: Bool, monthSelectedDate: Date?, reduceMotion: Bool,
          layoutRevision: Int, interactionSession: CalendarInteractionSession) {
         self.days = days
@@ -1448,6 +1586,8 @@ private struct CalendarPagedTimeline: View {
         self.onHourHeightChange = onHourHeightChange
         self.scrollRequest = scrollRequest
         self.onScrollRequestConsumed = onScrollRequestConsumed
+        self._retainedTimelineAnchor = retainedTimelineAnchor
+        self._didRestoreTimelinePosition = didRestoreTimelinePosition
         self.monthNamespace = monthNamespace
         self.monthExpanded = monthExpanded
         self.monthSelectedDate = monthSelectedDate
@@ -1535,6 +1675,59 @@ private struct CalendarPagedTimeline: View {
                 dayHeaderHeight: Double(dayHeaderHeight),
                 allDayHeight: Double(allDayHeight)
             ))
+            let timelineColumnContext = CalendarTimelineColumnContext(
+                hourHeight: renderedHourHeight,
+                visibleDayStarts: visibleDayStarts,
+                viewportHeight: timedViewportHeight
+            )
+            let timelineColumns = makeTimelineColumns(
+                days: stripDays,
+                columnWidth: columnWidth,
+                context: timelineColumnContext
+            )
+            let timelineSurface = AnyView(timelineColumnSurface(
+                viewportWidth: timelineWidth,
+                canvasWidth: virtualWidth,
+                height: contentHeight,
+                columns: timelineColumns,
+                offset: stripBaseX(columnWidth: columnWidth) + horizontalDragOffset
+            ))
+            let timelineNowLine = AnyView(CalendarNowLine(
+                days: stripDays,
+                todayColumnVisible: todayColumnVisible,
+                calendar: calendar,
+                timeGutter: timeGutter,
+                totalHeight: timelineAxisHeight,
+                contentWidth: timelineWidth,
+                columnOriginX: stripBaseX(columnWidth: columnWidth) + horizontalDragOffset,
+                columnWidthOverride: columnWidth
+            ))
+            let timelineLabels = AnyView(
+                hourLabels(
+                    contentHeight: contentHeight,
+                    todayColumnVisible: todayColumnVisible
+                )
+                    .frame(width: timeGutter, height: contentHeight, alignment: .top)
+                    .zIndex(1)
+                    .allowsHitTesting(false)
+            )
+            let timelineAnchors = AnyView(
+                CalendarTimelineHourAnchors(
+                    hourHeight: renderedHourHeight,
+                    totalHeight: timelineAxisHeight
+                )
+                .frame(width: 1, height: timelineAxisHeight, alignment: .top)
+                .offset(x: -1)
+                .allowsHitTesting(false)
+            )
+            let timelineCanvas = makeTimelineCanvas(
+                surface: timelineSurface,
+                nowLine: timelineNowLine,
+                labels: timelineLabels,
+                anchors: timelineAnchors,
+                width: timelineWidth,
+                height: contentHeight
+            )
             VStack(spacing: 0) {
                 dayHeaderStrip(days: stripDays, columnWidth: columnWidth, containerWidth: timelineWidth)
                 CalendarAllDayLaneStrip(
@@ -1551,105 +1744,13 @@ private struct CalendarPagedTimeline: View {
                 .simultaneousGesture(pagerDragGesture(columnWidth: columnWidth), including: .all)
                 ScrollViewReader { scrollProxy in
                     ScrollView(.vertical) {
-                        ZStack(alignment: .topLeading) {
-                            // The sliding day columns live in a masked
-                            // overlay container: pre-mounted leading
-                            // neighbours slide under the pinned hour gutter
-                            // instead of showing through it at rest.
-                            Color.clear
-                                .frame(width: timelineWidth, height: contentHeight, alignment: .topLeading)
-                                .overlay(alignment: .topLeading) {
-                                    HStack(alignment: .top, spacing: 0) {
-                                        ForEach(stripDays, id: \.self) { day in
-                                            CalendarDayTimeline(
-                                            day: day,
-                                            items: items,
-                                                hourHeight: renderedHourHeight,
-                                                calendar: calendar,
-                                                onSelect: onSelect,
-                                                onCreate: onCreate,
-                                                onCreateTimedRange: onCreateTimedRange,
-                                                timedCreationPreview: timedCreationPreview,
-                                                onTimedCreationDraft: onTimedCreationDraft,
-                                                onUpdate: onUpdate,
-                                                onStatusUpdate: onStatusUpdate,
-                                                monthNamespace: monthNamespace,
-                                                monthExpanded: monthExpanded,
-                                                monthSelectedDate: monthSelectedDate,
-                                                reduceMotion: reduceMotion,
-                                                isInteractionEnabled: visibleDayStarts.contains(calendar.startOfDay(for: day)),
-                                                interactionSession: interactionSession,
-                                                verticalScrollOffset: verticalScrollOffset,
-                                                visibleViewportHeight: timedViewportHeight,
-                                                layoutRevision: layoutRevision
-                                            )
-                                            .frame(width: columnWidth)
-                                        }
-                                    }
-                                    .frame(width: virtualWidth, height: contentHeight, alignment: .topLeading)
-                                    .offset(x: stripBaseX(columnWidth: columnWidth) + horizontalDragOffset)
-                                }
-                                .calendarDayAreaMask(totalWidth: timelineWidth, gutter: timeGutter)
-                            CalendarNowLine(
-                                days: stripDays,
-                                todayColumnVisible: todayColumnVisible,
-                                calendar: calendar,
-                                timeGutter: timeGutter,
-                                totalHeight: timelineAxisHeight,
-                                contentWidth: timelineWidth,
-                                columnOriginX: stripBaseX(columnWidth: columnWidth) + horizontalDragOffset,
-                                columnWidthOverride: columnWidth
-                            )
-                            hourLabels(
-                                contentHeight: contentHeight,
-                                todayColumnVisible: todayColumnVisible
-                            )
-                                // Top-aligned: the labels are absolutely
-                                // offset inside a naturally short ZStack, so
-                                // the default center alignment would shove
-                                // the whole hour axis halfway down the grid.
-                                .frame(width: timeGutter, height: contentHeight, alignment: .top)
-                                .zIndex(1)
-                                .allowsHitTesting(false)
-                            CalendarTimelineHourAnchors(
-                                hourHeight: renderedHourHeight,
-                                totalHeight: timelineAxisHeight
-                            )
-                            .frame(width: 1, height: timelineAxisHeight, alignment: .top)
-                            .offset(x: -1)
-                            .allowsHitTesting(false)
-                        }
-                        .frame(width: timelineWidth, height: contentHeight, alignment: .topLeading)
-                        .clipped()
+                        timelineCanvas
                         // This reader is inside the moving content. Measuring
                         // the ScrollView itself reports the viewport and
                         // therefore cannot describe the user's actual offset.
-                        .background {
-                            GeometryReader { content in
-                                let frame = content.frame(in: .named("calendar-timeline-viewport"))
-                                let offset = frame.minY.isFinite ? max(0, -frame.minY) : 0
-                                let height = frame.height.isFinite ? max(0, frame.height) : 0
-                                Color.clear.preference(
-                                    key: CalendarTimelineVerticalOffsetKey.self,
-                                    value: CalendarTimelineVerticalOffsetMeasurement(
-                                        offset: offset,
-                                        contentHeight: height
-                                    )
-                                )
-                            }
-                        }
+                        .background(timelineOffsetReader())
                         .overlay {
-                            CalendarIOSScrollViewResolver { scrollView in
-                                if iPhoneTimelineScrollView !== scrollView {
-                                    iPhoneTimelineScrollView = scrollView
-                                }
-                                let measured = verticalScrollOffset
-                                let native = scrollView.contentOffset.y
-                                if measured.isFinite, native.isFinite {
-                                    iPhoneNativeOffsetAdjustment = native - measured
-                                }
-                                settlePendingIPhoneTimelineScrollOffsetIfPossible()
-                            }
+                            CalendarIOSScrollViewResolver(onResolve: handleResolvedIPhoneScrollView)
                             .frame(width: 1, height: 1)
                             .allowsHitTesting(false)
                         }
@@ -1675,6 +1776,17 @@ private struct CalendarPagedTimeline: View {
                     .accessibilityIdentifier("calendar-vertical-timeline-scroll")
                     .onPreferenceChange(CalendarTimelineVerticalOffsetKey.self) { measurement in
                         let offset = measurement.offset
+                        // ScrollViewReader may report the coarse hour target
+                        // before UIKit has applied the retained minute. Keep
+                        // the pending native target authoritative during that
+                        // handoff so 14:45 cannot be replaced by 14:00.
+                        let shouldRecordAnchor = CalendarTimelineRestorationPolicy.shouldRecordObservedOffset(
+                            observedOffset: Double(offset),
+                            retainedAnchor: retainedTimelineAnchor,
+                            hourHeight: Double(renderedHourHeight),
+                            isRestoring: iPhonePendingTimelineScrollOffset != nil,
+                            isZooming: iPhoneZoomTransaction.isActive
+                        )
                         verticalScrollOffset = offset
                         if let scrollView = iPhoneTimelineScrollView,
                            scrollView.contentOffset.y.isFinite,
@@ -1682,28 +1794,36 @@ private struct CalendarPagedTimeline: View {
                             iPhoneNativeOffsetAdjustment = scrollView.contentOffset.y - offset
                         }
                         settlePendingIPhoneTimelineScrollOffsetIfPossible()
-                        guard !iPhoneZoomTransaction.isActive,
-                              abs(offset - (retainedTimelineAnchor?.offset(hourHeight: Double(renderedHourHeight)) ?? .greatestFiniteMagnitude)) > 0.5 else { return }
-                        retainedTimelineAnchor = CalendarTimelineScrollAnchor.from(
+                        guard shouldRecordAnchor else { return }
+                        storeTimelineAnchor(CalendarTimelineScrollAnchor.from(
                             scrollOffset: Double(offset),
                             hourHeight: Double(renderedHourHeight)
-                        )
+                        ))
                     }
                     .onAppear {
-                        guard !didInitialVerticalScroll else { return }
-                        didInitialVerticalScroll = true
-                        let anchor = scrollRequest?.anchor ?? retainedTimelineAnchor ?? CalendarTimelineScrollAnchor.todayMinusTwoHours(
+                        let anchor = CalendarTimelineRestorationPolicy.anchor(
+                            request: scrollRequest,
+                            retained: retainedTimelineAnchor,
+                            didRestore: didRestoreTimelinePosition,
                             now: .now,
                             calendar: calendar
                         )
-                        applyiPhoneTimelineAnchor(anchor, scrollProxy: scrollProxy)
+                        applyiPhoneTimelineAnchor(
+                            anchor,
+                            hourHeight: renderedHourHeight,
+                            scrollProxy: scrollProxy
+                        )
                         if let request = scrollRequest {
                             onScrollRequestConsumed?(request.id)
                         }
                     }
                     .onChange(of: scrollRequest) { _, request in
                         guard let request else { return }
-                        applyiPhoneTimelineAnchor(request.anchor, scrollProxy: scrollProxy)
+                        applyiPhoneTimelineAnchor(
+                            request.anchor,
+                            hourHeight: renderedHourHeight,
+                            scrollProxy: scrollProxy
+                        )
                         onScrollRequestConsumed?(request.id)
                     }
 #if os(iOS)
@@ -1921,10 +2041,25 @@ private struct CalendarPagedTimeline: View {
         guard let pendingOffset = iPhonePendingTimelineScrollOffset,
               let scrollView = iPhoneTimelineScrollView,
               scrollView.contentOffset.y.isFinite else { return }
+        let adjustment = iPhoneNativeOffsetAdjustment.isFinite ? iPhoneNativeOffsetAdjustment : 0
+        let minimumY = -scrollView.adjustedContentInset.top
+        let maximumY = max(
+            minimumY,
+            scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom
+        )
+        guard let attainableTarget = CalendarTimelineRestorationPolicy.attainableSemanticOffset(
+            requestedOffset: Double(pendingOffset),
+            nativeOffsetAdjustment: Double(adjustment),
+            minimumNativeOffset: Double(minimumY),
+            maximumNativeOffset: Double(maximumY)
+        ) else { return }
+
         applyIPhoneTimelineScrollOffset(pendingOffset)
-        let semanticOffset = scrollView.contentOffset.y - iPhoneNativeOffsetAdjustment
-        guard semanticOffset.isFinite,
-              abs(semanticOffset - pendingOffset) <= 1 else { return }
+        let semanticOffset = scrollView.contentOffset.y - adjustment
+        guard CalendarTimelineRestorationPolicy.isNativeOffsetSettled(
+            observedOffset: Double(semanticOffset),
+            targetOffset: attainableTarget
+        ) else { return }
         iPhonePendingTimelineScrollOffset = nil
     }
 
@@ -1940,7 +2075,13 @@ private struct CalendarPagedTimeline: View {
             minimumY,
             scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom
         )
-        let targetY = min(max(desiredY, minimumY), maximumY)
+        guard let targetSemanticOffset = CalendarTimelineRestorationPolicy.attainableSemanticOffset(
+            requestedOffset: Double(semanticOffset),
+            nativeOffsetAdjustment: Double(adjustment),
+            minimumNativeOffset: Double(minimumY),
+            maximumNativeOffset: Double(maximumY)
+        ) else { return }
+        let targetY = CGFloat(targetSemanticOffset) + adjustment
         guard targetY.isFinite,
               abs(scrollView.contentOffset.y - targetY) > 0.25 else { return }
 
@@ -1957,17 +2098,171 @@ private struct CalendarPagedTimeline: View {
         return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
     }
 
+    private func timelineColumn(
+        for day: Date,
+        columnWidth: CGFloat,
+        context: CalendarTimelineColumnContext
+    ) -> AnyView {
+        let dayStart = calendar.startOfDay(for: day)
+        let isInteractionEnabled = context.visibleDayStarts.contains(dayStart)
+        let timeline = CalendarDayTimeline(
+            day: day,
+            items: items,
+            hourHeight: context.hourHeight,
+            calendar: calendar,
+            onSelect: onSelect,
+            onCreate: onCreate,
+            onCreateTimedRange: onCreateTimedRange,
+            timedCreationPreview: timedCreationPreview,
+            onTimedCreationDraft: onTimedCreationDraft,
+            onUpdate: onUpdate,
+            onStatusUpdate: onStatusUpdate,
+            monthNamespace: monthNamespace,
+            monthExpanded: monthExpanded,
+            monthSelectedDate: monthSelectedDate,
+            reduceMotion: reduceMotion,
+            isInteractionEnabled: isInteractionEnabled,
+            interactionSession: interactionSession,
+            verticalScrollOffset: verticalScrollOffset,
+            visibleViewportHeight: context.viewportHeight,
+            layoutRevision: layoutRevision
+        )
+        // The pager mounts only the small neighbouring-day window. Keeping
+        // this boundary type-erased avoids asking Swift to solve the full
+        // CalendarDayTimeline view tree again from inside ForEach.
+        return AnyView(timeline.frame(width: columnWidth))
+    }
+
+    private func makeTimelineColumns(
+        days: [Date],
+        columnWidth: CGFloat,
+        context: CalendarTimelineColumnContext
+    ) -> [CalendarTimelineColumnViewModel] {
+        var columns: [CalendarTimelineColumnViewModel] = []
+        columns.reserveCapacity(days.count)
+        for day in days {
+            columns.append(CalendarTimelineColumnViewModel(
+                id: day,
+                content: timelineColumn(
+                    for: day,
+                    columnWidth: columnWidth,
+                    context: context
+                )
+            ))
+        }
+        return columns
+    }
+
+    private func timelineColumnsOverlay(
+        columns: [CalendarTimelineColumnViewModel],
+        width: CGFloat,
+        height: CGFloat,
+        offset: CGFloat
+    ) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            CalendarTimelineColumns(columns: columns)
+        }
+        .frame(width: width, height: height, alignment: .topLeading)
+        .offset(x: offset)
+    }
+
+    private func timelineColumnSurface(
+        viewportWidth: CGFloat,
+        canvasWidth: CGFloat,
+        height: CGFloat,
+        columns: [CalendarTimelineColumnViewModel],
+        offset: CGFloat
+    ) -> some View {
+        Color.clear
+            .frame(width: viewportWidth, height: height, alignment: .topLeading)
+            .overlay(
+                timelineColumnsOverlay(
+                    columns: columns,
+                    width: canvasWidth,
+                    height: height,
+                    offset: offset
+                ),
+                alignment: .topLeading
+            )
+            .calendarDayAreaMask(totalWidth: viewportWidth, gutter: timeGutter)
+    }
+
+    private func makeTimelineCanvas(
+        surface: AnyView,
+        nowLine: AnyView,
+        labels: AnyView,
+        anchors: AnyView,
+        width: CGFloat,
+        height: CGFloat
+    ) -> AnyView {
+        let canvas = ZStack(alignment: .topLeading) {
+            surface
+            nowLine
+            labels
+            anchors
+        }
+        return AnyView(canvas.frame(width: width, height: height, alignment: .topLeading).clipped())
+    }
+
+    private func timelineOffsetReader() -> some View {
+        GeometryReader { content in
+            let frame = content.frame(in: .named("calendar-timeline-viewport"))
+            let offset: CGFloat = frame.minY.isFinite ? max(0, -frame.minY) : 0
+            let contentHeight: CGFloat = frame.height.isFinite ? max(0, frame.height) : 0
+            Color.clear.preference(
+                key: CalendarTimelineVerticalOffsetKey.self,
+                value: CalendarTimelineVerticalOffsetMeasurement(
+                    offset: offset,
+                    contentHeight: contentHeight
+                )
+            )
+        }
+    }
+
+#if os(iOS)
+    private func handleResolvedIPhoneScrollView(_ scrollView: UIScrollView) {
+        if iPhoneTimelineScrollView !== scrollView {
+            iPhoneTimelineScrollView = scrollView
+        }
+        let measured = verticalScrollOffset
+        let native = scrollView.contentOffset.y
+        if measured.isFinite, native.isFinite {
+            iPhoneNativeOffsetAdjustment = native - measured
+        }
+        settlePendingIPhoneTimelineScrollOffsetIfPossible()
+    }
+#endif
+
+    private func storeTimelineAnchor(_ anchor: CalendarTimelineScrollAnchor) {
+        if retainedTimelineAnchor != anchor {
+            retainedTimelineAnchor = anchor
+        }
+        if !didRestoreTimelinePosition {
+            didRestoreTimelinePosition = true
+        }
+    }
+
     private func applyiPhoneTimelineAnchor(
         _ anchor: CalendarTimelineScrollAnchor,
+        hourHeight: CGFloat,
         scrollProxy: ScrollViewProxy
     ) {
-        retainedTimelineAnchor = anchor
+        storeTimelineAnchor(anchor)
+        let nativeTarget = CalendarTimelineRestorationPolicy.nativeOffset(
+            for: anchor,
+            hourHeight: Double(hourHeight)
+        ).map { CGFloat($0) }
         var transaction = Transaction()
         transaction.animation = nil
         transaction.disablesAnimations = true
         withTransaction(transaction) {
+            iPhonePendingTimelineScrollOffset = nativeTarget
             scrollProxy.scrollTo(CalendarTimelineScrollAnchor.id(for: anchor.hour), anchor: .top)
         }
+        // If the UIKit bridge has already resolved, apply the minute-precise
+        // target immediately. Otherwise the resolver retries this after the
+        // native content size and insets are available.
+        settlePendingIPhoneTimelineScrollOffsetIfPossible()
     }
 
     private func cancelStripImmediately(to target: Date) {
