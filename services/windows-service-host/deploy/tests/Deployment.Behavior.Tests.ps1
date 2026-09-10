@@ -1054,7 +1054,7 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
         $manifest = [pscustomobject]@{ transactionId='linear-fixture'; generation='generation'; operatorSid='fixture'; manifestPath=$manifestPath; paths=[pscustomobject]@{ backupDirectory=$Root } }
         $units = New-Object object[] $Count
         for ($index = 0; $index -lt $Count; $index++) { $units[$index] = [pscustomobject]@{ phase='pending' } }
-        $journal = [pscustomobject]@{ transactionId='linear-fixture'; generation='generation'; operatorSid='fixture'; manifestPath=$manifestPath; units=$units; unitCount=$Count; progressPath=(Get-RecoveryProgressPath $manifest); progressSequence=0 }
+        $journal = [pscustomobject]@{ transactionId='linear-fixture'; generation='generation'; operatorSid='fixture'; manifestPath=$manifestPath; units=@($units); unitCount=$Count; progressPath=(Get-RecoveryProgressPath $manifest); progressSequence=0 }
         for ($index = 0; $index -lt $Count; $index++) {
             [void](Append-RecoveryProgress -Manifest $manifest -Journal $journal -UnitIndex $index -Phase 'complete')
         }
@@ -1099,7 +1099,7 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
         }
         $journal = [pscustomobject]@{
             schemaVersion = 1; transactionId = $manifest.transactionId; generation = $manifest.generation; operatorSid = $manifest.operatorSid; manifestPath = $manifest.manifestPath
-            units = $units; unitCount = $UnitCount; treeRoots = @($data); phase = 'artifacts'; progressPath = (Get-RecoveryProgressPath $manifest)
+            units = @($units); unitCount = $UnitCount; treeRoots = @($data); phase = 'artifacts'; progressPath = (Get-RecoveryProgressPath $manifest)
         }
         Write-JsonAtomic (Get-RecoveryJournalPath $manifest) $journal -MaxBytes $script:LifeOSRecoveryJournalMaxBytes
         for ($index = 0; $index -lt $UnitCount; $index++) {
