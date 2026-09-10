@@ -442,13 +442,24 @@ Assert-Behavior ($emptyServiceArguments[6] -ceq 'password=' -and $emptyServiceAr
 $populatedServiceArguments = Get-LifeOSServiceConfigArguments -Name 'LifeOSGateway' -BinaryPath '"D:\host.exe"' -StartName 'NT SERVICE\LifeOSGateway' -StartMode 'delayed-auto' -Dependencies @('LifeOSAPI', 'Schedule')
 Assert-Behavior ($populatedServiceArguments[7] -ceq '""' -and $populatedServiceArguments[11] -ceq 'LifeOSAPI/Schedule') 'populated service dependencies use the shared native encoding.'
 Assert-BehaviorThrows { Get-LifeOSServiceConfigArguments -Name 'LifeOSGateway' -BinaryPath '"D:\host.exe"' -StartName 'NT SERVICE\LifeOSGateway' -StartMode 'auto' -Dependencies @('LifeOSAPI', '') } 'empty dependency entries are rejected'
+
+function Copy-BehaviorServiceSnapshot {
+    param([Parameter(Mandatory)][System.Collections.IDictionary]$Snapshot)
+    $copy = [ordered]@{}
+    foreach ($key in $Snapshot.Keys) {
+        $value = $Snapshot[$key]
+        $copy[$key] = if ($value -is [Array]) { @($value) } else { $value }
+    }
+    return $copy
+}
+
 $presentServiceSnapshot = [ordered]@{ Name='LifeOSGateway'; Exists=$true; State='Stopped'; StartMode='Auto'; StartName='NT SERVICE\LifeOSGateway'; BinaryPath='"D:\host.exe"'; Dependencies=@('LifeOSAPI'); DelayedAutoStartPresent=$false; DelayedAutoStart=$null; ServiceSidTypePresent=$false; ServiceSidType=$null; FailureActionsPresent=$false; FailureActions=@(); FailureFlagPresent=$false; FailureFlag=$null }
 Assert-CompleteLifeOSServiceSnapshot $presentServiceSnapshot
 Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot ([pscustomobject]@{ Name='LifeOSGateway'; Exists=$true }) } 'partial existing service snapshots are rejected'
-$inconsistentAbsentSnapshot = $presentServiceSnapshot.Clone()
+$inconsistentAbsentSnapshot = Copy-BehaviorServiceSnapshot $presentServiceSnapshot
 $inconsistentAbsentSnapshot.Name = 'LifeOSAPI'; $inconsistentAbsentSnapshot.Exists = $false; $inconsistentAbsentSnapshot.State = 'Stopped'; $inconsistentAbsentSnapshot.StartMode = 'Disabled'; $inconsistentAbsentSnapshot.StartName = ''; $inconsistentAbsentSnapshot.BinaryPath = $null; $inconsistentAbsentSnapshot.Dependencies = @()
 Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $inconsistentAbsentSnapshot } 'inconsistent absent service snapshots are rejected'
-$apiServiceSnapshot = $presentServiceSnapshot.Clone()
+$apiServiceSnapshot = Copy-BehaviorServiceSnapshot $presentServiceSnapshot
 $apiServiceSnapshot.Name = 'LifeOSAPI'; $apiServiceSnapshot.State = 'Running'; $apiServiceSnapshot.StartName = 'NT SERVICE\LifeOSAPI'; $apiServiceSnapshot.Dependencies = @()
 $serviceSnapshotMap = [ordered]@{ LifeOSAPI = $apiServiceSnapshot; LifeOSGateway = $presentServiceSnapshot }
 $validatedServiceSnapshotMap = Get-LifeOSServiceSnapshotMap $serviceSnapshotMap
@@ -459,7 +470,7 @@ $mismatchedServiceSnapshotMap = [ordered]@{ LifeOSAPI = $presentServiceSnapshot;
 Assert-BehaviorThrows { Get-LifeOSServiceSnapshotMap $mismatchedServiceSnapshotMap } 'mismatched service snapshot key is rejected'
 $unknownServiceSnapshotMap = [ordered]@{ LifeOSAPI = $apiServiceSnapshot; LifeOSGateway = $presentServiceSnapshot; LifeOSUnknown = $presentServiceSnapshot }
 Assert-BehaviorThrows { Get-LifeOSServiceSnapshotMap $unknownServiceSnapshotMap } 'unknown service snapshot entries are rejected'
-$unknownServiceSnapshotField = $presentServiceSnapshot.Clone(); $unknownServiceSnapshotField['Unexpected'] = 'fixture'
+$unknownServiceSnapshotField = Copy-BehaviorServiceSnapshot $presentServiceSnapshot; $unknownServiceSnapshotField['Unexpected'] = 'fixture'
 Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnapshotField } 'unknown service snapshot fields are rejected'
 
 & {
@@ -495,7 +506,7 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
     $data = Join-Path $temp 'data'; $backup = Join-Path $temp 'backup'
     Ensure-Directory $data; Ensure-Directory $backup
     $destination = Join-Path $data 'stable.json'; [IO.File]::WriteAllText($destination, 'stable')
-    $gatewayRunningSnapshot = $presentServiceSnapshot.Clone()
+    $gatewayRunningSnapshot = Copy-BehaviorServiceSnapshot $presentServiceSnapshot
     $gatewayRunningSnapshot.State = 'Running'
     $serviceRecoveryMap = [ordered]@{ LifeOSAPI = $apiServiceSnapshot; LifeOSGateway = $gatewayRunningSnapshot }
     $script:orchestrationServiceStates = [ordered]@{ LifeOSAPI = 'Running'; LifeOSGateway = 'Running' }
@@ -822,8 +833,8 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
     $data = Join-Path $temp 'data'; $backup = Join-Path $temp 'backup'
     Ensure-Directory $data; Ensure-Directory $backup
     $destination = Join-Path $data 'stable.json'; [IO.File]::WriteAllText($destination, 'stable')
-    $apiRunningSnapshot = $apiServiceSnapshot.Clone(); $apiRunningSnapshot.State = 'Running'; $apiRunningSnapshot.StartMode = 'Auto'
-    $gatewayRunningSnapshot = $presentServiceSnapshot.Clone(); $gatewayRunningSnapshot.State = 'Running'; $gatewayRunningSnapshot.StartMode = 'Auto'
+    $apiRunningSnapshot = Copy-BehaviorServiceSnapshot $apiServiceSnapshot; $apiRunningSnapshot.State = 'Running'; $apiRunningSnapshot.StartMode = 'Auto'
+    $gatewayRunningSnapshot = Copy-BehaviorServiceSnapshot $presentServiceSnapshot; $gatewayRunningSnapshot.State = 'Running'; $gatewayRunningSnapshot.StartMode = 'Auto'
     $retrySnapshotMap = [ordered]@{ LifeOSAPI = $apiRunningSnapshot; LifeOSGateway = $gatewayRunningSnapshot }
     $script:serviceTransitionStates = [ordered]@{ LifeOSAPI = 'Stopped'; LifeOSGateway = 'Stopped' }
     $script:serviceTransitionEvents = @()
