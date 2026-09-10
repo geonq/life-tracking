@@ -136,9 +136,9 @@ public struct CalendarWidgetEntry: TimelineEntry {
     public let isPreview: Bool
 
     public enum SharingCopy {
-        public static let title = "Widget sharing unavailable"
-        public static let detail = "A provisioned App Group is required. Open LifeOS for the local calendar."
-        public static let accessibility = "Widget sharing unavailable. A provisioned App Group is required. Open LifeOS for the local calendar."
+        public static let title = "Calendar unavailable"
+        public static let detail = "Open LifeOS to restore widget sharing."
+        public static let accessibility = "Calendar unavailable. Open LifeOS to restore widget sharing."
     }
 
     public init(date: Date = .now, snapshot: CalendarSnapshot, storageAvailable: Bool = true, isPreview: Bool = false) {
@@ -398,10 +398,10 @@ public struct CalendarWidgetView: View {
     private var unavailableView: some View {
         VStack(alignment: .leading, spacing: 7) {
             Text(CalendarWidgetEntry.SharingCopy.title)
-                .font(LifeOSWidgetTypography.title)
+                .lifeOSWidgetTypography(.title)
                 .foregroundStyle(primaryForeground)
             Text(CalendarWidgetEntry.SharingCopy.detail)
-                .font(LifeOSWidgetTypography.metadata)
+                .lifeOSWidgetTypography(.metadata)
                 .foregroundStyle(secondaryForeground)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -482,12 +482,12 @@ public struct CalendarWidgetView: View {
                 Text(entry.date, format: dateTimeStyle.day())
                     .foregroundStyle(primaryForeground)
             }
-            .font(LifeOSWidgetTypography.compactMetric)
+            .lifeOSWidgetTypography(.compactMetric)
             .lineLimit(1)
 
             if events.isEmpty {
                 Text("No events today")
-                    .font(LifeOSWidgetTypography.metadata)
+                    .lifeOSWidgetTypography(.metadata)
                     .foregroundStyle(secondaryForeground)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.top, 5)
@@ -498,7 +498,7 @@ public struct CalendarWidgetView: View {
                     }
                     if overflow > 0 {
                         Text("+\(overflow) more")
-                            .font(LifeOSWidgetTypography.metadata)
+                            .lifeOSWidgetTypography(.metadata)
                             .foregroundStyle(tertiaryForeground)
                             .padding(.leading, 10)
                     }
@@ -516,11 +516,11 @@ public struct CalendarWidgetView: View {
                 .frame(width: 3, height: 28)
             VStack(alignment: .leading, spacing: 0) {
                 Text(item.title)
-                    .font(LifeOSWidgetTypography.title)
+                    .lifeOSWidgetTypography(.title)
                     .foregroundStyle(primaryForeground)
                     .lineLimit(1)
                 Text(timeRange(for: item))
-                    .font(LifeOSWidgetTypography.metadata)
+                    .lifeOSWidgetTypography(.metadata)
                     .foregroundStyle(secondaryForeground)
                     .lineLimit(1)
             }

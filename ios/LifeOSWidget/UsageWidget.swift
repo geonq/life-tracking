@@ -431,7 +431,6 @@ private struct UsageRingView: View {
     let progress: Double?
     let diameter: CGFloat
     let lineWidth: CGFloat
-    let heroFontSize: CGFloat
     let disclosure: UsageWidgetConnectorDisclosure
     let isPreview: Bool
 
@@ -474,7 +473,7 @@ private struct UsageRingView: View {
             }
 
             Text(heroText)
-                .font(.system(size: heroFontSize, weight: .semibold, design: .default))
+                .lifeOSWidgetTypography(.compactMetric)
                 .monospacedDigit()
                 .foregroundStyle(progress == nil ? chrome.secondary : chrome.hero)
         }
@@ -516,34 +515,42 @@ struct LifeOSUsageSmallWidgetView: View {
     }
 
     var body: some View {
-        VStack(spacing: 4) {
+        HStack(alignment: .center, spacing: 10) {
             UsageRingView(
                 progress: lead.map { $0.summary.remainingPercent },
-                diameter: 56,
+                diameter: 58,
                 lineWidth: 6,
-                heroFontSize: 22,
                 disclosure: UsageWidgetData.connectorDisclosure(for: entry.snapshot, lead: lead, at: entry.date),
                 isPreview: UsageWidgetData.hasDemoSource(in: entry.snapshot)
             )
-
-            Text(label)
-                .font(LifeOSWidgetTypography.metadata)
-                .lineLimit(1)
-
-            HStack(spacing: 5) {
-                Text(UsageWidgetDate.updated(entry.snapshot.updatedAt))
-                if UsageWidgetData.hasDemoSource(in: entry.snapshot) {
-                    Text("PREVIEW").fontWeight(.bold)
-                }
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Usage")
+                    .lifeOSWidgetTypography(.title)
+                    .foregroundStyle(chrome.hero)
+                    .lineLimit(1)
+                Text(label)
+                    .lifeOSWidgetTypography(.metadata)
+                    .foregroundStyle(chrome.secondary)
+                    .lineLimit(2)
+                Text(usageFooter)
+                    .lifeOSWidgetTypography(.metadata)
+                    .foregroundStyle(chrome.tertiary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .font(LifeOSWidgetTypography.metadata)
-            .foregroundStyle(chrome.tertiary)
-            .lineLimit(1)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(URL(string: "lifeos://usage"))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilitySummary)
+    }
+
+    private var usageFooter: String {
+        if UsageWidgetData.hasDemoSource(in: entry.snapshot) {
+            return "Preview · not live"
+        }
+        return UsageWidgetDate.updated(entry.snapshot.updatedAt)
     }
 
     private var accessibilitySummary: String {
@@ -612,13 +619,12 @@ struct LifeOSWidgetView: View {
                         progress: lead.map { $0.summary.remainingPercent },
                         diameter: 72,
                         lineWidth: 8,
-                        heroFontSize: 22,
                         disclosure: UsageWidgetData.connectorDisclosure(for: entry.snapshot, lead: lead, at: entry.date),
                         isPreview: UsageWidgetData.hasDemoSource(in: entry.snapshot)
                     )
 
                     Text(leadLabel)
-                        .font(LifeOSWidgetTypography.metadata)
+                        .lifeOSWidgetTypography(.metadata)
                         .lineLimit(1)
 
                     if let secondary {
@@ -632,7 +638,7 @@ struct LifeOSWidgetView: View {
                                 .monospacedDigit()
                                 .foregroundStyle(chrome.tertiary)
                         }
-                        .font(LifeOSWidgetTypography.metadata)
+                        .lifeOSWidgetTypography(.metadata)
                         .lineLimit(1)
                     }
                 }
@@ -651,10 +657,10 @@ struct LifeOSWidgetView: View {
                 Spacer(minLength: 4)
                 Text(UsageWidgetDate.updated(entry.snapshot.updatedAt))
                 if UsageWidgetData.hasDemoSource(in: entry.snapshot) {
-                    Text("PREVIEW").fontWeight(.bold)
+                    Text("Preview · not live").fontWeight(.semibold)
                 }
             }
-            .font(LifeOSWidgetTypography.metadata)
+            .lifeOSWidgetTypography(.metadata)
             .foregroundStyle(chrome.tertiary)
             .lineLimit(1)
         }
@@ -746,12 +752,12 @@ private struct SharedUsageGraph: View {
         } else {
             VStack(spacing: 3) {
                 Text(state.title)
-                    .font(LifeOSWidgetTypography.metadata)
+                    .lifeOSWidgetTypography(.metadata)
                     .foregroundStyle(chrome.secondary)
                     .lineLimit(1)
                 if !state.detail.isEmpty {
                     Text(state.detail)
-                        .font(LifeOSWidgetTypography.metadata)
+                        .lifeOSWidgetTypography(.metadata)
                         .foregroundStyle(chrome.tertiary)
                         .lineLimit(1)
                 }

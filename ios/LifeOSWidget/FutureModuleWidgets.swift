@@ -55,28 +55,31 @@ enum LifeOSWidgetTypography {
 
         var baseSize: CGFloat {
             switch self {
-            case .hero: 28
+            case .hero: 26
             case .heroFallback: 24
-            case .heroMinimum, .compactMetric: 22
-            case .title: 15
+            case .heroMinimum: 21
+            case .compactMetric: 22
+            case .title: 14
             case .metadata: 12
             }
         }
 
         var minimumSize: CGFloat {
             switch self {
-            case .hero, .heroFallback, .heroMinimum, .compactMetric: 22
-            case .title: 13
-            case .metadata: 11
+            case .hero: 22
+            case .heroFallback: 21
+            case .heroMinimum, .compactMetric: 19
+            case .title: 12
+            case .metadata: 10
             }
         }
 
         var maximumSize: CGFloat {
             switch self {
-            case .hero: 34
-            case .heroFallback: 30
-            case .heroMinimum, .compactMetric: 27
-            case .title: 18
+            case .hero: 30
+            case .heroFallback: 27
+            case .heroMinimum, .compactMetric: 24
+            case .title: 17
             case .metadata: 14
             }
         }
@@ -104,18 +107,11 @@ enum LifeOSWidgetTypography {
             return .heroMinimum
         }
 
-        /// Older widget sources still ask for a role as a `Font`. Keep those
-        /// call sites dynamic by returning the system text style that matches
-        /// the role; new sources use the scaled modifier above for tighter
-        /// family-specific bounds.
+        /// Compatibility aliases for the few legacy call sites that still
+        /// request a `Font`. New sources use the scaled modifier above so the
+        /// family-specific bounds remain in force.
         var dynamicFont: Font {
-            switch self {
-            case .hero: .largeTitle
-            case .heroFallback: .title
-            case .heroMinimum, .compactMetric: .title2
-            case .title: .headline
-            case .metadata: .footnote
-            }
+            .system(size: baseSize, weight: weight, design: .default)
         }
     }
 
@@ -280,8 +276,8 @@ struct TasksWidgetData {
 
     var detail: String {
         switch state {
-        case .redacted: return "Summary hidden"
-        case .unavailable: return "No shared task snapshot"
+        case .redacted: return "Tasks hidden"
+        case .unavailable: return "Open Calendar to connect"
         case .stale: return "Saved tasks · stale"
         case .fresh: return pendingCount == 0 ? "No pending tasks today" : "Pending today"
         }
@@ -386,7 +382,7 @@ private func futureModuleAccessibilityState(_ state: WidgetAggregateAvailability
     case .stale: return "stale aggregate summary"
     case .unavailable: return "no data"
     case .redacted: return "summary hidden"
-}
+    }
 }
 
 private struct FutureModuleWidgetHeader: View {
@@ -449,15 +445,10 @@ private struct FutureModuleUnavailableHero: View {
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(chrome.tertiary)
                 .frame(width: 18, height: 18)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(state == .redacted ? "Hidden" : "Unavailable")
-                    .lifeOSWidgetTypography(.title)
-                    .foregroundStyle(chrome.hero)
-                Text(state == .redacted ? "Summary hidden" : unavailableText)
-                    .lifeOSWidgetTypography(.metadata)
-                    .foregroundStyle(chrome.supportingText)
-                    .lineLimit(2)
-            }
+            Text(state == .redacted ? "Summary hidden" : unavailableText)
+                .lifeOSWidgetTypography(.title)
+                .foregroundStyle(chrome.hero)
+                .lineLimit(2)
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -519,14 +510,19 @@ struct NetWorthWidgetView: View {
 
             if let netWorth = entry.snapshot.finance.netWorthCents,
                entry.snapshot.financeDisplayState(at: entry.date) == .fresh || entry.snapshot.financeDisplayState(at: entry.date) == .stale {
-                Text(futureModuleCurrency(netWorth, maximumFractionDigits: 2))
-                    .lifeOSWidgetTypography(.hero)
-                    .foregroundStyle(chrome.hero)
-                Text(futureModuleStateText(entry.snapshot.financeDisplayState(at: entry.date)))
-                    .lifeOSWidgetTypography(.metadata)
-                    .foregroundStyle(chrome.tertiary)
-                Spacer(minLength: 0)
-                Text("Aggregate only")
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(futureModuleCurrency(netWorth, maximumFractionDigits: 2))
+                        .lifeOSWidgetTypography(.hero)
+                        .foregroundStyle(chrome.hero)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.82)
+                    Spacer(minLength: 4)
+                    Text(futureModuleStateText(entry.snapshot.financeDisplayState(at: entry.date)))
+                        .lifeOSWidgetTypography(.metadata)
+                        .foregroundStyle(chrome.tertiary)
+                        .lineLimit(1)
+                }
+                Text("Account total")
                     .lifeOSWidgetTypography(.metadata)
                     .foregroundStyle(chrome.tertiary)
             } else {
@@ -561,21 +557,21 @@ struct SpendRingWidgetView: View {
     }
 
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             FutureModuleWidgetHeader(title: "Spend", icon: .spending, accent: LifeOSTokens.Module.finance)
 
-            Spacer(minLength: 0)
             if let spend = entry.snapshot.finance.spendCents,
                entry.snapshot.financeDisplayState(at: entry.date) == .fresh || entry.snapshot.financeDisplayState(at: entry.date) == .stale {
-                VStack(spacing: 4) {
-                    Text(futureModuleCurrency(spend))
-                        .lifeOSWidgetTypography(.compactMetric)
-                        .foregroundStyle(chrome.hero)
-                    Text("Observed spend")
-                        .lifeOSWidgetTypography(.metadata)
-                        .foregroundStyle(chrome.tertiary)
+                Text(futureModuleCurrency(spend))
+                    .lifeOSWidgetTypography(.compactMetric)
+                    .foregroundStyle(chrome.hero)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.82)
+                HStack(spacing: 5) {
+                    Text("Spent")
+                    Text("·")
+                    Text(futureModuleStateText(entry.snapshot.financeDisplayState(at: entry.date)))
                 }
-                Text(futureModuleStateText(entry.snapshot.financeDisplayState(at: entry.date)))
                     .lifeOSWidgetTypography(.metadata)
                     .foregroundStyle(chrome.tertiary)
             } else {
@@ -584,7 +580,6 @@ struct SpendRingWidgetView: View {
                     hasValue: entry.snapshot.finance.spendCents != nil
                 ))
             }
-            Spacer(minLength: 0)
         }
         .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(URL(string: "lifeos://finance/spend"))
@@ -616,14 +611,19 @@ struct CashFlowWidgetView: View {
 
             if let cashFlow = entry.snapshot.finance.cashFlowCents,
                entry.snapshot.financeDisplayState(at: entry.date) == .fresh || entry.snapshot.financeDisplayState(at: entry.date) == .stale {
-                Text(futureModuleCurrency(cashFlow, maximumFractionDigits: 2))
-                    .lifeOSWidgetTypography(.hero)
-                    .foregroundStyle(chrome.hero)
-                Text(futureModuleStateText(entry.snapshot.financeDisplayState(at: entry.date)))
-                    .lifeOSWidgetTypography(.metadata)
-                    .foregroundStyle(chrome.tertiary)
-                Spacer(minLength: 0)
-                Text("Aggregate only")
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(futureModuleCurrency(cashFlow, maximumFractionDigits: 2))
+                        .lifeOSWidgetTypography(.hero)
+                        .foregroundStyle(chrome.hero)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.82)
+                    Spacer(minLength: 4)
+                    Text(futureModuleStateText(entry.snapshot.financeDisplayState(at: entry.date)))
+                        .lifeOSWidgetTypography(.metadata)
+                        .foregroundStyle(chrome.tertiary)
+                        .lineLimit(1)
+                }
+                Text("Net movement")
                     .lifeOSWidgetTypography(.metadata)
                     .foregroundStyle(chrome.tertiary)
             } else {
@@ -663,14 +663,21 @@ struct HealthMonitorWidgetView: View {
 
             if let health = entry.snapshot.fitness.healthScore,
                entry.snapshot.fitnessDisplayState(at: entry.date) == .fresh || entry.snapshot.fitnessDisplayState(at: entry.date) == .stale {
-                Text(futureModuleScore(health))
-                    .lifeOSWidgetTypography(.hero)
-                    .foregroundStyle(chrome.hero)
-                Text("Health aggregate")
-                    .lifeOSWidgetTypography(.metadata)
-                    .foregroundStyle(chrome.tertiary)
-                Spacer(minLength: 0)
-                Text(futureModuleStateText(entry.snapshot.fitnessDisplayState(at: entry.date)))
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(futureModuleScore(health))
+                        .lifeOSWidgetTypography(.hero)
+                        .foregroundStyle(chrome.hero)
+                        .monospacedDigit()
+                    Text("score")
+                        .lifeOSWidgetTypography(.metadata)
+                        .foregroundStyle(chrome.tertiary)
+                    Spacer(minLength: 4)
+                    Text(futureModuleStateText(entry.snapshot.fitnessDisplayState(at: entry.date)))
+                        .lifeOSWidgetTypography(.metadata)
+                        .foregroundStyle(chrome.tertiary)
+                        .lineLimit(1)
+                }
+                Text("Source-backed health aggregate")
                     .lifeOSWidgetTypography(.metadata)
                     .foregroundStyle(chrome.tertiary)
             } else {
@@ -705,7 +712,7 @@ struct RecoveryRingWidgetView: View {
     }
 
     var body: some View {
-        VStack(spacing: 7) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 5) {
                 LifeOSIcon(.heartRate)
                     .frame(width: 14, height: 14)
@@ -715,22 +722,28 @@ struct RecoveryRingWidgetView: View {
                     .foregroundStyle(chrome.hero)
                     .lineLimit(1)
             }
-            .frame(maxWidth: .infinity)
 
             if let recovery = entry.snapshot.fitness.recoveryScore,
                entry.snapshot.fitnessDisplayState(at: entry.date) == .fresh || entry.snapshot.fitnessDisplayState(at: entry.date) == .stale {
-                ZStack {
-                    FutureModuleProgressRing(diameter: 56, lineWidth: 6, progress: recovery / 100)
-                    Text(futureModuleScore(recovery))
-                        .lifeOSWidgetTypography(.compactMetric)
-                        .foregroundStyle(chrome.hero)
+                HStack(alignment: .center, spacing: 10) {
+                    ZStack {
+                        FutureModuleProgressRing(diameter: 52, lineWidth: 6, progress: recovery / 100)
+                        Text(futureModuleScore(recovery))
+                            .lifeOSWidgetTypography(.compactMetric)
+                            .foregroundStyle(chrome.hero)
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Readiness")
+                            .lifeOSWidgetTypography(.title)
+                            .foregroundStyle(chrome.hero)
+                        Text(futureModuleStateText(futureModuleMetricState(
+                            entry.snapshot.fitnessDisplayState(at: entry.date),
+                            hasValue: true
+                        )))
+                        .lifeOSWidgetTypography(.metadata)
+                        .foregroundStyle(chrome.tertiary)
+                    }
                 }
-                Text(futureModuleStateText(futureModuleMetricState(
-                    entry.snapshot.fitnessDisplayState(at: entry.date),
-                    hasValue: entry.snapshot.fitness.recoveryScore != nil
-                )))
-                    .lifeOSWidgetTypography(.metadata)
-                    .foregroundStyle(chrome.tertiary)
             } else {
                 FutureModuleUnavailableHero(state: futureModuleMetricState(
                     entry.snapshot.fitnessDisplayState(at: entry.date),
@@ -753,11 +766,9 @@ struct TasksSmallWidgetView: View {
     let entry: FutureModuleWidgetEntry
 
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             FutureModuleWidgetHeader(title: "Today's Tasks", icon: .tasks, accent: LifeOSTokens.Module.tasks)
-            Spacer(minLength: 0)
             TasksWidgetSummary(data: entry.tasks)
-            Spacer(minLength: 0)
         }
         .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(TasksWidgetData.destination)
@@ -1626,48 +1637,51 @@ private struct FitnessRingCell: View {
     @Environment(\.lifeOSWidgetChrome) private var chrome
 
     var body: some View {
+        let state = fitnessWidgetState(metric, at: date)
+        let hasValue = metric.value != nil && (state == .fresh || state == .stale)
         Link(destination: URL(string: route)!) {
-            VStack(spacing: 2) {
-                if let value = metric.value,
-                   fitnessWidgetState(metric, at: date) == .fresh || fitnessWidgetState(metric, at: date) == .stale {
-                    ZStack {
-                        Circle()
-                            .stroke(LifeOSTokens.Ring.track, lineWidth: 4)
-                        Circle()
-                            .trim(from: 0, to: min(1, max(0, value / 100)))
-                            .stroke(fitnessWidgetStatusColor(progress: value / 100), style: StrokeStyle(lineWidth: 4, lineCap: .round))
-                            .rotationEffect(.degrees(-90))
-                        Text(value.formatted(.number.precision(.fractionLength(0))) + "%")
-                            .lifeOSWidgetTypography(.metadata)
-                            .fontWeight(.bold)
-                            .monospacedDigit()
-                            .lineLimit(1)
-                    }
-                    .frame(width: 37, height: 37)
-                } else {
-                    VStack(spacing: 3) {
-                        Image(systemName: metric.state == .redacted ? "lock.fill" : "minus")
-                            .font(.system(size: 12, weight: .semibold))
-                        Text(metric.state == .redacted ? "Hidden" : "No data")
-                            .lifeOSWidgetTypography(.metadata)
-                            .fontWeight(.semibold)
-                            .lineLimit(1)
-                    }
-                    .foregroundStyle(chrome.tertiary)
-                    .frame(minWidth: 37, minHeight: 37)
-                }
+            VStack(alignment: .leading, spacing: 4) {
                 Text(title)
-                    .lifeOSWidgetTypography(.metadata)
-                    .fontWeight(.semibold)
+                    .lifeOSWidgetTypography(.metadata, weight: .semibold)
+                    .foregroundStyle(chrome.secondary)
                     .lineLimit(1)
-                Text(fitnessWidgetState(metric, at: date) == .fresh ? "Observed" : futureModuleStateText(fitnessWidgetState(metric, at: date)))
-                    .lifeOSWidgetTypography(.metadata)
-                    .foregroundStyle(chrome.tertiary)
-                    .lineLimit(1)
+                HStack(alignment: .center, spacing: 6) {
+                    if let value = metric.value, hasValue {
+                        ZStack {
+                            Circle()
+                                .stroke(LifeOSTokens.Ring.track, lineWidth: 4)
+                            Circle()
+                                .trim(from: 0, to: min(1, max(0, value / 100)))
+                                .stroke(fitnessWidgetStatusColor(progress: value / 100), style: StrokeStyle(lineWidth: 4, lineCap: .round))
+                                .rotationEffect(.degrees(-90))
+                            Text(value.formatted(.number.precision(.fractionLength(0))) + "%")
+                                .lifeOSWidgetTypography(.metadata)
+                                .fontWeight(.bold)
+                                .monospacedDigit()
+                                .lineLimit(1)
+                        }
+                        .frame(width: 36, height: 36)
+                    } else {
+                        Image(systemName: state == .redacted ? "lock.fill" : "minus")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(chrome.tertiary)
+                            .frame(width: 36, height: 36)
+                    }
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(hasValue ? metric.unit.displayName : (state == .redacted ? "Hidden" : "No data"))
+                            .lifeOSWidgetTypography(.metadata)
+                            .foregroundStyle(hasValue ? chrome.tertiary : chrome.secondary)
+                            .lineLimit(2)
+                        if hasValue {
+                            Text(state == .fresh ? "Observed" : "Stale")
+                                .lifeOSWidgetTypography(.metadata)
+                                .foregroundStyle(chrome.tertiary)
+                                .lineLimit(1)
+                        }
+                    }
+                }
             }
-            .padding(.horizontal, 4)
-            .padding(.vertical, 2)
-            .frame(maxWidth: .infinity, minHeight: 44)
+            .frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
         }
         .buttonStyle(.plain)
         .accessibilityElement(children: .ignore)
@@ -1695,30 +1709,25 @@ struct DailyOverviewWidgetView: View {
                 FitnessCompactWidgetHeader(title: "Daily Overview", icon: .overview)
                 if fitness.isDemoFixture { FitnessDemoBadge(compact: true) }
             }
-            LazyVGrid(
-                columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)],
-                alignment: .leading,
-                spacing: 3
-            ) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(entry.date, format: .dateTime.weekday(.abbreviated).month(.abbreviated).day())
-                        .lifeOSWidgetTypography(.title)
-                        .lineLimit(1)
-                    Text("Aggregate signals")
-                        .lifeOSWidgetTypography(.metadata)
-                        .foregroundStyle(chrome.tertiary)
-                        .lineLimit(1)
-                }
-                .padding(.horizontal, 7)
-                .padding(.vertical, 5)
-                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(entry.date, format: .dateTime.weekday(.abbreviated).month(.abbreviated).day())
+                    .lifeOSWidgetTypography(.metadata, weight: .semibold)
+                    .foregroundStyle(chrome.hero)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Text("Source-backed")
+                    .lifeOSWidgetTypography(.metadata)
+                    .foregroundStyle(chrome.tertiary)
+                    .lineLimit(1)
+            }
+            HStack(spacing: 0) {
                 FitnessRingCell(title: "Strain", metric: fitness.strain, route: "lifeos://fitness/strain", date: entry.date)
+                Divider().overlay(chrome.separator).frame(height: 56)
                 FitnessRingCell(title: "Recovery", metric: fitness.recovery, route: "lifeos://fitness/recovery", date: entry.date)
+                Divider().overlay(chrome.separator).frame(height: 56)
                 FitnessRingCell(title: "Sleep", metric: fitness.sleepScore, route: "lifeos://fitness/sleep", date: entry.date)
             }
-            .padding(5)
-            .background(chrome.panelFill(opacity: 0.32), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(chrome.separator, lineWidth: 0.7))
+            .frame(maxWidth: .infinity, minHeight: 64, maxHeight: 64)
         }
         .lifeOSWidgetContainer { LifeOSTokens.surface }
         .widgetURL(URL(string: "lifeos://fitness/daily-overview"))
