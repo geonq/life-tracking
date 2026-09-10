@@ -42,7 +42,9 @@ public enum LifeOSModule: String, CaseIterable, Hashable, Identifiable, Sendable
 
     public var icon: LifeOSIconName {
         switch self {
-        case .home: .home
+        // The compact overview grid reads as a product surface at a glance;
+        // `.home` remains in the icon catalog for older callers.
+        case .home: .overview
         case .finance: .finance
         case .bankConnections: .bankConnections
         case .investments: .investments
@@ -210,39 +212,47 @@ struct LifeOSDestinationUnavailableView: View {
     let onHome: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            LifeOSIcon(.warning)
-                .foregroundStyle(LifeOSTokens.warning)
-                .frame(width: 24, height: 24)
+        LifeOSCard(level: .surface, cornerRadius: LifeOSTokens.Radius.card, padding: LifeOSTokens.Space.md) {
+            VStack(alignment: .leading, spacing: LifeOSTokens.Space.md) {
+                LifeOSIcon(.warning, context: .card)
+                    .foregroundStyle(LifeOSTokens.warning)
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Destination unavailable")
-                    .lifeOSTypography(.cardTitle, weight: .semibold)
-                    .foregroundStyle(LifeOSTokens.primaryText)
-                Text("This link does not match a supported LifeOS destination.")
-                    .lifeOSTypography(.body)
-                    .foregroundStyle(LifeOSTokens.secondaryText)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+                VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
+                    Text("Destination unavailable")
+                        .lifeOSTypography(.cardTitle, weight: .semibold)
+                        .foregroundStyle(LifeOSTokens.primaryText)
+                    Text("This link does not match a supported LifeOS destination.")
+                        .lifeOSTypography(.body)
+                        .foregroundStyle(LifeOSTokens.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
 
-            HStack(spacing: 10) {
-                Button("Back", action: onBack)
-                    .buttonStyle(LifeOSButtonStyle(.secondary))
-                    .accessibilityIdentifier("destination-unavailable-back")
-                Button("Home", action: onHome)
-                    .buttonStyle(LifeOSButtonStyle(.primary))
-                    .accessibilityIdentifier("destination-unavailable-home")
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: LifeOSTokens.Space.xs) {
+                        actionButtons
+                    }
+                    VStack(alignment: .leading, spacing: LifeOSTokens.Space.xs) {
+                        actionButtons
+                    }
+                }
             }
         }
-        .padding(20)
         .frame(maxWidth: 440, alignment: .leading)
-        .background(LifeOSTokens.surface, in: LifeOSTokens.cardShape)
-        .overlay(LifeOSTokens.cardShape.stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-        .padding(24)
+        .padding(LifeOSTokens.pageGutter)
         .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("destination-unavailable")
+    }
+
+    @ViewBuilder
+    private var actionButtons: some View {
+        Button("Back", action: onBack)
+            .buttonStyle(LifeOSButtonStyle(.secondary))
+            .accessibilityIdentifier("destination-unavailable-back")
+        Button("Home", action: onHome)
+            .buttonStyle(LifeOSButtonStyle(.primary))
+            .accessibilityIdentifier("destination-unavailable-home")
     }
 }
 
@@ -443,7 +453,7 @@ public struct LifeOSModuleLandingView: View {
 
     private var landingBody: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: LifeOSTokens.sectionGap) {
                 header
                 statusCard
                 if let section = route?.sectionTitle {
@@ -453,31 +463,26 @@ public struct LifeOSModuleLandingView: View {
                     previewStructure
                 }
             }
-            .frame(maxWidth: 760, alignment: .leading)
-            .padding(.horizontal, 20)
-            .padding(.vertical, 24)
+            .frame(maxWidth: 640, alignment: .leading)
+            .padding(.horizontal, LifeOSTokens.pageGutter)
+            .padding(.vertical, LifeOSTokens.Space.lg)
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
-        .navigationTitle(module.title)
+        // The content owns the one page title. The surrounding More stack
+        // supplies back navigation without repeating the module name in a
+        // second large toolbar title.
         .accessibilityIdentifier("module-landing-\(module.rawValue)")
     }
 
     private var header: some View {
-        HStack(alignment: .top, spacing: 14) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(module.accent.opacity(0.12))
-                LifeOSIcon(module.icon)
-                    .foregroundStyle(module.accent)
-                    .frame(width: 24, height: 24)
-            }
-            .frame(width: 52, height: 52)
+        HStack(alignment: .firstTextBaseline, spacing: LifeOSTokens.Space.sm) {
+            LifeOSIcon(module.icon, context: .navigation)
+                .foregroundStyle(module.accent)
 
-            VStack(alignment: .leading, spacing: 5) {
+            VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
                 Text(module.title)
                     .lifeOSTypography(.pageTitle)
-                    .tracking(-0.35)
                 Text(module.subtitle)
                     .lifeOSTypography(.body)
                     .foregroundStyle(LifeOSTokens.secondaryText)
@@ -488,71 +493,67 @@ public struct LifeOSModuleLandingView: View {
     }
 
     private var statusCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                LifeOSStatusPill(
-                    label: "Not connected",
-                    tone: .warning,
-                    systemImage: "exclamationmark.circle"
-                )
+        LifeOSCard(level: .surface, cornerRadius: LifeOSTokens.Radius.card, padding: LifeOSTokens.Space.md) {
+            VStack(alignment: .leading, spacing: LifeOSTokens.Space.sm) {
+                HStack(spacing: LifeOSTokens.Space.xs) {
+                    Circle()
+                        .fill(LifeOSTokens.warning)
+                        .frame(width: 6, height: 6)
+                    Text("Not connected")
+                        .lifeOSTypography(.label, weight: .medium)
+                        .foregroundStyle(LifeOSTokens.warning)
+                }
+                Text(module.unavailableMessage)
+                    .lifeOSTypography(.body)
+                    .foregroundStyle(LifeOSTokens.primaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Connect a source in Settings to see current data here.")
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            Text(module.unavailableMessage)
-                .lifeOSTypography(.body)
-                .foregroundStyle(LifeOSTokens.primaryText)
-                .fixedSize(horizontal: false, vertical: true)
-            Text("Unavailable values stay unavailable until a reviewed source is available.")
-                .lifeOSTypography(.metadata)
-                .foregroundStyle(LifeOSTokens.secondaryText)
         }
-        .padding(18)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(LifeOSTokens.surface, in: LifeOSTokens.cardShape)
-        .overlay(LifeOSTokens.cardShape.stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("module-landing-status")
     }
 
     private func routeCard(section: String) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Requested view")
-                .lifeOSTypography(.body, weight: .semibold)
-                .tracking(0.5)
-                .textCase(.uppercase)
-                .foregroundStyle(LifeOSTokens.tertiaryText)
-            Text("\(module.title) / \(section)")
-                .lifeOSTypography(.body, weight: .semibold)
-            Text("This route is ready for navigation, but its data surface is not connected in this build.")
-                .lifeOSTypography(.body)
-                .foregroundStyle(LifeOSTokens.tertiaryText)
+        LifeOSCard(level: .surface, cornerRadius: LifeOSTokens.Radius.card, padding: LifeOSTokens.Space.md) {
+            VStack(alignment: .leading, spacing: LifeOSTokens.Space.xs) {
+                Text("Requested view")
+                    .lifeOSTypography(.metadata, weight: .medium)
+                    .foregroundStyle(LifeOSTokens.secondaryText)
+                Text("\(module.title) / \(section)")
+                    .lifeOSTypography(.body, weight: .semibold)
+                Text("This destination will show its data when a source is connected.")
+                    .lifeOSTypography(.body)
+                    .foregroundStyle(LifeOSTokens.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
-        .padding(18)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(LifeOSTokens.accent.opacity(0.07), in: LifeOSTokens.cardShape)
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("module-route-context")
     }
 
     private var previewStructure: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("DEMO · PREVIEW STRUCTURE · NOT LIVE DATA")
-                .lifeOSTypography(.body, weight: .bold)
-                .tracking(0.65)
-                .foregroundStyle(LifeOSTokens.warning)
-            ForEach(["Overview", "Recent activity", "Trends"], id: \.self) { label in
-                HStack {
-                    Text(label)
-                        .lifeOSTypography(.body, weight: .medium)
-                    Spacer()
-                    Text("Unavailable")
-                        .lifeOSTypography(.body, weight: .semibold)
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
+        LifeOSCard(level: .surface, cornerRadius: LifeOSTokens.Radius.card, padding: LifeOSTokens.Space.md) {
+            VStack(alignment: .leading, spacing: LifeOSTokens.Space.sm) {
+                Text("Demo preview")
+                    .lifeOSTypography(.cardTitle, weight: .semibold)
+                    .foregroundStyle(LifeOSTokens.warning)
+                ForEach(["Overview", "Recent activity", "Trends"], id: \.self) { label in
+                    HStack {
+                        Text(label)
+                            .lifeOSTypography(.body, weight: .medium)
+                        Spacer()
+                        Text("Unavailable")
+                            .lifeOSTypography(.body, weight: .semibold)
+                            .foregroundStyle(LifeOSTokens.tertiaryText)
+                    }
+                    .padding(.vertical, LifeOSTokens.Space.xxs)
                 }
-                .padding(.vertical, 3)
             }
         }
-        .padding(18)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(LifeOSTokens.warning.opacity(0.07), in: LifeOSTokens.cardShape)
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("module-landing-preview-structure")
     }
@@ -567,6 +568,7 @@ public struct LifeOSMoreModulesView: View {
     @State private var selectedModule: LifeOSModule?
     @State private var restoredOnce = false
     @SceneStorage("LifeOS.More.selectedModule.v1") private var restoredModule = ""
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private let initialModule: LifeOSModule?
 
     public init(
@@ -587,18 +589,22 @@ public struct LifeOSMoreModulesView: View {
     public var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    Text("The rest of LifeOS, grouped so it stays easy to reach one-handed.")
-                        .lifeOSTypography(.body)
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
-                        .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: LifeOSTokens.sectionGap) {
+                    VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
+                        Text("More")
+                            .lifeOSTypography(.pageTitle)
+                            .foregroundStyle(LifeOSTokens.primaryText)
+                        Text("The rest of LifeOS, grouped so it stays easy to reach one-handed.")
+                            .lifeOSTypography(.metadata)
+                            .foregroundStyle(LifeOSTokens.secondaryText)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
 
                     ForEach(LifeOSModule.moreGroups) { group in
                         VStack(alignment: .leading, spacing: 8) {
-                            Text(group.title.uppercased())
-                                .lifeOSTypography(.body, weight: .bold)
-                                .tracking(0.7)
-                                .foregroundStyle(LifeOSTokens.tertiaryText)
+                            Text(group.title)
+                                .lifeOSTypography(.metadata, weight: .semibold)
+                                .foregroundStyle(LifeOSTokens.secondaryText)
 
                             VStack(spacing: 0) {
                                 ForEach(group.modules) { module in
@@ -613,12 +619,12 @@ public struct LifeOSMoreModulesView: View {
                         }
                     }
                 }
-                .padding(.horizontal, 18)
-                .padding(.top, 18)
-                .padding(.bottom, 28)
+                .frame(maxWidth: 520, alignment: .leading)
+                .padding(.horizontal, LifeOSTokens.pageGutter)
+                .padding(.top, LifeOSTokens.Space.lg)
+                .padding(.bottom, LifeOSTokens.Space.xxl)
             }
             .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
-            .navigationTitle("More")
             .accessibilityIdentifier("more-modules-screen")
             .onAppear {
                 guard !restoredOnce else { return }
@@ -640,28 +646,27 @@ public struct LifeOSMoreModulesView: View {
         return Button {
             selectedModule = module
         } label: {
-            HStack(spacing: 12) {
+            HStack(spacing: LifeOSTokens.Space.sm) {
                 Capsule(style: .continuous)
                     .fill(selected ? LifeOSTokens.accent : .clear)
-                    .frame(width: 3, height: 20)
-                LifeOSIcon(module.icon)
+                    .frame(width: 2, height: 16)
+                LifeOSIcon(module.icon, context: .navigation)
                     .foregroundStyle(selected ? LifeOSTokens.selectedNavigationText : LifeOSTokens.secondaryText)
-                    .frame(width: 24, height: 24)
                 Text(module.title)
                     .lifeOSTypography(.label, weight: .medium)
                     .foregroundStyle(selected ? LifeOSTokens.selectedNavigationText : LifeOSTokens.secondaryText)
-                Spacer(minLength: 12)
-                LifeOSIcon(.chevronRight)
+                Spacer(minLength: LifeOSTokens.Space.sm)
+                LifeOSIcon(.chevronRight, context: .disclosure)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
-                    .frame(width: 24, height: 24)
             }
-            .padding(.horizontal, 16)
-            .frame(minHeight: 48)
+            .padding(.horizontal, LifeOSTokens.Space.sm)
+            .frame(minHeight: LifeOSTokens.Control.standardHeight)
             .background(
                 selected ? LifeOSTokens.selectedNavigationFill : .clear,
                 in: RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
             )
             .contentShape(Rectangle())
+            .animation(reduceMotion ? nil : LifeOSMotion.selector, value: selected)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(module.title)

@@ -15,7 +15,6 @@ struct OverviewView: View {
     private let financeState: FinanceLoadState
     private let openDestination: ((LifeOSDeepLink) -> Void)?
     @Binding private var showingUsage: Bool
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var selectedDetail: OverviewDetail?
 
     private enum OverviewDetail: Hashable {
@@ -64,9 +63,8 @@ struct OverviewView: View {
                     bottomPadding: contentBottomPadding,
                     maxReadableWidth: OverviewLayoutContract.maxContentWidth
                 ) {
-                    VStack(alignment: .leading, spacing: 0) {
+                    VStack(alignment: .leading, spacing: LifeOSTokens.sectionGap) {
                         header
-                            .padding(.bottom, headerBottomSpacing)
                         dashboard
                     }
                 }
@@ -102,17 +100,9 @@ struct OverviewView: View {
 
     private var headerTopSpacing: CGFloat {
 #if os(macOS)
-        20
-#else
-        12
-#endif
-    }
-
-    private var headerBottomSpacing: CGFloat {
-#if os(macOS)
-        20
-#else
         16
+#else
+        8
 #endif
     }
 
@@ -146,8 +136,6 @@ struct OverviewView: View {
 
             if let usage = visibleSections.first(where: { $0.kind == .llm }) {
                 sectionRow(usage, featured: true)
-                    .transition(reduceMotion ? .identity : .opacity)
-                    .padding(.bottom, LifeOSTokens.overviewCardGap + 4)
             }
 
             supportingDashboard(sections: supportingSections)
@@ -159,7 +147,6 @@ struct OverviewView: View {
         OverviewSupportingLayout {
             ForEach(sections) { section in
                 sectionRow(section)
-                    .transition(reduceMotion ? .identity : .opacity)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -475,7 +462,7 @@ struct OverviewView: View {
         HStack(alignment: .center, spacing: LifeOSTokens.Space.md) {
             VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
                 Text("Home")
-                    .lifeOSTypography(.sectionTitle, weight: .semibold)
+                    .lifeOSTypography(.pageTitle, weight: .semibold)
                     .foregroundStyle(LifeOSTokens.primaryText)
                 Text(overviewDateLabel)
                     .lifeOSTypography(.metadata)
@@ -504,7 +491,7 @@ struct OverviewView: View {
     }
 
     private var overviewDateLabel: String {
-        Date.now.formatted(date: .complete, time: .omitted)
+        Date.now.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day())
     }
 
     private var shouldShowStatusBadge: Bool {
@@ -1081,7 +1068,7 @@ private struct OverviewMetricCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: LifeOSTokens.Space.md) {
             HStack(alignment: .center, spacing: LifeOSTokens.Space.sm) {
-                LifeOSIcon(sectionIcon)
+                LifeOSIcon(sectionIcon, context: .card)
                     .foregroundStyle(LifeOSTokens.secondaryText)
                     .frame(width: 20, height: 20)
 
@@ -1149,7 +1136,7 @@ private struct OverviewMetricCard: View {
             HStack(alignment: .firstTextBaseline, spacing: LifeOSTokens.Space.xs) {
                 if let remaining = leadUsageSnapshot?.smallestObservedWindow?.usedPercent.map({ 1 - $0 }) {
                     Text("\(Int((remaining * 100).rounded()))")
-                        .lifeOSTypography(.metricCompact)
+                        .lifeOSTypography(.metric)
                         .foregroundStyle(.primary)
                         .numericTransition()
                     Text("% remaining")
@@ -1593,7 +1580,7 @@ private struct ClipperAnalyticsView: View {
                 bottomPadding: 28
             ) {
                 VStack(alignment: .leading, spacing: 16) {
-                    heroCard.transition(.opacity)
+                    heroCard
                     if let snapshot, snapshot.availability == .observed {
                         observedDetailCards(snapshot)
                     } else if section.provenance.quality == .demo {
@@ -1619,7 +1606,6 @@ private struct ClipperAnalyticsView: View {
             }
         }
         .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
-        .navigationTitle("Clipper Analytics")
 #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .tabBar)
