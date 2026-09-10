@@ -340,57 +340,68 @@ function Read-LifeOSCappedFileBytes {
     if ($MaxBytes -le 0 -or $MaxBytes -gt $script:LifeOSMaxCappedReadBytes) {
         throw "$Description has an invalid bounded read size."
     }
-    Assert-ExistingFile $Path $Description
-    $beforeChain = @(Get-LifeOSPathIdentityChain -Path $Path -Description $Description)
-    if ($beforeChain.Count -le 0) { throw "$Description has no readable path identity." }
-    $beforeLeaf = $beforeChain[$beforeChain.Count - 1]
-    $handle = $null
-    $stream = $null
-    try {
-        $handle = [LifeOSNativeFileIdentity]::OpenRead((Get-FullPath $Path))
-        $attributes = [LifeOSNativeFileIdentity]::GetAttributes($handle)
-        if (($attributes -band [int][IO.FileAttributes]::ReparsePoint) -ne 0) {
-            $handle.Dispose()
-            $handle = $null
-            throw "$Description is a reparse point."
+    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+        $beforeChain = $null
+        $beforeLeaf = $null
+        $handle = $null
+        $stream = $null
+        $retry = $false
+        try {
+            Assert-ExistingFile $Path $Description
+            $beforeChain = @(Get-LifeOSPathIdentityChain -Path $Path -Description $Description)
+            if ($beforeChain.Count -le 0) { throw "$Description has no readable path identity." }
+            $beforeLeaf = $beforeChain[$beforeChain.Count - 1]
+            $handle = [LifeOSNativeFileIdentity]::OpenRead((Get-FullPath $Path))
+            $attributes = [LifeOSNativeFileIdentity]::GetAttributes($handle)
+            if (($attributes -band [int][IO.FileAttributes]::ReparsePoint) -ne 0) {
+                $handle.Dispose()
+                $handle = $null
+                throw "$Description is a reparse point."
+            }
+            if ([string][LifeOSNativeFileIdentity]::Get($handle) -cne [string]$beforeLeaf.FileId) {
+                $handle.Dispose()
+                $handle = $null
+                throw "$Description changed while it was being opened."
+            }
+            # The FileStream is created from the already-validated SafeFileHandle;
+            # it owns that handle and is the only source of bytes below. The
+            # native open uses FILE_SHARE_READ, blocking ordinary writer, delete,
+            # and replace operations until the read has finished.
+            $stream = [IO.FileStream]::new($handle, [IO.FileAccess]::Read, 65536, $false)
+            $openedLength = [long]$stream.Length
+            if ($openedLength -gt $MaxBytes) { throw "$Description exceeds its bounded read size." }
+            $buffer = New-Object byte[] ([int]$MaxBytes + 1)
+            [int]$offset = 0
+            while ($offset -lt $buffer.Length) {
+                $read = $stream.Read($buffer, $offset, $buffer.Length - $offset)
+                if ($read -le 0) { break }
+                $offset += $read
+            }
+            if ($offset -gt [int]$MaxBytes -or $offset -ne [int]$openedLength) {
+                throw "$Description grew or changed while it was being read."
+            }
+            if ([long]$stream.Length -ne $openedLength -or $stream.Position -ne $openedLength) {
+                throw "$Description was truncated while it was being read."
+            }
+            if ([string][LifeOSNativeFileIdentity]::Get($stream.SafeFileHandle) -cne [string]$beforeLeaf.FileId) {
+                throw "$Description identity changed while it was being read."
+            }
+            Assert-LifeOSPathIdentityChain -Expected $beforeChain -Description $Description | Out-Null
+            $result = New-Object byte[] $offset
+            if ($offset -gt 0) { [Array]::Copy($buffer, $result, $offset) }
+            return ,$result
+        } catch {
+            $message = [string]$_.Exception.Message
+            if ($attempt -lt 2 -and $message -like '*ancestor identity changed.') {
+                $retry = $true
+            } else {
+                throw "$Description could not be read as a stable bounded file: $message"
+            }
+        } finally {
+            if ($null -ne $stream) { $stream.Dispose() }
+            elseif ($null -ne $handle) { $handle.Dispose() }
         }
-        if ([string][LifeOSNativeFileIdentity]::Get($handle) -cne [string]$beforeLeaf.FileId) {
-            $handle.Dispose()
-            $handle = $null
-            throw "$Description changed while it was being opened."
-        }
-        # The FileStream is created from the already-validated SafeFileHandle;
-        # it owns that handle and is the only source of bytes below. The
-        # native open uses FILE_SHARE_READ, blocking ordinary writer, delete,
-        # and replace operations until the read has finished.
-        $stream = [IO.FileStream]::new($handle, [IO.FileAccess]::Read, 65536, $false)
-        $openedLength = [long]$stream.Length
-        if ($openedLength -gt $MaxBytes) { throw "$Description exceeds its bounded read size." }
-        $buffer = New-Object byte[] ([int]$MaxBytes + 1)
-        [int]$offset = 0
-        while ($offset -lt $buffer.Length) {
-            $read = $stream.Read($buffer, $offset, $buffer.Length - $offset)
-            if ($read -le 0) { break }
-            $offset += $read
-        }
-        if ($offset -gt [int]$MaxBytes -or $offset -ne [int]$openedLength) {
-            throw "$Description grew or changed while it was being read."
-        }
-        if ([long]$stream.Length -ne $openedLength -or $stream.Position -ne $openedLength) {
-            throw "$Description was truncated while it was being read."
-        }
-        if ([string][LifeOSNativeFileIdentity]::Get($stream.SafeFileHandle) -cne [string]$beforeLeaf.FileId) {
-            throw "$Description identity changed while it was being read."
-        }
-        Assert-LifeOSPathIdentityChain -Expected $beforeChain -Description $Description | Out-Null
-        $result = New-Object byte[] $offset
-        if ($offset -gt 0) { [Array]::Copy($buffer, $result, $offset) }
-        return ,$result
-    } catch {
-        throw "$Description could not be read as a stable bounded file: $($_.Exception.Message)"
-    } finally {
-        if ($null -ne $stream) { $stream.Dispose() }
-        elseif ($null -ne $handle) { $handle.Dispose() }
+        if ($retry) { Start-Sleep -Milliseconds 50 }
     }
 }
 
@@ -1207,6 +1218,7 @@ function Assert-LifeOSPathIdentityChain {
             [long]$actual[$index].Length -ne [long]$Expected[$index].Length -or
             [DateTime]$actual[$index].LastWriteTimeUtc -ne [DateTime]$Expected[$index].LastWriteTimeUtc -or
             [DateTime]$actual[$index].CreationTimeUtc -ne [DateTime]$Expected[$index].CreationTimeUtc) {
+            if ($index -eq $Expected.Count - 1) { throw "$Description file identity changed." }
             throw "$Description ancestor identity changed."
         }
     }
@@ -2186,56 +2198,67 @@ function Get-LifeOSFileDigest {
         [Parameter(Mandatory)][string]$Description,
         [string]$ExpectedFileId = ''
     )
-    Assert-ExistingFile $Path $Description
-    $beforeChain = @(Get-LifeOSPathIdentityChain -Path $Path -Description $Description)
-    if ($beforeChain.Count -le 0) { throw "$Description has no readable path identity." }
-    $beforeLeaf = $beforeChain[$beforeChain.Count - 1]
-    $handle = $null
-    $stream = $null
-    $hasher = $null
-    try {
-        $handle = [LifeOSNativeFileIdentity]::OpenRead((Get-FullPath $Path))
-        $attributes = [LifeOSNativeFileIdentity]::GetAttributes($handle)
-        if (($attributes -band [int][IO.FileAttributes]::ReparsePoint) -ne 0) {
-            $handle.Dispose()
-            $handle = $null
-            throw "$Description is a reparse point."
+    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+        $beforeChain = $null
+        $beforeLeaf = $null
+        $handle = $null
+        $stream = $null
+        $hasher = $null
+        $retry = $false
+        try {
+            Assert-ExistingFile $Path $Description
+            $beforeChain = @(Get-LifeOSPathIdentityChain -Path $Path -Description $Description)
+            if ($beforeChain.Count -le 0) { throw "$Description has no readable path identity." }
+            $beforeLeaf = $beforeChain[$beforeChain.Count - 1]
+            $handle = [LifeOSNativeFileIdentity]::OpenRead((Get-FullPath $Path))
+            $attributes = [LifeOSNativeFileIdentity]::GetAttributes($handle)
+            if (($attributes -band [int][IO.FileAttributes]::ReparsePoint) -ne 0) {
+                $handle.Dispose()
+                $handle = $null
+                throw "$Description is a reparse point."
+            }
+            $openedId = [string][LifeOSNativeFileIdentity]::Get($handle)
+            if ($openedId -cne [string]$beforeLeaf.FileId -or
+                (-not [string]::IsNullOrWhiteSpace($ExpectedFileId) -and $openedId -cne $ExpectedFileId)) {
+                $handle.Dispose()
+                $handle = $null
+                throw "$Description changed while it was being opened."
+            }
+            # Hashing consumes the descriptor-bound stream. The path is only used
+            # for the ancestor-chain revalidation after the descriptor is read.
+            $stream = [IO.FileStream]::new($handle, [IO.FileAccess]::Read, 65536, $false)
+            $openedLength = [long]$stream.Length
+            if ($openedLength -gt $script:LifeOSMaxCappedReadBytes) {
+                throw "$Description exceeds its bounded hash size."
+            }
+            $hasher = [Security.Cryptography.SHA256]::Create()
+            $digest = $hasher.ComputeHash($stream)
+            if ([long]$stream.Length -ne $openedLength -or $stream.Position -ne $openedLength -or
+                [string][LifeOSNativeFileIdentity]::Get($stream.SafeFileHandle) -cne $openedId) {
+                throw "$Description changed while it was being read."
+            }
+            Assert-LifeOSPathIdentityChain -Expected $beforeChain -Description $Description | Out-Null
+            if ($null -eq $digest -or $digest.Length -ne 32) {
+                throw "Hash operation returned no SHA-256 value for $Path."
+            }
+            return [pscustomobject]@{
+                Length = $openedLength
+                Sha256 = ([BitConverter]::ToString($digest) -replace '-', '').ToLowerInvariant()
+                FileId = $openedId
+            }
+        } catch {
+            $message = [string]$_.Exception.Message
+            if ($attempt -lt 2 -and $message -like '*ancestor identity changed.') {
+                $retry = $true
+            } else {
+                throw "Could not hash ${Path}: $message"
+            }
+        } finally {
+            if ($null -ne $hasher) { $hasher.Dispose() }
+            if ($null -ne $stream) { $stream.Dispose() }
+            elseif ($null -ne $handle) { $handle.Dispose() }
         }
-        $openedId = [string][LifeOSNativeFileIdentity]::Get($handle)
-        if ($openedId -cne [string]$beforeLeaf.FileId -or
-            (-not [string]::IsNullOrWhiteSpace($ExpectedFileId) -and $openedId -cne $ExpectedFileId)) {
-            $handle.Dispose()
-            $handle = $null
-            throw "$Description changed while it was being opened."
-        }
-        # Hashing consumes the descriptor-bound stream. The path is only used
-        # for the ancestor-chain revalidation after the descriptor is read.
-        $stream = [IO.FileStream]::new($handle, [IO.FileAccess]::Read, 65536, $false)
-        $openedLength = [long]$stream.Length
-        if ($openedLength -gt $script:LifeOSMaxCappedReadBytes) {
-            throw "$Description exceeds its bounded hash size."
-        }
-        $hasher = [Security.Cryptography.SHA256]::Create()
-        $digest = $hasher.ComputeHash($stream)
-        if ([long]$stream.Length -ne $openedLength -or $stream.Position -ne $openedLength -or
-            [string][LifeOSNativeFileIdentity]::Get($stream.SafeFileHandle) -cne $openedId) {
-            throw "$Description changed while it was being read."
-        }
-        Assert-LifeOSPathIdentityChain -Expected $beforeChain -Description $Description | Out-Null
-    } catch {
-        throw "Could not hash ${Path}: $($_.Exception.Message)"
-    } finally {
-        if ($null -ne $hasher) { $hasher.Dispose() }
-        if ($null -ne $stream) { $stream.Dispose() }
-        elseif ($null -ne $handle) { $handle.Dispose() }
-    }
-    if ($null -eq $digest -or $digest.Length -ne 32) {
-        throw "Hash operation returned no SHA-256 value for $Path."
-    }
-    return [pscustomobject]@{
-        Length = $openedLength
-        Sha256 = ([BitConverter]::ToString($digest) -replace '-', '').ToLowerInvariant()
-        FileId = $openedId
+        if ($retry) { Start-Sleep -Milliseconds 50 }
     }
 }
 
