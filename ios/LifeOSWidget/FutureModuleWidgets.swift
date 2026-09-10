@@ -1642,7 +1642,8 @@ private struct FitnessRingCell: View {
         Link(destination: URL(string: route)!) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
-                    .lifeOSWidgetTypography(.metadata, weight: .semibold)
+                    .lifeOSWidgetTypography(.metadata)
+                    .fontWeight(.semibold)
                     .foregroundStyle(chrome.secondary)
                     .lineLimit(1)
                 HStack(alignment: .center, spacing: 6) {
@@ -1711,7 +1712,8 @@ struct DailyOverviewWidgetView: View {
             }
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text(entry.date, format: .dateTime.weekday(.abbreviated).month(.abbreviated).day())
-                    .lifeOSWidgetTypography(.metadata, weight: .semibold)
+                    .lifeOSWidgetTypography(.metadata)
+                    .fontWeight(.semibold)
                     .foregroundStyle(chrome.hero)
                     .lineLimit(1)
                 Spacer(minLength: 4)
