@@ -810,7 +810,7 @@ def test_install_preflight_invocation_uses_named_parameter_splat() -> None:
     # every value is bound to its named parameter.
     match = re.search(
         r"(?ms)\$preflightArgs\s*=\s*@\{(?P<body>.*?)\n\}\s*"
-        r"& \(Join-Path \$script:LifeOSInstallScriptRoot 'preflight\.ps1'\) @preflightArgs",
+        r"& \(Join-Path \$PSScriptRoot 'preflight\.ps1'\) @preflightArgs",
         install,
     )
     assert match is not None

@@ -661,7 +661,7 @@ $preflightArgs = @{
     LegacyTaskName = $LegacyTaskName
     CodexTaskName = $CodexTaskName
 }
-& (Join-Path $script:LifeOSInstallScriptRoot 'preflight.ps1') @preflightArgs | Out-Host
+& (Join-Path $PSScriptRoot 'preflight.ps1') @preflightArgs | Out-Host
 
 $hostSource = Resolve-ServiceHostBinary $ServiceHostBinarySource $paths.ServiceHostPath
 $nodeSource = Resolve-NodeRuntimeSource $NodeRuntimeSource $ApiSource
