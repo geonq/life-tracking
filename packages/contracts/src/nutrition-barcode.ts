@@ -173,7 +173,7 @@ export function normalizeNutritionBarcode(input: string): string | undefined {
 }
 
 function hasValidChecksum(digits: string): boolean {
-  const checkDigit = Number(digits.at(-1));
+  const checkDigit = Number(digits[digits.length - 1]);
   const data = digits.slice(0, -1);
   let sum = 0;
   for (let index = data.length - 1, weight = 3; index >= 0; index -= 1, weight = weight === 3 ? 1 : 3) {
