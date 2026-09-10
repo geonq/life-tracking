@@ -370,13 +370,17 @@ function Get-ChildRuntimeStage {
         $baseTarget = Join-Path $RuntimeRoot 'python312'
         $venvTarget = Join-Path $RuntimeRoot 'python-venv'
         $basePriorExists = Test-Path -LiteralPath $baseTarget -PathType Container
-        $baseChanged = -not (Compare-TreeManifest $homeRoot $baseTarget)
+        # The staged base intentionally omits the operator's global packages
+        # and other non-runtime content, so a normal full-tree comparison is
+        # both too large and semantically wrong here. The specialized copier
+        # below builds and verifies the bounded runtime view.
+        $baseChanged = $true
         $baseIntent = New-ManifestIntent $Manifest.backups $Manifest $ManifestPath 'python-base' $homeRoot $baseTarget (Join-Path $BackupDirectory 'previous-python312') $basePriorExists $baseChanged
         $baseResult = $null
         $venvResult = $null
         $venvIntent = $null
         try {
-            $baseResult = Copy-TreeVerifiedAtomic $homeRoot $baseTarget $BackupDirectory 'previous-python312'
+            $baseResult = Copy-PythonBaseRuntimeAtomic $homeRoot $baseTarget $BackupDirectory 'previous-python312'
             Complete-ManifestIntent $baseIntent $Manifest $ManifestPath $baseResult
             $venvPriorExists = Test-Path -LiteralPath $venvTarget -PathType Container
             $venvChanged = -not (Compare-TreeManifest $sourceRoot $venvTarget)
@@ -435,12 +439,90 @@ function Get-ChildRuntimeStage {
     }
     $baseTarget = Join-Path $RuntimeRoot 'python312'
     $basePriorExists = Test-Path -LiteralPath $baseTarget -PathType Container
-    $baseChanged = -not (Compare-TreeManifest $sourceRoot $baseTarget)
+    $baseChanged = $true
     $baseIntent = New-ManifestIntent $Manifest.backups $Manifest $ManifestPath 'python-base' $sourceRoot $baseTarget (Join-Path $BackupDirectory 'previous-python312') $basePriorExists $baseChanged
-    $baseResult = Copy-TreeVerifiedAtomic $sourceRoot $baseTarget $BackupDirectory 'previous-python312'
+    $baseResult = Copy-PythonBaseRuntimeAtomic $sourceRoot $baseTarget $BackupDirectory 'previous-python312'
     Complete-ManifestIntent $baseIntent $Manifest $ManifestPath $baseResult
     $stagedBaseRuntime = Resolve-PythonRuntimeSource -Requested $baseTarget -GatewaySource $baseTarget
     return [pscustomobject]@{ PythonPath = $stagedBaseRuntime.Executable; PythonRoot = $stagedBaseRuntime.Root; PythonLayout = $stagedBaseRuntime.Layout; BaseTarget = $baseTarget; VenvTarget = $null; Base = $baseResult; Venv = $null }
+}
+
+function Copy-PythonBaseRuntimeAtomic {
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Destination,
+        [Parameter(Mandatory)][string]$BackupDirectory,
+        [string]$BackupName = 'previous-python312'
+    )
+    # A Windows Python installation may contain an unrelated global
+    # site-packages tree, documentation, and test modules. The service uses
+    # the virtual environment's site-packages; copying the global packages
+    # would exceed the 512 MiB bounded-tree contract and would make the
+    # deployed runtime depend on arbitrary packages from the operator profile.
+    # Copy the base interpreter and standard library in bounded subtrees while
+    # preserving the same per-file identity/hash checks as every other stage.
+    Assert-ExistingDirectory $Source 'Python base runtime source'
+    $sourceRoot = Get-FullPath $Source
+    $sourceItem = Get-Item -LiteralPath $sourceRoot -Force -ErrorAction Stop
+    $sourceIdentity = New-LifeOSTreeItemIdentity -Item $sourceItem -Description 'Python base runtime source'
+    $destinationFull = Get-FullPath $Destination
+    $destinationParent = Split-Path -Parent $destinationFull
+    Ensure-Directory $destinationParent
+    $temp = Join-Path $destinationParent ('.' + [IO.Path]::GetFileName($destinationFull) + '.' + [Guid]::NewGuid().ToString('N') + '.staging')
+    $backup = $null
+    $excludedRootDirectories = @('Doc')
+    $excludedLibDirectories = @('site-packages', 'test', 'idlelib', 'turtledemo')
+    try {
+        Ensure-Directory $temp
+        foreach ($item in @(Get-ChildItem -LiteralPath $sourceRoot -Force -ErrorAction Stop)) {
+            $name = [string]$item.Name
+            $target = Join-Path $temp $name
+            Assert-NoReparsePath $item.FullName
+            if ($item.PSIsContainer -and $excludedRootDirectories -contains $name) { continue }
+            if ($name -ieq 'Lib' -and $item.PSIsContainer) {
+                Ensure-Directory $target
+                foreach ($libItem in @(Get-ChildItem -LiteralPath $item.FullName -Force -ErrorAction Stop)) {
+                    Assert-NoReparsePath $libItem.FullName
+                    if ($libItem.PSIsContainer -and $excludedLibDirectories -contains ([string]$libItem.Name)) { continue }
+                    $libTarget = Join-Path $target ([string]$libItem.Name)
+                    if ($libItem.PSIsContainer) {
+                        [void](Copy-TreeVerifiedAtomic -Source $libItem.FullName -Destination $libTarget -BackupDirectory $BackupDirectory -BackupName ('python-base-' + $libItem.Name))
+                    } else {
+                        [void](Copy-FileVerifiedAtomic -Source $libItem.FullName -Destination $libTarget -BackupDirectory $BackupDirectory -BackupName ('python-base-' + $libItem.Name))
+                    }
+                }
+            } elseif ($item.PSIsContainer) {
+                [void](Copy-TreeVerifiedAtomic -Source $item.FullName -Destination $target -BackupDirectory $BackupDirectory -BackupName ('python-base-' + $name))
+            } else {
+                [void](Copy-FileVerifiedAtomic -Source $item.FullName -Destination $target -BackupDirectory $BackupDirectory -BackupName ('python-base-' + $name))
+            }
+        }
+        Assert-LifeOSTreeItemIdentity -Path $sourceRoot -Expected $sourceIdentity -Description 'Python base runtime source' | Out-Null
+        $stagedManifest = @(Get-TreeManifest $temp)
+        if ($stagedManifest.Count -le 0) { throw 'Python base runtime staging produced no files.' }
+        if (Test-Path -LiteralPath $destinationFull -PathType Container) {
+            Assert-NoReparsePath $destinationFull
+            Ensure-Directory $BackupDirectory
+            $backup = Join-Path $BackupDirectory $BackupName
+            Move-Item -LiteralPath $destinationFull -Destination $backup -Force
+        }
+        Move-Item -LiteralPath $temp -Destination $destinationFull -Force
+        $installedManifest = @(Get-TreeManifest $destinationFull)
+        if (($stagedManifest | ConvertTo-Json -Depth 8 -Compress) -join '' -cne (($installedManifest | ConvertTo-Json -Depth 8 -Compress) -join '')) {
+            throw "Staged Python base runtime verification failed for $destinationFull."
+        }
+    } catch {
+        if ($null -ne $backup -and (Test-Path -LiteralPath $backup)) {
+            if (Test-Path -LiteralPath $destinationFull) { Move-CurrentOutOfTheWay $destinationFull $BackupDirectory }
+            Move-Item -LiteralPath $backup -Destination $destinationFull -Force
+        } elseif (Test-Path -LiteralPath $destinationFull) {
+            Move-CurrentOutOfTheWay $destinationFull $BackupDirectory
+        }
+        throw
+    } finally {
+        if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+    return [pscustomobject]@{ Destination = $destinationFull; Backup = $backup; Manifest = $stagedManifest; Changed = $true }
 }
 
 function Get-PathOnlyGatewayConfig {
