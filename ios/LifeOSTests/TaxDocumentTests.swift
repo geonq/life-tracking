@@ -257,4 +257,179 @@ final class TaxDocumentTests: XCTestCase {
             XCTAssertTrue(csv.contains("\"'\(value)\""), "CSV value should be prefixed before quoting: \(value.debugDescription)")
         }
     }
+
+    func testParserBoundsUntrustedPageText() {
+        let page = String(repeating: "x", count: TaxDocumentLimits.maximumPageCharacters + 1)
+        let result = TaxDocumentParser.parse(pages: [page], documentName: "large.pdf")
+
+        XCTAssertLessThanOrEqual(result.pages.first?.utf8.count ?? 0, TaxDocumentLimits.maximumTotalPageBytes)
+        XCTAssertTrue(result.warnings.contains("Document text was truncated to a safe limit."))
+    }
+
+    func testStoreRejectsOversizedFileBeforeDecoding() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let fileURL = directory.appendingPathComponent("documents.json")
+        try Data(repeating: 0x20, count: TaxDocumentLimits.maximumStoredBytes + 1).write(to: fileURL)
+
+        var thrown: Error?
+        XCTAssertThrowsError(try TaxDocumentStore(directory: directory).load()) { thrown = $0 }
+        XCTAssertEqual(thrown as? TaxDocumentStoreError, .fileTooLarge)
+    }
+
+    func testStoreRejectsTooManyDocumentsBeforePublish() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let documents = (0...TaxDocumentLimits.maximumStoredDocuments).map { index in
+            TaxDocument(title: "Document \(index)", documentType: "Tax", taxYear: nil,
+                        issuer: nil as String?, taxpayerIdentifier: nil as String?,
+                        referenceIdentifier: nil as String?, dates: [], amounts: [], pages: [])
+        }
+
+        var thrown: Error?
+        XCTAssertThrowsError(try TaxDocumentStore(directory: directory).save(documents)) { thrown = $0 }
+        XCTAssertEqual(thrown as? TaxDocumentStoreError, .tooManyDocuments)
+    }
+
+    @MainActor
+    func testViewModelBlocksWritesAfterLoadFailure() {
+        let preserved = TaxDocument(title: "Preserved", documentType: "Tax", taxYear: 2024,
+                                    issuer: nil as String?, taxpayerIdentifier: nil as String?, referenceIdentifier: nil as String?,
+                                    dates: [], amounts: [], pages: [])
+        var persisted = [preserved]
+        var saveCallCount = 0
+        let model = TaxDocumentsViewModel(
+            load: { throw TaxDocumentStoreError.fileTooLarge },
+            save: { candidate in
+                saveCallCount += 1
+                persisted = candidate
+            }
+        )
+
+        XCTAssertTrue(model.isWriteBlocked)
+        XCTAssertTrue(model.documents.isEmpty)
+        model.saveReview(preserved)
+        model.delete(at: IndexSet(integer: 0))
+
+        XCTAssertEqual(saveCallCount, 0)
+        XCTAssertEqual(persisted, [preserved])
+        XCTAssertTrue(model.errorMessage?.contains("disabled") == true)
+    }
+
+    @MainActor
+    func testViewModelRetainsStateAfterFailedSave() {
+        struct SaveFailure: Error {}
+        let original = TaxDocument(title: "Original", documentType: "Tax", taxYear: 2024,
+                                   issuer: nil as String?, taxpayerIdentifier: nil as String?, referenceIdentifier: nil as String?,
+                                   dates: [], amounts: [], pages: [])
+        let replacement = TaxDocument(id: original.id, title: "Replacement", documentType: "Tax", taxYear: 2024,
+                                      issuer: nil as String?, taxpayerIdentifier: nil as String?, referenceIdentifier: nil as String?,
+                                      dates: [], amounts: [], pages: [])
+        var saveCallCount = 0
+        let model = TaxDocumentsViewModel(
+            load: { [original] in [original] },
+            save: { _ in
+                saveCallCount += 1
+                throw SaveFailure()
+            }
+        )
+        model.reviewDocument = replacement
+
+        model.saveReview(replacement)
+
+        XCTAssertEqual(saveCallCount, 1)
+        XCTAssertEqual(model.documents, [original])
+        XCTAssertEqual(model.reviewDocument, replacement)
+        XCTAssertEqual(model.errorMessage, "Tax documents could not be saved. Your current documents were kept.")
+    }
+
+    @MainActor
+    func testViewModelRetainsStateAfterFailedDelete() {
+        struct DeleteFailure: Error {}
+        let original = TaxDocument(title: "Original", documentType: "Tax", taxYear: 2024,
+                                   issuer: nil as String?, taxpayerIdentifier: nil as String?, referenceIdentifier: nil as String?,
+                                   dates: [], amounts: [], pages: [])
+        let model = TaxDocumentsViewModel(
+            load: { [original] in [original] },
+            save: { _ in throw DeleteFailure() }
+        )
+
+        model.delete(at: IndexSet(integer: 0))
+
+        XCTAssertEqual(model.documents, [original])
+        XCTAssertEqual(model.errorMessage, "Tax documents could not be saved. Your current documents were kept.")
+    }
+
+    @MainActor
+    func testViewModelAdmitsOneImportAndClearsBusyAfterCancellation() async {
+        let model = TaxDocumentsViewModel(load: { [] }, save: { _ in })
+        let url = URL(fileURLWithPath: "/definitely-missing-tax-document.pdf")
+
+        model.importPDF(url: url)
+        XCTAssertTrue(model.isImporting)
+
+        model.importPDF(url: url)
+        XCTAssertEqual(model.errorMessage, "A PDF import is already in progress.")
+
+        model.cancelImport()
+        for _ in 0..<8 { await Task.yield() }
+
+        XCTAssertFalse(model.isImporting)
+        XCTAssertNil(model.errorMessage)
+    }
+
+    func testExtractorRejectsOversizedPageAndAggregateWithoutTruncating() {
+        var pages: [String] = []
+        var totalBytes = 0
+        let oversizedPage = String(repeating: "x", count: TaxDocumentLimits.maximumPageCharacters + 1)
+
+        XCTAssertFalse(TaxPDFExtractor.appendBounded(oversizedPage, to: &pages, totalBytes: &totalBytes))
+        XCTAssertTrue(pages.isEmpty)
+        XCTAssertEqual(totalBytes, 0)
+
+        let boundedPage = String(repeating: "x", count: TaxDocumentLimits.maximumPageCharacters)
+        while TaxPDFExtractor.appendBounded(boundedPage, to: &pages, totalBytes: &totalBytes) {}
+        let pageCountBeforeRejectedAppend = pages.count
+        let bytesBeforeRejectedAppend = totalBytes
+
+        XCTAssertFalse(TaxPDFExtractor.appendBounded(boundedPage, to: &pages, totalBytes: &totalBytes))
+        XCTAssertEqual(pages.count, pageCountBeforeRejectedAppend)
+        XCTAssertEqual(totalBytes, bytesBeforeRejectedAppend)
+        XCTAssertLessThanOrEqual(totalBytes, TaxDocumentLimits.maximumTotalPageBytes)
+    }
+
+    func testCancelledExtractionReturnsCancellationBeforeReading() async {
+        let result = await Task { () -> Result<[String], TaxPDFExtractor.ExtractError> in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await TaxPDFExtractor.extract(url: URL(fileURLWithPath: "/definitely-missing-tax-document.pdf"))
+        }.value
+
+        XCTAssertEqual(result, .failure(.cancelled))
+    }
+
+    func testParserStopsAtDateAndAmountBounds() {
+        let datesText = Array(repeating: "01.01.2024", count: TaxDocumentLimits.maximumDates + 25)
+            .joined(separator: " ")
+        let dateResult = TaxDocumentParser.parse(text: datesText, documentName: "dates.pdf")
+        XCTAssertEqual(dateResult.dates.count, TaxDocumentLimits.maximumDates)
+
+        let amountsText = Array(repeating: "Einkommensteuer 1,00 EUR", count: TaxDocumentLimits.maximumAmounts + 25)
+            .joined(separator: " ")
+        let amountResult = TaxDocumentParser.parse(text: amountsText, documentName: "amounts.pdf")
+        XCTAssertEqual(amountResult.amounts.count, TaxDocumentLimits.maximumAmounts)
+    }
+
+    func testParserHonorsCancellationCheck() {
+        let text = Array(repeating: "01.01.2024 Einkommensteuer 1,00 EUR", count: 100)
+            .joined(separator: " ")
+        let result = TaxDocumentParser.parse(
+            text: text,
+            documentName: "cancelled.pdf",
+            cancellationCheck: { true }
+        )
+
+        XCTAssertTrue(result.dates.isEmpty)
+        XCTAssertTrue(result.amounts.isEmpty)
+    }
 }
