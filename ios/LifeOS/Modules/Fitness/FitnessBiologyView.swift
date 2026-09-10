@@ -171,6 +171,7 @@ public struct FitnessBiologyDetailSurface: View {
     @Binding private var selectedDate: Date
     @State private var selectedRange: FitnessBiologyRange = .thirtyDays
     @State private var selectedMetric: FitnessBiologyMetricID?
+    @State private var showingDatePicker = false
     private let embeddedInParentScroll: Bool
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
@@ -204,6 +205,29 @@ public struct FitnessBiologyDetailSurface: View {
                 FitnessBiologyMetricDetailView(metric: metric, selectedDate: selectedDate, initialRange: selectedRange)
             }
         }
+        .sheet(isPresented: $showingDatePicker) {
+            NavigationStack {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Choose the day to review")
+                        .lifeOSTypography(.sectionTitle)
+                    DatePicker("Selected date", selection: $selectedDate, displayedComponents: .date)
+                        .labelsHidden()
+#if os(iOS)
+                        .datePickerStyle(.graphical)
+#endif
+                        .accessibilityIdentifier("fitness-biology-date-picker-control")
+                    Spacer(minLength: 0)
+                }
+                .padding(20)
+                .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { showingDatePicker = false }
+                    }
+                }
+            }
+            .presentationDetents([.medium])
+        }
         .accessibilityIdentifier("fitness-biology")
     }
 
@@ -236,7 +260,7 @@ public struct FitnessBiologyDetailSurface: View {
                     Text("Biology")
                         .lifeOSTypography(.pageTitle)
                     Text("Source-backed body signals")
-                        .lifeOSTypography(.body)
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
                 Spacer(minLength: 8)
@@ -260,10 +284,25 @@ public struct FitnessBiologyDetailSurface: View {
                 .buttonStyle(BiologyQuietIconButtonStyle())
                 .accessibilityLabel("Previous biology date")
 
-                DatePicker("Date", selection: $selectedDate, displayedComponents: .date)
-                    .labelsHidden()
-                    .datePickerStyle(.compact)
-                    .accessibilityIdentifier("fitness-biology-date")
+                Button {
+                    showingDatePicker = true
+                } label: {
+                    HStack(spacing: 7) {
+                        LifeOSIcon(.calendar)
+                            .frame(width: 16, height: 16)
+                        Text(selectedDate.formatted(date: .abbreviated, time: .omitted))
+                            .lifeOSTypography(.button)
+                            .lineLimit(1)
+                    }
+                    .padding(.horizontal, 10)
+                    .frame(minHeight: 44)
+                    .background(LifeOSTokens.raised, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Selected biology date")
+                .accessibilityValue(selectedDate.formatted(date: .abbreviated, time: .omitted))
+                .accessibilityIdentifier("fitness-biology-date")
 
                 Button {
                     shiftDate(by: 1)
@@ -432,9 +471,9 @@ private struct FitnessBiologicalAgeCard: View {
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
                 Spacer(minLength: 8)
-                Image(systemName: age.isReviewedAndDisplayable ? "checkmark.seal" : "info.circle")
-                    .lifeOSTypography(.button)
+                LifeOSIcon(age.isReviewedAndDisplayable ? .verified : .warning)
                     .foregroundStyle(age.isReviewedAndDisplayable ? LifeOSTokens.success : LifeOSTokens.tertiaryText)
+                    .frame(width: 18, height: 18)
             }
 
             switch age.state {
@@ -509,11 +548,6 @@ private struct FitnessBiologyMetricCard: View {
                     Text(metric.title)
                         .lifeOSTypography(.cardTitle)
                         .foregroundStyle(Color.primary)
-                    if metric.isDemo || isFixture {
-                        Text("DEMO")
-                            .lifeOSTypography(.metadata, weight: .bold)
-                            .foregroundStyle(LifeOSTokens.warning)
-                    }
                     Spacer(minLength: 0)
                 }
                 metricValue
@@ -521,8 +555,8 @@ private struct FitnessBiologyMetricCard: View {
                     Text(metadataLine)
                         .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
-                        .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
-                        .fixedSize(horizontal: false, vertical: true)
+                        .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
+                        .minimumScaleFactor(0.8)
                         .multilineTextAlignment(.leading)
                 }
                 if visiblePoints.count > 1 {

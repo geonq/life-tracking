@@ -1191,8 +1191,8 @@ private struct FitnessHeader: View {
                     Text("Fitness")
                         .lifeOSTypography(.pageTitle)
                         .tracking(-0.5)
-                    Text(source.status == .demo ? "Visual review" : "Local-first health journal")
-                        .lifeOSTypography(.body)
+                    Text(source.status == .demo ? "Visual review" : "Health data")
+                        .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.secondaryText)
                 }
 
@@ -1394,7 +1394,7 @@ private struct FitnessSectionPicker: View {
                 LifeOSIcon(selection.icon)
                     .frame(width: 15, height: 15)
                 Text(selection.rawValue)
-                    .lifeOSTypography(.body, weight: .semibold)
+                    .lifeOSTypography(.button, weight: .semibold)
                 Spacer(minLength: 0)
                 LifeOSIcon(.chevronRight)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
@@ -1553,7 +1553,7 @@ private struct FitnessFixtureBanner: View {
         HStack(spacing: 8) {
             LifeOSIcon(.warning).frame(width: 14, height: 14)
             Text("DEMO FIXTURES · NOT LIVE DATA")
-                .lifeOSTypography(.body, weight: .bold)
+                .lifeOSTypography(.metadata, weight: .semibold)
                 .tracking(0.45)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -1697,9 +1697,7 @@ private struct FitnessCoreTodayComposition: View {
     let onSourceTap: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            FitnessSectionHeading(title: "Today", subtitle: selectedDate.fitnessDayLabel)
-
+        VStack(alignment: .leading, spacing: 16) {
             if snapshot.source.status.needsReview {
                 FitnessSourceGateCard(source: snapshot.source, onSourceTap: onSourceTap)
             }
@@ -2081,7 +2079,7 @@ private struct FitnessCoreMetricCard: View {
                             .lifeOSTypography(.sectionTitle)
                         HStack(alignment: .firstTextBaseline, spacing: 4) {
                             Text(metric.value ?? "—")
-                                .lifeOSTypography(.sectionTitle, weight: .bold)
+                                .lifeOSTypography(.metricCompact, weight: .bold)
                                 .monospacedDigit()
                             if !metric.unit.isEmpty {
                                 Text(metric.unit)
@@ -2183,7 +2181,8 @@ private struct FitnessCoreProvenance: View {
             Text(compactDetail)
                 .lifeOSTypography(.metadata)
                 .foregroundStyle(Color.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+                .lineLimit(1)
+                .minimumScaleFactor(0.78)
         }
         .accessibilityElement(children: .combine)
     }
@@ -2322,15 +2321,25 @@ private struct FitnessCoreSparkline: View {
 
     var body: some View {
         let normalized = FitnessTrendSeries(values: values)?.normalized ?? []
-        HStack(alignment: .bottom, spacing: 4) {
-            ForEach(Array(normalized.enumerated()), id: \.offset) { _, value in
-                RoundedRectangle(cornerRadius: 2, style: .continuous)
-                    .fill(role.color.opacity(0.42 + value * 0.42))
-                    .frame(maxWidth: .infinity, minHeight: 4, maxHeight: 34)
-                    .frame(height: max(4, min(34, CGFloat(value) * 30 + 4)))
+        GeometryReader { geometry in
+            Path { path in
+                guard normalized.count > 1 else { return }
+                let width = max(geometry.size.width - 2, 1)
+                let height = max(geometry.size.height - 4, 1)
+                for (index, value) in normalized.enumerated() {
+                    let x = 1 + width * CGFloat(index) / CGFloat(normalized.count - 1)
+                    let y = 2 + height * (1 - CGFloat(value))
+                    let point = CGPoint(x: x, y: y)
+                    if index == 0 {
+                        path.move(to: point)
+                    } else {
+                        path.addLine(to: point)
+                    }
+                }
             }
+            .stroke(role.color, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
         }
-        .frame(height: 34, alignment: .bottom)
+        .frame(height: 28)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(role.label) trend")
         .accessibilityValue(values.map { $0.formatted(.number.precision(.fractionLength(0...1))) }.joined(separator: ", "))
@@ -2390,9 +2399,7 @@ private struct FitnessCoreMiniMetric: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(10)
-        .background(LifeOSTokens.screenCanvas.opacity(0.42), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(LifeOSTokens.hairlineBorder, lineWidth: 0.75))
+        .padding(.vertical, 6)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(metric.title)
         .accessibilityValue("\(metric.value ?? "Not available") \(metric.unit). \(metric.sourceState.label). \(metric.provenanceSummary)")
@@ -2541,7 +2548,11 @@ private struct FitnessCoreDetailView: View {
     @ViewBuilder
     private var detailContent: some View {
         VStack(alignment: .leading, spacing: 16) {
-            FitnessSectionHeading(title: route.title, subtitle: selectedDate.fitnessDayLabel)
+            if !embeddedInParentScroll {
+                Text(selectedDate.fitnessDayLabel)
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.secondaryText)
+            }
             FitnessCoreDetailHero(metric: metric, route: route)
             FitnessCoreAvailabilityNote(metric: metric, source: snapshot.source, onSourceTap: onSourceTap)
 
@@ -2757,9 +2768,10 @@ private struct FitnessCoreHeartRateZoneRow: View {
                     Text(zone.range)
                         .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
-                    Image(systemName: isExpanded ? "info.circle.fill" : "info.circle")
-                        .lifeOSTypography(.metadata)
+                    LifeOSIcon(.more)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
                         .foregroundStyle(isExpanded || hovering ? LifeOSTokens.accent : LifeOSTokens.tertiaryText)
+                        .frame(width: 16, height: 16)
                 }
                 if isExpanded {
                     Text(zone.evidence.summary)
@@ -2856,9 +2868,10 @@ private struct FitnessCoreLoadTrendCard: View {
                 HStack(spacing: 8) {
                     Text(card.id.title).lifeOSTypography(.body, weight: .medium)
                     Spacer()
-                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .lifeOSTypography(.metadata)
+                    LifeOSIcon(.chevronRight)
+                        .rotationEffect(.degrees(isExpanded ? -90 : 90))
                         .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .frame(width: 14, height: 14)
                 }
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
                     Text(card.metric.value ?? "No data").lifeOSTypography(.sectionTitle, weight: .bold).monospacedDigit()
@@ -3096,9 +3109,10 @@ private struct FitnessCoreRecoveryTrendButton: View {
                     Text(card.id.title).lifeOSTypography(.body, weight: .medium)
                     Spacer()
                     Text(card.metric.value ?? "No data").lifeOSTypography(.body, weight: .semibold)
-                    Image(systemName: isSelected ? "chevron.up" : "chevron.down")
-                        .lifeOSTypography(.metadata)
+                    LifeOSIcon(.chevronRight)
+                        .rotationEffect(.degrees(isSelected ? -90 : 90))
                         .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .frame(width: 14, height: 14)
                 }
                 if let series = card.series(for: range), !series.isEmpty {
                     FitnessCoreSparkline(values: series, role: card.metric.fitnessTrendSemanticRole)
@@ -3588,9 +3602,10 @@ private struct FitnessCoreSleepTrendCard: View {
                     Text(card.id.title)
                         .lifeOSTypography(.body, weight: .medium)
                     Spacer(minLength: 8)
-                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .lifeOSTypography(.metadata)
+                    LifeOSIcon(.chevronRight)
+                        .rotationEffect(.degrees(isExpanded ? -90 : 90))
                         .foregroundStyle(LifeOSTokens.tertiaryText)
+                        .frame(width: 14, height: 14)
                 }
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
                     Text(card.metric.value ?? "No data")
@@ -4220,13 +4235,13 @@ private struct FitnessSourceGateCard: View {
     private var summary: String {
         switch source.status {
         case .unavailable:
-            "No readings are substituted or estimated here."
+            "Connect Health data to see source-backed readings."
         case .stale:
-            "Existing values remain labelled stale until a newer source observation arrives."
+            "The last reading is stale; refresh the source to update it."
         case .permissionRequired:
-            "Grant only the HealthKit categories you want LifeOS to read."
+            "Allow the Health categories LifeOS should read."
         case .connected:
-            "Source metadata is available for the selected snapshot."
+            "Source metadata is available for this day."
         case .demo:
             "Fixture-only values are not live health data."
         }
@@ -4250,16 +4265,17 @@ private struct FitnessSourceGateCard: View {
                     .buttonStyle(LifeOSButtonStyle(.primary))
                     .accessibilityIdentifier("fitness-source-review")
             }
-            Text("\(source.detail) · \(source.freshness) · \(summary)")
+            Text(summary)
                 .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
-                .fixedSize(horizontal: false, vertical: true)
+                .lineLimit(2)
+                .minimumScaleFactor(0.82)
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .flatCard()
         .accessibilityElement(children: .contain)
-        .accessibilityValue("\(source.status.label). \(summary) \(source.freshness)")
+        .accessibilityValue("\(source.status.label). \(source.detail). \(source.freshness). \(summary)")
         .accessibilityIdentifier("fitness-health-source-gate")
     }
 }
@@ -4331,6 +4347,26 @@ private struct FitnessMetricCard: View {
 }
 
 // MARK: - Journal
+
+private func fitnessJournalIcon(for title: String) -> LifeOSIconName {
+    let normalized = title.lowercased()
+    if normalized.contains("sleep") || normalized.contains("nap") {
+        return .sleep
+    }
+    if normalized.contains("step") || normalized.contains("cardio") || normalized.contains("strength") || normalized.contains("workout") {
+        return .fitness
+    }
+    if normalized.contains("meal") || normalized.contains("sugar") || normalized.contains("carb") || normalized.contains("nutrition") {
+        return .grocery
+    }
+    if normalized.contains("mood") || normalized.contains("stress") || normalized.contains("mindful") || normalized.contains("hydration") || normalized.contains("daylight") || normalized.contains("sun") {
+        return .health
+    }
+    if normalized.contains("device") {
+        return .settings
+    }
+    return .more
+}
 
 /// Explicit, deterministic journal observations for visual review only. The
 /// production path has no automatic rows until a connector supplies these
@@ -4421,7 +4457,7 @@ private struct FitnessJournalView: View {
                         ForEach(quickLogs, id: \.0) { item in
                             Button { sheet = .new(seed: template(for: item.0)) } label: {
                                 HStack(spacing: 7) {
-                                    Text(item.1).lifeOSTypography(.cardTitle).frame(width: 20, height: 20)
+                                    LifeOSIcon(fitnessJournalIcon(for: item.0)).frame(width: 20, height: 20)
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text(item.0).lifeOSTypography(.body, weight: .semibold)
                                         Text(item.2).lifeOSTypography(.body).foregroundStyle(LifeOSTokens.tertiaryText)
@@ -4601,7 +4637,9 @@ private struct FitnessJournalRow: View {
     let onAutomaticDetail: ((FitnessJournalRecord) -> Void)?
     var body: some View {
         HStack(spacing: 10) {
-            Text(record.emoji).lifeOSTypography(.cardTitle).frame(width: 30, height: 30)
+            LifeOSIcon(fitnessJournalIcon(for: record.title))
+                .foregroundStyle(LifeOSTokens.Module.fitness)
+                .frame(width: 20, height: 20)
             VStack(alignment: .leading, spacing: 2) {
                 Text(record.title).lifeOSTypography(.body, weight: .medium)
                 Text(provenanceLabel).lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText).lineLimit(1)
@@ -4622,9 +4660,9 @@ private struct FitnessJournalRow: View {
                     Text(observedValue).lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
                     FitnessJournalStatusMark(state: record.tagState, automatic: true)
                 }
-                Image(systemName: "chevron.right")
-                    .lifeOSTypography(.metadata, weight: .semibold)
+                LifeOSIcon(.chevronRight)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .frame(width: 14, height: 14)
             } else {
                 FitnessJournalTriState(record: record, store: store, onEdit: onEdit)
             }
@@ -4694,7 +4732,7 @@ private struct FitnessJournalMonthCalendar: View {
                     Button {
                         moveMonth(by: -1)
                     } label: {
-                        Image(systemName: "chevron.left")
+                        LifeOSIcon(.chevronLeft)
                             .frame(width: 28, height: 28)
                     }
                     .buttonStyle(.plain)
@@ -4704,7 +4742,7 @@ private struct FitnessJournalMonthCalendar: View {
                     Button {
                         moveMonth(by: 1)
                     } label: {
-                        Image(systemName: "chevron.right")
+                        LifeOSIcon(.chevronRight)
                             .frame(width: 28, height: 28)
                     }
                     .buttonStyle(.plain)
@@ -4818,7 +4856,9 @@ private struct FitnessJournalAutomaticDetail: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     HStack(spacing: 10) {
-                        Text(record.emoji).lifeOSTypography(.cardTitle)
+                        LifeOSIcon(fitnessJournalIcon(for: record.title))
+                            .foregroundStyle(LifeOSTokens.Module.fitness)
+                            .frame(width: 20, height: 20)
                         VStack(alignment: .leading, spacing: 3) {
                             Text(record.title).lifeOSTypography(.sectionTitle)
                             Text("Automatic observation · read-only")
@@ -4984,7 +5024,12 @@ private struct FitnessJournalEditor: View {
             Form {
                 Section("Entry") {
                     TextField("Name", text: $title)
-                    Text("\(seed.emoji) · \(selectedDate.fitnessDayLabel)")
+                    HStack(spacing: 6) {
+                        LifeOSIcon(fitnessJournalIcon(for: seed.title))
+                            .foregroundStyle(LifeOSTokens.Module.fitness)
+                            .frame(width: 16, height: 16)
+                        Text(selectedDate.fitnessDayLabel)
+                    }
                         .lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
                 }
                 if isQuantity {
@@ -6262,9 +6307,9 @@ private struct FitnessWorkoutRow: View {
             Spacer()
             Text(workout.time.fitnessTimeLabel).lifeOSTypography(.metadata).foregroundStyle(LifeOSTokens.tertiaryText)
             if showsDisclosure {
-                Image(systemName: "chevron.right")
-                    .lifeOSTypography(.metadata)
+                LifeOSIcon(.chevronRight)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .frame(width: 14, height: 14)
             }
         }
         .padding(.vertical, 2)

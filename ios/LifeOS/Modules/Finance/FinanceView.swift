@@ -477,10 +477,16 @@ public struct FinanceView: View {
                     heroNamespace: reduceMotion ? nil : financeHeroNamespace,
                     onClose: { closeAnalytics() }
                 )
-                .transition(reduceMotion ? .opacity : .identity)
+                .transition(reduceMotion ? .opacity : .asymmetric(
+                    insertion: .opacity.combined(with: .offset(x: 8)),
+                    removal: .opacity.combined(with: .offset(x: -8))
+                ))
             } else {
                 mainScrollContent(snapshot: snapshot)
-                    .transition(reduceMotion ? .opacity : .identity)
+                    .transition(reduceMotion ? .opacity : .asymmetric(
+                        insertion: .opacity.combined(with: .offset(x: 8)),
+                        removal: .opacity.combined(with: .offset(x: -8))
+                    ))
             }
         }
         .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
@@ -544,6 +550,7 @@ public struct FinanceView: View {
                                 VStack(alignment: .leading, spacing: 16) {
                                     FinanceStateNotice(snapshot: snapshot, onRefresh: onRefresh)
                                     FinanceHeroCard(snapshot: snapshot, isStacked: financeUsesStackedLayout)
+                                    FinanceSummaryMetricStrip(snapshot: snapshot)
                                 }
                             }
 
@@ -733,7 +740,7 @@ public struct FinanceView: View {
             if financeUsesStackedLayout {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack(alignment: .center, spacing: 12) {
-                        financeHeaderTitle
+                        financeHeaderTitle(snapshot: snapshot)
                         Spacer(minLength: 6)
                         FinanceStatusBadge(snapshot: snapshot)
                     }
@@ -746,7 +753,7 @@ public struct FinanceView: View {
                 }
             } else {
                 HStack(alignment: .center, spacing: 12) {
-                    financeHeaderTitle
+                    financeHeaderTitle(snapshot: snapshot)
                     Spacer(minLength: 6)
                     financeRefreshControl
                     FinanceStatusBadge(snapshot: snapshot)
@@ -759,15 +766,22 @@ public struct FinanceView: View {
     }
 
     @ViewBuilder
-    private var financeHeaderTitle: some View {
-        LifeOSIcon(.finance)
-            .foregroundStyle(LifeOSTokens.Module.finance)
-            .frame(width: 21, height: 21)
+    private func financeHeaderTitle(snapshot: FinanceDisplaySnapshot) -> some View {
+        HStack(alignment: .center, spacing: 10) {
+            LifeOSIcon(.finance)
+                .foregroundStyle(LifeOSTokens.Module.finance)
+                .frame(width: 21, height: 21)
 
-        VStack(alignment: .leading, spacing: 1) {
-            Text("Finance")
-                .lifeOSTypography(.pageTitle)
-                .tracking(-0.5)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Finance")
+                    .lifeOSTypography(.pageTitle)
+                    .tracking(-0.5)
+                Text(snapshot.sourceDisclosure)
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(snapshot.isDemo ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+            }
         }
     }
 
@@ -833,16 +847,30 @@ public struct FinanceView: View {
     }
 
     private func financeDetailPanel(snapshot: FinanceDisplaySnapshot) -> some View {
+        let availableRanges = snapshot.availableRanges(for: selectedDetail)
+
         VStack(alignment: .leading, spacing: 12) {
             FinanceSectionHeader(title: "Details", subtitle: "Trend context for this period", icon: .views, accent: LifeOSTokens.Module.finance)
-            FinanceDetailSelector(
-                selection: $presentationState.selectedDetail
-            )
-
-            FinanceRangePills(
-                selection: $presentationState.selectedRange,
-                availableRanges: snapshot.availableRanges(for: selectedDetail)
-            )
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) {
+                    FinanceDetailSelector(selection: $presentationState.selectedDetail)
+                    if !availableRanges.isEmpty {
+                        FinanceRangePills(
+                            selection: $presentationState.selectedRange,
+                            availableRanges: availableRanges
+                        )
+                    }
+                }
+                VStack(alignment: .leading, spacing: 10) {
+                    FinanceDetailSelector(selection: $presentationState.selectedDetail)
+                    if !availableRanges.isEmpty {
+                        FinanceRangePills(
+                            selection: $presentationState.selectedRange,
+                            availableRanges: availableRanges
+                        )
+                    }
+                }
+            }
             detailCard(snapshot: snapshot)
         }
     }
@@ -1335,25 +1363,16 @@ private struct FinanceHeroCard: View {
             if isStacked {
                 VStack(alignment: .leading, spacing: 10) {
                     FinanceHeroFact(title: "Accounts", value: snapshot.accounts.isEmpty ? "Not available" : "\(snapshot.accounts.count) connected")
-                    FinanceHeroFact(title: "Updated", value: snapshot.updatedLabel)
                     FinanceHeroFact(title: "Currency", value: "EUR")
                 }
             } else {
                 HStack(spacing: 0) {
                     FinanceHeroFact(title: "Accounts", value: snapshot.accounts.isEmpty ? "Not available" : "\(snapshot.accounts.count) connected")
                     Divider().frame(height: 28)
-                    FinanceHeroFact(title: "Updated", value: snapshot.updatedLabel)
-                    Divider().frame(height: 28)
                     FinanceHeroFact(title: "Currency", value: "EUR")
                 }
             }
 
-            Text(snapshot.sourceDisclosure)
-                .lifeOSTypography(.metadata)
-                .foregroundStyle(snapshot.isDemo ? LifeOSTokens.warning : LifeOSTokens.tertiaryText)
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityLabel("Finance source and freshness")
         }
         .padding(LifeOSTokens.cardPadding)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1366,9 +1385,7 @@ private struct FinanceHeroCard: View {
     private var heroSummary: some View {
         VStack(alignment: .leading, spacing: 3) {
             Text("Total across accounts")
-                .lifeOSTypography(.label)
-                .tracking(0.8)
-                .textCase(.uppercase)
+                .lifeOSTypography(.metadata, weight: .semibold)
                 .foregroundStyle(LifeOSTokens.secondaryText)
             Text(snapshot.netWorth.valueText)
                 .lifeOSTypography(.metric)
@@ -1389,6 +1406,55 @@ private struct FinanceHeroCard: View {
             FinanceMiniSparkline(points: snapshot.netWorthPoints)
                 .frame(width: 132, height: 62)
         }
+    }
+}
+
+private struct FinanceSummaryMetricStrip: View {
+    let snapshot: FinanceDisplaySnapshot
+
+    var body: some View {
+        LazyVGrid(
+            columns: [GridItem(.adaptive(minimum: 150), spacing: 12)],
+            spacing: 12
+        ) {
+            FinanceSummaryMetricCell(title: "Spend", metric: snapshot.spent, color: LifeOSTokens.danger)
+            FinanceSummaryMetricCell(title: "Income", metric: snapshot.income, color: LifeOSTokens.success)
+            FinanceSummaryMetricCell(title: "Cash flow", metric: snapshot.cashFlow, color: LifeOSTokens.protein)
+        }
+        .padding(LifeOSTokens.cardPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .flatCard()
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("finance-summary-metrics")
+    }
+}
+
+private struct FinanceSummaryMetricCell: View {
+    let title: String
+    let metric: FinanceDisplayMetric
+    let color: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .lifeOSTypography(.metadata)
+                .foregroundStyle(LifeOSTokens.tertiaryText)
+            Text(metric.valueText)
+                .lifeOSTypography(.inlineMonitoringValue, weight: .semibold)
+                .monospacedDigit()
+                .foregroundStyle(metric.isUnavailable ? LifeOSTokens.tertiaryText : color)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+            Text(metric.detail)
+                .lifeOSTypography(.metadata)
+                .foregroundStyle(LifeOSTokens.tertiaryText)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(title)
+        .accessibilityValue("\(metric.accessibilityValue). \(metric.detail)")
     }
 }
 

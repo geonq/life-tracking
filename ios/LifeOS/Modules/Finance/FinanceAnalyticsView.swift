@@ -51,7 +51,7 @@ public struct FinanceAnalyticsView: View {
             switch self {
             case .wealth: .investments
             case .spendingAbroad: .spending
-            case .travel: .empty
+            case .travel: .calendar
             }
         }
 
@@ -195,7 +195,7 @@ public struct FinanceAnalyticsView: View {
             FinanceEmptyModuleRow(
                 icon: entry.icon,
                 title: "Spending abroad unavailable",
-                detail: "Foreign-currency transactions are not imported: the statement importer accepts EUR rows only, so there is no foreign-currency spending to break down here. This is a deliberate data-source limit, not a bug.",
+                detail: "The current Finance source provides EUR transactions only, so foreign-currency spending is unavailable.",
                 actionTitle: onOpenConnections == nil ? nil : "Manage connections",
                 action: onOpenConnections
             )
@@ -205,7 +205,7 @@ public struct FinanceAnalyticsView: View {
             FinanceEmptyModuleRow(
                 icon: entry.icon,
                 title: "Travel unavailable",
-                detail: "No country or foreign-currency data is ingested by Finance, so trips and travel spending can't be shown. Adding trip or country tracking is a product decision this surface doesn't make on its own.",
+                detail: "The current Finance source provides no country or trip data, so travel cannot be shown.",
                 actionTitle: onOpenConnections == nil ? nil : "Manage connections",
                 action: onOpenConnections
             )
@@ -218,12 +218,6 @@ public struct FinanceAnalyticsView: View {
         VStack(alignment: .leading, spacing: 16) {
             FinanceWealthCard(snapshot: snapshot, onOpenConnections: onOpenConnections)
             VStack(alignment: .leading, spacing: 12) {
-                FinanceSectionHeader(
-                    title: "Net worth",
-                    subtitle: "Balance trend and estimate",
-                    icon: .netWorth,
-                    accent: LifeOSTokens.Module.finance
-                )
                 FinanceRangePills(
                     selection: $selectedRange,
                     availableRanges: snapshot.availableRanges(for: .netWorth)
