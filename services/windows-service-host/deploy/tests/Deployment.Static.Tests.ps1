@@ -513,7 +513,15 @@ foreach ($name in @('calendar.json', 'calendar.json.state.json', 'calendar.json.
 Assert-Text "'finance-summary\.json\.state\.json' = 6 \* 1024 \* 1024" 'Finance state migration matches the gateway 6 MiB bound.'
 Assert-Text "'finance-imported\.json' = 8 \* 1024 \* 1024" 'Gateway-owned imported finance state has the gateway 8 MiB bound.'
 
-$enableBankingText = Get-Content -LiteralPath (Join-Path $root '..\..\gateway\enablebanking.py') -Raw
+$gatewayRoot = Join-Path $root '..\..\gateway'
+if (-not (Test-Path -LiteralPath $gatewayRoot -PathType Container)) {
+    # Release candidates flatten deploy/ beside gateway/, while the source
+    # checkout keeps gateway under services/. Keep the suite valid in both
+    # reviewed layouts without reaching outside the candidate root.
+    $gatewayRoot = Join-Path $root '..\gateway'
+}
+if (-not (Test-Path -LiteralPath $gatewayRoot -PathType Container)) { throw 'FAIL: gateway source root is missing.' }
+$enableBankingText = Get-Content -LiteralPath (Join-Path $gatewayRoot 'enablebanking.py') -Raw
 $enableBankingStateMatch = [regex]::Match($enableBankingText, '(?m)^\s*MAX_FINANCE_STATE_SIZE\s*=\s*(?<value>\d+)\s*\*\s*1024\s*\*\s*1024\s*$')
 $installerStateMatch = [regex]::Match($installText, "(?m)^\s*'finance-summary\.json\.state\.json'\s*=\s*(?<value>\d+)\s*\*\s*1024\s*\*\s*1024\s*$")
 if (-not $enableBankingStateMatch.Success -or -not $installerStateMatch.Success) {
@@ -525,7 +533,7 @@ if ($gatewayStateBytes -ne $installerStateBytes) {
     throw "FAIL: installer finance state bound $installerStateBytes differs from gateway bound $gatewayStateBytes."
 }
 
-$gatewayMainText = Get-Content -LiteralPath (Join-Path $root '..\..\gateway\main.py') -Raw
+$gatewayMainText = Get-Content -LiteralPath (Join-Path $gatewayRoot 'main.py') -Raw
 $gatewayImportedStateMatch = [regex]::Match($gatewayMainText, '(?m)^\s*FINANCE_IMPORTED_MAX_STATE_SIZE\s*=\s*(?<value>\d+)\s*\*\s*1024\s*\*\s*1024\s*$')
 $installerImportedStateMatch = [regex]::Match($installText, "(?m)^\s*'finance-imported\.json'\s*=\s*(?<value>\d+)\s*\*\s*1024\s*\*\s*1024\s*$")
 if (-not $gatewayImportedStateMatch.Success -or -not $installerImportedStateMatch.Success) {
