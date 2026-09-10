@@ -619,9 +619,22 @@ public struct CalendarSnapshot: Codable, Equatable, Sendable {
         guard version == Self.currentSchemaVersion else {
             throw CalendarSnapshotError.unsupportedSchemaVersion(version)
         }
-        let decodedItems = try container.decodeIfPresent([CalendarItem].self, forKey: .items) ?? []
-        guard decodedItems.count <= Self.maximumItemCount else {
-            throw CalendarSnapshotError.tooManyItems
+        let decodedItems: [CalendarItem]
+        if !container.contains(.items) {
+            decodedItems = []
+        } else if try container.decodeNil(forKey: .items) {
+            decodedItems = []
+        } else {
+            var itemContainer = try container.nestedUnkeyedContainer(forKey: .items)
+            var boundedItems: [CalendarItem] = []
+            boundedItems.reserveCapacity(min(itemContainer.count ?? Self.maximumItemCount, Self.maximumItemCount))
+            while !itemContainer.isAtEnd {
+                guard boundedItems.count < Self.maximumItemCount else {
+                    throw CalendarSnapshotError.tooManyItems
+                }
+                boundedItems.append(try itemContainer.decode(CalendarItem.self))
+            }
+            decodedItems = boundedItems
         }
         schemaVersion = version
         items = Self.sortedItems(decodedItems)

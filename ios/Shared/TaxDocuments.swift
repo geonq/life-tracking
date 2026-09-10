@@ -1,5 +1,19 @@
 import Foundation
 
+public enum TaxDocumentLimits {
+    public static let maximumStoredDocuments = 512
+    public static let maximumStoredBytes = 4 * 1024 * 1024
+    public static let maximumPages = 200
+    public static let maximumPageCharacters = 250_000
+    public static let maximumTotalPageBytes = 8 * 1024 * 1024
+    public static let maximumDates = 2_048
+    public static let maximumAmounts = 2_048
+    public static let maximumWarnings = 64
+    public static let maximumFieldCharacters = 2_048
+    public static let maximumEvidenceCharacters = 512
+    public static let maximumPDFBytes = 64 * 1024 * 1024
+}
+
 private enum TaxPrivacy {
     // German tax IDs are eleven digits and are often printed immediately
     // before a date. Keep the capture to those eleven digits so redaction
@@ -71,8 +85,8 @@ public struct TaxEvidence: Codable, Equatable, Sendable {
     public let snippet: String
 
     public init(page: Int, snippet: String) {
-        self.page = page
-        self.snippet = TaxPrivacy.redactIdentifiers(in: snippet)
+        self.page = max(1, page)
+        self.snippet = String(TaxPrivacy.redactIdentifiers(in: snippet).prefix(TaxDocumentLimits.maximumEvidenceCharacters))
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -100,7 +114,7 @@ public struct TaxDate: Codable, Equatable, Sendable {
     public var evidence: TaxEvidence
 
     public init(value: String, evidence: TaxEvidence) {
-        self.value = TaxPrivacy.redactIdentifiers(in: value)
+        self.value = String(TaxPrivacy.redactIdentifiers(in: value).prefix(TaxDocumentLimits.maximumFieldCharacters))
         self.evidence = evidence
     }
 
@@ -130,8 +144,8 @@ public struct TaxAmount: Codable, Equatable, Sendable {
     public var evidence: TaxEvidence
 
     public init(value: String, label: String, evidence: TaxEvidence) {
-        self.value = TaxPrivacy.redactIdentifiers(in: value)
-        self.label = TaxPrivacy.redactIdentifiers(in: label)
+        self.value = String(TaxPrivacy.redactIdentifiers(in: value).prefix(TaxDocumentLimits.maximumFieldCharacters))
+        self.label = String(TaxPrivacy.redactIdentifiers(in: label).prefix(TaxDocumentLimits.maximumFieldCharacters))
         self.evidence = evidence
     }
 
@@ -163,7 +177,7 @@ public struct TaxCandidate: Codable, Equatable, Sendable {
     public var evidence: TaxEvidence
 
     public init(value: String, evidence: TaxEvidence) {
-        self.value = TaxPrivacy.redactIdentifiers(in: value)
+        self.value = String(TaxPrivacy.redactIdentifiers(in: value).prefix(TaxDocumentLimits.maximumFieldCharacters))
         self.evidence = evidence
     }
 
@@ -235,19 +249,21 @@ public struct TaxDocument: Codable, Equatable, Identifiable, Sendable {
         confidence: TaxConfidence? = nil
     ) {
         self.id = id
-        self.title = title
-        self.documentType = documentType
+        self.title = String(title.prefix(TaxDocumentLimits.maximumFieldCharacters))
+        self.documentType = String(documentType.prefix(TaxDocumentLimits.maximumFieldCharacters))
         self.taxYear = taxYear
         self.issuer = issuer
         self.taxpayerIdentifier = Self.redactedIdentifierCandidate(taxpayerIdentifier)
         self.referenceIdentifier = Self.redactedIdentifierCandidate(referenceIdentifier)
-        self.dates = dates
-        self.amounts = amounts
-        self.pages = pages.map { TaxPrivacy.redactIdentifiers(in: $0) }
-        self.warnings = warnings
+        self.dates = Array(dates.prefix(TaxDocumentLimits.maximumDates))
+        self.amounts = Array(amounts.prefix(TaxDocumentLimits.maximumAmounts))
+        self.pages = Self.boundedPagesForParsing(pages).pages
+        self.warnings = Array(warnings.prefix(TaxDocumentLimits.maximumWarnings)).map {
+            String($0.prefix(TaxDocumentLimits.maximumFieldCharacters))
+        }
         self.confidence = confidence ?? TaxDocumentParser.confidence(
             taxYear: taxYear, issuer: issuer, taxpayerIdentifier: self.taxpayerIdentifier,
-            referenceIdentifier: self.referenceIdentifier, dates: dates, amounts: amounts
+            referenceIdentifier: self.referenceIdentifier, dates: self.dates, amounts: self.amounts
         )
     }
 
@@ -275,12 +291,41 @@ public struct TaxDocument: Codable, Equatable, Identifiable, Sendable {
             issuer: try container.decodeIfPresent(TaxCandidate.self, forKey: .issuer),
             taxpayerIdentifier: try container.decodeIfPresent(TaxCandidate.self, forKey: .taxpayerIdentifier),
             referenceIdentifier: try container.decodeIfPresent(TaxCandidate.self, forKey: .referenceIdentifier),
-            dates: try container.decodeIfPresent([TaxDate].self, forKey: .dates) ?? [],
-            amounts: try container.decodeIfPresent([TaxAmount].self, forKey: .amounts) ?? [],
+            dates: try Self.decodeBoundedArray(TaxDate.self, from: container, forKey: .dates,
+                                               maximumCount: TaxDocumentLimits.maximumDates),
+            amounts: try Self.decodeBoundedArray(TaxAmount.self, from: container, forKey: .amounts,
+                                                 maximumCount: TaxDocumentLimits.maximumAmounts),
             pages: [],
-            warnings: try container.decodeIfPresent([String].self, forKey: .warnings) ?? [],
+            warnings: try Self.decodeBoundedArray(String.self, from: container, forKey: .warnings,
+                                                  maximumCount: TaxDocumentLimits.maximumWarnings),
             confidence: try container.decodeIfPresent(TaxConfidence.self, forKey: .confidence)
         )
+    }
+
+    /// Decode arrays incrementally so a compact malicious JSON array cannot
+    /// allocate an arbitrary number of elements before the initializer's
+    /// normal value bounds are applied.
+    private static func decodeBoundedArray<Element: Decodable>(
+        _ type: Element.Type,
+        from container: KeyedDecodingContainer<CodingKeys>,
+        forKey key: CodingKeys,
+        maximumCount: Int
+    ) throws -> [Element] {
+        guard container.contains(key) else { return [] }
+        guard try !container.decodeNil(forKey: key) else { return [] }
+        var valuesContainer = try container.nestedUnkeyedContainer(forKey: key)
+        var values: [Element] = []
+        values.reserveCapacity(min(valuesContainer.count ?? maximumCount, maximumCount))
+        while !valuesContainer.isAtEnd {
+            guard values.count < maximumCount else {
+                throw DecodingError.dataCorrupted(.init(
+                    codingPath: valuesContainer.codingPath,
+                    debugDescription: "Tax document array exceeds its safe element limit."
+                ))
+            }
+            values.append(try valuesContainer.decode(Element.self))
+        }
+        return values
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -312,15 +357,45 @@ public struct TaxDocument: Codable, Equatable, Identifiable, Sendable {
             evidence: TaxEvidence(page: candidate.evidence.page, snippet: safeEvidenceSnippet)
         )
     }
+
+    static func boundedPagesForParsing(_ pages: [String]) -> (pages: [String], truncated: Bool) {
+        var remainingBytes = TaxDocumentLimits.maximumTotalPageBytes
+        var truncated = pages.count > TaxDocumentLimits.maximumPages
+        var bounded: [String] = []
+        bounded.reserveCapacity(min(pages.count, TaxDocumentLimits.maximumPages))
+        for page in pages.prefix(TaxDocumentLimits.maximumPages) {
+            let characterBounded = String(page.prefix(TaxDocumentLimits.maximumPageCharacters))
+            truncated = truncated || characterBounded.count != page.count
+            guard remainingBytes > 0 else {
+                truncated = true
+                bounded.append("")
+                continue
+            }
+            let encoded = Data(characterBounded.utf8)
+            let prefix = encoded.count > remainingBytes ? Data(encoded.prefix(remainingBytes)) : encoded
+            let value = String(decoding: prefix, as: UTF8.self)
+            truncated = truncated || value.utf8.count != encoded.count
+            remainingBytes -= value.utf8.count
+            bounded.append(TaxPrivacy.redactIdentifiers(in: value))
+        }
+        return (bounded, truncated)
+    }
 }
 
 enum TaxDocumentParser {
-    static func parse(text: String, documentName: String) -> TaxDocument {
-        parse(pages: [text], documentName: documentName)
+    static func parse(
+        text: String, documentName: String,
+        cancellationCheck: @escaping () -> Bool = { false }
+    ) -> TaxDocument {
+        parse(pages: [text], documentName: documentName, cancellationCheck: cancellationCheck)
     }
 
-    static func parse(pages: [String], documentName: String) -> TaxDocument {
-        let cleanedPages = pages.map { $0.replacingOccurrences(of: "\u{FFFD}", with: "") }
+    static func parse(
+        pages: [String], documentName: String,
+        cancellationCheck: @escaping () -> Bool = { false }
+    ) -> TaxDocument {
+        let bounded = TaxDocument.boundedPagesForParsing(pages)
+        let cleanedPages = bounded.pages.map { $0.replacingOccurrences(of: "\u{FFFD}", with: "") }
         let safePages = cleanedPages.map { TaxPrivacy.redactIdentifiers(in: $0) }
         var dates: [TaxDate] = []
         var amounts: [TaxAmount] = []
@@ -331,28 +406,54 @@ enum TaxDocumentParser {
         let moneyRegex = try? NSRegularExpression(pattern: moneyPattern)
 
         for (index, page) in safePages.enumerated() {
+            if cancellationCheck() { break }
             let nsPage = page as NSString
             let range = NSRange(location: 0, length: nsPage.length)
-            dateRegex?.enumerateMatches(in: page, range: range) { match, _, _ in
-                guard let match else { return }
-                let value = nsPage.substring(with: match.range)
-                let evidence = TaxEvidence(page: index + 1, snippet: evidenceSnippet(in: page, around: value))
-                dates.append(TaxDate(value: value, evidence: evidence))
-                let yearText = value.contains("-") ? String(value.prefix(4)) : String(value.suffix(4))
-                if let year = Int(yearText), (1900...2100).contains(year) { years.append(year) }
+            if dates.count < TaxDocumentLimits.maximumDates {
+                dateRegex?.enumerateMatches(in: page, range: range) { match, _, stop in
+                    if cancellationCheck() {
+                        stop.pointee = true
+                        return
+                    }
+                    guard dates.count < TaxDocumentLimits.maximumDates else {
+                        stop.pointee = true
+                        return
+                    }
+                    guard let match else { return }
+                    let value = nsPage.substring(with: match.range)
+                    let evidence = TaxEvidence(page: index + 1, snippet: evidenceSnippet(in: page, around: value))
+                    dates.append(TaxDate(value: value, evidence: evidence))
+                    let yearText = value.contains("-") ? String(value.prefix(4)) : String(value.suffix(4))
+                    if let year = Int(yearText), (1900...2100).contains(year), years.count < TaxDocumentLimits.maximumDates {
+                        years.append(year)
+                    }
+                    if dates.count >= TaxDocumentLimits.maximumDates { stop.pointee = true }
+                }
             }
-            moneyRegex?.enumerateMatches(in: page, range: range) { match, _, _ in
-                guard let match else { return }
-                let hasPrefixCurrency = match.range(at: 2).location != NSNotFound
-                let hasSuffixCurrency = match.range(at: 4).location != NSNotFound
-                guard hasPrefixCurrency || hasSuffixCurrency else { return }
-                let label = nsPage.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespaces)
-                let raw = nsPage.substring(with: match.range(at: 3))
-                let normalized = raw.replacingOccurrences(of: ".", with: "")
-                    .replacingOccurrences(of: " ", with: "")
-                    .replacingOccurrences(of: ",", with: ".")
-                let evidence = TaxEvidence(page: index + 1, snippet: evidenceSnippet(in: page, around: match.range))
-                amounts.append(TaxAmount(value: normalized, label: label, evidence: evidence))
+            if cancellationCheck() { break }
+            if amounts.count < TaxDocumentLimits.maximumAmounts {
+                moneyRegex?.enumerateMatches(in: page, range: range) { match, _, stop in
+                    if cancellationCheck() {
+                        stop.pointee = true
+                        return
+                    }
+                    guard amounts.count < TaxDocumentLimits.maximumAmounts else {
+                        stop.pointee = true
+                        return
+                    }
+                    guard let match else { return }
+                    let hasPrefixCurrency = match.range(at: 2).location != NSNotFound
+                    let hasSuffixCurrency = match.range(at: 4).location != NSNotFound
+                    guard hasPrefixCurrency || hasSuffixCurrency else { return }
+                    let label = nsPage.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespaces)
+                    let raw = nsPage.substring(with: match.range(at: 3))
+                    let normalized = raw.replacingOccurrences(of: ".", with: "")
+                        .replacingOccurrences(of: " ", with: "")
+                        .replacingOccurrences(of: ",", with: ".")
+                    let evidence = TaxEvidence(page: index + 1, snippet: evidenceSnippet(in: page, around: match.range))
+                    amounts.append(TaxAmount(value: normalized, label: label, evidence: evidence))
+                    if amounts.count >= TaxDocumentLimits.maximumAmounts { stop.pointee = true }
+                }
             }
         }
 
@@ -366,6 +467,9 @@ enum TaxDocumentParser {
         ])
         let explicitYear = firstCapture(in: combined, pattern: #"(?i)(?:Steuerjahr|tax year)\s*:?\s*(\d{4})"#).flatMap(Int.init)
         var warnings: [String] = []
+        if bounded.truncated {
+            warnings.append("Document text was truncated to a safe limit.")
+        }
         if combined.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             warnings.append("No embedded text was found.")
         }
@@ -454,8 +558,15 @@ public struct TaxDocumentStore: Sendable {
 
     public func load() throws -> [TaxDocument] {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return [] }
+        let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+        guard let size = attributes[.size] as? NSNumber, size.intValue <= TaxDocumentLimits.maximumStoredBytes else {
+            throw TaxDocumentStoreError.fileTooLarge
+        }
         let data = try Data(contentsOf: fileURL)
         let documents = try JSONDecoder().decode([TaxDocument].self, from: data)
+        guard documents.count <= TaxDocumentLimits.maximumStoredDocuments else {
+            throw TaxDocumentStoreError.tooManyDocuments
+        }
         let sanitizedData = try JSONEncoder().encode(documents)
         if sanitizedData != data {
             do {
@@ -468,8 +579,14 @@ public struct TaxDocumentStore: Sendable {
     }
 
     public func save(_ documents: [TaxDocument]) throws {
+        guard documents.count <= TaxDocumentLimits.maximumStoredDocuments else {
+            throw TaxDocumentStoreError.tooManyDocuments
+        }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let data = try JSONEncoder().encode(documents)
+        guard data.count <= TaxDocumentLimits.maximumStoredBytes else {
+            throw TaxDocumentStoreError.fileTooLarge
+        }
         try persist(data)
     }
 
@@ -513,9 +630,15 @@ public struct TaxDocumentStore: Sendable {
 
 public enum TaxDocumentStoreError: LocalizedError, Equatable, Sendable {
     case rawPageMigrationFailed
+    case fileTooLarge
+    case tooManyDocuments
 
     public var errorDescription: String? {
-        "Stored tax metadata could not be migrated safely."
+        switch self {
+        case .rawPageMigrationFailed: return "Stored tax metadata could not be migrated safely."
+        case .fileTooLarge: return "The local tax store exceeds its safe size limit."
+        case .tooManyDocuments: return "The local tax store contains too many documents."
+        }
     }
 }
 

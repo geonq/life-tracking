@@ -27,6 +27,11 @@ export const API_HEADERS_TIMEOUT_MS = 10_000;
 export const API_REQUEST_TIMEOUT_MS = 30_000;
 export const API_SOCKET_TIMEOUT_MS = 30_000;
 export const API_KEEP_ALIVE_TIMEOUT_MS = 5_000;
+// The body limit is enforced per request. These process-wide admission limits
+// keep many individually valid photo/document requests from multiplying into
+// an unbounded resident-memory spike on the personal server.
+export const API_MAX_CONNECTIONS = 64;
+export const API_MAX_IN_FLIGHT_REQUESTS = 16;
 
 function usageStorePath(): string | undefined {
   const configured = process.env.USAGE_STORE_PATH;
@@ -613,14 +618,34 @@ export function createApiServer(
   nutritionPhotoClient?: NutritionPhotoProposalClient,
 ) {
   const configuredBarcodeClient = barcodeClient ?? createConfiguredOpenFoodFactsClient();
-  const server = createServer((req, res) => void app(
-    req,
-    res,
-    readLive,
-    configuredBarcodeClient,
-    clipperStore,
-    nutritionPhotoClient,
-  ));
+  let inFlight = 0;
+  const server = createServer((req, res) => {
+    if (inFlight >= API_MAX_IN_FLIGHT_REQUESTS) {
+      req.resume();
+      json(res, 503, { error: 'server_busy' });
+      return;
+    }
+    inFlight += 1;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      inFlight -= 1;
+    };
+    void app(
+      req,
+      res,
+      readLive,
+      configuredBarcodeClient,
+      clipperStore,
+      nutritionPhotoClient,
+    ).catch(() => {
+      if (!res.headersSent) json(res, 503, { error: 'service_unavailable' });
+      else res.destroy();
+    }).finally(release);
+  });
+  server.maxConnections = API_MAX_CONNECTIONS;
+  server.maxRequestsPerSocket = 100;
   server.headersTimeout = API_HEADERS_TIMEOUT_MS;
   server.requestTimeout = API_REQUEST_TIMEOUT_MS;
   server.timeout = API_SOCKET_TIMEOUT_MS;

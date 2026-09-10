@@ -12,6 +12,7 @@ from unittest.mock import patch
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 from starlette.websockets import WebSocketDisconnect
 
 os.environ["LIFEOS_TAILSCALE_ALLOWED_LOGIN"] = "test-user@example.com"
@@ -61,6 +62,56 @@ VALID = {
         "google_ai_studio": "unavailable",
     },
 }
+
+
+def multipart_part(name, body, *, filename=None, content_type=None):
+    headers = [f'Content-Disposition: form-data; name="{name}"']
+    if filename is not None:
+        headers[0] += f'; filename="{filename}"'
+    if content_type is not None:
+        headers.append(f"Content-Type: {content_type}")
+    return "\r\n".join(headers).encode("ascii") + b"\r\n\r\n" + body
+
+
+def multipart_body(parts, boundary="lifeos-test-boundary"):
+    return b"".join(
+        b"--" + boundary.encode("ascii") + b"\r\n" + part + b"\r\n"
+        for part in parts
+    ) + b"--" + boundary.encode("ascii") + b"--\r\n"
+
+
+def streamed_request(body, *, boundary="lifeos-test-boundary", chunk_size=7, content_length=None):
+    chunks = [body[index:index + chunk_size] for index in range(0, len(body), chunk_size)]
+    if not chunks:
+        chunks = [b""]
+    messages = [
+        {
+            "type": "http.request",
+            "body": chunk,
+            "more_body": index < len(chunks) - 1,
+        }
+        for index, chunk in enumerate(chunks)
+    ]
+    headers = [(b"content-type", f"multipart/form-data; boundary={boundary}".encode("ascii"))]
+    if content_length is not None:
+        headers.append((b"content-length", str(content_length).encode("ascii")))
+
+    async def receive():
+        return messages.pop(0)
+
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/documents",
+            "headers": headers,
+        },
+        receive,
+    )
+
+
+def run_document_upload(body, **request_options):
+    return asyncio.run(main.upload_document(streamed_request(body, **request_options)))
 
 FINANCE_PROVENANCE = {
     "source": "no-authorized-finance-source",
@@ -1069,6 +1120,46 @@ def test_websocket_requires_identity():
 def test_websocket_accepts_trusted_serve_identity():
     with client.websocket_connect("/ws", headers=AUTH) as websocket:
         websocket.close()
+
+
+def test_websocket_is_push_only_and_rejects_oversized_client_messages():
+    with client.websocket_connect("/ws", headers=AUTH) as websocket:
+        websocket.send_text("unexpected")
+        with pytest.raises(WebSocketDisconnect) as rejected:
+            websocket.receive_text()
+    assert rejected.value.code == 1003
+
+    with client.websocket_connect("/ws", headers=AUTH) as websocket:
+        websocket.send_text("x" * (main.MAX_CLIENT_MESSAGE_BYTES + 1))
+        with pytest.raises(WebSocketDisconnect) as rejected:
+            websocket.receive_text()
+    assert rejected.value.code == 1009
+
+
+def test_websocket_rejects_binary_client_messages():
+    with client.websocket_connect("/ws", headers=AUTH) as websocket:
+        websocket.send_bytes(b"unexpected binary payload")
+        with pytest.raises(WebSocketDisconnect) as rejected:
+            websocket.receive_text()
+    assert rejected.value.code == 1003
+
+
+@pytest.mark.parametrize("message, expected", [
+    ({"type": "websocket.receive"}, 1003),
+    ({"type": "websocket.receive", "text": None, "bytes": None}, 1003),
+    ({"type": "websocket.other"}, 1002),
+    (object(), 1002),
+])
+def test_websocket_rejects_unknown_client_frames_with_bounded_codes(message, expected):
+    assert main._websocket_client_message_close_code(message) == expected
+
+
+def test_websocket_rejects_oversized_binary_client_messages():
+    with client.websocket_connect("/ws", headers=AUTH) as websocket:
+        websocket.send_bytes(b"x" * (main.MAX_CLIENT_MESSAGE_BYTES + 1))
+        with pytest.raises(WebSocketDisconnect) as rejected:
+            websocket.receive_text()
+    assert rejected.value.code == 1009
 
 
 def test_websocket_rejects_canonical_identity_without_trusted_edge():
@@ -2631,26 +2722,161 @@ def test_document_upload_normalizes_unsafe_filename_extension(tmp_path, monkeypa
     assert not (tmp_path / "documents" / document_id / "original.exe").exists()
 
 
-def test_document_upload_rejects_oversized_streamed_upload(tmp_path, monkeypatch):
+def test_document_upload_rejects_chunked_oversized_metadata_without_content_length(monkeypatch):
     import main
 
-    monkeypatch.setattr(main, "DOCUMENT_MAX_UPLOAD_SIZE", 3)
+    monkeypatch.setattr(main, "DOCUMENT_METADATA_MAX_SIZE", 8)
+    body = multipart_body([
+        multipart_part(
+            "metadata",
+            json.dumps({"id": "11111111-1111-4111-8111-111111111111"}).encode(),
+        ),
+        multipart_part("file", b"safe", filename="tax.pdf", content_type="application/pdf"),
+    ])
 
-    class StreamedUpload:
-        filename = "tax.pdf"
+    response = run_document_upload(body, chunk_size=1)
 
-        def __init__(self):
-            self.chunks = iter((b"12", b"345"))
+    assert response.status_code == 413
+    assert json.loads(response.body) == {"error": "request_too_large"}
 
-        async def read(self, _chunk_size):
-            return next(self.chunks, b"")
 
-    async def exercise_bounded_reader():
-        with pytest.raises(main.HTTPException) as error:
-            await main._read_bounded_upload(StreamedUpload())
-        assert error.value.status_code == 413
+def test_document_upload_accepts_chunked_request_without_content_length():
+    body = multipart_body([
+        multipart_part("metadata", b'{"id":"11111111-1111-4111-8111-111111111111"}'),
+        multipart_part("file", b"safe", filename="tax.pdf", content_type="application/pdf"),
+    ])
 
-    asyncio.run(exercise_bounded_reader())
+    payload = asyncio.run(main._read_document_multipart(streamed_request(body, chunk_size=2)))
+    try:
+        assert payload.metadata == '{"id":"11111111-1111-4111-8111-111111111111"}'
+        assert payload.file.read() == b"safe"
+    finally:
+        payload.close()
+
+
+def test_document_upload_rejects_a_slow_chunked_body_with_a_bounded_timeout(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "DOCUMENT_BODY_TIMEOUT", 0.001)
+    body = multipart_body([
+        multipart_part("metadata", b'{"id":"11111111-1111-4111-8111-111111111111"}'),
+        multipart_part("file", b"safe", filename="tax.pdf", content_type="application/pdf"),
+    ])
+    messages = [{"type": "http.request", "body": body, "more_body": False}]
+
+    async def slow_receive():
+        await asyncio.sleep(0.02)
+        return messages.pop(0)
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/documents",
+            "headers": [(b"content-type", b"multipart/form-data; boundary=lifeos-test-boundary")],
+        },
+        slow_receive,
+    )
+
+    response = asyncio.run(main.upload_document(request))
+
+    assert response.status_code == 408
+    assert json.loads(response.body) == {"error": "request_timeout"}
+
+
+@pytest.mark.parametrize("header", [
+    b"X" * 257 + b": value",
+    b"Content-Disposition: " + b"X" * 4097,
+])
+def test_document_upload_rejects_oversized_part_headers(header):
+    boundary = "lifeos-header-boundary"
+    body = (
+        b"--" + boundary.encode() + b"\r\n"
+        + header + b"\r\n\r\n"
+        + b"ignored\r\n--" + boundary.encode() + b"--\r\n"
+    )
+
+    response = run_document_upload(body, boundary=boundary, chunk_size=5)
+
+    assert response.status_code == 413
+    assert json.loads(response.body) == {"error": "request_too_large"}
+
+
+@pytest.mark.parametrize("parts", [
+    [
+        multipart_part("metadata", b'{"id":"11111111-1111-4111-8111-111111111111"}'),
+        multipart_part("metadata", b'{"id":"22222222-2222-4222-8222-222222222222"}'),
+    ],
+    [
+        multipart_part("metadata", b'{"id":"11111111-1111-4111-8111-111111111111"}'),
+        multipart_part("file", b"safe", filename="tax.pdf", content_type="application/pdf"),
+        multipart_part("extra", b"unexpected"),
+    ],
+])
+def test_document_upload_rejects_duplicate_or_extra_parts(parts):
+    response = run_document_upload(multipart_body(parts), chunk_size=3)
+
+    assert response.status_code == 400
+    assert json.loads(response.body) == {"error": "invalid_request"}
+
+
+def test_document_upload_rejects_oversized_file_before_storage(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "DOCUMENT_MAX_UPLOAD_SIZE", 4)
+    body = multipart_body([
+        multipart_part("metadata", b'{"id":"11111111-1111-4111-8111-111111111111"}'),
+        multipart_part("file", b"12345", filename="tax.pdf", content_type="application/pdf"),
+    ])
+
+    response = run_document_upload(body, chunk_size=2)
+
+    assert response.status_code == 413
+    assert json.loads(response.body) == {"error": "request_too_large"}
+
+
+def test_document_upload_rejects_oversized_aggregate_body_before_parser(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "DOCUMENT_MAX_UPLOAD_SIZE", 8)
+    monkeypatch.setattr(main, "DOCUMENT_METADATA_MAX_SIZE", 128)
+    monkeypatch.setattr(main, "DOCUMENT_MULTIPART_OVERHEAD", 8)
+    body = multipart_body([
+        multipart_part("metadata", b'{"id":"11111111-1111-4111-8111-111111111111"}'),
+        multipart_part("file", b"12345678", filename="tax.pdf", content_type="application/pdf"),
+    ])
+
+    response = run_document_upload(body, chunk_size=5)
+
+    assert response.status_code == 413
+    assert json.loads(response.body) == {"error": "request_too_large"}
+
+
+def test_document_upload_closes_file_when_multipart_parser_fails(monkeypatch):
+    import main
+
+    opened = []
+    real_temporary_file = main.tempfile.TemporaryFile
+
+    def tracked_temporary_file(*args, **kwargs):
+        file = real_temporary_file(*args, **kwargs)
+        opened.append(file)
+        return file
+
+    monkeypatch.setattr(main.tempfile, "TemporaryFile", tracked_temporary_file)
+    boundary = "lifeos-malformed-boundary"
+    body = (
+        b"--" + boundary.encode() + b"\r\n"
+        + multipart_part("file", b"partial", filename="tax.pdf", content_type="application/pdf")
+        + b"\r\n--" + boundary.encode() + b"\r\n"
+        + b"Bad Header\r\n\r\n"
+    )
+
+    response = run_document_upload(body, boundary=boundary, chunk_size=4)
+
+    assert response.status_code == 400
+    assert json.loads(response.body) == {"error": "invalid_request"}
+    assert opened and all(file.closed for file in opened)
 
 
 def test_document_upload_rejects_non_object_metadata(tmp_path, monkeypatch):

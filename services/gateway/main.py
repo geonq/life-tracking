@@ -10,7 +10,7 @@ Tailscale tailnet, not a second place that re-implements merge semantics.
 
 Run:
     python -m venv venv
-    venv\\\\Scripts\\\\pip install -r requirements.txt
+    venv\\\\Scripts\\\\pip install --require-hashes -r requirements.lock
     set LIFEOS_TAILSCALE_ALLOWED_LOGIN=<exact tailnet login>
     set LIFEOS_TAILSCALE_EDGE_TOKEN=<random edge-only capability>
     venv\\\\Scripts\\\\python -m uvicorn main:app --host 127.0.0.1 --port 8421
@@ -35,15 +35,20 @@ import mimetypes
 import os
 import re
 import stat
+import tempfile
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable
+from typing import BinaryIO, Callable
 from urllib.parse import urlsplit
 
 import httpx
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+import python_multipart as multipart
+from python_multipart.exceptions import MultipartParseError
+from python_multipart.multipart import parse_options_header
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response
+from starlette.requests import ClientDisconnect
 
 from enablebanking import (
     EnableBankingService,
@@ -498,12 +503,16 @@ NUTRITION_PHOTO_TOTAL_TIMEOUT = 30.0
 NUTRITION_PHOTO_BODY_TIMEOUT = 30.0
 DOCUMENT_MAX_UPLOAD_SIZE = int(os.environ.get("LIFEOS_DOCUMENT_MAX_UPLOAD_SIZE", 64 * 1024 * 1024))
 DOCUMENT_READ_CHUNK_SIZE = 1024 * 1024
+DOCUMENT_BODY_TIMEOUT = 90.0
 DOCUMENT_ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".heic"}
 DOCUMENT_INDEX_MAX_SIZE = 256 * 1024
 DOCUMENT_INDEX_MAX_ENTRIES = 512
 DOCUMENT_METADATA_MAX_SIZE = 64 * 1024
 DOCUMENT_METADATA_MAX_FIELDS = 128
 DOCUMENT_MULTIPART_OVERHEAD = 128 * 1024
+DOCUMENT_MULTIPART_HEADER_FIELD_MAX_SIZE = 256
+DOCUMENT_MULTIPART_HEADER_VALUE_MAX_SIZE = 4 * 1024
+DOCUMENT_MULTIPART_MAX_HEADERS_PER_PART = 16
 DOCUMENT_INDEX_FILENAME_PATTERN = re.compile(
     r"^original(?:-[0-9a-f]{32})?\.(?:pdf|png|jpg|jpeg|heic|bin)$"
 )
@@ -581,7 +590,7 @@ class ChangeBroadcaster:
     """Push-only fan-out so clients don't have to poll. Costs ~nothing while idle:
     connections just sit parked until a write happens, no timers, no background loop."""
 
-    MAX_CONNECTIONS = 32
+    MAX_CONNECTIONS = 16
     SEND_TIMEOUT = 0.25
     BROADCAST_TIMEOUT = 0.50
 
@@ -640,6 +649,30 @@ class ChangeBroadcaster:
 
 
 broadcaster = ChangeBroadcaster()
+MAX_CLIENT_MESSAGE_BYTES = 4 * 1024
+
+
+def _websocket_client_message_close_code(message: object) -> int | None:
+    """Return the bounded close code for one push-only client frame."""
+    if not isinstance(message, dict):
+        return 1002
+    message_type = message.get("type")
+    if message_type == "websocket.disconnect":
+        return None
+    if message_type != "websocket.receive":
+        return 1002
+
+    text = message.get("text")
+    binary = message.get("bytes")
+    if isinstance(text, str) and binary is None:
+        size = len(text.encode("utf-8"))
+    elif isinstance(binary, bytes) and text is None:
+        size = len(binary)
+    else:
+        # ASGI requires exactly one of text/bytes for a receive frame. Treat
+        # malformed or unknown frames as unsupported protocol input.
+        return 1003
+    return 1009 if size > MAX_CLIENT_MESSAGE_BYTES else 1003
 
 
 CONNECTOR_STATES = {"healthy", "refresh_due", "reauth_required", "revoked", "rate_limited", "unavailable"}
@@ -1875,15 +1908,24 @@ async def ws_changes(websocket: WebSocket) -> None:
     try:
         while True:
             # No client->server messages are expected; this just detects disconnects.
-            await websocket.receive_text()
+            try:
+                message = await websocket.receive()
+            except RuntimeError:
+                await websocket.close(code=1002)
+                break
+            close_code = _websocket_client_message_close_code(message)
+            if close_code is None:
+                break
+            await websocket.close(code=close_code)
+            break
     except WebSocketDisconnect:
         pass
     finally:
         await broadcaster.unregister(websocket)
 
 
-def _atomic_write_bytes(path: Path, data: bytes) -> None:
-    """Publish one bounded file atomically and durably where the OS permits."""
+def _atomic_publish(path: Path, write_content: Callable[[BinaryIO], None]) -> None:
+    """Atomically publish content through the protected state path contract."""
     path = Path(os.path.abspath(os.fspath(path)))
     parent = path.parent
     parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -1943,7 +1985,7 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
         try:
             with os.fdopen(descriptor, "wb") as handle:
                 descriptor = -1
-                handle.write(data)
+                write_content(handle)
                 handle.flush()
                 os.fsync(handle.fileno())
         finally:
@@ -1987,6 +2029,32 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
                 tmp.unlink()
             except (FileNotFoundError, OSError, ValueError):
                 pass
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Publish one bounded byte string atomically and durably."""
+    _atomic_publish(path, lambda handle: handle.write(data))
+
+
+def _atomic_write_stream(path: Path, source: BinaryIO, maximum: int) -> None:
+    """Publish a bounded seekable stream without materializing it in memory."""
+    if maximum < 0:
+        raise ValueError("stream maximum must be nonnegative")
+
+    def write_content(handle: BinaryIO) -> None:
+        copied = 0
+        while True:
+            chunk = source.read(DOCUMENT_READ_CHUNK_SIZE)
+            if not chunk:
+                break
+            if not isinstance(chunk, bytes):
+                raise TypeError("document stream returned non-bytes")
+            copied += len(chunk)
+            if copied > maximum:
+                raise ValueError("document stream exceeds limit")
+            handle.write(chunk)
+
+    _atomic_publish(path, write_content)
 
 
 class _CalendarStateUnavailable(Exception):
@@ -3258,6 +3326,316 @@ def _safe_document_id(value) -> str:
         raise HTTPException(status_code=400, detail="metadata.id must be a UUID") from exc
 
 
+class _DocumentMultipartError(Exception):
+    """A bounded, intentionally non-descriptive multipart request failure."""
+
+    def __init__(self, status_code: int) -> None:
+        if status_code not in {400, 408, 413, 503}:
+            raise ValueError("unsupported document multipart status")
+        super().__init__()
+        self.status_code = status_code
+
+
+class _DocumentMultipartPayload:
+    """The two accepted document fields and a seekable bounded temp file."""
+
+    def __init__(self, metadata: str, filename: str, file: BinaryIO) -> None:
+        self.metadata = metadata
+        self.filename = filename
+        self.file = file
+
+    def close(self) -> None:
+        try:
+            self.file.close()
+        except OSError:
+            pass
+
+
+class _BoundedDocumentMultipartParser:
+    """Stream exactly one metadata field and one file into bounded storage.
+
+    Starlette's implicit ``Request.form()`` path constructs a complete list of
+    parsed fields before the route runs.  This parser uses the installed
+    python-multipart callback API directly so raw bytes, headers, fields, and
+    the file are checked while the ASGI stream is being consumed.
+    """
+
+    def __init__(self, request: Request) -> None:
+        content_type_values = _raw_header_values(request, "content-type")
+        if len(content_type_values) != 1 or len(content_type_values[0]) > 4096:
+            raise _DocumentMultipartError(400)
+        try:
+            content_type, parameters = parse_options_header(content_type_values[0])
+        except (TypeError, ValueError, UnicodeError, AssertionError):
+            raise _DocumentMultipartError(400) from None
+        if content_type != b"multipart/form-data":
+            raise _DocumentMultipartError(400)
+
+        boundary = parameters.get(b"boundary")
+        if (
+            not isinstance(boundary, bytes)
+            or not 1 <= len(boundary) <= 70
+            or b"\r" in boundary
+            or b"\n" in boundary
+        ):
+            raise _DocumentMultipartError(400)
+        charset = parameters.get(b"charset", b"utf-8")
+        if not isinstance(charset, bytes) or not 1 <= len(charset) <= 64:
+            raise _DocumentMultipartError(400)
+        try:
+            self._charset = charset.decode("ascii")
+        except UnicodeDecodeError:
+            raise _DocumentMultipartError(400) from None
+
+        self._raw_limit = (
+            DOCUMENT_MAX_UPLOAD_SIZE
+            + DOCUMENT_METADATA_MAX_SIZE
+            + DOCUMENT_MULTIPART_OVERHEAD
+        )
+        if self._raw_limit < 0:
+            raise _DocumentMultipartError(413)
+        self._part_count = 0
+        self._headers: dict[bytes, bytes] = {}
+        self._partial_header_field = bytearray()
+        self._partial_header_value = bytearray()
+        self._current_kind: str | None = None
+        self._metadata_bytes = bytearray()
+        self._metadata: str | None = None
+        self._filename = ""
+        self._file: BinaryIO | None = None
+        self._file_size = 0
+        self._file_seen = False
+        self._metadata_seen = False
+        self._ended = False
+        self._parser = multipart.MultipartParser(
+            boundary,
+            {
+                "on_part_begin": self._on_part_begin,
+                "on_part_data": self._on_part_data,
+                "on_part_end": self._on_part_end,
+                "on_header_field": self._on_header_field,
+                "on_header_value": self._on_header_value,
+                "on_header_end": self._on_header_end,
+                "on_headers_finished": self._on_headers_finished,
+                "on_end": self._on_end,
+            },
+            max_size=self._raw_limit,
+        )
+
+    @staticmethod
+    def _callback_bytes(data: bytes, start: int, end: int) -> bytes:
+        if not isinstance(data, bytes) or not isinstance(start, int) or not isinstance(end, int):
+            raise _DocumentMultipartError(400)
+        return data[start:end]
+
+    def _on_part_begin(self) -> None:
+        self._part_count += 1
+        if self._part_count > 2:
+            raise _DocumentMultipartError(400)
+        self._headers = {}
+        self._partial_header_field.clear()
+        self._partial_header_value.clear()
+        self._current_kind = None
+
+    def _on_header_field(self, data: bytes, start: int, end: int) -> None:
+        chunk = self._callback_bytes(data, start, end)
+        if len(self._partial_header_field) + len(chunk) > DOCUMENT_MULTIPART_HEADER_FIELD_MAX_SIZE:
+            raise _DocumentMultipartError(413)
+        self._partial_header_field.extend(chunk)
+
+    def _on_header_value(self, data: bytes, start: int, end: int) -> None:
+        chunk = self._callback_bytes(data, start, end)
+        if len(self._partial_header_value) + len(chunk) > DOCUMENT_MULTIPART_HEADER_VALUE_MAX_SIZE:
+            raise _DocumentMultipartError(413)
+        self._partial_header_value.extend(chunk)
+
+    def _on_header_end(self) -> None:
+        field = bytes(self._partial_header_field).lower()
+        value = bytes(self._partial_header_value)
+        if not field or field in self._headers:
+            raise _DocumentMultipartError(400)
+        if len(self._headers) >= DOCUMENT_MULTIPART_MAX_HEADERS_PER_PART:
+            raise _DocumentMultipartError(413)
+        self._headers[field] = value
+        self._partial_header_field.clear()
+        self._partial_header_value.clear()
+
+    def _decode_header_value(self, value: bytes) -> str:
+        try:
+            return value.decode(self._charset)
+        except (LookupError, UnicodeDecodeError):
+            return value.decode("latin-1")
+
+    def _on_headers_finished(self) -> None:
+        content_disposition = self._headers.get(b"content-disposition")
+        if content_disposition is None:
+            raise _DocumentMultipartError(400)
+        try:
+            disposition, options = parse_options_header(content_disposition)
+        except (TypeError, ValueError, UnicodeError, AssertionError):
+            raise _DocumentMultipartError(400) from None
+        name = options.get(b"name")
+        has_filename = b"filename" in options
+        if disposition != b"form-data" or name not in {b"file", b"metadata"}:
+            raise _DocumentMultipartError(400)
+
+        if has_filename:
+            if name != b"file" or self._file_seen:
+                raise _DocumentMultipartError(400)
+            self._file_seen = True
+            self._filename = self._decode_header_value(options[b"filename"])
+            try:
+                self._file = tempfile.TemporaryFile(mode="w+b")
+            except OSError:
+                raise _DocumentMultipartError(503) from None
+            self._current_kind = "file"
+            return
+
+        if name != b"metadata" or self._metadata_seen:
+            raise _DocumentMultipartError(400)
+        self._metadata_seen = True
+        self._current_kind = "metadata"
+
+    def _on_part_data(self, data: bytes, start: int, end: int) -> None:
+        chunk = self._callback_bytes(data, start, end)
+        if self._current_kind == "metadata":
+            if len(self._metadata_bytes) + len(chunk) > DOCUMENT_METADATA_MAX_SIZE:
+                raise _DocumentMultipartError(413)
+            self._metadata_bytes.extend(chunk)
+            return
+        if self._current_kind != "file" or self._file is None:
+            raise _DocumentMultipartError(400)
+        if self._file_size + len(chunk) > DOCUMENT_MAX_UPLOAD_SIZE:
+            raise _DocumentMultipartError(413)
+        try:
+            written = self._file.write(chunk)
+        except (OSError, ValueError):
+            raise _DocumentMultipartError(503) from None
+        if written != len(chunk):
+            raise _DocumentMultipartError(503)
+        self._file_size += len(chunk)
+
+    def _on_part_end(self) -> None:
+        if self._current_kind == "metadata":
+            self._metadata = self._decode_header_value(bytes(self._metadata_bytes))
+        elif self._current_kind != "file":
+            raise _DocumentMultipartError(400)
+        self._current_kind = None
+
+    def _on_end(self) -> None:
+        self._ended = True
+
+    def close(self) -> None:
+        if self._file is not None:
+            try:
+                self._file.close()
+            except OSError:
+                pass
+            self._file = None
+
+    async def read(self, request: Request) -> _DocumentMultipartPayload:
+        try:
+            async with asyncio.timeout(DOCUMENT_BODY_TIMEOUT):
+                return await self._read_impl(request)
+        except TimeoutError:
+            self.close()
+            raise _DocumentMultipartError(408) from None
+
+    async def _read_impl(self, request: Request) -> _DocumentMultipartPayload:
+        try:
+            length_values = _raw_header_values(request, "content-length")
+            if len(length_values) > 1:
+                raise _DocumentMultipartError(400)
+            declared_length: int | None = None
+            if length_values:
+                try:
+                    raw_length = length_values[0].decode("ascii")
+                except UnicodeDecodeError:
+                    raise _DocumentMultipartError(400) from None
+                if re.fullmatch(r"[0-9]+", raw_length) is None:
+                    raise _DocumentMultipartError(400)
+                try:
+                    declared_length = int(raw_length)
+                except (OverflowError, ValueError):
+                    raise _DocumentMultipartError(400) from None
+                if declared_length > self._raw_limit:
+                    raise _DocumentMultipartError(413)
+
+            raw_size = 0
+            async for chunk in request.stream():
+                if not isinstance(chunk, bytes):
+                    raise _DocumentMultipartError(400)
+                raw_size += len(chunk)
+                if raw_size > self._raw_limit:
+                    raise _DocumentMultipartError(413)
+                try:
+                    consumed = self._parser.write(chunk)
+                except _DocumentMultipartError:
+                    raise
+                except MultipartParseError:
+                    raise _DocumentMultipartError(400) from None
+                if consumed != len(chunk):
+                    raise _DocumentMultipartError(413)
+
+            if declared_length is not None and declared_length != raw_size:
+                raise _DocumentMultipartError(400)
+            if (
+                not self._ended
+                or self._current_kind is not None
+                or not self._file_seen
+                or not self._metadata_seen
+                or self._metadata is None
+                or self._file is None
+            ):
+                raise _DocumentMultipartError(400)
+            try:
+                self._file.flush()
+                self._file.seek(0)
+            except (OSError, ValueError):
+                raise _DocumentMultipartError(503) from None
+            file = self._file
+            self._file = None
+            return _DocumentMultipartPayload(self._metadata, self._filename, file)
+        except _DocumentMultipartError:
+            self.close()
+            raise
+        except asyncio.CancelledError:
+            self.close()
+            raise
+        except ClientDisconnect:
+            self.close()
+            raise _DocumentMultipartError(400) from None
+        except (
+            MultipartParseError,
+            OSError,
+            TypeError,
+            ValueError,
+            UnicodeError,
+            KeyError,
+            IndexError,
+            AssertionError,
+        ):
+            self.close()
+            raise _DocumentMultipartError(400) from None
+
+
+async def _read_document_multipart(request: Request) -> _DocumentMultipartPayload:
+    parser = _BoundedDocumentMultipartParser(request)
+    return await parser.read(request)
+
+
+def _document_multipart_error_response(status_code: int) -> JSONResponse:
+    if status_code == 408:
+        error = "request_timeout"
+    elif status_code == 413:
+        error = "request_too_large"
+    elif status_code == 503:
+        error = "documents_unavailable"
+    else:
+        error = "invalid_request"
+    return JSONResponse({"error": error}, status_code=status_code)
+
+
 class _DocumentIndexError(Exception):
     """The durable document index is missing, malformed, or unsafe."""
 
@@ -3403,15 +3781,6 @@ def _document_destination_name(suffix: str, existing: list[Path]) -> str:
     return f"original-{uuid.uuid4().hex}{suffix}"
 
 
-async def _read_bounded_upload(file: UploadFile) -> bytes:
-    body = bytearray()
-    while chunk := await file.read(DOCUMENT_READ_CHUNK_SIZE):
-        if len(body) + len(chunk) > DOCUMENT_MAX_UPLOAD_SIZE:
-            raise HTTPException(status_code=413, detail="Document exceeds upload limit")
-        body.extend(chunk)
-    return bytes(body)
-
-
 def _read_and_repair_calendar_storage() -> tuple[bytes, int, bool, bool]:
     """Read Calendar authority and repair its projections as one storage unit."""
     body, _document, metadata = _load_calendar_state()
@@ -3525,7 +3894,7 @@ def _write_calendar_storage(
 def _store_document_upload(
     doc_id: str,
     meta: dict,
-    original_bytes: bytes,
+    original_file: BinaryIO,
     suffix: str,
 ) -> int:
     """Publish one document and its index as one lock-protected storage unit."""
@@ -3562,7 +3931,7 @@ def _store_document_upload(
     index_published = False
     try:
         doc_dir.mkdir(parents=True, exist_ok=True)
-        _atomic_write_bytes(destination, original_bytes)
+        _atomic_write_stream(destination, original_file, DOCUMENT_MAX_UPLOAD_SIZE)
         file_published = True
         # The index is the commit point. Files are published first so a crash
         # between the two operations leaves the old index usable.
@@ -3724,37 +4093,40 @@ async def list_documents() -> Response:
 
 
 @app.post("/documents")
-async def upload_document(
-    file: UploadFile = File(...),
-    metadata: str = Form(...),
-) -> JSONResponse:
+async def upload_document(request: Request) -> JSONResponse:
     """`metadata` is the client's TaxDocument JSON (must include an `id` field)."""
-    meta = _parse_document_metadata(metadata)
-    doc_id = meta["id"]
-
-    original_bytes = await _read_bounded_upload(file)
-    candidate_suffix = Path(file.filename or "").suffix.lower()
-    suffix = candidate_suffix if candidate_suffix in DOCUMENT_ALLOWED_EXTENSIONS else ".bin"
-
-    async with documents_lock:
-        try:
-            revision = await _run_gateway_storage(
-                _store_document_upload,
-                doc_id,
-                meta,
-                original_bytes,
-                suffix,
-            )
-        except HTTPException:
-            raise
+    try:
+        payload = await _read_document_multipart(request)
+    except _DocumentMultipartError as exc:
+        return _document_multipart_error_response(exc.status_code)
 
     try:
-        # Persistence is already committed; bounded fan-out must not turn a
-        # successful upload into an HTTP failure.
-        await broadcaster.broadcast({"type": "documents_changed", "revision": revision})
-    except Exception:
-        pass
-    return JSONResponse({"status": "ok", "id": doc_id})
+        meta = _parse_document_metadata(payload.metadata)
+        doc_id = meta["id"]
+        candidate_suffix = Path(payload.filename).suffix.lower()
+        suffix = candidate_suffix if candidate_suffix in DOCUMENT_ALLOWED_EXTENSIONS else ".bin"
+
+        async with documents_lock:
+            try:
+                revision = await _run_gateway_storage(
+                    _store_document_upload,
+                    doc_id,
+                    meta,
+                    payload.file,
+                    suffix,
+                )
+            except HTTPException:
+                raise
+
+        try:
+            # Persistence is already committed; bounded fan-out must not turn
+            # a successful upload into an HTTP failure.
+            await broadcaster.broadcast({"type": "documents_changed", "revision": revision})
+        except Exception:
+            pass
+        return JSONResponse({"status": "ok", "id": doc_id})
+    finally:
+        payload.close()
 
 
 @app.get("/documents/{doc_id}/file")

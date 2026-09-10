@@ -1131,6 +1131,9 @@ public actor TailscaleSyncClient {
         recordNetworkTaskCreated()
         let (bytes, response) = try await session.bytes(for: request)
         guard let http = response as? HTTPURLResponse else { throw TailscaleSyncError.invalidResponse }
+        guard Self.isJSONContentType(http.value(forHTTPHeaderField: "Content-Type")) else {
+            throw TailscaleSyncError.invalidResponse
+        }
         let declaredLength = http.value(forHTTPHeaderField: "Content-Length")
         guard Self.contentLengthIsAllowed(declaredLength, maximumBytes: maximumBytes) else {
             throw TailscaleSyncError.responseTooLarge

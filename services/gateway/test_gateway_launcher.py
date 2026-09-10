@@ -26,6 +26,14 @@ launcher = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(launcher)
 
 
+def test_gateway_connection_budget_reserves_http_capacity() -> None:
+    assert launcher.GATEWAY_MAX_WEBSOCKET_CONNECTIONS == 16
+    assert launcher.GATEWAY_MAX_CONCURRENCY == (
+        launcher.GATEWAY_MAX_HTTP_CONNECTIONS + launcher.GATEWAY_MAX_WEBSOCKET_CONNECTIONS
+    )
+    assert launcher.GATEWAY_MAX_HTTP_CONNECTIONS > 0
+
+
 def exact_web(proxy: str = "http://127.0.0.1:8421") -> dict:
     return {"Web": {"machine.example.ts.net:8420": {"Handlers": {"/": {
         "Proxy": proxy,

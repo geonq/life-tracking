@@ -70,6 +70,16 @@ BOUNDED_PROBE_MAX_TRACKED_PROBES = (
 BOUNDED_PROBE_MAX_CONSUMERS_PER_PROBE = (
     BOUNDED_PROBE_MAX_WORKERS + BOUNDED_PROBE_MAX_WAITERS + 1
 )
+# Uvicorn applies a process-wide connection bound before the reviewed FastAPI
+# app receives a request. Reserve a separate HTTP budget so the gateway's
+# bounded push-only WebSocket pool cannot consume every HTTP slot.
+GATEWAY_MAX_HTTP_CONNECTIONS = 16
+GATEWAY_MAX_WEBSOCKET_CONNECTIONS = 16
+GATEWAY_MAX_CONCURRENCY = GATEWAY_MAX_HTTP_CONNECTIONS + GATEWAY_MAX_WEBSOCKET_CONNECTIONS
+GATEWAY_MAX_REQUESTS = 5_000
+GATEWAY_MAX_WEBSOCKET_SIZE = 64 * 1024
+GATEWAY_MAX_WEBSOCKET_QUEUE = 16
+GATEWAY_MAX_INCOMPLETE_EVENT_SIZE = 64 * 1024
 SERVE_CONFIG_KEYS = frozenset({"Web", "TCP", "Services", "AllowFunnel", "Foreground"})
 GATEWAY_LOOPBACK_PORT = 8421
 WINDOWS_AF_INET = 2
@@ -1430,7 +1440,21 @@ def run(config_path: Path, entry_point: Path, tailscale: Path) -> int:
             if Path(getattr(module, name)) != Path(config["documentsPath"]):
                 raise RuntimeError("documents path contract mismatch")
     uvicorn = importlib.import_module("uvicorn")
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=8421, log_level="warning", proxy_headers=False))
+    server = uvicorn.Server(uvicorn.Config(
+        app,
+        host="127.0.0.1",
+        port=8421,
+        log_level="warning",
+        proxy_headers=False,
+        limit_concurrency=GATEWAY_MAX_CONCURRENCY,
+        limit_max_requests=GATEWAY_MAX_REQUESTS,
+        ws_max_size=GATEWAY_MAX_WEBSOCKET_SIZE,
+        ws_max_queue=GATEWAY_MAX_WEBSOCKET_QUEUE,
+        h11_max_incomplete_event_size=GATEWAY_MAX_INCOMPLETE_EVENT_SIZE,
+        ws_ping_interval=20,
+        ws_ping_timeout=20,
+        timeout_keep_alive=5,
+    ))
 
     def stop_on_stdin_eof() -> None:
         try:

@@ -30,8 +30,11 @@ $script:LifeOSRecoveryMaxTreeRoots = 256
 $script:LifeOSRecoveryMaxFileUnits = 65536
 # File count alone is not a sufficient resource bound: a small inventory can
 # still force an expensive hash/restore of very large files. Keep the limits
-# finite and shared by tree indexing, journal validation, and recovery.
-$script:LifeOSRecoveryMaxTreeBytes = 512 * 1024 * 1024
+# finite and shared by tree indexing, journal validation, and recovery. The
+# machine's Python base runtime can legitimately be larger than 512 MiB on
+# Windows because the rollback snapshot preserves the prior interpreter in
+# full; this remains a finite, exact per-tree and aggregate inventory bound.
+$script:LifeOSRecoveryMaxTreeBytes = 1024 * 1024 * 1024
 $script:LifeOSRecoveryMaxFileBytes = 64 * 1024 * 1024
 # A standalone Windows node.exe is an explicitly allowlisted candidate file.
 # Keep its larger runtime bound separate from the 64 MiB recovery/file bound so
@@ -42,7 +45,7 @@ $script:LifeOSCandidateNodeMaxFileBytes = 256 * 1024 * 1024
 # the Node runtime so a same-basename file elsewhere cannot opt in.
 $script:LifeOSCandidateServiceHostMaxFileBytes = 256 * 1024 * 1024
 $script:LifeOSCandidateServiceHostRelativePath = 'service-host/LifeOS.ServiceHost.exe'
-$script:LifeOSRecoveryMaxInventoryBytes = 512 * 1024 * 1024
+$script:LifeOSRecoveryMaxInventoryBytes = 1024 * 1024 * 1024
 $script:LifeOSRecoveryMaxPathLength = 4096
 $script:LifeOSDeploymentMarkerMaxBytes = 64 * 1024
 $script:LifeOSGenerationManifestMaxBytes = 16 * 1024 * 1024
@@ -3274,7 +3277,27 @@ function Read-RecoveryProgress {
     }
     Assert-ExistingFile $progressPath 'Recovery progress log'
     Assert-NoReparsePath $progressPath
-    Assert-RestrictedAcl $progressPath $Manifest.operatorSid @() @() -AllowInherited
+    try {
+        Assert-RestrictedAcl $progressPath $Manifest.operatorSid @() @() -AllowInherited
+    } catch {
+        # A pre-fix recovery attempt could have created this transaction-owned
+        # log with the parent ACL (the observed failure was an admin-only ACL
+        # with no SYSTEM/operator entries). Repair only when the current owner
+        # and every explicit allow identity are already within the management
+        # boundary; any broad or unknown grant remains fail-closed.
+        $currentAcl = Get-Acl -LiteralPath $progressPath -ErrorAction Stop
+        $allowedRecoverySids = @([string]$Manifest.operatorSid, 'S-1-5-18', 'S-1-5-32-544')
+        $currentOwner = $currentAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+        if ($currentOwner -notin $allowedRecoverySids) { throw }
+        foreach ($accessRule in @($currentAcl.Access)) {
+            if ($accessRule.AccessControlType -ne 'Allow') { continue }
+            try { $accessSid = $accessRule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value }
+            catch { throw }
+            if ($accessSid -notin $allowedRecoverySids) { throw }
+        }
+        Set-RestrictedAcl -Path $progressPath -OperatorSid $Manifest.operatorSid -ReadSids @() -ModifySids @() -File -SkipSnapshot
+        Assert-RestrictedAcl $progressPath $Manifest.operatorSid @() @() -AllowInherited
+    }
     $progressItem = Get-Item -LiteralPath $progressPath -Force -ErrorAction Stop
     if ($progressItem.PSIsContainer -or [long]$progressItem.Length -gt $script:LifeOSRecoveryProgressMaxBytes) {
         throw 'Recovery progress log exceeds its bounded parse size.'
@@ -3417,7 +3440,21 @@ function Append-RecoveryProgress {
     $record = New-RecoveryProgressRecord -Manifest $Manifest -Journal $Journal -UnitIndex $UnitIndex -Phase $Phase -Sequence $sequence -UnitCount $unitCount
     $frame = New-RecoveryProgressFrame $record
     Ensure-Directory (Split-Path -Parent $progressPath)
-    if (-not (Test-Path -LiteralPath $progressPath)) { [IO.File]::WriteAllBytes($progressPath, [byte[]]@()) }
+    Assert-NoReparsePath $progressPath -AllowMissingLeaf
+    if (-not (Test-Path -LiteralPath $progressPath)) {
+        # A newly-created progress log starts with the same protected DACL as
+        # every other recovery artifact before any bytes are appended. This
+        # avoids validating the inherited default ACL and then writing through
+        # it during the recovery boundary.
+        $progressStream = $null
+        try {
+            $progressStream = [IO.File]::Open($progressPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+        } finally {
+            if ($null -ne $progressStream) { $progressStream.Dispose() }
+        }
+        Assert-NoReparsePath $progressPath
+        Set-RestrictedAcl -Path $progressPath -OperatorSid $Manifest.operatorSid -ReadSids @() -ModifySids @() -File -SkipSnapshot
+    }
     Assert-ExistingFile $progressPath 'Recovery progress log'
     Assert-NoReparsePath $progressPath
     Assert-RestrictedAcl $progressPath $Manifest.operatorSid @() @() -AllowInherited
@@ -4617,7 +4654,10 @@ function Assert-AclRoleRights {
         'read' { [long][Security.AccessControl.FileSystemRights]::ReadAndExecute -bor [long][Security.AccessControl.FileSystemRights]::Synchronize }
     }
     if (($Granted -band $required) -ne $required -or ($Denied -band $required) -ne 0 -or
-        ($Granted -band (-bnot $permitted)) -ne 0) { throw 'ACL role has missing required or forbidden rights.' }
+        ($Granted -band (-bnot $permitted)) -ne 0) {
+        throw ("ACL role has missing required or forbidden rights: role={0}; granted={1}; denied={2}; required={3}; permitted={4}; directory={5}; executable={6}" -f
+            $Role, $Granted, $Denied, $required, $permitted, $Directory, $Executable)
+    }
 }
 
 function Assert-RestrictedAcl {
@@ -4671,7 +4711,12 @@ function Assert-RestrictedAcl {
             # accepted provenance for the writable tree, never a FullControl
             # grant that could bypass the service ACE check below.
             $role = if ($sid -in $managementOwners) { 'owner' } elseif ($sid -in $ModifySids) { 'modify' } else { 'read' }
-            Assert-AclRoleRights $role $granted[$sid] $denied[$sid] $target.PSIsContainer ([IO.Path]::GetExtension($target.FullName) -in @('.exe', '.dll'))
+            try {
+                Assert-AclRoleRights $role $granted[$sid] $denied[$sid] $target.PSIsContainer ([IO.Path]::GetExtension($target.FullName) -in @('.exe', '.dll'))
+            } catch {
+                throw ("ACL role verification failed: path={0}; identity={1}; {2}" -f
+                    $target.FullName, $sid, $_.Exception.Message)
+            }
         }
     }
 }
