@@ -1287,8 +1287,8 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
         schemaVersion = 1; transactionId = 'task-retry-fixture'; generation = 'generation'; operatorSid = 'fixture'; manifestPath = 'fixture'
         phase = 'artifacts-complete'; stages = [pscustomobject]@{ 'Restore-CodexCollectorTask' = 'complete'; 'Restore-TailscaleSnapshotTask' = 'restoring' }
     }
-    $codexRecord = [pscustomobject]@{ Name = 'LifeOSCodexCollector'; Exists = $true; Enabled = $true; State = 'Running'; TaskPath = '\'; Backup = $codexBackup }
-    $snapshotRecord = [pscustomobject]@{ Name = 'LifeOSTailscaleSnapshot'; Exists = $true; Enabled = $true; State = 'Running'; TaskPath = '\'; Backup = $snapshotBackup }
+    $codexRecord = [pscustomobject]@{ Name = 'LifeOSCodexCollector'; Exists = $true; Enabled = $true; State = 'Running'; TaskPath = '\'; Backup = $codexBackup; Xml = $xml }
+    $snapshotRecord = [pscustomobject]@{ Name = 'LifeOSTailscaleSnapshot'; Exists = $true; Enabled = $true; State = 'Running'; TaskPath = '\'; Backup = $snapshotBackup; Xml = $xml }
     $manifest = [pscustomobject]@{
         transactionId = 'task-retry-fixture'; generation = 'generation'; operatorSid = 'fixture'; manifestPath = 'fixture'
         paths = [pscustomobject]@{ backupDirectory = $temp }; codexTask = $codexRecord; snapshotTask = $snapshotRecord
