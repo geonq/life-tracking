@@ -198,7 +198,7 @@ if (Test-Path -LiteralPath $enableBankingConnectionsSource) {
 }
 $financeSummarySource = Join-Path $legacyData 'finance-summary.json'
 if (Test-Path -LiteralPath $financeSummarySource) {
-    $null = Assert-BoundedFile $financeSummarySource (1 * 1024 * 1024) 'Legacy finance summary cache'
+    $null = Assert-BoundedFile $financeSummarySource (256 * 1024) 'Legacy finance summary cache'
 }
 
 Write-Host 'LifeOS Windows deployment preflight passed.'

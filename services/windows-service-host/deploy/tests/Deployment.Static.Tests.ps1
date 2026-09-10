@@ -268,7 +268,7 @@ Assert-Text 'enablebanking-connections\.json' 'Enable Banking connection state i
 Assert-Text 'finance-summary\.json' 'Finance summary state is migrated.'
 Assert-Text 'Assert-BoundedFile' 'Legacy Finance migrations enforce a size bound.'
 Assert-Text "'enablebanking-connections\.json' = 256 \* 1024" 'Enable Banking connection migration bound is 256 KiB.'
-Assert-Text "'finance-summary\.json' = 1 \* 1024 \* 1024" 'Finance summary migration bound is 1 MiB.'
+Assert-Text "'finance-summary\.json' = 256 \* 1024" 'Finance summary migration bound is 256 KiB.'
 Assert-Text "'calendar\.json\.state\.json' = 6 \* 1024 \* 1024" 'Calendar state migration matches the gateway 6 MiB bound.'
 Assert-Text "'calendar\.json\.meta\.json' = 4 \* 1024 \* 1024" 'Calendar metadata migration matches the gateway 4 MiB bound.'
 Assert-Text "'finance-summary\.json\.meta\.json' = 4 \* 1024 \* 1024" 'Finance metadata migration matches the gateway 4 MiB bound.'

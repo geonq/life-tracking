@@ -539,6 +539,7 @@ def test_legacy_finance_files_are_bounded_atomic_and_journaled() -> None:
     assert "LegacyGatewaySource" in preflight and "LegacyGatewaySource" in install
     assert "enablebanking-connections.json" in preflight
     assert "finance-summary.json" in preflight
+    assert "Assert-BoundedFile $financeSummarySource (256 * 1024)" in preflight
     assert "Migrate-LegacyDataFile" not in install
     assert "256 * 1024" in install
     assert "Assert-BoundedFile" in common
