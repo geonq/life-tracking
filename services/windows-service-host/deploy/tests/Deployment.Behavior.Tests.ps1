@@ -1228,6 +1228,7 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
     $realFramePart = ${function:Write-RecoveryProgressFramePart}
     $script:progressCommitCount = 0
     function Assert-RestrictedAcl { param($Path, $OperatorSid, $ReadSids, $ModifySids, [switch]$AllowInherited) }
+    function Set-RestrictedAcl { param($Path, $OperatorSid, $ReadSids, $ModifySids, [switch]$File, [switch]$SkipSnapshot, [string[]]$AllowedOwnerSids, [switch]$InheritableSystemFullControl, [int]$MaxAttempts = 5, [int]$RetryDelayMilliseconds = 500) }
     function Write-RecoveryProgressFramePart {
         param($Stream, $Bytes, $Boundary)
         & $realFramePart -Stream $Stream -Bytes $Bytes -Boundary $Boundary
