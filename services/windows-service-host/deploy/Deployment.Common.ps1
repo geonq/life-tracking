@@ -1211,13 +1211,22 @@ function Assert-LifeOSPathIdentityChain {
     $actual = @(Get-LifeOSPathIdentityChain -Path ([string]$Expected[$Expected.Count - 1].Path) -Description $Description)
     if ($actual.Count -ne $Expected.Count) { throw "$Description ancestor identity changed." }
     for ($index = 0; $index -lt $Expected.Count; $index++) {
-        if ([string]$actual[$index].Path -ine [string]$Expected[$index].Path -or
+        # Directory timestamps are mutable metadata: creating or removing a
+        # sibling staging entry updates an ancestor even when this exact path
+        # was never replaced. File ID, type, and attributes still detect an
+        # ancestor replacement or reparse transition. Keep the stronger
+        # timestamp/length check for the descriptor's leaf file itself.
+        $identityChanged = [string]$actual[$index].Path -ine [string]$Expected[$index].Path -or
             [string]$actual[$index].FileId -cne [string]$Expected[$index].FileId -or
             [int]$actual[$index].Attributes -ne [int]$Expected[$index].Attributes -or
-            [bool]$actual[$index].IsContainer -ne [bool]$Expected[$index].IsContainer -or
-            [long]$actual[$index].Length -ne [long]$Expected[$index].Length -or
-            [DateTime]$actual[$index].LastWriteTimeUtc -ne [DateTime]$Expected[$index].LastWriteTimeUtc -or
-            [DateTime]$actual[$index].CreationTimeUtc -ne [DateTime]$Expected[$index].CreationTimeUtc) {
+            [bool]$actual[$index].IsContainer -ne [bool]$Expected[$index].IsContainer
+        if ($index -eq $Expected.Count - 1) {
+            $identityChanged = $identityChanged -or
+                [long]$actual[$index].Length -ne [long]$Expected[$index].Length -or
+                [DateTime]$actual[$index].LastWriteTimeUtc -ne [DateTime]$Expected[$index].LastWriteTimeUtc -or
+                [DateTime]$actual[$index].CreationTimeUtc -ne [DateTime]$Expected[$index].CreationTimeUtc
+        }
+        if ($identityChanged) {
             if ($index -eq $Expected.Count - 1) { throw "$Description file identity changed." }
             throw "$Description ancestor identity changed."
         }
