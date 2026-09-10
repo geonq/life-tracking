@@ -707,7 +707,7 @@ if ([string]::IsNullOrWhiteSpace($CandidateRoot) -or [string]::IsNullOrWhiteSpac
     throw 'CandidateRoot and ExpectedSourceSha are required for an install; use -DefineOnly only for source inspection.'
 }
 $candidateRootFull = Assert-LifeOSCandidateRoot -Root $CandidateRoot -ExpectedSourceSha $ExpectedSourceSha -DeploymentScriptRoot $PSScriptRoot -VerifyCandidate
-$deploymentMutex = Enter-LifeOSDeploymentTransaction
+$deploymentMutex = $null
 $deploymentCompleted = $false
 $deploymentRollbackSucceeded = $false
 $deploymentRecoveryCompleted = $false
@@ -733,7 +733,6 @@ if ($codexPathProvided) {
         throw 'Optional Codex executable path failed file, ownership, or reparse-point validation.'
     }
 }
-$previousGeneration = Get-LifeOSPreviousInstalledGeneration -MarkerState $deploymentMutex.PreviousState -ManifestPath $deploymentMutex.PreviousManifestPath -OperatorSid $operatorSid -ExpectedGeneration ([string]$deploymentMutex.PreviousGeneration)
 $tailscaleEdgeTokenPath = Assert-TailscaleEdgeTokenSource -Path $TailscaleEdgeTokenSource -ExpectedPath (Get-LifeOSTailscaleEdgeTokenPath $paths.SecretRoot) -OperatorSid $operatorSid
 $preflightArgs = @{
     CandidateRoot = $candidateRootFull
@@ -752,6 +751,13 @@ $preflightArgs = @{
     CodexTaskName = $CodexTaskName
 }
 & (Join-Path $PSScriptRoot 'preflight.ps1') @preflightArgs | Out-Host
+
+# Preflight is read-only and runs transaction fixtures in a child process. Do
+# not hold the deployment mutex while those fixtures execute; acquire it only
+# after every preflight gate has passed and before any journal or filesystem
+# mutation begins.
+$deploymentMutex = Enter-LifeOSDeploymentTransaction
+$previousGeneration = Get-LifeOSPreviousInstalledGeneration -MarkerState $deploymentMutex.PreviousState -ManifestPath $deploymentMutex.PreviousManifestPath -OperatorSid $operatorSid -ExpectedGeneration ([string]$deploymentMutex.PreviousGeneration)
 
 $hostSource = Resolve-ServiceHostBinary $ServiceHostBinarySource $paths.ServiceHostPath
 $nodeSource = Resolve-NodeRuntimeSource $NodeRuntimeSource $ApiSource
@@ -1464,6 +1470,9 @@ Save-InstallManifest $manifest $manifestPath
     $deploymentCompleted = $true
     Write-Host 'LifeOS cutover completed; the legacy task was disabled but preserved.'
 } catch {
+    # A read-only preflight failure occurs before the transaction is acquired;
+    # there is no journal or deployment mutation to recover in that case.
+    if ($null -eq $deploymentMutex) { throw }
     $deploymentRollbackSucceeded = $true
     if ($null -ne $hostStage -and $null -ne $hostStage.PSObject.Properties['StagedPath'] -and
         -not [string]::IsNullOrWhiteSpace([string]$hostStage.StagedPath) -and
