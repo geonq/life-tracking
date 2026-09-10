@@ -1435,7 +1435,7 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
     $script:barrierEvents = @(); $script:barrierState = 'Running'; $script:tamperedTask = $false
     $xml = '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Principals><Principal><UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals><Actions><Exec><Command>D:\host\writer.exe</Command><Arguments>--snapshot</Arguments><WorkingDirectory>D:\host</WorkingDirectory></Exec></Actions></Task>'
     $record = [pscustomobject]@{ Name='LifeOSTailscaleSnapshot'; TaskPath='\'; Exists=$false; installedIdentity=(Get-TaskRecoveryIdentity $xml '\') }
-    $manifest = [pscustomobject]@{ codexTask=$record; snapshotTask=[pscustomobject]@{ Name='LifeOSCodexCollector'; Exists=$false; TaskPath='\' } }
+    $manifest = [pscustomobject]@{ operatorSid='fixture'; codexTask=$record; snapshotTask=[pscustomobject]@{ Name='LifeOSCodexCollector'; Exists=$false; TaskPath='\' } }
     function Get-ScheduledTask { param($TaskName, $TaskPath) if ($TaskName -ne 'LifeOSCodexCollector') { return [pscustomobject]@{ TaskName='LifeOSTailscaleSnapshot'; TaskPath='\'; State=$script:barrierState } } }
     function Export-ScheduledTask { param($TaskName, $TaskPath) if ($script:tamperedTask) { return $xml.Replace('HighestAvailable', 'LeastPrivilege') }; return $xml }
     function Write-JsonAtomic { param($Path, $Value, $OperatorSid, $MaxBytes) $script:barrierEvents += 'journal' }
