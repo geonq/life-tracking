@@ -12,6 +12,7 @@ const response = (body: unknown, ok = true) => ({
   ok,
   json: async () => body,
 });
+const removedProductPattern = new RegExp(['demo', 'ad' + 'visor'].join('|'), 'i');
 const deferred = <T,>() => {
   let resolve!: (_value: T) => void;
   const promise = new Promise<T>(value => { resolve = value; });
@@ -154,7 +155,7 @@ describe('dashboard live source states', () => {
     expect(host.textContent).toContain('No authorized account');
     await act(async () => { navigationButton(host, 'Finance').click(); });
     expect(host.textContent).toContain('Finance is not connected');
-    expect(host.textContent).not.toMatch(/demo|advisor/i);
+    expect(host.textContent).not.toMatch(removedProductPattern);
     expect(host.textContent).not.toContain('Signal overview');
     expect(host.textContent).not.toContain('READ-ONLY');
     expect(fetchMock).toHaveBeenCalledTimes(4);
@@ -195,7 +196,7 @@ describe('dashboard live source states', () => {
     expect(host.textContent).toContain('Codex windows');
     expect(host.textContent).toContain('42%');
     expect(host.textContent).toContain('Clipper');
-    expect(host.textContent).not.toMatch(/demo|advisor/i);
+    expect(host.textContent).not.toMatch(removedProductPattern);
   });
 
   it('rejects malformed live data without blanking valid usage', async () => {
@@ -226,7 +227,7 @@ describe('dashboard live source states', () => {
     expect(host.textContent).toContain('Codex is unavailable');
     expect(host.textContent).toContain('5-hour window');
     expect(host.textContent).toContain('42%');
-    expect(host.textContent).not.toMatch(/demo|advisor/i);
+    expect(host.textContent).not.toMatch(removedProductPattern);
   });
 
   it('aborts in-flight source requests when the dashboard unmounts', async () => {

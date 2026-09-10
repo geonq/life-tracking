@@ -104,17 +104,18 @@ SCANNABLE_BASENAMES = frozenset({".env"})
 MAX_SCANNED_FILES = 4096
 MAX_TEXT_FILE_BYTES = 1_048_576
 BINARY_PREFIX_BYTES = 4096
-ROLE_STYLES = {
-    "pageTitle": {"size": 28, "weight": "bold", "monospaced": False},
-    "sectionTitle": {"size": 20, "weight": "semibold", "monospaced": False},
-    "cardTitle": {"size": 17, "weight": "semibold", "monospaced": False},
-    "body": {"size": 17, "weight": "regular", "monospaced": False},
-    "label": {"size": 15, "weight": "medium", "monospaced": False},
-    "metadata": {"size": 13, "weight": "regular", "monospaced": False},
-    "metric": {"size": 36, "weight": "semibold", "monospaced": True},
-    "metricCompact": {"size": 24, "weight": "semibold", "monospaced": True},
-    "button": {"size": 15, "weight": "semibold", "monospaced": False},
-}
+TYPOGRAPHY_ROLES = (
+    "pageTitle",
+    "sectionTitle",
+    "cardTitle",
+    "body",
+    "label",
+    "metadata",
+    "metric",
+    "metricCompact",
+    "inlineMonitoringValue",
+    "button",
+)
 CUSTOM_FONT_PATTERNS = (
     re.compile(r"(?<![A-Za-z0-9_])Font\s*\.\s*custom\s*\("),
     re.compile(r"(?<![A-Za-z0-9_])\.custom\s*\("),
@@ -452,7 +453,7 @@ def test_product_typography_uses_the_system_facade() -> None:
     assert "public enum Role: CaseIterable, Hashable" in typography
     assert "public static func modifier(" in typography
     assert "@ScaledMetric private var scaledSize: CGFloat" in typography
-    for role in ROLE_STYLES:
+    for role in TYPOGRAPHY_ROLES:
         assert f".{role}" in typography
 
 
@@ -464,21 +465,32 @@ def test_app_typography_uses_exact_system_role_contract() -> None:
     assert "relativeTo: role.dynamicTypeAnchor" in typography
     assert "Font.custom" not in typography
     base_size_contracts = (
-        "case .pageTitle: 28",
-        "case .sectionTitle: 20",
-        "case .cardTitle, .body: 17",
+        "#if os(macOS)",
+        "case .pageTitle: 22",
+        "case .sectionTitle: 15",
+        "case .cardTitle: 14",
+        "case .body: 13",
+        "case .label, .button: 13",
+        "case .metadata: 12",
+        "case .metric: 28",
+        "case .metricCompact: 22",
+        "#else",
+        "case .pageTitle: 24",
+        "case .sectionTitle: 18",
+        "case .cardTitle: 16",
+        "case .body: 17",
         "case .label, .button: 15",
         "case .metadata: 13",
-        "case .metric: 36",
+        "case .metric: 30",
         "case .metricCompact: 24",
     )
     for contract in base_size_contracts:
         assert contract in typography
-    assert "case .pageTitle: .bold" in typography
+    assert "case .pageTitle, .inlineMonitoringValue: .semibold" in typography
     assert "case .sectionTitle, .cardTitle, .metric, .metricCompact, .button: .semibold" in typography
     assert "case .body, .metadata: .regular" in typography
     assert "case .label: .medium" in typography
-    assert "self == .metric || self == .metricCompact" in typography
+    assert "case .metric, .metricCompact, .inlineMonitoringValue: true" in typography
     assert ".monospacedDigit()" in typography
     assert "public static func pageTitle" not in typography
     assert "public static func sectionTitle" not in typography
@@ -554,6 +566,10 @@ def test_shared_component_and_icon_contracts_are_explicit() -> None:
     assert "Text(unit)" in components
     assert "lifeOSTypography(.metadata)" in components
 
-    assert ".font(.system(size: 17, weight: .medium, design: .default))" in icon
+    assert "public enum LifeOSIconContext: Sendable" in icon
+    assert ".font(.system(size: context.glyph, weight: context.weight, design: .default))" in icon
+    assert "case .standard: LifeOSTokens.Icon.glyph" in icon
+    assert "case .standard, .navigation, .toolbar: LifeOSTokens.Icon.box" in icon
+    assert "case .standard, .toolbar: .medium" in icon
     assert ".resizable()" not in icon
     assert ".scaledToFit()" not in icon
