@@ -3075,7 +3075,8 @@ function Assert-RecoveryProgressRecord {
     if ($UnitCount -le 0 -or $UnitCount -gt $script:LifeOSRecoveryMaxFileUnits) {
         throw 'Recovery progress unit count is out of bounds.'
     }
-    if ($null -eq $Record -or $Record -is [string] -or $Record -isnot [psobject]) {
+    $isObjectRecord = $Record -is [psobject] -or $Record -is [System.Collections.IDictionary]
+    if ($null -eq $Record -or $Record -is [string] -or -not $isObjectRecord) {
         throw 'Recovery progress record is not a JSON object.'
     }
     $expectedFields = @('sequence', 'transactionId', 'generation', 'operatorSid', 'manifestPath', 'unitIndex', 'phase')
