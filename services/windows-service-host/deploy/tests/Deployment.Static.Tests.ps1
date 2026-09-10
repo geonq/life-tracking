@@ -277,7 +277,7 @@ Assert-Text "'enablebanking-revocation\.json' = 8 \* 1024 \* 1024" 'Enable Banki
 Assert-Text "'finance-imported\.json' = 8 \* 1024 \* 1024" 'Imported finance migration matches the gateway 8 MiB bound.'
 Assert-NotText 'Migrate-LegacyDataFile' 'Legacy Finance migration has no unused helper path.'
 Assert-NotText 'Start-CodexCollectorAndVerify' 'Collector verification has no unused helper path.'
-Assert-Text "@\('-I', '-c'" 'Staged Python imports run in isolated mode.'
+Assert-Text "@\('-B', '-I', '-c'" 'Staged Python imports run in isolated mode without writing bytecode.'
 Assert-Text 'function Resolve-PythonRuntimeSource' 'Python runtime resolution is centralized.'
 Assert-NotText '\$home\s*=' 'Deployment scripts do not assign the read-only PowerShell HOME variable.'
 Assert-Text '\$script:LifeOSCandidateNodeMaxFileBytes = 256 \* 1024 \* 1024' 'The allowlisted standalone Node runtime has an explicit 256 MiB bound.'
