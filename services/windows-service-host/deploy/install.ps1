@@ -327,7 +327,7 @@ function Initialize-SupplementCatalog {
         # argv still carries only the four explicit filesystem paths.
         $env:LIFEOS_DEPLOY_SUPPLEMENT_CATALOG_CHECK = $pythonCode
         $pythonRunner = 'import os;exec(os.environ.get(chr(76)+chr(73)+chr(70)+chr(69)+chr(79)+chr(83)+chr(95)+chr(68)+chr(69)+chr(80)+chr(76)+chr(79)+chr(89)+chr(95)+chr(83)+chr(85)+chr(80)+chr(80)+chr(76)+chr(69)+chr(77)+chr(69)+chr(78)+chr(84)+chr(95)+chr(67)+chr(65)+chr(84)+chr(65)+chr(76)+chr(79)+chr(71)+chr(95)+chr(67)+chr(72)+chr(69)+chr(67)+chr(75)))'
-        Invoke-NativeChecked -FilePath $PythonExecutable -ArgumentList ([string[]]@('-I', '-c', $pythonRunner, $temporaryCatalog, $existingCatalog, $schema, $seed)) -Quiet | Out-Null
+        Invoke-NativeChecked -FilePath $PythonExecutable -ArgumentList ([string[]]@('-B', '-I', '-c', $pythonRunner, $temporaryCatalog, $existingCatalog, $schema, $seed)) -Quiet | Out-Null
         Assert-ExistingFile $temporaryCatalog 'Staged supplement catalog database'
         Assert-NoReparsePath $temporaryCatalog
         $backup = $null
@@ -950,7 +950,7 @@ $hostChanged = -not ($hostPriorExists -and $hostSourceHash -eq (Get-FileSha256 $
 $hostIntent = New-ManifestIntent -List $manifest.backups -Manifest $manifest -ManifestPath $manifestPath -Kind 'host-binary' -Source $hostSource -Destination $hostTarget -Backup (Join-Path $backupDirectory ('previous-' + [IO.Path]::GetFileName($hostTarget))) -PriorExists $hostPriorExists -Changed $hostChanged
 $hostStage = $null
 $pythonStage = Get-ChildRuntimeStage $pythonSource $paths.RuntimeRoot $backupDirectory $manifest $manifestPath
-Invoke-NativeChecked -FilePath $pythonStage.PythonPath -ArgumentList ([string[]]@('-I', '-c', 'import fastapi,httpx,uvicorn,multipart')) -Quiet | Out-Null
+Invoke-NativeChecked -FilePath $pythonStage.PythonPath -ArgumentList ([string[]]@('-B', '-I', '-c', 'import fastapi,httpx,uvicorn,multipart')) -Quiet | Out-Null
 $gatewayImportCheck = 'import importlib,os,pathlib,sys; assert sys.version_info[:2] == (3,12),sys.version; from zoneinfo import ZoneInfo; ZoneInfo("Europe/Berlin"); roots=[pathlib.Path(os.environ["LIFEOS_DEPLOY_STAGED_GATEWAY_SOURCE"]).resolve()]; sys.path[:0]=[str(root) for root in roots]; names=("main","enablebanking","supplement_catalog","gateway_launcher"); modules=[importlib.import_module(name) for name in names]; assert all(pathlib.Path(module.__file__).resolve().parent == roots[0] for module in modules), [(name,module.__file__) for name,module in zip(names,modules)]'
 $previousAllowedLogin = $env:LIFEOS_TAILSCALE_ALLOWED_LOGIN
 $previousStagedGatewayImportSource = $env:LIFEOS_DEPLOY_STAGED_GATEWAY_SOURCE
@@ -962,7 +962,9 @@ try {
     # Keep the native `-c` payload quote-free for Windows PowerShell 5.1,
     # which strips nested quote characters while binding native arguments.
     $gatewayImportRunner = 'import os;exec(os.environ.get(chr(76)+chr(73)+chr(70)+chr(69)+chr(79)+chr(83)+chr(95)+chr(68)+chr(69)+chr(80)+chr(76)+chr(79)+chr(89)+chr(95)+chr(83)+chr(84)+chr(65)+chr(71)+chr(69)+chr(68)+chr(95)+chr(73)+chr(77)+chr(80)+chr(79)+chr(82)+chr(84)+chr(95)+chr(67)+chr(72)+chr(69)+chr(67)+chr(75)))'
-    Invoke-NativeChecked -FilePath $pythonStage.PythonPath -ArgumentList ([string[]]@('-I', '-c', $gatewayImportRunner)) -Quiet | Out-Null
+    # The installed gateway is hashed and ACL-locked immediately after this
+    # check.  Avoid creating __pycache__ beside its reviewed source bundle.
+    Invoke-NativeChecked -FilePath $pythonStage.PythonPath -ArgumentList ([string[]]@('-B', '-I', '-c', $gatewayImportRunner)) -Quiet | Out-Null
 } finally {
     if ($null -eq $previousAllowedLogin) { Remove-Item Env:LIFEOS_TAILSCALE_ALLOWED_LOGIN -ErrorAction SilentlyContinue }
     else { $env:LIFEOS_TAILSCALE_ALLOWED_LOGIN = $previousAllowedLogin }

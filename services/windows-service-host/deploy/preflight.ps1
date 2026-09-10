@@ -125,7 +125,10 @@ try {
     # Keep the native `-c` payload quote-free for Windows PowerShell 5.1,
     # which strips nested quote characters while binding native arguments.
     $gatewayImportRunner = 'import os;exec(os.environ.get(chr(76)+chr(73)+chr(70)+chr(69)+chr(79)+chr(83)+chr(95)+chr(68)+chr(69)+chr(80)+chr(76)+chr(79)+chr(89)+chr(95)+chr(80)+chr(82)+chr(69)+chr(70)+chr(76)+chr(73)+chr(71)+chr(72)+chr(84)+chr(95)+chr(73)+chr(77)+chr(80)+chr(79)+chr(82)+chr(84)+chr(95)+chr(67)+chr(72)+chr(69)+chr(67)+chr(75)))'
-    Invoke-NativeChecked -FilePath $pythonExecutable -ArgumentList ([string[]]@('-I', '-c', $gatewayImportRunner)) -Quiet | Out-Null
+    # The candidate is immutable after transfer.  Import checks must not leave
+    # Python bytecode beside the reviewed source files and invalidate the
+    # candidate allowlist before install starts.
+    Invoke-NativeChecked -FilePath $pythonExecutable -ArgumentList ([string[]]@('-B', '-I', '-c', $gatewayImportRunner)) -Quiet | Out-Null
 } finally {
     if ($null -eq $previousAllowedLogin) { Remove-Item Env:LIFEOS_TAILSCALE_ALLOWED_LOGIN -ErrorAction SilentlyContinue }
     else { $env:LIFEOS_TAILSCALE_ALLOWED_LOGIN = $previousAllowedLogin }
