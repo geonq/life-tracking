@@ -1839,6 +1839,8 @@ def test_recovery_inventory_uses_bounded_hash_sets_without_per_file_full_scans()
     assert '$script:LifeOSRecoveryMaxFileUnits = 65536' in common
     assert '$treeRoots = @(' in reader
     assert '$journalUnits = @(' in reader
+    assert 'return $canonical.ToArray()' in common
+    assert 'return ,$canonical.ToArray()' not in common
     assert '$script:LifeOSRecoveryMaxTreeBytes = 512 * 1024 * 1024' in common
     assert '$script:LifeOSRecoveryMaxFileBytes = 64 * 1024 * 1024' in common
     assert '$script:LifeOSRecoveryMaxInventoryBytes = 512 * 1024 * 1024' in common

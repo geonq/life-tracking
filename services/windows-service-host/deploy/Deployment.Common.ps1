@@ -3606,7 +3606,7 @@ function Get-RecoveryCanonicalTreeRoots {
         }
         if (-not $covered) { [void]$canonical.Add($candidate) }
     }
-    return ,$canonical.ToArray()
+    return $canonical.ToArray()
 }
 
 function Enable-RecoveryWriterRestoration {
