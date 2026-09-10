@@ -556,7 +556,7 @@ Assert-Text 'Usage authority changed or has no provenance' 'Usage writes also bl
 Assert-Text 'function Test-AuthorityRecoveryBaseline' 'Recovered early transactions require a complete authority baseline.'
 Assert-Text 'function Get-LifeOSServiceConfigArguments' 'Install and rollback share service-manager argument encoding.'
 Assert-Text 'function Assert-CompleteLifeOSServiceSnapshot' 'Service rollback requires a complete snapshot.'
-Assert-Text 'stageState -eq ''complete''.*return' 'Completed recovery stages are idempotent.'
+Assert-Text "(?s)stageState -eq 'complete'.*?return" 'Completed recovery stages are idempotent.'
 
 # Inspect the verifier array itself, so matching strings elsewhere cannot mask
 # an obsolete allowlist. The Python source suite checks the compiler-derived
