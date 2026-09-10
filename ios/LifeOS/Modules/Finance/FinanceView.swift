@@ -849,7 +849,7 @@ public struct FinanceView: View {
     private func financeDetailPanel(snapshot: FinanceDisplaySnapshot) -> some View {
         let availableRanges = snapshot.availableRanges(for: selectedDetail)
 
-        VStack(alignment: .leading, spacing: 12) {
+        return VStack(alignment: .leading, spacing: 12) {
             FinanceSectionHeader(title: "Details", subtitle: "Trend context for this period", icon: .views, accent: LifeOSTokens.Module.finance)
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 10) {
