@@ -1536,6 +1536,7 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
     }
     $script:inventoryRestoreCalled = $false
     function Assert-RestrictedAcl { param($Path, $OperatorSid, $ReadSids, $ModifySids, [switch]$AllowInherited) }
+    function Set-RestrictedAcl { param($Path, $OperatorSid, $ReadSids, $ModifySids, [switch]$File, [switch]$SkipSnapshot, [string[]]$AllowedOwnerSids, [switch]$InheritableSystemFullControl) }
     $realRestore = ${function:Restore-Artifact}
     function Restore-Artifact {
         param($Artifact, $BackupDirectory)
@@ -1750,6 +1751,7 @@ Assert-BehaviorThrows { Assert-AclRoleRights 'read' ([long][Security.AccessContr
     $script:unexpectedRecoveryAction = $false
     $manifest = [pscustomobject]@{ transactionId='receipt-fixture'; generation='generation'; operatorSid='fixture'; manifestPath=$manifestPath; collectorTransition=[pscustomobject]@{ phase='running'; usageBefore='absent'; startedAtUtc='fixture-run' }; paths=[pscustomobject]@{ backupDirectory=$temp; gatewayData=$data; usageHistory=$usage }; backups=@([pscustomobject]@{ destination=$code; backup=$codeBackup; priorExists=$true; changed=$true; phase='complete' }) }
     function Assert-RestrictedAcl { param($Path, $OperatorSid, $ReadSids, $ModifySids, [switch]$AllowInherited) }
+    function Set-RestrictedAcl { param($Path, $OperatorSid, $ReadSids, $ModifySids, [switch]$File, [switch]$SkipSnapshot, [string[]]$AllowedOwnerSids, [switch]$InheritableSystemFullControl) }
     try {
         Write-JsonAtomic $manifestPath $manifest
         [IO.File]::WriteAllText($usage, 'acknowledged-observation')
@@ -1803,6 +1805,7 @@ Assert-BehaviorThrows { Assert-AclRoleRights 'read' ([long][Security.AccessContr
     $usage = Join-Path $temp 'usage.jsonl'
     $manifest = [pscustomobject]@{ transactionId='absent'; generation='generation'; operatorSid='fixture'; manifestPath=(Join-Path $temp 'manifest.json'); collectorTransition=$null; paths=[pscustomobject]@{ backupDirectory=$temp; gatewayData=$data; usageHistory=$usage }; backups=@() }
     function Assert-RestrictedAcl { param($Path, $OperatorSid, $ReadSids, $ModifySids, [switch]$AllowInherited) }
+    function Set-RestrictedAcl { param($Path, $OperatorSid, $ReadSids, $ModifySids, [switch]$File, [switch]$SkipSnapshot, [string[]]$AllowedOwnerSids, [switch]$InheritableSystemFullControl) }
     try {
         Restore-ManifestArtifacts $manifest $temp
         [IO.File]::WriteAllText($usage, 'new-observation')
