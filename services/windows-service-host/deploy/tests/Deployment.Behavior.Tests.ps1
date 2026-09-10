@@ -5,6 +5,11 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $deploy = Split-Path -Parent $PSScriptRoot
 . (Join-Path $deploy 'Deployment.Common.ps1')
+# Keep the install transaction helpers available for the later manifest and
+# checkpoint fixtures. Loading definition-only at script scope is required on
+# Windows PowerShell 5.1; a dot-source nested in an `& {}` fixture expires
+# with that child scope.
+. (Join-Path $deploy 'install.ps1') -DefineOnly
 
 function Assert-Behavior {
     param([Parameter(Mandatory)][bool]$Condition, [Parameter(Mandatory)][string]$Message)
