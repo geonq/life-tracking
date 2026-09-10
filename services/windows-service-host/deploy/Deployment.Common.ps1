@@ -1580,8 +1580,11 @@ function Assert-CanonicalRollbackManifest {
                 throw "Rollback manifest collection is malformed: $($collection.Name)"
             }
         }
-        $items = if ($null -eq $collection.Value) { @() } else { @($collection.Value) }
-        if ($items.Count -gt [int]$collection.Maximum) {
+        # An `if` expression unwraps a one-item array under Windows
+        # PowerShell 5.1. Count the normalized wrapper inline so a single
+        # manifest item cannot lose its collection shape before validation.
+        $itemCount = if ($null -eq $collection.Value) { 0 } else { @($collection.Value).Count }
+        if ($itemCount -gt [int]$collection.Maximum) {
             throw "Rollback manifest collection is too large: $($collection.Name)"
         }
     }
