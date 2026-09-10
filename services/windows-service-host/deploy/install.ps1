@@ -130,6 +130,434 @@ function Assert-AuthorityJsonBounds {
     }
 }
 
+# The release builder supplies the reviewed wheelhouse; the operator supplies
+# only a trusted Windows Python 3.12 base runtime. A legacy source venv may
+# identify that base through pyvenv.cfg, but no prebuilt venv is used as a
+# runtime or preflight dependency. The installer creates fresh venvs and
+# installs only the candidate's hash-pinned wheels.
+$script:LifeOSGatewayDependencyLockMaxBytes = 1024 * 1024
+$script:LifeOSGatewayDependencyMaxPackages = 1024
+$script:LifeOSGatewayWheelMaxFileBytes = 64 * 1024 * 1024
+
+function Normalize-GatewayDependencyName {
+    param([Parameter(Mandatory)][string]$Name)
+    if ($Name -notmatch '\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z') {
+        throw 'Gateway dependency lock contains an invalid distribution name.'
+    }
+    return ([regex]::Replace($Name, '[-_.]+', '-')).ToLowerInvariant()
+}
+
+function Read-GatewayDependencyLock {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [string]$Description = 'Gateway dependency lock'
+    )
+    Assert-ExistingFile $Path $Description
+    $fullPath = Get-FullPath $Path
+    $item = Get-Item -LiteralPath $fullPath -Force -ErrorAction Stop
+    if ($item.PSIsContainer -or [long]$item.Length -gt [long]$script:LifeOSGatewayDependencyLockMaxBytes) {
+        throw "$Description exceeds its bounded size."
+    }
+    $text = Read-LifeOSCappedFileText -Path $fullPath -MaxBytes $script:LifeOSGatewayDependencyLockMaxBytes -Description $Description
+    if ($text.IndexOf([char]0xfeff) -ge 0 -or $text -notmatch '\r?\n\z') {
+        throw "$Description must be UTF-8 text without a BOM and end with one newline."
+    }
+
+    $packages = New-Object 'System.Collections.Generic.List[object]'
+    $packageNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $lastName = $null
+    $lineNumber = 0
+    $reader = [IO.StringReader]::new($text)
+    try {
+        while ($true) {
+            $line = $reader.ReadLine()
+            if ($null -eq $line) { break }
+            $lineNumber++
+            if ($line.Length -gt 1024) { throw "$Description line $lineNumber exceeds its bounded length." }
+            $trimmed = $line.Trim()
+            if ([string]::IsNullOrEmpty($trimmed) -or $trimmed.StartsWith('#', [StringComparison]::Ordinal)) { continue }
+            $match = [regex]::Match($line, '\A(?<name>[A-Za-z0-9][A-Za-z0-9._-]{0,127})==(?<version>[A-Za-z0-9][A-Za-z0-9.!+_-]{0,127})\s+--hash=sha256:(?<hash>[0-9a-f]{64})\s+#\s+(?<wheel>[A-Za-z0-9][A-Za-z0-9._+!-]{0,255}\.whl)\z')
+            if (-not $match.Success) { throw "$Description line $lineNumber must name its reviewed wheel." }
+            $normalizedName = Normalize-GatewayDependencyName $match.Groups['name'].Value
+            if (-not $packageNames.Add($normalizedName)) { throw "$Description contains a duplicate normalized distribution name." }
+            if ($null -ne $lastName -and [string]::CompareOrdinal($lastName, $normalizedName) -ge 0) {
+                throw "$Description distributions are not sorted by normalized name."
+            }
+            $wheelMatch = [regex]::Match($match.Groups['wheel'].Value, '\A(?<distribution>[A-Za-z0-9][A-Za-z0-9._-]{0,127})-(?<version>[A-Za-z0-9][A-Za-z0-9.!+_-]{0,127})-(?<python>[A-Za-z0-9.]+)-(?<abi>[A-Za-z0-9]+)-(?<platform>[A-Za-z0-9_]+)\.whl\z')
+            if (-not $wheelMatch.Success) { throw "$Description contains an invalid wheel filename." }
+            $wheelDistribution = Normalize-GatewayDependencyName $wheelMatch.Groups['distribution'].Value
+            if ($wheelDistribution -cne $normalizedName -or $wheelMatch.Groups['version'].Value -cne $match.Groups['version'].Value) {
+                throw "$Description wheel filename does not match its locked distribution or version."
+            }
+            $pythonTag = [string]$wheelMatch.Groups['python'].Value
+            $abiTag = [string]$wheelMatch.Groups['abi'].Value
+            $platformTag = [string]$wheelMatch.Groups['platform'].Value
+            $pureWheel = ($pythonTag -ceq 'py3' -or $pythonTag -ceq 'py2.py3') -and $abiTag -ceq 'none' -and $platformTag -ceq 'any'
+            $abi3WindowsWheel = $platformTag -ceq 'win_amd64' -and $pythonTag -match '\Acp[0-9]+\z' -and $abiTag -ceq 'abi3'
+            $cp312WindowsWheel = $pythonTag -ceq 'cp312' -and $abiTag -ceq 'cp312' -and $platformTag -ceq 'win_amd64'
+            if (-not ($pureWheel -or $abi3WindowsWheel -or $cp312WindowsWheel)) {
+                throw "$Description contains a wheel that is not compatible with Windows CPython 3.12."
+            }
+            [void]$packages.Add([pscustomobject]@{
+                NormalizedName = $normalizedName
+                Version = [string]$match.Groups['version'].Value
+                Sha256 = [string]$match.Groups['hash'].Value
+                Filename = [string]$match.Groups['wheel'].Value
+                PythonTag = $pythonTag
+                AbiTag = $abiTag
+                PlatformTag = $platformTag
+            })
+            $lastName = $normalizedName
+            if ($packages.Count -gt $script:LifeOSGatewayDependencyMaxPackages) { throw "$Description contains too many packages." }
+        }
+    } finally {
+        $reader.Dispose()
+    }
+    if ($packages.Count -eq 0) { throw "$Description does not contain any dependency entries." }
+    return [pscustomobject]@{
+        Path = $fullPath
+        Sha256 = [string](Get-FileSha256 $fullPath)
+        PackageCount = [int]$packages.Count
+        Wheels = [object[]]$packages.ToArray()
+    }
+}
+
+function Assert-PythonRuntimeDependencyInventory {
+    param(
+        [Parameter(Mandatory)][string]$PythonExecutable,
+        [Parameter(Mandatory)][psobject]$DependencyContract,
+        [Parameter(Mandatory)][string]$Description,
+        [switch]$AllowPackagingTools
+    )
+    if ($null -eq $DependencyContract.Path -or $null -eq $DependencyContract.Sha256 -or
+        [string]$DependencyContract.Sha256 -notmatch '\A[0-9a-f]{64}\z') {
+        throw 'Gateway dependency contract is incomplete.'
+    }
+    Assert-ExistingFile $PythonExecutable "$Description interpreter"
+    $lockPath = Get-FullPath ([string]$DependencyContract.Path)
+    $actualLockSha256 = Get-FileSha256 $lockPath
+    if ($actualLockSha256 -cne [string]$DependencyContract.Sha256) {
+        throw "$Description dependency lock changed after it was authenticated."
+    }
+
+    # Keep the Python program in an environment variable. Windows PowerShell
+    # 5.1 can re-tokenize quote-bearing native -c arguments; the runner itself
+    # contains no quotes and reads only these bounded, installer-owned paths.
+    $pythonCode = @'
+import hashlib
+import importlib.metadata as metadata
+import os
+import pathlib
+import re
+import sys
+
+if sys.version_info[:2] != (3, 12):
+    raise SystemExit("Gateway runtime must be Python 3.12.")
+
+lock_path = pathlib.Path(os.environ["LIFEOS_DEPLOY_DEPENDENCY_LOCK_PATH"])
+expected_lock_sha256 = os.environ["LIFEOS_DEPLOY_DEPENDENCY_LOCK_SHA256"]
+lock_bytes = lock_path.read_bytes()
+if hashlib.sha256(lock_bytes).hexdigest() != expected_lock_sha256:
+    raise SystemExit("Gateway dependency lock changed during runtime verification.")
+lock_text = lock_bytes.decode("utf-8")
+if lock_text.startswith("\ufeff") or not lock_text.endswith("\n"):
+    raise SystemExit("Gateway dependency lock encoding is not canonical.")
+line_pattern = re.compile(
+    r"\A(?P<name>[A-Za-z0-9][A-Za-z0-9._-]{0,127})=="
+    r"(?P<version>[A-Za-z0-9][A-Za-z0-9.!+_-]{0,127})\s+"
+    r"--hash=sha256:[0-9a-f]{64}"
+    r"(?:\s+#\s+[A-Za-z0-9][A-Za-z0-9._+-]{0,255})?\Z"
+)
+expected = {}
+last_name = None
+for line_number, line in enumerate(lock_text.splitlines(), 1):
+    if len(line) > 1024:
+        raise SystemExit("Gateway dependency lock contains an oversized line.")
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        continue
+    match = line_pattern.fullmatch(line)
+    if match is None:
+        raise SystemExit("Gateway dependency lock contains a non-canonical entry.")
+    normalized = re.sub(r"[-_.]+", "-", match.group("name")).lower()
+    if normalized in expected:
+        raise SystemExit("Gateway dependency lock contains duplicate normalized names.")
+    if last_name is not None and normalized <= last_name:
+        raise SystemExit("Gateway dependency lock is not sorted by normalized name.")
+    expected[normalized] = match.group("version")
+    last_name = normalized
+if not expected:
+    raise SystemExit("Gateway dependency lock is empty.")
+
+actual = {}
+packaging_tools = {"pip", "setuptools", "wheel"}
+distribution_count = 0
+for distribution in metadata.distributions():
+    distribution_count += 1
+    if distribution_count > 1027:
+        raise SystemExit("Installed gateway dependency inventory exceeds its bound.")
+    name = distribution.metadata.get("Name")
+    version = distribution.version
+    if not name or not version:
+        raise SystemExit("Installed gateway dependency metadata is incomplete.")
+    normalized = re.sub(r"[-_.]+", "-", name).lower()
+    if normalized in packaging_tools and os.environ.get("LIFEOS_DEPLOY_ALLOW_PACKAGING_TOOLS") != "1":
+        raise SystemExit("Packaging tools must not remain in the gateway runtime.")
+    if normalized in packaging_tools:
+        continue
+    if normalized in actual:
+        raise SystemExit("Installed gateway dependency inventory contains duplicate names.")
+    actual[normalized] = version
+
+if actual != expected:
+    raise SystemExit("Installed gateway dependency inventory does not exactly match requirements.lock.")
+'@
+    $previousCode = $env:LIFEOS_DEPLOY_DEPENDENCY_CHECK
+    $previousLockPath = $env:LIFEOS_DEPLOY_DEPENDENCY_LOCK_PATH
+    $previousLockSha256 = $env:LIFEOS_DEPLOY_DEPENDENCY_LOCK_SHA256
+    $previousAllowPackagingTools = $env:LIFEOS_DEPLOY_ALLOW_PACKAGING_TOOLS
+    try {
+        $env:LIFEOS_DEPLOY_DEPENDENCY_CHECK = $pythonCode
+        $env:LIFEOS_DEPLOY_DEPENDENCY_LOCK_PATH = $lockPath
+        $env:LIFEOS_DEPLOY_DEPENDENCY_LOCK_SHA256 = [string]$DependencyContract.Sha256
+        if ($AllowPackagingTools) { $env:LIFEOS_DEPLOY_ALLOW_PACKAGING_TOOLS = '1' }
+        else { Remove-Item Env:LIFEOS_DEPLOY_ALLOW_PACKAGING_TOOLS -ErrorAction SilentlyContinue }
+        $pythonRunner = 'import os;exec(os.environ.get(chr(76)+chr(73)+chr(70)+chr(69)+chr(79)+chr(83)+chr(95)+chr(68)+chr(69)+chr(80)+chr(76)+chr(79)+chr(89)+chr(95)+chr(68)+chr(69)+chr(80)+chr(69)+chr(78)+chr(68)+chr(69)+chr(78)+chr(67)+chr(89)+chr(95)+chr(67)+chr(72)+chr(69)+chr(67)+chr(75)))'
+        Invoke-NativeChecked -FilePath $PythonExecutable -ArgumentList ([string[]]@('-B', '-I', '-c', $pythonRunner)) -Quiet | Out-Null
+    } finally {
+        if ($null -eq $previousCode) { Remove-Item Env:LIFEOS_DEPLOY_DEPENDENCY_CHECK -ErrorAction SilentlyContinue }
+        else { $env:LIFEOS_DEPLOY_DEPENDENCY_CHECK = $previousCode }
+        if ($null -eq $previousLockPath) { Remove-Item Env:LIFEOS_DEPLOY_DEPENDENCY_LOCK_PATH -ErrorAction SilentlyContinue }
+        else { $env:LIFEOS_DEPLOY_DEPENDENCY_LOCK_PATH = $previousLockPath }
+        if ($null -eq $previousLockSha256) { Remove-Item Env:LIFEOS_DEPLOY_DEPENDENCY_LOCK_SHA256 -ErrorAction SilentlyContinue }
+        else { $env:LIFEOS_DEPLOY_DEPENDENCY_LOCK_SHA256 = $previousLockSha256 }
+        if ($null -eq $previousAllowPackagingTools) { Remove-Item Env:LIFEOS_DEPLOY_ALLOW_PACKAGING_TOOLS -ErrorAction SilentlyContinue }
+        else { $env:LIFEOS_DEPLOY_ALLOW_PACKAGING_TOOLS = $previousAllowPackagingTools }
+    }
+    if ((Get-FileSha256 $lockPath) -cne [string]$DependencyContract.Sha256) {
+        throw "$Description dependency lock changed during runtime verification."
+    }
+    return [pscustomobject]@{
+        Description = $Description
+        LockSha256 = [string]$DependencyContract.Sha256
+        PackageCount = [int]$DependencyContract.PackageCount
+    }
+}
+
+function Assert-GatewayWheelhouse {
+    param(
+        [Parameter(Mandatory)][string]$GatewaySource,
+        [Parameter(Mandatory)][psobject]$DependencyContract,
+        [string]$Description = 'Gateway wheelhouse'
+    )
+    if ($null -eq $DependencyContract.Wheels -or [int]$DependencyContract.PackageCount -le 0 -or
+        [int]$DependencyContract.PackageCount -gt [int]$script:LifeOSGatewayDependencyMaxPackages) {
+        throw "$Description dependency contract has no bounded wheel set."
+    }
+    $wheelhouse = Join-Path (Get-FullPath $GatewaySource) 'wheelhouse'
+    Assert-ExistingDirectory $wheelhouse $Description
+    $expected = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
+    foreach ($wheel in @($DependencyContract.Wheels)) {
+        $filename = [string]$wheel.Filename
+        if ($filename -notmatch '\A[A-Za-z0-9][A-Za-z0-9._+!-]{0,255}\.whl\z' -or $filename.Contains('\') -or $filename.Contains('/')) {
+            throw "$Description contains an unsafe wheel filename."
+        }
+        if ($expected.ContainsKey($filename)) { throw "$Description contains a duplicate wheel filename." }
+        [void]$expected.Add($filename, $wheel)
+    }
+    if ($expected.Count -ne [int]$DependencyContract.PackageCount) {
+        throw "$Description wheel count does not match the dependency lock."
+    }
+    $maxWheelhouseFiles = [int]$expected.Count + 1
+    $maxWheelhouseBytes = [long]$expected.Count * [long]$script:LifeOSGatewayWheelMaxFileBytes + 1 * 1024 * 1024
+    $items = @(Get-LifeOSBoundedTreeItem -Root $wheelhouse -MaxFiles $maxWheelhouseFiles -MaxDirectories 1 -MaxBytes $maxWheelhouseBytes -MaxFileBytes $script:LifeOSGatewayWheelMaxFileBytes)
+    $actual = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    [long]$totalWheelBytes = 0
+    foreach ($item in $items) {
+        if ($item.PSIsContainer) { throw "$Description must contain files directly at its root." }
+        $relative = [string]$item.FullName.Substring((Get-FullPath $wheelhouse).Length).TrimStart('\')
+        if ($relative -ceq 'ALLOWLIST.sha256') { continue }
+        if (-not $expected.ContainsKey($relative)) { throw "$Description contains an unreviewed artifact." }
+        if (-not $actual.Add($relative)) { throw "$Description contains a duplicate artifact path." }
+        $wheel = $expected[$relative]
+        $digest = Get-LifeOSFileDigest -Path $item.FullName -Description "$Description artifact $relative"
+        if ([long]$digest.Length -le 0 -or [long]$digest.Length -gt [long]$script:LifeOSGatewayWheelMaxFileBytes -or
+            [string]$digest.Sha256 -cne [string]$wheel.Sha256) {
+            throw "$Description artifact provenance does not match the dependency lock."
+        }
+        $totalWheelBytes += [long]$digest.Length
+    }
+    if ($actual.Count -ne $expected.Count -or $totalWheelBytes -gt ([long]$expected.Count * [long]$script:LifeOSGatewayWheelMaxFileBytes)) {
+        throw "$Description does not contain exactly one bounded artifact per locked package."
+    }
+
+    $allowlistPath = Join-Path $wheelhouse 'ALLOWLIST.sha256'
+    Assert-ExistingFile $allowlistPath "$Description allowlist"
+    $allowlistMaxBytes = [long]($expected.Count + 1) * 160
+    $allowlistText = Read-LifeOSCappedFileText -Path $allowlistPath -MaxBytes $allowlistMaxBytes -Description "$Description allowlist"
+    if ($allowlistText.IndexOf([char]0xfeff) -ge 0 -or $allowlistText -notmatch '\r?\n\z') {
+        throw "$Description allowlist encoding is not canonical."
+    }
+    $allowlistNames = New-Object 'System.Collections.Generic.List[string]'
+    $allowlistHashes = @{}
+    $reader = [IO.StringReader]::new($allowlistText)
+    try {
+        while ($true) {
+            $line = $reader.ReadLine()
+            if ($null -eq $line) { break }
+            if ($line -notmatch '\A(?<hash>[0-9a-f]{64})  \./(?<name>[A-Za-z0-9][A-Za-z0-9._+!-]{0,255}\.whl)\z') {
+                throw "$Description allowlist contains a non-canonical line."
+            }
+            $name = [string]$Matches['name']
+            if (-not $expected.ContainsKey($name) -or $allowlistHashes.ContainsKey($name)) {
+                throw "$Description allowlist contains an unreviewed or duplicate artifact."
+            }
+            $allowlistHashes[$name] = [string]$Matches['hash']
+            [void]$allowlistNames.Add($name)
+        }
+    } finally {
+        $reader.Dispose()
+    }
+    $sortedExpected = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($name in $expected.Keys) { [void]$sortedExpected.Add([string]$name) }
+    $sortedExpected.Sort([StringComparer]::Ordinal)
+    if ($allowlistNames.Count -ne $sortedExpected.Count -or
+        ($allowlistNames.ToArray() -join "`n") -cne ($sortedExpected.ToArray() -join "`n")) {
+        throw "$Description allowlist does not match the sorted dependency lock."
+    }
+    foreach ($wheel in @($DependencyContract.Wheels)) {
+        if ([string]$allowlistHashes[[string]$wheel.Filename] -cne [string]$wheel.Sha256) {
+            throw "$Description allowlist hash does not match the dependency lock."
+        }
+    }
+    return [pscustomobject]@{
+        Path = (Get-FullPath $wheelhouse)
+        AllowlistPath = (Get-FullPath $allowlistPath)
+        AllowlistSha256 = [string](Get-FileSha256 $allowlistPath)
+        TotalBytes = $totalWheelBytes
+        FileCount = [int]$actual.Count
+    }
+}
+
+function Assert-PythonPackagingToolsAbsent {
+    param([Parameter(Mandatory)][string]$PythonExecutable)
+    $pythonCode = @'
+import importlib.metadata as metadata
+import pathlib
+import re
+import sys
+
+names = {"pip", "setuptools", "wheel"}
+installed = set()
+for distribution_count, distribution in enumerate(metadata.distributions(), 1):
+    if distribution_count > 1027:
+        raise SystemExit("Packaging-tool inventory exceeds its bound.")
+    installed.add(re.sub(r"[-_.]+", "-", distribution.metadata.get("Name", "")).lower())
+if installed.intersection(names):
+    raise SystemExit("Packaging-tool metadata remains in the gateway runtime.")
+scripts = pathlib.Path(sys.prefix) / "Scripts"
+if any(path.name.lower().startswith("pip") for path in scripts.glob("pip*")):
+    raise SystemExit("Packaging-tool launchers remain in the gateway runtime.")
+'@
+    $previousCode = $env:LIFEOS_DEPLOY_PACKAGING_CHECK
+    try {
+        $env:LIFEOS_DEPLOY_PACKAGING_CHECK = $pythonCode
+        $runner = 'import os;exec(os.environ.get(chr(76)+chr(73)+chr(70)+chr(69)+chr(79)+chr(83)+chr(95)+chr(68)+chr(69)+chr(80)+chr(76)+chr(79)+chr(89)+chr(95)+chr(80)+chr(65)+chr(67)+chr(75)+chr(65)+chr(71)+chr(73)+chr(78)+chr(71)+chr(95)+chr(67)+chr(72)+chr(69)+chr(67)+chr(75)))'
+        Invoke-NativeChecked -FilePath $PythonExecutable -ArgumentList ([string[]]@('-B', '-I', '-c', $runner)) -Quiet | Out-Null
+    } finally {
+        if ($null -eq $previousCode) { Remove-Item Env:LIFEOS_DEPLOY_PACKAGING_CHECK -ErrorAction SilentlyContinue }
+        else { $env:LIFEOS_DEPLOY_PACKAGING_CHECK = $previousCode }
+    }
+}
+
+function Assert-PythonWheelInstallReport {
+    param(
+        [Parameter(Mandatory)][string]$PythonExecutable,
+        [Parameter(Mandatory)][string]$ReportPath,
+        [Parameter(Mandatory)][string]$WheelhousePath,
+        [Parameter(Mandatory)][psobject]$DependencyContract
+    )
+    Assert-ExistingFile $ReportPath 'Python dependency install report'
+    $reportMaxBytes = [long]($DependencyContract.PackageCount + 1) * 64 * 1024
+    if ([long](Get-Item -LiteralPath $ReportPath -Force).Length -gt $reportMaxBytes) {
+        throw 'Python dependency install report exceeds its derived bound.'
+    }
+    $pythonCode = @'
+import json
+import os
+import pathlib
+import re
+import urllib.parse
+
+report = json.loads(pathlib.Path(os.environ["LIFEOS_DEPLOY_PIP_REPORT"]).read_text(encoding="utf-8"))
+expected = {}
+lock = pathlib.Path(os.environ["LIFEOS_DEPLOY_DEPENDENCY_LOCK_PATH"]).read_text(encoding="utf-8")
+line_pattern = re.compile(
+    r"\A(?P<name>[A-Za-z0-9][A-Za-z0-9._-]{0,127})=="
+    r"(?P<version>[A-Za-z0-9][A-Za-z0-9.!+_-]{0,127})\s+"
+    r"--hash=sha256:(?P<hash>[0-9a-f]{64})\s+#\s+"
+    r"(?P<wheel>[A-Za-z0-9][A-Za-z0-9._+!-]{0,255}\.whl)\Z"
+)
+for line in lock.splitlines():
+    if not line.strip() or line.lstrip().startswith("#"):
+        continue
+    match = line_pattern.fullmatch(line)
+    if match is None:
+        raise SystemExit("Dependency lock is not canonical during install-report verification.")
+    values = match.groupdict()
+    expected[re.sub(r"[-_.]+", "-", values["name"]).lower()] = values
+entries = report.get("install")
+if not isinstance(entries, list) or len(entries) != len(expected):
+    raise SystemExit("Pip install report does not contain exactly the locked package count.")
+seen = set()
+wheelhouse_name = pathlib.Path(os.environ["LIFEOS_DEPLOY_WHEELHOUSE"]).name
+for entry in entries:
+    metadata = entry.get("metadata") or {}
+    name = metadata.get("name")
+    version = metadata.get("version")
+    normalized = re.sub(r"[-_.]+", "-", name or "").lower()
+    if normalized in seen or normalized not in expected or version != expected[normalized]["version"]:
+        raise SystemExit("Pip install report contains an unexpected package.")
+    download = entry.get("download_info") or {}
+    if download.get("url", "").lower().split(":", 1)[0] != "file":
+        raise SystemExit("Pip install report contains a non-local artifact URL.")
+    archive = download.get("archive_info") or {}
+    hashes = archive.get("hashes") or {}
+    if hashes.get("sha256") != expected[normalized]["hash"]:
+        raise SystemExit("Pip install report contains an unexpected artifact hash.")
+    parsed = urllib.parse.urlparse(download["url"])
+    filename = pathlib.PurePosixPath(urllib.parse.unquote(parsed.path)).name
+    if filename != expected[normalized]["wheel"]:
+        raise SystemExit("Pip install report artifact filename does not match the lock.")
+    if pathlib.PurePosixPath(urllib.parse.unquote(parsed.path)).parent.name.lower() != wheelhouse_name.lower():
+        raise SystemExit("Pip install report artifact was outside the reviewed wheelhouse.")
+    seen.add(normalized)
+if seen != set(expected):
+    raise SystemExit("Pip install report omitted a locked package.")
+'@
+    $previousCode = $env:LIFEOS_DEPLOY_PIP_REPORT_CHECK
+    $previousReport = $env:LIFEOS_DEPLOY_PIP_REPORT
+    $previousLock = $env:LIFEOS_DEPLOY_DEPENDENCY_LOCK_PATH
+    $previousWheelhouse = $env:LIFEOS_DEPLOY_WHEELHOUSE
+    try {
+        $env:LIFEOS_DEPLOY_PIP_REPORT_CHECK = $pythonCode
+        $env:LIFEOS_DEPLOY_PIP_REPORT = (Get-FullPath $ReportPath)
+        $env:LIFEOS_DEPLOY_DEPENDENCY_LOCK_PATH = (Get-FullPath ([string]$DependencyContract.Path))
+        $env:LIFEOS_DEPLOY_WHEELHOUSE = (Get-FullPath $WheelhousePath)
+        $runner = 'import os;exec(os.environ.get(chr(76)+chr(73)+chr(70)+chr(69)+chr(79)+chr(83)+chr(95)+chr(68)+chr(69)+chr(80)+chr(76)+chr(79)+chr(89)+chr(95)+chr(80)+chr(73)+chr(80)+chr(95)+chr(82)+chr(69)+chr(80)+chr(79)+chr(82)+chr(84)+chr(95)+chr(67)+chr(72)+chr(69)+chr(67)+chr(75)))'
+        Invoke-NativeChecked -FilePath $PythonExecutable -ArgumentList ([string[]]@('-B', '-I', '-c', $runner)) -Quiet | Out-Null
+    } finally {
+        if ($null -eq $previousCode) { Remove-Item Env:LIFEOS_DEPLOY_PIP_REPORT_CHECK -ErrorAction SilentlyContinue }
+        else { $env:LIFEOS_DEPLOY_PIP_REPORT_CHECK = $previousCode }
+        if ($null -eq $previousReport) { Remove-Item Env:LIFEOS_DEPLOY_PIP_REPORT -ErrorAction SilentlyContinue }
+        else { $env:LIFEOS_DEPLOY_PIP_REPORT = $previousReport }
+        if ($null -eq $previousLock) { Remove-Item Env:LIFEOS_DEPENDENCY_LOCK_PATH -ErrorAction SilentlyContinue }
+        else { $env:LIFEOS_DEPENDENCY_LOCK_PATH = $previousLock }
+        if ($null -eq $previousWheelhouse) { Remove-Item Env:LIFEOS_DEPLOY_WHEELHOUSE -ErrorAction SilentlyContinue }
+        else { $env:LIFEOS_DEPLOY_WHEELHOUSE = $previousWheelhouse }
+    }
+}
+
 function Start-AttributedCodexCollector {
     param(
         [string]$TaskName,
@@ -217,13 +645,32 @@ function Copy-ApiReleaseBundle {
 }
 
 function Copy-GatewayCodeBundle {
-    param([Parameter(Mandatory)][string]$GatewaySource, [Parameter(Mandatory)][string]$GatewayEntryPoint, [Parameter(Mandatory)][string]$Destination, [Parameter(Mandatory)][string]$LauncherSource, [Parameter(Mandatory)][string]$BackupDirectory, [string]$BackupName = 'previous-gateway-release')
+    param(
+        [Parameter(Mandatory)][string]$GatewaySource,
+        [Parameter(Mandatory)][string]$GatewayEntryPoint,
+        [Parameter(Mandatory)][string]$Destination,
+        [Parameter(Mandatory)][string]$LauncherSource,
+        [Parameter(Mandatory)][string]$BackupDirectory,
+        [string]$BackupName = 'previous-gateway-release',
+        [AllowNull()][psobject]$DependencyContract = $null,
+        [switch]$RequireDependencyContract
+    )
     $parent = Split-Path -Parent $Destination
     Ensure-Directory $parent
     $temp = Join-Path $parent ('.gateway-release-' + [Guid]::NewGuid().ToString('N'))
     Ensure-Directory $temp
     $backup = $null
+    $sourceDependencyContract = $null
     try {
+        $wheelhouseContract = $null
+        if ($RequireDependencyContract) {
+            if ($null -eq $DependencyContract) { throw 'Gateway release dependency contract is required.' }
+            $sourceDependencyContract = Read-GatewayDependencyLock -Path (Join-Path $GatewaySource 'requirements.lock')
+            if ([string]$sourceDependencyContract.Sha256 -cne [string]$DependencyContract.Sha256) {
+                throw 'Gateway dependency lock changed between preflight and staging.'
+            }
+            $wheelhouseContract = Assert-GatewayWheelhouse -GatewaySource $GatewaySource -DependencyContract $DependencyContract
+        }
         $entryRelative = $GatewayEntryPoint.Substring((Get-FullPath $GatewaySource).TrimEnd('\').Length).TrimStart('\')
         if ($entryRelative -ne 'main.py') { throw 'Gateway release must contain only the reviewed root main.py entry point.' }
         Assert-ExistingFile $GatewayEntryPoint 'Gateway main.py'
@@ -274,7 +721,16 @@ function Copy-GatewayCodeBundle {
             Move-Item -LiteralPath $Destination -Destination $backup
         }
         Move-Item -LiteralPath $temp -Destination $Destination
-        return [pscustomobject]@{ Destination = $Destination; Backup = $backup; EntryRelative = $entryRelative; Changed = $true }
+        return [pscustomobject]@{
+            Destination = $Destination
+            Backup = $backup
+            EntryRelative = $entryRelative
+            Changed = $true
+            DependencyLockSha256 = if ($null -ne $sourceDependencyContract) { [string]$sourceDependencyContract.Sha256 } else { $null }
+            DependencyWheelhouseAllowlistSha256 = if ($null -ne $wheelhouseContract) { [string]$wheelhouseContract.AllowlistSha256 } else { $null }
+            DependencyWheelhouseBytes = if ($null -ne $wheelhouseContract) { [long]$wheelhouseContract.TotalBytes } else { $null }
+            DependencyWheelhouseFileCount = if ($null -ne $wheelhouseContract) { [int]$wheelhouseContract.FileCount } else { $null }
+        }
     } catch {
         if ($null -ne $backup -and (Test-Path -LiteralPath $backup)) {
             Move-CurrentOutOfTheWay $Destination $BackupDirectory
@@ -352,99 +808,200 @@ function Initialize-SupplementCatalog {
     }
 }
 
-function Get-ChildRuntimeStage {
-    param([Parameter(Mandatory)][string]$Source, [Parameter(Mandatory)][string]$RuntimeRoot, [Parameter(Mandatory)][string]$BackupDirectory, [Parameter(Mandatory)][object]$Manifest, [Parameter(Mandatory)][string]$ManifestPath)
-    $sourceRuntime = Resolve-PythonRuntimeSource -Requested $Source -GatewaySource $Source
-    $sourceRoot = $sourceRuntime.Root
-    $pyvenv = Join-Path $sourceRoot 'pyvenv.cfg'
+function New-PythonVirtualEnvironmentAtomic {
+    param(
+        [Parameter(Mandatory)][string]$BasePython,
+        [Parameter(Mandatory)][string]$Destination,
+        [Parameter(Mandatory)][string]$BackupDirectory,
+        [string]$BackupName = 'previous-python-venv'
+    )
+    Assert-ExistingFile $BasePython 'Staged Python base interpreter'
+    $destinationFull = Get-FullPath $Destination
+    $destinationParent = Split-Path -Parent $destinationFull
+    Ensure-Directory $destinationParent
+    Assert-NoReparsePath $destinationParent
+    $temp = Join-Path $destinationParent ('.' + [IO.Path]::GetFileName($destinationFull) + '.' + [Guid]::NewGuid().ToString('N') + '.staging')
+    $backup = $null
+    try {
+        # A fresh venv is created by the staged, version-checked base runtime.
+        # The source venv, if one was supplied for legacy preflight, never
+        # crosses this boundary. Explicit copies prevent the fresh venv from
+        # linking back to the base runtime. Python itself fails closed if
+        # ensurepip/venv cannot create the isolated environment.
+        Invoke-NativeChecked -FilePath $BasePython -ArgumentList ([string[]]@('-B', '-I', '-m', 'venv', '--clear', '--copies', $temp)) -Quiet | Out-Null
+        Assert-ExistingDirectory $temp 'Fresh Python venv'
+        [void]@(Get-LifeOSBoundedTreeItem -Root $temp)
+        $runtime = Resolve-PythonRuntimeSource -Requested $temp -GatewaySource $temp
+        if (-not $runtime.IsVirtualEnvironment -or $runtime.Layout -ne 'Scripts') {
+            throw 'Fresh Python venv does not have the reviewed Windows layout.'
+        }
+        Invoke-NativeChecked -FilePath $runtime.Executable -ArgumentList ([string[]]@('-B', '-I', '-c', 'import sys;raise SystemExit(0 if sys.prefix != sys.base_prefix and sys.version_info[:2] == (3,12) else 1)')) -Quiet | Out-Null
+        $activationScriptNames = @('Activate.ps1', 'activate.bat', 'activate')
+        foreach ($activationScriptName in $activationScriptNames) {
+            $activationScript = Join-Path $temp ('Scripts\' + $activationScriptName)
+            if (Test-Path -LiteralPath $activationScript -PathType Leaf) {
+                Assert-NoReparsePath $activationScript
+                Remove-Item -LiteralPath $activationScript -Force
+            }
+        }
+        [void]@(Get-LifeOSBoundedTreeItem -Root $temp)
+        if (Test-Path -LiteralPath $destinationFull -PathType Container) {
+            Assert-NoReparsePath $destinationFull
+            Ensure-Directory $BackupDirectory
+            $backup = Join-Path $BackupDirectory $BackupName
+            Move-Item -LiteralPath $destinationFull -Destination $backup -Force
+        } elseif (Test-Path -LiteralPath $destinationFull) {
+            throw 'Python venv destination is not a directory.'
+        }
+        Move-Item -LiteralPath $temp -Destination $destinationFull -Force
+        $installed = Resolve-PythonRuntimeSource -Requested $destinationFull -GatewaySource $destinationFull
+        if (-not $installed.IsVirtualEnvironment) { throw 'Fresh Python venv disappeared during atomic installation.' }
+        return [pscustomobject]@{ Destination = $destinationFull; Backup = $backup; Changed = $true; PythonPath = $installed.Executable }
+    } catch {
+        if ($null -ne $backup -and (Test-Path -LiteralPath $backup -PathType Container)) {
+            if (Test-Path -LiteralPath $destinationFull) { Move-CurrentOutOfTheWay $destinationFull $BackupDirectory }
+            Move-Item -LiteralPath $backup -Destination $destinationFull -Force
+        } elseif (Test-Path -LiteralPath $destinationFull) {
+            Move-CurrentOutOfTheWay $destinationFull $BackupDirectory
+        }
+        throw
+    } finally {
+        if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Resolve-PythonBaseRuntime {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Source,
+        [Parameter(Mandatory)][string]$GatewaySource,
+        [Parameter(Mandatory)][string]$OperatorSid
+    )
+    # A supplied legacy venv never crosses this boundary; only its validated
+    # pyvenv.cfg home may identify the trusted base interpreter.
+    $sourceRuntime = Resolve-PythonRuntimeSource -Requested $Source -GatewaySource $GatewaySource
+    $baseRuntime = $sourceRuntime
     if ($sourceRuntime.IsVirtualEnvironment) {
+        $sourceRoot = $sourceRuntime.Root
+        $pyvenv = Join-Path $sourceRoot 'pyvenv.cfg'
         Assert-ExistingFile $pyvenv 'Python venv metadata'
-        $cfg = Read-LifeOSCappedFileText -Path $pyvenv -MaxBytes $script:LifeOSRecoveryMaxFileBytes -Description 'Python venv metadata'
+        $cfg = Read-LifeOSCappedFileText -Path $pyvenv -MaxBytes (64 * 1024) -Description 'Python venv metadata'
         $homeMatch = [regex]::Match($cfg, '(?m)^\s*home\s*=\s*(?<home>[^\r\n]+)\s*$')
         if (-not $homeMatch.Success) { throw "Python venv has no absolute home entry: $pyvenv" }
-        # `$HOME` is a read-only automatic variable in Windows PowerShell;
-        # use a task-specific name for the venv's base-runtime path.
         $pythonHomePath = $homeMatch.Groups['home'].Value.Trim()
-        $homeRuntime = Resolve-PythonRuntimeSource -Requested $pythonHomePath -GatewaySource $pythonHomePath
-        $homeRoot = $homeRuntime.Root
-        $baseTarget = Join-Path $RuntimeRoot 'python312'
-        $venvTarget = Join-Path $RuntimeRoot 'python-venv'
-        $basePriorExists = Test-Path -LiteralPath $baseTarget -PathType Container
-        # The staged base intentionally omits the operator's global packages
-        # and other non-runtime content, so a normal full-tree comparison is
-        # both too large and semantically wrong here. The specialized copier
-        # below builds and verifies the bounded runtime view.
-        $baseChanged = $true
-        $baseIntent = New-ManifestIntent $Manifest.backups $Manifest $ManifestPath 'python-base' $homeRoot $baseTarget (Join-Path $BackupDirectory 'previous-python312') $basePriorExists $baseChanged
-        $baseResult = $null
-        $venvResult = $null
-        $venvIntent = $null
-        try {
-            $baseResult = Copy-PythonBaseRuntimeAtomic $homeRoot $baseTarget $BackupDirectory 'previous-python312'
-            Complete-ManifestIntent $baseIntent $Manifest $ManifestPath $baseResult
-            $venvPriorExists = Test-Path -LiteralPath $venvTarget -PathType Container
-            $venvChanged = -not (Compare-TreeManifest $sourceRoot $venvTarget)
-            $venvIntent = New-ManifestIntent $Manifest.backups $Manifest $ManifestPath 'python-venv' $sourceRoot $venvTarget (Join-Path $BackupDirectory 'previous-python-venv') $venvPriorExists $venvChanged
-            $venvResult = Copy-TreeVerifiedAtomic $sourceRoot $venvTarget $BackupDirectory 'previous-python-venv'
-            $targetCfg = Join-Path $venvTarget 'pyvenv.cfg'
-            Assert-ExistingFile $targetCfg 'Staged pyvenv.cfg'
-            $updated = Read-LifeOSCappedFileText -Path $targetCfg -MaxBytes $script:LifeOSRecoveryMaxFileBytes -Description 'Staged pyvenv.cfg'
-            $updated = [regex]::Replace($updated, '(?m)^\s*home\s*=\s*[^\r\n]+\s*$', ('home = ' + $baseTarget))
-            $baseTargetInterpreter = if ($homeRuntime.Layout -eq 'root') {
-                Join-Path $baseTarget 'python.exe'
-            } else {
-                Join-Path $baseTarget 'Scripts\python.exe'
-            }
-            $updated = [regex]::Replace($updated, '(?m)^\s*executable\s*=\s*[^\r\n]+\s*$', ('executable = ' + $baseTargetInterpreter))
-            $updated = [regex]::Replace($updated, '(?m)^\s*command\s*=\s*[^\r\n]+\s*$', ('command = ' + $baseTargetInterpreter + ' -m venv ' + $venvTarget))
-            $updated = $updated.Replace($sourceRoot, $venvTarget).Replace($homeRoot, $baseTarget)
-            $tempCfg = Join-Path $venvTarget ('.pyvenv.cfg.' + [Guid]::NewGuid().ToString('N') + '.tmp')
-            try {
-                [IO.File]::WriteAllText($tempCfg, $updated, [Text.UTF8Encoding]::new($false))
-                Move-Item -LiteralPath $tempCfg -Destination $targetCfg -Force
-            } finally {
-                if (Test-Path -LiteralPath $tempCfg) { Remove-Item -LiteralPath $tempCfg -Force -ErrorAction SilentlyContinue }
-            }
-            # Activation helpers are operator-shell conveniences, not part of
-            # the service runtime. Standard venv activation scripts retain
-            # the creator's user-profile path and would otherwise make a
-            # deployed runtime depend on that profile.
-            $activationScriptNames = @('Activate.ps1', 'activate.bat', 'activate')
-            foreach ($activationScriptName in $activationScriptNames) {
-                $activationScript = Join-Path $venvTarget ('Scripts\' + $activationScriptName)
-                if (Test-Path -LiteralPath $activationScript -PathType Leaf) {
-                    Assert-NoReparsePath $activationScript
-                    Remove-Item -LiteralPath $activationScript -Force
-                }
-            }
-            # Walk the staged venv incrementally through the shared bounded,
-            # reparse-rejecting inventory. A recursive Get-ChildItem array and
-            # ReadAllText would let one large tree or metadata file escape the
-            # deployment resource contract.
-            Get-LifeOSBoundedTreeItem -Root $venvTarget |
-                Where-Object { -not $_.PSIsContainer -and $_.Extension -in @('.cfg', '.ini', '.txt', '.cmd', '.bat', '.ps1') } |
-                ForEach-Object {
-                $metadata = $_
-                $content = Read-LifeOSCappedFileText -Path $metadata.FullName -MaxBytes $script:LifeOSRecoveryMaxFileBytes -Description "Staged Python metadata $($metadata.Name)"
-                $content = $content.Replace($sourceRoot, $venvTarget).Replace($homeRoot, $baseTarget)
-                [IO.File]::WriteAllText($metadata.FullName, $content, [Text.UTF8Encoding]::new($false))
-                if ($content -match '(?i)[A-Za-z]:\\Users\\') { throw "Staged Python metadata retains a user-profile path: $($metadata.Name)" }
-            }
-            Complete-ManifestIntent $venvIntent $Manifest $ManifestPath $venvResult
-        } catch {
-            throw
+        if ($pythonHomePath -notmatch '\A[A-Za-z]:[\\/]') {
+            throw 'Python venv home must be an absolute local Windows path.'
         }
-        $stagedVenvRuntime = Resolve-PythonRuntimeSource -Requested $venvTarget -GatewaySource $venvTarget
-        return [pscustomobject]@{ PythonPath = $stagedVenvRuntime.Executable; PythonRoot = $stagedVenvRuntime.Root; PythonLayout = $stagedVenvRuntime.Layout; BaseTarget = $baseTarget; VenvTarget = $venvTarget; Base = $baseResult; Venv = $venvResult }
+        $baseRuntime = Resolve-PythonRuntimeSource -Requested $pythonHomePath -GatewaySource $pythonHomePath
+        if ($baseRuntime.IsVirtualEnvironment) { throw 'Python venv home must identify a base Python installation, not another venv.' }
     }
+    Assert-TrustedSourcePath $baseRuntime.Root $OperatorSid
+    Assert-TrustedSourcePath $baseRuntime.Executable $OperatorSid
+    Invoke-NativeChecked -FilePath $baseRuntime.Executable -ArgumentList ([string[]]@('-B', '-I', '-c', 'import sys;raise SystemExit(0 if sys.version_info[:2] == (3,12) else 1)')) -Quiet | Out-Null
+    return $baseRuntime
+}
+
+function Install-GatewayDependencies {
+    param(
+        [Parameter(Mandatory)][string]$PythonExecutable,
+        [Parameter(Mandatory)][string]$WheelhousePath,
+        [Parameter(Mandatory)][psobject]$DependencyContract,
+        [Parameter(Mandatory)][string]$ReportDirectory
+    )
+    $wheelhouseContract = Assert-GatewayWheelhouse -GatewaySource (Split-Path -Parent $WheelhousePath) -DependencyContract $DependencyContract
+    $lockPath = Get-FullPath ([string]$DependencyContract.Path)
+    $reportParent = Get-FullPath $ReportDirectory
+    Assert-ExistingDirectory $reportParent 'Python dependency report directory'
+    $reportPath = Join-Path $reportParent ('.python-dependency-report.' + [Guid]::NewGuid().ToString('N') + '.json')
+    Assert-NoReparsePath $reportParent
+    try {
+        # Every artifact is local to the candidate wheelhouse. No index, cache,
+        # proxy, or source distribution can participate in this installation.
+        Invoke-NativeChecked -FilePath $PythonExecutable -ArgumentList ([string[]]@(
+            '-B', '-I', '-m', 'pip', 'install',
+            '--disable-pip-version-check', '--no-input', '--no-index',
+            '--find-links', (Get-FullPath $WheelhousePath),
+            '--require-hashes', '--only-binary=:all:', '--no-cache-dir',
+            '--report', $reportPath, '-r', $lockPath
+        )) -Quiet | Out-Null
+        Assert-PythonWheelInstallReport -PythonExecutable $PythonExecutable -ReportPath $reportPath -WheelhousePath $WheelhousePath -DependencyContract $DependencyContract
+        Assert-PythonRuntimeDependencyInventory -PythonExecutable $PythonExecutable -DependencyContract $DependencyContract -Description 'Fresh Python runtime dependency inventory' -AllowPackagingTools | Out-Null
+        Invoke-NativeChecked -FilePath $PythonExecutable -ArgumentList ([string[]]@(
+            '-B', '-I', '-m', 'pip', 'uninstall', '--disable-pip-version-check',
+            '--no-input', '-y', 'pip', 'setuptools', 'wheel'
+        )) -Quiet | Out-Null
+        Assert-PythonPackagingToolsAbsent -PythonExecutable $PythonExecutable
+        $finalInventory = Assert-PythonRuntimeDependencyInventory -PythonExecutable $PythonExecutable -DependencyContract $DependencyContract -Description 'Final Python runtime dependency inventory'
+        $venvRoot = Split-Path -Parent (Split-Path -Parent (Get-FullPath $PythonExecutable))
+        [int]$venvMaxFiles = [Math]::Min([int]$script:LifeOSRecoveryMaxFileUnits, [int](8192 + ([int]$DependencyContract.PackageCount * 4096)))
+        [int]$venvMaxDirectories = [Math]::Min([int]$script:LifeOSRecoveryMaxFileUnits, [int](4096 + ([int]$DependencyContract.PackageCount * 2048)))
+        [long]$venvMaxBytes = [Math]::Min([long]$script:LifeOSRecoveryMaxTreeBytes, ([long]$DependencyContract.PackageCount * [long]$script:LifeOSGatewayWheelMaxFileBytes) + (256 * 1024 * 1024))
+        [long]$venvTreeBytes = 0
+        [int]$venvTreeFileCount = 0
+        foreach ($item in @(Get-LifeOSBoundedTreeItem -Root $venvRoot -MaxFiles $venvMaxFiles -MaxDirectories $venvMaxDirectories -MaxBytes $venvMaxBytes -MaxFileBytes $script:LifeOSGatewayWheelMaxFileBytes)) {
+            if (-not $item.PSIsContainer) {
+                $venvTreeFileCount++
+                $venvTreeBytes += [long]$item.Length
+            }
+        }
+        return [pscustomobject]@{
+            LockSha256 = [string]$DependencyContract.Sha256
+            PackageCount = [int]$DependencyContract.PackageCount
+            WheelhousePath = [string]$wheelhouseContract.Path
+            WheelhouseAllowlistSha256 = [string]$wheelhouseContract.AllowlistSha256
+            WheelhouseBytes = [long]$wheelhouseContract.TotalBytes
+            WheelhouseFileCount = [int]$wheelhouseContract.FileCount
+            VenvTreeBytes = $venvTreeBytes
+            VenvTreeFileCount = $venvTreeFileCount
+            VenvTreeMaxBytes = $venvMaxBytes
+            VenvTreeMaxFiles = $venvMaxFiles
+            VenvTreeMaxDirectories = $venvMaxDirectories
+            PackagingToolsRemoved = $true
+            Inventory = $finalInventory
+        }
+    } finally {
+        if (Test-Path -LiteralPath $reportPath) { Remove-Item -LiteralPath $reportPath -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Get-ChildRuntimeStage {
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$RuntimeRoot,
+        [Parameter(Mandatory)][string]$BackupDirectory,
+        [Parameter(Mandatory)][object]$Manifest,
+        [Parameter(Mandatory)][string]$ManifestPath,
+        [Parameter(Mandatory)][psobject]$DependencyContract,
+        [Parameter(Mandatory)][string]$WheelhousePath,
+        [Parameter(Mandatory)][string]$OperatorSid
+    )
+    $baseRuntime = Resolve-PythonBaseRuntime -Source $Source -GatewaySource $Source -OperatorSid $OperatorSid
+    $sourceRoot = $baseRuntime.Root
     $baseTarget = Join-Path $RuntimeRoot 'python312'
     $basePriorExists = Test-Path -LiteralPath $baseTarget -PathType Container
     $baseChanged = $true
-    $baseIntent = New-ManifestIntent $Manifest.backups $Manifest $ManifestPath 'python-base' $sourceRoot $baseTarget (Join-Path $BackupDirectory 'previous-python312') $basePriorExists $baseChanged
+    $baseIntent = New-ManifestIntent $Manifest.backups $Manifest $ManifestPath 'python-base' $baseRuntime.Root $baseTarget (Join-Path $BackupDirectory 'previous-python312') $basePriorExists $baseChanged
     $baseResult = Copy-PythonBaseRuntimeAtomic $sourceRoot $baseTarget $BackupDirectory 'previous-python312'
     Complete-ManifestIntent $baseIntent $Manifest $ManifestPath $baseResult
     $stagedBaseRuntime = Resolve-PythonRuntimeSource -Requested $baseTarget -GatewaySource $baseTarget
-    return [pscustomobject]@{ PythonPath = $stagedBaseRuntime.Executable; PythonRoot = $stagedBaseRuntime.Root; PythonLayout = $stagedBaseRuntime.Layout; BaseTarget = $baseTarget; VenvTarget = $null; Base = $baseResult; Venv = $null }
+    Invoke-NativeChecked -FilePath $stagedBaseRuntime.Executable -ArgumentList ([string[]]@('-B', '-I', '-c', 'import sys;raise SystemExit(0 if sys.version_info[:2] == (3,12) else 1)')) -Quiet | Out-Null
+    $venvTarget = Join-Path $RuntimeRoot 'python-venv'
+    $venvPriorExists = Test-Path -LiteralPath $venvTarget -PathType Container
+    $venvIntent = New-ManifestIntent $Manifest.backups $Manifest $ManifestPath 'python-venv' $baseTarget $venvTarget (Join-Path $BackupDirectory 'previous-python-venv') $venvPriorExists $true
+    $venvResult = New-PythonVirtualEnvironmentAtomic -BasePython $stagedBaseRuntime.Executable -Destination $venvTarget -BackupDirectory $BackupDirectory -BackupName 'previous-python-venv'
+    Complete-ManifestIntent $venvIntent $Manifest $ManifestPath $venvResult
+    $stagedVenvRuntime = Resolve-PythonRuntimeSource -Requested $venvTarget -GatewaySource $venvTarget
+    if (-not $stagedVenvRuntime.IsVirtualEnvironment) { throw 'Fresh Python venv creation did not produce pyvenv.cfg.' }
+    $dependencyResult = Install-GatewayDependencies -PythonExecutable $stagedVenvRuntime.Executable -WheelhousePath $WheelhousePath -DependencyContract $DependencyContract -ReportDirectory $RuntimeRoot
+    return [pscustomobject]@{
+        PythonPath = $stagedVenvRuntime.Executable
+        PythonRoot = $stagedVenvRuntime.Root
+        PythonLayout = $stagedVenvRuntime.Layout
+        BaseTarget = $baseTarget
+        VenvTarget = $venvTarget
+        Base = $baseResult
+        Venv = $venvResult
+        Dependency = $dependencyResult
+    }
 }
 
 function Copy-PythonBaseRuntimeAtomic {
@@ -457,7 +1014,7 @@ function Copy-PythonBaseRuntimeAtomic {
     # A Windows Python installation may contain an unrelated global
     # site-packages tree, documentation, and test modules. The service uses
     # the virtual environment's site-packages; copying the global packages
-    # would exceed the 512 MiB bounded-tree contract and would make the
+    # would exceed the 1 GiB bounded-tree contract and would make the
     # deployed runtime depend on arbitrary packages from the operator profile.
     # Copy the base interpreter and standard library in bounded subtrees while
     # preserving the same per-file identity/hash checks as every other stage.
@@ -734,6 +1291,11 @@ if ($codexPathProvided) {
     }
 }
 $tailscaleEdgeTokenPath = Assert-TailscaleEdgeTokenSource -Path $TailscaleEdgeTokenSource -ExpectedPath (Get-LifeOSTailscaleEdgeTokenPath $paths.SecretRoot) -OperatorSid $operatorSid
+$gatewayDependencyContract = Read-GatewayDependencyLock -Path (Join-Path $GatewaySource 'requirements.lock')
+$gatewayWheelhousePath = Join-Path $GatewaySource 'wheelhouse'
+$gatewayWheelhouseContract = Assert-GatewayWheelhouse -GatewaySource $GatewaySource -DependencyContract $gatewayDependencyContract
+$pythonBaseRuntime = Resolve-PythonBaseRuntime -Source $PythonRuntimeSource -GatewaySource $GatewaySource -OperatorSid $operatorSid
+$pythonSource = $pythonBaseRuntime.Root
 $preflightArgs = @{
     CandidateRoot = $candidateRootFull
     ExpectedSourceSha = $ExpectedSourceSha
@@ -750,7 +1312,43 @@ $preflightArgs = @{
     LegacyTaskName = $LegacyTaskName
     CodexTaskName = $CodexTaskName
 }
-& (Join-Path $PSScriptRoot 'preflight.ps1') @preflightArgs | Out-Host
+$preflightRuntimeRoot = $null
+try {
+    # Preflight must prove the transferred gateway imports using the same
+    # freshly-created, hash-pinned environment that the deployment will use.
+    # A caller-supplied venv is reduced to its trusted base pointer only.
+    $preflightRuntimeRoot = Join-Path ([IO.Path]::GetTempPath()) ('lifeos-preflight-' + [Guid]::NewGuid().ToString('N'))
+    if (Test-Path -LiteralPath $preflightRuntimeRoot) { throw 'Preflight runtime staging path already exists.' }
+    Ensure-Directory $preflightRuntimeRoot
+    $preflightVenvTarget = Join-Path $preflightRuntimeRoot 'python-venv'
+    $null = New-PythonVirtualEnvironmentAtomic -BasePython $pythonBaseRuntime.Executable -Destination $preflightVenvTarget -BackupDirectory $preflightRuntimeRoot -BackupName 'unused-preflight-backup'
+    $preflightVenvRuntime = Resolve-PythonRuntimeSource -Requested $preflightVenvTarget -GatewaySource $preflightVenvTarget
+    if (-not $preflightVenvRuntime.IsVirtualEnvironment) { throw 'Preflight fresh Python venv creation did not produce pyvenv.cfg.' }
+    $preflightDependency = Install-GatewayDependencies -PythonExecutable $preflightVenvRuntime.Executable -WheelhousePath $gatewayWheelhousePath -DependencyContract $gatewayDependencyContract -ReportDirectory $preflightRuntimeRoot
+    if ([string]$preflightDependency.LockSha256 -cne [string]$gatewayDependencyContract.Sha256 -or
+        -not [bool]$preflightDependency.PackagingToolsRemoved) {
+        throw 'Preflight fresh Python dependency provenance is incomplete.'
+    }
+    $preflightArgs.PythonRuntimeSource = $preflightVenvRuntime.Root
+    & (Join-Path $PSScriptRoot 'preflight.ps1') @preflightArgs | Out-Host
+} finally {
+    if ($null -ne $preflightRuntimeRoot -and (Test-Path -LiteralPath $preflightRuntimeRoot)) {
+        Remove-Item -LiteralPath $preflightRuntimeRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# Re-run the candidate verifier after the temporary preflight environment is
+# gone. This closes the read-only window around the candidate manifest before
+# any deployment mutation; the lock and wheelhouse are then re-read from the
+# verified tree as a separate provenance gate. No installer download is
+# permitted.
+$candidateRootFull = Assert-LifeOSCandidateRoot -Root $CandidateRoot -ExpectedSourceSha $ExpectedSourceSha -DeploymentScriptRoot $PSScriptRoot -VerifyCandidate
+$postPreflightDependencyContract = Read-GatewayDependencyLock -Path (Join-Path $GatewaySource 'requirements.lock')
+if ([string]$postPreflightDependencyContract.Sha256 -cne [string]$gatewayDependencyContract.Sha256) {
+    throw 'Gateway dependency lock changed during preflight.'
+}
+$gatewayDependencyContract = $postPreflightDependencyContract
+$gatewayWheelhouseContract = Assert-GatewayWheelhouse -GatewaySource $GatewaySource -DependencyContract $gatewayDependencyContract
 
 # Preflight is read-only and runs transaction fixtures in a child process. Do
 # not hold the deployment mutex while those fixtures execute; acquire it only
@@ -764,8 +1362,6 @@ $nodeSource = Resolve-NodeRuntimeSource $NodeRuntimeSource $ApiSource
 $nodeLargeFileRelativePath = 'node.exe'
 $nodeLargeFileMaxBytes = [long]$script:LifeOSCandidateNodeMaxFileBytes
 $hostMaxFileBytes = [long]$script:LifeOSCandidateServiceHostMaxFileBytes
-$pythonRuntime = Resolve-PythonRuntimeSource $PythonRuntimeSource $GatewaySource
-$pythonSource = $pythonRuntime.Root
 $gatewayEntrySource = Resolve-GatewayEntryPoint $GatewayEntryPoint $GatewaySource
 $apiRoot = Resolve-ApiReleaseRoot $ApiSource
 $tailscale = Resolve-TailscaleExecutable $TailscaleExecutable
@@ -913,6 +1509,7 @@ $manifest = [ordered]@{
     backups = New-Object System.Collections.ArrayList
     aclSnapshots = New-Object System.Collections.ArrayList
     tailscaleStatusBefore = $tailscaleStatusBefore
+    pythonDependencyProvenance = $null
 }
 if ($null -ne $previousGeneration -and $null -ne $previousGeneration.Reference) {
     $manifest['priorInstalledGeneration'] = $previousGeneration.Reference
@@ -947,8 +1544,19 @@ try {
 $apiIntent = New-ManifestIntent -List $manifest.backups -Manifest $manifest -ManifestPath $manifestPath -Kind 'api-release' -Source $apiRoot -Destination $apiTarget -Backup (Join-Path $backupDirectory 'previous-api-release') -PriorExists (Test-Path -LiteralPath $apiTarget -PathType Container) -Changed $true
 $apiStage = Copy-ApiReleaseBundle $apiRoot $apiTarget $backupDirectory 'previous-api-release'
 Complete-ManifestIntent $apiIntent $manifest $manifestPath $apiStage
-$gatewayIntent = New-ManifestIntent -List $manifest.backups -Manifest $manifest -ManifestPath $manifestPath -Kind 'gateway-release' -Source $GatewaySource -Destination $gatewayTarget -Backup (Join-Path $backupDirectory 'previous-gateway-release') -PriorExists (Test-Path -LiteralPath $gatewayTarget -PathType Container) -Changed $true
-$gatewayStage = Copy-GatewayCodeBundle $GatewaySource $gatewayEntrySource $gatewayTarget $launcherSource $backupDirectory 'previous-gateway-release'
+$gatewayIntent = New-ManifestIntent -List $manifest.backups -Manifest $manifest -ManifestPath $manifestPath -Kind 'gateway-release' -Source $GatewaySource -Destination $gatewayTarget -Backup (Join-Path $backupDirectory 'previous-gateway-release') -PriorExists (Test-Path -LiteralPath $gatewayTarget -PathType Container) -Changed $true -PendingFields ([ordered]@{
+    dependencyLockPath = 'gateway/requirements.lock'
+    dependencyLockSha256 = [string]$gatewayDependencyContract.Sha256
+    dependencyInventoryContract = 'exact-normalized-name-version-no-extras'
+    dependencyWheelhousePath = 'gateway/wheelhouse'
+    dependencyWheelhouseAllowlistSha256 = [string]$gatewayWheelhouseContract.AllowlistSha256
+    dependencyWheelhouseBytes = [long]$gatewayWheelhouseContract.TotalBytes
+    dependencyWheelhouseFileCount = [int]$gatewayWheelhouseContract.FileCount
+})
+$gatewayStage = Copy-GatewayCodeBundle -GatewaySource $GatewaySource -GatewayEntryPoint $gatewayEntrySource -Destination $gatewayTarget -LauncherSource $launcherSource -BackupDirectory $backupDirectory -BackupName 'previous-gateway-release' -DependencyContract $gatewayDependencyContract -RequireDependencyContract
+if ([string]$gatewayStage.DependencyLockSha256 -cne [string]$gatewayDependencyContract.Sha256) {
+    throw 'Gateway dependency lock evidence did not survive staging.'
+}
 Complete-ManifestIntent $gatewayIntent $manifest $manifestPath $gatewayStage
 $hostPriorExists = Test-Path -LiteralPath $hostTarget -PathType Leaf
 # The service host is the second explicitly allowlisted large candidate file.
@@ -958,7 +1566,28 @@ $hostSourceHash = [string]$hostSourceInfo.Sha256
 $hostChanged = -not ($hostPriorExists -and $hostSourceHash -eq (Get-FileSha256 $hostTarget))
 $hostIntent = New-ManifestIntent -List $manifest.backups -Manifest $manifest -ManifestPath $manifestPath -Kind 'host-binary' -Source $hostSource -Destination $hostTarget -Backup (Join-Path $backupDirectory ('previous-' + [IO.Path]::GetFileName($hostTarget))) -PriorExists $hostPriorExists -Changed $hostChanged
 $hostStage = $null
-$pythonStage = Get-ChildRuntimeStage $pythonSource $paths.RuntimeRoot $backupDirectory $manifest $manifestPath
+$pythonStage = Get-ChildRuntimeStage -Source $pythonSource -RuntimeRoot $paths.RuntimeRoot -BackupDirectory $backupDirectory -Manifest $manifest -ManifestPath $manifestPath -DependencyContract $gatewayDependencyContract -WheelhousePath $gatewayWheelhousePath -OperatorSid $operatorSid
+if ([string]$pythonStage.Dependency.LockSha256 -cne [string]$gatewayDependencyContract.Sha256 -or
+    -not [bool]$pythonStage.Dependency.PackagingToolsRemoved) {
+    throw 'Fresh Python runtime dependency provenance is incomplete.'
+}
+$manifest['pythonDependencyProvenance'] = [ordered]@{
+    contract = 'fresh-venv-offline-hash-pinned-wheelhouse'
+    lockPath = 'gateway/requirements.lock'
+    lockSha256 = [string]$pythonStage.Dependency.LockSha256
+    packageCount = [int]$pythonStage.Dependency.PackageCount
+    wheelhousePath = 'gateway/wheelhouse'
+    wheelhouseAllowlistSha256 = [string]$pythonStage.Dependency.WheelhouseAllowlistSha256
+    wheelhouseBytes = [long]$pythonStage.Dependency.WheelhouseBytes
+    wheelhouseFileCount = [int]$pythonStage.Dependency.WheelhouseFileCount
+    venvTreeBytes = [long]$pythonStage.Dependency.VenvTreeBytes
+    venvTreeFileCount = [int]$pythonStage.Dependency.VenvTreeFileCount
+    venvTreeMaxBytes = [long]$pythonStage.Dependency.VenvTreeMaxBytes
+    venvTreeMaxFiles = [int]$pythonStage.Dependency.VenvTreeMaxFiles
+    venvTreeMaxDirectories = [int]$pythonStage.Dependency.VenvTreeMaxDirectories
+    packagingToolsRemoved = [bool]$pythonStage.Dependency.PackagingToolsRemoved
+}
+Save-InstallManifest $manifest $manifestPath
 Invoke-NativeChecked -FilePath $pythonStage.PythonPath -ArgumentList ([string[]]@('-B', '-I', '-c', 'import fastapi,httpx,uvicorn,multipart')) -Quiet | Out-Null
 $gatewayImportCheck = 'import importlib,os,pathlib,sys; assert sys.version_info[:2] == (3,12),sys.version; from zoneinfo import ZoneInfo; ZoneInfo("Europe/Berlin"); roots=[pathlib.Path(os.environ["LIFEOS_DEPLOY_STAGED_GATEWAY_SOURCE"]).resolve()]; sys.path[:0]=[str(root) for root in roots]; names=("main","enablebanking","supplement_catalog","gateway_launcher"); modules=[importlib.import_module(name) for name in names]; assert all(pathlib.Path(module.__file__).resolve().parent == roots[0] for module in modules), [(name,module.__file__) for name,module in zip(names,modules)]'
 $previousAllowedLogin = $env:LIFEOS_TAILSCALE_ALLOWED_LOGIN

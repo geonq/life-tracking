@@ -55,6 +55,85 @@ function Assert-ExactJsonPropertySet {
     }
 }
 
+$script:LifeOSGatewayDependencyLockMaxBytes = 1024 * 1024
+$script:LifeOSGatewayDependencyMaxPackages = 1024
+$script:LifeOSGatewayWheelMaxFileBytes = 64 * 1024 * 1024
+
+function Normalize-CandidateDependencyName {
+    param([Parameter(Mandatory)][string]$Name)
+    if ($Name -notmatch '\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z') {
+        throw 'Gateway dependency lock contains an invalid distribution name.'
+    }
+    return ([regex]::Replace($Name, '[-_.]+', '-')).ToLowerInvariant()
+}
+
+function Read-CandidateGatewayDependencyLock {
+    param([Parameter(Mandatory)][string]$Path)
+    Assert-ExistingFile $Path 'Candidate gateway dependency lock'
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ($item.PSIsContainer -or [long]$item.Length -gt [long]$script:LifeOSGatewayDependencyLockMaxBytes) {
+        throw 'Candidate gateway dependency lock exceeds its bounded size.'
+    }
+    $text = Read-LifeOSCappedFileText -Path $Path -MaxBytes $script:LifeOSGatewayDependencyLockMaxBytes -Description 'Candidate gateway dependency lock'
+    if ($text.IndexOf([char]0xfeff) -ge 0 -or $text -notmatch '\r?\n\z') {
+        throw 'Candidate gateway dependency lock must be UTF-8 text without a BOM and end with one newline.'
+    }
+    $packages = New-Object 'System.Collections.Generic.List[object]'
+    $packageNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $lastName = $null
+    $reader = [IO.StringReader]::new($text)
+    try {
+        while ($true) {
+            $line = $reader.ReadLine()
+            if ($null -eq $line) { break }
+            if ($line.Length -gt 1024) { throw 'Candidate gateway dependency lock contains an oversized line.' }
+            $trimmed = $line.Trim()
+            if ([string]::IsNullOrEmpty($trimmed) -or $trimmed.StartsWith('#', [StringComparison]::Ordinal)) { continue }
+            $match = [regex]::Match($line, '\A(?<name>[A-Za-z0-9][A-Za-z0-9._-]{0,127})==(?<version>[A-Za-z0-9][A-Za-z0-9.!+_-]{0,127})\s+--hash=sha256:(?<hash>[0-9a-f]{64})\s+#\s+(?<wheel>[A-Za-z0-9][A-Za-z0-9._+!-]{0,255}\.whl)\z')
+            if (-not $match.Success) { throw 'Candidate gateway dependency lock must name its reviewed wheel.' }
+            $normalizedName = Normalize-CandidateDependencyName $match.Groups['name'].Value
+            if (-not $packageNames.Add($normalizedName)) { throw 'Candidate gateway dependency lock contains duplicate normalized names.' }
+            if ($null -ne $lastName -and [string]::CompareOrdinal($lastName, $normalizedName) -ge 0) {
+                throw 'Candidate gateway dependency lock is not sorted by normalized name.'
+            }
+            $wheelMatch = [regex]::Match($match.Groups['wheel'].Value, '\A(?<distribution>[A-Za-z0-9][A-Za-z0-9._-]{0,127})-(?<version>[A-Za-z0-9][A-Za-z0-9.!+_-]{0,127})-(?<python>[A-Za-z0-9.]+)-(?<abi>[A-Za-z0-9]+)-(?<platform>[A-Za-z0-9_]+)\.whl\z')
+            if (-not $wheelMatch.Success) { throw 'Candidate gateway dependency lock contains an invalid wheel filename.' }
+            $wheelDistribution = Normalize-CandidateDependencyName $wheelMatch.Groups['distribution'].Value
+            if ($wheelDistribution -cne $normalizedName -or $wheelMatch.Groups['version'].Value -cne $match.Groups['version'].Value) {
+                throw 'Candidate wheel filename does not match its locked distribution or version.'
+            }
+            $pythonTag = [string]$wheelMatch.Groups['python'].Value
+            $abiTag = [string]$wheelMatch.Groups['abi'].Value
+            $platformTag = [string]$wheelMatch.Groups['platform'].Value
+            $pureWheel = ($pythonTag -ceq 'py3' -or $pythonTag -ceq 'py2.py3') -and $abiTag -ceq 'none' -and $platformTag -ceq 'any'
+            $abi3WindowsWheel = $platformTag -ceq 'win_amd64' -and $pythonTag -match '\Acp[0-9]+\z' -and $abiTag -ceq 'abi3'
+            $cp312WindowsWheel = $pythonTag -ceq 'cp312' -and $abiTag -ceq 'cp312' -and $platformTag -ceq 'win_amd64'
+            if (-not ($pureWheel -or $abi3WindowsWheel -or $cp312WindowsWheel)) {
+                throw 'Candidate wheel is not compatible with Windows CPython 3.12.'
+            }
+            [void]$packages.Add([pscustomobject]@{
+                NormalizedName = $normalizedName
+                Version = [string]$match.Groups['version'].Value
+                Sha256 = [string]$match.Groups['hash'].Value
+                Filename = [string]$match.Groups['wheel'].Value
+                PythonTag = $pythonTag
+                AbiTag = $abiTag
+                PlatformTag = $platformTag
+            })
+            $lastName = $normalizedName
+            if ($packages.Count -gt $script:LifeOSGatewayDependencyMaxPackages) { throw 'Candidate gateway dependency lock contains too many packages.' }
+        }
+    } finally {
+        $reader.Dispose()
+    }
+    if ($packages.Count -eq 0) { throw 'Candidate gateway dependency lock is empty.' }
+    return [pscustomobject]@{
+        Sha256 = [string](Get-FileSha256 $Path)
+        PackageCount = [int]$packages.Count
+        Wheels = [object[]]$packages.ToArray()
+    }
+}
+
 $expectedSha = $ExpectedSourceSha.ToLowerInvariant()
 $rootFull = [IO.Path]::GetFullPath($Root)
 Assert-ExistingDirectory $rootFull 'Candidate root'
@@ -62,6 +141,8 @@ $rootName = ([IO.DirectoryInfo]$rootFull).Name
 if ($rootName -cne ('lifeos-release-' + $expectedSha)) {
     throw 'Candidate directory name must be lifeos-release-<full-source-sha>.'
 }
+
+$gatewayDependencyLock = Read-CandidateGatewayDependencyLock -Path (Join-Path $rootFull 'gateway\requirements.lock')
 
 $expectedFiles = @(
     'SOURCE_SHA.txt'
@@ -126,6 +207,8 @@ $expectedFiles = @(
     'gateway/supplement_catalog_schema.sql'
     'gateway/supplement_catalog_seed.sql'
     'gateway/requirements.txt'
+    'gateway/requirements.lock'
+    'gateway/wheelhouse/ALLOWLIST.sha256'
     'gateway/test_enablebanking.py'
     'gateway/test_gateway.py'
     'gateway/test_gateway_launcher.py'
@@ -146,6 +229,15 @@ $expectedFiles = @(
     'deploy/tests/Deployment.LegacyServe.Tests.ps1'
     'deploy/tests/Deployment.Static.Tests.ps1'
 )
+
+foreach ($wheel in @($gatewayDependencyLock.Wheels)) {
+    $wheelPath = 'gateway/wheelhouse/' + [string]$wheel.Filename
+    if ($wheelPath -match '[\r\n/\\]' -or $wheel.Filename -notmatch '\A[A-Za-z0-9][A-Za-z0-9._+!-]{0,255}\.whl\z') {
+        throw 'Candidate wheel filename is unsafe.'
+    }
+    if ($expectedFiles -contains $wheelPath) { throw "Candidate wheel allowlist contains a duplicate: $wheelPath" }
+    $expectedFiles += $wheelPath
+}
 
 $expectedSet = @{}
 foreach ($relativePath in $expectedFiles) {
@@ -285,6 +377,62 @@ foreach ($relativePath in $manifestPaths) {
     }
 }
 
+if ([string]$manifestHashes['gateway/requirements.lock'] -cne [string]$gatewayDependencyLock.Sha256) {
+    throw 'Candidate manifest does not bind the gateway dependency lock digest.'
+}
+
+$wheelhouseRoot = Join-Path $rootFull 'gateway\wheelhouse'
+$wheelhouseAllowlistPath = Join-Path $wheelhouseRoot 'ALLOWLIST.sha256'
+$wheelhouseAllowlistMaxBytes = [long]($gatewayDependencyLock.PackageCount + 1) * 160
+$allowlistItem = Get-Item -LiteralPath $wheelhouseAllowlistPath -Force -ErrorAction Stop
+if ($allowlistItem.PSIsContainer -or [long]$allowlistItem.Length -gt $wheelhouseAllowlistMaxBytes) {
+    throw 'Candidate wheelhouse allowlist exceeds its derived parse bound.'
+}
+$allowlistText = Read-LifeOSCappedFileText -Path $wheelhouseAllowlistPath -MaxBytes $wheelhouseAllowlistMaxBytes -Description 'Candidate wheelhouse allowlist'
+if ($allowlistText.IndexOf([char]0xfeff) -ge 0 -or $allowlistText -notmatch '\r?\n\z') {
+    throw 'Candidate wheelhouse allowlist must be UTF-8 text without a BOM and end with one newline.'
+}
+$allowlistLines = New-Object 'System.Collections.Generic.List[string]'
+$allowlistHashes = @{}
+$allowlistReader = [IO.StringReader]::new($allowlistText)
+try {
+    while ($true) {
+        $line = $allowlistReader.ReadLine()
+        if ($null -eq $line) { break }
+        if ($line -notmatch '\A(?<hash>[0-9a-f]{64})  \./(?<name>[A-Za-z0-9][A-Za-z0-9._+!-]{0,255}\.whl)\z') {
+            throw 'Candidate wheelhouse allowlist contains a non-canonical line.'
+        }
+        $name = [string]$Matches['name']
+        if ($allowlistHashes.ContainsKey($name)) { throw 'Candidate wheelhouse allowlist contains a duplicate.' }
+        $allowlistHashes[$name] = [string]$Matches['hash']
+        [void]$allowlistLines.Add($name)
+    }
+} finally {
+    $allowlistReader.Dispose()
+}
+$expectedAllowlistLines = @($gatewayDependencyLock.Wheels | ForEach-Object { [string]$_.Filename } | Sort-Object)
+$sortedAllowlistLines = Sort-CandidatePaths $allowlistLines
+if (($sortedAllowlistLines.ToArray() -join "`n") -ne ($allowlistLines.ToArray() -join "`n") -or
+    ($allowlistLines.ToArray() -join "`n") -ne ($expectedAllowlistLines -join "`n")) {
+    throw 'Candidate wheelhouse allowlist does not match the sorted dependency lock.'
+}
+foreach ($wheel in @($gatewayDependencyLock.Wheels)) {
+    $relativeWheelPath = 'gateway/wheelhouse/' + [string]$wheel.Filename
+    $candidateWheelPath = Join-Path $rootFull ('gateway\wheelhouse\' + [string]$wheel.Filename)
+    $wheelItem = Get-Item -LiteralPath $candidateWheelPath -Force -ErrorAction Stop
+    if ($wheelItem.PSIsContainer -or [long]$wheelItem.Length -le 0 -or [long]$wheelItem.Length -gt [long]$script:LifeOSGatewayWheelMaxFileBytes) {
+        throw "Candidate wheel exceeds its bounded size: $($wheel.Filename)"
+    }
+    if ([string]$manifestHashes[$relativeWheelPath] -cne [string]$wheel.Sha256 -or
+        [string]$allowlistHashes[$wheel.Filename] -cne [string]$wheel.Sha256) {
+        throw "Candidate wheel provenance does not match the dependency lock: $($wheel.Filename)"
+    }
+    $wheelDigest = Get-LifeOSFileDigest -Path $candidateWheelPath -Description "Candidate wheel $($wheel.Filename)"
+    if ([string]$wheelDigest.Sha256 -cne [string]$wheel.Sha256) {
+        throw "Candidate wheel hash mismatch: $($wheel.Filename)"
+    }
+}
+
 Assert-CandidatePeFile -Path (Join-Path $rootFull 'node-runtime\node.exe') -Name 'Node runtime'
 Assert-CandidatePeFile -Path (Join-Path $rootFull 'service-host\LifeOS.ServiceHost.exe') -Name 'Service host'
 
@@ -305,4 +453,4 @@ if ($apiPackage.dependencies.'@iphone-life-os/contracts' -isnot [string] -or
     throw 'Candidate API package contains an unsafe or non-installer-shaped dependency declaration.'
 }
 
-Write-Host ("PASS: candidate {0} verified ({1} files; source {0})." -f $expectedSha, $manifestPaths.Count)
+Write-Host ("PASS: candidate {0} verified ({1} files; source {0}; gateway lock {2} packages {3})." -f $expectedSha, $manifestPaths.Count, $gatewayDependencyLock.PackageCount, $gatewayDependencyLock.Sha256)

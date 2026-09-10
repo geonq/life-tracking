@@ -741,8 +741,14 @@ def test_python_runtime_resolver_supports_base_and_windows_venv_layouts() -> Non
     assert "hasRootInterpreter" in common and "hasScriptsInterpreter" in common
     assert "both python.exe and Scripts\\python.exe exist" in common
     assert "PythonPath = $stagedVenvRuntime.Executable" in install
-    assert "PythonPath = $stagedBaseRuntime.Executable" in install
+    assert "BaseTarget = $baseTarget" in install
     assert "PythonLayout = $stagedVenvRuntime.Layout" in install
+    assert "function Resolve-PythonBaseRuntime" in install
+    assert "Assert-TrustedSourcePath $baseRuntime.Executable $OperatorSid" in install
+    assert "$preflightArgs.PythonRuntimeSource = $preflightVenvRuntime.Root" in install
+    assert "Install-GatewayDependencies -PythonExecutable $preflightVenvRuntime.Executable" in install
+    assert "Gateway dependency lock changed during preflight." in install
+    assert "Re-run the candidate verifier after the temporary preflight environment is" in install
     assert "pythonRoot = if ([IO.Path]::GetFileName($pythonDirectory) -ieq 'Scripts')" in install
     assert "PATH = $pythonRoot + ';' + (Join-Path $pythonRoot 'Scripts')" in install
     assert "Assert-TrustedSourcePath $pythonSource $operatorSid" in preflight
@@ -774,13 +780,74 @@ def test_python_import_checks_avoid_windows_native_c_argument_retokenization() -
     assert "gatewayImportRunner = 'import os;exec(os.environ.get(chr(" in preflight
     assert "$env:LIFEOS_DEPLOY_STAGED_IMPORT_CHECK = $gatewayImportCheck" in install
     assert "gatewayImportRunner = 'import os;exec(os.environ.get(chr(" in install
-    assert "Invoke-NativeChecked -FilePath $pythonExecutable -ArgumentList ([string[]]@('-I', '-c', $gatewayImportRunner)) -Quiet" in preflight
-    assert "Invoke-NativeChecked -FilePath $pythonStage.PythonPath -ArgumentList ([string[]]@('-I', '-c', $gatewayImportRunner)) -Quiet" in install
+    assert "Invoke-NativeChecked -FilePath $pythonExecutable -ArgumentList ([string[]]@('-B', '-I', '-c', $gatewayImportRunner)) -Quiet" in preflight
+    assert "Invoke-NativeChecked -FilePath $pythonStage.PythonPath -ArgumentList ([string[]]@('-B', '-I', '-c', $gatewayImportRunner)) -Quiet" in install
 
     # A path after -c is the exact regression that made Python parse the
     # Windows API path as its program under Windows PowerShell 5.1.
     assert "Invoke-NativeChecked $pythonExecutable @('-I', '-c', $gatewayImportCheck, $GatewaySource, $PSScriptRoot)" not in preflight
     assert "Invoke-NativeChecked $pythonStage.PythonPath @('-I', '-c', $gatewayImportCheck, $gatewayTarget)" not in install
+
+
+def test_windows_install_requires_exact_locked_python_inventory_and_manifest_evidence() -> None:
+    install = read("install.ps1")
+    candidate = read("verify-candidate.ps1")
+    builder = (ROOT / "scripts" / "build_windows_release.sh").read_text(encoding="utf-8")
+
+    assert "function Read-GatewayDependencyLock" in install
+    assert "function Normalize-GatewayDependencyName" in install
+    assert "function Assert-PythonRuntimeDependencyInventory" in install
+    assert "function Assert-GatewayWheelhouse" in install
+    assert "function Assert-PythonWheelInstallReport" in install
+    assert "function Assert-PythonPackagingToolsAbsent" in install
+    assert "function New-PythonVirtualEnvironmentAtomic" in install
+    assert "'-m', 'venv', '--clear', '--copies'" in install
+    assert "--no-index" in install
+    assert "--find-links" in install
+    assert "--require-hashes" in install
+    assert "--only-binary=:all:" in install
+    assert "--report" in install
+    assert "never crosses this boundary" in install
+    assert "Assert-TrustedSourcePath $baseRuntime.Root $OperatorSid" in install
+    assert "if sys.version_info[:2] != (3, 12):" in install
+    assert "metadata.distributions()" in install
+    assert "ArgumentList ([string[]]@('-B', '-I', '-c', $pythonRunner))" in install
+    assert "if actual != expected:" in install
+    assert "distribution_count > 1027" in install
+    assert "Gateway dependency lock changed between preflight and staging." in install
+    assert "Assert-PythonRuntimeDependencyInventory -PythonExecutable $pythonRuntime.Executable" not in install
+    assert "Assert-PythonRuntimeDependencyInventory -PythonExecutable $sourceRuntime.Executable" not in install
+    assert "Assert-PythonRuntimeDependencyInventory -PythonExecutable $stagedVenvRuntime.Executable" not in install
+    assert "PackagingToolsRemoved = $true" in install
+    assert "venvMaxBytes" in install
+    assert "Get-LifeOSBoundedTreeItem -Root $venvRoot" in install
+    assert "venvTreeBytes" in install
+    assert install.index("$gatewayDependencyContract = Read-GatewayDependencyLock") < install.index(
+        "$deploymentMutex = Enter-LifeOSDeploymentTransaction"
+    )
+    assert "-RequireDependencyContract" in install
+    assert "dependencyLockSha256" in install
+    assert "dependencyInventoryContract = 'exact-normalized-name-version-no-extras'" in install
+    assert "dependencyLockPath = 'gateway/requirements.lock'" in install
+    assert "DependencyLockSha256" in install
+
+    assert "function Read-CandidateGatewayDependencyLock" in candidate
+    assert "Normalize-CandidateDependencyName" in candidate
+    assert "manifestHashes['gateway/requirements.lock']" in candidate
+    assert "Candidate manifest does not bind the gateway dependency lock digest." in candidate
+    assert "--hash=sha256:" in candidate
+    assert "gateway/wheelhouse/ALLOWLIST.sha256" in candidate
+    assert "Candidate wheel provenance does not match the dependency lock" in candidate
+    assert "expectedAllowlistLines" in candidate
+
+    assert "gateway_lock_source=\"$repo_root/services/gateway/requirements.lock\"" in builder
+    assert "gateway/wheelhouse/" in builder
+    assert "wheelhouse.contract" in builder
+    assert "ALLOWLIST.sha256" in builder
+    assert "MAX_WHEEL_UNCOMPRESSED_BYTES" in builder
+    assert "staged gateway dependency lock digest mismatch" in builder
+    assert "pip download" not in builder
+    assert builder.index('gateway_lock_sha="$(python3') < builder.index("archive_tmp=")
 
 
 def test_native_invocations_bind_argument_arrays_by_name() -> None:
@@ -798,7 +865,7 @@ def test_native_invocations_bind_argument_arrays_by_name() -> None:
     # values for the child process.
     for source in sources:
         assert not re.search(r"Invoke-NativeChecked[^\r\n]*\s@\(", source)
-    assert "-ArgumentList ([string[]]@('-I', '-c', $gatewayImportRunner))" in read("preflight.ps1")
+    assert "-ArgumentList ([string[]]@('-B', '-I', '-c', $gatewayImportRunner))" in read("preflight.ps1")
     common = read("Deployment.Common.ps1")
     assert "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File $FilePath @ArgumentList" in common
 
@@ -812,11 +879,11 @@ def test_install_preflight_invocation_uses_named_parameter_splat() -> None:
     # positional argument. The preflight call must use a hashtable splat so
     # every value is bound to its named parameter.
     match = re.search(
-        r"(?ms)\$preflightArgs\s*=\s*@\{(?P<body>.*?)\n\}\s*"
-        r"& \(Join-Path \$PSScriptRoot 'preflight\.ps1'\) @preflightArgs",
+        r"(?ms)\$preflightArgs\s*=\s*@\{(?P<body>.*?)\n\}",
         install,
     )
     assert match is not None
+    assert "& (Join-Path $PSScriptRoot 'preflight.ps1') @preflightArgs" in install
     assert not re.search(r"\$preflightArgs\s*=\s*@\(", install)
     body = match.group("body")
     expected_bindings = {
@@ -1841,9 +1908,9 @@ def test_recovery_inventory_uses_bounded_hash_sets_without_per_file_full_scans()
     assert '$journalUnits = @(' in reader
     assert 'return $canonical.ToArray()' in common
     assert 'return ,$canonical.ToArray()' not in common
-    assert '$script:LifeOSRecoveryMaxTreeBytes = 512 * 1024 * 1024' in common
+    assert '$script:LifeOSRecoveryMaxTreeBytes = 1024 * 1024 * 1024' in common
     assert '$script:LifeOSRecoveryMaxFileBytes = 64 * 1024 * 1024' in common
-    assert '$script:LifeOSRecoveryMaxInventoryBytes = 512 * 1024 * 1024' in common
+    assert '$script:LifeOSRecoveryMaxInventoryBytes = 1024 * 1024 * 1024' in common
     assert "function Get-LifeOSDefaultLargeFileRelativePath" in common
     assert "function Get-LifeOSBoundedFileMaxBytes" in common
     assert "function Get-LifeOSRecoveryFileMaxBytes" in common

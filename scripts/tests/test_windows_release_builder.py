@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 BUILDER = ROOT / "scripts" / "build_windows_release.sh"
 VERIFIER = ROOT / "services" / "windows-service-host" / "deploy" / "verify-candidate.ps1"
 COMMON = ROOT / "services" / "windows-service-host" / "deploy" / "Deployment.Common.ps1"
+GATEWAY_LOCK = ROOT / "services" / "gateway" / "requirements.lock"
 LEGACY_TEST = (
     ROOT
     / "services"
@@ -49,6 +50,7 @@ class WindowsReleaseBuilderTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--node-source", result.stdout + result.stderr)
+        self.assertIn("--wheelhouse", result.stdout + result.stderr)
 
     def test_planned_copy_destinations_match_verifier_and_are_unique(self) -> None:
         builder = BUILDER.read_text(encoding="utf-8")
@@ -83,6 +85,7 @@ class WindowsReleaseBuilderTests(unittest.TestCase):
         planned.extend(f"api/node_modules/zod/{name}" for name in zod_root)
         planned.extend(f"api/node_modules/zod/{name}" for name in zod_files)
         planned.extend(f"gateway/{name}" for name in gateway)
+        planned.append("gateway/wheelhouse/ALLOWLIST.sha256")
         planned.append("windows-service-host/deploy/gateway_launcher.py")
         planned.extend(f"deploy/{name}" for name in deploy)
         planned.extend(f"deploy/tests/{name}" for name in deploy_tests)
@@ -115,6 +118,51 @@ class WindowsReleaseBuilderTests(unittest.TestCase):
             self.assertIn(repr(root), builder)
         self.assertLess(builder.index("Staged JavaScript import closure failed"), builder.index('archive_tmp='))
         self.assertNotIn("console.error(error)", builder)
+
+    def test_python_dependency_lock_is_validated_and_digest_bound_without_downloads(self) -> None:
+        builder = BUILDER.read_text(encoding="utf-8")
+        verifier = VERIFIER.read_text(encoding="utf-8")
+        lock = GATEWAY_LOCK.read_text(encoding="utf-8")
+
+        self.assertIn('gateway_lock_source="$repo_root/services/gateway/requirements.lock"', builder)
+        self.assertIn("--wheelhouse", builder)
+        self.assertIn("wheelhouse.contract", builder)
+        self.assertIn("ALLOWLIST.sha256", builder)
+        self.assertIn("MAX_WHEEL_MEMBERS", builder)
+        self.assertIn("reject_path_redirection", builder)
+        self.assertIn("gateway dependency lock line", builder)
+        self.assertIn("gateway/wheelhouse/", builder)
+        self.assertIn("staged gateway dependency lock digest mismatch", builder)
+        self.assertNotIn("pip download", builder)
+        self.assertNotIn("curl ", builder)
+        self.assertLess(
+            builder.index('gateway_lock_sha="$(python3'),
+            builder.index('archive_tmp='),
+            "the lock must be validated before the release archive is created",
+        )
+        self.assertIn("Read-CandidateGatewayDependencyLock", verifier)
+        self.assertIn("manifestHashes['gateway/requirements.lock']", verifier)
+        self.assertIn("Candidate manifest does not bind the gateway dependency lock digest", verifier)
+
+        entry_pattern = re.compile(
+            r"\A(?P<name>[A-Za-z0-9][A-Za-z0-9._-]{0,127})=="
+            r"(?P<version>[A-Za-z0-9][A-Za-z0-9.!+_-]{0,127})\s+"
+            r"--hash=sha256:[0-9a-f]{64}"
+            r"\s+#\s+[A-Za-z0-9][A-Za-z0-9._+!-]{0,255}\.whl\Z"
+        )
+        names: list[str] = []
+        wheels: list[str] = []
+        for line in lock.splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            self.assertIsNotNone(entry_pattern.fullmatch(line), line)
+            raw_name = line.split("==", 1)[0]
+            names.append(re.sub(r"[-_.]+", "-", raw_name).lower())
+            wheels.append(line.split("#", 1)[1].strip())
+        self.assertEqual(names, sorted(set(names)))
+        self.assertGreater(len(names), 0)
+        self.assertEqual(len(wheels), len(set(wheels)))
+        self.assertTrue(all(wheel.endswith(".whl") for wheel in wheels))
 
     def test_node_runtime_size_contract_matches_candidate_verifier(self) -> None:
         builder = BUILDER.read_text(encoding="utf-8")
