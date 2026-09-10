@@ -76,7 +76,7 @@ Assert-Text 'Disable-LegacyTaskAfterCutover' 'Legacy task is disabled only throu
 Assert-Text 'Restore-LegacyTask' 'Rollback restores the legacy task.'
 Assert-Text 'Restore-CodexCollectorTask' 'Rollback restores the Codex collector task.'
 Assert-Text 'AllowProviderUnavailable' 'Codex provider unavailability is an explicit degraded install state.'
-Assert-Text 'result -eq 2' 'Only the typed provider-unavailable collector result can use degraded install state.'
+Assert-Text '\$exitCode -eq 2' 'Only the typed provider-unavailable collector result can use degraded install state.'
 Assert-Text 'codexCollectorVerification' 'Codex collector verification status is persisted in the install manifest.'
 Assert-Text 'Register-TailscaleSnapshotTask' 'A SYSTEM task publishes the Tailscale state the service account cannot query.'
 Assert-Text 'Start-TailscaleSnapshotTaskAndVerify' 'The snapshot is verified against an independent Tailscale query before cutover.'

@@ -131,7 +131,12 @@ function Assert-AuthorityJsonBounds {
 }
 
 function Start-AttributedCodexCollector {
-    param([string]$TaskName, [uri]$UsageUri, [int]$TimeoutSeconds = 45)
+    param(
+        [string]$TaskName,
+        [uri]$UsageUri,
+        [switch]$AllowProviderUnavailable,
+        [int]$TimeoutSeconds = 45
+    )
     $before = Get-ScheduledTaskInfo -TaskName $TaskName -TaskPath '\' -ErrorAction Stop
     $initial = Get-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction Stop
     if ([string]$initial.State -ne 'Ready') { throw 'Collector is not idle before attribution.' }
@@ -153,7 +158,10 @@ function Start-AttributedCodexCollector {
             if ([string]$terminal.State -ne 'Ready' -or $confirm.LastRunTime -ne $info.LastRunTime -or
                 $confirm.LastTaskResult -ne $info.LastTaskResult) { throw 'Collector terminal attribution changed.' }
             $exitCode = [long]$confirm.LastTaskResult
-            if ($exitCode -eq 2) { return [pscustomobject]@{ status='provider_unavailable'; exitCode=2; observation='unverified'; terminalCompleted=$true; lastRunTime=$info.LastRunTime.ToUniversalTime().ToString('o') } }
+            if ($exitCode -eq 2) {
+                if (-not $AllowProviderUnavailable) { throw 'Collector provider unavailable without explicit allowance.' }
+                return [pscustomobject]@{ status='provider_unavailable'; exitCode=2; observation='unverified'; terminalCompleted=$true; lastRunTime=$info.LastRunTime.ToUniversalTime().ToString('o') }
+            }
             if ($exitCode -ne 0) { throw "Collector terminal failure: $exitCode" }
             if (-not (Wait-CodexUsageObservation $UsageUri $TimeoutSeconds $startedAt)) { throw 'Collector ingestion remains unverified.' }
             return [pscustomobject]@{ status='observed'; exitCode=0; observation='observed'; terminalCompleted=$true; lastRunTime=$info.LastRunTime.ToUniversalTime().ToString('o') }
@@ -1340,7 +1348,7 @@ Save-InstallManifest $manifest $manifestPath
     if (-not (Wait-LoopbackReadiness ([uri]'http://127.0.0.1:8787/ready') 45)) { throw 'LifeOSAPI did not pass its loopback readiness check.' }
     $manifest['collectorTransition'] = [ordered]@{ phase = 'running'; usageBefore = (Get-RecoveryArtifactState $usageHistory); startedAtUtc = (Get-Date).ToUniversalTime().ToString('o') }
     Save-InstallManifest $manifest $manifestPath
-    $codexVerification = Start-AttributedCodexCollector -TaskName $CodexTaskName -UsageUri ([uri]'http://127.0.0.1:8787/api/usage')
+    $codexVerification = Start-AttributedCodexCollector -TaskName $CodexTaskName -UsageUri ([uri]'http://127.0.0.1:8787/api/usage') -AllowProviderUnavailable
     $manifest.collectorTransition['phase'] = 'terminal'
     $manifest.collectorTransition['usageAfter'] = Get-RecoveryArtifactState $usageHistory
     $manifest.collectorTransition['acknowledged'] = ($codexVerification.status -eq 'observed')

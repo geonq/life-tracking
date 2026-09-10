@@ -930,6 +930,9 @@ def test_collector_requires_terminal_attributed_completion() -> None:
     assert "$confirm.LastRunTime -ne $info.LastRunTime" in body
     assert "$confirm.LastTaskResult -ne $info.LastTaskResult" in body
     assert "$exitCode -eq 2" in body and "$exitCode -ne 0" in body
+    assert "[switch]$AllowProviderUnavailable" in body
+    assert "-not $AllowProviderUnavailable" in body
+    assert "-AllowProviderUnavailable" in install
     assert "Wait-CodexUsageObservation" in body
     assert "terminal completed observation missing" in body
     assert "terminalCompleted = [bool]$codexVerification.terminalCompleted" in install
