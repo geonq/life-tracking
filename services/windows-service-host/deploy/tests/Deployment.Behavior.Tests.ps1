@@ -1467,6 +1467,7 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
     ) }
     # Real file/hash/journal operations; only the Windows ACL adapter is fake.
     function Assert-RestrictedAcl { param($Path, $OperatorSid, $ReadSids, $ModifySids, [switch]$AllowInherited) }
+    function Set-RestrictedAcl { param($Path, $OperatorSid, $ReadSids, $ModifySids, [switch]$File, [switch]$SkipSnapshot, [string[]]$AllowedOwnerSids, [switch]$InheritableSystemFullControl) }
     $realRestore = ${function:Restore-Artifact}; $script:interruptRecovery = $true
     function Restore-Artifact {
         param($Artifact, $BackupDirectory)
