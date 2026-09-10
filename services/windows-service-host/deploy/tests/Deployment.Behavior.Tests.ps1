@@ -519,7 +519,11 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
         return [pscustomobject]@{ State = [string]$script:orchestrationServiceStates[$Name]; StartMode = 'Auto'; StartName = ('NT SERVICE\' + $Name); PathName = 'D:\temporary-host.exe' }
     }
     function Stop-LifeOSService { param($Name) [void]$script:orchestrationServiceEvents.Add("stop:$Name"); $script:orchestrationServiceStates[$Name] = 'Stopped' }
-    function Restore-LifeOSServiceRegistrySnapshot { param($Name, $Snapshot) [void]$script:orchestrationServiceEvents.Add("registry:$Name") }
+    function Restore-LifeOSServiceRegistrySnapshot {
+        param($Name, $Snapshot)
+        $script:orchestrationServiceConfiguration[$Name] = 'restored'
+        [void]$script:orchestrationServiceEvents.Add("registry:$Name")
+    }
     function Invoke-NativeChecked {
         [CmdletBinding()]
         param([string]$FilePath, [object[]]$ArgumentList, [switch]$Quiet)
