@@ -1520,6 +1520,7 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
         collectorTransition = $null; paths = [pscustomobject]@{ backupDirectory = $backup; gatewayData = $data; usageHistory = $usage }; backups = @()
     }
     $script:inventoryRestoreCalled = $false
+    function Assert-RestrictedAcl { param($Path, $OperatorSid, $ReadSids, $ModifySids, [switch]$AllowInherited) }
     $realRestore = ${function:Restore-Artifact}
     function Restore-Artifact {
         param($Artifact, $BackupDirectory)
