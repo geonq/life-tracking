@@ -929,7 +929,11 @@ public struct CalendarView: View {
 
     private var calendarNewButton: some View {
         Button(action: create) {
-            Label("New", systemImage: "calendar.badge.plus")
+            Label {
+                Text("New")
+            } icon: {
+                LifeOSIcon(.calendarPlus, context: .toolbar)
+            }
                 .labelStyle(.titleAndIcon)
         }
         .buttonStyle(LifeOSButtonStyle(.primary))
@@ -1021,9 +1025,13 @@ public struct CalendarView: View {
                     .accessibilityIdentifier("calendar-today")
                 Button { create() } label: {
                     if compact {
-                        Image(systemName: "calendar.badge.plus")
+                        LifeOSIcon(.calendarPlus, context: .toolbar)
                     } else {
-                        Label("New", systemImage: "calendar.badge.plus")
+                        Label {
+                            Text("New")
+                        } icon: {
+                            LifeOSIcon(.calendarPlus, context: .toolbar)
+                        }
                     }
                 }
                 .buttonStyle(.borderedProminent)
@@ -1104,54 +1112,36 @@ public struct CalendarView: View {
     }
 
     private var macDensityControls: some View {
-        HStack(spacing: 4) {
-            Text("Density")
-                .lifeOSTypography(.metadata)
-                .foregroundStyle(LifeOSTokens.secondaryText)
-            Button {
-                adjustHourHeight(by: -8)
-            } label: {
-                Image(systemName: "minus")
-                    .frame(width: 26, height: 26)
+        Menu {
+            Button("Compact · 38 pt") { setMacHourHeight(CGFloat(CalendarInteractionLayout.minimumHourHeight)) }
+            Button("Default · 54 pt") { setMacHourHeight(54) }
+            Button("Comfortable · 80 pt") { setMacHourHeight(80) }
+            Divider()
+            Button("Reset") { setMacHourHeight(54) }
+        } label: {
+            HStack(spacing: 5) {
+                LifeOSIcon(.zoomIn, context: .toolbar)
+                Text("Density")
+                    .lifeOSTypography(.metadata, weight: .medium)
             }
-            .buttonStyle(.bordered)
-            .accessibilityLabel("Decrease timeline density")
-            .accessibilityHint("Decreases hour spacing by 8 points")
-            Button {
-                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.16)) {
-                    hourHeight = 54
-                }
-            } label: {
-                Text("\(Int((hourHeight / 54 * 100).rounded()))%")
-                    .monospacedDigit()
-                    .frame(minWidth: 42)
-            }
-            .buttonStyle(.bordered)
-            .accessibilityLabel("Reset timeline density")
-            .accessibilityValue("\(Int(hourHeight.rounded())) points per hour")
-            .accessibilityHint("Resets hour spacing to 54 points")
-            Button {
-                adjustHourHeight(by: 8)
-            } label: {
-                Image(systemName: "plus")
-                    .frame(width: 26, height: 26)
-            }
-            .buttonStyle(.bordered)
-            .accessibilityLabel("Increase timeline density")
-            .accessibilityHint("Increases hour spacing by 8 points")
+            .frame(minWidth: 78, minHeight: 32)
         }
+        .menuStyle(.borderlessButton)
+        .buttonStyle(.bordered)
         .controlSize(.small)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Timeline density controls")
+        .accessibilityLabel("Timeline density menu")
+        .accessibilityValue("\(Int(hourHeight.rounded())) points per hour")
+        .accessibilityHint("Choose a density, or pinch the schedule with the trackpad to zoom around the pointer")
         .help("Pinch on the schedule with the trackpad to zoom around the pointer")
     }
 
-    private func adjustHourHeight(by delta: CGFloat) {
+    private func setMacHourHeight(_ requested: CGFloat) {
+        let bounded = min(
+            CGFloat(CalendarInteractionLayout.maximumHourHeight),
+            max(CGFloat(CalendarInteractionLayout.minimumHourHeight), requested)
+        )
         withAnimation(reduceMotion ? nil : .easeOut(duration: 0.16)) {
-            hourHeight = min(
-                CGFloat(CalendarInteractionLayout.maximumHourHeight),
-                max(CGFloat(CalendarInteractionLayout.minimumHourHeight), hourHeight + delta)
-            )
+            hourHeight = bounded
         }
     }
 #endif

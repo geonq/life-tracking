@@ -892,7 +892,10 @@ public struct CalendarTimelineView: View {
             let macColumnWidth = days.isEmpty
                 ? 0
                 : max(0, (contentWidth - timeGutter) / CGFloat(days.count))
-            let todayColumnIndex = days.firstIndex(where: { calendar.isDateInToday($0) }) ?? -1
+            let todayColumnIndex = CalendarInteractionLayout.nowIndicatorColumnIndex(
+                days: days,
+                calendar: calendar
+            ) ?? -1
             let todayColumnVisible = CalendarInteractionLayout.isTimelineDayColumnVisible(
                 dayIndex: todayColumnIndex,
                 dayCount: days.count,
@@ -1652,7 +1655,8 @@ private struct CalendarPagedTimeline: View {
             let contentHeight = CGFloat(CalendarInteractionLayout.timelineContentHeight(
                 days: days,
                 hourHeight: Double(renderedHourHeight),
-                calendar: calendar
+                calendar: calendar,
+                viewportHeight: Double(viewport.size.height)
             ))
             let allDayHeight = CGFloat(CalendarAllDayLayout.height(
                 items: items,
@@ -1660,7 +1664,10 @@ private struct CalendarPagedTimeline: View {
                 calendar: calendar
             ))
             let visibleDayStarts = Set(visibleWindow.map { calendar.startOfDay(for: $0) })
-            let todayColumnIndex = stripDays.firstIndex(where: { calendar.isDateInToday($0) }) ?? -1
+            let todayColumnIndex = CalendarInteractionLayout.nowIndicatorColumnIndex(
+                days: stripDays,
+                calendar: calendar
+            ) ?? -1
             let todayColumnVisible = CalendarInteractionLayout.isTimelineDayColumnVisible(
                 dayIndex: todayColumnIndex,
                 dayCount: stripDays.count,
@@ -1705,6 +1712,7 @@ private struct CalendarPagedTimeline: View {
             let timelineLabels = AnyView(
                 hourLabels(
                     contentHeight: contentHeight,
+                    hourHeight: renderedHourHeight,
                     todayColumnVisible: todayColumnVisible
                 )
                     .frame(width: timeGutter, height: contentHeight, alignment: .top)
@@ -1764,7 +1772,7 @@ private struct CalendarPagedTimeline: View {
                     // transactional preview after the shared arbitration
                     // gate succeeds, so it cannot run as an independent
                     // parent gesture during an edit.
-                    .gesture(
+                    .simultaneousGesture(
                         iPhoneTimelineMagnificationGesture(viewportHeight: timedViewportHeight),
                         including: .all
                     )
@@ -1957,11 +1965,15 @@ private struct CalendarPagedTimeline: View {
                     )
                 }
                 guard let token = iPhoneZoomGestureToken,
-                      let zoom = iPhoneZoomTransaction.update(
-                          token: token,
-                          magnification: Double(scale),
-                          viewportHeight: Double(viewportHeight)
-                      ) else {
+                        let zoom = iPhoneZoomTransaction.update(
+                            token: token,
+                            magnification: Double(scale),
+                            viewportHeight: Double(viewportHeight),
+                            contentBottomInset: max(
+                                CalendarInteractionLayout.timelineBottomInset,
+                                Double(viewportHeight)
+                            )
+                        ) else {
                     cancelIPhoneZoom()
                     return
                 }
@@ -2725,7 +2737,11 @@ private struct CalendarPagedTimeline: View {
         .overlay(alignment: .trailing) { Rectangle().fill(Color.primary.opacity(0.08)).frame(width: 1) }
     }
 
-    private func hourLabels(contentHeight: CGFloat, todayColumnVisible: Bool) -> some View {
+    private func hourLabels(
+        contentHeight: CGFloat,
+        hourHeight: CGFloat,
+        todayColumnVisible: Bool
+    ) -> some View {
         CalendarTimelineHourLabels(
             day: pageAnchor,
             todayColumnVisible: todayColumnVisible,
@@ -2750,7 +2766,6 @@ private struct CalendarAllDayLaneStrip: View {
     let timeGutter: CGFloat
     let onSelect: ((CalendarItem) -> Void)?
     let onCreateAllDay: ((Date) -> Void)?
-    @State private var overflowPresented = false
 
     /// Virtual neighbours are mounted so a multi-day bar can track the pager,
     /// but events that live only in those neighbours must not consume rows in
@@ -2770,19 +2785,6 @@ private struct CalendarAllDayLaneStrip: View {
 
     private var placements: [CalendarAllDayLayout.Placement] {
         CalendarAllDayLayout.placements(items: visibleLayoutItems, days: days, calendar: calendar)
-    }
-
-    private var visiblePlacements: [CalendarAllDayLayout.Placement] {
-        Array(placements.prefix(CalendarAllDayLayout.maximumVisibleEventRows))
-    }
-
-    private var overflowItems: [CalendarItem] {
-        placements.dropFirst(CalendarAllDayLayout.maximumVisibleEventRows).map(\.item)
-    }
-
-    private var overflowDayIndex: Int {
-        guard let firstVisibleDay = visibleDays.first else { return 0 }
-        return days.firstIndex(where: { calendar.isDate($0, inSameDayAs: firstVisibleDay) }) ?? 0
     }
 
     private var rowCount: Int {
@@ -2842,7 +2844,7 @@ private struct CalendarAllDayLaneStrip: View {
                                 .frame(width: 1, height: laneHeight)
                                 .offset(x: CGFloat(index + 1) * columnWidth - 1)
                         }
-                        ForEach(visiblePlacements, id: \.renderID) { placement in
+                        ForEach(placements, id: \.renderID) { placement in
                             CalendarAllDayEventChip(
                                 item: placement.item,
                                 calendar: calendar,
@@ -2857,25 +2859,6 @@ private struct CalendarAllDayLaneStrip: View {
                                 x: CGFloat(placement.firstDayIndex) * columnWidth + 1,
                                 y: CGFloat(placement.row) * (CalendarAllDayLayout.rowHeight + CGFloat(CalendarAllDayLayout.rowSpacing)) + 2
                                 )
-                        }
-                        if !overflowItems.isEmpty,
-                           let overflowRow = CalendarAllDayLayout.overflowRowIndex(
-                               items: visibleLayoutItems,
-                               days: days,
-                               calendar: calendar
-                           ) {
-                            CalendarAllDayOverflowButton(count: overflowItems.count) {
-                                overflowPresented = true
-                            }
-                            .frame(
-                                width: max(1, columnWidth - 2),
-                                height: CalendarAllDayLayout.rowHeight - 4,
-                                alignment: .leading
-                            )
-                            .offset(
-                                x: CGFloat(overflowDayIndex) * columnWidth + 1,
-                                y: CGFloat(overflowRow) * (CalendarAllDayLayout.rowHeight + CGFloat(CalendarAllDayLayout.rowSpacing)) + 2
-                            )
                         }
                         ForEach(visibleEmptyCells) { cell in
                             CalendarAllDayEmptyCell(
@@ -2920,13 +2903,6 @@ private struct CalendarAllDayLaneStrip: View {
         .accessibilityLabel("All-day events")
         .accessibilityIdentifier("calendar-all-day-lane")
         .accessibilityValue(accessibilitySummary)
-        .sheet(isPresented: $overflowPresented) {
-            CalendarAllDayOverflowSheet(
-                items: overflowItems,
-                calendar: calendar,
-                onSelect: onSelect
-            )
-        }
     }
 
 }
@@ -2980,18 +2956,9 @@ private struct CalendarAllDayRow: View {
     let timeGutter: CGFloat
     let width: CGFloat
     let onSelect: ((CalendarItem) -> Void)?
-    @State private var overflowPresented = false
 
     private var placements: [CalendarAllDayLayout.Placement] {
         CalendarAllDayLayout.placements(items: items, days: days, calendar: calendar)
-    }
-
-    private var visiblePlacements: [CalendarAllDayLayout.Placement] {
-        Array(placements.prefix(CalendarAllDayLayout.maximumVisibleEventRows))
-    }
-
-    private var overflowItems: [CalendarItem] {
-        placements.dropFirst(CalendarAllDayLayout.maximumVisibleEventRows).map(\.item)
     }
 
     private var laneHeight: CGFloat {
@@ -3022,7 +2989,7 @@ private struct CalendarAllDayRow: View {
                         .frame(width: 1, height: laneHeight)
                         .offset(x: CGFloat(index + 1) * dayWidth - 1)
                 }
-                ForEach(visiblePlacements, id: \.renderID) { placement in
+                ForEach(placements, id: \.renderID) { placement in
                     CalendarAllDayEventChip(
                         item: placement.item,
                         calendar: calendar,
@@ -3038,25 +3005,6 @@ private struct CalendarAllDayRow: View {
                         y: CGFloat(placement.row) * (Self.minimumHeight + CGFloat(CalendarAllDayLayout.rowSpacing)) + 2
                     )
                 }
-                if !overflowItems.isEmpty,
-                   let overflowRow = CalendarAllDayLayout.overflowRowIndex(
-                       items: items,
-                       days: days,
-                       calendar: calendar
-                   ) {
-                    CalendarAllDayOverflowButton(count: overflowItems.count) {
-                        overflowPresented = true
-                    }
-                    .frame(
-                        width: max(1, dayWidth - 2),
-                        height: Self.minimumHeight - 4,
-                        alignment: .leading
-                    )
-                    .offset(
-                        x: 1,
-                        y: CGFloat(overflowRow) * (Self.minimumHeight + CGFloat(CalendarAllDayLayout.rowSpacing)) + 2
-                    )
-                }
             }
             .frame(width: max(0, width - timeGutter), height: laneHeight, alignment: .topLeading)
         }
@@ -3067,13 +3015,6 @@ private struct CalendarAllDayRow: View {
         .accessibilityLabel("All-day events")
         .accessibilityIdentifier("calendar-all-day-lane")
         .accessibilityValue(accessibilitySummary)
-        .sheet(isPresented: $overflowPresented) {
-            CalendarAllDayOverflowSheet(
-                items: overflowItems,
-                calendar: calendar,
-                onSelect: onSelect
-            )
-        }
     }
 
     private var dayWidth: CGFloat {
@@ -3124,100 +3065,6 @@ private struct CalendarAllDayEventChip: View {
     private func calendarISODate(_ date: Date) -> String {
         let parts = calendar.dateComponents([.year, .month, .day], from: date)
         return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
-    }
-}
-
-private struct CalendarAllDayOverflowButton: View {
-    let count: Int
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Text("+\(count) more")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(CalendarEventVisuals.accent)
-                .lineLimit(1)
-                .minimumScaleFactor(0.72)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-                .padding(.horizontal, 6)
-                .background(
-                    CalendarEventVisuals.accent.opacity(0.10),
-                    in: RoundedRectangle(cornerRadius: 6, style: .continuous)
-                )
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Show \(count) more all-day events")
-        .accessibilityIdentifier("calendar-all-day-overflow")
-    }
-}
-
-private struct CalendarAllDayOverflowRow: Identifiable {
-    let item: CalendarItem
-
-    var id: String {
-        CalendarAllDayLayout.renderIdentity(for: item)
-    }
-}
-
-private struct CalendarAllDayOverflowSheet: View {
-    let items: [CalendarItem]
-    let calendar: Calendar
-    let onSelect: ((CalendarItem) -> Void)?
-    @Environment(\.dismiss) private var dismiss
-
-    private var rows: [CalendarAllDayOverflowRow] {
-        items.map(CalendarAllDayOverflowRow.init(item:))
-    }
-
-    var body: some View {
-        NavigationStack {
-            List(rows) { row in
-                if let onSelect {
-                    Button {
-                        onSelect(row.item)
-                        dismiss()
-                    } label: {
-                        rowLabel(for: row.item)
-                    }
-                    .buttonStyle(.plain)
-                } else {
-                    rowLabel(for: row.item)
-                }
-            }
-            .navigationTitle("More all-day events")
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
-                }
-            }
-        }
-#if os(macOS)
-        .frame(minWidth: 360, idealWidth: 440, minHeight: 260)
-#endif
-    }
-
-    private func rowLabel(for item: CalendarItem) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(item.title)
-                .lifeOSTypography(.body, weight: .medium)
-                .foregroundStyle(LifeOSTokens.primaryText)
-            Text(itemDateRange(item))
-                .lifeOSTypography(.metadata)
-                .foregroundStyle(LifeOSTokens.secondaryText)
-        }
-        .padding(.vertical, 3)
-        .contentShape(Rectangle())
-    }
-
-    private func itemDateRange(_ item: CalendarItem) -> String {
-        var style = Date.FormatStyle.dateTime
-            .weekday(.abbreviated)
-            .month(.abbreviated)
-            .day()
-            .locale(.current)
-        style.timeZone = calendar.timeZone
-        return "\(item.start.formatted(style)) – \(item.end.formatted(style))"
     }
 }
 
@@ -4427,7 +4274,10 @@ private struct CalendarNowLine: View {
                 // current day during horizontal paging.
                 let dayColumnWidth = columnWidthOverride ??
                     (days.isEmpty ? 0 : max(0, (contentWidth - timeGutter) / CGFloat(days.count)))
-                let todayIndex = days.firstIndex(where: { calendar.isDateInToday($0) }) ?? 0
+                let todayIndex = CalendarInteractionLayout.nowIndicatorColumnIndex(
+                    days: days,
+                    calendar: calendar
+                ) ?? 0
                 AnyView(ZStack(alignment: .topLeading) {
                     Text(CalendarTimelineScale.localizedTimeLabel(for: context.date, calendar: calendar))
                         .lifeOSTypography(.metadata, weight: .semibold).monospacedDigit()

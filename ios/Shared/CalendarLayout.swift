@@ -262,14 +262,16 @@ public struct CalendarTimelineZoomTransaction: Equatable, Sendable {
     public mutating func update(
         token: Token,
         magnification: Double,
-        viewportHeight: Double
+        viewportHeight: Double,
+        contentBottomInset: Double = CalendarInteractionLayout.timelineEndpointClearance
     ) -> CalendarTimelineZoomResult? {
         guard token.generation == generation,
               var session,
               session.isActive else { return nil }
         guard let result = session.update(
             magnification: magnification,
-            viewportHeight: viewportHeight
+            viewportHeight: viewportHeight,
+            contentBottomInset: contentBottomInset
         ) else { return nil }
         self.session = session
         return result
@@ -522,15 +524,14 @@ public enum CalendarOverlapLayout {
 
 /// Pure geometry for the sticky all-day lane above the timed grid.
 ///
-/// Row contract for the bounded all-day lane: at most two event rows are
-/// visible, overflow is represented by one +N row, and one empty creation row
-/// always trails below them. Keeping the cap in the layout model prevents a
-/// dense calendar from consuming the timed viewport.
+/// Row contract: every visible all-day entry owns one row and one empty
+/// creation row always trails below them. Zero entries therefore render one
+/// empty row; n entries render n event rows plus one empty row. The lane stays
+/// outside the timed ScrollView so its height cannot change the timeline axis.
 public enum CalendarAllDayLayout {
     public static let rowHeight: Double = 26
     public static let rowSpacing: Double = 2
     public static let minimumRows = 1
-    public static let maximumVisibleEventRows = 2
 
     public struct Placement: Equatable, Identifiable, Sendable {
         public let item: CalendarItem
@@ -616,35 +617,13 @@ public enum CalendarAllDayLayout {
         return "\(sourceID.uuidString)-\(occurrenceStart)"
     }
 
-    public static func overflowCount(
-        items: [CalendarItem],
-        days: [Date],
-        calendar: Calendar
-    ) -> Int {
-        max(0, placements(items: items, days: days, calendar: calendar).count - maximumVisibleEventRows)
-    }
-
-    /// The row at which the compact +N overflow affordance is rendered.
-    public static func overflowRowIndex(
-        items: [CalendarItem],
-        days: [Date],
-        calendar: Calendar
-    ) -> Int? {
-        overflowCount(items: items, days: days, calendar: calendar) > 0
-            ? maximumVisibleEventRows
-            : nil
-    }
-
-    /// Two visible event rows, one optional overflow row, and one creation row.
+    /// Every placement owns a row, followed by the trailing creation row.
     public static func rowCount(
         items: [CalendarItem],
         days: [Date],
         calendar: Calendar
     ) -> Int {
-        let count = placements(items: items, days: days, calendar: calendar).count
-        let visibleRows = min(maximumVisibleEventRows, count)
-        let overflowRow = count > maximumVisibleEventRows ? 1 : 0
-        return max(minimumRows, visibleRows + overflowRow + 1)
+        max(minimumRows, placements(items: items, days: days, calendar: calendar).count + 1)
     }
 
     public static func height(
@@ -1095,18 +1074,35 @@ public enum CalendarInteractionLayout {
     /// either control from creating a scale the timeline cannot render.
     public static let minimumHourHeight: Double = 38
     public static let maximumHourHeight: Double = 110
-    /// The iPhone gutter remains 40 pt so its established paging and day
-    /// column geometry do not change.
-    public static let timelineTimeGutter: Double = 40
-    /// macOS clock labels use the same trailing inset as the shared renderer,
-    /// with enough dedicated content width for a single-line `HH:MM` label in
-    /// the configured SF Pro metadata role.
-    public static let macTimelineTimeGutter: Double = 48
+    /// The pinned iPhone gutter is a stable 44pt touch/layout column. Keeping
+    /// it outside the moving day surface prevents horizontal paging from
+    /// moving or clipping the clock labels.
+    public static let timelineTimeGutter: Double = 44
+    /// macOS has a little more room for the same single-line SF Pro clock
+    /// labels while retaining an equal-width day grid.
+    public static let macTimelineTimeGutter: Double = 52
     public static let timelineTimeLabelTrailingInset: Double = 8
     public static let timelineOuterInset: Double = 8
-    /// Clearance after the final 24:00 mark. Bottom controls are reserved by
-    /// the owning page's safe-area inset, so this is the only display space
-    /// added to the 24-hour axis itself.
+    /// Baseline iPhone occlusion budget: home indicator, compact tab bar,
+    /// endpoint label clearance, and a small breathing margin. The quick
+    /// actions are installed with `safeAreaInset` by the parent view, so the
+    /// timeline viewport already excludes that surface and must not count it
+    /// twice here.
+    /// The iPhone timeline also reserves at least one viewport below the axis
+    /// so a 23:45 event and the unique 24:00 mark can travel into view at the
+    /// maximum native scroll offset. Creation/event coordinates still use the
+    /// 24-hour axis only.
+    public static let homeIndicatorSafeAreaHeight: Double = 34
+    public static let compactTabBarHeight: Double = 50
+    public static let endpointLabelClearance: Double = 14
+    public static let endpointScrollMargin: Double = 6
+    public static let timelineBottomInset: Double =
+        homeIndicatorSafeAreaHeight
+            + compactTabBarHeight
+            + endpointLabelClearance
+            + endpointScrollMargin
+    /// Clearance used by the desktop timeline, where the page does not have
+    /// the iPhone tab-bar and quick-action occlusion stack.
     public static let timelineEndpointClearance: Double = 24
     /// The short range shown while a mobile time selection is being held.
     /// The editor receives the actual dragged interval; this is only the
@@ -1383,7 +1379,7 @@ public enum CalendarInteractionLayout {
         horizontalTranslation: Double,
         verticalTranslation: Double,
         minimumDistance: Double = 8,
-        dominanceRatio: Double = 1.15
+        dominanceRatio: Double = 1.25
     ) -> PagerDragAxis {
         guard horizontalTranslation.isFinite,
               verticalTranslation.isFinite,
@@ -1403,7 +1399,7 @@ public enum CalendarInteractionLayout {
         horizontalTranslation: Double,
         verticalTranslation: Double,
         minimumDistance: Double = 8,
-        dominanceRatio: Double = 1.15
+        dominanceRatio: Double = 1.25
     ) -> Bool {
         pagerDragAxis(
             horizontalTranslation: horizontalTranslation,
@@ -1423,6 +1419,17 @@ public enum CalendarInteractionLayout {
               timeGutter.isFinite,
               timeGutter >= 0 else { return false }
         return startX >= timeGutter
+    }
+
+    /// Returns the sole candidate column for the now indicator. The caller
+    /// still checks whether that column intersects the visible day surface;
+    /// keeping the date lookup here prevents separate renderers from choosing
+    /// different columns or drawing one marker per day.
+    public static func nowIndicatorColumnIndex(
+        days: [Date],
+        calendar: Calendar
+    ) -> Int? {
+        days.firstIndex(where: { calendar.isDateInToday($0) })
     }
 
     /// Returns whether a day column intersects the currently visible day
@@ -1529,6 +1536,21 @@ public enum CalendarInteractionLayout {
         let axis = timelineHeight(days: days, hourHeight: hourHeight, calendar: calendar)
         let safeOcclusion = occlusionHeight.isFinite ? max(0, occlusionHeight) : 0
         return axis + safeOcclusion + timelineEndpointClearance
+    }
+
+    /// iPhone content height for a finite viewport. The larger of the known
+    /// bottom occlusion budget and the viewport lets the 24-hour endpoint move
+    /// through a complete viewport instead of leaving the final hours behind
+    /// the bottom chrome. The extra height is display-only.
+    public static func timelineContentHeight(
+        days: [Date],
+        hourHeight: Double,
+        calendar: Calendar,
+        viewportHeight: Double
+    ) -> Double {
+        let axis = timelineHeight(days: days, hourHeight: hourHeight, calendar: calendar)
+        let safeViewport = viewportHeight.isFinite ? max(0, viewportHeight) : 0
+        return axis + max(timelineBottomInset, safeViewport)
     }
 
     /// Maps one macOS pinch sample to a bounded timeline density and scroll

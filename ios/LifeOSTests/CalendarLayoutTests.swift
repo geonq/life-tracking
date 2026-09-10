@@ -258,16 +258,9 @@ final class CalendarLayoutTests: XCTestCase {
             calendar: calendar
         )
         XCTAssertEqual(axisHeight, 24 * 54)
-        XCTAssertEqual(
-            CalendarInteractionLayout.timelineContentHeight(
-                days: [day],
-                hourHeight: 54,
-                calendar: calendar
-            ),
-            axisHeight + CalendarInteractionLayout.timelineEndpointClearance
-        )
-        // The quick actions are reserved by the page's safe-area inset, so
-        // the timed viewport needs only the endpoint clearance below 24:00.
+        // The phone's finite viewport gets the larger of the measured viewport
+        // and the bottom chrome budget, so the 24:00 endpoint can travel into
+        // view instead of being stranded behind the tab bar.
         let deviceContainerHeight = 731.0
         let dayHeaderHeight = 58.0
         let allDayHeight = CalendarAllDayLayout.rowHeight
@@ -279,14 +272,23 @@ final class CalendarLayoutTests: XCTestCase {
         let contentHeight = CalendarInteractionLayout.timelineContentHeight(
             days: [day],
             hourHeight: 54,
-            calendar: calendar
+            calendar: calendar,
+            viewportHeight: viewport
         )
-        let maxOffset = contentHeight - viewport
+        XCTAssertEqual(
+            contentHeight,
+            axisHeight + max(CalendarInteractionLayout.timelineBottomInset, viewport),
+            accuracy: 0.0001
+        )
+        let maxOffset = CalendarInteractionLayout.timelineMaximumScrollOffset(
+            contentHeight: contentHeight,
+            viewportHeight: viewport
+        )
         XCTAssertGreaterThan(maxOffset, 0, "The full-day content must be scrollable inside the finite viewport")
         XCTAssertGreaterThanOrEqual(
-            maxOffset + viewport - axisHeight,
-            CalendarInteractionLayout.timelineEndpointClearance,
-            "At maximum scroll the 24:00 endpoint must remain visible"
+            maxOffset,
+            axisHeight - viewport,
+            "A 23:45 event must be reachable at the bottom of the timeline"
         )
         XCTAssertEqual(
             CalendarInteractionLayout.timelineHourLabel(
@@ -333,20 +335,46 @@ final class CalendarLayoutTests: XCTestCase {
     }
 
     func testMacTimelineGutterProtectsSingleLineClockLabelsWithoutChangingIPhoneGeometry() {
-        XCTAssertEqual(CalendarInteractionLayout.timelineTimeGutter, 40)
+        XCTAssertEqual(CalendarInteractionLayout.timelineTimeGutter, 44)
+        XCTAssertEqual(CalendarInteractionLayout.macTimelineTimeGutter, 52)
         XCTAssertEqual(CalendarInteractionLayout.timelineTimeLabelTrailingInset, 8)
         XCTAssertGreaterThanOrEqual(
             CalendarInteractionLayout.macTimelineTimeGutter - CalendarInteractionLayout.timelineTimeLabelTrailingInset,
-            40,
+            44,
             "The Mac label content area must remain wide enough for the SF Pro HH:MM clock label."
+        )
+    }
+
+    func testNowIndicatorSelectsAtMostOneVisibleTodayColumn() throws {
+        let todayStart = calendar.startOfDay(for: .now)
+        let tomorrowStart = try XCTUnwrap(calendar.date(byAdding: .day, value: 1, to: todayStart))
+        let window = [todayStart, tomorrowStart]
+        let today = CalendarInteractionLayout.nowIndicatorColumnIndex(
+            days: window,
+            calendar: calendar
+        )
+        XCTAssertEqual(today, 0)
+
+        let dayAfterTomorrow = try XCTUnwrap(calendar.date(byAdding: .day, value: 1, to: tomorrowStart))
+        XCTAssertNil(
+            CalendarInteractionLayout.nowIndicatorColumnIndex(
+                days: [tomorrowStart, dayAfterTomorrow],
+                calendar: calendar
+            )
+        )
+        XCTAssertEqual(
+            window.filter {
+                calendar.isDate($0, inSameDayAs: .now)
+            }.count,
+            1,
+            "A three-day window contains at most one today column"
         )
     }
 
     func testTimelineContentHeightKeepsLateDayContentReachableAtEveryDensity() {
         let day = dayStart
-        // Bottom controls are reserved before the timed viewport is measured.
-        // The content therefore ends at 24 hours plus the small endpoint
-        // clearance, without a blank viewport-sized tail.
+        // A mobile timeline reserves enough trailing space for the actual
+        // finite viewport and the known bottom occlusion budget.
         for hourHeight in [38.0, 54.0, 110.0] {
             for viewport in [597.0, 679.0, 731.0] {
                 let axis = CalendarInteractionLayout.timelineHeight(
@@ -355,11 +383,12 @@ final class CalendarLayoutTests: XCTestCase {
                 let content = CalendarInteractionLayout.timelineContentHeight(
                     days: [day],
                     hourHeight: hourHeight,
-                    calendar: calendar
+                    calendar: calendar,
+                    viewportHeight: viewport
                 )
                 XCTAssertEqual(
                     content,
-                    axis + CalendarInteractionLayout.timelineEndpointClearance,
+                    axis + max(CalendarInteractionLayout.timelineBottomInset, viewport),
                     accuracy: 0.0001
                 )
                 let maxOffset = CalendarInteractionLayout.timelineMaximumScrollOffset(
@@ -367,11 +396,10 @@ final class CalendarLayoutTests: XCTestCase {
                     viewportHeight: viewport
                 )
                 XCTAssertGreaterThanOrEqual(
-                    maxOffset + viewport,
-                    axis,
-                    "24:00 must be visible at hourHeight \(hourHeight)"
+                    maxOffset,
+                    axis - viewport,
+                    "A 23:45 event must be reachable at hourHeight \(hourHeight)"
                 )
-                // Every late wall-clock hour is within the reachable viewport.
                 XCTAssertGreaterThanOrEqual(
                     maxOffset + viewport,
                     23 * hourHeight,
@@ -379,9 +407,9 @@ final class CalendarLayoutTests: XCTestCase {
                 )
                 XCTAssertEqual(
                     maxOffset + viewport - axis,
-                    CalendarInteractionLayout.timelineEndpointClearance,
+                    max(CalendarInteractionLayout.timelineBottomInset, viewport),
                     accuracy: 0.0001,
-                    "The timeline must not reserve an oversized trailing tail at hourHeight \(hourHeight)"
+                    "The endpoint tail must cover the viewport or bottom chrome at hourHeight \(hourHeight)"
                 )
             }
         }
@@ -1147,8 +1175,8 @@ final class CalendarLayoutTests: XCTestCase {
         let timed = try CalendarItem(title: "Timed", start: timedStart, end: timedEnd)
         let deleted = try CalendarItem(title: "Deleted", start: anchor, end: day1).deleting(at: anchor.addingTimeInterval(1))
 
-        // Three entries retain deterministic placement data. The view renders
-        // the first two and exposes the third through one bounded overflow row.
+        // Every all-day entry keeps deterministic placement data and its own
+        // row. The trailing row remains the creation surface.
         let placements = CalendarAllDayLayout.placements(
             items: [first, adjacent, overlapping, timed, deleted],
             days: days,
@@ -1171,7 +1199,7 @@ final class CalendarLayoutTests: XCTestCase {
         XCTAssertEqual(
             CalendarAllDayLayout.rowCount(items: entries, days: days, calendar: calendar),
             4,
-            "two visible rows + one overflow row + one trailing empty cell"
+            "three entry rows + one trailing empty cell"
         )
         XCTAssertEqual(
             CalendarAllDayLayout.height(items: entries, days: days, calendar: calendar),
@@ -1221,7 +1249,7 @@ final class CalendarLayoutTests: XCTestCase {
         )
     }
 
-    func testAllDayOverflowIsBoundedAndKeepsLateDayTimelineReachable() throws {
+    func testAllDayLaneKeepsEveryEntryAndTrailingCell() throws {
         let anchor = try XCTUnwrap(DateComponents(
             calendar: calendar,
             year: 2026,
@@ -1242,27 +1270,22 @@ final class CalendarLayoutTests: XCTestCase {
 
         let placements = CalendarAllDayLayout.placements(items: entries, days: days, calendar: calendar)
         XCTAssertEqual(placements.count, entries.count)
-        XCTAssertEqual(CalendarAllDayLayout.maximumVisibleEventRows, 2)
-        XCTAssertEqual(
-            CalendarAllDayLayout.overflowCount(items: entries, days: days, calendar: calendar),
-            38
-        )
-        XCTAssertEqual(
-            CalendarAllDayLayout.overflowRowIndex(items: entries, days: days, calendar: calendar),
-            2
-        )
         XCTAssertEqual(
             CalendarAllDayLayout.rowCount(items: entries, days: days, calendar: calendar),
-            4,
-            "Dense all-day data must not allocate one row per event"
+            entries.count + 1,
+            "Every all-day entry owns one row plus one trailing empty cell"
         )
         XCTAssertEqual(
             CalendarAllDayLayout.trailingEmptyRowIndex(items: entries, days: days, calendar: calendar),
-            3
+            entries.count
         )
 
         let allDayHeight = CalendarAllDayLayout.height(items: entries, days: days, calendar: calendar)
-        XCTAssertEqual(allDayHeight, 4 * CalendarAllDayLayout.rowHeight + 3 * CalendarAllDayLayout.rowSpacing)
+        XCTAssertEqual(
+            allDayHeight,
+            Double(entries.count + 1) * CalendarAllDayLayout.rowHeight
+                + Double(entries.count) * CalendarAllDayLayout.rowSpacing
+        )
 
         let smallestTimedViewport = CalendarInteractionLayout.timedViewportHeight(
             containerHeight: 58 + allDayHeight + 1,
@@ -1453,6 +1476,10 @@ final class CalendarLayoutTests: XCTestCase {
             horizontalTranslation: 12,
             verticalTranslation: 10
         ))
+        XCTAssertTrue(CalendarInteractionLayout.isHorizontalPagerDrag(
+            horizontalTranslation: 13,
+            verticalTranslation: 10
+        ))
         XCTAssertFalse(CalendarInteractionLayout.isHorizontalPagerDrag(
             horizontalTranslation: 10,
             verticalTranslation: 12
@@ -1463,6 +1490,10 @@ final class CalendarLayoutTests: XCTestCase {
         )
         XCTAssertEqual(
             CalendarInteractionLayout.pagerDragAxis(horizontalTranslation: 12, verticalTranslation: 10),
+            .undecided
+        )
+        XCTAssertEqual(
+            CalendarInteractionLayout.pagerDragAxis(horizontalTranslation: 13, verticalTranslation: 10),
             .horizontal
         )
         XCTAssertEqual(
