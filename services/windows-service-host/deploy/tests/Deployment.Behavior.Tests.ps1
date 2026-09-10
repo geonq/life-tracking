@@ -870,6 +870,11 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
     $script:serviceTransitionWaitFailures = 1
     $script:serviceTransitionHealthFailures = 1
     function Assert-RestrictedAcl { param($Path, $OperatorSid, $ReadSids, $ModifySids, [switch]$AllowInherited) }
+    $realJsonWriter = ${function:Write-JsonAtomic}
+    function Write-JsonAtomic {
+        param([string]$Path, [object]$Value, [string]$OperatorSid, [long]$MaxBytes = 0)
+        & $realJsonWriter -Path $Path -Value $Value -MaxBytes $MaxBytes
+    }
     function Get-ServiceRecord {
         param($Name)
         return [pscustomobject]@{ State = [string]$script:serviceTransitionStates[$Name]; StartMode = 'Auto' }
