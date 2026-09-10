@@ -922,7 +922,9 @@ Bind-LifeOSDeploymentManifest $deploymentMutex $manifest $manifestPath
 Set-AclSnapshotContext -Manifest $manifest -ManifestPath $manifestPath -BackupDirectory $backupDirectory
 # Capture ACLs of pre-existing deployment targets before any replacement. A
 # later snapshot of a newly-created path is still useful for a retry, while
-# these early snapshots preserve the old target's ACL for rollback.
+# these early snapshots preserve the old target's ACL for rollback. The
+# runtime parent is intentionally handled below as RootOnly because it may
+# contain legacy generations outside the bounded managed child trees.
 foreach ($aclTarget in @($hostTarget, $apiTarget, $gatewayTarget, $nodeTarget, $paths.DataRoot, $paths.LogRoot, $paths.SecretRoot, $configDirectory, $stateDirectory, $snapshotScriptTarget, $tailscaleEdgeTokenPath)) {
     if (Test-Path -LiteralPath $aclTarget) { Register-AclSnapshot $aclTarget }
 }
