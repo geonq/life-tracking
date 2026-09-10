@@ -1,68 +1,58 @@
 # DECISIONS — LifeOS native app
 
-Updated 2026-09-09 21:16 Europe/Berlin.
+Updated 2026-09-10 09:45 Europe/Berlin.
 
 ## Product and design
 
-- Use SF Pro/system typography and shared dark design tokens. Keep nearby blue
-  accents separated by hue/value; estimates use green and calories use orange.
-  Preserve transparent widget legibility on a grey wallpaper.
-- Use shared page, card, status, button, selector, sheet, and motion recipes.
-  Calendar owns iPhone vertical scrolling and Mac trackpad magnification;
-  paging and editing must not compete with those gestures.
+- Use the native SF Pro/system facade, compact hierarchy, 4/8/12/16/24/32/48
+  spacing, 12pt Home/Usage cards, semantic SF Symbols, and distinct palette
+  values from `colors.md`. Estimates are green; calories are orange.
+- Home shows one compact Usage lead surface and avoids duplicate provider rings.
+  Usage is an operational monitoring surface with truthful live/demo provenance.
+- Calendar owns iPhone vertical scrolling and Mac trackpad magnification.
+  Paging, editing, and zoom must not compete for the same gesture.
+- Use direct user motion and restrained transitions: Mac detail entry is 180ms
+  with an 8pt offset, module transitions are 120ms, and outgoing detail opacity
+  is 120ms. Rapid reversal starts from visible values.
 - Remove Advisor and generic conversational AI from every product layer.
   Calorie photo tracking is the only permitted in-app AI behavior.
 
-## Data boundaries
+## State and data boundaries
 
-- Python remains Calendar authority; local edits persist an outbox receipt
-  before sync is called automatic. Missing records never imply deletion.
+- Scene-owned state retains Calendar position, Finance chart/detail choices,
+  Fitness section, and Usage provider/graph/range across route replacement.
+- Python remains Calendar authority; local edits persist an outbox receipt before
+  sync. Missing records never imply deletion.
 - Enable Banking is the live bank path; Trade Republic stays a manual import.
   HealthKit is the iPhone-owned workout evidence path.
 - LifeOS owns workout templates, exercises, sessions, sets, history, PRs, and
-  reports. Zepp is a read-only sync source; unsupported proprietary fields are
-  shown as unavailable rather than inferred.
-- Obsidian integration remains a future design/feasibility item tracked in issue
-  #2. Markdown/YAML links are the semantic source; Canvas coordinates are
-  presentation metadata. It is not part of this completion batch.
+  reports. Zepp is a read-only sync source; unsupported fields remain unavailable.
+- Obsidian integration remains a future feasibility item tracked in issue #2.
+  Markdown/YAML links are semantic source; Canvas coordinates are presentation
+  metadata.
 
-## Security and release
+## Security and runtime
 
-- Windows gateway access remains fail-closed with scoped credentials,
-  protected snapshots, atomic recovery, identity-bound bounded reads, ACL
-  checks, and journal-bound Node staging.
-- Keep secrets out of source, prompts, logs, and archives. Do not claim
-  physical-device, provider, Windows-native, or remote-runtime evidence from
-  source checks alone.
-- Personal Team signing and seven-day renewal remain platform-managed steps.
-  Native Shortcuts can open Zepp and report LifeOS refresh/status; a public
-  Zepp API is not assumed.
-- The Windows release contract keeps the ordinary per-file limit at 64 MiB and
-  allows 256 MiB only for the exact manifest-bound `node-runtime/node.exe` and
-  `service-host/LifeOS.ServiceHost.exe` paths. Aggregate candidate and recovery
-  limits remain finite.
+- Windows gateway access remains fail-closed with scoped credentials, protected
+  snapshots, atomic recovery, identity-bound bounded reads, ACL checks, and
+  journal-bound Node staging.
+- Protected storage runs off the asyncio loop with four workers and four queued
+  admissions. Full capacity and shutdown use one sanitized response. A caller
+  cancellation cannot release its domain lock before the worker finishes.
+- Keep secrets out of source, prompts, logs, and archives. Do not claim provider,
+  Windows-native, physical-device, or visual evidence from source checks alone.
+- Native Shortcuts may open Zepp and report LifeOS refresh/status; a public Zepp
+  API is not assumed. Personal Team signing and seven-day renewal remain
+  platform-managed steps.
 
 ## Workflow
 
 - Use Luna Max for bounded implementation and Astra Medium for batched review.
-  Keep worker write scopes disjoint and commit coherent groups gradually.
-- Keep coordination files below 200 lines. Do not add a Claude usage-limit
-  watcher, overnight supervisor, or unrelated AI feature. Backend scheduled
-  tasks that publish trusted Tailscale identity or collect approved automatic
-  sync data are security/product infrastructure and remain permitted.
-
-## Fresh Astra/backend disposition
-
-- The fresh Astra Medium plan is the current implementation order: repair the
-  Windows verifier/installer, then shell/state B, nutrition receipt F,
-  Finance/Usage C, Calendar D, Fitness E, widgets G, Windows runtime W, and
-  integrated evidence H. Review B+F first, then batch the remaining visual
-  tranches by subsystem.
-- Do not merge PR #1 while the four native P1s or the Windows candidate failure
-  remain. A green historical suite does not override a reproduced runtime
-  failure.
-- Treat the PowerShell identity-chain failure as a source bug. Preserve
-  reparse, handle identity, bounds, ACL, and rollback checks while correcting
-  only the collection-shape contract; do not special-case `SOURCE_SHA.txt`.
-- Preserve the dirty Windows API checkout. Stage and verify candidates under a
-  unique source hash before any service or Tailscale mutation.
+  Keep write scopes disjoint, native builds serialized with `-jobs 1`, and close
+  completed workers/processes immediately.
+- Keep coordination files below 200 lines. Use live production reads and keep
+  visual fixtures isolated from production paths.
+- Do not add a Claude usage-limit watcher, overnight supervisor, demo fallback,
+  or unrelated conversational AI.
+- Do not merge PR #1 while Windows, provider, physical-device, and visual gates
+  remain unverified, even when local automated suites are green.

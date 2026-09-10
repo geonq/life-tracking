@@ -1,73 +1,54 @@
 # PHASE STATUS — LifeOS
 
-Updated 2026-09-09 21:16 Europe/Berlin.
+Updated 2026-09-10 09:50 Europe/Berlin.
 
-- Overall: **NO-GO for completion, merge, and release.** The foundation is
-  useful, but fresh Astra and Windows evidence found local blockers.
+- Overall: **local source gates green; release and merge NO-GO pending external
+  runtime evidence**.
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- Latest source commit: `1129a92`; preceding commits `5087c04` and `7fc3cc3`
-  contain the Windows release and visual contract work.
-- PR #1 is open, draft, and mergeable; it is not merged.
-- No Claude usage-limit watcher or overnight supervisor is in the product or
-  workflow. Backend Tailscale snapshot/Codex tasks remain allowed when they
-  provide authentication or automatic sync infrastructure.
+- Local `HEAD`: `3f274e9`; remote branch: `46c4160` before the current
+  coordination refresh is committed and pushed.
+- PR #1 was last observed open and draft. Refresh its state with `gh` after push.
+- No Claude usage watcher or overnight supervisor exists in the product.
 
 ## Completed local work
 
-1. SF Pro design system, responsive shells, interaction/motion primitives,
-   readable widgets, and removal of Advisor/generic conversational AI.
-2. Calendar transport/authentication, mobile reachability, Mac magnification,
-   precise dates, bounded Codable, and safe tombstone ordering.
-3. Live Finance/Trade Republic import, Fitness/HealthKit/workout contracts,
-   Nutrition capture, Tax privacy/persistence, and native Shortcut intents.
-4. API/gateway security, bounded reads, live/fixture separation, Windows
-   staging/ACL/recovery contracts, and explicit runtime path handling.
-5. Clean Windows candidate build and 81-entry manifest verification; exact
-   Node/service-host artifacts are accepted under the scoped 256 MiB contract.
-
-## Fresh review findings
-
-- Astra Medium: P1 shell Finance state/actions, shared Finance range scope,
-  durable photo-meal receipt identity, and module-state preservation; P2 exact
-  chart selection, Settings, Calendar header pinch, Usage decimation, and
-  widget destinations.
-- Windows candidate: stable `SOURCE_SHA.txt` verification fails because the
-  PowerShell path identity chain is nested when callers expect a flat array.
-- Backend audit: likely PowerShell 5.1 parse issue in `Copy-GatewayCodeBundle`,
-  plus bounded-body, barcode error-attribution, finance failure-state,
-  writer/secret ancestor, and consent-restart follow-ups.
+1. Shared visual system: SF Pro/system type, compact hierarchy, semantic icons,
+   separated accents, Home/Usage card geometry, widget contrast, and motion kit.
+2. Calendar: authenticated pairing/sync, bounded validation, minute-precise
+   restoration, bottom-edge clamping, mobile scrolling, paging, editing, and
+   Mac magnification.
+3. Finance/Fitness/Nutrition/Tax: live-source contracts, workout tracking,
+   durable imports/receipts, privacy boundaries, atomic stores, and Shortcut
+   intents.
+4. API/gateway/Windows source: bounded reads/bodies, local Host/auth checks,
+   secret handling, explicit executable resolution, ACL/recovery/staging rules,
+   and bounded protected-storage concurrency.
+5. Navigation/state: scene-retained Usage/Finance/Fitness/Calendar state, stable
+   Mac module identity, Home↔Usage retention, and reversal-aware transitions.
 
 ## Verification
 
-- API: 131 tests and TypeScript typecheck pass.
-- Gateway: 447 tests pass with two dependency warnings.
-- Windows source/deployment suite: 68 tests pass with loopback permission;
-  design source suite: 11 tests pass.
-- Current iOS generic test build succeeds; current macOS logic/snapshots: 49
-  tests pass. The 1,526 iOS simulator tests are prior baseline evidence
-  because this Mac has no available simulator runtime.
-- Source validators: 157 tests and 47 subtests pass on the preceding baseline.
-- Available unsigned LifeOS build, Swift parsing, XcodeGen, native calendar,
-  release invariants, removed-product scan, and diff check pass.
-- Earlier Astra foundation follow-ups remain repaired, but the fresh Astra
-  implementation gate is NO-GO until the findings above are addressed.
+- Gateway: **463 passed**; API: **140 passed** plus TypeScript typecheck.
+- macOS `LifeOSMacLogic`: unsigned build passed and **54 tests passed**.
+- Generic unsigned iOS `LifeOSLogic` build passed.
+- Swift parsing and `git diff --check` passed.
+- CoreSimulator is currently unavailable, so current iPhone UI/logic test
+  execution is blocked by the host service rather than a recorded app failure.
 
 ## Blocking acceptance
 
-- Windows PowerShell 5.1 suites, candidate installation, standalone runtime,
-  Tailscale Serve, and recovery/readback.
-- Local Windows verifier/installer repairs and a successful staged preflight.
-- Native B/F state and receipt tranches, followed by C/D/E/G presentation
-  review, before final UI acceptance.
-- Enable Banking provider consent and real finance observations.
-- Physical iPhone HealthKit/Zepp/Shortcuts/USB behavior and Personal Team
-  signing/renewal.
-- iOS/macOS UI and WidgetKit visual/gesture acceptance, including transparent
-  grey-wallpaper states and Mac pinch/hover behavior.
-- Obsidian mind-map integration remains issue #2 scope.
+- Staged Windows verifier/preflight, installation, standalone runtime, Tailscale
+  Serve, restart recovery, and remote readback on the always-on PC.
+- Real Enable Banking consent and observations; real Trade Republic import.
+- Physical iPhone 17 HealthKit/Zepp/Shortcut/USB behavior and seven-day signing.
+- Mac and iPhone visual/gesture/widget evidence, including compact text,
+  transparent grey-wallpaper widgets, calendar scroll/pinch, sheets, hover, and
+  rapid navigation reversal.
+- GitHub status refresh, attributable push, and PR review/merge decision.
+- Obsidian graph/mind-map feasibility remains issue #2.
 
-## Rule
+## Operating rule
 
-Keep changes attributable and coordination files under 200 lines. Record
-external evidence separately from source evidence; do not mark this phase
-complete until every blocking acceptance item has a result.
+Do not mark this phase complete from automated tests alone. Keep each coordination
+file under 200 lines, record external evidence separately, and stop every
+completed build, test, worker, or temporary server before starting another.
