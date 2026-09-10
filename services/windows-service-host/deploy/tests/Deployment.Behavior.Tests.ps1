@@ -152,6 +152,14 @@ try {
     # assertion reaches the invalid-byte branch rather than a correct,
     # transient stability rejection.
     Start-Sleep -Milliseconds 100
+    $stableInvalidToken = $false
+    for ($attempt = 0; $attempt -lt 5 -and -not $stableInvalidToken; $attempt++) {
+        try {
+            $null = Read-LifeOSCappedFileBytes -Path $invalidToken -MaxBytes 256 -Description 'invalid token fixture'
+            $stableInvalidToken = $true
+        } catch { Start-Sleep -Milliseconds 100 }
+    }
+    Assert-Behavior $stableInvalidToken 'invalid token fixture becomes readable before its content diagnostic is asserted.'
     Assert-BehaviorThrowsSafe { Assert-TailscaleEdgeTokenBytes $invalidToken } 'LIFEOS_TAILSCALE_EDGE_TOKEN source is invalid' $fixtureToken
 } finally {
     Remove-Item -LiteralPath $tokenRoot -Recurse -Force -ErrorAction SilentlyContinue
