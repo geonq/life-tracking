@@ -422,7 +422,7 @@ Assert-BehaviorThrows { Get-LifeOSPreviousInstalledGeneration -MarkerState 'acti
         foreach ($name in @('main.py', 'gateway_launcher.py', 'enablebanking.py', 'supplement_catalog.py', 'supplement_catalog_schema.sql', 'supplement_catalog_seed.sql')) {
             [IO.File]::WriteAllText((Join-Path $gatewaySource $name), "fixture-$name")
         }
-        . (Join-Path $deploy 'install.ps1') -DefineOnly
+        . (Join-Path $deploy 'install.ps1') -DefineOnly -GatewaySource $gatewaySource
         $stage = Copy-GatewayCodeBundle -GatewaySource $gatewaySource -GatewayEntryPoint (Join-Path $gatewaySource 'main.py') -Destination $gatewayDestination -LauncherSource (Join-Path $gatewaySource 'gateway_launcher.py') -BackupDirectory $backupDirectory
         $releaseManifest = Read-LifeOSBoundedJsonFile -Path (Join-Path $gatewayDestination 'gateway-release.manifest.json') -MaxBytes $script:LifeOSGenerationManifestMaxBytes -Description 'gateway bundle fixture manifest'
         $bundleFiles = @($releaseManifest.bundleFiles)
