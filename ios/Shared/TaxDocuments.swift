@@ -295,7 +295,12 @@ private enum TaxPrivacy {
         let bounded = boundedText(text, maximumCharacters: maximumCharacters)
         guard !bounded.isEmpty, !replacements.isEmpty else { return bounded }
         var result = bounded
-        for (source, replacement) in replacements.sorted(by: { $0.key.count > $1.key.count }) {
+        for (source, replacement) in replacements.sorted(by: {
+            if $0.key.count != $1.key.count {
+                return $0.key.count > $1.key.count
+            }
+            return $0.key < $1.key
+        }) {
             guard !source.isEmpty,
                   let regex = try? NSRegularExpression(
                     pattern: NSRegularExpression.escapedPattern(for: source),
@@ -306,6 +311,114 @@ private enum TaxPrivacy {
             }
         }
         return result
+    }
+
+    /// Replaces known identifiers while preserving validated monetary spans.
+    /// A long numeric identifier can be a substring of a real amount such as
+    /// `12345678901.00`; replacing that substring would corrupt financial data
+    /// and its evidence. Matches elsewhere still use the authoritative
+    /// candidate mapping before the normal privacy classifier runs.
+    static func replacingKnownIdentifierValuesOutsideMonetarySpans(
+        in text: String,
+        replacements: [String: String],
+        maximumCharacters: Int = TaxDocumentLimits.maximumFieldCharacters
+    ) -> String {
+        let bounded = boundedText(text, maximumCharacters: maximumCharacters)
+        guard !bounded.isEmpty, !replacements.isEmpty else { return bounded }
+        var result = bounded
+
+        for (source, replacement) in replacements.sorted(by: {
+            if $0.key.count != $1.key.count {
+                return $0.key.count > $1.key.count
+            }
+            return $0.key < $1.key
+        }) {
+            guard !source.isEmpty,
+                  let regex = try? NSRegularExpression(
+                    pattern: NSRegularExpression.escapedPattern(for: source),
+                    options: .caseInsensitive
+                  ) else { continue }
+
+            let sourceNSString = result as NSString
+            let fullRange = NSRange(location: 0, length: sourceNSString.length)
+            let monetaryRanges = ordinaryDecimalAmountSpanRegex.matches(
+                in: result,
+                range: fullRange
+            ).map(\.range)
+            var monetaryIndex = 0
+
+            result = replacingMatchRanges(regex, in: result) { source, match in
+                while monetaryIndex < monetaryRanges.count,
+                      NSMaxRange(monetaryRanges[monetaryIndex]) <= match.range.location {
+                    monetaryIndex += 1
+                }
+                let matchEnd = NSMaxRange(match.range)
+                var protectedRanges: [NSRange] = []
+                var candidateIndex = monetaryIndex
+                while candidateIndex < monetaryRanges.count {
+                    let monetaryRange = monetaryRanges[candidateIndex]
+                    if monetaryRange.location >= matchEnd { break }
+                    if match.range.location < NSMaxRange(monetaryRange),
+                       monetaryRange.location < matchEnd {
+                        protectedRanges.append(monetaryRange)
+                    }
+                    candidateIndex += 1
+                }
+                guard !protectedRanges.isEmpty else {
+                    return (match.range, replacement)
+                }
+
+                var pieces: [String] = []
+                pieces.reserveCapacity(protectedRanges.count * 2 + 1)
+                var cursor = match.range.location
+                for protectedRange in protectedRanges {
+                    let protectedStart = max(cursor, protectedRange.location)
+                    let protectedEnd = min(matchEnd, NSMaxRange(protectedRange))
+                    guard protectedStart < protectedEnd else { continue }
+                    if cursor < protectedStart {
+                        pieces.append(maskedIdentifierFragment(source.substring(with: NSRange(
+                            location: cursor,
+                            length: protectedStart - cursor
+                        ))))
+                    }
+                    pieces.append(source.substring(with: NSRange(
+                        location: protectedStart,
+                        length: protectedEnd - protectedStart
+                    )))
+                    cursor = protectedEnd
+                }
+                if cursor < matchEnd {
+                    pieces.append(maskedIdentifierFragment(source.substring(with: NSRange(
+                        location: cursor,
+                        length: matchEnd - cursor
+                    ))))
+                }
+                return (match.range, pieces.joined())
+            }
+        }
+        return result
+    }
+
+    private static func maskedIdentifierFragment(_ fragment: String) -> String {
+        let isWhitespace: (Character) -> Bool = { character in
+            character.unicodeScalars.allSatisfy {
+                CharacterSet.whitespacesAndNewlines.contains($0)
+            }
+        }
+        var sensitiveStart = fragment.startIndex
+        while sensitiveStart < fragment.endIndex, isWhitespace(fragment[sensitiveStart]) {
+            sensitiveStart = fragment.index(after: sensitiveStart)
+        }
+        var sensitiveEnd = fragment.endIndex
+        while sensitiveEnd > sensitiveStart {
+            let previous = fragment.index(before: sensitiveEnd)
+            guard isWhitespace(fragment[previous]) else { break }
+            sensitiveEnd = previous
+        }
+        guard sensitiveStart < sensitiveEnd else { return fragment }
+        return String(fragment[..<sensitiveStart])
+            + String(repeating: "*", count: 8)
+            + String(fragment[sensitiveEnd...])
     }
 
     static func identifierReplacements(for candidates: [TaxCandidate?]) -> [String: String] {
@@ -551,11 +664,48 @@ private enum TaxPrivacy {
         return boundedText(redacted, maximumCharacters: maximumCharacters)
     }
 
-    static func sanitizePageText(_ text: String) -> String {
-        let bounded = boundedText(text, maximumCharacters: TaxDocumentLimits.maximumPageCharacters)
+    static func sanitizeAmountValue(
+        _ text: String,
+        replacements: [String: String],
+        visibleSuffixes: Set<String>
+    ) -> String {
+        let bounded = boundedText(text, maximumCharacters: TaxDocumentLimits.maximumFieldCharacters)
+        let replaced = replacingKnownIdentifierValuesOutsideMonetarySpans(
+            in: bounded,
+            replacements: replacements,
+            maximumCharacters: TaxDocumentLimits.maximumFieldCharacters
+        )
+        return sanitizePublishedField(
+            replaced,
+            maximumCharacters: TaxDocumentLimits.maximumFieldCharacters,
+            visibleSuffixes: visibleSuffixes
+        )
+    }
+
+    static func sanitizeAmountEvidence(
+        _ text: String,
+        replacements: [String: String]
+    ) -> String {
+        let bounded = boundedText(
+            text,
+            maximumCharacters: TaxDocumentLimits.maximumEvidenceCharacters
+        )
+        let replaced = replacingKnownIdentifierValuesOutsideMonetarySpans(
+            in: bounded,
+            replacements: replacements,
+            maximumCharacters: TaxDocumentLimits.maximumEvidenceCharacters
+        )
+        return sanitizeEvidenceSnippet(replaced)
+    }
+
+    static func sanitizePageText(
+        _ text: String,
+        maximumCharacters: Int = TaxDocumentLimits.maximumPageCharacters
+    ) -> String {
+        let bounded = boundedText(text, maximumCharacters: maximumCharacters)
         var redacted = redactUnlabelledAlphaNumericIdentifiers(
-            in: redactIdentifiers(in: bounded, maximumCharacters: TaxDocumentLimits.maximumPageCharacters),
-            maximumCharacters: TaxDocumentLimits.maximumPageCharacters
+            in: redactIdentifiers(in: bounded, maximumCharacters: maximumCharacters),
+            maximumCharacters: maximumCharacters
         )
         redacted = replacingMatchRanges(secretReferenceSpanRegex, in: redacted) { _, match in
             (match.range, evidencePrivacyPlaceholder)
@@ -570,7 +720,7 @@ private enum TaxPrivacy {
             guard hasIdentifierMaterial, !isCanonicalMaskedIdentifier(token) else { return nil }
             return (match.range, evidencePrivacyPlaceholder)
         }
-        return boundedText(redacted, maximumCharacters: TaxDocumentLimits.maximumPageCharacters)
+        return boundedText(redacted, maximumCharacters: maximumCharacters)
     }
 
     /// The one privacy boundary for evidence snippets. Every evidence field
@@ -1140,8 +1290,11 @@ public struct TaxDocument: Codable, Equatable, Identifiable, Sendable {
         replacements: [String: String],
         visibleSuffixes: Set<String>
     ) -> TaxAmount {
+        // Monetary spans are preserved only in the amount value and evidence.
+        // Labels remain ordinary publication fields and therefore receive the
+        // full identifier replacement map.
         TaxAmount(
-            value: redactedField(
+            value: TaxPrivacy.sanitizeAmountValue(
                 amount.value,
                 replacements: replacements,
                 visibleSuffixes: visibleSuffixes
@@ -1151,7 +1304,13 @@ public struct TaxDocument: Codable, Equatable, Identifiable, Sendable {
                 replacements: replacements,
                 visibleSuffixes: visibleSuffixes
             ),
-            evidence: redactedEvidence(amount.evidence, replacements: replacements)
+            evidence: TaxEvidence(
+                page: amount.evidence.page,
+                snippet: TaxPrivacy.sanitizeAmountEvidence(
+                    amount.evidence.snippet,
+                    replacements: replacements
+                )
+            )
         )
     }
 
@@ -1222,7 +1381,13 @@ public struct TaxDocument: Codable, Equatable, Identifiable, Sendable {
                 in: redacted,
                 maximumCharacters: TaxDocumentLimits.maximumPageCharacters
             )
-            let sanitizedPage = TaxPrivacy.sanitizePageText(redactedPage)
+            // Redaction can expand short untrusted tokens. Let the aggregate
+            // byte bound observe that expansion so it can truncate and report
+            // it, rather than hiding it behind a per-page character cap.
+            let sanitizedPage = TaxPrivacy.sanitizePageText(
+                redactedPage,
+                maximumCharacters: Int.max
+            )
             let boundedOutput = TaxPrivacy.boundedUTF8Prefix(
                 sanitizedPage,
                 maximumBytes: remainingOutputBytes

@@ -704,7 +704,8 @@ private struct LifeOSIOSSceneRoot: View {
                             showingUsage = false
                             selectedModuleRoute = nil
                         }
-                    }
+                    },
+                    onOpenSettings: { navigate(.settings) }
                 )
                 .transition(routeTransition)
             } else {

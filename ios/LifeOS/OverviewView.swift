@@ -195,11 +195,11 @@ struct OverviewView: View {
     /// remain navigable, but they never present an unavailable operation as a
     /// button of their own.
     private var noSourceDashboard: some View {
-        VStack(alignment: .leading, spacing: LifeOSTokens.overviewCardGap + 4) {
+        OverviewSupportingLayout {
             noSourceStatusBlock
             noSourceModuleList
         }
-        .frame(maxWidth: 720, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityIdentifier("overview-no-source")
     }
 
@@ -229,40 +229,21 @@ struct OverviewView: View {
     }
 
     private var noSourceStatusBlock: some View {
-        LifeOSCard(
-            level: .surface,
-            cornerRadius: LifeOSTokens.Radius.widget,
-            padding: LifeOSTokens.Space.md
-        ) {
-            VStack(alignment: .leading, spacing: LifeOSTokens.Space.sm) {
-                HStack(alignment: .top, spacing: LifeOSTokens.Space.sm) {
-                    LifeOSIcon(.settings, context: .card)
-                        .foregroundStyle(LifeOSTokens.accent)
-                        .frame(width: 24, height: 24)
-
-                    VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
-                        Text("No connected sources")
-                            .lifeOSTypography(.cardTitle)
-                            .foregroundStyle(LifeOSTokens.primaryText)
-                        Text("Connect a supported source in Settings to populate Home with observed data.")
-                            .lifeOSTypography(.body)
-                            .foregroundStyle(LifeOSTokens.secondaryText)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-
-                if openDestination != nil {
-                    Button {
-                        openDestination?(.settings)
-                    } label: {
-                        Text("Open Settings")
-                    }
-                    .buttonStyle(LifeOSButtonStyle(.primary))
-                    .accessibilityIdentifier("overview-no-source-settings")
-                    .accessibilityHint("Opens the supported source setup destinations")
-                }
-            }
+        let settingsAction: (() -> Void)?
+        if let openDestination {
+            settingsAction = { openDestination(.settings) }
+        } else {
+            settingsAction = nil
         }
+
+        return LifeOSEmptyStatePanel(
+            icon: .settings,
+            title: "No connected sources",
+            explanation: "Connect a supported source in Settings to populate Home with observed data.",
+            actionTitle: settingsAction == nil ? nil : "Open Settings",
+            action: settingsAction,
+            actionAccessibilityIdentifier: "overview-no-source-settings"
+        )
         .accessibilityIdentifier("overview-no-source-status")
     }
 

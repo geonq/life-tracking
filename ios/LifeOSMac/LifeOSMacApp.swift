@@ -866,7 +866,8 @@ struct LifeOSMacRootView: View {
             analytics: usesVisualFixtures ? DemoUsageAnalytics.snapshots : usageCoordinator.analytics,
             state: usesVisualFixtures ? .demo : usageCoordinator.state,
             refreshAction: usesVisualFixtures ? nil : { await usageCoordinator.refresh() },
-            onBack: interactive ? { select(.home) } : nil
+            onBack: interactive ? { select(.home) } : nil,
+            onOpenSettings: interactive ? { navigate(to: .settings) } : nil
         )
     }
 

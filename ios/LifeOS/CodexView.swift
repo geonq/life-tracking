@@ -4,14 +4,24 @@ import Charts
 struct CodexView: View {
     let snapshot: ProviderSnapshot
     let analytics: [UsageAnalyticsSnapshot]
+    private let onOpenSettings: (() -> Void)?
 
-    init(snapshot: ProviderSnapshot, analytics: [UsageAnalyticsSnapshot] = []) {
+    init(
+        snapshot: ProviderSnapshot,
+        analytics: [UsageAnalyticsSnapshot] = [],
+        onOpenSettings: (() -> Void)? = nil
+    ) {
         self.snapshot = snapshot
         self.analytics = analytics
+        self.onOpenSettings = onOpenSettings
     }
 
     var body: some View {
-        UsageView(snapshots: [snapshot], analytics: analytics)
+        UsageView(
+            snapshots: [snapshot],
+            analytics: analytics,
+            onOpenSettings: onOpenSettings
+        )
     }
 }
 
@@ -73,6 +83,7 @@ struct UsageView: View {
     let state: UsageLoadState
     let refreshAction: (() async -> Void)?
     private let onBack: (() -> Void)?
+    private let onOpenSettings: (() -> Void)?
     private let analytics: [UsageAnalyticsSnapshot]
 
     // These selections belong to the scene, not to one mounted copy of the
@@ -87,12 +98,14 @@ struct UsageView: View {
         analytics: [UsageAnalyticsSnapshot],
         state: UsageLoadState = .observed,
         refreshAction: (() async -> Void)? = nil,
-        onBack: (() -> Void)? = nil
+        onBack: (() -> Void)? = nil,
+        onOpenSettings: (() -> Void)? = nil
     ) {
         self.snapshots = snapshots
         self.state = state
         self.refreshAction = refreshAction
         self.onBack = onBack
+        self.onOpenSettings = onOpenSettings
         self.analytics = analytics
     }
 
@@ -214,8 +227,9 @@ struct UsageView: View {
                     } else {
                         usageHeader(nil)
                         UsageEmptyState(
-                            title: "Usage data unavailable",
-                            detail: "No provider account is connected. LifeOS will not display placeholder usage."
+                            title: "Connect a usage provider",
+                            detail: "No provider account is connected. Connect one in Settings to see observed usage.",
+                            onOpenSettings: onOpenSettings
                         )
                     }
                 }
@@ -831,17 +845,27 @@ private struct UsageAdditionalObservations: View {
 struct UsageEmptyState: View {
     let title: String
     let detail: String
+    let onOpenSettings: (() -> Void)?
+
+    init(
+        title: String,
+        detail: String,
+        onOpenSettings: (() -> Void)? = nil
+    ) {
+        self.title = title
+        self.detail = detail
+        self.onOpenSettings = onOpenSettings
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title).lifeOSTypography(.cardTitle)
-            Text(detail)
-                .lifeOSTypography(.body)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .flatCard()
-        .accessibilityElement(children: .combine)
+        LifeOSEmptyStatePanel(
+            icon: .usage,
+            title: title,
+            explanation: detail,
+            actionTitle: onOpenSettings == nil ? nil : "Open Settings",
+            action: onOpenSettings
+        )
+        .accessibilityIdentifier("usage-empty-state")
     }
 }
 

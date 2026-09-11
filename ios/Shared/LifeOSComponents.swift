@@ -1139,6 +1139,96 @@ public struct LifeOSStateView: View {
     }
 }
 
+/// A page-level empty state for truthful setup and zero-content routes. The
+/// panel owns its surface and border so callers do not need to wrap it in a
+/// second card, while an action is rendered only when both halves of the
+/// action contract are present.
+public struct LifeOSEmptyStatePanel: View {
+    public enum Layout {
+        public static let outerInset: CGFloat = 24
+        public static let internalGap: CGFloat = 12
+        public static let cornerRadius: CGFloat = 12
+        public static let minimumHeight: CGFloat = 160
+        public static let explanationMaxWidth: CGFloat = 480
+    }
+
+    private let icon: LifeOSIconName
+    private let title: String
+    private let explanation: String
+    private let actionTitle: String?
+    private let action: (() -> Void)?
+    private let actionAccessibilityIdentifier: String?
+
+    @Environment(\.displayScale) private var displayScale
+
+    public init(
+        icon: LifeOSIconName,
+        title: String,
+        explanation: String,
+        actionTitle: String? = nil,
+        action: (() -> Void)? = nil,
+        actionAccessibilityIdentifier: String? = nil
+    ) {
+        self.icon = icon
+        self.title = title
+        self.explanation = explanation
+        self.actionTitle = actionTitle
+        self.action = action
+        self.actionAccessibilityIdentifier = actionAccessibilityIdentifier
+    }
+
+    private var hairlineWidth: CGFloat {
+        guard displayScale.isFinite, displayScale > 0 else { return 1 }
+        return 1 / displayScale
+    }
+
+    @ViewBuilder
+    private var actionView: some View {
+        if let action, let actionTitle, !actionTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            Button(actionTitle, action: action)
+                .buttonStyle(LifeOSButtonStyle(.primary))
+                .accessibilityIdentifier(actionAccessibilityIdentifier ?? "lifeos-empty-state-action")
+        }
+    }
+
+    public var body: some View {
+        VStack(alignment: .leading, spacing: Layout.internalGap) {
+            HStack(alignment: .top, spacing: Layout.internalGap) {
+                LifeOSIcon(icon, context: .card)
+                    .foregroundStyle(LifeOSTokens.accent)
+
+                VStack(alignment: .leading, spacing: Layout.internalGap) {
+                    Text(title)
+                        .lifeOSTypography(.cardTitle)
+                        .foregroundStyle(LifeOSTokens.primaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Text(explanation)
+                        .lifeOSTypography(.body)
+                        .foregroundStyle(LifeOSTokens.secondaryText)
+                        .frame(maxWidth: Layout.explanationMaxWidth, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            actionView
+        }
+        .padding(Layout.outerInset)
+        .frame(minHeight: Layout.minimumHeight, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            LifeOSTokens.surface,
+            in: RoundedRectangle(cornerRadius: Layout.cornerRadius, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: Layout.cornerRadius, style: .continuous)
+                .stroke(LifeOSTokens.subtleBorder, lineWidth: hairlineWidth)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("lifeos-empty-state-panel")
+    }
+}
+
 // MARK: - Canonical sheet surface
 
 /// Pure sheet geometry constants shared by the native presentation and its

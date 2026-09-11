@@ -335,15 +335,17 @@ struct TaxDocumentsView: View {
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Button { model.isImporterPresented = true } label: {
-                        HStack(spacing: 6) {
-                            LifeOSIcon(.importDocument).frame(width: 16, height: 16)
-                            Text("Import PDF")
+                    if !model.documents.isEmpty {
+                        Button { model.isImporterPresented = true } label: {
+                            HStack(spacing: 6) {
+                                LifeOSIcon(.importDocument).frame(width: 16, height: 16)
+                                Text("Import PDF")
+                            }
                         }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(model.isImporting)
+                        .accessibilityIdentifier("import-tax-pdf")
                     }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(model.isImporting)
-                    .accessibilityIdentifier("import-tax-pdf")
                 }
                 .padding(LifeOSTokens.pagePadding)
 
@@ -379,14 +381,48 @@ struct TaxDocumentsView: View {
                         }
                         .padding(.vertical, 4)
                     }
-                    ForEach(model.documents) { document in
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(document.title).lifeOSTypography(.cardTitle)
-                            Text("\(document.documentType) · \(document.taxYear.map(String.init) ?? "Year not found") · \(document.confidence.rawValue) confidence")
-                                .lifeOSTypography(.label).foregroundStyle(.secondary)
+                    if model.isWriteBlocked {
+                        Section {
+                            LifeOSEmptyStatePanel(
+                                icon: .security,
+                                title: "Stored documents unavailable",
+                                explanation: "The stored tax documents could not be loaded safely. Saving and deleting are disabled. You can still import a PDF for review, but it cannot be saved until storage is available.",
+                                actionTitle: model.isImporting ? nil : "Import PDF",
+                                action: model.isImporting ? nil : { model.isImporterPresented = true },
+                                actionAccessibilityIdentifier: "import-tax-pdf"
+                            )
+                            .listRowInsets(EdgeInsets())
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                            .padding(.vertical, LifeOSTokens.Space.md)
+                            .accessibilityIdentifier("tax-storage-unavailable")
                         }
+                    } else if model.documents.isEmpty {
+                        Section {
+                            LifeOSEmptyStatePanel(
+                                icon: .importDocument,
+                                title: "No documents yet",
+                                explanation: "Import a PDF to review its locally extracted fields before saving it on this device.",
+                                actionTitle: model.isImporting ? nil : "Import PDF",
+                                action: model.isImporting ? nil : { model.isImporterPresented = true },
+                                actionAccessibilityIdentifier: "import-tax-pdf"
+                            )
+                            .listRowInsets(EdgeInsets())
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                            .padding(.vertical, LifeOSTokens.Space.md)
+                            .accessibilityIdentifier("tax-empty-state")
+                        }
+                    } else {
+                        ForEach(model.documents) { document in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(document.title).lifeOSTypography(.cardTitle)
+                                Text("\(document.documentType) · \(document.taxYear.map(String.init) ?? "Year not found") · \(document.confidence.rawValue) confidence")
+                                    .lifeOSTypography(.label).foregroundStyle(.secondary)
+                            }
+                        }
+                        .onDelete(perform: model.delete)
                     }
-                    .onDelete(perform: model.delete)
                 }
                 .scrollContentBackground(.hidden)
             }

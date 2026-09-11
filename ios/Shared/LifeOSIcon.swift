@@ -76,7 +76,7 @@ public enum LifeOSIconName: Sendable {
         case .grocery: "basket"
         case .shopping: "bag"
         case .reports: "chart.bar.doc"
-        case .fitness: "figure.strengthtraining.traditional"
+        case .fitness: "waveform.path.ecg"
         case .settings: "gearshape"
         case .more: "ellipsis"
         case .close: "xmark"
@@ -194,12 +194,13 @@ public enum LifeOSIconContext: Sendable {
         case .standard: LifeOSTokens.Icon.box
         case .navigation: LifeOSTokens.Icon.statusBox
         case .card: LifeOSTokens.Icon.statusBox
-        case .toolbar, .disclosure: 18
+        case .toolbar: LifeOSTokens.Icon.statusBox
+        case .disclosure: 16
         }
 #else
         switch self {
         case .standard, .navigation, .toolbar: LifeOSTokens.Icon.box
-        case .card: LifeOSTokens.Icon.statusBox
+        case .card: LifeOSTokens.Icon.box
         case .disclosure: 20
         }
 #endif
@@ -209,17 +210,14 @@ public enum LifeOSIconContext: Sendable {
 #if os(macOS)
         switch self {
         case .standard: LifeOSTokens.Icon.glyph
-        case .navigation: 15
-        case .card: 14
-        case .toolbar: 14
+        case .navigation, .card, .toolbar: 16
         case .disclosure: 12
         }
 #else
         switch self {
         case .standard: LifeOSTokens.Icon.glyph
-        case .navigation: 18
-        case .card: 14
-        case .toolbar: 17
+        case .navigation, .toolbar: 20
+        case .card: 18
         case .disclosure: 14
         }
 #endif

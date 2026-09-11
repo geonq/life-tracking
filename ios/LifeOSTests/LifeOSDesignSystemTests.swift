@@ -4,6 +4,82 @@ import UIKit
 @testable import LifeOS
 
 final class LifeOSDesignSystemTests: XCTestCase {
+    @MainActor
+    func testEmptyStatePanelKeepsCompactGeometryWithoutAction() {
+        XCTAssertEqual(LifeOSEmptyStatePanel.Layout.outerInset, 24)
+        XCTAssertEqual(LifeOSEmptyStatePanel.Layout.internalGap, 12)
+        XCTAssertEqual(LifeOSEmptyStatePanel.Layout.cornerRadius, 12)
+        XCTAssertEqual(LifeOSEmptyStatePanel.Layout.minimumHeight, 160)
+        XCTAssertEqual(LifeOSEmptyStatePanel.Layout.explanationMaxWidth, 480)
+
+        let panel = LifeOSEmptyStatePanel(
+            icon: .settings,
+            title: "No connected sources",
+            explanation: "Connect a supported source in Settings to populate Home with observed data."
+        )
+        let controller = UIHostingController(rootView: panel)
+        controller.view.frame = CGRect(x: 0, y: 0, width: 640, height: 1)
+        controller.view.setNeedsLayout()
+        controller.view.layoutIfNeeded()
+
+        XCTAssertGreaterThanOrEqual(
+            controller.sizeThatFits(in: CGSize(width: 640, height: 1_000)).height,
+            LifeOSEmptyStatePanel.Layout.minimumHeight
+        )
+    }
+
+    func testDisconnectedRoutesUseTruthfulPanelsAndRetainTheirGates() throws {
+        let iosRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let components = try String(
+            contentsOf: iosRoot.appendingPathComponent("Shared/LifeOSComponents.swift"),
+            encoding: .utf8
+        )
+        let overview = try String(
+            contentsOf: iosRoot.appendingPathComponent("LifeOS/OverviewView.swift"),
+            encoding: .utf8
+        )
+        let usage = try String(
+            contentsOf: iosRoot.appendingPathComponent("LifeOS/CodexView.swift"),
+            encoding: .utf8
+        )
+        let iosApp = try String(
+            contentsOf: iosRoot.appendingPathComponent("LifeOS/LifeOSApp.swift"),
+            encoding: .utf8
+        )
+        let macApp = try String(
+            contentsOf: iosRoot.appendingPathComponent("LifeOSMac/LifeOSMacApp.swift"),
+            encoding: .utf8
+        )
+        let tax = try String(
+            contentsOf: iosRoot.appendingPathComponent("LifeOS/TaxDocumentsView.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(components.contains("public struct LifeOSEmptyStatePanel"))
+        XCTAssertTrue(components.contains("if let action, let actionTitle"))
+        XCTAssertTrue(overview.contains("showsNoSourceDashboard"))
+        XCTAssertTrue(overview.contains("OverviewSupportingLayout"))
+        XCTAssertTrue(overview.contains("LifeOSEmptyStatePanel"))
+        XCTAssertFalse(overview.contains(".frame(maxWidth: 720"))
+        XCTAssertTrue(usage.contains("Connect a usage provider"))
+        XCTAssertTrue(usage.contains("onOpenSettings"))
+        XCTAssertFalse(usage.contains("Advisor"))
+        XCTAssertTrue(iosApp.contains("onOpenSettings: { navigate(.settings) }"))
+        XCTAssertTrue(macApp.contains("onOpenSettings: interactive ? { navigate(to: .settings) } : nil"))
+        XCTAssertTrue(tax.contains("No documents yet"))
+        XCTAssertTrue(tax.contains("model.documents.isEmpty"))
+        XCTAssertTrue(tax.contains("if model.isWriteBlocked"))
+        XCTAssertTrue(tax.contains("else if model.documents.isEmpty"))
+        XCTAssertTrue(tax.contains("Saving and deleting are disabled"))
+        XCTAssertTrue(tax.contains("it cannot be saved until storage is available"))
+        XCTAssertLessThan(
+            try XCTUnwrap(tax.range(of: "if model.isWriteBlocked")?.lowerBound),
+            try XCTUnwrap(tax.range(of: "else if model.documents.isEmpty")?.lowerBound)
+        )
+    }
+
     func testTypographyFacadeExposesEveryContractRole() {
         XCTAssertEqual(LifeOSTypography.Role.allCases.count, 10)
         XCTAssertEqual(
@@ -425,6 +501,7 @@ final class LifeOSDesignSystemTests: XCTestCase {
     func testIconCatalogUsesContractMappingsAndMonochromeRendering() throws {
         XCTAssertEqual(LifeOSIconName.home.systemImageName, "house")
         XCTAssertEqual(LifeOSIconName.finance.systemImageName, "creditcard")
+        XCTAssertEqual(LifeOSIconName.fitness.systemImageName, "waveform.path.ecg")
         XCTAssertEqual(LifeOSIconName.reports.systemImageName, "chart.bar.doc")
         XCTAssertEqual(LifeOSIconName.calendarPlus.systemImageName, "calendar.badge.plus")
         XCTAssertEqual(LifeOSIconName.close.systemImageName, "xmark")
@@ -434,12 +511,26 @@ final class LifeOSDesignSystemTests: XCTestCase {
         XCTAssertEqual(LifeOSIconContext.standard.glyph, 17)
         XCTAssertLessThan(LifeOSIconContext.disclosure.glyph, LifeOSIconContext.disclosure.box)
 #if os(macOS)
-        XCTAssertEqual(LifeOSIconContext.navigation.glyph, 15)
-        XCTAssertEqual(LifeOSIconContext.card.glyph, 14)
-        XCTAssertEqual(LifeOSIconContext.toolbar.box, 18)
+        XCTAssertEqual(LifeOSIconContext.navigation.box, 20)
+        XCTAssertEqual(LifeOSIconContext.card.box, 20)
+        XCTAssertEqual(LifeOSIconContext.toolbar.box, 20)
+        XCTAssertEqual(LifeOSIconContext.navigation.glyph, 16)
+        XCTAssertEqual(LifeOSIconContext.card.glyph, 16)
+        XCTAssertEqual(LifeOSIconContext.toolbar.glyph, 16)
+        XCTAssertEqual(LifeOSIconContext.disclosure.box, 16)
 #else
-        XCTAssertEqual(LifeOSIconContext.navigation.glyph, 18)
-        XCTAssertEqual(LifeOSIconContext.toolbar.glyph, 17)
+        XCTAssertEqual(LifeOSIconContext.navigation.box, 24)
+        XCTAssertEqual(LifeOSIconContext.card.box, 24)
+        XCTAssertEqual(LifeOSIconContext.toolbar.box, 24)
+        XCTAssertEqual(LifeOSIconContext.navigation.glyph, 20)
+        XCTAssertEqual(LifeOSIconContext.card.glyph, 18)
+        XCTAssertEqual(LifeOSIconContext.toolbar.glyph, 20)
+        XCTAssertEqual(LifeOSIconContext.disclosure.box, 20)
+#endif
+#if os(macOS)
+        XCTAssertEqual(LifeOSIconContext.disclosure.glyph, 12)
+#else
+        XCTAssertEqual(LifeOSIconContext.disclosure.glyph, 14)
 #endif
 
         let iosRoot = URL(fileURLWithPath: #filePath)

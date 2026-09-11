@@ -512,6 +512,122 @@ final class TaxDocumentTests: XCTestCase {
         XCTAssertEqual(try store.load().first?.amounts.first?.value, amount)
     }
 
+    func testKnownIdentifierIsRedactedFromAmountLabelAndEvidenceWithoutChangingMoney() throws {
+        let amount = "12345678901.00"
+        let rawIdentifier = "berlin"
+        let amountEntry = TaxAmount(
+            value: amount,
+            label: rawIdentifier,
+            evidence: TaxEvidence(page: 1, snippet: "Amount \(rawIdentifier) \(amount)")
+        )
+        let document = TaxDocument(
+            title: "Amount privacy",
+            documentType: "Tax",
+            taxYear: 2026,
+            issuer: nil as TaxCandidate?,
+            taxpayerIdentifier: TaxCandidate(
+                value: rawIdentifier,
+                evidence: TaxEvidence(page: 1, snippet: "Reference \(rawIdentifier)")
+            ),
+            referenceIdentifier: nil,
+            dates: [],
+            amounts: [amountEntry],
+            pages: []
+        )
+
+        let inMemoryAmount = try XCTUnwrap(document.amounts.first)
+        XCTAssertEqual(inMemoryAmount.value, amount)
+        XCTAssertFalse(inMemoryAmount.label.localizedCaseInsensitiveContains(rawIdentifier))
+        XCTAssertFalse(inMemoryAmount.evidence.snippet.localizedCaseInsensitiveContains(rawIdentifier))
+        XCTAssertTrue(inMemoryAmount.evidence.snippet.contains(amount))
+
+        let encoded = try JSONEncoder().encode(document)
+        let encodedText = String(decoding: encoded, as: UTF8.self)
+        XCTAssertFalse(encodedText.localizedCaseInsensitiveContains(rawIdentifier))
+        XCTAssertTrue(encodedText.contains(amount))
+
+        let decoded = try JSONDecoder().decode(TaxDocument.self, from: encoded)
+        XCTAssertEqual(decoded.amounts.first?.value, amount)
+        XCTAssertFalse(
+            decoded.amounts.first?.label.localizedCaseInsensitiveContains(rawIdentifier) == true
+        )
+        XCTAssertFalse(
+            decoded.amounts.first?.evidence.snippet.localizedCaseInsensitiveContains(rawIdentifier) == true
+        )
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = TaxDocumentStore(directory: directory)
+        try store.save([document])
+        let stored = String(
+            decoding: try Data(contentsOf: directory.appendingPathComponent("documents.json")),
+            as: UTF8.self
+        )
+        XCTAssertFalse(stored.localizedCaseInsensitiveContains(rawIdentifier))
+        XCTAssertTrue(stored.contains(amount))
+        XCTAssertEqual(try store.load().first?.amounts.first?.value, amount)
+    }
+
+    func testPartiallyOverlappingIdentifierIsRedactedAroundPreservedMoney() throws {
+        let amount = "12.00"
+        let rawIdentifier = "berlin 12"
+        let document = TaxDocument(
+            title: "Partial overlap",
+            documentType: "Tax",
+            taxYear: 2026,
+            issuer: nil as TaxCandidate?,
+            taxpayerIdentifier: TaxCandidate(
+                value: rawIdentifier,
+                evidence: TaxEvidence(page: 1, snippet: "Reference \(rawIdentifier)")
+            ),
+            referenceIdentifier: nil,
+            dates: [],
+            amounts: [TaxAmount(
+                value: amount,
+                label: "Amount",
+                evidence: TaxEvidence(page: 1, snippet: "Amount \(rawIdentifier).00")
+            )],
+            pages: []
+        )
+
+        let safeAmount = try XCTUnwrap(document.amounts.first)
+        XCTAssertEqual(safeAmount.value, amount)
+        XCTAssertFalse(safeAmount.evidence.snippet.localizedCaseInsensitiveContains("berlin"))
+        XCTAssertFalse(safeAmount.evidence.snippet.localizedCaseInsensitiveContains(rawIdentifier))
+        XCTAssertTrue(safeAmount.evidence.snippet.contains(amount))
+
+        let encoded = try JSONEncoder().encode(document)
+        let encodedText = String(decoding: encoded, as: UTF8.self)
+        XCTAssertFalse(encodedText.localizedCaseInsensitiveContains(rawIdentifier))
+        XCTAssertTrue(encodedText.contains(amount))
+        let decoded = try JSONDecoder().decode(TaxDocument.self, from: encoded)
+        XCTAssertEqual(decoded.amounts.first?.value, amount)
+        XCTAssertFalse(
+            decoded.amounts.first?.evidence.snippet.localizedCaseInsensitiveContains("berlin") == true
+        )
+        XCTAssertFalse(
+            decoded.amounts.first?.evidence.snippet.localizedCaseInsensitiveContains(rawIdentifier) == true
+        )
+        XCTAssertTrue(decoded.amounts.first?.evidence.snippet.contains(amount) == true)
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = TaxDocumentStore(directory: directory)
+        try store.save([document])
+        let stored = String(
+            decoding: try Data(contentsOf: directory.appendingPathComponent("documents.json")),
+            as: UTF8.self
+        )
+        XCTAssertFalse(stored.localizedCaseInsensitiveContains(rawIdentifier))
+        XCTAssertTrue(stored.contains(amount))
+        let loaded = try XCTUnwrap(store.load().first?.amounts.first)
+        XCTAssertEqual(loaded.value, amount)
+        XCTAssertFalse(loaded.evidence.snippet.localizedCaseInsensitiveContains("berlin"))
+        XCTAssertTrue(loaded.evidence.snippet.contains(amount))
+    }
+
     func testFilenameDerivedFieldsAreSanitizedWithoutChangingFinancialValues() throws {
         let rawIdentifier = "12345678901"
         let result = TaxDocumentParser.parse(
