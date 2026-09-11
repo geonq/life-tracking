@@ -4,11 +4,12 @@ Updated 2026-09-11 Europe/Berlin.
 
 ## Current verdict
 
-The reviewed source checkpoint is **GREEN** after the final Astra Medium
-security review. Release is still **pending operational and product gates**:
-Windows recovery/install, live-provider reads, device/signing checks, and
-visual acceptance. The review reproduced and cleared the versioned-tax-record
-evidence disclosure. Do not infer runtime/device acceptance from source checks.
+The source security checkpoint is **GREEN** after the final Astra Medium
+review. The shared visual foundation is currently **RED pending repair**:
+Astra found selector-state, semantic-color, contrast, responsive, motion, and
+focus-contract defects at `5767204`; one Luna Max worker is repairing those
+shared files. Release remains pending operational, provider, device, and
+visual acceptance. Do not infer runtime/device acceptance from source checks.
 
 Do not claim a production release, remote backend availability, or device
 acceptance from the local source results. No generic conversational
@@ -19,12 +20,11 @@ product.
 ## Git and review state
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- Source checkpoint: `eb9ca620c4040a2f6ea08f1fe4ddfa1e2ccd1237`.
-- The local branch is 45 commits ahead of its origin-tracking ref and has not
-  been pushed. The latest security checkpoints are `b82f23b` (fail closed on
-  versioned tax evidence), `2fb2b9b` (native privacy test typing), and
-  `eb9ca62` (bounded native tax lookahead). Keep these small, attributable
-  commits when synchronizing.
+- Source checkpoint: `5767204` (`Align shared visual foundation tokens`).
+- The local branch is synchronized with its origin-tracking ref. The latest
+  security checkpoints are `b82f23b` (fail closed on versioned tax evidence),
+  `2fb2b9b` (native privacy test typing), and `eb9ca62` (bounded native tax
+  lookahead). Keep these small, attributable commits when synchronizing.
 - Recent source checkpoints include `ceddd2b` (design validator contract),
   `c814299` (widget typography compile fix), `544633b` (finance detail return),
   `ebbfff2` (gateway/native calendar-limit alignment), `f425b2a` (bounded
@@ -92,6 +92,9 @@ recovery, live penetration results, or physical-device behavior.
   passed; the macOS XCTest result contains **54 passed tests**.
 - The named `LifeOSWidgets` scheme exposes only macOS destinations; that is
   scheme metadata, not a source failure.
+- The shared-foundation token change at `5767204` compiled for unsigned iOS
+  logic and macOS. Full native XCTest and runtime visual acceptance remain
+  unverified; Astra's follow-up review is the current blocker.
 
 ## External acceptance gates
 
@@ -115,12 +118,15 @@ recovery, live penetration results, or physical-device behavior.
 
 ## Next serialized queue
 
-1. Synchronize the reviewed branch and refresh PR state.
-2. Complete bounded Windows recovery,
+1. Land and review the shared-foundation repair, then synchronize the branch
+   and refresh PR state.
+2. Complete the icon/component, chart, shell/truth-gate, and screen visual
+   tranches with an Astra review after each bounded batch.
+3. Complete bounded Windows recovery,
    installation, and remote runtime verification.
-3. Complete provider, physical-device, signing, visual, widget, and
+4. Complete provider, physical-device, signing, visual, widget, and
    CoreSimulator acceptance gates.
-4. Resolve the issue #2 Obsidian/Zepp decisions with evidence before calling
+5. Resolve the issue #2 Obsidian/Zepp decisions with evidence before calling
    the app complete.
 
 Keep this file and the other coordination files below 200 lines. Record new

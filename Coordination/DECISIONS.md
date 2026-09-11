@@ -16,6 +16,9 @@ Updated 2026-09-11 Europe/Berlin.
   start from the currently visible state.
 - Generic conversational assistant/advisor/AI is removed from every product
   layer. Calorie-photo tracking is the only permitted in-app AI behavior.
+- The shared foundation token alignment is at `5767204`. Astra's review found
+  visible selector-state, semantic-action, responsive, motion, and focus
+  defects; screen-level visual work waits for that repair and review.
 
 ## State and data boundaries
 

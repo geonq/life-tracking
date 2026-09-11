@@ -2,15 +2,18 @@
 
 Updated 2026-09-11 Europe/Berlin.
 
-Current checkpoint: `eb9ca620c4040a2f6ea08f1fe4ddfa1e2ccd1237` on
-`lifeos-foundation-checkpoint-20260812`. The local branch is 45 commits ahead
-of origin tracking and has not been pushed. Final Astra Medium source review
-is GREEN; release status remains pending external gates.
+Current checkpoint: `5767204` on `lifeos-foundation-checkpoint-20260812`,
+synchronized with origin. Final Astra Medium source security review is GREEN;
+the shared visual foundation review is RED pending one Luna Max repair. Release
+status remains pending external gates.
 
 ## Active gates
 
-1. Synchronize the reviewed candidate and refresh GitHub PR state.
-2. Complete bounded Windows recovery, candidate install, standalone runtime,
+1. Land and review the shared visual foundation repair, then refresh GitHub PR
+   state.
+2. Complete icon/component, chart, shell/truth-gate, and screen visual batches
+   with bounded Astra reviews.
+3. Complete bounded Windows recovery, candidate install, standalone runtime,
    protected readback, Tailscale Serve, restart recovery, and health checks on
    `domke@tailscaleip`. Current host evidence is stopped `LifeOSAPI`, no
    expected listeners, an active deployment transaction, recovery phase
