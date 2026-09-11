@@ -208,6 +208,11 @@ class WindowsReleaseBuilderTests(unittest.TestCase):
             "$expectedAllowlistLines = ", 1
         )[1].split("foreach ($wheel in @($gatewayDependencyLock.Wheels)) {", 1)[0]
         self.assertIn(
+            "$expectedAllowlistLines = @(Sort-CandidatePaths $expectedAllowlistNames)",
+            verifier,
+        )
+        self.assertNotIn("Sort-Object", comparison)
+        self.assertIn(
             "$sortedAllowlistLines = @(Sort-CandidatePaths $allowlistLines)",
             comparison,
         )
@@ -235,6 +240,16 @@ class WindowsReleaseBuilderTests(unittest.TestCase):
                 [
                     "typing_extensions-4.15.0-py3-none-any.whl",
                     "tzdata-2026.3-py2.py3-none-any.whl",
+                ],
+            ),
+            (
+                [
+                    "pydantic-2.11.7-cp312-cp312-win_amd64.whl",
+                    "pydantic_core-2.33.2-cp312-cp312-win_amd64.whl",
+                ],
+                [
+                    "pydantic-2.11.7-cp312-cp312-win_amd64.whl",
+                    "pydantic_core-2.33.2-cp312-cp312-win_amd64.whl",
                 ],
             ),
         )

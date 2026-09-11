@@ -410,7 +410,11 @@ try {
 } finally {
     $allowlistReader.Dispose()
 }
-$expectedAllowlistLines = @($gatewayDependencyLock.Wheels | ForEach-Object { [string]$_.Filename } | Sort-Object)
+$expectedAllowlistNames = New-Object 'System.Collections.Generic.List[string]'
+foreach ($wheel in @($gatewayDependencyLock.Wheels)) {
+    [void]$expectedAllowlistNames.Add([string]$wheel.Filename)
+}
+$expectedAllowlistLines = @(Sort-CandidatePaths $expectedAllowlistNames)
 $sortedAllowlistLines = @(Sort-CandidatePaths $allowlistLines)
 if (($sortedAllowlistLines -join "`n") -ne (@($allowlistLines) -join "`n") -or
     (@($allowlistLines) -join "`n") -ne ($expectedAllowlistLines -join "`n")) {
