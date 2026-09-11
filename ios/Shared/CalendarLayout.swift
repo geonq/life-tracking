@@ -1069,11 +1069,13 @@ public enum CalendarInteractionLayout {
     public static let snapIntervalMinutes = 15
     public static let minimumDurationMinutes = 15
     public static let creationDurationMinutes = 60
-    /// The density limits are shared by the macOS trackpad gesture and its
-    /// secondary slider fallback. Keeping them in the layout layer prevents
-    /// either control from creating a scale the timeline cannot render.
-    public static let minimumHourHeight: Double = 38
-    public static let maximumHourHeight: Double = 110
+    /// The density range and default are shared by the macOS trackpad gesture
+    /// and its secondary density menu. Keeping them in the layout layer
+    /// prevents either control from creating a scale the timeline cannot
+    /// render.
+    public static let minimumHourHeight: Double = 40
+    public static let defaultHourHeight: Double = 64
+    public static let maximumHourHeight: Double = 120
     /// The pinned iPhone gutter is a stable 44pt touch/layout column. Keeping
     /// it outside the moving day surface prevents horizontal paging from
     /// moving or clipping the clock labels.
@@ -1560,7 +1562,7 @@ public enum CalendarInteractionLayout {
     /// then placed back under the same viewport point:
     ///
     ///     m = 60 * (s0 + p) / h0
-    ///     h1 = clamp(h0 * factor, 38, 110)
+    ///     h1 = clamp(h0 * factor, 40, 120)
     ///     s1 = clamp(m * h1 / 60 - p, 0, H(h1) - V)
     ///
     /// This is pure so the focal-point contract can be tested without an

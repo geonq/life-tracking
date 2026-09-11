@@ -375,7 +375,11 @@ final class CalendarLayoutTests: XCTestCase {
         let day = dayStart
         // A mobile timeline reserves enough trailing space for the actual
         // finite viewport and the known bottom occlusion budget.
-        for hourHeight in [38.0, 54.0, 110.0] {
+        for hourHeight in [
+            CalendarInteractionLayout.minimumHourHeight,
+            CalendarInteractionLayout.defaultHourHeight,
+            CalendarInteractionLayout.maximumHourHeight
+        ] {
             for viewport in [597.0, 679.0, 731.0] {
                 let axis = CalendarInteractionLayout.timelineHeight(
                     days: [day], hourHeight: hourHeight, calendar: calendar
@@ -424,6 +428,14 @@ final class CalendarLayoutTests: XCTestCase {
         )
     }
 
+    func testCalendarDensityContractUsesRequestedBoundsAndDefault() {
+        XCTAssertEqual(CalendarInteractionLayout.minimumHourHeight, 40)
+        XCTAssertEqual(CalendarInteractionLayout.defaultHourHeight, 64)
+        XCTAssertEqual(CalendarInteractionLayout.maximumHourHeight, 120)
+        XCTAssertLessThan(CalendarInteractionLayout.minimumHourHeight, CalendarInteractionLayout.defaultHourHeight)
+        XCTAssertLessThan(CalendarInteractionLayout.defaultHourHeight, CalendarInteractionLayout.maximumHourHeight)
+    }
+
     func testTimelineZoomKeepsThePinchFocalMinuteStationary() {
         let result = CalendarInteractionLayout.zoomedTimeline(
             hourHeight: 54,
@@ -445,7 +457,7 @@ final class CalendarLayoutTests: XCTestCase {
 
     func testTimelineZoomClampsDensityAndScrollToFiniteContentBounds() {
         let result = CalendarInteractionLayout.zoomedTimeline(
-            hourHeight: 54,
+            hourHeight: CalendarInteractionLayout.defaultHourHeight,
             scrollOffset: .infinity,
             focalViewportOffset: .infinity,
             magnification: .infinity,
@@ -453,6 +465,7 @@ final class CalendarLayoutTests: XCTestCase {
         )
 
         XCTAssertEqual(result.hourHeight, CalendarInteractionLayout.maximumHourHeight)
+        XCTAssertTrue(result.hourHeight.isFinite)
         XCTAssertEqual(
             result.scrollOffset,
             CalendarInteractionLayout.timelineMaximumScrollOffset(
@@ -464,6 +477,18 @@ final class CalendarLayoutTests: XCTestCase {
         )
         XCTAssertTrue(result.scrollOffset.isFinite)
         XCTAssertGreaterThanOrEqual(result.scrollOffset, 0)
+
+        let minimum = CalendarInteractionLayout.zoomedTimeline(
+            hourHeight: CalendarInteractionLayout.defaultHourHeight,
+            scrollOffset: 0,
+            focalViewportOffset: 0,
+            magnification: 0.25,
+            viewportHeight: 600
+        )
+        XCTAssertEqual(minimum.hourHeight, CalendarInteractionLayout.minimumHourHeight)
+        XCTAssertTrue(minimum.hourHeight.isFinite)
+        XCTAssertTrue(minimum.scrollOffset.isFinite)
+        XCTAssertGreaterThanOrEqual(minimum.scrollOffset, 0)
     }
 
     func testTimelineZoomSessionRestoresInterruptedPinchAndCommitsOnlyOnEnd() {
@@ -792,6 +817,17 @@ final class CalendarLayoutTests: XCTestCase {
 
         XCTAssertEqual(state.timelineScrollAnchor, anchor)
         XCTAssertTrue(state.didRestoreTimelinePosition)
+    }
+
+    @MainActor
+    func testCalendarPresentationStateDefaultsToCalendarDensity() {
+        let state = CalendarPresentationState()
+
+        XCTAssertEqual(
+            state.hourHeight,
+            CGFloat(CalendarInteractionLayout.defaultHourHeight),
+            accuracy: 0.0001
+        )
     }
 
     func testCalendarTimelineRestorationPolicyUsesRequestThenSceneAnchorThenDefault() {

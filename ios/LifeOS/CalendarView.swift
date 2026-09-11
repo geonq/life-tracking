@@ -33,7 +33,7 @@ public final class CalendarPresentationState: ObservableObject {
     public init(
         selectedDate: Date = .now,
         startsInMonthMode: Bool = false,
-        hourHeight: CGFloat = 54,
+        hourHeight: CGFloat = CGFloat(CalendarInteractionLayout.defaultHourHeight),
         timelineScrollAnchor: CalendarTimelineScrollAnchor? = nil
     ) {
         self.selectedDate = selectedDate
@@ -1113,11 +1113,11 @@ public struct CalendarView: View {
 
     private var macDensityControls: some View {
         Menu {
-            Button("Compact · 38 pt") { setMacHourHeight(CGFloat(CalendarInteractionLayout.minimumHourHeight)) }
-            Button("Default · 54 pt") { setMacHourHeight(54) }
-            Button("Comfortable · 80 pt") { setMacHourHeight(80) }
+            Button("Compact · 40 pt") { setMacHourHeight(CGFloat(CalendarInteractionLayout.minimumHourHeight)) }
+            Button("Default · 64 pt") { setMacHourHeight(CGFloat(CalendarInteractionLayout.defaultHourHeight)) }
+            Button("Comfortable · 96 pt") { setMacHourHeight(96) }
             Divider()
-            Button("Reset") { setMacHourHeight(54) }
+            Button("Reset · 64 pt") { setMacHourHeight(CGFloat(CalendarInteractionLayout.defaultHourHeight)) }
         } label: {
             HStack(spacing: 5) {
                 LifeOSIcon(.zoomIn, context: .toolbar)
