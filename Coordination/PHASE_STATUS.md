@@ -10,8 +10,8 @@ Updated 2026-09-12 Europe/Berlin.
   versioned-tax-record evidence bypass. No source-code blocker remains under
   the review criteria.
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- Source checkpoint: `b05c4fb`, synchronized with origin and draft PR #1.
-  Astra's final
+- Source code checkpoint: `b05c4fb`; coordination tip: `84b8336`, both
+  synchronized with origin and draft PR #1. Astra's final
   foundation re-review is GREEN at `6751bb5`, and the ChartKit/Usage review is
   GREEN at `6713de1`. Both responsive containers own their builder content;
   chart gaps, selection, and bounded rendering are covered.

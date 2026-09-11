@@ -2,9 +2,10 @@
 
 Updated 2026-09-12 Europe/Berlin.
 
-Current checkpoint: `b05c4fb` on `lifeos-foundation-checkpoint-20260812`,
-synchronized with origin and draft PR #1. Final Astra Medium source security,
-shared foundation, ChartKit/Usage, and Calendar density reviews are GREEN.
+Current source checkpoint: `b05c4fb`; coordination tip: `84b8336` on
+`lifeos-foundation-checkpoint-20260812`, synchronized with origin and draft PR
+#1. Final Astra Medium source security, shared foundation, ChartKit/Usage, and
+Calendar density reviews are GREEN.
 Release status remains pending external gates.
 
 ## Active gates

@@ -35,10 +35,12 @@ product.
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
 - Source checkpoint: `b05c4fb` (`Align Calendar density with pinch-first design`).
+- Coordination checkpoint: `84b8336` (`Refresh LifeOS coordination after Calendar review`).
 - Shared-foundation checkpoint: `6751bb5` (`Prove responsive builder content is preserved`).
 - Latest reviewed tranche: `b05c4fb` (`Align Calendar density with pinch-first design`).
 - The branch, its remote-tracking ref, and draft PR #1 head are synchronized at
-  `b05c4fb`, confirmed through direct Git and GitHub CLI ref checks. The latest
+  `84b8336`, confirmed through direct Git and GitHub CLI ref checks. The source
+  code through `b05c4fb` is included; the latest
   security checkpoints are `b82f23b` (fail closed on versioned tax evidence),
   `2fb2b9b` (native privacy test typing), and `eb9ca62` (bounded native tax
   lookahead). Keep these small, attributable commits when synchronizing.
