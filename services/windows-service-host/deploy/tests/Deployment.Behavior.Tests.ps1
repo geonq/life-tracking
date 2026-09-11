@@ -1073,6 +1073,7 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
     Ensure-Directory $firstRoot
     Ensure-Directory $secondRoot
     function Assert-RestrictedAcl { param($Path, $OperatorSid, $ReadSids, $ModifySids, [switch]$AllowInherited) }
+    function Set-RestrictedAcl { param($Path, $OperatorSid, $ReadSids, $ModifySids, [switch]$File, [switch]$SkipSnapshot, [string[]]$AllowedOwnerSids, [switch]$InheritableSystemFullControl, [int]$MaxAttempts = 5, [int]$RetryDelayMilliseconds = 500) }
     function Measure-RecoveryProgressOutput {
         param([string]$Root, [int]$Count)
         $manifestPath = Join-Path $Root 'manifest.json'
