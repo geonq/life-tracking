@@ -1,99 +1,112 @@
 # HANDOFF — LifeOS native app
 
-Updated 2026-09-10 09:50 Europe/Berlin.
+Updated 2026-09-11 Europe/Berlin.
 
 ## Current verdict
 
-**Source candidate is green for the local compile and automated gates. Release
-and merge are still pending external runtime evidence.** The reviewed native
-and backend batches are committed locally; do not reset or discard them.
+Local source checks are current and passing, but the release is **pending a
+fresh Astra Medium security review**. The previous final Astra review was
+**RED** because the Windows deployment was in unfinished recovery and because
+the gateway accepted more calendar items than native clients. The calendar
+contract defect is fixed; the Windows runtime is still not green.
 
-Advisor and generic conversational AI are absent from the product path. Calorie
-photo tracking is the only permitted in-app AI flow. No usage watcher or
-overnight scheduler is part of the product.
+Do not claim a production release, remote backend availability, or device
+acceptance from the local source results. No generic conversational
+assistant/advisor/AI product exists. Calorie-photo tracking is the only
+permitted in-app AI flow. No Claude scheduling or usage watcher is part of the
+product.
 
 ## Git and review state
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- Local `HEAD`: `3f274e9` (`Harden protected storage and deployment boundaries`).
-- Remote branch currently resolves to `46c4160`; the two reviewed implementation
-  commits and this coordination update still need an attributable push.
-- The working tree contains only the coordination-document refresh.
-- PR #1 was last observed as open and draft; refresh it with `gh` after pushing.
-- Preserve small coherent commits. Do not merge until the external gates below
-  have direct evidence.
+- Local `HEAD`: `ebbfff2c1eda6d017669cc391050f45296b4429d`.
+- The local branch is 20 commits ahead of its origin-tracking ref and has not
+  been pushed. Synchronized remote or PR state is therefore unverified.
+- Recent source checkpoints include `ceddd2b` (design validator contract),
+  `c814299` (widget typography compile fix), `544633b` (finance detail return),
+  and `ebbfff2` (gateway/native calendar-limit alignment).
+- This coordination refresh must remain uncommitted and unpushed per the
+  current task. Preserve small, attributable commits when synchronization is
+  later authorized.
 
 ## Implemented source slices
 
-- SF Pro/system typography, dark tokens, separated semantic accents, compact
-  Home/Usage cards, semantic SF Symbols, grey-wallpaper widget legibility, and
-  reduced model-bar animation replay.
-- Calendar mobile scrolling, minute-precise timeline restoration, attainable
-  bottom-edge clamping, paging/editing, Mac trackpad magnification, explicit
-  pairing, authenticated payloads, bounded decoding, and timestamp validation.
-- Finance live Enable Banking state, manual Trade Republic import, durable
-  imported-finance reconciliation, scene-retained chart state, and truthful
-  unavailable states.
-- Fitness recovery/biology/nutrition, local workout templates/exercises/
-  sessions/sets/history/PRs/reports, and bounded read-only HealthKit evidence.
+- Compact SF Pro/system typography, semantic SF Symbols, separated accents,
+  responsive surfaces, widget contrast, and restrained route/microinteraction
+  behavior.
+- Calendar scrolling, minute-precise restoration, paging/editing, Mac
+  trackpad magnification, explicit pairing, authenticated payloads, bounded
+  decoding, timestamp validation, and fail-closed oversized-state handling.
+- Finance live-source contracts, manual Trade Republic import, durable
+  reconciliation, and truthful unavailable/provenance states.
+- Fitness recovery/biology/nutrition plus local workout templates, exercises,
+  sessions, sets, history, PRs, reports, and bounded HealthKit evidence.
 - Tax redaction before persistence/evidence, page exclusion from sync,
   formula-safe CSV export, atomic replacement, and legacy migration.
 - Bounded API/gateway reads, localhost/JSON headers, constant-time secret
   comparison, explicit Codex executable paths, Windows manifest/ACL/recovery
-  checks, and bounded protected-storage executor admission.
-- Mac module identity is stable across same-module routes; Home and Usage stay
-  mounted together, detail entry remains 180ms/8pt, and outgoing detail fade is
-  120ms with reversal-aware starting values.
+  checks, and bounded protected-storage admission.
 
 ## Security status
 
-The twelve Claude findings are addressed in source and regression tests:
-nearby calendar pairing/authentication, remote timestamp/deletion validation,
-Calendar Codable limits, Keychain sync token handling, bounded JSON reads, tax
-redaction/page handling, CSV formula neutralization, atomic tax writes,
-symlink-safe usage writes, localhost Host checks, explicit Codex path
-resolution, and constant-time ingest-secret comparison.
+The twelve Claude findings have source mitigations and regression coverage.
+The gateway calendar maximum is now exactly 1,024, matching the native limit.
+Overflow requests are rejected before persistence, and an already oversized
+persisted snapshot fails closed without truncating or modifying the raw state.
 
-The protected storage executor now has a fixed four-worker/four-queued budget,
-typed overload/shutdown responses, exactly-once slot ownership, and repeated
-cancellation draining. Windows ACL and PowerShell behavior still require a
-real Windows run; source tests are not a substitute for that gate.
+The current native sync boundary uses Tailscale connection identity plus an
+edge capability. The native app does not persist that bearer token; do not
+describe the current transport as a Keychain-stored sync token. Legacy
+credential cleanup and the physical transport still require verification.
+
+The source/security status remains **pending fresh Astra review**. The prior
+review also left raw WebSocket probing unverified because the local environment
+lacked the `websockets` package, although ASGI WebSocket tests passed. The
+fresh review must repeat adversarial HTTP/WS, authentication, bounds, replay,
+deployment, and dependency checks and issue the release gate.
 
 ## Verification evidence
 
-- Gateway: **463 pytest tests passed**, with dependency deprecation warnings.
-- API: **140 Vitest tests passed** and TypeScript typecheck passed. Loopback
-  tests required elevated execution because the sandbox rejects local binds.
-- macOS: unsigned `LifeOSMacLogic` build passed; **54 native tests passed**.
-- iOS: generic unsigned `LifeOSLogic` build passed. CoreSimulator currently
-  refuses connections, so iPhone simulator tests have no current execution
-  result.
-- Swift parse checks and `git diff --check` passed.
-- No visual sign-off has been claimed from PNG existence alone. The real Mac
-  UI and physical iPhone still need interaction/rendering evidence.
+- Full repository source validator: **163 passed**, **47 subtests passed**.
+- Gateway: **483 passed**, with two dependency deprecation warnings.
+- API: **141 tests passed** and TypeScript typecheck passed.
+- Contracts: **198 tests passed** and build passed.
+- Full and production-only `npm audit`: **zero vulnerabilities**.
+- Unsigned `LifeOSMacLogic` build, unsigned `LifeOSLogic` build, direct
+  `LifeOSWidget` iOS target, `LifeOSPrereleaseIOS`, and macOS logic XCTest
+  passed; the macOS XCTest result contains **54 passed tests**.
+- The named `LifeOSWidgets` scheme exposes only macOS destinations; that is
+  scheme metadata, not a source failure.
 
 ## External acceptance gates
 
-- Run the staged Windows verifier/installer, standalone runtime, Tailscale Serve,
-  restart recovery, protected snapshots, and remote readback on `domke@tailscaleip`.
-- Complete Enable Banking consent/readback with the real accounts and import a
-  real Trade Republic CSV through the durable reconciliation path.
-- Exercise HealthKit, Zepp sync, native morning refresh/USB shortcut flows, and
-  seven-day Personal Team signing renewal on the iPhone 17 and Mac.
-- Inspect the Mac UI at the documented viewport and verify Home/Usage hierarchy,
-  calendar pinch/scroll, rapid route reversal, hover, sheets, and compact text.
-- Restore CoreSimulator before claiming current iPhone UI/gesture/widget tests.
-- Obsidian graph/mind-map integration remains GitHub issue #2 and is not silently
-  represented as complete.
+- Complete bounded Windows recovery, candidate installation, standalone
+  runtime, ACL/readback, Tailscale Serve, restart recovery, and health checks
+  on `domke@tailscaleip`. Current evidence is: `LifeOSAPI` stopped, no
+  listener on expected ports, deployment marker active, recovery phase
+  `artifacts`, 31,226 recovery units.
+- Synchronize the candidate and refresh PR state before using the Windows
+  release builder.
+- Complete real Enable Banking consent/readback and one real Trade Republic
+  import; keep missing-provider states truthful.
+- Exercise HealthKit, Zepp sync, morning refresh/USB Shortcuts, and seven-day
+  Personal Team signing renewal on the iPhone 17 and Mac.
+- Inspect the Mac UI and iPhone behavior for compact hierarchy, transparent
+  grey-wallpaper widgets, calendar scroll/pinch, sheets, hover, route
+  reversal, and animation quality. CoreSimulator/device evidence is not yet
+  recorded.
+- Obsidian graph/mind-map feasibility remains tracked in GitHub issue #2 and
+  is not silently represented as complete.
 
 ## Next serialized queue
 
-1. Commit this coordination refresh, push the three local commits, and capture
-   GitHub status with `gh`.
-2. Re-run the Windows staged verifier/preflight and then perform remote runtime
-   gates without mutating the dirty Windows checkout unnecessarily.
-3. Capture visual/native evidence, provider/device evidence, and only then move
-   PR #1 from draft or merge it under the user's authorized workflow.
+1. Run a fresh Astra Medium security review after this documentation refresh.
+2. Synchronize the candidate and PR, then complete bounded Windows recovery,
+   installation, and remote runtime verification.
+3. Complete provider, physical-device, signing, visual, widget, and
+   CoreSimulator acceptance gates.
+4. Resolve the issue #2 Obsidian/Zepp decisions with evidence before calling
+   the app complete.
 
-Keep this file and the other coordination files below 200 lines. Record every
-new external result here before calling the phase complete.
+Keep this file and the other coordination files below 200 lines. Record new
+external evidence here before marking a gate complete.

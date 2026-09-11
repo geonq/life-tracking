@@ -1,54 +1,63 @@
 # PHASE STATUS — LifeOS
 
-Updated 2026-09-10 09:50 Europe/Berlin.
+Updated 2026-09-11 Europe/Berlin.
 
-- Overall: **local source gates green; release and merge NO-GO pending external
-  runtime evidence**.
+- Overall: **local source gates pass; release is NO-GO pending a fresh Astra
+  Medium review and external runtime/device evidence**.
+- Previous final Astra review: **RED**. Its Windows operational blocker
+  remains unresolved; its calendar contract finding is fixed in `ebbfff2`.
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- Local `HEAD`: `3f274e9`; remote branch: `46c4160` before the current
-  coordination refresh is committed and pushed.
-- PR #1 was last observed open and draft. Refresh its state with `gh` after push.
-- No Claude usage watcher or overnight supervisor exists in the product.
+- `HEAD`: `ebbfff2c1eda6d017669cc391050f45296b4429d`, local and not pushed;
+  20 commits ahead of the origin-tracking ref.
+- No Claude usage watcher, overnight supervisor, generic assistant, or
+  conversational AI is in the product. Calorie-photo AI remains allowed.
 
 ## Completed local work
 
-1. Shared visual system: SF Pro/system type, compact hierarchy, semantic icons,
-   separated accents, Home/Usage card geometry, widget contrast, and motion kit.
-2. Calendar: authenticated pairing/sync, bounded validation, minute-precise
-   restoration, bottom-edge clamping, mobile scrolling, paging, editing, and
-   Mac magnification.
+1. Shared visual system: compact SF Pro/system type, semantic icons, distinct
+   accents, responsive cards, widget contrast, and restrained motion.
+2. Calendar: authenticated pairing/sync, bounded validation, mobile scrolling,
+   paging/editing, minute-precise restoration, bottom-edge clamping, and Mac
+   trackpad magnification. Gateway and native maxima now both equal 1,024;
+   oversized persisted state fails closed without truncation.
 3. Finance/Fitness/Nutrition/Tax: live-source contracts, workout tracking,
    durable imports/receipts, privacy boundaries, atomic stores, and Shortcut
    intents.
-4. API/gateway/Windows source: bounded reads/bodies, local Host/auth checks,
-   secret handling, explicit executable resolution, ACL/recovery/staging rules,
-   and bounded protected-storage concurrency.
-5. Navigation/state: scene-retained Usage/Finance/Fitness/Calendar state, stable
-   Mac module identity, Home↔Usage retention, and reversal-aware transitions.
+4. API/gateway/Windows source: bounded reads/bodies, Host/auth checks, secret
+   handling, executable resolution, ACL/recovery/staging rules, and bounded
+   protected-storage concurrency.
+5. Navigation/state: retained module state, stable Mac module identity, and
+   reversal-aware transitions.
 
 ## Verification
 
-- Gateway: **463 passed**; API: **140 passed** plus TypeScript typecheck.
-- macOS `LifeOSMacLogic`: unsigned build passed and **54 tests passed**.
-- Generic unsigned iOS `LifeOSLogic` build passed.
-- Swift parsing and `git diff --check` passed.
-- CoreSimulator is currently unavailable, so current iPhone UI/logic test
-  execution is blocked by the host service rather than a recorded app failure.
+- Repository source validator: **163 passed**, **47 subtests passed**.
+- Gateway: **483 passed**, with two dependency deprecation warnings.
+- API: **141 tests passed** and typecheck passed.
+- Contracts: **198 tests passed** and build passed.
+- `npm audit` and production audit: **zero vulnerabilities**.
+- Unsigned macOS logic, unsigned iOS logic, direct iOS widget target, and
+  `LifeOSPrereleaseIOS` passed. macOS logic XCTest passed **54 tests**.
+- `LifeOSWidgets` exposes only macOS destinations; this is scheme metadata.
 
 ## Blocking acceptance
 
-- Staged Windows verifier/preflight, installation, standalone runtime, Tailscale
-  Serve, restart recovery, and remote readback on the always-on PC.
-- Real Enable Banking consent and observations; real Trade Republic import.
-- Physical iPhone 17 HealthKit/Zepp/Shortcut/USB behavior and seven-day signing.
-- Mac and iPhone visual/gesture/widget evidence, including compact text,
-  transparent grey-wallpaper widgets, calendar scroll/pinch, sheets, hover, and
-  rapid navigation reversal.
-- GitHub status refresh, attributable push, and PR review/merge decision.
-- Obsidian graph/mind-map feasibility remains issue #2.
+- Fresh Astra Medium security review, including the previously unverified raw
+  WebSocket probe where the environment permits it.
+- Candidate synchronization and PR state refresh.
+- Windows recovery/install/runtime/Tailscale Serve/readback. Current remote
+  evidence: `LifeOSAPI` stopped, expected ports have no listeners, transaction
+  marker active, recovery phase `artifacts`, 31,226 units.
+- Real Enable Banking consent/readback and Trade Republic import.
+- Physical iPhone 17 HealthKit/Zepp/Shortcut/USB behavior and seven-day
+  signing renewal.
+- Mac/iPhone visual, gesture, widget, and animation evidence; CoreSimulator
+  acceptance remains unrecorded.
+- Obsidian graph/mind-map feasibility and storage decision in issue #2.
 
 ## Operating rule
 
-Do not mark this phase complete from automated tests alone. Keep each coordination
-file under 200 lines, record external evidence separately, and stop every
-completed build, test, worker, or temporary server before starting another.
+Do not mark this phase complete from automated source checks alone. Keep each
+coordination file under 200 lines, serialize native builds with one compiler
+job, use live data, keep visual fixtures isolated, and stop completed workers,
+builds, tests, and temporary servers before starting another.
