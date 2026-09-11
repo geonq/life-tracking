@@ -232,7 +232,7 @@ $expectedFiles = @(
 
 foreach ($wheel in @($gatewayDependencyLock.Wheels)) {
     $wheelPath = 'gateway/wheelhouse/' + [string]$wheel.Filename
-    if ($wheelPath -match '[\r\n/\\]' -or $wheel.Filename -notmatch '\A[A-Za-z0-9][A-Za-z0-9._+!-]{0,255}\.whl\z') {
+    if ($wheel.Filename -match '[\r\n\\]' -or $wheel.Filename -notmatch '\A[A-Za-z0-9][A-Za-z0-9._+!-]{0,255}\.whl\z') {
         throw 'Candidate wheel filename is unsafe.'
     }
     if ($expectedFiles -contains $wheelPath) { throw "Candidate wheel allowlist contains a duplicate: $wheelPath" }

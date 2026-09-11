@@ -168,6 +168,40 @@ class WindowsReleaseBuilderTests(unittest.TestCase):
         self.assertEqual(len(wheels), len(set(wheels)))
         self.assertTrue(all(wheel.endswith(".whl") for wheel in wheels))
 
+    def test_candidate_wheel_filename_gate_accepts_tzdata_and_rejects_separators(self) -> None:
+        verifier = VERIFIER.read_text(encoding="utf-8")
+        wheel_gate = verifier.split(
+            "foreach ($wheel in @($gatewayDependencyLock.Wheels)) {", 1
+        )[1].split("if ($expectedFiles", 1)[0]
+        self.assertIn(
+            r"$wheelPath = 'gateway/wheelhouse/' + [string]$wheel.Filename",
+            wheel_gate,
+        )
+        self.assertNotIn(r"$wheelPath -match '[\r\n/\\]'", wheel_gate)
+
+        safety_match = re.search(r"\$wheel\.Filename -match '([^']+)'", wheel_gate)
+        filename_match = re.search(r"\$wheel\.Filename -notmatch '([^']+)'", wheel_gate)
+        self.assertIsNotNone(safety_match)
+        self.assertIsNotNone(filename_match)
+        safety_pattern = re.compile(safety_match.group(1))
+        filename_pattern = re.compile(filename_match.group(1).replace(r"\z", r"\Z"))
+
+        def accepts(filename: str) -> bool:
+            return (
+                safety_pattern.search(filename) is None
+                and filename_pattern.fullmatch(filename) is not None
+            )
+
+        valid = "tzdata-2026.3-py2.py3-none-any.whl"
+        self.assertTrue(accepts(valid))
+        for invalid in (
+            "tzdata-2026.3-py2.py3-none-any.whl/extra",
+            "tzdata-2026.3-py2.py3-none-any.whl\\extra",
+            "tzdata-2026.3-py2.py3-none-any.whl\n",
+        ):
+            with self.subTest(filename=invalid):
+                self.assertFalse(accepts(invalid))
+
     def test_wheel_validator_matches_split_py2_py3_metadata_tags(self) -> None:
         builder = BUILDER.read_text(encoding="utf-8")
         validator = builder.split(
