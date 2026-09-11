@@ -163,10 +163,18 @@ enum LifeOSSemanticColorPairs {
         lightForegroundHex: LifeOSPalette.canvasLightHex,
         lightBackgroundHex: LifeOSPalette.primaryTextLightHex
     )
-    // Hover and press are composited through the interaction overlay tokens;
-    // their opaque semantic pair remains the primary-text/canvas contract.
-    static let primaryActionHover = primaryAction
-    static let primaryActionPressed = primaryAction
+    static let primaryActionHover = LifeOSColorPair(
+        darkForegroundHex: LifeOSPalette.canvasDarkHex,
+        darkBackgroundHex: 0xD9D9DD,
+        lightForegroundHex: LifeOSPalette.canvasLightHex,
+        lightBackgroundHex: 0x303036
+    )
+    static let primaryActionPressed = LifeOSColorPair(
+        darkForegroundHex: LifeOSPalette.canvasDarkHex,
+        darkBackgroundHex: 0xC2C2C7,
+        lightForegroundHex: LifeOSPalette.canvasLightHex,
+        lightBackgroundHex: 0x50505A
+    )
     static let selectedNavigation = LifeOSColorPair(
         darkForegroundHex: LifeOSSelectedNavigationPalette.darkForegroundHex,
         darkBackgroundHex: LifeOSSelectedNavigationPalette.darkBackgroundHex,
@@ -469,8 +477,14 @@ public extension Color {
     )
     // Primary action states keep the monochrome action role and change only
     // luminance. They are transient state colors, not a second accent family.
-    static let lifeOSPrimaryActionHover = lifeOSAdaptiveHex(dark: 0xD9D9DD, light: 0x303036)
-    static let lifeOSPrimaryActionPressed = lifeOSAdaptiveHex(dark: 0xC2C2C7, light: 0x50505A)
+    static let lifeOSPrimaryActionHover = lifeOSAdaptiveHex(
+        dark: LifeOSSemanticColorPairs.primaryActionHover.darkBackgroundHex,
+        light: LifeOSSemanticColorPairs.primaryActionHover.lightBackgroundHex
+    )
+    static let lifeOSPrimaryActionPressed = lifeOSAdaptiveHex(
+        dark: LifeOSSemanticColorPairs.primaryActionPressed.darkBackgroundHex,
+        light: LifeOSSemanticColorPairs.primaryActionPressed.lightBackgroundHex
+    )
     static let lifeOSLinkForeground = lifeOSAdaptiveHex(
         dark: LifeOSSemanticColorPairs.link.darkForegroundHex,
         light: LifeOSSemanticColorPairs.link.lightForegroundHex
@@ -592,6 +606,10 @@ public extension Color {
     static let lifeOSDanger = lifeOSAdaptiveHex(
         dark: LifeOSSemanticColorPairs.danger.darkForegroundHex,
         light: LifeOSSemanticColorPairs.danger.lightForegroundHex
+    )
+    static let lifeOSInfo = lifeOSAdaptiveHex(
+        dark: LifeOSSemanticColorPairs.info.darkForegroundHex,
+        light: LifeOSSemanticColorPairs.info.lightForegroundHex
     )
 }
 
@@ -753,7 +771,7 @@ public enum LifeOSTokens {
     public static let warningText = Color.lifeOSWarningText
     /// danger / negative / over-limit / failed
     public static let danger  = Color.lifeOSDanger
-    /// Neutral goal/reference mark, kept separate from status green.
+    /// Green goal/reference mark, separated from estimate by line pattern and label.
     public static let neutralTarget = Color.lifeOSNeutralTarget
     /// Green estimated/projection mark; the estimate label uses this role too.
     public static let estimate = Color.lifeOSEstimateGreen
@@ -761,11 +779,8 @@ public enum LifeOSTokens {
     /// modules, independent of the module identity accent.
     public static let calories = Color.lifeOSCalories
     public static let protein = Color.lifeOSProtein
-    /// Retired teal — one accent only. Alias of `accent` kept for compile;
-    /// call sites migrate to `accent` (or a semantic) in the Phase 2 sweep.
-    /// Deliberately NOT `@available(deprecated)` yet: that would emit warnings
-    /// at every un-migrated call site and break the zero-new-warnings gate.
-    public static let info = accent
+    /// Teal information state, kept separate from blue focus/data roles.
+    public static let info = Color.lifeOSInfo
 
     // MARK: Series colors (Usage view: Target / Actual / Estimate / History)
 
@@ -950,6 +965,7 @@ public enum LifeOSMotion {
         public static let release = Curve.easeOut(0.18)
         public static let hover = Curve.easeOut(0.12)
         public static let feedback = Curve.easeOut(0.10)
+        public static let reducedNavigation = Curve.easeOut(0.12)
         public static let primary = Curve.spring(response: 0.42, damping: 0.82)
         public static let snappy = Curve.spring(response: 0.30, damping: 0.86)
         public static let hero = Curve.spring(response: 0.50, damping: 0.85)
@@ -975,7 +991,7 @@ public enum LifeOSMotion {
         case .release: return reduceMotion ? nil : Timing.release
         case .hover: return reduceMotion ? nil : Timing.hover
         case .selection: return reduceMotion ? nil : Timing.snappy
-        case .navigation: return reduceMotion ? Timing.feedback : Timing.hero
+        case .navigation: return reduceMotion ? Timing.reducedNavigation : Timing.hero
         case .reveal: return reduceMotion ? nil : Timing.chart
         case .scrub: return nil // selection, marker and bubble follow the same sample
         case .cancel: return reduceMotion ? nil : Timing.snappy

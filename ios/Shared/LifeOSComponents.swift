@@ -450,7 +450,15 @@ public struct LifeOSSelector<ID: Hashable>: View {
     private func optionBackground(for option: LifeOSSelectorOption<ID>) -> some View {
         let isSelected = option.id == selection
         let isHovered = hoveredOption == option.id
-        let fillOpacity: Double = isSelected ? 0.08 : (isHovered ? 0.05 : 0)
+        let fillOpacity: Double = if isSelected && isHovered {
+            0.10
+        } else if isSelected {
+            0.06
+        } else if isHovered {
+            0.04
+        } else {
+            0
+        }
         let fill = option.isEnabled
             ? LifeOSTokens.primaryText.opacity(fillOpacity)
             : LifeOSTokens.disabledFill

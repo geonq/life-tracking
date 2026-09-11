@@ -270,8 +270,8 @@ final class LifeOSDesignSystemTests: XCTestCase {
         XCTAssertEqual(LifeOSTokens.chartGrid, LifeOSTokens.hairlineBorder)
         XCTAssertEqual(LifeOSTokens.hairlineBorder, LifeOSTokens.subtleBorder)
 
-        // One accent: teal `info` is retired as an alias of accent.
-        XCTAssertEqual(LifeOSTokens.info, LifeOSTokens.accent)
+        // Information is a teal semantic distinct from blue focus/data roles.
+        XCTAssertNotEqual(LifeOSTokens.info, LifeOSTokens.accent)
 
         // Chart series semantics per §2.4.
         // Target and estimate share the green semantic, while their line
@@ -302,7 +302,7 @@ final class LifeOSDesignSystemTests: XCTestCase {
             XCTAssertTrue(pair.meetsGraphicContrast, "Graphic contrast failed for \(pair)")
         }
 
-        XCTAssertNotEqual(
+        XCTAssertEqual(
             LifeOSSemanticColorPairs.neutralTarget.darkForegroundHex,
             LifeOSSemanticColorPairs.estimate.darkForegroundHex
         )
@@ -321,6 +321,14 @@ final class LifeOSDesignSystemTests: XCTestCase {
         XCTAssertEqual(
             LifeOSSemanticColorPairs.primaryAction.lightBackgroundHex,
             LifeOSPalette.primaryTextLightHex
+        )
+        XCTAssertEqual(
+            LifeOSSemanticColorPairs.primaryActionHover.darkBackgroundHex,
+            0xD9D9DD
+        )
+        XCTAssertEqual(
+            LifeOSSemanticColorPairs.primaryActionPressed.lightBackgroundHex,
+            0x50505A
         )
         XCTAssertGreaterThanOrEqual(
             LifeOSSemanticColorPairs.warningText.lightContrastRatio,
@@ -703,6 +711,7 @@ final class LifeOSDesignSystemTests: XCTestCase {
         XCTAssertEqual(LifeOSMotion.Timing.press, .easeOut(0.08))
         XCTAssertEqual(LifeOSMotion.Timing.release, .easeOut(0.18))
         XCTAssertEqual(LifeOSMotion.Timing.hover, .easeOut(0.12))
+        XCTAssertEqual(LifeOSMotion.Timing.reducedNavigation, .easeOut(0.12))
         XCTAssertEqual(LifeOSMotion.Timing.primary, .spring(response: 0.42, damping: 0.82))
         XCTAssertEqual(LifeOSMotion.Timing.snappy, .spring(response: 0.30, damping: 0.86))
         XCTAssertEqual(LifeOSMotion.Timing.hero, .spring(response: 0.50, damping: 0.85))
@@ -736,7 +745,7 @@ final class LifeOSDesignSystemTests: XCTestCase {
         XCTAssertNil(LifeOSMotion.curve(for: .reveal, reduceMotion: true))
         XCTAssertNil(LifeOSMotion.curve(for: .cancel, reduceMotion: true))
         XCTAssertNil(LifeOSMotion.curve(for: .selection, reduceMotion: true))
-        XCTAssertEqual(LifeOSMotion.curve(for: .navigation, reduceMotion: true), .easeOut(0.10))
+        XCTAssertEqual(LifeOSMotion.curve(for: .navigation, reduceMotion: true), .easeOut(0.12))
         XCTAssertNil(LifeOSMotion.curve(for: .release, reduceMotion: true))
         XCTAssertEqual(LifeOSMotion.curve(for: .selection, reduceMotion: false), LifeOSMotion.Timing.snappy)
         XCTAssertEqual(LifeOSMotion.curve(for: .navigation, reduceMotion: false), LifeOSMotion.Timing.hero)

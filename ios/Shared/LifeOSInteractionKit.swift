@@ -110,9 +110,9 @@ public struct LifeOSInteractionAppearance: Equatable, Sendable {
     public static func resolve(for state: LifeOSInteractionState) -> LifeOSInteractionAppearance {
         switch state.phase {
         case .pressed:
-            return LifeOSInteractionAppearance(fillOpacity: 0.16, borderOpacity: 0.30, contentOpacity: 0.78)
+            return LifeOSInteractionAppearance(fillOpacity: 0.08, borderOpacity: 0.30, contentOpacity: 0.78)
         case .hover:
-            return LifeOSInteractionAppearance(fillOpacity: 0.08, borderOpacity: 0.18, contentOpacity: 1)
+            return LifeOSInteractionAppearance(fillOpacity: 0.04, borderOpacity: 0.18, contentOpacity: 1)
         case .focus:
             return LifeOSInteractionAppearance(fillOpacity: 0.06, borderOpacity: 1, contentOpacity: 1)
         case .cancelled:

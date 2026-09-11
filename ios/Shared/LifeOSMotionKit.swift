@@ -350,9 +350,9 @@ public struct SpringPillSelector<T: Hashable, Label: View>: View {
                                 // overlay keeps the labels stable and visible
                                 // without introducing a blue capsule.
                                 if reduceMotion {
-                                    Capsule().fill(LifeOSTokens.primaryText.opacity(0.08))
+                                    Capsule().fill(LifeOSTokens.primaryText.opacity(0.06))
                                 } else {
-                                    Capsule().fill(LifeOSTokens.primaryText.opacity(0.08))
+                                    Capsule().fill(LifeOSTokens.primaryText.opacity(0.06))
                                         .matchedGeometryEffect(id: highlightID, in: namespace)
                                 }
                             }
