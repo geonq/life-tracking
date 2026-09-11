@@ -21,6 +21,11 @@ Updated 2026-09-11 Europe/Berlin.
   iPhone suite measures sibling and ForEach rows in a mounted window. Screen
   work proceeds in bounded tranches; actual Mac sheet resizing remains a
   runtime acceptance item.
+- The Usage chart tranche is reviewed GREEN at `6713de1`. Normalize and
+  coalesce source dates once per revision with last-source authority; split
+  observed cadence gaps before the 240-point render budget; keep estimate and
+  target guides continuous; use cached binary-search selection; retain whole
+  segment endpoints and visible singleton observations.
 
 ## State and data boundaries
 

@@ -11,6 +11,10 @@ hosted-view coverage, and interaction layering. Release remains pending
 operational, provider, device, and visual acceptance. Do not infer
 runtime/device acceptance from source checks.
 
+The ChartKit/Usage source tranche is also **GREEN** at `6713de1` after three
+Astra review cycles. It preserves real cadence gaps, bounded rendering,
+cached selection, duplicate-source authority, and singleton observations.
+
 Do not claim a production release, remote backend availability, or device
 acceptance from the local source results. No generic conversational
 assistant/advisor/AI product exists. Calorie-photo tracking is the only
@@ -20,7 +24,8 @@ product.
 ## Git and review state
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- Source checkpoint: `6751bb5` (`Prove responsive builder content is preserved`).
+- Source checkpoint: `6713de1` (`Harden Usage chart rendering and selection`).
+- Shared-foundation checkpoint: `6751bb5` (`Prove responsive builder content is preserved`).
 - The local branch is synchronized with its origin-tracking ref. The latest
   security checkpoints are `b82f23b` (fail closed on versioned tax evidence),
   `2fb2b9b` (native privacy test typing), and `eb9ca62` (bounded native tax
@@ -44,6 +49,9 @@ product.
   reconciliation, and truthful unavailable/provenance states.
 - Fitness recovery/biology/nutrition plus local workout templates, exercises,
   sessions, sets, history, PRs, reports, and bounded HealthKit evidence.
+- Usage charts normalize once per revision, split real telemetry gaps before
+  the render cap, keep derived guides continuous, cache binary-search
+  selection, coalesce duplicates last-source-wins, and retain singleton data.
 - Tax redaction before persistence/evidence, page exclusion from sync,
   formula-safe CSV export, atomic replacement, and legacy migration.
 - Bounded API/gateway reads, localhost/JSON headers, constant-time secret
@@ -93,6 +101,9 @@ recovery, live penetration results, or physical-device behavior.
 - Foundation repair evidence: unsigned `LifeOSMac` build passed, and the
   focused iPhone 17 `LifeOSDesignSystemTests` suite passed **39 tests with
   0 failures**, including mounted sibling/`ForEach` layout probes.
+- Chart tranche evidence: focused iPhone 17 chart/design suites passed **56
+  tests with 0 failures** (17 chart, 39 design), and unsigned `LifeOSMac`
+  build passed after `6713de1`.
 - The named `LifeOSWidgets` scheme exposes only macOS destinations; that is
   scheme metadata, not a source failure.
 - The shared-foundation repair through `6751bb5` compiled for unsigned iOS
@@ -122,15 +133,13 @@ recovery, live penetration results, or physical-device behavior.
 
 ## Next serialized queue
 
-1. Start the ChartKit/Usage visual tranche from the approved foundation, with
-   one bounded Luna Max implementation and an Astra Medium review.
-2. Complete the icon/component, shell/truth-gate, and screen visual
+1. Complete the icon/component, shell/truth-gate, and screen visual
    tranches with an Astra review after each bounded batch.
-3. Complete bounded Windows recovery,
+2. Complete bounded Windows recovery,
    installation, and remote runtime verification.
-4. Complete provider, physical-device, signing, visual, widget, and
+3. Complete provider, physical-device, signing, visual, widget, and
    CoreSimulator acceptance gates.
-5. Resolve the issue #2 Obsidian/Zepp decisions with evidence before calling
+4. Resolve the issue #2 Obsidian/Zepp decisions with evidence before calling
    the app complete.
 
 Keep this file and the other coordination files below 200 lines. Record new

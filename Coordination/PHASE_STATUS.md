@@ -3,15 +3,16 @@
 Updated 2026-09-11 Europe/Berlin.
 
 - Overall: **source security gate GREEN; shared visual foundation GREEN at
-  `6751bb5`; release remains NO-GO pending operational, provider, device, and
-  visual evidence**.
+  `6751bb5`; ChartKit/Usage GREEN at `6713de1`; release remains NO-GO pending
+  operational, provider, device, and visual evidence**.
 - Final Astra Medium review at `eb9ca620…` reproduced and cleared the
   versioned-tax-record evidence bypass. No source-code blocker remains under
   the review criteria.
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- Source checkpoint: `6751bb5`, synchronized with origin. Astra's final
-  foundation re-review is GREEN. Both responsive containers now own their
-  builder content, and the iPhone hosted-view regression suite passes.
+- Source checkpoint: `6713de1`, synchronized with origin. Astra's final
+  foundation re-review is GREEN at `6751bb5`, and the ChartKit/Usage review is
+  GREEN at `6713de1`. Both responsive containers own their builder content;
+  chart gaps, selection, and bounded rendering are covered.
 - No Claude usage watcher, overnight supervisor, generic assistant, or
   conversational AI is in the product. Calorie-photo AI remains allowed.
 
@@ -35,6 +36,8 @@ Updated 2026-09-11 Europe/Berlin.
    responses, and bounded usage idempotency replay are also implemented.
 5. Navigation/state: retained module state, stable Mac module identity, and
    reversal-aware transitions.
+6. Usage chart: real cadence segmentation, whole-segment render budgets,
+   cached pointer selection, duplicate authority, and singleton visibility.
 
 ## Verification
 
@@ -46,11 +49,14 @@ Updated 2026-09-11 Europe/Berlin.
 - Unsigned macOS logic, unsigned iOS logic, direct iOS widget target, and
   `LifeOSPrereleaseIOS` passed. macOS logic XCTest passed **54 tests**.
 - `LifeOSWidgets` exposes only macOS destinations; this is scheme metadata.
+- Focused iPhone 17 chart/design suites: **56 tests, 0 failures** (17 chart,
+  39 design); unsigned `LifeOSMac` build passed after `6713de1`.
 
 ## Blocking acceptance
 
-- Complete ChartKit/Usage, then the icon/component and screen tranches with
-  an Astra review after each bounded batch.
+- Complete the icon/component and screen tranches with an Astra review after
+  each bounded batch. ChartKit/Usage source work is GREEN; runtime visual
+  acceptance remains open.
 - Preserve the Astra source verdict in the release record; it does not replace
   operational or device evidence.
 - Candidate synchronization and PR state refresh.
