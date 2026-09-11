@@ -3813,6 +3813,24 @@ def test_document_index_rejects_untrusted_form_identifier_without_mutation(
     assert main.DOCUMENTS_INDEX_PATH.read_bytes() == original
 
 
+def test_document_index_rejects_unknown_privacy_version_without_mutation(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(main, "DOCUMENTS_INDEX_PATH", tmp_path / "documents.json")
+
+    document_id = "26262626-2626-4262-8262-262626262626"
+    entry = native_tax_document_metadata(document_id)
+    entry["_originalFile"] = "original.pdf"
+    entry["_privacyVersion"] = main.DOCUMENT_PRIVACY_VERSION + 1
+    original = json.dumps([entry], separators=(",", ":")).encode()
+    main.DOCUMENTS_INDEX_PATH.write_bytes(original)
+
+    response = client.get("/documents", headers=AUTH)
+
+    assert response.status_code == 503
+    assert main.DOCUMENTS_INDEX_PATH.read_bytes() == original
+
+
 def test_document_index_migration_preserves_original_bytes_when_privacy_is_uncertain(
     tmp_path, monkeypatch
 ):

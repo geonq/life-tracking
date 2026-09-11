@@ -681,9 +681,12 @@ _TAX_LEGACY_IDENTIFIER_TOKEN_PATTERN = re.compile(
 _TAX_LEGACY_SUSPICIOUS_ALPHA_TOKEN_PATTERN = re.compile(
     r"(?<![A-Za-z0-9*])[A-Z]{6,32}(?![A-Za-z0-9*])"
 )
-_TAX_LEGACY_VALID_FORM_LABEL_PATTERN = re.compile(
-    r"(?i)^(?:[A-Z]{1,4}(?:[ -]?[0-9]{1,3})?|[0-9]{3,4})$"
-)
+_TAX_LEGACY_VALID_FORM_TOKENS = frozenset({
+    "w2", "w-2", "w3", "w-3", "1040", "1040-sr", "1098", "1099",
+})
+_TAX_LEGACY_VALID_SCHEDULE_TOKENS = frozenset({
+    "a", "c", "d", "e", "f", "k1", "k-1",
+})
 _TAX_LEGACY_NUMERIC_TOKEN_PATTERN = re.compile(
     r"(?<![A-Za-z0-9*])[0-9]{1,32}(?![0-9*])"
 )
@@ -4621,11 +4624,18 @@ def _legacy_text_contains_unproven_identifier(
         token = match.group(0)
         if any(character.isalpha() for character in token) and any(character.isdigit() for character in token):
             prefix = residual[:match.start()]
-            if (
-                re.search(r"(?i)\b(?:form|schedule)[ \t]+$", prefix[-64:])
-                and _TAX_LEGACY_VALID_FORM_LABEL_PATTERN.fullmatch(token)
-            ):
-                continue
+            label_match = re.search(
+                r"(?i)\b(form|schedule)[ \t]+$",
+                prefix[-64:],
+            )
+            if label_match:
+                valid_tokens = (
+                    _TAX_LEGACY_VALID_FORM_TOKENS
+                    if label_match.group(1).casefold() == "form"
+                    else _TAX_LEGACY_VALID_SCHEDULE_TOKENS
+                )
+                if token.casefold() in valid_tokens:
+                    continue
             return True
 
     for match in _TAX_LEGACY_NUMERIC_TOKEN_PATTERN.finditer(residual):
