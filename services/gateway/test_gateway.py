@@ -639,6 +639,16 @@ def calendar_item(title="Event", **overrides):
     }
 
 
+def calendar_items(count):
+    return [
+        calendar_item(
+            title=f"Event {index}",
+            id=f"00000000-0000-0000-0000-{index:012x}",
+        )
+        for index in range(count)
+    ]
+
+
 def test_calendar_uses_versioned_etag_if_match_and_bounded_idempotent_replay(tmp_path, monkeypatch):
     import main
 
@@ -1054,6 +1064,76 @@ def test_calendar_enforces_item_count_without_dropping_existing_data(tmp_path, m
     response = client.put("/calendar", headers=calendar_write_headers(initial.headers["etag"]),
                           json={"schemaVersion": 1, "items": [calendar_item()] * 3})
     assert response.status_code == 400 and calendar_files(tmp_path) == {}
+
+
+def test_calendar_rejects_native_limit_overflow_before_persistence(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "CALENDAR_PATH", tmp_path / "calendar.json")
+    initial = client.get("/calendar", headers=AUTH)
+    seed = client.put(
+        "/calendar",
+        headers=calendar_write_headers(initial.headers["etag"], "count-seed"),
+        json={"schemaVersion": 1, "items": [calendar_item("Existing event")]},
+    )
+    assert seed.status_code == 200
+    before = calendar_files(tmp_path)
+
+    overflow = {"schemaVersion": 1, "items": calendar_items(main.CALENDAR_MAX_ITEMS + 1)}
+    rejected = client.put(
+        "/calendar",
+        headers=calendar_write_headers(seed.headers["etag"], "count-overflow"),
+        json=overflow,
+    )
+
+    assert rejected.status_code == 400
+    assert rejected.json() == {"error": "invalid_request"}
+    assert calendar_files(tmp_path) == before
+    current = client.get("/calendar", headers=AUTH)
+    assert current.status_code == 200
+    assert current.content == seed.content
+    assert current.headers["x-lifeos-revision"] == seed.headers["x-lifeos-revision"]
+
+
+@pytest.mark.parametrize("storage_kind", ["legacy", "state"])
+def test_calendar_rejects_persisted_oversized_snapshot_without_truncating(
+    storage_kind, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(main, "CALENDAR_PATH", tmp_path / "calendar.json")
+    body = json.dumps(
+        {"schemaVersion": 1, "items": calendar_items(main.CALENDAR_MAX_ITEMS + 1)},
+        separators=(",", ":"),
+    ).encode()
+    assert len(body) < main.CALENDAR_MAX_BODY_SIZE
+
+    if storage_kind == "legacy":
+        main.CALENDAR_PATH.write_bytes(body)
+    else:
+        metadata = main._calendar_default_metadata(body)
+        main._calendar_state_path().write_bytes(json.dumps(
+            {
+                "schemaVersion": main.CALENDAR_STATE_SCHEMA_VERSION,
+                "bodyBase64": base64.b64encode(body).decode("ascii"),
+                "metadata": metadata,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode())
+
+    before = calendar_files(tmp_path)
+    unavailable = client.get("/calendar", headers=AUTH)
+    assert unavailable.status_code == 503
+    assert unavailable.json() == {"error": "calendar_unavailable"}
+
+    # A failed-closed read must also block a write rather than repairing,
+    # truncating, or replacing the incompatible durable snapshot.
+    etag = main._calendar_etag(0, main._calendar_digest(body))
+    write = client.put(
+        "/calendar",
+        headers=calendar_write_headers(etag, f"oversized-{storage_kind}"),
+        json={"schemaVersion": 1, "items": []},
+    )
+    assert write.status_code == 503
+    assert write.json() == {"error": "calendar_unavailable"}
+    assert calendar_files(tmp_path) == before
 
 
 def test_calendar_maximum_incoming_etag_is_a_conflict_not_counter_assignment(tmp_path, monkeypatch):
