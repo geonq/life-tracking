@@ -1149,7 +1149,7 @@ struct UsageProjectionChart: View {
                         Text("\(Int((1 - selectedPoint.usedPercent) * 100))% remaining")
                             .lifeOSTypography(.button)
                         Text(selectedPoint.date, format: .dateTime.month(.abbreviated).day().hour().minute())
-                            .lifeOSTypography(.body)
+                            .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.secondaryText)
                     }
                     Text("\(provider.displayName) · \(qualityTag)")
@@ -1205,20 +1205,59 @@ struct UsageProjectionChart: View {
     private var belowChartRows: some View {
         VStack(alignment: .leading, spacing: 10) {
             Divider().opacity(0.3)
-            metaRow(
-                label: "Set range start",
-                value: selectedPoint.map { $0.date.formatted(.dateTime.month(.abbreviated).day().hour().minute()) } ?? "Choose a point",
-                action: pinRangeStart
-            )
-            HStack(spacing: 16) {
-                iconLabelButton(icon: .zoomIn, label: "Zoom in") { changeZoom(by: 0.6) }
-                iconLabelButton(icon: .zoomOut, label: "Zoom out") { changeZoom(by: 1 / 0.6) }
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .center, spacing: 12) {
+                    rangeStartControl
+                    Spacer(minLength: 0)
+                    zoomControls
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    rangeStartControl
+                    zoomControls
+                }
             }
-            metaRow(label: "Reset", value: resetText)
-            metaRow(label: "Suggested pace", value: "Not available")
-            metaRow(label: "Runway", value: "Not available")
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("Reset")
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.secondaryText)
+                Spacer(minLength: 0)
+                Text(resetText)
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .monospacedDigit()
+            }
         }
         .padding(.top, 2)
+    }
+
+    private var rangeStartControl: some View {
+        Button(action: pinRangeStart) {
+            HStack(alignment: .center, spacing: 6) {
+                LifeOSIcon(.calendar, context: .disclosure)
+                    .foregroundStyle(LifeOSTokens.secondaryText)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Range start")
+                        .lifeOSTypography(.metadata, weight: .medium)
+                        .foregroundStyle(LifeOSTokens.primaryText)
+                    Text(selectedPoint?.date.formatted(.dateTime.month(.abbreviated).day().hour().minute()) ?? "Choose a point")
+                        .lifeOSTypography(.metadata)
+                        .foregroundStyle(LifeOSTokens.secondaryText)
+                        .lineLimit(1)
+                }
+            }
+        }
+        .buttonStyle(FinanceMotionControlStyle())
+        .disabled(selectedPoint == nil)
+        .accessibilityLabel(selectedPoint.map {
+            "Set chart range start to \($0.date.formatted(.dateTime.month(.abbreviated).day().hour().minute()))"
+        } ?? "Set chart range start, choose a point first")
+    }
+
+    private var zoomControls: some View {
+        HStack(spacing: 12) {
+            iconLabelButton(icon: .zoomIn, label: "Zoom in") { changeZoom(by: 0.6) }
+            iconLabelButton(icon: .zoomOut, label: "Zoom out") { changeZoom(by: 1 / 0.6) }
+        }
     }
 
     private var keyboardStepper: some View {
@@ -1236,7 +1275,7 @@ struct UsageProjectionChart: View {
             Text(selectedPoint.map {
                 "\($0.date.formatted(.dateTime.month(.abbreviated).day().hour().minute())) · \(Int((1 - $0.usedPercent) * 100))% remaining"
             } ?? "Select a chart point")
-                .lifeOSTypography(.button).monospacedDigit()
+                .lifeOSTypography(.metadata).monospacedDigit()
                 .foregroundStyle(LifeOSTokens.secondaryText)
                 .lineLimit(2)
                 .minimumScaleFactor(0.8)
@@ -1268,35 +1307,13 @@ struct UsageProjectionChart: View {
         return resetAt.formatted(.dateTime.month(.abbreviated).day().year().hour().minute())
     }
 
-    @ViewBuilder
-    private func metaRow(label: String, value: String, action: (() -> Void)? = nil) -> some View {
-        if let action {
-            Button(action: action) {
-                metaRowContent(label: label, value: value)
-            }
-            .buttonStyle(FinanceMotionControlStyle())
-            .disabled(selectedPoint == nil)
-        } else {
-            metaRowContent(label: label, value: value)
-        }
-    }
-
-    private func metaRowContent(label: String, value: String) -> some View {
-        HStack {
-            Text(label).foregroundStyle(LifeOSTokens.secondaryText)
-            Spacer()
-            Text(value).foregroundStyle(LifeOSTokens.primaryText)
-        }
-        .lifeOSTypography(.body)
-    }
-
     private func iconLabelButton(icon: LifeOSIconName, label: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 5) {
                 LifeOSIcon(icon).frame(width: 12, height: 12)
                 Text(label)
             }
-            .lifeOSTypography(.button)
+            .lifeOSTypography(.metadata, weight: .medium)
             .foregroundStyle(LifeOSTokens.secondaryText)
         }
         .buttonStyle(FinanceMotionControlStyle())

@@ -379,7 +379,8 @@ struct UsageView: View {
                 UsageProgressRing(
                     remainingFraction: window.usedPercent.map { 1 - $0 },
                     valueText: remainingText(for: window),
-                    state: state
+                    state: state,
+                    diameter: 96
                 )
             }
             VStack(alignment: .leading, spacing: LifeOSTokens.Space.md) {
@@ -389,12 +390,13 @@ struct UsageView: View {
                     UsageProgressRing(
                         remainingFraction: window.usedPercent.map { 1 - $0 },
                         valueText: remainingText(for: window),
-                        state: state
+                        state: state,
+                        diameter: 72
                     )
                 }
             }
         }
-        .frame(minHeight: 136, alignment: .leading)
+        .frame(minHeight: 112, alignment: .leading)
     }
 
     private func primaryWindowDetails(_ window: UsageWindow, state: UsageValueState) -> some View {
@@ -413,7 +415,7 @@ struct UsageView: View {
                     .lifeOSTypography(.metric)
                     .foregroundStyle(LifeOSTokens.primaryText)
                 Text("% remaining")
-                    .lifeOSTypography(.body, weight: .medium)
+                    .lifeOSTypography(.metadata, weight: .medium)
                     .foregroundStyle(LifeOSTokens.secondaryText)
             }
 
@@ -698,8 +700,10 @@ private struct UsageProgressRing: View {
     let remainingFraction: Double?
     let valueText: String
     let state: UsageValueState
+    let diameter: CGFloat
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var hasPresented = false
 
     private var fraction: CGFloat {
@@ -716,15 +720,26 @@ private struct UsageProgressRing: View {
         }
     }
 
+    private var lineWidth: CGFloat {
+        diameter <= 72 ? 6 : 8
+    }
+
+    @ViewBuilder
     var body: some View {
+        if dynamicTypeSize.isAccessibilitySize {
+            // The primary percentage and its source state remain in the
+            // adjacent scalable details column. A fixed ring would make that
+            // value compete with accessibility-sized text for its interior.
+            EmptyView()
+        } else {
         ZStack {
             Circle()
-                .stroke(LifeOSTokens.Ring.track, lineWidth: 6)
+                .stroke(LifeOSTokens.Ring.track, lineWidth: lineWidth)
             Circle()
                 .trim(from: 0, to: reduceMotion || hasPresented ? fraction : 0)
                 .stroke(
                     arcColor,
-                    style: StrokeStyle(lineWidth: 6, lineCap: .round)
+                    style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
                 )
                 .rotationEffect(.degrees(-90))
             Text(valueText)
@@ -732,7 +747,7 @@ private struct UsageProgressRing: View {
                 .foregroundStyle(LifeOSTokens.primaryText)
                 .monospacedDigit()
         }
-        .frame(width: 112, height: 112)
+        .frame(width: diameter, height: diameter)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Usage remaining")
         .accessibilityValue(remainingFraction.map { "\(Int(($0 * 100).rounded())) percent" } ?? "Unavailable")
@@ -751,6 +766,7 @@ private struct UsageProgressRing: View {
         .onChange(of: fraction) { _, _ in
             guard !reduceMotion else { return }
             withAnimation(LifeOSMotion.ease) { hasPresented = true }
+        }
         }
     }
 }
@@ -835,9 +851,6 @@ private struct UsageAdditionalObservations: View {
                 Spacer(minLength: 0)
             }
         }
-        .padding(LifeOSTokens.Space.md)
-        .background(LifeOSTokens.surface, in: LifeOSTokens.cardShape)
-        .overlay(LifeOSTokens.cardShape.stroke(LifeOSTokens.subtleBorder, lineWidth: 1))
         .accessibilityIdentifier("usage-additional-observations")
     }
 }
@@ -1189,15 +1202,13 @@ struct UsageCardHeader: View {
     let icon: LifeOSIconName
 
     var body: some View {
-        HStack(alignment: .top, spacing: 9) {
+        HStack(alignment: .top, spacing: LifeOSTokens.Space.sm) {
             LifeOSIcon(icon, context: .card)
                 .foregroundStyle(.secondary)
-                .frame(width: 16, height: 16)
-                .padding(.top, 2)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).lifeOSTypography(.cardTitle)
                 Text(subtitle)
-                    .lifeOSTypography(.body)
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(.secondary)
             }
             Spacer(minLength: 0)
