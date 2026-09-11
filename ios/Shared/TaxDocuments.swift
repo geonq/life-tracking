@@ -111,8 +111,56 @@ private enum TaxPrivacy {
     ]
 
     static func boundedText(_ text: String, maximumCharacters: Int) -> String {
-        guard text.count > maximumCharacters else { return text }
-        return String(text.prefix(maximumCharacters))
+        guard maximumCharacters >= 0 else { return "" }
+        let prefix = text.prefix(maximumCharacters)
+        return prefix.endIndex == text.endIndex ? text : String(prefix)
+    }
+
+    /// Applies range replacements in one forward pass over an immutable
+    /// NSString. The replacement range may be a capture inside the match;
+    /// untouched spans are copied once and never searched again.
+    private static func replacingMatchRanges(
+        _ regex: NSRegularExpression,
+        in text: String,
+        replacement: (NSString, NSTextCheckingResult) -> (range: NSRange, value: String)?
+    ) -> String {
+        let source = text as NSString
+        let fullRange = NSRange(location: 0, length: source.length)
+        let matches = regex.matches(in: text, range: fullRange)
+        guard !matches.isEmpty else { return text }
+
+        var pieces: [String] = []
+        pieces.reserveCapacity(matches.count * 2 + 1)
+        var cursor = 0
+
+        for match in matches {
+            guard let change = replacement(source, match) else { continue }
+            let target = change.range
+            let matchRange = match.range
+            guard target.location >= cursor,
+                  target.location >= matchRange.location,
+                  target.location <= source.length,
+                  target.length >= 0,
+                  NSMaxRange(target) <= source.length,
+                  NSMaxRange(target) <= NSMaxRange(matchRange) else { continue }
+
+            if cursor < target.location {
+                pieces.append(source.substring(with: NSRange(
+                    location: cursor,
+                    length: target.location - cursor
+                )))
+            }
+            pieces.append(change.value)
+            cursor = NSMaxRange(target)
+        }
+
+        if cursor < source.length {
+            pieces.append(source.substring(with: NSRange(
+                location: cursor,
+                length: source.length - cursor
+            )))
+        }
+        return pieces.joined()
     }
 
     static func redactIdentifiers(
@@ -129,14 +177,12 @@ private enum TaxPrivacy {
             maskedIdentifierTokenRegex,
             identifierRegex
         ] {
-            let matches = regex.matches(
-                in: redacted,
-                range: NSRange(location: 0, length: (redacted as NSString).length)
-            )
-            for match in matches.reversed() {
-                guard match.numberOfRanges > 1,
-                      let valueRange = Range(match.range(at: 1), in: redacted) else { continue }
-                redacted.replaceSubrange(valueRange, with: maskIdentifier(String(redacted[valueRange])))
+            redacted = replacingMatchRanges(regex, in: redacted) { source, match in
+                guard match.numberOfRanges > 1 else { return nil }
+                let valueRange = match.range(at: 1)
+                guard valueRange.location != NSNotFound,
+                      NSMaxRange(valueRange) <= source.length else { return nil }
+                return (valueRange, maskIdentifier(source.substring(with: valueRange)))
             }
         }
         return redacted
@@ -151,39 +197,40 @@ private enum TaxPrivacy {
     ) -> String {
         let bounded = boundedText(text, maximumCharacters: maximumCharacters)
         guard !bounded.isEmpty else { return bounded }
-        var redacted = bounded
-        let range = NSRange(location: 0, length: (redacted as NSString).length)
-        let matches = unlabelledAlphaNumericIdentifierRegex.matches(in: redacted, range: range)
-        let source = redacted as NSString
-        for match in matches.reversed() {
-            guard match.numberOfRanges > 1,
-                  let valueRange = Range(match.range(at: 1), in: redacted) else { continue }
-            let token = source.substring(with: match.range(at: 1))
+        return replacingMatchRanges(unlabelledAlphaNumericIdentifierRegex, in: bounded) { source, match in
+            guard match.numberOfRanges > 1 else { return nil }
+            let valueRange = match.range(at: 1)
+            guard valueRange.location != NSNotFound,
+                  NSMaxRange(valueRange) <= source.length else { return nil }
+            let token = source.substring(with: valueRange)
             guard token.unicodeScalars.contains(where: { CharacterSet.letters.contains($0) }),
-                  token.unicodeScalars.contains(where: { CharacterSet.decimalDigits.contains($0) }) else { continue }
-            let contextLength = min(32, match.range(at: 1).location)
-            let context = source
-                .substring(with: NSRange(
-                    location: match.range(at: 1).location - contextLength,
-                    length: contextLength
-                ))
-                .lowercased()
+                  token.unicodeScalars.contains(where: { CharacterSet.decimalDigits.contains($0) }) else {
+                return nil
+            }
+
+            // Context is deliberately capped in UTF-16 units so a hostile
+            // prefix cannot make each match rescan an ever-growing String.
+            let contextLength = min(32, valueRange.location)
+            let context = source.substring(with: NSRange(
+                location: valueRange.location - contextLength,
+                length: contextLength
+            )).lowercased()
+            let contextRange = NSRange(location: 0, length: (context as NSString).length)
             let isForm = formDocumentLabelPrefixRegex.firstMatch(
                 in: context,
-                range: NSRange(location: 0, length: (context as NSString).length)
+                range: contextRange
             ) != nil
             let isSchedule = scheduleDocumentLabelPrefixRegex.firstMatch(
                 in: context,
-                range: NSRange(location: 0, length: (context as NSString).length)
+                range: contextRange
             ) != nil
             let normalizedToken = token.lowercased()
             if (isForm && validatedFormTokens.contains(normalizedToken))
                 || (isSchedule && validatedScheduleTokens.contains(normalizedToken)) {
-                continue
+                return nil
             }
-            redacted.replaceSubrange(valueRange, with: maskIdentifier(token))
+            return (valueRange, maskIdentifier(token))
         }
-        return redacted
     }
 
     /// Replaces exact identifier values before generic redaction. Candidate
@@ -204,12 +251,9 @@ private enum TaxPrivacy {
                     pattern: NSRegularExpression.escapedPattern(for: source),
                     options: .caseInsensitive
                   ) else { continue }
-            result = regex.stringByReplacingMatches(
-                in: result,
-                options: [],
-                range: NSRange(location: 0, length: (result as NSString).length),
-                withTemplate: replacement
-            )
+            result = replacingMatchRanges(regex, in: result) { _, match in
+                (match.range, replacement)
+            }
         }
         return result
     }
@@ -227,12 +271,32 @@ private enum TaxPrivacy {
     }
 
     private static func replacingMatches(_ regex: NSRegularExpression, in text: String) -> String {
-        regex.stringByReplacingMatches(
-            in: text,
-            options: [],
-            range: NSRange(location: 0, length: (text as NSString).length),
-            withTemplate: ""
-        )
+        replacingMatchRanges(regex, in: text) { _, match in
+            (match.range, "")
+        }
+    }
+
+    /// Returns a valid UTF-8 prefix without inserting a replacement scalar
+    /// when the byte boundary falls inside a multi-byte character.
+    static func boundedUTF8Prefix(
+        _ text: String,
+        maximumBytes: Int
+    ) -> (value: String, truncated: Bool) {
+        guard maximumBytes >= 0 else { return ("", true) }
+        let data = Data(text.utf8)
+        guard data.count > maximumBytes else { return (text, false) }
+        guard maximumBytes > 0 else { return ("", true) }
+
+        var end = maximumBytes
+        while end > 0 {
+            if let value = String(data: Data(data.prefix(end)), encoding: .utf8) {
+                return (value, true)
+            }
+            // A valid UTF-8 scalar is at most four bytes, so this loop backs
+            // up only across the partial scalar at the boundary.
+            end -= 1
+        }
+        return ("", true)
     }
 
     private static func evidenceContainsUntrustedNumber(_ text: String) -> Bool {
@@ -876,33 +940,62 @@ public struct TaxDocument: Codable, Equatable, Identifiable, Sendable {
         )
     }
 
-    static func boundedPagesForParsing(_ pages: [String]) -> (pages: [String], truncated: Bool) {
-        boundedPagesForParsing(pages, replacements: [:])
+    static func boundedPagesForParsing(
+        _ pages: [String],
+        cancellationCheck: @escaping () -> Bool = { false }
+    ) -> (pages: [String], truncated: Bool) {
+        boundedPagesForParsing(
+            pages,
+            replacements: [:],
+            cancellationCheck: cancellationCheck
+        )
     }
 
     static func boundedPagesForParsing(
         _ pages: [String],
-        replacements: [String: String]
+        replacements: [String: String],
+        cancellationCheck: @escaping () -> Bool = { false }
     ) -> (pages: [String], truncated: Bool) {
-        var remainingBytes = TaxDocumentLimits.maximumTotalPageBytes
+        var remainingInputBytes = TaxDocumentLimits.maximumTotalPageBytes
+        var remainingOutputBytes = TaxDocumentLimits.maximumTotalPageBytes
         var truncated = pages.count > TaxDocumentLimits.maximumPages
         var bounded: [String] = []
         bounded.reserveCapacity(min(pages.count, TaxDocumentLimits.maximumPages))
         for page in pages.prefix(TaxDocumentLimits.maximumPages) {
-            let characterBounded = String(page.prefix(TaxDocumentLimits.maximumPageCharacters))
-            truncated = truncated || characterBounded.count != page.count
-            guard remainingBytes > 0 else {
+            if cancellationCheck() {
+                truncated = true
+                break
+            }
+
+            let characterPrefix = page.prefix(TaxDocumentLimits.maximumPageCharacters)
+            let characterBounded = String(characterPrefix)
+            truncated = truncated || characterPrefix.endIndex != page.endIndex
+            guard remainingInputBytes > 0 else {
                 truncated = true
                 bounded.append("")
                 continue
             }
-            let encoded = Data(characterBounded.utf8)
-            let prefix = encoded.count > remainingBytes ? Data(encoded.prefix(remainingBytes)) : encoded
-            let value = String(decoding: prefix, as: UTF8.self)
-            truncated = truncated || value.utf8.count != encoded.count
-            remainingBytes -= value.utf8.count
+
+            let boundedInput = TaxPrivacy.boundedUTF8Prefix(
+                characterBounded,
+                maximumBytes: remainingInputBytes
+            )
+            truncated = truncated || boundedInput.truncated
+            remainingInputBytes -= boundedInput.value.utf8.count
+            guard remainingOutputBytes > 0 else {
+                truncated = true
+                bounded.append("")
+                continue
+            }
+
+            // Check again after the cheap input bounds and immediately before
+            // the regex passes, which are the expensive part of page import.
+            if cancellationCheck() {
+                truncated = true
+                break
+            }
             let replaced = TaxPrivacy.replacingKnownIdentifierValues(
-                in: value,
+                in: boundedInput.value,
                 replacements: replacements,
                 maximumCharacters: TaxDocumentLimits.maximumPageCharacters
             )
@@ -910,12 +1003,17 @@ public struct TaxDocument: Codable, Equatable, Identifiable, Sendable {
                 in: replaced,
                 maximumCharacters: TaxDocumentLimits.maximumPageCharacters
             )
-            bounded.append(
-                TaxPrivacy.redactUnlabelledAlphaNumericIdentifiers(
-                    in: redacted,
-                    maximumCharacters: TaxDocumentLimits.maximumPageCharacters
-                )
+            let redactedPage = TaxPrivacy.redactUnlabelledAlphaNumericIdentifiers(
+                in: redacted,
+                maximumCharacters: TaxDocumentLimits.maximumPageCharacters
             )
+            let boundedOutput = TaxPrivacy.boundedUTF8Prefix(
+                redactedPage,
+                maximumBytes: remainingOutputBytes
+            )
+            truncated = truncated || boundedOutput.truncated
+            remainingOutputBytes -= boundedOutput.value.utf8.count
+            bounded.append(boundedOutput.value)
         }
         return (bounded, truncated)
     }
@@ -933,17 +1031,15 @@ enum TaxDocumentParser {
         pages: [String], documentName: String,
         cancellationCheck: @escaping () -> Bool = { false }
     ) -> TaxDocument {
-        let bounded = TaxDocument.boundedPagesForParsing(pages)
+        let bounded = TaxDocument.boundedPagesForParsing(
+            pages,
+            cancellationCheck: cancellationCheck
+        )
         let cleanedPages = bounded.pages.map { $0.replacingOccurrences(of: "\u{FFFD}", with: "") }
-        let safePages = cleanedPages.map {
-            TaxPrivacy.redactUnlabelledAlphaNumericIdentifiers(
-                in: TaxPrivacy.redactIdentifiers(
-                    in: $0,
-                    maximumCharacters: TaxDocumentLimits.maximumPageCharacters
-                ),
-                maximumCharacters: TaxDocumentLimits.maximumPageCharacters
-            )
-        }
+        // boundedPagesForParsing already applies the complete privacy pass
+        // from a bounded input and enforces the aggregate redacted output
+        // budget. Re-running the regexes here doubled page-import work.
+        let safePages = cleanedPages
         var dates: [TaxDate] = []
         var amounts: [TaxAmount] = []
         var years: [Int] = []

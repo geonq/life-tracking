@@ -639,6 +639,34 @@ final class TaxDocumentTests: XCTestCase {
         XCTAssertFalse(bounded.pages.first?.contains(sentinel) == true)
     }
 
+    func testPageRedactionKeepsExpandedOutputWithinAggregateByteBudget() {
+        // Each short token expands when masked. Twelve bounded pages are
+        // enough to exceed the aggregate output budget while keeping this
+        // fixture small enough for a normal unit-test process.
+        let page = String(repeating: "A7 ", count: 83_333)
+        let result = TaxDocument.boundedPagesForParsing(Array(repeating: page, count: 12))
+        let outputBytes = result.pages.reduce(0) { $0 + $1.utf8.count }
+
+        XCTAssertLessThanOrEqual(outputBytes, TaxDocumentLimits.maximumTotalPageBytes)
+        XCTAssertTrue(result.truncated)
+        XCTAssertTrue(result.pages.allSatisfy { !$0.contains("A7") })
+    }
+
+    func testPageBoundsChecksCancellationBeforeRedaction() {
+        var checks = 0
+        let result = TaxDocument.boundedPagesForParsing(
+            ["A7 A7 A7"],
+            cancellationCheck: {
+                checks += 1
+                return checks == 1
+            }
+        )
+
+        XCTAssertTrue(result.pages.isEmpty)
+        XCTAssertTrue(result.truncated)
+        XCTAssertEqual(checks, 1)
+    }
+
     func testEmptyPagesWarnAndRemainLowConfidence() {
         let result = TaxDocumentParser.parse(pages: ["", "   "], documentName: "scan.pdf")
         XCTAssertTrue(result.warnings.contains("No embedded text was found."))
