@@ -391,8 +391,16 @@ def validate_wheel(path: Path, expected: dict[str, str]) -> int:
         for line in wheel_metadata.decode("utf-8").splitlines()
         if line.startswith("Tag:")
     }
-    expected_tag = "-".join((expected["python_tag"], expected["abi_tag"], expected["platform_tag"]))
-    if expected_tag not in tags:
+    if expected["python_tag"] == "py2.py3":
+        expected_tags = {
+            f"py2-{expected['abi_tag']}-{expected['platform_tag']}",
+            f"py3-{expected['abi_tag']}-{expected['platform_tag']}",
+        }
+    else:
+        expected_tags = {
+            "-".join((expected["python_tag"], expected["abi_tag"], expected["platform_tag"]))
+        }
+    if not expected_tags.issubset(tags):
         raise SystemExit(f"wheel WHEEL tags do not match the lock: {path.name}")
     return size
 

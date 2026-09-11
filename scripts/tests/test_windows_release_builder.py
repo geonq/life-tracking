@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import subprocess
+import sys
+import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 
@@ -163,6 +167,60 @@ class WindowsReleaseBuilderTests(unittest.TestCase):
         self.assertGreater(len(names), 0)
         self.assertEqual(len(wheels), len(set(wheels)))
         self.assertTrue(all(wheel.endswith(".whl") for wheel in wheels))
+
+    def test_wheel_validator_matches_split_py2_py3_metadata_tags(self) -> None:
+        builder = BUILDER.read_text(encoding="utf-8")
+        validator = builder.split(
+            "python3 - \"$gateway_lock_source\" \"$wheelhouse_source\" \"$repo_root\" \"$wheelhouse_contract\" <<'PY'\n",
+            1,
+        )[1].split("\nPY\n", 1)[0]
+        wheel_name = "tzdata-2026.3-py2.py3-none-any.whl"
+        metadata = b"Name: tzdata\nVersion: 2026.3\n"
+        dist_info = "tzdata-2026.3.dist-info"
+
+        def run_validator(tags: tuple[str, ...]) -> tuple[subprocess.CompletedProcess[str], str]:
+            temp_dir = "/private/tmp" if Path("/private/tmp").is_dir() else None
+            with tempfile.TemporaryDirectory(dir=temp_dir) as temporary:
+                root = Path(temporary)
+                wheelhouse = root / "wheelhouse"
+                wheelhouse.mkdir()
+                wheel_path = wheelhouse / wheel_name
+                wheel_metadata = (
+                    "Wheel-Version: 1.0\n"
+                    "Generator: test\n"
+                    "Root-Is-Purelib: true\n"
+                    + "".join(f"Tag: {tag}\n" for tag in tags)
+                ).encode("utf-8")
+                with zipfile.ZipFile(wheel_path, "w", compression=zipfile.ZIP_STORED) as archive:
+                    archive.writestr(f"{dist_info}/METADATA", metadata)
+                    archive.writestr(f"{dist_info}/WHEEL", wheel_metadata)
+                digest = hashlib.sha256(wheel_path.read_bytes()).hexdigest()
+                lock_path = root / "requirements.lock"
+                lock_path.write_text(
+                    f"tzdata==2026.3 --hash=sha256:{digest} # {wheel_name}\n",
+                    encoding="utf-8",
+                )
+                contract_path = root / "wheelhouse.contract"
+                result = subprocess.run(
+                    [sys.executable, "-", str(lock_path), str(wheelhouse), str(ROOT), str(contract_path)],
+                    input=validator,
+                    cwd=ROOT,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                contract = contract_path.read_text(encoding="utf-8") if contract_path.exists() else ""
+                return result, contract
+
+        accepted, contract = run_validator(("py2-none-any", "py3-none-any"))
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        self.assertTrue(contract.startswith(f"{wheel_name}\t"))
+
+        for tags in (("py2-none-any",), ("py2-none-any", "cp312-cp312-win_amd64")):
+            with self.subTest(tags=tags):
+                rejected, _ = run_validator(tags)
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertIn("wheel WHEEL tags do not match the lock", rejected.stderr)
 
     def test_node_runtime_size_contract_matches_candidate_verifier(self) -> None:
         builder = BUILDER.read_text(encoding="utf-8")
