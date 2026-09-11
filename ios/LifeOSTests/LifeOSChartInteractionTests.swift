@@ -81,6 +81,270 @@ final class LifeOSChartInteractionTests: XCTestCase {
         )
     }
 
+    func testUsageProjectionSegmentsPreserveHourlyCadenceBreaksAndValues() {
+        let base = Date(timeIntervalSince1970: 1_800_000_000)
+        let snapshot = UsageAnalyticsSnapshot(
+            provider: .codex,
+            activity: [
+                UsageActivityPoint(date: base, tokens: 1, usedPercent: 0.2),
+                UsageActivityPoint(date: base.addingTimeInterval(3_600), tokens: 2, usedPercent: 0.35),
+                UsageActivityPoint(date: base.addingTimeInterval(10_800), tokens: 3, usedPercent: 0.8)
+            ],
+            projection: [],
+            modelBreakdowns: [],
+            heatmap: [],
+            provenance: Provenance(
+                source: "Gateway",
+                observedAt: base,
+                quality: .observed,
+                connector: .healthy
+            )
+        )
+
+        let displayModel = UsageProjectionDisplayModel(analytics: snapshot, window: nil)
+
+        XCTAssertEqual(displayModel.renderedActualSegments.map { $0.points.count }, [2, 1])
+        XCTAssertEqual(
+            displayModel.renderedActualSegments.flatMap(\.points).map(\.usedPercent),
+            [0.2, 0.35, 0.8]
+        )
+    }
+
+    func testUsageProjectionDuplicateTimestampUsesLastValueEverywhere() throws {
+        let base = Date(timeIntervalSince1970: 1_800_000_000)
+        let estimateDate = base.addingTimeInterval(7_200)
+        let snapshot = UsageAnalyticsSnapshot(
+            provider: .codex,
+            activity: [
+                UsageActivityPoint(date: base, tokens: 1, usedPercent: 0.2),
+                UsageActivityPoint(date: base, tokens: 2, usedPercent: 0.8),
+                UsageActivityPoint(
+                    date: base.addingTimeInterval(3_600),
+                    tokens: 3,
+                    usedPercent: 0.9
+                )
+            ],
+            projection: [
+                UsageProjectionPoint(date: estimateDate, usedPercent: 0.3),
+                UsageProjectionPoint(date: estimateDate, usedPercent: 0.7)
+            ],
+            modelBreakdowns: [],
+            heatmap: [],
+            provenance: Provenance(
+                source: "Gateway",
+                observedAt: base,
+                quality: .observed,
+                connector: .healthy
+            )
+        )
+
+        let displayModel = UsageProjectionDisplayModel(analytics: snapshot, window: nil)
+        let selected = try XCTUnwrap(displayModel.nearestSelection(to: base))
+        let projected = try XCTUnwrap(displayModel.nearestSelection(to: estimateDate))
+
+        XCTAssertEqual(displayModel.actualPoints.map(\.date), [base, base.addingTimeInterval(3_600)])
+        XCTAssertEqual(displayModel.actualPoints[0].usedPercent, 0.8)
+        XCTAssertEqual(displayModel.renderedActualPoints[0].usedPercent, 0.8)
+        XCTAssertEqual(selected.usedPercent, 0.8)
+        XCTAssertEqual(displayModel.selectionIndex[selected.id]?.usedPercent, 0.8)
+        XCTAssertEqual(
+            displayModel.selectablePoints.filter { $0.date == base }.map(\.usedPercent),
+            [0.8]
+        )
+        XCTAssertEqual(displayModel.estimatePoints.map(\.usedPercent), [0.7])
+        XCTAssertEqual(displayModel.renderedEstimatePoints.map(\.usedPercent), [0.7])
+        XCTAssertTrue(projected.isProjected)
+        XCTAssertEqual(projected.usedPercent, 0.7)
+        XCTAssertEqual(displayModel.selectionIndex[projected.id]?.usedPercent, 0.7)
+    }
+
+    func testLongRegularHourlyHistoryDownsamplesAfterSegmentation() throws {
+        let base = Date(timeIntervalSince1970: 1_800_000_000)
+        let activity = (0..<480).map { index in
+            UsageActivityPoint(
+                date: base.addingTimeInterval(Double(index) * 3_600),
+                tokens: index + 1,
+                usedPercent: 0.1 + (Double(index) / 479) * 0.7
+            )
+        }
+        let snapshot = UsageAnalyticsSnapshot(
+            provider: .codex,
+            activity: activity,
+            projection: [],
+            modelBreakdowns: [],
+            heatmap: [],
+            provenance: Provenance(
+                source: "Gateway",
+                observedAt: base,
+                quality: .observed,
+                connector: .healthy
+            )
+        )
+
+        let displayModel = UsageProjectionDisplayModel(analytics: snapshot, window: nil)
+        let rendered = displayModel.renderedActualSegments.flatMap(\.points)
+
+        XCTAssertEqual(displayModel.renderedActualSegments.count, 1)
+        XCTAssertEqual(rendered.count, UsageProjectionDisplayModel.maximumRenderedSamples)
+        XCTAssertLessThanOrEqual(rendered.count, UsageProjectionDisplayModel.maximumRenderedSamples)
+        XCTAssertEqual(displayModel.renderedActualPoints, rendered)
+
+        let first = try XCTUnwrap(rendered.first)
+        let last = try XCTUnwrap(rendered.last)
+        XCTAssertEqual(first.date, activity[0].date)
+        XCTAssertEqual(first.usedPercent, activity[0].usedPercent)
+        XCTAssertEqual(last.date, activity[479].date)
+        XCTAssertEqual(last.usedPercent, activity[479].usedPercent)
+
+        let selected = try XCTUnwrap(
+            displayModel.nearestSelection(to: base.addingTimeInterval(4_500))
+        )
+        XCTAssertFalse(selected.isProjected)
+        XCTAssertEqual(selected.date, base.addingTimeInterval(3_600))
+    }
+
+    func testTightBudgetRetainsWholeCadenceSegmentsAndLatestObservation() throws {
+        let base = Date(timeIntervalSince1970: 1_800_000_000)
+        let activity = (0..<121).flatMap { index -> [UsageActivityPoint] in
+            let segmentStart = base.addingTimeInterval(Double(index) * 10_800)
+            let firstValue = 0.1 + Double(index) * 0.001
+            return [
+                UsageActivityPoint(
+                    date: segmentStart,
+                    tokens: index * 2 + 1,
+                    usedPercent: firstValue
+                ),
+                UsageActivityPoint(
+                    date: segmentStart.addingTimeInterval(3_600),
+                    tokens: index * 2 + 2,
+                    usedPercent: firstValue + 0.0005
+                )
+            ]
+        }
+        let snapshot = UsageAnalyticsSnapshot(
+            provider: .codex,
+            activity: activity,
+            projection: [],
+            modelBreakdowns: [],
+            heatmap: [],
+            provenance: Provenance(
+                source: "Gateway",
+                observedAt: base,
+                quality: .observed,
+                connector: .healthy
+            )
+        )
+
+        let displayModel = UsageProjectionDisplayModel(analytics: snapshot, window: nil)
+        let renderedSegments = displayModel.renderedActualSegments
+        let renderedPoints = renderedSegments.flatMap(\.points)
+
+        XCTAssertEqual(renderedSegments.count, 120)
+        XCTAssertTrue(renderedSegments.allSatisfy { $0.points.count == 2 })
+        XCTAssertLessThanOrEqual(
+            renderedPoints.count,
+            UsageProjectionDisplayModel.maximumRenderedSamples
+        )
+        XCTAssertEqual(renderedPoints.count, 240)
+        XCTAssertEqual(renderedPoints.first?.date, activity.first?.date)
+        XCTAssertEqual(renderedPoints.last?.date, activity.last?.date)
+        XCTAssertEqual(renderedPoints.last?.usedPercent, activity.last?.usedPercent)
+
+        let sourceByStartDate = Dictionary(
+            uniqueKeysWithValues: stride(from: 0, to: activity.count, by: 2).map { index in
+                (activity[index].date, Array(activity[index..<(index + 2)]))
+            }
+        )
+        XCTAssertTrue(renderedSegments.allSatisfy { segment in
+            guard let first = segment.points.first,
+                  let source = sourceByStartDate[first.date] else {
+                return false
+            }
+            return segment.points.map(\.date) == source.map(\.date)
+                && segment.points.map(\.usedPercent) == source.map(\.usedPercent)
+        })
+    }
+
+    func testLiveHistoryProjectionStaysContinuousAndSelectionRemainsGapSafe() throws {
+        let base = Date(timeIntervalSince1970: 1_800_000_000)
+        let latestObserved = base.addingTimeInterval(10_800)
+        let resetAt = base.addingTimeInterval(18_000)
+        let history = [
+            UsageHistoryEntry(
+                provider: .codex,
+                window: "five_hour",
+                durationMinutes: 300,
+                usedPercent: 20,
+                resetAt: resetAt,
+                observedAt: base,
+                source: "Gateway",
+                connectorState: .healthy
+            ),
+            UsageHistoryEntry(
+                provider: .codex,
+                window: "five_hour",
+                durationMinutes: 300,
+                usedPercent: 35,
+                resetAt: resetAt,
+                observedAt: latestObserved,
+                source: "Gateway",
+                connectorState: .healthy
+            )
+        ]
+        let snapshot = UsageAnalyticsSnapshot(
+            provider: .codex,
+            windowID: "five_hour",
+            activity: [],
+            projection: [
+                UsageProjectionPoint(date: latestObserved, usedPercent: 0.35),
+                UsageProjectionPoint(date: resetAt, usedPercent: 0.65)
+            ],
+            modelBreakdowns: [],
+            heatmap: [],
+            provenance: Provenance(
+                source: "Gateway",
+                observedAt: latestObserved,
+                quality: .observed,
+                connector: .healthy
+            ),
+            history: history
+        )
+        let window = UsageWindow(
+            id: "five_hour",
+            label: "5-hour",
+            resetAt: resetAt,
+            durationMinutes: 300
+        )
+
+        // This mirrors UsageAnalyticsHistoryBuilder's live shape: activity is
+        // empty, history is observed, and projection is anchor plus endpoint.
+        let displayModel = UsageProjectionDisplayModel(analytics: snapshot, window: window)
+
+        XCTAssertEqual(displayModel.renderedActualSegments.map { $0.points.count }, [1, 1])
+        XCTAssertEqual(displayModel.renderedEstimateSegments.map { $0.points.count }, [2])
+        XCTAssertEqual(
+            displayModel.renderedEstimateSegments.flatMap(\.points).map(\.usedPercent),
+            [0.35, 0.65]
+        )
+
+        let estimateSelection = try XCTUnwrap(
+            displayModel.nearestSelection(to: latestObserved.addingTimeInterval(6_600))
+        )
+        XCTAssertTrue(estimateSelection.isProjected)
+        XCTAssertEqual(estimateSelection.date, resetAt)
+
+        let observedTieSelection = try XCTUnwrap(
+            displayModel.nearestSelection(to: latestObserved.addingTimeInterval(3_600))
+        )
+        XCTAssertFalse(observedTieSelection.isProjected)
+        XCTAssertEqual(observedTieSelection.date, latestObserved)
+
+        XCTAssertNil(
+            displayModel.nearestSelection(to: base.addingTimeInterval(5_400)),
+            "An observed cadence gap must not fall through to the estimate series."
+        )
+    }
+
     func testSelectionReturnsNoDataInsideExplicitGap() {
         let base = Date(timeIntervalSince1970: 1_800_000_000)
         let series = LifeOSChartSeries(
