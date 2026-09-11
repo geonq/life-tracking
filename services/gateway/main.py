@@ -659,7 +659,11 @@ _TAX_BARE_IDENTIFIER_PATTERN = re.compile(
     r"(?<![0-9])(?P<value>[0-9*]{11,32})(?![0-9])"
 )
 _TAX_GROUPED_IDENTIFIER_PATTERN = re.compile(
-    r"(?<![0-9])(?P<value>\*?[0-9*]{2}(?:[ \t]{1,3}[0-9*]{3}){3}\*?)(?![0-9])"
+    r"(?<![0-9])(?P<value>"
+    r"\*?[0-9*]{2}[ \t/.-]{1,3}[0-9*]{3}[ \t/.-]{1,3}[0-9*]{5}\*?"
+    r"|\*?[0-9*]{2}(?:[ \t]{1,3}[0-9*]{3}){3}\*?"
+    r"|\*?(?:[0-9*]{3}[ \t/.-]{1,3}){3}[0-9*]{2}\*?"
+    r")(?![0-9])"
 )
 _TAX_MASKED_IDENTIFIER_PATTERN = re.compile(
     r"(?<![0-9*])\*{1,32}(?P<suffix>[0-9]{2})(?![0-9])"
@@ -3453,12 +3457,17 @@ def _validate_jpeg_structure(raw: bytes) -> bool:
                 offset += 2
 
             if len(scan_components) == 1:
-                # A non-interleaved sequential scan is made of ordinary 8x8
-                # data units. Some ImageIO/ImageMagick outputs retain a
-                # larger SOF sampling factor even though the scan is not
-                # interleaved; using frame max sampling here rejects them.
-                total_units = ((frame["width"] + 7) // 8) * ((frame["height"] + 7) // 8)
-                scan_blocks = [(scan_components[0][3], scan_components[0][4])]
+                # A non-interleaved sequential scan uses the scan component's
+                # dimensions on the frame's maximum-sampling grid. Using the
+                # full frame dimensions for a subsampled component rejects
+                # valid ImageIO/cjpeg multiscan JPEGs.
+                component = scan_components[0]
+                max_h = max(item[1] for item in frame["components"])
+                max_v = max(item[2] for item in frame["components"])
+                total_units = (
+                    (frame["width"] * component[1] + 8 * max_h - 1) // (8 * max_h)
+                ) * ((frame["height"] * component[2] + 8 * max_v - 1) // (8 * max_v))
+                scan_blocks = [(component[3], component[4])]
             else:
                 max_h = max(component[1] for component in frame["components"])
                 max_v = max(component[2] for component in frame["components"])
@@ -4416,9 +4425,6 @@ def _mask_tax_identifier(value: str) -> str:
     return "*" * 8 + digits[-2:]
 
 
-_CANONICAL_MASKED_TAX_IDENTIFIER_PATTERN = re.compile(r"^\*{8}[0-9]{2}$")
-
-
 def _replace_tax_identifier_match(match: re.Match[str]) -> str:
     whole = match.group(0)
     start = match.start("value") - match.start()
@@ -4428,8 +4434,9 @@ def _replace_tax_identifier_match(match: re.Match[str]) -> str:
 def _replace_bare_tax_identifier_match(match: re.Match[str], source: str) -> str:
     value = match.group("value")
     digits = "".join(character for character in value if "0" <= character <= "9")
-    compact = "".join(character for character in value if character not in " \t")
-    marker_count = len(compact) - len(digits)
+    compact = "".join(character for character in value if character == "*" or "0" <= character <= "9")
+    marker_count = compact.count("*")
+    is_grouped_identifier = _TAX_GROUPED_IDENTIFIER_PATTERN.fullmatch(value) is not None
     # A star can stand in for a hidden identifier digit (for example
     # ``*2345678901`` or ``12345*78901``), while a trailing star may be a
     # legacy redaction marker after all eleven digits.  A plain 12-digit
@@ -4437,7 +4444,7 @@ def _replace_bare_tax_identifier_match(match: re.Match[str], source: str) -> str
     is_eleven_digit_identifier = len(digits) == 11 or (
         len(compact) == 11 and marker_count >= 1 and len(digits) >= 2
     )
-    if not is_eleven_digit_identifier:
+    if not is_grouped_identifier and not is_eleven_digit_identifier:
         return value
 
     # An amount with an explicit decimal fraction is ordinary numeric text,
@@ -4450,7 +4457,7 @@ def _replace_bare_tax_identifier_match(match: re.Match[str], source: str) -> str
     return _mask_tax_identifier(value)
 
 
-def _redact_tax_text(value: str, *, normalize_masked: bool = False) -> str:
+def _redact_tax_text(value: str) -> str:
     redacted = _TAX_GERMAN_IDENTIFIER_PATTERN.sub(_replace_tax_identifier_match, value)
     redacted = _TAX_IDENTIFIER_PATTERN.sub(_replace_tax_identifier_match, redacted)
     redacted = _TAX_GROUPED_IDENTIFIER_PATTERN.sub(
@@ -4461,23 +4468,24 @@ def _redact_tax_text(value: str, *, normalize_masked: bool = False) -> str:
         lambda match: _replace_bare_tax_identifier_match(match, redacted),
         redacted,
     )
-    if normalize_masked:
-        redacted = _TAX_MASKED_IDENTIFIER_PATTERN.sub(
-            lambda match: "*" * 8 + match.group("suffix"),
-            redacted,
-        )
+    # Canonicalize already-masked values everywhere, including generic
+    # evidence and titles, so publication has one stable mask contract.
+    redacted = _TAX_MASKED_IDENTIFIER_PATTERN.sub(
+        lambda match: "*" * 8 + match.group("suffix"),
+        redacted,
+    )
     return redacted
 
 
 def _mask_tax_identifier_value(value: str) -> str:
     trimmed = value.strip()
-    redacted = _redact_tax_text(trimmed, normalize_masked=True)
+    redacted = _redact_tax_text(trimmed)
     if redacted != trimmed:
         return redacted
     return _mask_tax_identifier(trimmed)
 
 
-def _validate_document_evidence(value: object, *, identifier: bool = False) -> dict:
+def _validate_document_evidence(value: object) -> dict:
     if not isinstance(value, dict) or set(value) != {"page", "snippet"}:
         raise ValueError("document evidence fields are invalid")
     page = value["page"]
@@ -4486,7 +4494,7 @@ def _validate_document_evidence(value: object, *, identifier: bool = False) -> d
     snippet = _bounded_document_string(value["snippet"], DOCUMENT_MAX_EVIDENCE_CHARACTERS)
     return {
         "page": page,
-        "snippet": _redact_tax_text(snippet, normalize_masked=identifier),
+        "snippet": _redact_tax_text(snippet),
     }
 
 
@@ -4496,7 +4504,7 @@ def _validate_document_candidate(value: object, *, identifier: bool) -> dict | N
     if not isinstance(value, dict) or set(value) != {"value", "evidence"}:
         raise ValueError("document candidate fields are invalid")
     raw_value = _bounded_document_string(value["value"], DOCUMENT_MAX_FIELD_CHARACTERS)
-    evidence = _validate_document_evidence(value["evidence"], identifier=identifier)
+    evidence = _validate_document_evidence(value["evidence"])
     safe_value = _mask_tax_identifier_value(raw_value) if identifier else _redact_tax_text(raw_value)
     return {"value": safe_value, "evidence": evidence}
 

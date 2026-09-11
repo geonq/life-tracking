@@ -1348,6 +1348,18 @@ def test_calendar_icon_wire_contract_and_legacy_optional_hash():
     })]}
     assert main._parse_calendar_document(json.dumps(imageio_document).encode()) == imageio_document
 
+    # libjpeg's documented sequential scan script can emit one non-interleaved
+    # scan per component while retaining 4:2:0 sampling in the frame. This
+    # 17x19 fixture decodes in Apple ImageIO and exercises component-relative
+    # block counts at both non-multiple-of-eight dimensions.
+    subsampled_multiscan_jpeg = base64.b64decode(
+        "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAATABEDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/9oACAEBAAA/APOPC3hL7n7v9K9T0zwoVtEAj+8wB4/H+lX/AOx9O/5+7T/v6v8AjTLS88O6J8t3fRPcLvHkW/719y9VIXhTnj5iP0NQeOPiemm6LHF4e0p/tFwNsct4wXY2fmOxDkgL0IYYJHHHPm//AAm/iH/oH6T/AN+ZP/i60fC1rB8n7taPEqrL4n8pxmOGNAi9lyMn9as/ZYP+ea1//8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oACAECEQA/AMKeJxtfLKnsov3la+y95pdemup4/wDYOL/mX3o+oqNvAv1X5nDdn//aAAgBAxEAPwDoyueK9n9Y5HyRV7vRfj/Vzm/1nzn/AJ8w/wDAmexxJUlHAwSe81f7pP8AM+Nuz//Z"
+    )
+    multiscan_document = {"schemaVersion": 1, "items": [calendar_item(iconAsset={
+        "format": "jpeg", "bytes": base64.b64encode(subsampled_multiscan_jpeg).decode()
+    })]}
+    assert main._parse_calendar_document(json.dumps(multiscan_document).encode()) == multiscan_document
+
     marker_only = b"\xff\xd8\xff\xc0\x00\x11\x08\x00\x01\x00\x01\x01\x01\x11\x00\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00\x00\xff\xd9"
     invalid = {"schemaVersion": 1, "items": [calendar_item(iconAsset={
         "format": "jpeg", "bytes": base64.b64encode(marker_only).decode()
@@ -3408,9 +3420,12 @@ def test_document_publication_redacts_identifiers_and_hides_internal_fields(tmp_
     ("***90", "********90"),
     ("12345678901", "********01"),
     ("12 345 678 901", "********01"),
+    ("12/345/67890", "********90"),
+    ("123 456 789 01", "********01"),
     ("12345678901*", "********01"),
     ("*2345678901", "********01"),
     ("12345*78901", "********01"),
+    ("*90", "********90"),
     ("identifier-without-digits", "********"),
 ])
 def test_tax_identifier_mask_contract_is_canonical(raw, expected):
@@ -3420,8 +3435,12 @@ def test_tax_identifier_mask_contract_is_canonical(raw, expected):
 def test_tax_text_keeps_ordinary_date_and_money_text_intact():
     ordinary = "Invoice date 31.12.2025; amount 1.234,56 EUR; short code 1234567890"
     assert main._redact_tax_text(ordinary) == ordinary
+    assert main._redact_tax_text("Amount 12345678901.00") == "Amount 12345678901.00"
     assert main._redact_tax_text("Unlabelled 12345678901") == "Unlabelled ********01"
     assert main._redact_tax_text("Unlabelled 12 345 678 901") == "Unlabelled ********01"
+    assert main._redact_tax_text("Unlabelled 12/345/67890") == "Unlabelled ********90"
+    assert main._redact_tax_text("Unlabelled 123 456 789 01") == "Unlabelled ********01"
+    assert main._redact_tax_text("Already masked *90") == "Already masked ********90"
 
 
 def test_document_publication_redacts_unlabelled_identifiers_across_all_text_fields_and_persistence(
@@ -3432,7 +3451,8 @@ def test_document_publication_redacts_unlabelled_identifiers_across_all_text_fie
     monkeypatch.setattr(main, "DOCUMENTS_DIR", tmp_path / "documents")
     document_id = "16161616-1616-4161-8161-161616161616"
     raw = "12345678901"
-    grouped = "12 345 678 901"
+    grouped = "12/345/67890"
+    split_grouped = "123 456 789 01"
     mixed = "12345*78901"
     metadata = tax_document_metadata(
         document_id,
@@ -3443,7 +3463,7 @@ def test_document_publication_redacts_unlabelled_identifiers_across_all_text_fie
         referenceIdentifier=tax_candidate("*90", snippet=f"Reference {mixed}"),
         dates=[{
             "value": f"31.12.2025 ({raw})",
-            "evidence": tax_evidence(1, f"Date {grouped}"),
+            "evidence": tax_evidence(1, f"Date {split_grouped}"),
         }],
         amounts=[{
             "value": f"1.234,56 EUR · {raw}",
@@ -3466,25 +3486,25 @@ def test_document_publication_redacts_unlabelled_identifiers_across_all_text_fie
     publication = listed.json()[0]
     persisted = (tmp_path / "documents.json").read_text()
     for text in (listed.text, persisted):
-        for leaked in (raw, grouped, mixed):
+        for leaked in (raw, grouped, split_grouped, mixed):
             assert leaked not in text
         assert '"*90"' not in text
     assert "31.12.2025" in listed.text
     assert "1.234,56 EUR" in listed.text
     assert publication["title"] == "Assessment ********01"
-    assert publication["documentType"] == "tax_assessment ********01"
+    assert publication["documentType"] == "tax_assessment ********90"
     assert publication["issuer"]["value"] == "Finanzamt ********01"
     assert publication["issuer"]["evidence"]["snippet"] == "Issuer ********01"
     assert publication["taxpayerIdentifier"]["value"] == "********01"
-    assert publication["taxpayerIdentifier"]["evidence"]["snippet"] == "Taxpayer ********01"
+    assert publication["taxpayerIdentifier"]["evidence"]["snippet"] == "Taxpayer ********90"
     assert publication["referenceIdentifier"]["value"] == "********90"
     assert publication["referenceIdentifier"]["evidence"]["snippet"] == "Reference ********01"
     assert publication["dates"][0]["value"] == "31.12.2025 (********01)"
     assert publication["dates"][0]["evidence"]["snippet"] == "Date ********01"
     assert publication["amounts"][0]["value"] == "1.234,56 EUR · ********01"
     assert publication["amounts"][0]["label"] == "Amount ********01"
-    assert publication["amounts"][0]["evidence"]["snippet"] == "Amount 1.234,56 EUR ********01"
-    assert publication["warnings"] == ["Review ********01 and ********01"]
+    assert publication["amounts"][0]["evidence"]["snippet"] == "Amount 1.234,56 EUR ********90"
+    assert publication["warnings"] == ["Review ********01 and ********90"]
 
 
 @pytest.mark.parametrize("raw_identifier", ["12345678901*", "*2345678901", "12345*78901"])
