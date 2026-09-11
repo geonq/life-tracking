@@ -3590,7 +3590,9 @@ def test_document_index_migration_keeps_masked_candidate_with_ordinary_context(
 
     assert [item["id"] for item in entries] == [document_id]
     assert entries[0]["title"] == "Tax year 2026"
-    assert entries[0]["taxpayerIdentifier"]["evidence"]["snippet"] == "Page 1"
+    assert entries[0]["taxpayerIdentifier"]["evidence"]["snippet"] == (
+        main.DOCUMENT_PRIVACY_PLACEHOLDER
+    )
     assert entries[0]["dates"][0]["value"] == "31.12.2025"
     assert entries[0]["amounts"][0]["value"] == "1.234,56 EUR"
     serialized = reloaded_body.decode("utf-8")
@@ -3688,7 +3690,60 @@ def test_document_publication_remasks_mixed_identifier_tokens(tmp_path, monkeypa
     assert "12345678901" not in listed.text
 
 
-def test_document_index_migrates_legacy_masked_identifier_privacy_without_leak(
+@pytest.mark.parametrize("snippet", ["Page 8642", "8642 EUR", "SECRETREF"])
+def test_document_index_withholds_unverifiable_legacy_identifier_evidence(
+    tmp_path, monkeypatch, snippet
+):
+    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(main, "DOCUMENTS_INDEX_PATH", tmp_path / "documents.json")
+    monkeypatch.setattr(main, "DOCUMENTS_DIR", tmp_path / "documents")
+
+    document_id = "20202020-2020-4202-8202-202020202020"
+    entry = native_tax_document_metadata(document_id)
+    entry["_originalFile"] = "original-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.pdf"
+    entry["taxpayerIdentifier"] = tax_candidate("********42", snippet=snippet)
+
+    original = json.dumps(
+        [entry],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    main.DOCUMENTS_INDEX_PATH.write_bytes(original)
+
+    entries, reloaded_body = main._load_document_index()
+    assert [item["id"] for item in entries] == [document_id]
+    assert entries[0]["taxpayerIdentifier"]["evidence"]["snippet"] == (
+        main.DOCUMENT_PRIVACY_PLACEHOLDER
+    )
+
+    persisted = main.DOCUMENTS_INDEX_PATH.read_bytes()
+    assert persisted == reloaded_body
+    assert snippet.encode("utf-8") not in persisted
+
+    listed = client.get("/documents", headers=AUTH)
+    assert listed.status_code == 200
+    assert snippet not in listed.text
+    assert main.DOCUMENT_PRIVACY_PLACEHOLDER in listed.text
+    assert document_id in listed.text
+
+
+def test_document_index_migration_preserves_safe_form_w2_entry(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DOCUMENTS_INDEX_PATH", tmp_path / "documents.json")
+
+    document_id = "19191919-1919-4191-8191-191919191919"
+    entry = native_tax_document_metadata(document_id)
+    entry["_originalFile"] = "original.pdf"
+    entry["title"] = "Form W2"
+    original = json.dumps([entry], separators=(",", ":")).encode()
+    main.DOCUMENTS_INDEX_PATH.write_bytes(original)
+
+    entries, _body = main._load_document_index()
+
+    assert [item["id"] for item in entries] == [document_id]
+    assert entries[0]["title"] == "Form W2"
+
+
+def test_document_index_migration_preserves_original_bytes_when_privacy_is_uncertain(
     tmp_path, monkeypatch
 ):
     monkeypatch.setattr(main, "DATA_DIR", tmp_path)
@@ -3696,54 +3751,27 @@ def test_document_index_migrates_legacy_masked_identifier_privacy_without_leak(
     monkeypatch.setattr(main, "DOCUMENTS_DIR", tmp_path / "documents")
 
     safe_id = "19191919-1919-4191-8191-191919191919"
-    evidence_id = "20202020-2020-4202-8202-202020202020"
-    cross_field_id = "21212121-2121-4212-8212-212121212121"
-
+    unsafe_id = "21212121-2121-4212-8212-212121212121"
     safe_entry = native_tax_document_metadata(safe_id)
     safe_entry["_originalFile"] = "original.pdf"
-
-    evidence_entry = native_tax_document_metadata(evidence_id)
-    evidence_entry["_originalFile"] = "original-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.pdf"
-    evidence_entry["taxpayerIdentifier"] = tax_candidate(
-        "********56", snippet="Legacy evidence AZ123456"
-    )
-
-    cross_field_entry = native_tax_document_metadata(cross_field_id)
-    cross_field_entry["_originalFile"] = "original-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.pdf"
-    cross_field_entry["title"] = "Assessment AZ123456 8642 A7"
-    cross_field_entry["taxpayerIdentifier"] = tax_candidate(
-        "********56", snippet="Already masked"
-    )
-    cross_field_entry["referenceIdentifier"] = tax_candidate(
-        "********42", snippet="Legacy evidence 8642"
-    )
+    safe_entry["title"] = "Form W2"
+    unsafe_entry = native_tax_document_metadata(unsafe_id)
+    unsafe_entry["_originalFile"] = "original-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.pdf"
+    unsafe_entry["title"] = "Assessment 8642"
+    unsafe_entry["taxpayerIdentifier"] = tax_candidate("********42", snippet="Already masked")
 
     original = json.dumps(
-        [safe_entry, evidence_entry, cross_field_entry],
+        [safe_entry, unsafe_entry],
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode("utf-8")
     main.DOCUMENTS_INDEX_PATH.write_bytes(original)
 
-    entries, reloaded_body = main._load_document_index()
-    entry_ids = {entry["id"] for entry in entries}
-    assert entry_ids == {safe_id, evidence_id}
-    assert entries[1]["taxpayerIdentifier"]["evidence"]["snippet"] == (
-        "Evidence withheld for privacy."
-    )
+    response = client.get("/documents", headers=AUTH)
 
-    persisted = main.DOCUMENTS_INDEX_PATH.read_bytes()
-    assert persisted == reloaded_body
-    for raw_identifier in ("AZ123456", "8642", "A7"):
-        assert raw_identifier.encode("utf-8") not in persisted
-
-    listed = client.get("/documents", headers=AUTH)
-    assert listed.status_code == 200
-    assert cross_field_id not in listed.text
-    for raw_identifier in ("AZ123456", "8642", "A7"):
-        assert raw_identifier not in listed.text
-    assert evidence_id in listed.text
-    assert safe_id in listed.text
+    assert response.status_code == 503
+    assert response.json() == {"error": "documents_unavailable"}
+    assert main.DOCUMENTS_INDEX_PATH.read_bytes() == original
 
 
 def test_document_index_accepts_uppercase_foundation_uuid_spelling(tmp_path, monkeypatch):

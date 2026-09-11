@@ -609,6 +609,7 @@ DOCUMENT_MAX_DATES = 2_048
 DOCUMENT_MAX_AMOUNTS = 2_048
 DOCUMENT_MAX_WARNINGS = 64
 DOCUMENT_MAX_EVIDENCE_PAGE = 200
+DOCUMENT_PRIVACY_PLACEHOLDER = "Evidence withheld for privacy."
 DOCUMENT_PUBLICATION_KEYS = frozenset({
     "id", "title", "documentType", "taxYear", "issuer", "taxpayerIdentifier",
     "referenceIdentifier", "dates", "amounts", "warnings", "confidence",
@@ -674,6 +675,9 @@ _TAX_CANONICAL_MASK_PATTERN = re.compile(
 )
 _TAX_LEGACY_IDENTIFIER_TOKEN_PATTERN = re.compile(
     r"(?<![A-Za-z0-9*])[A-Za-z0-9*]{2,32}(?![A-Za-z0-9*])"
+)
+_TAX_LEGACY_SUSPICIOUS_ALPHA_TOKEN_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9*])[A-Z]{6,32}(?![A-Za-z0-9*])"
 )
 _TAX_LEGACY_NUMERIC_TOKEN_PATTERN = re.compile(
     r"(?<![A-Za-z0-9*])[0-9]{1,32}(?![0-9*])"
@@ -4603,27 +4607,41 @@ def _legacy_text_contains_unproven_identifier(
     residual = _TAX_MASKED_IDENTIFIER_PATTERN.sub("", residual)
     safe_spans = [match.span() for match in _TAX_LEGACY_SAFE_NUMBER_PATTERN.finditer(residual)]
 
+    # Opaque all-caps tokens are common identifier/reference spellings. They
+    # remain unproven even when another part of the same snippet is masked.
+    if _TAX_LEGACY_SUSPICIOUS_ALPHA_TOKEN_PATTERN.search(residual):
+        return True
+
     for match in _TAX_LEGACY_IDENTIFIER_TOKEN_PATTERN.finditer(residual):
         token = match.group(0)
         if any(character.isalpha() for character in token) and any(character.isdigit() for character in token):
+            prefix = residual[:match.start()]
+            if re.search(r"(?i)\b(?:form|schedule)[ \t]+$", prefix[-64:]):
+                continue
             return True
 
     for match in _TAX_LEGACY_NUMERIC_TOKEN_PATTERN.finditer(residual):
-        if any(start <= match.start() and match.end() <= end for start, end in safe_spans):
-            continue
         prefix = residual[:match.start()]
         if _TAX_LEGACY_ORDINARY_NUMBER_CONTEXT_PATTERN.search(prefix[-64:]):
             continue
+        if any(start <= match.start() and match.end() <= end for start, end in safe_spans):
+            continue
+        # A visible suffix is the only identifier fact retained by a masked
+        # candidate. A legacy field outside an ordinary date/amount context
+        # that contains a longer token ending in that suffix cannot be proven
+        # safe from context alone.
+        if any(
+            suffix and match.group(0) != suffix and match.group(0).endswith(suffix)
+            for suffix in visible_suffixes
+        ):
+            return True
         if _TAX_LEGACY_IDENTIFIER_CONTEXT_PATTERN.search(prefix[-64:]):
             return True
         # Evidence is published verbatim and may contain a bare legacy
         # identifier such as ``8642``.  A non-evidence numeric token is only
         # suspicious when it matches the visible suffix of a masked candidate;
         # this keeps tax years, page numbers, and ordinary prose available.
-        if evidence or any(
-            suffix and match.group(0) != suffix and match.group(0).endswith(suffix)
-            for suffix in visible_suffixes
-        ):
+        if evidence:
             return True
     return False
 
@@ -4656,17 +4674,22 @@ def _migrate_legacy_document_privacy(
     for field, candidate in masked_candidates:
         evidence = candidate.get("evidence")
         snippet = evidence.get("snippet") if isinstance(evidence, dict) else None
-        if type(snippet) is not str or not _legacy_text_contains_unproven_identifier(
-            snippet,
-            visible_suffixes=visible_suffixes,
-            evidence=True,
+        if type(snippet) is not str:
+            continue
+        if (
+            snippet == DOCUMENT_PRIVACY_PLACEHOLDER
+            or _TAX_CANONICAL_MASK_PATTERN.search(snippet) is not None
         ):
             continue
+        # A masked candidate does not prove what its legacy source snippet
+        # contained.  Do not classify page numbers, amounts, or opaque words
+        # as safe with regex heuristics; retain the document while withholding
+        # the unverifiable evidence.
         normalized[field] = {
             **candidate,
             "evidence": {
                 **evidence,
-                "snippet": "Evidence withheld for privacy.",
+                "snippet": DOCUMENT_PRIVACY_PLACEHOLDER,
             },
         }
 
@@ -4834,7 +4857,7 @@ def _serialize_public_document_index(index: list[dict]) -> bytes:
 
 
 def _load_document_index() -> tuple[list[dict], bytes | None]:
-    """Load only canonical, privacy-safe index entries without repairing state."""
+    """Load canonical entries, applying migration as one all-or-nothing write."""
     try:
         body = _read_bounded_state_file(DOCUMENTS_INDEX_PATH, DOCUMENT_INDEX_MAX_SIZE)
     except (OSError, _CalendarStateUnavailable) as exc:
@@ -4853,15 +4876,12 @@ def _load_document_index() -> tuple[list[dict], bytes | None]:
         raise _DocumentIndexError("document index entry limit exceeded")
     identifiers: set[str] = set()
     validated_entries = []
-    migration_required = False
     for entry in decoded:
+        # Validate every entry before rewriting any bytes. An uncertain legacy
+        # entry aborts the migration, so GET can never delete it or publish a
+        # partially repaired index.
         try:
             validated = _validate_document_index_entry(entry, migrate_legacy=True)
-        except _LegacyDocumentPrivacyError:
-            # Omit only the uncertain entry. No legacy text is serialized or
-            # returned, while all other valid documents remain available.
-            migration_required = True
-            continue
         except (TypeError, ValueError, UnicodeError, OverflowError, RecursionError) as exc:
             raise _DocumentIndexError("document index entry is invalid") from exc
         identifier = validated["id"]
@@ -4871,7 +4891,7 @@ def _load_document_index() -> tuple[list[dict], bytes | None]:
         validated_entries.append(validated)
     # Validate the canonical publication form as well as the raw read bound.
     repaired_body = _serialize_document_index(validated_entries)
-    if migration_required or repaired_body != body:
+    if repaired_body != body:
         try:
             _atomic_write_bytes(DOCUMENTS_INDEX_PATH, repaired_body)
         except (OSError, ValueError) as exc:
