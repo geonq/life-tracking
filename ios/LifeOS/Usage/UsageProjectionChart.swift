@@ -3,8 +3,8 @@ import Charts
 
 // MARK: - Projection chart (02-charts-rings-widgets.md §2) — 4-series model.
 //
-// Target (neutral dotted) / Actual (blue solid, area fill) / Current estimate (green dashed) /
-// Past estimate (grey dotted, only if a prior-estimate series is actually stored — it is not,
+// Target (green dashed) / Actual (blue solid, area fill) / Current estimate (green dashed) /
+// Past estimate (metadata dotted, only if a prior-estimate series is actually stored — it is not,
 // see DemoUsageAnalytics / UsageAnalyticsSnapshot, so this series is omitted rather than
 // fabricated).
 
@@ -262,15 +262,21 @@ struct UsageProjectionChart: View {
 
     private var chartHeight: CGFloat {
 #if os(macOS)
-        244
+        280
 #else
         220
 #endif
     }
 
-    /// Target pace is a neutral reference line. Green is reserved for the
-    /// current estimate so the two meanings cannot be confused at a glance.
-    private var targetColor: Color { LifeOSTokens.tertiaryText }
+    private func strokeStyle(for kind: LifeOSChartSeriesKind) -> StrokeStyle {
+        let style = kind.style
+        return StrokeStyle(
+            lineWidth: style.lineWidth,
+            lineCap: .round,
+            lineJoin: .round,
+            dash: style.dashPattern
+        )
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -434,7 +440,7 @@ struct UsageProjectionChart: View {
 
     private var referenceChart: some View {
         Chart {
-                // §5.4: only Actual receives the restrained area fill.
+                // §5.4: only observed points receive the restrained area fill.
 
                 ForEach(displayModel.renderedActualPoints) { point in
                     AreaMark(
@@ -444,7 +450,12 @@ struct UsageProjectionChart: View {
                     )
                     .foregroundStyle(
                         LinearGradient(
-                            colors: [LifeOSTokens.Series.actual.opacity(0.22), .clear],
+                            colors: [
+                                LifeOSChartSeriesKind.observed.color.opacity(
+                                    LifeOSChartSeriesKind.observed.style.areaOpacity
+                                ),
+                                .clear
+                            ],
                             startPoint: .top,
                             endPoint: .bottom
                         )
@@ -456,22 +467,22 @@ struct UsageProjectionChart: View {
                         y: .value("Actual", point.usedPercent),
                         series: .value("Series", "Actual")
                     )
-                    .foregroundStyle(LifeOSTokens.Series.actual)
-                    .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                    .foregroundStyle(LifeOSChartSeriesKind.observed.color)
+                    .lineStyle(strokeStyle(for: .observed))
                     .interpolationMethod(.catmullRom)
                 }
 
                 ForEach(displayModel.renderedTargetPoints) { point in
                     LineMark(x: .value("Time", point.date), y: .value("Target", point.usedPercent), series: .value("Series", "Target"))
-                        .foregroundStyle(targetColor)
-                        .lineStyle(StrokeStyle(lineWidth: 1.25, lineCap: .round, dash: [1, 3]))
+                        .foregroundStyle(LifeOSTokens.Series.target)
+                        .lineStyle(strokeStyle(for: .target))
                         .interpolationMethod(.catmullRom)
                 }
 
                 ForEach(displayModel.renderedEstimatePoints) { point in
                     LineMark(x: .value("Time", point.date), y: .value("Estimate", point.usedPercent), series: .value("Series", "Estimate"))
                         .foregroundStyle(LifeOSTokens.Series.estimate)
-                        .lineStyle(StrokeStyle(lineWidth: 1.5, lineCap: .round, dash: [3, 3]))
+                        .lineStyle(strokeStyle(for: .estimate))
                         .interpolationMethod(.catmullRom)
                 }
 
@@ -555,13 +566,13 @@ struct UsageProjectionChart: View {
             spacing: 8
         ) {
             if !displayModel.targetPoints.isEmpty {
-                UsageLegendKey(color: targetColor, label: "Target pace", dotted: true)
+                UsageProjectionLegendKey(kind: .target, label: "Target pace")
             }
             if !displayModel.actualPoints.isEmpty {
-                UsageLegendKey(color: LifeOSTokens.Series.actual, label: "Actual")
+                UsageProjectionLegendKey(kind: .observed, label: "Actual")
             }
             if !displayModel.estimatePoints.isEmpty {
-                UsageLegendKey(color: LifeOSTokens.Series.estimate, label: "Current estimate", dashed: true)
+                UsageProjectionLegendKey(kind: .estimate, label: "Current estimate")
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -788,5 +799,38 @@ struct UsageProjectionChart: View {
         let next = displayModel.selectablePoints[nextIndex]
         if next.id != selectedID { ScrubBubble<EmptyView>.snapHaptic() }
         LifeOSMotion.withoutAnimation { selectedID = next.id }
+    }
+}
+
+private struct UsageProjectionLegendKey: View {
+    let kind: LifeOSChartSeriesKind
+    let label: String
+
+    var body: some View {
+        let style = kind.style
+
+        HStack(spacing: 5) {
+            if style.lineStyle == .solid {
+                Capsule()
+                    .fill(kind.color)
+                    .frame(width: 14, height: max(2, style.lineWidth))
+            } else {
+                DashedLine(dash: style.dashPattern)
+                    .stroke(
+                        kind.color,
+                        style: StrokeStyle(
+                            lineWidth: style.lineWidth,
+                            lineCap: .round,
+                            dash: style.dashPattern
+                        )
+                    )
+                    .frame(width: 14, height: 4)
+            }
+            Text(label)
+                .lifeOSTypography(.metadata)
+                .foregroundStyle(LifeOSTokens.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

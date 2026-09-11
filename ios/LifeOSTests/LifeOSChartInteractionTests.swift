@@ -166,10 +166,29 @@ final class LifeOSChartInteractionTests: XCTestCase {
         XCTAssertNil(result.selectedDatum)
     }
 
-    func testSeriesStylesKeepBindingDashPatternsDistinct() {
-        XCTAssertEqual(LifeOSChartSeriesKind.target.style.dashPattern.map(Double.init), [6, 4])
-        XCTAssertEqual(LifeOSChartSeriesKind.estimate.style.dashPattern.map(Double.init), [3, 3])
-        XCTAssertEqual(LifeOSChartSeriesKind.history.style.lineStyle, .dotted)
+    func testSeriesStylesMatchSharedVisualContract() {
+        let observed = LifeOSChartSeriesKind.observed.style
+        XCTAssertEqual(observed.lineStyle, .solid)
+        XCTAssertEqual(observed.lineWidth, 2.25, accuracy: 0.0001)
+        XCTAssertEqual(observed.areaOpacity, 0.14, accuracy: 0.0001)
+        XCTAssertEqual(observed.dashPattern.map(Double.init), [])
+
+        let target = LifeOSChartSeriesKind.target.style
+        XCTAssertEqual(target.lineStyle, .dashed)
+        XCTAssertEqual(target.lineWidth, 1.25, accuracy: 0.0001)
+        XCTAssertEqual(target.dashPattern.map(Double.init), [6, 4])
+        XCTAssertEqual(LifeOSChartSeriesKind.target.color, LifeOSTokens.Series.target)
+
+        let estimate = LifeOSChartSeriesKind.estimate.style
+        XCTAssertEqual(estimate.lineStyle, .dashed)
+        XCTAssertEqual(estimate.lineWidth, 1.75, accuracy: 0.0001)
+        XCTAssertEqual(estimate.dashPattern.map(Double.init), [3, 3])
+        XCTAssertEqual(LifeOSChartSeriesKind.estimate.color, LifeOSTokens.Series.estimate)
+
+        let history = LifeOSChartSeriesKind.history.style
+        XCTAssertEqual(history.lineStyle, .dotted)
+        XCTAssertEqual(history.lineWidth, 1.25, accuracy: 0.0001)
+        XCTAssertEqual(history.dashPattern.map(Double.init), [1, 3])
     }
 
     func testTooltipFrameStaysInsidePlotInset() {
