@@ -411,9 +411,9 @@ try {
     $allowlistReader.Dispose()
 }
 $expectedAllowlistLines = @($gatewayDependencyLock.Wheels | ForEach-Object { [string]$_.Filename } | Sort-Object)
-$sortedAllowlistLines = Sort-CandidatePaths $allowlistLines
-if (($sortedAllowlistLines.ToArray() -join "`n") -ne ($allowlistLines.ToArray() -join "`n") -or
-    ($allowlistLines.ToArray() -join "`n") -ne ($expectedAllowlistLines -join "`n")) {
+$sortedAllowlistLines = @(Sort-CandidatePaths $allowlistLines)
+if (($sortedAllowlistLines -join "`n") -ne (@($allowlistLines) -join "`n") -or
+    (@($allowlistLines) -join "`n") -ne ($expectedAllowlistLines -join "`n")) {
     throw 'Candidate wheelhouse allowlist does not match the sorted dependency lock.'
 }
 foreach ($wheel in @($gatewayDependencyLock.Wheels)) {

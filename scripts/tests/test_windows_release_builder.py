@@ -202,6 +202,48 @@ class WindowsReleaseBuilderTests(unittest.TestCase):
             with self.subTest(filename=invalid):
                 self.assertFalse(accepts(invalid))
 
+    def test_candidate_allowlist_comparison_is_scalar_safe_for_one_and_many_wheels(self) -> None:
+        verifier = VERIFIER.read_text(encoding="utf-8")
+        comparison = verifier.split(
+            "$expectedAllowlistLines = ", 1
+        )[1].split("foreach ($wheel in @($gatewayDependencyLock.Wheels)) {", 1)[0]
+        self.assertIn(
+            "$sortedAllowlistLines = @(Sort-CandidatePaths $allowlistLines)",
+            comparison,
+        )
+        self.assertNotIn("$sortedAllowlistLines.ToArray()", comparison)
+        self.assertNotIn("$allowlistLines.ToArray()", comparison)
+
+        def passes(allowlist: list[str], expected: list[str]) -> bool:
+            sorted_lines = list(sorted(allowlist))
+            allowlist_key = "\n".join(allowlist)
+            return (
+                "\n".join(sorted_lines) == allowlist_key
+                and allowlist_key == "\n".join(expected)
+            )
+
+        valid_cases = (
+            (
+                ["tzdata-2026.3-py2.py3-none-any.whl"],
+                ["tzdata-2026.3-py2.py3-none-any.whl"],
+            ),
+            (
+                [
+                    "typing_extensions-4.15.0-py3-none-any.whl",
+                    "tzdata-2026.3-py2.py3-none-any.whl",
+                ],
+                [
+                    "typing_extensions-4.15.0-py3-none-any.whl",
+                    "tzdata-2026.3-py2.py3-none-any.whl",
+                ],
+            ),
+        )
+        for allowlist, expected in valid_cases:
+            with self.subTest(count=len(allowlist)):
+                self.assertTrue(passes(allowlist, expected))
+        self.assertFalse(passes(list(reversed(valid_cases[1][0])), valid_cases[1][1]))
+        self.assertFalse(passes(valid_cases[0][0], ["other-1.0-py3-none-any.whl"]))
+
     def test_wheel_validator_matches_split_py2_py3_metadata_tags(self) -> None:
         builder = BUILDER.read_text(encoding="utf-8")
         validator = builder.split(
