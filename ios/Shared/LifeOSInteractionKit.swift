@@ -49,18 +49,29 @@ enum LifeOSHitTarget {
 public struct LifeOSInteractionState: Equatable, Sendable {
     public let phase: LifeOSInteractionPhase
     public let policy: LifeOSInteractionPolicy
+    /// These flags stay independent so focus and hover are not lost while a
+    /// button is pressed, and selection can be rendered alongside either.
+    public let isPressed: Bool
+    public let isHovered: Bool
+    public let isFocused: Bool
+    public let isSelected: Bool
 
     public init(
         phase: LifeOSInteractionPhase = .idle,
-        reduceMotion: Bool = false
+        reduceMotion: Bool = false,
+        pressed: Bool? = nil,
+        hovered: Bool? = nil,
+        focused: Bool? = nil,
+        selected: Bool = false
     ) {
         self.phase = phase
         self.policy = LifeOSInteractionPolicy(reduceMotion: reduceMotion)
+        self.isPressed = pressed ?? (phase == .pressed)
+        self.isHovered = hovered ?? (phase == .hover)
+        self.isFocused = focused ?? (phase == .focus)
+        self.isSelected = selected
     }
 
-    public var isPressed: Bool { phase == .pressed }
-    public var isHovered: Bool { phase == .hover }
-    public var isFocused: Bool { phase == .focus }
     public var isCancelled: Bool { phase == .cancelled }
     public var isDirectManipulation: Bool {
         phase == .dragging || phase == .scrubbing
@@ -76,7 +87,8 @@ public struct LifeOSInteractionState: Equatable, Sendable {
         hovered: Bool,
         focused: Bool,
         cancelled: Bool = false,
-        reduceMotion: Bool = false
+        reduceMotion: Bool = false,
+        selected: Bool = false
     ) -> LifeOSInteractionState {
         let phase: LifeOSInteractionPhase
         if cancelled {
@@ -90,13 +102,27 @@ public struct LifeOSInteractionState: Equatable, Sendable {
         } else {
             phase = .idle
         }
-        return LifeOSInteractionState(phase: phase, reduceMotion: reduceMotion)
+        return LifeOSInteractionState(
+            phase: phase,
+            reduceMotion: reduceMotion,
+            pressed: pressed,
+            hovered: hovered,
+            focused: focused,
+            selected: selected
+        )
     }
 }
 
 /// Presentation values for a stateful control. Hover/focus affect fill and
 /// border only; the shared foundation does not lift or scale controls.
 public struct LifeOSInteractionAppearance: Equatable, Sendable {
+    public static let hoverFillOpacity = 0.04
+    public static let selectedFillOpacity = 0.06
+    public static let pressedFillOpacity = 0.08
+    public static let selectedHoverFillOpacity = 0.10
+    public static let focusRingLineWidth = 2.0
+    public static let focusRingSeparation = 2.0
+
     public let fillOpacity: Double
     public let borderOpacity: Double
     public let contentOpacity: Double
@@ -108,18 +134,26 @@ public struct LifeOSInteractionAppearance: Equatable, Sendable {
     }
 
     public static func resolve(for state: LifeOSInteractionState) -> LifeOSInteractionAppearance {
-        switch state.phase {
-        case .pressed:
-            return LifeOSInteractionAppearance(fillOpacity: 0.08, borderOpacity: 0.30, contentOpacity: 0.78)
-        case .hover:
-            return LifeOSInteractionAppearance(fillOpacity: 0.04, borderOpacity: 0.18, contentOpacity: 1)
-        case .focus:
-            return LifeOSInteractionAppearance(fillOpacity: 0.06, borderOpacity: 1, contentOpacity: 1)
-        case .cancelled:
-            return LifeOSInteractionAppearance(fillOpacity: 0, borderOpacity: 0, contentOpacity: 1)
-        case .idle, .dragging, .scrubbing, .settling:
-            return LifeOSInteractionAppearance(fillOpacity: 0, borderOpacity: 0, contentOpacity: 1)
+        let fillOpacity: Double
+        if state.isPressed {
+            fillOpacity = pressedFillOpacity
+        } else if state.isSelected && state.isHovered {
+            fillOpacity = selectedHoverFillOpacity
+        } else if state.isSelected {
+            fillOpacity = selectedFillOpacity
+        } else if state.isHovered {
+            fillOpacity = hoverFillOpacity
+        } else {
+            fillOpacity = 0
         }
+
+        return LifeOSInteractionAppearance(
+            fillOpacity: state.isCancelled ? 0 : fillOpacity,
+            borderOpacity: state.isSelected ? 1 : 0,
+            // Interaction feedback keeps labels fully readable. Disabled
+            // controls own their separate readable foreground role.
+            contentOpacity: 1
+        )
     }
 }
 
@@ -195,7 +229,11 @@ public struct LifeOSInteractionModifier: ViewModifier {
     public func body(content: Content) -> some View {
         let effectiveState = LifeOSInteractionState(
             phase: state.phase,
-            reduceMotion: state.policy.reduceMotion || environmentReduceMotion
+            reduceMotion: state.policy.reduceMotion || environmentReduceMotion,
+            pressed: state.isPressed,
+            hovered: state.isHovered,
+            focused: state.isFocused,
+            selected: state.isSelected
         )
         let appearance = LifeOSInteractionAppearance.resolve(for: effectiveState)
 
@@ -213,10 +251,24 @@ public struct LifeOSInteractionModifier: ViewModifier {
                 }
             }
             .animation(
-                effectiveState.allowsAnimatedStateTransition ? LifeOSMotion.hover : nil,
-                value: effectiveState.phase
+                LifeOSMotion.curve(
+                    for: .hover,
+                    reduceMotion: !effectiveState.allowsAnimatedStateTransition
+                )?.animation,
+                value: effectiveState.isHovered
             )
-    }
+            .animation(
+                LifeOSMotion.curve(
+                    for: effectiveState.isPressed ? .press : .release,
+                    reduceMotion: !effectiveState.allowsAnimatedStateTransition
+                )?.animation,
+                value: effectiveState.isPressed
+            )
+            .animation(
+                effectiveState.allowsAnimatedStateTransition ? LifeOSMotion.selector : nil,
+                value: effectiveState.isSelected
+            )
+        }
 }
 
 public extension View {
@@ -225,7 +277,8 @@ public extension View {
         hovered: Bool = false,
         focused: Bool = false,
         cancelled: Bool = false,
-        reduceMotion: Bool = false
+        reduceMotion: Bool = false,
+        selected: Bool = false
     ) -> some View {
         modifier(
             LifeOSInteractionModifier(
@@ -234,7 +287,8 @@ public extension View {
                     hovered: hovered,
                     focused: focused,
                     cancelled: cancelled,
-                    reduceMotion: reduceMotion
+                    reduceMotion: reduceMotion,
+                    selected: selected
                 )
             )
         )

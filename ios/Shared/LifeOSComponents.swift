@@ -83,21 +83,28 @@ private struct LifeOSIconButtonStyle: ButtonStyle {
             reduceMotion: reducedMotion
         )
         let appearance = LifeOSInteractionAppearance.resolve(for: state)
+        let shape = RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
         configuration.label
             .frame(width: targetSize, height: targetSize)
             .foregroundStyle(tint)
             .background(
                 LifeOSTokens.primaryText.opacity(appearance.fillOpacity),
-                in: RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
+                in: shape
             )
             .overlay {
-                RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
+                shape
                     .stroke(
-                        isFocused ? LifeOSTokens.focusStroke : LifeOSTokens.essentialBorder,
-                        lineWidth: isFocused ? 2 : 1
+                        LifeOSTokens.essentialBorder,
+                        lineWidth: 1
                     )
-                    .opacity(isFocused ? 1 : max(0.45, appearance.borderOpacity))
-                    .padding(isFocused ? -3 : 0)
+                    .opacity(max(0.45, appearance.borderOpacity))
+            }
+            .overlay {
+                if state.isFocused {
+                    shape
+                        .stroke(LifeOSTokens.focusStroke, lineWidth: 2)
+                        .padding(-3)
+                }
             }
             .opacity(appearance.contentOpacity)
             .animation(
@@ -184,6 +191,65 @@ public struct LifeOSIconButton: View {
         .focused($isFocused)
         .contentShape(Rectangle())
         .accessibilityLabel(Text(label))
+    }
+}
+
+private struct LifeOSSelectorOptionButtonStyle: ButtonStyle {
+    let isSelected: Bool
+    let isHovered: Bool
+    let isFocused: Bool
+    let isEnabled: Bool
+    let reduceMotion: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        let state = LifeOSInteractionState.resolve(
+            pressed: isEnabled && configuration.isPressed,
+            hovered: isEnabled && isHovered,
+            focused: isEnabled && isFocused,
+            reduceMotion: reduceMotion,
+            selected: isSelected
+        )
+        let appearance = LifeOSInteractionAppearance.resolve(for: state)
+        let shape = RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
+
+        return configuration.label
+            .background {
+                shape.fill(
+                    isEnabled
+                        ? LifeOSTokens.primaryText.opacity(appearance.fillOpacity)
+                        : LifeOSTokens.disabledFill
+                )
+            }
+            .overlay {
+                if isEnabled && isSelected {
+                    shape.stroke(LifeOSTokens.essentialBorder, lineWidth: 1)
+                }
+            }
+            .overlay {
+                if state.isFocused {
+                    shape
+                        .stroke(LifeOSTokens.focusStroke, lineWidth: 2)
+                        .padding(-3)
+                }
+            }
+            .contentShape(shape)
+            // Only the visual state changes; the option's measured frame and
+            // label remain fixed during hover, press, and selection.
+            .animation(
+                LifeOSMotion.curve(for: .hover, reduceMotion: reduceMotion)?.animation,
+                value: state.isHovered
+            )
+            .animation(
+                LifeOSMotion.curve(
+                    for: state.isPressed ? .press : .release,
+                    reduceMotion: reduceMotion
+                )?.animation,
+                value: state.isPressed
+            )
+            .animation(
+                reduceMotion ? nil : LifeOSMotion.selector,
+                value: state.isSelected
+            )
     }
 }
 
@@ -349,7 +415,7 @@ public struct LifeOSSelector<ID: Hashable>: View {
         if reduceMotion {
             LifeOSMotion.withoutAnimation { selection = option.id }
         } else {
-            selection = option.id
+            withAnimation(LifeOSMotion.selector) { selection = option.id }
         }
     }
 
@@ -421,16 +487,16 @@ public struct LifeOSSelector<ID: Hashable>: View {
                             maxWidth: .infinity,
                             minHeight: LifeOSTokens.Control.standardHeight
                         )
-                        .background { optionBackground(for: option) }
-                        .overlay {
-                            if focusedOption == option.id {
-                                RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
-                                    .stroke(LifeOSTokens.focusStroke, lineWidth: 2)
-                                    .padding(-3)
-                            }
-                        }
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(
+                    LifeOSSelectorOptionButtonStyle(
+                        isSelected: option.id == selection,
+                        isHovered: hoveredOption == option.id,
+                        isFocused: focusedOption == option.id,
+                        isEnabled: option.isEnabled,
+                        reduceMotion: reduceMotion
+                    )
+                )
                 .disabled(!option.isEnabled)
                 .focused($focusedOption, equals: option.id)
                 .onHover { isInside in
@@ -445,36 +511,6 @@ public struct LifeOSSelector<ID: Hashable>: View {
             }
         }
         .frame(maxWidth: .infinity)
-    }
-
-    private func optionBackground(for option: LifeOSSelectorOption<ID>) -> some View {
-        let isSelected = option.id == selection
-        let isHovered = hoveredOption == option.id
-        let fillOpacity: Double = if isSelected && isHovered {
-            0.10
-        } else if isSelected {
-            0.06
-        } else if isHovered {
-            0.04
-        } else {
-            0
-        }
-        let fill = option.isEnabled
-            ? LifeOSTokens.primaryText.opacity(fillOpacity)
-            : LifeOSTokens.disabledFill
-        let shape = RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
-
-        return shape
-            .fill(fill)
-            .overlay {
-                if option.isEnabled && isSelected {
-                    shape.stroke(LifeOSTokens.essentialBorder, lineWidth: 1)
-                }
-            }
-            // Only the highlight surface animates. The option label and its
-            // measured geometry remain stationary during selection.
-            .animation(reduceMotion ? nil : LifeOSMotion.selector, value: isSelected)
-            .animation(reduceMotion ? nil : LifeOSMotion.hover, value: isHovered)
     }
 
     private var menu: some View {
@@ -502,7 +538,7 @@ public struct LifeOSSelector<ID: Hashable>: View {
             .padding(.horizontal, LifeOSTokens.Space.sm)
             .frame(minWidth: LifeOSSelectorLayout.minimumCellWidth, minHeight: LifeOSTokens.Control.standardHeight)
             .background(
-                LifeOSTokens.primaryText.opacity(0.06),
+                LifeOSTokens.primaryText.opacity(LifeOSInteractionAppearance.selectedFillOpacity),
                 in: RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
             )
             .overlay {
@@ -733,8 +769,17 @@ public enum LifeOSStatusTone: String, CaseIterable, Sendable {
         }
     }
 
+    /// Warning marks keep the authored amber hue even when normal-size light
+    /// warning text falls back to primary text for readability.
+    fileprivate var indicatorForeground: Color {
+        switch self {
+        case .warning, .demo: LifeOSTokens.warning
+        default: foreground
+        }
+    }
+
     fileprivate var background: Color {
-        foreground.opacity(self == .neutral ? 0.08 : 0.14)
+        indicatorForeground.opacity(self == .neutral ? 0.08 : 0.14)
     }
 }
 
@@ -758,11 +803,12 @@ public struct LifeOSStatusPill: View {
         // capsule, no stroke — pills are for true status selectors only.
         HStack(spacing: LifeOSTokens.Space.xxs) {
             Circle()
-                .fill(tone.foreground)
+                .fill(tone.indicatorForeground)
                 .frame(width: 6, height: 6)
             if let systemImage {
                 Image(systemName: systemImage)
                     .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(tone.indicatorForeground)
             }
             Text(label)
                 .lifeOSTypography(.label)
@@ -869,7 +915,7 @@ public struct LifeOSProvenanceNotice: View {
         HStack(alignment: .top, spacing: LifeOSTokens.Space.xs) {
             Image(systemName: kind == .observed ? "checkmark.circle" : "info.circle")
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(kind.tone.foreground)
+                .foregroundStyle(kind.tone.indicatorForeground)
 
             VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
                 Text(kind.label)
@@ -1020,7 +1066,7 @@ public struct LifeOSStatusRow: View {
             Image(systemName: state.iconName)
                 .symbolRenderingMode(.monochrome)
                 .font(.system(size: 15, weight: .medium, design: .default))
-                .foregroundStyle(state.tone.foreground)
+                .foregroundStyle(state.tone.indicatorForeground)
                 .frame(width: 20, height: 20)
         }
     }
@@ -1091,9 +1137,35 @@ public struct LifeOSStateView: View {
 
 // MARK: - Canonical sheet surface
 
+/// Pure sheet geometry constants shared by the native presentation and its
+/// regression tests. The macOS layout receives the window proposal from
+/// SwiftUI, so its rendered width and height are bounded at layout time.
+public enum LifeOSSheetGeometry {
+    public static let macStandardWidth: CGFloat = 520
+    public static let macMaximumHeightFraction: CGFloat = 0.80
+    public static let macSafeHeightInset: CGFloat = 48
+
+    public static func macWidth(for availableWidth: CGFloat) -> CGFloat {
+        guard availableWidth.isFinite else {
+            return availableWidth == .infinity ? macStandardWidth : 0
+        }
+        return min(max(0, availableWidth), macStandardWidth)
+    }
+
+    public static func macMaximumHeight(
+        for availableHeight: CGFloat,
+        safeInset: CGFloat = macSafeHeightInset
+    ) -> CGFloat {
+        guard availableHeight.isFinite else {
+            return availableHeight == .infinity ? .infinity : 0
+        }
+        let safeHeight = max(0, availableHeight - max(0, safeInset))
+        return safeHeight * macMaximumHeightFraction
+    }
+}
+
 #if os(macOS)
 private struct LifeOSSheetPresentationLayout: Layout {
-    let maxHeight: CGFloat
     let availableHeightInset: CGFloat
 
     func sizeThatFits(
@@ -1103,22 +1175,27 @@ private struct LifeOSSheetPresentationLayout: Layout {
     ) -> CGSize {
         guard subviews.count >= 3 else { return .zero }
 
-        let width = proposal.width.flatMap { value in
-            value.isFinite ? max(0, value) : nil
-        }
+        let width = proposal.width.map(LifeOSSheetGeometry.macWidth(for:))
         let childProposal = ProposedViewSize(width: width, height: nil)
         let scrollSize = subviews[0].sizeThatFits(childProposal)
         let dividerSize = subviews[1].sizeThatFits(childProposal)
         let footerSize = subviews[2].sizeThatFits(childProposal)
         let naturalHeight = scrollSize.height + dividerSize.height + footerSize.height
-        let safeNaturalHeight = naturalHeight.isFinite ? max(0, naturalHeight) : maxHeight
-        let availableBound = proposal.height.flatMap { value in
-            guard value.isFinite, value > 0 else { return nil }
-            return max(0, value - availableHeightInset)
-        } ?? maxHeight
-        let height = min(safeNaturalHeight, maxHeight, availableBound)
+        let safeNaturalHeight = naturalHeight.isFinite ? max(0, naturalHeight) : 0
+        let availableBound: CGFloat = {
+            guard let value = proposal.height else { return .infinity }
+            guard value.isFinite else {
+                return value == .infinity ? .infinity : 0
+            }
+            return LifeOSSheetGeometry.macMaximumHeight(
+                for: value,
+                safeInset: availableHeightInset
+            )
+        }()
+        let height = min(safeNaturalHeight, availableBound)
         let naturalWidth = max(scrollSize.width, max(dividerSize.width, footerSize.width))
-        return CGSize(width: width ?? max(0, naturalWidth), height: max(0, height))
+        let renderedWidth = width ?? LifeOSSheetGeometry.macWidth(for: naturalWidth)
+        return CGSize(width: renderedWidth, height: max(0, height))
     }
 
     func placeSubviews(
@@ -1184,19 +1261,21 @@ public struct LifeOSSheet<Content: View, Footer: View>: View {
 
     public var body: some View {
 #if os(macOS)
-        LifeOSSheetPresentationLayout(maxHeight: 760, availableHeightInset: 48) {
+        LifeOSSheetPresentationLayout(
+            availableHeightInset: LifeOSSheetGeometry.macSafeHeightInset
+        ) {
             scrollContent
             Divider()
             footerContent
         }
         .frame(
-            minWidth: 420,
-            idealWidth: 560,
-            maxWidth: 640
+            minWidth: 0,
+            idealWidth: LifeOSSheetGeometry.macStandardWidth,
+            maxWidth: LifeOSSheetGeometry.macStandardWidth
         )
 #elseif os(iOS)
         sheetStack
-            .presentationDetents([.large])
+            .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
 #else
         sheetStack

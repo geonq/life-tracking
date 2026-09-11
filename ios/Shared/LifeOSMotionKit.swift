@@ -296,6 +296,75 @@ public struct GlowRing<Center: View>: View {
 
 // MARK: - B. Spring Pill Selector
 
+private struct LifeOSSpringPillButtonStyle: ButtonStyle {
+    let isSelected: Bool
+    let isHovered: Bool
+    let isFocused: Bool
+    let reduceMotion: Bool
+    let namespace: Namespace.ID
+    let highlightID: String
+
+    func makeBody(configuration: Configuration) -> some View {
+        let state = LifeOSInteractionState.resolve(
+            pressed: configuration.isPressed,
+            hovered: isHovered,
+            focused: isFocused,
+            reduceMotion: reduceMotion,
+            selected: isSelected
+        )
+        let appearance = LifeOSInteractionAppearance.resolve(for: state)
+        let transientOpacity: Double = if state.isPressed {
+            appearance.fillOpacity
+        } else if state.isHovered {
+            // The selected highlight supplies .06. A separate .04 hover
+            // overlay keeps selected+hover visibly distinct without moving
+            // or scaling the pill.
+            state.isSelected
+                ? appearance.fillOpacity - LifeOSInteractionAppearance.selectedFillOpacity
+                : appearance.fillOpacity
+        } else {
+            0
+        }
+
+        return configuration.label
+            .background {
+                if state.isSelected {
+                    Capsule()
+                        .fill(LifeOSTokens.primaryText.opacity(LifeOSInteractionAppearance.selectedFillOpacity))
+                        .matchedGeometryEffect(id: highlightID, in: namespace)
+                }
+            }
+            .overlay {
+                if transientOpacity > 0 {
+                    Capsule()
+                        .fill(LifeOSTokens.primaryText.opacity(transientOpacity))
+                }
+            }
+            .overlay {
+                if state.isFocused {
+                    Capsule()
+                        .stroke(LifeOSTokens.focusStroke, lineWidth: 2)
+                        .padding(-3)
+                }
+            }
+            .animation(
+                LifeOSMotion.curve(for: .hover, reduceMotion: reduceMotion)?.animation,
+                value: state.isHovered
+            )
+            .animation(
+                LifeOSMotion.curve(
+                    for: state.isPressed ? .press : .release,
+                    reduceMotion: reduceMotion
+                )?.animation,
+                value: state.isPressed
+            )
+            .animation(
+                reduceMotion ? nil : LifeOSMotion.selector,
+                value: state.isSelected
+            )
+    }
+}
+
 /// A generic segmented control whose selected-pill background travels between options via
 /// `matchedGeometryEffect`, animated with `LifeOSMotion.snappy` (`03-motion-revolut.md` §E).
 /// Labels stay put; only the highlight moves. Reduce-Motion: highlight swaps without slide.
@@ -308,6 +377,8 @@ public struct SpringPillSelector<T: Hashable, Label: View>: View {
     @Environment(\.lifeOSReduceMotion) private var requestedReduceMotion
     private var reduceMotion: Bool { systemReduceMotion || requestedReduceMotion }
     @Namespace private var namespace
+    @State private var hoveredOption: T?
+    @FocusState private var focusedOption: T?
     private let highlightID = "lifeos.pillSelector.highlight"
 
     public init(
@@ -344,21 +415,25 @@ public struct SpringPillSelector<T: Hashable, Label: View>: View {
                         .padding(.vertical, LifeOSTokens.Space.xxs)
                         .frame(minWidth: LifeOSTokens.Control.minimumTarget)
                         .frame(minHeight: LifeOSTokens.Control.minimumTarget)
-                        .background {
-                            if isSelected {
-                                // Monochrome selection: a transient primary-text
-                                // overlay keeps the labels stable and visible
-                                // without introducing a blue capsule.
-                                if reduceMotion {
-                                    Capsule().fill(LifeOSTokens.primaryText.opacity(0.06))
-                                } else {
-                                    Capsule().fill(LifeOSTokens.primaryText.opacity(0.06))
-                                        .matchedGeometryEffect(id: highlightID, in: namespace)
-                                }
-                            }
-                        }
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(
+                    LifeOSSpringPillButtonStyle(
+                        isSelected: isSelected,
+                        isHovered: hoveredOption == option,
+                        isFocused: focusedOption == option,
+                        reduceMotion: reduceMotion,
+                        namespace: namespace,
+                        highlightID: highlightID
+                    )
+                )
+                .focused($focusedOption, equals: option)
+                .onHover { isInside in
+                    if isInside {
+                        hoveredOption = option
+                    } else if hoveredOption == option {
+                        hoveredOption = nil
+                    }
+                }
                 .accessibilityAddTraits(isSelected ? .isSelected : [])
             }
         }

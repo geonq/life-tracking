@@ -14,22 +14,30 @@ enum LifeOSPalette {
     static let brandBlueHex: UInt32 = 0x0253C4
     static let observedBlueHex: UInt32 = 0x3085FD
     static let focusBlueHex: UInt32 = 0x5DA0FD
+    static let primaryTextDarkHex: UInt32 = 0xF5F5F7
+    static let primaryTextLightHex: UInt32 = 0x111113
     static let targetGreenHex: UInt32 = 0x60D386
     static let targetGreenLightHex: UInt32 = 0x01773B
     static let estimateGreenHex: UInt32 = targetGreenHex
     static let calorieOrangeHex: UInt32 = 0xFFB06E
+    static let calorieOrangeLightHex: UInt32 = 0xA25A03
     static let proteinTealHex: UInt32 = 0x63D2D2
     static let warningAmberHex: UInt32 = 0xFBDD68
     static let warningAmberLightHex: UInt32 = 0x9E8405
-    // The documented orange.700 sibling is used for small warning text in
-    // light mode because amber.700 does not clear 4.5:1 on a white surface.
-    static let warningTextLightHex: UInt32 = 0xA25A03
+    // Amber remains the warning mark. Normal-size light warning text falls
+    // back to the documented primary-text role when the amber hue is not
+    // readable on a light surface.
+    static let warningTextLightHex: UInt32 = primaryTextLightHex
     static let dangerRedHex: UInt32 = 0xFC584F
     static let dangerRedLightHex: UInt32 = 0xB70112
     static let infoTealHex: UInt32 = 0x63D2D2
     static let infoTealLightHex: UInt32 = 0x067878
-    static let primaryTextDarkHex: UInt32 = 0xF5F5F7
-    static let primaryTextLightHex: UInt32 = 0x111113
+    static let metadataTextDarkHex: UInt32 = 0x84848C
+    static let metadataTextLightHex: UInt32 = 0x6D6D74
+    static let fitnessVioletDarkHex: UInt32 = 0x8D74FE
+    static let fitnessVioletLightHex: UInt32 = 0x4502A5
+    static let taxPurpleDarkHex: UInt32 = 0xC853E2
+    static let taxPurpleLightHex: UInt32 = 0x650177
     static let canvasDarkHex: UInt32 = 0x000000
     static let canvasLightHex: UInt32 = 0xF7F7F8
     static let surfaceDarkHex: UInt32 = 0x08080A
@@ -148,10 +156,30 @@ enum LifeOSWidgetContrastPolicy {
 /// tests can verify both appearance pairs without attempting to introspect a
 /// platform-specific adaptive `Color` provider.
 enum LifeOSSelectedNavigationPalette {
-    static let darkForegroundHex: UInt32 = 0xB8D5FE
-    static let darkBackgroundHex: UInt32 = 0x011E47
-    static let lightForegroundHex: UInt32 = 0x0244A2
-    static let lightBackgroundHex: UInt32 = 0xE6F0FF
+    static let overlayOpacity: Double = 0.06
+    static let darkForegroundHex: UInt32 = LifeOSPalette.primaryTextDarkHex
+    static let darkBackgroundHex: UInt32 = LifeOSPalette.surfaceDarkHex
+    static let lightForegroundHex: UInt32 = LifeOSPalette.primaryTextLightHex
+    static let lightBackgroundHex: UInt32 = LifeOSPalette.surfaceLightHex
+    static let darkIndicatorHex: UInt32 = LifeOSPalette.focusBlueHex
+    static let lightIndicatorHex: UInt32 = LifeOSPalette.brandBlueHex
+}
+
+/// Authored module identity pairs. The rendered colors below are adaptive,
+/// but these pairs keep the dark/light identity contract deterministic.
+enum LifeOSModuleColorPairs {
+    static let fitness = LifeOSColorPair(
+        darkForegroundHex: LifeOSPalette.fitnessVioletDarkHex,
+        darkBackgroundHex: LifeOSPalette.surfaceDarkHex,
+        lightForegroundHex: LifeOSPalette.fitnessVioletLightHex,
+        lightBackgroundHex: LifeOSPalette.surfaceLightHex
+    )
+    static let tax = LifeOSColorPair(
+        darkForegroundHex: LifeOSPalette.taxPurpleDarkHex,
+        darkBackgroundHex: LifeOSPalette.surfaceDarkHex,
+        lightForegroundHex: LifeOSPalette.taxPurpleLightHex,
+        lightBackgroundHex: LifeOSPalette.surfaceLightHex
+    )
 }
 
 /// Semantic pairs used by controls and data meaning. Keep these values in
@@ -228,7 +256,7 @@ enum LifeOSSemanticColorPairs {
     static let calories = LifeOSColorPair(
         darkForegroundHex: LifeOSPalette.calorieOrangeHex,
         darkBackgroundHex: LifeOSPalette.surfaceDarkHex,
-        lightForegroundHex: 0xA25A03,
+        lightForegroundHex: LifeOSPalette.calorieOrangeLightHex,
         lightBackgroundHex: LifeOSPalette.surfaceLightHex
     )
     static let protein = LifeOSColorPair(
@@ -425,8 +453,12 @@ public extension Color {
     /// values preserve the quiet hierarchy while clearing the 4.5:1 small-text
     /// threshold on the dark card and light canvas surfaces.
     static let lifeOSMetadataText = lifeOSAdaptiveColor(
-        darkRed: 0x84/255, darkGreen: 0x84/255, darkBlue: 0x8C/255,
-        lightRed: 0x6D/255, lightGreen: 0x6D/255, lightBlue: 0x74/255
+        darkRed: Double((LifeOSPalette.metadataTextDarkHex >> 16) & 0xFF)/255,
+        darkGreen: Double((LifeOSPalette.metadataTextDarkHex >> 8) & 0xFF)/255,
+        darkBlue: Double(LifeOSPalette.metadataTextDarkHex & 0xFF)/255,
+        lightRed: Double((LifeOSPalette.metadataTextLightHex >> 16) & 0xFF)/255,
+        lightGreen: Double((LifeOSPalette.metadataTextLightHex >> 8) & 0xFF)/255,
+        lightBlue: Double(LifeOSPalette.metadataTextLightHex & 0xFF)/255
     )
 
     /// Disabled text only.
@@ -522,14 +554,13 @@ public extension Color {
     /// The selected-navigation pair is deliberately distinct from focus
     /// blue: a row needs a stable filled surface and a text color that stays
     /// readable in both appearances.
-    static let lifeOSSelectedNavigationFill = lifeOSAdaptiveHex(
-        dark: LifeOSSelectedNavigationPalette.darkBackgroundHex,
-        light: LifeOSSelectedNavigationPalette.lightBackgroundHex
+    /// Selection is a transient primary-text overlay over the neutral row
+    /// surface. The brand indicator remains a separate blue mark at the
+    /// navigation call site.
+    static let lifeOSSelectedNavigationFill = lifeOSPrimaryText.opacity(
+        LifeOSSelectedNavigationPalette.overlayOpacity
     )
-    static let lifeOSSelectedNavigationText = lifeOSAdaptiveHex(
-        dark: LifeOSSelectedNavigationPalette.darkForegroundHex,
-        light: LifeOSSelectedNavigationPalette.lightForegroundHex
-    )
+    static let lifeOSSelectedNavigationText = lifeOSPrimaryText
 
     // Module identity accents. These stay vivid on the dark canvas and move
     // to the deeper sibling ramp in light mode so labels remain readable.
@@ -538,8 +569,12 @@ public extension Color {
         lightRed: 0x09/255, lightGreen: 0x96/255, lightBlue: 0x4C/255
     )
     static let lifeOSFitnessViolet = lifeOSAdaptiveColor(
-        darkRed: 0x8D/255, darkGreen: 0x74/255, darkBlue: 0xFE/255,
-        lightRed: 0x5E/255, lightGreen: 0x06/255, lightBlue: 0xDC/255
+        darkRed: Double((LifeOSModuleColorPairs.fitness.darkForegroundHex >> 16) & 0xFF)/255,
+        darkGreen: Double((LifeOSModuleColorPairs.fitness.darkForegroundHex >> 8) & 0xFF)/255,
+        darkBlue: Double(LifeOSModuleColorPairs.fitness.darkForegroundHex & 0xFF)/255,
+        lightRed: Double((LifeOSModuleColorPairs.fitness.lightForegroundHex >> 16) & 0xFF)/255,
+        lightGreen: Double((LifeOSModuleColorPairs.fitness.lightForegroundHex >> 8) & 0xFF)/255,
+        lightBlue: Double(LifeOSModuleColorPairs.fitness.lightForegroundHex & 0xFF)/255
     )
     /// Nutrition identity accent — pink keeps food surfaces distinct from
     /// Fitness violet while retaining a readable deeper light-mode ramp.
@@ -558,8 +593,12 @@ public extension Color {
     /// Tax identity uses the purple sibling ramp so it remains distinct from
     /// the teal Business/Info accent in navigation and supporting surfaces.
     static let lifeOSTaxPurple = lifeOSAdaptiveColor(
-        darkRed: 0xAF/255, darkGreen: 0x00/255, darkBlue: 0xCD/255,
-        lightRed: 0x89/255, lightGreen: 0x03/255, lightBlue: 0xA1/255
+        darkRed: Double((LifeOSModuleColorPairs.tax.darkForegroundHex >> 16) & 0xFF)/255,
+        darkGreen: Double((LifeOSModuleColorPairs.tax.darkForegroundHex >> 8) & 0xFF)/255,
+        darkBlue: Double(LifeOSModuleColorPairs.tax.darkForegroundHex & 0xFF)/255,
+        lightRed: Double((LifeOSModuleColorPairs.tax.lightForegroundHex >> 16) & 0xFF)/255,
+        lightGreen: Double((LifeOSModuleColorPairs.tax.lightForegroundHex >> 8) & 0xFF)/255,
+        lightBlue: Double(LifeOSModuleColorPairs.tax.lightForegroundHex & 0xFF)/255
     )
 
     static let lifeOSNeutralCanvas = lifeOSAdaptiveHex(
@@ -742,6 +781,7 @@ public enum LifeOSTokens {
     public static let accentHover = Color.lifeOSAccentHover
     public static let accentPressed = Color.lifeOSAccentPressed
     public static let accentLight = Color.lifeOSBlue50
+    public static let selectedNavigationOverlayOpacity = LifeOSSelectedNavigationPalette.overlayOpacity
     public static let selectedNavigationFill = Color.lifeOSSelectedNavigationFill
     public static let selectedNavigationText = Color.lifeOSSelectedNavigationText
 
@@ -943,6 +983,7 @@ public enum LifeOSMotion {
         case easeOut(Double)
         case easeInOut(Double)
         case spring(response: Double, damping: Double)
+        case interpolatingSpring(mass: Double, stiffness: Double, damping: Double, initialVelocity: Double)
         case interactive(response: Double, damping: Double)
         case direct
 
@@ -952,6 +993,13 @@ public enum LifeOSMotion {
             case let .easeInOut(duration): return .easeInOut(duration: duration)
             case let .spring(response, damping):
                 return .spring(response: response, dampingFraction: damping)
+            case let .interpolatingSpring(mass, stiffness, damping, initialVelocity):
+                return .interpolatingSpring(
+                    mass: mass,
+                    stiffness: stiffness,
+                    damping: damping,
+                    initialVelocity: initialVelocity
+                )
             case let .interactive(response, damping):
                 return .interactiveSpring(response: response, dampingFraction: damping)
             case .direct:
@@ -972,7 +1020,14 @@ public enum LifeOSMotion {
         /// Direct manipulation has no interpolation. The compatibility name
         /// remains so existing callers cannot accidentally add spring lag.
         public static let tracking = Curve.direct
-        public static let calendarSettle = Curve.spring(response: 0.28, damping: 0.92)
+        /// The calendar contract is expressed in the original physical
+        /// parameters so it cannot drift through a response/damping alias.
+        public static let calendarSettle = Curve.interpolatingSpring(
+            mass: 1,
+            stiffness: 340,
+            damping: 37,
+            initialVelocity: 0
+        )
         public static let tooltip = Curve.easeOut(0.08)
         public static let sheet = Curve.easeOut(0.18)
         public static let refresh = Curve.easeOut(0.10)
@@ -1144,8 +1199,14 @@ private struct LifeOSButtonBody: View {
 
     var body: some View {
         let pressed = isEnabled && configuration.isPressed
-        let highlighted = isEnabled && (hovered || isFocused)
         let reduceMotion = systemReduceMotion || requestedReduceMotion
+        let state = LifeOSInteractionState.resolve(
+            pressed: pressed,
+            hovered: isEnabled && hovered,
+            focused: isEnabled && isFocused,
+            reduceMotion: reduceMotion
+        )
+        let appearance = LifeOSInteractionAppearance.resolve(for: state)
         return configuration.label
             .lifeOSTypography(.button)
             .foregroundStyle(labelColor)
@@ -1155,9 +1216,15 @@ private struct LifeOSButtonBody: View {
                 minHeight: LifeOSTokens.Control.standardHeight
             )
             .background(
-                fillColor(pressed: pressed, highlighted: highlighted),
+                fillColor(pressed: pressed, highlighted: isEnabled && hovered),
                 in: RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
             )
+            .overlay {
+                if isEnabled && variant != .primary && appearance.fillOpacity > 0 {
+                    RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
+                        .fill(LifeOSTokens.primaryText.opacity(appearance.fillOpacity))
+                }
+            }
             .overlay {
                 if variant == .secondary {
                     RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
@@ -1165,7 +1232,7 @@ private struct LifeOSButtonBody: View {
                 }
             }
             .overlay {
-                if isEnabled && isFocused {
+                if state.isFocused {
                     RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
                         .stroke(LifeOSTokens.focusStroke, lineWidth: 2)
                         .padding(-3)
@@ -1195,11 +1262,11 @@ private struct LifeOSButtonBody: View {
             if highlighted { return LifeOSTokens.primaryActionHover }
             return LifeOSTokens.primaryActionFill
         case .secondary:
-            return pressed ? LifeOSTokens.strongBorder : LifeOSTokens.raised
+            return LifeOSTokens.raised
         case .tertiary:
-            return highlighted || pressed ? LifeOSTokens.raised : .clear
+            return .clear
         case .destructive:
-            return pressed ? LifeOSTokens.strongBorder : (highlighted ? LifeOSTokens.raised : .clear)
+            return .clear
         }
     }
 
