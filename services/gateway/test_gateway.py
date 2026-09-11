@@ -3690,7 +3690,7 @@ def test_document_publication_remasks_mixed_identifier_tokens(tmp_path, monkeypa
     assert "12345678901" not in listed.text
 
 
-@pytest.mark.parametrize("snippet", ["Page 8642", "8642 EUR", "SECRETREF"])
+@pytest.mark.parametrize("snippet", ["Page 8642", "8642 EUR", "SECRETREF", "secretref"])
 def test_document_index_withholds_unverifiable_legacy_identifier_evidence(
     tmp_path, monkeypatch, snippet
 ):
@@ -3741,6 +3741,76 @@ def test_document_index_migration_preserves_safe_form_w2_entry(tmp_path, monkeyp
 
     assert [item["id"] for item in entries] == [document_id]
     assert entries[0]["title"] == "Form W2"
+    assert entries[0]["_privacyVersion"] == main.DOCUMENT_PRIVACY_VERSION
+
+
+def test_document_index_migration_preserves_safe_schedule_k1_entry(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DOCUMENTS_INDEX_PATH", tmp_path / "documents.json")
+
+    document_id = "23232323-2323-4232-8232-232323232323"
+    entry = native_tax_document_metadata(document_id)
+    entry["_originalFile"] = "original.pdf"
+    entry["title"] = "Schedule K1"
+    original = json.dumps([entry], separators=(",", ":")).encode()
+    main.DOCUMENTS_INDEX_PATH.write_bytes(original)
+
+    entries, _body = main._load_document_index()
+
+    assert [item["id"] for item in entries] == [document_id]
+    assert entries[0]["title"] == "Schedule K1"
+
+
+def test_document_upload_marks_current_privacy_contract_and_keeps_redacted_evidence(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(main, "DOCUMENTS_INDEX_PATH", tmp_path / "documents.json")
+    monkeypatch.setattr(main, "DOCUMENTS_DIR", tmp_path / "documents")
+
+    document_id = "25252525-2525-4252-8252-252525252525"
+    metadata = native_tax_document_metadata(document_id)
+    metadata["taxpayerIdentifier"] = tax_candidate(
+        "12345678901",
+        snippet="Taxpayer 12345678901",
+    )
+
+    uploaded = client.post(
+        "/documents",
+        headers=AUTH,
+        data={"metadata": json.dumps(metadata)},
+        files={"file": ("return.pdf", b"safe", "application/pdf")},
+    )
+
+    assert uploaded.status_code == 200
+    entries, _body = main._load_document_index()
+    assert entries[0]["_privacyVersion"] == main.DOCUMENT_PRIVACY_VERSION
+    assert entries[0]["taxpayerIdentifier"]["evidence"]["snippet"] == (
+        "Taxpayer ********01"
+    )
+    listed = client.get("/documents", headers=AUTH)
+    assert listed.status_code == 200
+    assert "_privacyVersion" not in listed.text
+
+
+def test_document_index_rejects_untrusted_form_identifier_without_mutation(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(main, "DOCUMENTS_INDEX_PATH", tmp_path / "documents.json")
+    monkeypatch.setattr(main, "DOCUMENTS_DIR", tmp_path / "documents")
+
+    document_id = "24242424-2424-4242-8242-242424242424"
+    entry = native_tax_document_metadata(document_id)
+    entry["_originalFile"] = "original.pdf"
+    entry["title"] = "Form AZ123456"
+    entry["taxpayerIdentifier"] = tax_candidate("********56", snippet="Already masked")
+    original = json.dumps([entry], separators=(",", ":")).encode()
+    main.DOCUMENTS_INDEX_PATH.write_bytes(original)
+
+    response = client.get("/documents", headers=AUTH)
+
+    assert response.status_code == 503
+    assert main.DOCUMENTS_INDEX_PATH.read_bytes() == original
 
 
 def test_document_index_migration_preserves_original_bytes_when_privacy_is_uncertain(

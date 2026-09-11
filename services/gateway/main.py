@@ -610,10 +610,12 @@ DOCUMENT_MAX_AMOUNTS = 2_048
 DOCUMENT_MAX_WARNINGS = 64
 DOCUMENT_MAX_EVIDENCE_PAGE = 200
 DOCUMENT_PRIVACY_PLACEHOLDER = "Evidence withheld for privacy."
+DOCUMENT_PRIVACY_VERSION = 1
 DOCUMENT_PUBLICATION_KEYS = frozenset({
     "id", "title", "documentType", "taxYear", "issuer", "taxpayerIdentifier",
     "referenceIdentifier", "dates", "amounts", "warnings", "confidence",
 })
+DOCUMENT_INDEX_INTERNAL_KEYS = frozenset({"_originalFile", "_privacyVersion"})
 DOCUMENT_REQUIRED_PUBLICATION_KEYS = DOCUMENT_PUBLICATION_KEYS - {"taxYear"}
 DOCUMENT_CONFIDENCE_VALUES = frozenset({"low", "medium", "high"})
 
@@ -678,6 +680,9 @@ _TAX_LEGACY_IDENTIFIER_TOKEN_PATTERN = re.compile(
 )
 _TAX_LEGACY_SUSPICIOUS_ALPHA_TOKEN_PATTERN = re.compile(
     r"(?<![A-Za-z0-9*])[A-Z]{6,32}(?![A-Za-z0-9*])"
+)
+_TAX_LEGACY_VALID_FORM_LABEL_PATTERN = re.compile(
+    r"(?i)^(?:[A-Z]{1,4}(?:[ -]?[0-9]{1,3})?|[0-9]{3,4})$"
 )
 _TAX_LEGACY_NUMERIC_TOKEN_PATTERN = re.compile(
     r"(?<![A-Za-z0-9*])[0-9]{1,32}(?![0-9*])"
@@ -4616,7 +4621,10 @@ def _legacy_text_contains_unproven_identifier(
         token = match.group(0)
         if any(character.isalpha() for character in token) and any(character.isdigit() for character in token):
             prefix = residual[:match.start()]
-            if re.search(r"(?i)\b(?:form|schedule)[ \t]+$", prefix[-64:]):
+            if (
+                re.search(r"(?i)\b(?:form|schedule)[ \t]+$", prefix[-64:])
+                and _TAX_LEGACY_VALID_FORM_LABEL_PATTERN.fullmatch(token)
+            ):
                 continue
             return True
 
@@ -4649,8 +4657,10 @@ def _legacy_text_contains_unproven_identifier(
 def _migrate_legacy_document_privacy(
     original: dict,
     normalized: dict,
+    *,
+    legacy: bool,
 ) -> dict:
-    """Repair only privacy-safe legacy differences; reject uncertain entries."""
+    """Repair legacy privacy differences while preserving current evidence."""
     masked_candidates = []
     visible_suffixes: set[str] = set()
     for field in ("taxpayerIdentifier", "referenceIdentifier"):
@@ -4676,24 +4686,26 @@ def _migrate_legacy_document_privacy(
         snippet = evidence.get("snippet") if isinstance(evidence, dict) else None
         if type(snippet) is not str:
             continue
-        if (
-            snippet == DOCUMENT_PRIVACY_PLACEHOLDER
-            or _TAX_CANONICAL_MASK_PATTERN.search(snippet) is not None
-        ):
-            continue
-        # A masked candidate does not prove what its legacy source snippet
-        # contained.  Do not classify page numbers, amounts, or opaque words
-        # as safe with regex heuristics; retain the document while withholding
-        # the unverifiable evidence.
-        normalized[field] = {
-            **candidate,
-            "evidence": {
-                **evidence,
-                "snippet": DOCUMENT_PRIVACY_PLACEHOLDER,
-            },
-        }
+        if legacy:
+            if (
+                snippet == DOCUMENT_PRIVACY_PLACEHOLDER
+                or _TAX_CANONICAL_MASK_PATTERN.fullmatch(snippet.strip()) is not None
+            ):
+                continue
+            # A masked candidate does not prove what its legacy source snippet
+            # contained. Do not classify page numbers, amounts, or opaque
+            # words as safe with regex heuristics; withhold the evidence.
+            normalized[field] = {
+                **candidate,
+                "evidence": {
+                    **evidence,
+                    "snippet": DOCUMENT_PRIVACY_PLACEHOLDER,
+                },
+            }
 
     for text, in_evidence in _document_text_values(normalized):
+        if in_evidence and not legacy:
+            continue
         if _legacy_text_contains_unproven_identifier(
             text,
             visible_suffixes=visible_suffixes,
@@ -4820,12 +4832,21 @@ def _validate_document_publication(value: object, *, normalize: bool) -> dict:
 def _validate_document_index_entry(value: object, *, migrate_legacy: bool = False) -> dict:
     if not isinstance(value, dict) or "_originalFile" not in value:
         raise ValueError("document index entry is invalid")
-    if set(value) - DOCUMENT_PUBLICATION_KEYS - {"_originalFile"}:
+    if set(value) - DOCUMENT_PUBLICATION_KEYS - DOCUMENT_INDEX_INTERNAL_KEYS:
         raise ValueError("document index entry fields are invalid")
+    if "_privacyVersion" in value and (
+        type(value["_privacyVersion"]) is not int
+        or value["_privacyVersion"] != DOCUMENT_PRIVACY_VERSION
+    ):
+        raise ValueError("document privacy version is invalid")
     original_file = value["_originalFile"]
     if not _valid_document_index_filename(original_file):
         raise ValueError("document index file name is invalid")
-    publication = {key: item for key, item in value.items() if key != "_originalFile"}
+    publication = {
+        key: item
+        for key, item in value.items()
+        if key not in DOCUMENT_INDEX_INTERNAL_KEYS
+    }
     # Native Foundation's UUID encoder emits uppercase hexadecimal characters.
     # Accept that case-only spelling at this durable boundary, while still
     # rejecting every other non-canonical or privacy-unsafe difference.
@@ -4835,7 +4856,12 @@ def _validate_document_index_entry(value: object, *, migrate_legacy: bool = Fals
     if not migrate_legacy and normalized != comparable:
         raise ValueError("document index entry is not canonical or privacy-safe")
     if migrate_legacy:
-        normalized = _migrate_legacy_document_privacy(publication, normalized)
+        normalized = _migrate_legacy_document_privacy(
+            publication,
+            normalized,
+            legacy="_privacyVersion" not in value,
+        )
+    normalized["_privacyVersion"] = DOCUMENT_PRIVACY_VERSION
     normalized["_originalFile"] = original_file
     return normalized
 
@@ -4843,7 +4869,11 @@ def _validate_document_index_entry(value: object, *, migrate_legacy: bool = Fals
 def _serialize_public_document_index(index: list[dict]) -> bytes:
     try:
         body = json.dumps(
-            [{key: value for key, value in entry.items() if key != "_originalFile"} for entry in index],
+            [{
+                key: value
+                for key, value in entry.items()
+                if key not in DOCUMENT_INDEX_INTERNAL_KEYS
+            } for entry in index],
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -5110,6 +5140,7 @@ def _store_document_upload(
     next_index = [entry for entry in index if _document_index_id(entry.get("id")) != doc_id]
     meta = dict(meta)
     meta["_originalFile"] = destination_name
+    meta["_privacyVersion"] = DOCUMENT_PRIVACY_VERSION
     next_index.append(meta)
     try:
         next_index_body = _serialize_document_index(next_index)
