@@ -32,10 +32,10 @@ private enum TaxPrivacy {
     // suffix that is not in this grammar. This also prevents a regex from
     // scanning an unbounded run of attacker-controlled characters.
     private static let bareIdentifierRegex = try! NSRegularExpression(
-        pattern: #"(?<![0-9A-Z])([0-9*]{11,30})(?![0-9A-Z])"#
+        pattern: #"(?<![0-9A-Z])([0-9*]{11,30})(?![0-9A-Z]|[.,][0-9]{1,2}(?![0-9]))"#
     )
     private static let groupedIdentifierRegex = try! NSRegularExpression(
-        pattern: #"(?<![0-9A-Z])([0-9*]{2}[ \t/.-][0-9*]{3}[ \t/.-][0-9*]{5}|[0-9*]{2}(?:[ \t][0-9*]{3}){3}|(?:[0-9*]{3}[ \t/.-]){3}[0-9*]{2})(?![0-9A-Z])"#
+        pattern: #"(?<![0-9A-Z])([0-9*]{2}[ \t/.-][0-9*]{3}[ \t/.-][0-9*]{5}|[0-9*]{2}(?:[ \t][0-9*]{3}){3}|(?:[0-9*]{3}[ \t/.-]){3}[0-9*]{2})(?![0-9A-Z]|[.,][0-9]{1,2}(?![0-9]))"#
     )
 
     // Masked values are canonicalized even when they are already partially
@@ -50,6 +50,11 @@ private enum TaxPrivacy {
     private static let ordinaryAmountRegex = try! NSRegularExpression(
         pattern: #"^[+-]?(?:[0-9]{1,3}(?:[. ][0-9]{3})+|[0-9]+)(?:,[0-9]{2}|\.[0-9]{2})(?:[ \t]*(?:EUR|USD|€|\$))?$"#
     )
+    private static let identifierFieldLabels = [
+        "Steuerliche Identifikationsnummer", "Steueridentifikationsnummer",
+        "Identifikationsnummer", "Steuer-ID", "Id-Nr", "Steuernummer",
+        "Aktenzeichen", "Reference"
+    ]
 
     static func redactIdentifiers(in text: String) -> String {
         guard !text.isEmpty else { return text }
@@ -79,6 +84,16 @@ private enum TaxPrivacy {
         let redacted = redactIdentifiers(in: trimmed)
         if redacted != trimmed {
             return redacted
+        }
+        // A value can already be canonicalized while its field label remains
+        // intact. Preserve that label instead of falling back to masking the
+        // entire string and losing useful context in the review UI.
+        for label in identifierFieldLabels {
+            guard trimmed.range(of: label, options: .caseInsensitive) != nil else { continue }
+            let field = redactedIdentifierField(in: trimmed, label: label)
+            if field.contains("*") {
+                return field
+            }
         }
         return maskIdentifier(trimmed)
     }
@@ -112,20 +127,13 @@ private enum TaxPrivacy {
         ) != nil {
             return trimmed
         }
-        if ordinaryAmountRegex.firstMatch(
-            in: trimmed,
-            range: NSRange(location: 0, length: (trimmed as NSString).length)
-        ) != nil {
-            return trimmed
-        }
-
         let digits = trimmed.filter { character in
             guard character.unicodeScalars.count == 1,
                   let scalar = character.unicodeScalars.first else { return false }
             return (48...57).contains(scalar.value)
         }
         guard digits.count >= 2 else {
-            return String(repeating: "*", count: min(8, max(1, trimmed.count)))
+            return String(repeating: "*", count: 8)
         }
         return String(repeating: "*", count: 8) + String(digits.suffix(2))
     }

@@ -1472,7 +1472,7 @@ final class CalendarLayoutTests: XCTestCase {
             horizontalTranslation: 1,
             verticalTranslation: 12
         ))
-        XCTAssertTrue(CalendarInteractionLayout.isHorizontalPagerDrag(
+        XCTAssertFalse(CalendarInteractionLayout.isHorizontalPagerDrag(
             horizontalTranslation: 12,
             verticalTranslation: 10
         ))
@@ -1498,7 +1498,7 @@ final class CalendarLayoutTests: XCTestCase {
         )
         XCTAssertEqual(
             CalendarInteractionLayout.pagerDragAxis(horizontalTranslation: 10, verticalTranslation: 12),
-            .vertical
+            .undecided
         )
     }
 

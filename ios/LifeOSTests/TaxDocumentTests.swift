@@ -135,9 +135,9 @@ final class TaxDocumentTests: XCTestCase {
             ("12345678901*", "********01"),
             ("*2345678901", "********01"),
             ("12345*78901", "********01"),
-            ("1", "*"),
-            ("*9", "**"),
-            ("abc", "***")
+            ("1", "********"),
+            ("*9", "********"),
+            ("abc", "********")
         ]
 
         for (value, expected) in valuesAndExpected {
@@ -162,27 +162,27 @@ final class TaxDocumentTests: XCTestCase {
         let rawIdentifier = "12345678901"
         let groupedIdentifier = "12 345 678 901"
         let document = TaxDocument(
-            title: "(rawIdentifier).pdf",
-            documentType: "(groupedIdentifier)",
+            title: "\(rawIdentifier).pdf",
+            documentType: "\(groupedIdentifier)",
             taxYear: 2026,
             issuer: TaxCandidate(
-                value: "Finanzamt (rawIdentifier)",
-                evidence: TaxEvidence(page: 1, snippet: "Issuer (groupedIdentifier)")),
+                value: "Finanzamt \(rawIdentifier)",
+                evidence: TaxEvidence(page: 1, snippet: "Issuer \(groupedIdentifier)")),
             taxpayerIdentifier: TaxCandidate(
                 value: "*01",
-                evidence: TaxEvidence(page: 1, snippet: "Tax ID (rawIdentifier)")),
+                evidence: TaxEvidence(page: 1, snippet: "Tax ID \(rawIdentifier)")),
             referenceIdentifier: TaxCandidate(
                 value: "12/345/67890",
-                evidence: TaxEvidence(page: 1, snippet: "Reference (groupedIdentifier)")),
+                evidence: TaxEvidence(page: 1, snippet: "Reference \(groupedIdentifier)")),
             dates: [TaxDate(
                 value: "08.09.2026",
-                evidence: TaxEvidence(page: 1, snippet: "Date 08.09.2026 (rawIdentifier)"))],
+                evidence: TaxEvidence(page: 1, snippet: "Date 08.09.2026 \(rawIdentifier)"))],
             amounts: [TaxAmount(
                 value: "1234.56",
                 label: "Einkommensteuer",
-                evidence: TaxEvidence(page: 1, snippet: "Amount 1.234,56 EUR (rawIdentifier)"))],
-            pages: ["Page (rawIdentifier)", "Grouped (groupedIdentifier)"],
-            warnings: ["Warning (rawIdentifier)"]
+                evidence: TaxEvidence(page: 1, snippet: "Amount 1.234,56 EUR \(rawIdentifier)"))],
+            pages: ["Page \(rawIdentifier)", "Grouped \(groupedIdentifier)"],
+            warnings: ["Warning \(rawIdentifier)"]
         )
 
         XCTAssertEqual(document.title, "********01.pdf")
@@ -211,18 +211,49 @@ final class TaxDocumentTests: XCTestCase {
     }
 
     func testEvidenceCanonicalizesMaskedGroupedRawAndMixedIdentifierForms() {
-        let forms = ["*90", "**90", "***90", "12345678901", "12/345/67890", "123-456-789-01", "12345*78901"]
-        for form in forms {
-            let evidence = TaxEvidence(page: 1, snippet: "ID (form)")
-            XCTAssertEqual(evidence.snippet, "ID ********90", form)
+        let formsAndExpected = [
+            ("*90", "********90"),
+            ("**90", "********90"),
+            ("***90", "********90"),
+            ("12345678901", "********01"),
+            ("12/345/67890", "********90"),
+            ("123-456-789-01", "********01"),
+            ("12345*78901", "********01")
+        ]
+        for (form, expected) in formsAndExpected {
+            let evidence = TaxEvidence(page: 1, snippet: "ID \(form)")
+            XCTAssertEqual(evidence.snippet, "ID \(expected)", form)
         }
+    }
+
+    func testLongNumericAmountRemainsEvidenceAndAmountTextButIdentifierCandidatesMask() {
+        let amount = "12345678901.00"
+        let evidence = TaxEvidence(page: 1, snippet: "Amount \(amount)")
+        XCTAssertEqual(evidence.snippet, "Amount \(amount)")
+
+        let taxAmount = TaxAmount(value: amount, label: "Amount", evidence: evidence)
+        XCTAssertEqual(taxAmount.value, amount)
+
+        let document = TaxDocument(
+            title: "Amount context",
+            documentType: "Tax",
+            taxYear: nil,
+            issuer: nil as String?,
+            taxpayerIdentifier: amount,
+            referenceIdentifier: nil,
+            dates: [],
+            amounts: [taxAmount],
+            pages: []
+        )
+        XCTAssertEqual(document.taxpayerIdentifier?.value, "********00")
+        XCTAssertEqual(document.amounts.first?.value, amount)
     }
 
     func testFilenameDerivedFieldsAreSanitizedWithoutChangingFinancialValues() throws {
         let rawIdentifier = "12345678901"
         let result = TaxDocumentParser.parse(
             text: "08.09.2026\nEinkommensteuer 1.234,56 EUR",
-            documentName: "(rawIdentifier).pdf"
+            documentName: "\(rawIdentifier).pdf"
         )
 
         XCTAssertEqual(result.title, "********01.pdf")
@@ -381,35 +412,35 @@ final class TaxDocumentTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let rawIdentifier = "12345678901"
         let groupedIdentifier = "12 345 678 901"
-        let evidence = ["page": 1, "snippet": "Evidence (groupedIdentifier)"] as [String: Any]
+        let evidence = ["page": 1, "snippet": "Evidence \(groupedIdentifier)"] as [String: Any]
         let legacyDocument: [String: Any] = [
             "id": UUID().uuidString,
-            "title": "(rawIdentifier).pdf",
+            "title": "\(rawIdentifier).pdf",
             "documentType": groupedIdentifier,
             "taxYear": 2026,
             "issuer": [
-                "value": "Finanzamt (rawIdentifier)",
+                "value": "Finanzamt \(rawIdentifier)",
                 "evidence": evidence
             ],
             "taxpayerIdentifier": [
                 "value": "*90",
-                "evidence": ["page": 1, "snippet": "Tax ID (rawIdentifier)"]
+                "evidence": ["page": 1, "snippet": "Tax ID \(rawIdentifier)"]
             ],
             "referenceIdentifier": [
                 "value": "12345*78901",
-                "evidence": ["page": 1, "snippet": "Reference (groupedIdentifier)"]
+                "evidence": ["page": 1, "snippet": "Reference \(groupedIdentifier)"]
             ],
             "dates": [[
                 "value": "08.09.2026",
-                "evidence": ["page": 1, "snippet": "Date (rawIdentifier) 08.09.2026"]
+                "evidence": ["page": 1, "snippet": "Date \(rawIdentifier) 08.09.2026"]
             ]],
             "amounts": [[
                 "value": "1234.56",
                 "label": "Einkommensteuer",
-                "evidence": ["page": 1, "snippet": "Amount 1.234,56 EUR (rawIdentifier)"]
+                "evidence": ["page": 1, "snippet": "Amount 1.234,56 EUR \(rawIdentifier)"]
             ]],
-            "pages": ["Legacy raw page (rawIdentifier)"],
-            "warnings": ["Warning (rawIdentifier)"],
+            "pages": ["Legacy raw page \(rawIdentifier)"],
+            "warnings": ["Warning \(rawIdentifier)"],
             "confidence": "high"
         ]
         let fileURL = directory.appendingPathComponent("documents.json")
