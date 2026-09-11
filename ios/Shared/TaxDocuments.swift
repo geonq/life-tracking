@@ -492,7 +492,7 @@ enum TaxDocumentParser {
         var amounts: [TaxAmount] = []
         var years: [Int] = []
         let datePattern = #"\b(?:\d{1,2}[./]\d{1,2}[./]\d{4}|\d{4}-\d{2}-\d{2})\b"#
-        let moneyPattern = #"(?i)([\wÄÖÜäöüß -]{2,30}?)\s+([€$])?\s*(\d{1,3}(?:[. ]\d{3})*(?:,\d{2})|\d+(?:\.\d{2})?)\s*(EUR|€|USD|\$)?"#
+        let moneyPattern = #"(?i)([\wÄÖÜäöüß -]{2,30}?)\s+([€$])?\s*(\d{1,3}(?:[. ]\d{3})*,\d{2}|\d+(?:[.,]\d{2})?)\s*(EUR|€|USD|\$)?(?![0-9A-Za-z.,])"#
         let dateRegex = try? NSRegularExpression(pattern: datePattern)
         let moneyRegex = try? NSRegularExpression(pattern: moneyPattern)
 
@@ -538,9 +538,7 @@ enum TaxDocumentParser {
                     guard hasPrefixCurrency || hasSuffixCurrency else { return }
                     let label = nsPage.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespaces)
                     let raw = nsPage.substring(with: match.range(at: 3))
-                    let normalized = raw.replacingOccurrences(of: ".", with: "")
-                        .replacingOccurrences(of: " ", with: "")
-                        .replacingOccurrences(of: ",", with: ".")
+                    guard let normalized = normalizeMoneyToken(raw) else { return }
                     let evidence = TaxEvidence(page: index + 1, snippet: evidenceSnippet(in: page, around: match.range))
                     amounts.append(TaxAmount(value: normalized, label: label, evidence: evidence))
                     if amounts.count >= TaxDocumentLimits.maximumAmounts { stop.pointee = true }
@@ -583,6 +581,71 @@ enum TaxDocumentParser {
             pages: safePages,
             warnings: uniqueWarnings
         )
+    }
+
+    /// Normalizes only the bounded money grammar captured by `moneyPattern`.
+    /// A comma is the decimal separator for German grouped values; a single
+    /// dot followed by two digits is retained as a plain decimal point. Any
+    /// other punctuation layout is rejected instead of being guessed.
+    private static func normalizeMoneyToken(_ raw: String) -> String? {
+        let compact = raw.replacingOccurrences(of: " ", with: "")
+        guard !compact.isEmpty, compact.count <= 64 else { return nil }
+
+        let isASCIIDigits: (String) -> Bool = { value in
+            !value.isEmpty && value.unicodeScalars.allSatisfy { scalar in
+                (48...57).contains(scalar.value)
+            }
+        }
+        guard compact.unicodeScalars.allSatisfy({ scalar in
+            (48...57).contains(scalar.value) || scalar.value == 44 || scalar.value == 46
+        }) else { return nil }
+
+        let commaCount = compact.reduce(into: 0) { count, character in
+            if character == "," { count += 1 }
+        }
+        let dotCount = compact.reduce(into: 0) { count, character in
+            if character == "." { count += 1 }
+        }
+
+        if commaCount == 1 {
+            let components = compact.split(separator: ",", omittingEmptySubsequences: false)
+            guard components.count == 2,
+                  components[1].count == 2,
+                  isASCIIDigits(String(components[1])) else { return nil }
+
+            let integerPart = String(components[0])
+            let integer: String
+            if integerPart.contains(".") {
+                let groups = integerPart.split(separator: ".", omittingEmptySubsequences: false)
+                guard groups.count >= 2,
+                      let first = groups.first,
+                      (1...3).contains(first.count),
+                      isASCIIDigits(String(first)),
+                      groups.dropFirst().allSatisfy({ group in
+                          group.count == 3 && isASCIIDigits(String(group))
+                      }) else { return nil }
+                integer = groups.map(String.init).joined()
+            } else {
+                guard isASCIIDigits(integerPart) else { return nil }
+                integer = integerPart
+            }
+            return "\(integer).\(components[1])"
+        }
+
+        guard commaCount == 0 else { return nil }
+        if dotCount == 0 {
+            return isASCIIDigits(compact) ? compact : nil
+        }
+
+        // More than one dot could be grouping or a malformed decimal. The
+        // parser has no reliable signal to distinguish those cases.
+        guard dotCount == 1 else { return nil }
+        let components = compact.split(separator: ".", omittingEmptySubsequences: false)
+        guard components.count == 2,
+              components[1].count == 2,
+              isASCIIDigits(String(components[0])),
+              isASCIIDigits(String(components[1])) else { return nil }
+        return compact
     }
 
     static func confidence(

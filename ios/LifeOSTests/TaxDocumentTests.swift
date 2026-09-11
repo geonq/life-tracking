@@ -12,6 +12,28 @@ final class TaxDocumentTests: XCTestCase {
         XCTAssertTrue(result.amounts.first?.evidence.snippet.contains("Einkommensteuer") == true)
     }
 
+    func testParsesPlainAndGroupedMoneyFormatsWithoutGuessing() {
+        let cases = [
+            ("Einkommensteuer 1234.56 EUR", "1234.56"),
+            ("Einkommensteuer 1.234,56 EUR", "1234.56"),
+            ("Einkommensteuer 1 234,56 EUR", "1234.56")
+        ]
+
+        for (text, expected) in cases {
+            let result = TaxDocumentParser.parse(text: text, documentName: "Bescheid.pdf")
+            XCTAssertEqual(result.amounts.first?.value, expected, text)
+        }
+    }
+
+    func testRejectsAmbiguousGroupedOrDecimalTokenInsteadOfTruncatingIt() {
+        let result = TaxDocumentParser.parse(
+            text: "Einkommensteuer 1.234 EUR",
+            documentName: "Bescheid.pdf"
+        )
+
+        XCTAssertTrue(result.amounts.isEmpty)
+    }
+
     func testEvidencePreservesPageAndSnippet() {
         let result = TaxDocumentParser.parse(pages: ["Seite eins", "Steuerjahr 2023\nUSt 10,00 EUR"], documentName: "x.pdf")
         XCTAssertEqual(result.taxYear, 2023)
@@ -233,6 +255,12 @@ final class TaxDocumentTests: XCTestCase {
 
         let taxAmount = TaxAmount(value: amount, label: "Amount", evidence: evidence)
         XCTAssertEqual(taxAmount.value, amount)
+
+        let parsed = TaxDocumentParser.parse(
+            text: "Einkommensteuer \(amount) EUR",
+            documentName: "Amount.pdf"
+        )
+        XCTAssertEqual(parsed.amounts.first?.value, amount)
 
         let document = TaxDocument(
             title: "Amount context",
