@@ -4,14 +4,11 @@ Updated 2026-09-11 Europe/Berlin.
 
 ## Current verdict
 
-Local source checks are current and passing, but the release is **pending a
-new final Astra Medium security review** plus external acceptance gates. The
-previous final Astra review was **RED** because Windows recovery was
-unfinished and because the gateway accepted more calendar items than native
-clients. The local source patches now cover that calendar boundary, bounded
-PNG/JPEG validation, native-shaped TaxDocument publication, privacy-safe
-document responses, and bounded usage idempotency replay. The Windows runtime
-is still not green.
+The reviewed source checkpoint is **GREEN** after the final Astra Medium
+security review. Release is still **pending operational and product gates**:
+Windows recovery/install, live-provider reads, device/signing checks, and
+visual acceptance. The review reproduced and cleared the versioned-tax-record
+evidence disclosure. Do not infer runtime/device acceptance from source checks.
 
 Do not claim a production release, remote backend availability, or device
 acceptance from the local source results. No generic conversational
@@ -22,12 +19,12 @@ product.
 ## Git and review state
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- Source checkpoint: `1d79a1306717a03eae2bcf48daf847bb40e9e4ba`.
-- After this coordination commit, the local branch is 24 commits ahead of its
-  origin-tracking ref and has not been pushed. The coordination snapshot is
-  committed in the local history.
-  Source/security commits `f425b2a` and `1d79a13` are committed locally but
-  remain unsynchronized with origin, so remote or PR state is unverified.
+- Source checkpoint: `eb9ca620c4040a2f6ea08f1fe4ddfa1e2ccd1237`.
+- The local branch is 45 commits ahead of its origin-tracking ref and has not
+  been pushed. The latest security checkpoints are `b82f23b` (fail closed on
+  versioned tax evidence), `2fb2b9b` (native privacy test typing), and
+  `eb9ca62` (bounded native tax lookahead). Keep these small, attributable
+  commits when synchronizing.
 - Recent source checkpoints include `ceddd2b` (design validator contract),
   `c814299` (widget typography compile fix), `544633b` (finance detail return),
   `ebbfff2` (gateway/native calendar-limit alignment), `f425b2a` (bounded
@@ -75,19 +72,21 @@ edge capability. The native app does not persist that bearer token; do not
 describe the current transport as a Keychain-stored sync token. Legacy
 credential cleanup and the physical transport still require verification.
 
-The source/security status remains **pending fresh Astra review**. The prior
-review also left raw WebSocket probing unverified because the local environment
-lacked the `websockets` package, although ASGI WebSocket tests passed. The
-fresh review must repeat adversarial HTTP/WS, authentication, bounds, replay,
-deployment, and dependency checks and issue the release gate.
+Final Astra Medium source verdict: **GREEN** at `eb9ca620…`. It independently
+ran the gateway/API suites, reproduced current and legacy raw-evidence cases,
+confirmed authenticated reads fail closed without mutating bytes, and reviewed
+the native, calendar, API, WebSocket, replay, process, and deployment bounds.
+The green verdict does not prove effective Windows ACLs, remote restart
+recovery, live penetration results, or physical-device behavior.
 
 ## Verification evidence
 
 - Full repository source validator: **163 passed**, **47 subtests passed**.
-- Gateway: **490 passed**, with two dependency warnings.
+- Gateway: **549 passed**, with two dependency warnings.
 - API: **141 tests passed** and TypeScript typecheck passed.
 - Contracts: **198 tests passed** and build passed.
-- Full and production-only `npm audit`: **zero vulnerabilities**.
+- The final security pass did not rerun `npm audit`; advisory status was not
+  refreshed in this checkpoint.
 - Unsigned `LifeOSMacLogic` build, unsigned `LifeOSLogic` build, direct
   `LifeOSWidget` iOS target, `LifeOSPrereleaseIOS`, and macOS logic XCTest
   passed; the macOS XCTest result contains **54 passed tests**.
@@ -116,8 +115,8 @@ deployment, and dependency checks and issue the release gate.
 
 ## Next serialized queue
 
-1. Run the new final Astra Medium security review after this documentation refresh.
-2. Synchronize the candidate and PR, then complete bounded Windows recovery,
+1. Synchronize the reviewed branch and refresh PR state.
+2. Complete bounded Windows recovery,
    installation, and remote runtime verification.
 3. Complete provider, physical-device, signing, visual, widget, and
    CoreSimulator acceptance gates.

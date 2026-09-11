@@ -53,9 +53,8 @@ Updated 2026-09-11 Europe/Berlin.
   transport remain verification items.
 - Keep secrets out of source, prompts, logs, and archives. Do not claim
   provider, Windows-native, physical-device, or visual evidence from source
-  checks alone. The previous Astra final review was RED. Local source patches
-  are covered by the current validator and focused suites, but a new final
-  Astra Medium review is required before a release green light.
+  checks alone. Final Astra Medium source review is GREEN at `eb9ca620…`;
+  operational and device gates remain open.
 - Native Shortcuts may open Zepp and report LifeOS refresh/status; a public
   Zepp API is not assumed. Personal Team signing and seven-day renewal remain
   platform-managed steps.
@@ -69,5 +68,5 @@ Updated 2026-09-11 Europe/Berlin.
   visual fixtures isolated from production paths.
 - Do not add a Claude usage-limit watcher, overnight supervisor, demo fallback,
   generic assistant, or unrelated conversational AI.
-- Do not merge PR #1 while Astra, Windows, provider, physical-device, and
-  visual gates remain unresolved, even when local automated suites pass.
+- Do not merge PR #1 while Windows, provider, physical-device, and visual
+  gates remain unresolved, even when local automated suites pass.

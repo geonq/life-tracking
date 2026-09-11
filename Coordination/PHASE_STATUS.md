@@ -2,16 +2,15 @@
 
 Updated 2026-09-11 Europe/Berlin.
 
-- Overall: **local source gates pass; release is NO-GO pending a new final
-  Astra Medium review and external runtime/device evidence**.
-- Previous final Astra review: **RED**. Its Windows operational blocker
-  remains unresolved. Local commits `f425b2a` and `1d79a13` address the
-  bounded usage replay, calendar image, and TaxDocument publication findings;
-  the new review must verify them independently.
+- Overall: **source security gate GREEN; release remains NO-GO pending
+  operational, provider, device, and visual evidence**.
+- Final Astra Medium review at `eb9ca620…` reproduced and cleared the
+  versioned-tax-record evidence bypass. No source-code blocker remains under
+  the review criteria.
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- Source checkpoint: `1d79a1306717a03eae2bcf48daf847bb40e9e4ba`, local and not
-  pushed. After this coordination commit, the branch is 24 commits ahead of
-  the origin-tracking ref; the source/security commits remain unsynchronized.
+- Source checkpoint: `eb9ca620c4040a2f6ea08f1fe4ddfa1e2ccd1237`, local and not
+  pushed. The branch is 45 commits ahead of its origin-tracking ref; the
+  candidate and PR still need synchronization.
 - No Claude usage watcher, overnight supervisor, generic assistant, or
   conversational AI is in the product. Calorie-photo AI remains allowed.
 
@@ -37,18 +36,18 @@ Updated 2026-09-11 Europe/Berlin.
 ## Verification
 
 - Repository source validator: **163 passed**, **47 subtests passed**.
-- Gateway: **490 passed**, with two dependency warnings.
+- Gateway: **549 passed**, with two dependency warnings.
 - API: **141 tests passed** and typecheck passed.
 - Contracts: **198 tests passed** and build passed.
-- `npm audit` and production audit: **zero vulnerabilities**.
+- The final review did not rerun `npm audit`; advisory status is unrefreshed.
 - Unsigned macOS logic, unsigned iOS logic, direct iOS widget target, and
   `LifeOSPrereleaseIOS` passed. macOS logic XCTest passed **54 tests**.
 - `LifeOSWidgets` exposes only macOS destinations; this is scheme metadata.
 
 ## Blocking acceptance
 
-- Fresh Astra Medium security review, including the previously unverified raw
-  WebSocket probe where the environment permits it.
+- Preserve the Astra source verdict in the release record; it does not replace
+  operational or device evidence.
 - Candidate synchronization and PR state refresh.
 - Windows recovery/install/runtime/Tailscale Serve/readback. Current remote
   evidence: `LifeOSAPI` stopped, expected ports have no listeners, transaction

@@ -2,18 +2,15 @@
 
 Updated 2026-09-11 Europe/Berlin.
 
-Current checkpoint: `ebbfff2c1eda6d017669cc391050f45296b4429d` on
-`lifeos-foundation-checkpoint-20260812`. The local branch is 20 commits ahead
-of origin tracking and has not been pushed. Local source checks pass, but the
-previous final Astra review was RED, so release status remains pending.
+Current checkpoint: `eb9ca620c4040a2f6ea08f1fe4ddfa1e2ccd1237` on
+`lifeos-foundation-checkpoint-20260812`. The local branch is 45 commits ahead
+of origin tracking and has not been pushed. Final Astra Medium source review
+is GREEN; release status remains pending external gates.
 
 ## Active gates
 
-1. Run a fresh Astra Medium security review after this coordination refresh.
-   Include adversarial HTTP/WS, authentication, replay, input bounds,
-   dependency, and deployment checks.
-2. Synchronize the candidate and refresh GitHub PR state after the review.
-3. Complete bounded Windows recovery, candidate install, standalone runtime,
+1. Synchronize the reviewed candidate and refresh GitHub PR state.
+2. Complete bounded Windows recovery, candidate install, standalone runtime,
    protected readback, Tailscale Serve, restart recovery, and health checks on
    `domke@tailscaleip`. Current host evidence is stopped `LifeOSAPI`, no
    expected listeners, an active deployment transaction, recovery phase
@@ -32,10 +29,11 @@ previous final Astra review was RED, so release status remains pending.
 ## Completed local verification
 
 - Repository source validator: **163 passed**, **47 subtests passed**.
-- Gateway: **483 passed**, with two dependency deprecation warnings.
+- Gateway: **549 passed**, with two dependency deprecation warnings.
 - API: **141 tests passed** and typecheck passed.
 - Contracts: **198 tests passed** and build passed.
-- Full and production-only `npm audit`: **zero vulnerabilities**.
+- Final security review did not rerun `npm audit`; advisory status is
+  unrefreshed.
 - Unsigned `LifeOSMacLogic`, `LifeOSLogic`, direct `LifeOSWidget` iOS target,
   and `LifeOSPrereleaseIOS` passed; macOS logic XCTest passed **54 tests**.
 - The `LifeOSWidgets` macOS-only destination list is a scheme metadata issue,
