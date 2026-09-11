@@ -3414,6 +3414,47 @@ def test_document_publication_redacts_identifiers_and_hides_internal_fields(tmp_
     assert "12345678901" not in listed.text
 
 
+@pytest.mark.parametrize(("raw_identifier", "safe_identifier"), [
+    ("AZ123456", "********56"),
+    ("8642", "********42"),
+    ("A7", "********"),
+])
+def test_document_identifier_evidence_is_redacted_before_index_reload_and_publication(
+    tmp_path, monkeypatch, raw_identifier, safe_identifier
+):
+    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(main, "DOCUMENTS_INDEX_PATH", tmp_path / "documents.json")
+    monkeypatch.setattr(main, "DOCUMENTS_DIR", tmp_path / "documents")
+    document_id = "17171717-1717-4171-8171-171717171717"
+    evidence_snippet = f"Evidence begins {raw_identifier} and ends here"
+    metadata = native_tax_document_metadata(document_id)
+    metadata["taxpayerIdentifier"] = tax_candidate(raw_identifier, snippet=evidence_snippet)
+
+    uploaded = client.post(
+        "/documents",
+        headers=AUTH,
+        data={"metadata": json.dumps(metadata)},
+        files={"file": ("return.pdf", b"safe", "application/pdf")},
+    )
+    assert uploaded.status_code == 200
+
+    persisted = (tmp_path / "documents.json").read_text()
+    reloaded, reloaded_body = main._load_document_index()
+    listed = client.get("/documents", headers=AUTH)
+    assert listed.status_code == 200
+    publication = listed.json()[0]
+    serialized_reload = json.dumps(reloaded, ensure_ascii=False)
+
+    assert reloaded_body == persisted.encode("utf-8")
+    for serialized in (persisted, serialized_reload, listed.text):
+        assert raw_identifier not in serialized
+        assert safe_identifier in serialized
+    assert publication["taxpayerIdentifier"]["value"] == safe_identifier
+    assert publication["taxpayerIdentifier"]["evidence"]["snippet"] == (
+        f"Evidence begins {safe_identifier} and ends here"
+    )
+
+
 @pytest.mark.parametrize(("raw", "expected"), [
     ("*90", "********90"),
     ("**90", "********90"),

@@ -4485,16 +4485,18 @@ def _mask_tax_identifier_value(value: str) -> str:
     return _mask_tax_identifier(trimmed)
 
 
-def _validate_document_evidence(value: object) -> dict:
+def _validate_document_evidence(value: object, *, redact: bool = True) -> dict:
     if not isinstance(value, dict) or set(value) != {"page", "snippet"}:
         raise ValueError("document evidence fields are invalid")
     page = value["page"]
     if type(page) is not int or not 1 <= page <= DOCUMENT_MAX_EVIDENCE_PAGE:
         raise ValueError("document evidence page is invalid")
     snippet = _bounded_document_string(value["snippet"], DOCUMENT_MAX_EVIDENCE_CHARACTERS)
+    if redact:
+        snippet = _redact_tax_text(snippet)
     return {
         "page": page,
-        "snippet": _redact_tax_text(snippet),
+        "snippet": snippet,
     }
 
 
@@ -4504,8 +4506,19 @@ def _validate_document_candidate(value: object, *, identifier: bool) -> dict | N
     if not isinstance(value, dict) or set(value) != {"value", "evidence"}:
         raise ValueError("document candidate fields are invalid")
     raw_value = _bounded_document_string(value["value"], DOCUMENT_MAX_FIELD_CHARACTERS)
-    evidence = _validate_document_evidence(value["evidence"])
     safe_value = _mask_tax_identifier_value(raw_value) if identifier else _redact_tax_text(raw_value)
+    if identifier:
+        # Validate the page and bound the snippet before touching its contents.
+        # The candidate is authoritative here: generic redaction cannot detect
+        # every valid identifier spelling (for example, ``AZ123456``).
+        evidence = _validate_document_evidence(value["evidence"], redact=False)
+        snippet = evidence["snippet"]
+        exact_forms = {form for form in (raw_value, raw_value.strip()) if form}
+        for exact_form in sorted(exact_forms, key=len, reverse=True):
+            snippet = snippet.replace(exact_form, safe_value)
+        evidence["snippet"] = _redact_tax_text(snippet)
+    else:
+        evidence = _validate_document_evidence(value["evidence"])
     return {"value": safe_value, "evidence": evidence}
 
 
