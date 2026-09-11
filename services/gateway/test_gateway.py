@@ -3563,7 +3563,7 @@ def test_legacy_identifier_classifier_keeps_ordinary_numeric_context(ordinary_te
     )
 
 
-def test_document_index_migration_keeps_masked_candidate_with_ordinary_context(
+def test_document_index_migration_preserves_uncertain_masked_candidate_without_rewrite(
     tmp_path, monkeypatch
 ):
     monkeypatch.setattr(main, "DATA_DIR", tmp_path)
@@ -3584,20 +3584,14 @@ def test_document_index_migration_keeps_masked_candidate_with_ordinary_context(
         "label": "Normal amount",
         "evidence": tax_evidence(1, "Amount 1.234,56 EUR"),
     }]
-    main.DOCUMENTS_INDEX_PATH.write_bytes(json.dumps([entry]).encode("utf-8"))
+    original = json.dumps([entry]).encode("utf-8")
+    main.DOCUMENTS_INDEX_PATH.write_bytes(original)
 
-    entries, reloaded_body = main._load_document_index()
+    with pytest.raises(main._DocumentIndexError):
+        main._load_document_index()
 
-    assert [item["id"] for item in entries] == [document_id]
-    assert entries[0]["title"] == "Tax year 2026"
-    assert entries[0]["taxpayerIdentifier"]["evidence"]["snippet"] == (
-        main.DOCUMENT_PRIVACY_PLACEHOLDER
-    )
-    assert entries[0]["dates"][0]["value"] == "31.12.2025"
-    assert entries[0]["amounts"][0]["value"] == "1.234,56 EUR"
-    serialized = reloaded_body.decode("utf-8")
-    for raw_identifier in ("AZ123456", "8642", "A7"):
-        assert raw_identifier not in serialized
+    assert main.DOCUMENTS_INDEX_PATH.read_bytes() == original
+    assert client.get("/documents", headers=AUTH).status_code == 503
 
 
 def test_document_publication_redacts_unlabelled_identifiers_across_all_text_fields_and_persistence(
@@ -3655,7 +3649,9 @@ def test_document_publication_redacts_unlabelled_identifiers_across_all_text_fie
     assert publication["taxpayerIdentifier"]["value"] == "********01"
     assert publication["taxpayerIdentifier"]["evidence"]["snippet"] == "Taxpayer ********90"
     assert publication["referenceIdentifier"]["value"] == "********90"
-    assert publication["referenceIdentifier"]["evidence"]["snippet"] == "Reference ********01"
+    assert publication["referenceIdentifier"]["evidence"]["snippet"] == (
+        main.DOCUMENT_PRIVACY_PLACEHOLDER
+    )
     assert publication["dates"][0]["value"] == "31.12.2025 (********01)"
     assert publication["dates"][0]["evidence"]["snippet"] == "Date ********01"
     assert publication["amounts"][0]["value"] == "1.234,56 EUR · ********01"
@@ -3710,21 +3706,16 @@ def test_document_index_withholds_unverifiable_legacy_identifier_evidence(
     ).encode("utf-8")
     main.DOCUMENTS_INDEX_PATH.write_bytes(original)
 
-    entries, reloaded_body = main._load_document_index()
-    assert [item["id"] for item in entries] == [document_id]
-    assert entries[0]["taxpayerIdentifier"]["evidence"]["snippet"] == (
-        main.DOCUMENT_PRIVACY_PLACEHOLDER
-    )
+    with pytest.raises(main._DocumentIndexError):
+        main._load_document_index()
 
     persisted = main.DOCUMENTS_INDEX_PATH.read_bytes()
-    assert persisted == reloaded_body
-    assert snippet.encode("utf-8") not in persisted
+    assert persisted == original
+    assert snippet.encode("utf-8") in persisted
 
     listed = client.get("/documents", headers=AUTH)
-    assert listed.status_code == 200
+    assert listed.status_code == 503
     assert snippet not in listed.text
-    assert main.DOCUMENT_PRIVACY_PLACEHOLDER in listed.text
-    assert document_id in listed.text
 
 
 def test_document_index_migration_preserves_safe_form_w2_entry(tmp_path, monkeypatch):
@@ -3790,6 +3781,58 @@ def test_document_upload_marks_current_privacy_contract_and_keeps_redacted_evide
     listed = client.get("/documents", headers=AUTH)
     assert listed.status_code == 200
     assert "_privacyVersion" not in listed.text
+
+
+@pytest.mark.parametrize("snippet", ["Page 8642", "8642 EUR", "SECRETREF", "secretref"])
+def test_document_upload_sanitizes_masked_identifier_evidence_before_versioning(
+    tmp_path, monkeypatch, snippet
+):
+    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(main, "DOCUMENTS_INDEX_PATH", tmp_path / "documents.json")
+    monkeypatch.setattr(main, "DOCUMENTS_DIR", tmp_path / "documents")
+
+    document_id = "27272727-2727-4272-8272-272727272727"
+    metadata = native_tax_document_metadata(document_id)
+    metadata["taxpayerIdentifier"] = tax_candidate("********42", snippet=snippet)
+
+    uploaded = client.post(
+        "/documents",
+        headers=AUTH,
+        data={"metadata": json.dumps(metadata)},
+        files={"file": ("return.pdf", b"safe", "application/pdf")},
+    )
+
+    assert uploaded.status_code == 200
+    listed = client.get("/documents", headers=AUTH)
+    assert listed.status_code == 200
+    assert snippet not in listed.text
+    assert main.DOCUMENT_PRIVACY_PLACEHOLDER in listed.text
+    assert json.loads(main.DOCUMENTS_INDEX_PATH.read_text())[0]["_privacyVersion"] == (
+        main.DOCUMENT_PRIVACY_VERSION
+    )
+
+
+def test_document_upload_rejects_untrusted_cross_field_text_before_storage(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(main, "DOCUMENTS_INDEX_PATH", tmp_path / "documents.json")
+    monkeypatch.setattr(main, "DOCUMENTS_DIR", tmp_path / "documents")
+
+    document_id = "28282828-2828-4282-8282-282828282828"
+    metadata = native_tax_document_metadata(document_id)
+    metadata["title"] = "Form AZ123456"
+
+    uploaded = client.post(
+        "/documents",
+        headers=AUTH,
+        data={"metadata": json.dumps(metadata)},
+        files={"file": ("return.pdf", b"safe", "application/pdf")},
+    )
+
+    assert uploaded.status_code == 400
+    assert not main.DOCUMENTS_INDEX_PATH.exists()
+    assert not main.DOCUMENTS_DIR.exists()
 
 
 def test_document_index_rejects_untrusted_form_identifier_without_mutation(

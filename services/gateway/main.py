@@ -4703,15 +4703,10 @@ def _migrate_legacy_document_privacy(
             ):
                 continue
             # A masked candidate does not prove what its legacy source snippet
-            # contained. Do not classify page numbers, amounts, or opaque
-            # words as safe with regex heuristics; withhold the evidence.
-            normalized[field] = {
-                **candidate,
-                "evidence": {
-                    **evidence,
-                    "snippet": DOCUMENT_PRIVACY_PLACEHOLDER,
-                },
-            }
+            # contained. Do not rewrite uncertain legacy bytes during a read.
+            raise _LegacyDocumentPrivacyError(
+                "legacy identifier evidence cannot be established"
+            )
 
     for text, in_evidence in _document_text_values(normalized):
         if in_evidence and not legacy:
@@ -4722,6 +4717,53 @@ def _migrate_legacy_document_privacy(
             evidence=in_evidence,
         ):
             raise _LegacyDocumentPrivacyError("legacy document privacy cannot be established")
+    return normalized
+
+
+def _sanitize_uploaded_document_privacy(original: dict, normalized: dict) -> dict:
+    """Sanitize masked upload evidence before the entry can be versioned."""
+    for field in ("taxpayerIdentifier", "referenceIdentifier"):
+        candidate = original.get(field)
+        if not isinstance(candidate, dict):
+            continue
+        raw_value = candidate.get("value")
+        if (
+            type(raw_value) is not str
+            or _TAX_MASKED_IDENTIFIER_INPUT_PATTERN.fullmatch(raw_value.strip()) is None
+        ):
+            continue
+        safe_candidate = normalized.get(field)
+        if not isinstance(safe_candidate, dict):
+            continue
+        evidence = safe_candidate.get("evidence")
+        if not isinstance(evidence, dict):
+            continue
+        snippet = evidence.get("snippet")
+        if (
+            type(snippet) is str
+            and (
+                snippet == DOCUMENT_PRIVACY_PLACEHOLDER
+                or _TAX_CANONICAL_MASK_PATTERN.fullmatch(snippet.strip()) is not None
+            )
+        ):
+            continue
+        normalized[field] = {
+            **safe_candidate,
+            "evidence": {
+                **evidence,
+                "snippet": DOCUMENT_PRIVACY_PLACEHOLDER,
+            },
+        }
+
+    # Cross-field text is never made safe by the presence of a mask in an
+    # unrelated field. Reject it before the upload can create a trusted entry.
+    for text, in_evidence in _document_text_values(normalized):
+        if in_evidence:
+            continue
+        if _legacy_text_contains_unproven_identifier(text, evidence=False):
+            raise _LegacyDocumentPrivacyError(
+                "document publication privacy cannot be established"
+            )
     return normalized
 
 
@@ -4962,7 +5004,14 @@ def _parse_document_metadata(value: object) -> dict:
     if len(meta) > DOCUMENT_METADATA_MAX_FIELDS:
         raise HTTPException(status_code=413, detail="metadata field limit exceeded")
     try:
-        meta = _validate_document_publication(meta, normalize=True)
+        original_meta = meta
+        meta = _validate_document_publication(original_meta, normalize=True)
+        meta = _sanitize_uploaded_document_privacy(original_meta, meta)
+    except _LegacyDocumentPrivacyError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="metadata privacy could not be established",
+        ) from exc
     except (TypeError, ValueError, UnicodeError, OverflowError, RecursionError) as exc:
         raise HTTPException(status_code=400, detail="metadata is not a valid TaxDocument") from exc
     try:
