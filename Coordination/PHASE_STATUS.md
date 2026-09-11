@@ -3,8 +3,9 @@
 Updated 2026-09-11 Europe/Berlin.
 
 - Overall: **source security gate GREEN; shared visual foundation GREEN at
-  `6751bb5`; ChartKit/Usage GREEN at `6713de1`; release remains NO-GO pending
-  operational, provider, device, and visual evidence**.
+  `6751bb5`; ChartKit/Usage GREEN at `6713de1`; empty-state/icon/tax tranche
+  GREEN at `82b4eb1`; release remains NO-GO pending operational, provider,
+  device, and visual evidence**.
 - Final Astra Medium review at `eb9ca620…` reproduced and cleared the
   versioned-tax-record evidence bypass. No source-code blocker remains under
   the review criteria.
@@ -13,6 +14,9 @@ Updated 2026-09-11 Europe/Berlin.
   foundation re-review is GREEN at `6751bb5`, and the ChartKit/Usage review is
   GREEN at `6713de1`. Both responsive containers own their builder content;
   chart gaps, selection, and bounded rendering are covered.
+- Latest reviewed local commit: `82b4eb1`; it is ready to push after the
+  coordination update. Its source review is GREEN; CoreSimulatorService is
+  unavailable for the focused native rerun.
 - No Claude usage watcher, overnight supervisor, generic assistant, or
   conversational AI is in the product. Calorie-photo AI remains allowed.
 
@@ -38,6 +42,8 @@ Updated 2026-09-11 Europe/Berlin.
    reversal-aware transitions.
 6. Usage chart: real cadence segmentation, whole-segment render budgets,
    cached pointer selection, duplicate authority, and singleton visibility.
+7. Truthful unavailable panels, compact responsive supporting layout, settings
+   action wiring, platform icon geometry, and context-aware tax redaction.
 
 ## Verification
 
@@ -51,6 +57,11 @@ Updated 2026-09-11 Europe/Berlin.
 - `LifeOSWidgets` exposes only macOS destinations; this is scheme metadata.
 - Focused iPhone 17 chart/design suites: **56 tests, 0 failures** (17 chart,
   39 design); unsigned `LifeOSMac` build passed after `6713de1`.
+- The `82b4eb1` universal unsigned `LifeOSMac` build passed from isolated
+  DerivedData. Standalone Swift privacy probes passed, including partial
+  identifier/amount overlap and JSON round trips.
+- Focused native tests could not rerun because CoreSimulatorService and
+  `simdiskimaged` are unavailable on this Mac.
 
 ## Blocking acceptance
 

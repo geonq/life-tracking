@@ -15,6 +15,11 @@ The ChartKit/Usage source tranche is also **GREEN** at `6713de1` after three
 Astra review cycles. It preserves real cadence gaps, bounded rendering,
 cached selection, duplicate-source authority, and singleton observations.
 
+The truthful empty-state, icon, and tax privacy tranche is **GREEN** at
+`82b4eb1` after Astra independently reviewed the final ten-file diff. It adds
+compact unavailable panels and settings wiring, aligns the fitness symbol and
+platform icon geometry, and closes the partial monetary-span identifier leak.
+
 Do not claim a production release, remote backend availability, or device
 acceptance from the local source results. No generic conversational
 assistant/advisor/AI product exists. Calorie-photo tracking is the only
@@ -26,7 +31,9 @@ product.
 - Branch: `lifeos-foundation-checkpoint-20260812`.
 - Source checkpoint: `6713de1` (`Harden Usage chart rendering and selection`).
 - Shared-foundation checkpoint: `6751bb5` (`Prove responsive builder content is preserved`).
-- The local branch is synchronized with its origin-tracking ref. The latest
+- Latest reviewed local tranche: `82b4eb1` (`Polish truthful empty states and harden tax privacy`).
+- The local branch contains the reviewed `82b4eb1` commit and is pending its
+  next push. The latest
   security checkpoints are `b82f23b` (fail closed on versioned tax evidence),
   `2fb2b9b` (native privacy test typing), and `eb9ca62` (bounded native tax
   lookahead). Keep these small, attributable commits when synchronizing.
@@ -110,6 +117,12 @@ recovery, live penetration results, or physical-device behavior.
   logic and macOS and passed the focused hosted-view suite. Full native XCTest
   and runtime visual acceptance remain unverified; Mac sheet presentation and
   resize behavior remain explicit runtime checks.
+- The `82b4eb1` unsigned universal `LifeOSMac` build passed using an isolated
+  `/private/tmp` DerivedData path. Standalone Swift privacy probes passed for
+  text, numeric, Unicode, bounded, long-amount, and partial-overlap cases.
+- The focused native test rerun is blocked by the current CoreSimulatorService
+  failure (`simdiskimaged` unavailable); do not treat the source GREEN verdict
+  as simulator evidence.
 
 ## External acceptance gates
 

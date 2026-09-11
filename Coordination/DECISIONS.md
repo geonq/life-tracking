@@ -26,6 +26,11 @@ Updated 2026-09-11 Europe/Berlin.
   observed cadence gaps before the 240-point render budget; keep estimate and
   target guides continuous; use cached binary-search selection; retain whole
   segment endpoints and visible singleton observations.
+- The compact empty-state/icon/tax tranche is reviewed GREEN at `82b4eb1`.
+  Amount values and evidence preserve only validated monetary intersections;
+  known identifiers in labels and non-monetary fragments are masked. Fitness
+  uses the ECG waveform symbol, with platform-specific boxes and glyphs
+  asserted in the design contract.
 
 ## State and data boundaries
 
