@@ -301,7 +301,7 @@ final class TaxDocumentTests: XCTestCase {
             title: "Privacy test",
             documentType: "Tax",
             taxYear: 2026,
-            issuer: nil,
+            issuer: nil as TaxCandidate?,
             taxpayerIdentifier: TaxCandidate(value: rawIdentifier, evidence: taxpayerEvidence),
             referenceIdentifier: TaxCandidate(value: mixedIdentifier, evidence: referenceEvidence),
             dates: [],
@@ -486,7 +486,7 @@ final class TaxDocumentTests: XCTestCase {
             title: "Tax year 2026",
             documentType: "tax_return",
             taxYear: 2026,
-            issuer: nil,
+            issuer: nil as TaxCandidate?,
             taxpayerIdentifier: TaxCandidate(
                 value: "********26",
                 evidence: TaxEvidence(page: 1, snippet: "Page 1 · 31.12.2025 · 1.234,56 EUR")
@@ -504,7 +504,7 @@ final class TaxDocumentTests: XCTestCase {
             title: "Assessment A7",
             documentType: "tax_return",
             taxYear: nil,
-            issuer: nil,
+            issuer: nil as TaxCandidate?,
             taxpayerIdentifier: TaxCandidate(
                 value: "********",
                 evidence: TaxEvidence(page: 1, snippet: "Legacy A7")
@@ -517,10 +517,38 @@ final class TaxDocumentTests: XCTestCase {
         XCTAssertFalse(shortToken.title.contains("A7"))
         XCTAssertEqual(shortToken.taxpayerIdentifier?.evidence.snippet,
                        "Evidence withheld for privacy.")
+
+        let commonLabels = TaxDocument(
+            title: "Form W2",
+            documentType: "Schedule K1",
+            taxYear: nil,
+            issuer: nil as TaxCandidate?,
+            taxpayerIdentifier: nil,
+            referenceIdentifier: nil,
+            dates: [],
+            amounts: [],
+            pages: []
+        )
+        XCTAssertEqual(commonLabels.title, "Form W2")
+        XCTAssertEqual(commonLabels.documentType, "Schedule K1")
+
+        let arbitraryLabel = TaxDocument(
+            title: "Form AZ123456",
+            documentType: "Schedule AZ123456",
+            taxYear: nil,
+            issuer: nil as TaxCandidate?,
+            taxpayerIdentifier: nil,
+            referenceIdentifier: nil,
+            dates: [],
+            amounts: [],
+            pages: []
+        )
+        XCTAssertFalse(arbitraryLabel.title.contains("AZ123456"))
+        XCTAssertFalse(arbitraryLabel.documentType.contains("AZ123456"))
     }
 
-    func testMaskedIdentifierEvidenceWithholdsUntrustedNumericAndOpaqueText() {
-        for snippet in ["Page 8642", "8642 EUR", "SECRETREF"] {
+    func testMaskedIdentifierEvidenceWithholdsUntrustedNumericAndOpaqueText() throws {
+        for snippet in ["Page 8642", "8642 EUR", "SECRETREF", "secretref", "Amount 8642"] {
             let document = TaxDocument(
                 title: "Tax year 2026",
                 documentType: "tax_return",
@@ -540,7 +568,75 @@ final class TaxDocumentTests: XCTestCase {
                 "Evidence withheld for privacy.",
                 "masked candidate must not publish unverifiable evidence: \(snippet)"
             )
+
+            let encoded = try JSONEncoder().encode(document)
+            let encodedText = String(decoding: encoded, as: UTF8.self)
+            XCTAssertTrue(encodedText.contains("Evidence withheld for privacy."))
+            XCTAssertFalse(encodedText.contains(snippet))
+
+            let decoded = try JSONDecoder().decode(TaxDocument.self, from: encoded)
+            XCTAssertEqual(
+                decoded.taxpayerIdentifier?.evidence.snippet,
+                "Evidence withheld for privacy."
+            )
+
+            let directory = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let store = TaxDocumentStore(directory: directory)
+            try store.save([document])
+            let stored = String(
+                decoding: try Data(contentsOf: directory.appendingPathComponent("documents.json")),
+                as: UTF8.self
+            )
+            XCTAssertTrue(stored.contains("Evidence withheld for privacy."))
+            XCTAssertFalse(stored.contains(snippet))
+            XCTAssertEqual(
+                try store.load().first?.taxpayerIdentifier?.evidence.snippet,
+                "Evidence withheld for privacy."
+            )
         }
+    }
+
+    func testPrivacyBoundsOversizedFieldsBeforeContextSanitization() {
+        let sentinel = "SECRET_AFTER_SAFE_BOUND"
+        let oversizedTitle = String(repeating: "A7 ", count: TaxDocumentLimits.maximumFieldCharacters) + sentinel
+        let document = TaxDocument(
+            title: oversizedTitle,
+            documentType: "tax_return",
+            taxYear: nil,
+            issuer: nil as TaxCandidate?,
+            taxpayerIdentifier: nil,
+            referenceIdentifier: nil,
+            dates: [],
+            amounts: [],
+            pages: []
+        )
+
+        XCTAssertLessThanOrEqual(document.title.count, TaxDocumentLimits.maximumFieldCharacters)
+        XCTAssertFalse(document.title.contains(sentinel))
+
+        let oversizedEvidence = String(
+            repeating: "A7 ",
+            count: TaxDocumentLimits.maximumEvidenceCharacters
+        ) + sentinel
+        let candidate = TaxCandidate(
+            value: "********42",
+            evidence: TaxEvidence(page: 1, snippet: oversizedEvidence)
+        )
+        XCTAssertLessThanOrEqual(
+            candidate.evidence.snippet.count,
+            TaxDocumentLimits.maximumEvidenceCharacters
+        )
+        XCTAssertFalse(candidate.evidence.snippet.contains(sentinel))
+
+        let oversizedPage = String(repeating: "x", count: TaxDocumentLimits.maximumPageCharacters) + sentinel
+        let bounded = TaxDocument.boundedPagesForParsing([oversizedPage])
+        XCTAssertLessThanOrEqual(
+            bounded.pages.first?.count ?? 0,
+            TaxDocumentLimits.maximumPageCharacters
+        )
+        XCTAssertFalse(bounded.pages.first?.contains(sentinel) == true)
     }
 
     func testEmptyPagesWarnAndRemainLowConfidence() {

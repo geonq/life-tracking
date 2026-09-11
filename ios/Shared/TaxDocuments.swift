@@ -50,6 +50,9 @@ private enum TaxPrivacy {
     private static let ordinaryAmountRegex = try! NSRegularExpression(
         pattern: #"^[+-]?(?:[0-9]{1,3}(?:[. ][0-9]{3})+|[0-9]+)(?:,[0-9]{2}|\.[0-9]{2})(?:[ \t]*(?:EUR|USD|€|\$))?$"#
     )
+    private static let canonicalMaskedIdentifierRegex = try! NSRegularExpression(
+        pattern: #"(?<![0-9A-Za-z*])\*{8}(?:[0-9]{2})?(?![0-9A-Za-z*])"#
+    )
     private static let unlabelledAlphaNumericIdentifierRegex = try! NSRegularExpression(
         pattern: #"(?<![0-9A-Za-z*])([0-9A-Za-z][0-9A-Za-z./-]{1,31})(?![0-9A-Za-z./-])"#
     )
@@ -66,12 +69,39 @@ private enum TaxPrivacy {
         pattern: #"(?<![0-9A-Za-z])(?:[+-]?(?:[0-9]{1,3}(?:[. ][0-9]{3})+|[0-9]+)(?:,[0-9]{2}|\.[0-9]{2})(?:[ \t]*(?:EUR|USD|GBP|CHF|€|\$|£))?)(?![0-9A-Za-z])"#,
         options: .caseInsensitive
     )
-    private static let ordinaryNumberContextRegex = try! NSRegularExpression(
-        pattern: #"(?i)(?:tax[ \t]+year|year|page|seite|date|datum|amount|betrag|summe|total|owed|identifier[ \t]+ending)[\s:#()/.\\-]*$"#
+    private static let ordinaryYearSpanRegex = try! NSRegularExpression(
+        pattern: #"(?i)\b(?:tax[ \t]+year|year)[ \t]*[:#-]?[ \t]*[0-9]{4}\b"#
+    )
+    private static let ordinaryIdentifierEndingSpanRegex = try! NSRegularExpression(
+        pattern: #"(?i)\bidentifier[ \t]+ending[ \t]*[0-9]{2}\b"#
+    )
+    private static let ordinaryEvidencePageSpanRegex = try! NSRegularExpression(
+        pattern: #"(?i)\b(?:page|seite)[ \t]*[:#-]?[ \t]*[0-9]{1,3}\b"#
+    )
+    private static let ordinaryYearContextRegex = try! NSRegularExpression(
+        pattern: #"(?i)(?:tax[ \t]+year|year)[\s:#()/.\\-]*$"#
+    )
+    private static let ordinaryIdentifierEndingContextRegex = try! NSRegularExpression(
+        pattern: #"(?i)identifier[ \t]+ending[\s:#()/.\\-]*$"#
     )
     private static let ordinaryPageNumberContextRegex = try! NSRegularExpression(
         pattern: #"(?i)(?:page|seite)[\s:#()/.\\-]*$"#
     )
+    private static let ordinaryEvidenceWordRegex = try! NSRegularExpression(
+        pattern: #"(?i)\b(?:page|seite|date|datum|amount|betrag|summe|total|owed|tax|year|id|identifier|ending|reference|ref|taxpayer|issuer|steuer|steuernummer|aktenzeichen|identifikationsnummer|eur|usd|gbp|chf)\b"#
+    )
+    private static let formDocumentLabelPrefixRegex = try! NSRegularExpression(
+        pattern: #"(?i)form[ \t]*$"#
+    )
+    private static let scheduleDocumentLabelPrefixRegex = try! NSRegularExpression(
+        pattern: #"(?i)schedule[ \t]*$"#
+    )
+    private static let validatedFormTokens: Set<String> = [
+        "w2", "w-2", "w3", "w-3", "1040", "1040-sr", "1098", "1099"
+    ]
+    private static let validatedScheduleTokens: Set<String> = [
+        "a", "c", "d", "e", "f", "k1", "k-1"
+    ]
     private static let ordinaryPageNumberMaximum = 200
     static let evidencePrivacyPlaceholder = "Evidence withheld for privacy."
     private static let identifierFieldLabels = [
@@ -80,9 +110,18 @@ private enum TaxPrivacy {
         "Aktenzeichen", "Reference"
     ]
 
-    static func redactIdentifiers(in text: String) -> String {
-        guard !text.isEmpty else { return text }
-        var redacted = text
+    static func boundedText(_ text: String, maximumCharacters: Int) -> String {
+        guard text.count > maximumCharacters else { return text }
+        return String(text.prefix(maximumCharacters))
+    }
+
+    static func redactIdentifiers(
+        in text: String,
+        maximumCharacters: Int = TaxDocumentLimits.maximumFieldCharacters
+    ) -> String {
+        let bounded = boundedText(text, maximumCharacters: maximumCharacters)
+        guard !bounded.isEmpty else { return bounded }
+        var redacted = bounded
         for regex in [
             germanTaxIdentifierRegex,
             groupedIdentifierRegex,
@@ -106,19 +145,40 @@ private enum TaxPrivacy {
     /// Redacts bounded unlabelled mixed alpha-numeric tokens. This is kept
     /// separate from the broad text redactor so ordinary labels such as
     /// "Form W2" remain readable unless they occur in identifier evidence.
-    static func redactUnlabelledAlphaNumericIdentifiers(in text: String) -> String {
-        guard !text.isEmpty else { return text }
-        var redacted = text
+    static func redactUnlabelledAlphaNumericIdentifiers(
+        in text: String,
+        maximumCharacters: Int = TaxDocumentLimits.maximumFieldCharacters
+    ) -> String {
+        let bounded = boundedText(text, maximumCharacters: maximumCharacters)
+        guard !bounded.isEmpty else { return bounded }
+        var redacted = bounded
         let range = NSRange(location: 0, length: (redacted as NSString).length)
         let matches = unlabelledAlphaNumericIdentifierRegex.matches(in: redacted, range: range)
+        let source = redacted as NSString
         for match in matches.reversed() {
             guard match.numberOfRanges > 1,
                   let valueRange = Range(match.range(at: 1), in: redacted) else { continue }
-            let token = String(redacted[valueRange])
+            let token = source.substring(with: match.range(at: 1))
             guard token.unicodeScalars.contains(where: { CharacterSet.letters.contains($0) }),
                   token.unicodeScalars.contains(where: { CharacterSet.decimalDigits.contains($0) }) else { continue }
-            let prefix = String(redacted[..<valueRange.lowerBound]).lowercased()
-            if prefix.hasSuffix("form ") || prefix.hasSuffix("schedule ") {
+            let contextLength = min(32, match.range(at: 1).location)
+            let context = source
+                .substring(with: NSRange(
+                    location: match.range(at: 1).location - contextLength,
+                    length: contextLength
+                ))
+                .lowercased()
+            let isForm = formDocumentLabelPrefixRegex.firstMatch(
+                in: context,
+                range: NSRange(location: 0, length: (context as NSString).length)
+            ) != nil
+            let isSchedule = scheduleDocumentLabelPrefixRegex.firstMatch(
+                in: context,
+                range: NSRange(location: 0, length: (context as NSString).length)
+            ) != nil
+            let normalizedToken = token.lowercased()
+            if (isForm && validatedFormTokens.contains(normalizedToken))
+                || (isSchedule && validatedScheduleTokens.contains(normalizedToken)) {
                 continue
             }
             redacted.replaceSubrange(valueRange, with: maskIdentifier(token))
@@ -130,9 +190,14 @@ private enum TaxPrivacy {
     /// values are the only authoritative mapping available for a document;
     /// keeping this operation case-insensitive covers OCR/header casing while
     /// leaving unrelated UUIDs and ordinary numbers untouched.
-    static func replacingKnownIdentifierValues(in text: String, replacements: [String: String]) -> String {
-        guard !text.isEmpty, !replacements.isEmpty else { return text }
-        var result = text
+    static func replacingKnownIdentifierValues(
+        in text: String,
+        replacements: [String: String],
+        maximumCharacters: Int = TaxDocumentLimits.maximumFieldCharacters
+    ) -> String {
+        let bounded = boundedText(text, maximumCharacters: maximumCharacters)
+        guard !bounded.isEmpty, !replacements.isEmpty else { return bounded }
+        var result = bounded
         for (source, replacement) in replacements.sorted(by: { $0.key.count > $1.key.count }) {
             guard !source.isEmpty,
                   let regex = try? NSRegularExpression(
@@ -171,17 +236,23 @@ private enum TaxPrivacy {
     }
 
     private static func evidenceContainsUntrustedNumber(_ text: String) -> Bool {
-        var residual = replacingMatches(ordinaryDateSpanRegex, in: text)
+        let bounded = boundedText(text, maximumCharacters: TaxDocumentLimits.maximumEvidenceCharacters)
+        var residual = replacingMatches(ordinaryDateSpanRegex, in: bounded)
         residual = replacingMatches(ordinaryDecimalAmountSpanRegex, in: residual)
         let matches = standaloneNumberRegex.matches(
             in: residual,
             range: NSRange(location: 0, length: (residual as NSString).length)
         )
+        let source = residual as NSString
         for match in matches {
             guard match.numberOfRanges > 1,
                   let valueRange = Range(match.range(at: 1), in: residual) else { continue }
-            let prefix = String(residual[..<valueRange.lowerBound])
-            let context = String(prefix.suffix(64))
+            let numberRange = match.range(at: 1)
+            let contextLength = min(64, numberRange.location)
+            let context = source.substring(with: NSRange(
+                location: numberRange.location - contextLength,
+                length: contextLength
+            ))
             if ordinaryPageNumberContextRegex.firstMatch(
                 in: context,
                 range: NSRange(location: 0, length: (context as NSString).length)
@@ -193,10 +264,18 @@ private enum TaxPrivacy {
                 }
                 return true
             }
-            if ordinaryNumberContextRegex.firstMatch(
+            if ordinaryYearContextRegex.firstMatch(
                 in: context,
                 range: NSRange(location: 0, length: (context as NSString).length)
             ) != nil {
+                if let year = Int(String(residual[valueRange])), (1900...2100).contains(year) {
+                    continue
+                }
+            }
+            if ordinaryIdentifierEndingContextRegex.firstMatch(
+                in: context,
+                range: NSRange(location: 0, length: (context as NSString).length)
+            ) != nil, String(residual[valueRange]).count <= 2 {
                 continue
             }
             return true
@@ -204,12 +283,36 @@ private enum TaxPrivacy {
         return false
     }
 
+    private static func isClearlyOrdinaryEvidence(_ text: String) -> Bool {
+        let bounded = boundedText(text, maximumCharacters: TaxDocumentLimits.maximumEvidenceCharacters)
+        guard !evidenceContainsUntrustedNumber(bounded) else { return false }
+        var residual = replacingMatches(ordinaryEvidencePageSpanRegex, in: bounded)
+        residual = replacingMatches(ordinaryYearSpanRegex, in: residual)
+        residual = replacingMatches(ordinaryIdentifierEndingSpanRegex, in: residual)
+        residual = replacingMatches(ordinaryDateSpanRegex, in: residual)
+        residual = replacingMatches(ordinaryDecimalAmountSpanRegex, in: residual)
+        residual = replacingMatches(canonicalMaskedIdentifierRegex, in: residual)
+        residual = replacingMatches(ordinaryEvidenceWordRegex, in: residual)
+        let separators = CharacterSet(charactersIn: "·•,:;|/()[]{}#.+-–—")
+        return residual.unicodeScalars.allSatisfy {
+            CharacterSet.whitespacesAndNewlines.contains($0) || separators.contains($0)
+        }
+    }
+
     static func redactIdentifierEvidence(
         _ text: String,
         replacements: [String: String]
     ) -> String {
-        var redacted = replacingKnownIdentifierValues(in: text, replacements: replacements)
-        redacted = redactIdentifiers(in: redacted)
+        let bounded = boundedText(text, maximumCharacters: TaxDocumentLimits.maximumEvidenceCharacters)
+        var redacted = replacingKnownIdentifierValues(
+            in: bounded,
+            replacements: replacements,
+            maximumCharacters: TaxDocumentLimits.maximumEvidenceCharacters
+        )
+        redacted = redactIdentifiers(
+            in: redacted,
+            maximumCharacters: TaxDocumentLimits.maximumEvidenceCharacters
+        )
         let mixedMatches = unlabelledAlphaNumericIdentifierRegex.matches(
             in: redacted,
             range: NSRange(location: 0, length: (redacted as NSString).length)
@@ -226,14 +329,15 @@ private enum TaxPrivacy {
         if allCapsEvidenceTokenRegex.firstMatch(
             in: redacted,
             range: NSRange(location: 0, length: (redacted as NSString).length)
-        ) != nil || evidenceContainsUntrustedNumber(redacted) {
+        ) != nil || !isClearlyOrdinaryEvidence(redacted) {
             return evidencePrivacyPlaceholder
         }
         return redacted
     }
 
     static func maskIdentifierValue(_ value: String) -> String {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = boundedText(value, maximumCharacters: TaxDocumentLimits.maximumFieldCharacters)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         let redacted = redactIdentifiers(in: trimmed)
         if redacted != trimmed {
             return redacted
@@ -255,10 +359,11 @@ private enum TaxPrivacy {
     /// put an amount or date on the same line; retaining that whole line lets
     /// a privacy helper consume adjacent financial data and corrupt parsing.
     static func redactedIdentifierField(in line: String, label: String) -> String {
-        guard let labelRange = line.range(of: label, options: .caseInsensitive) else {
-            return redactIdentifiers(in: line)
+        let boundedLine = boundedText(line, maximumCharacters: TaxDocumentLimits.maximumFieldCharacters)
+        guard let labelRange = boundedLine.range(of: label, options: .caseInsensitive) else {
+            return redactIdentifiers(in: boundedLine)
         }
-        let suffix = String(line[labelRange.upperBound...])
+        let suffix = String(boundedLine[labelRange.upperBound...])
         let valueRegex = try? NSRegularExpression(
             pattern: #"(?i)^[ \t]*[:#-]?[ \t]*(?:([0-9*]{2}[ \t/.-][0-9*]{3}[ \t/.-][0-9*]{5}|[0-9*]{2}(?:[ \t][0-9*]{3}){3}|(?:[0-9*]{3}[ \t]){3}[0-9*]{2}|[0-9*]{11,30}|\*+[0-9]{1,30}|(?:AZ|AKZ|REF|ID)[ \t]+[0-9A-Z*][0-9A-Z*./-]{0,30}|[0-9A-Z*][0-9A-Z*./-]{0,30}))(?![0-9A-Z*./-])"#
         )
@@ -267,12 +372,13 @@ private enum TaxPrivacy {
               let valueEnd = Range(match.range, in: suffix) else {
             return redactIdentifiers(in: line)
         }
-        let field = String(line[..<labelRange.upperBound]) + String(suffix[..<valueEnd.upperBound])
+        let field = String(boundedLine[..<labelRange.upperBound]) + String(suffix[..<valueEnd.upperBound])
         return redactIdentifiers(in: field).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func maskIdentifier(_ value: String) -> String {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = boundedText(value, maximumCharacters: TaxDocumentLimits.maximumFieldCharacters)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return trimmed }
         if ordinaryDateRegex.firstMatch(
             in: trimmed,
@@ -296,12 +402,13 @@ private enum TaxPrivacy {
     }
 
     static func redactFinancialValue(_ value: String) -> String {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = boundedText(value, maximumCharacters: TaxDocumentLimits.maximumFieldCharacters)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         guard ordinaryAmountRegex.firstMatch(
             in: trimmed,
             range: NSRange(location: 0, length: (trimmed as NSString).length)
         ) == nil else {
-            return value
+            return trimmed
         }
         return redactIdentifiers(in: value)
     }
@@ -313,7 +420,18 @@ public struct TaxEvidence: Codable, Equatable, Sendable {
 
     public init(page: Int, snippet: String) {
         self.page = max(1, page)
-        self.snippet = String(TaxPrivacy.redactIdentifiers(in: snippet).prefix(TaxDocumentLimits.maximumEvidenceCharacters))
+        let bounded = TaxPrivacy.boundedText(
+            snippet,
+            maximumCharacters: TaxDocumentLimits.maximumEvidenceCharacters
+        )
+        let redacted = TaxPrivacy.redactUnlabelledAlphaNumericIdentifiers(
+            in: TaxPrivacy.redactIdentifiers(
+                in: bounded,
+                maximumCharacters: TaxDocumentLimits.maximumEvidenceCharacters
+            ),
+            maximumCharacters: TaxDocumentLimits.maximumEvidenceCharacters
+        )
+        self.snippet = String(redacted.prefix(TaxDocumentLimits.maximumEvidenceCharacters))
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -332,7 +450,18 @@ public struct TaxEvidence: Codable, Equatable, Sendable {
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(page, forKey: .page)
-        try container.encode(TaxPrivacy.redactIdentifiers(in: snippet), forKey: .snippet)
+        let bounded = TaxPrivacy.boundedText(
+            snippet,
+            maximumCharacters: TaxDocumentLimits.maximumEvidenceCharacters
+        )
+        let redacted = TaxPrivacy.redactUnlabelledAlphaNumericIdentifiers(
+            in: TaxPrivacy.redactIdentifiers(
+                in: bounded,
+                maximumCharacters: TaxDocumentLimits.maximumEvidenceCharacters
+            ),
+            maximumCharacters: TaxDocumentLimits.maximumEvidenceCharacters
+        )
+        try container.encode(redacted, forKey: .snippet)
     }
 }
 
@@ -341,7 +470,11 @@ public struct TaxDate: Codable, Equatable, Sendable {
     public var evidence: TaxEvidence
 
     public init(value: String, evidence: TaxEvidence) {
-        self.value = String(TaxPrivacy.redactDateValue(value).prefix(TaxDocumentLimits.maximumFieldCharacters))
+        let redacted = TaxPrivacy.redactUnlabelledAlphaNumericIdentifiers(
+            in: TaxPrivacy.redactDateValue(value),
+            maximumCharacters: TaxDocumentLimits.maximumFieldCharacters
+        )
+        self.value = String(redacted.prefix(TaxDocumentLimits.maximumFieldCharacters))
         self.evidence = evidence
     }
 
@@ -360,7 +493,11 @@ public struct TaxDate: Codable, Equatable, Sendable {
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(TaxPrivacy.redactDateValue(value), forKey: .value)
+        let redacted = TaxPrivacy.redactUnlabelledAlphaNumericIdentifiers(
+            in: TaxPrivacy.redactDateValue(value),
+            maximumCharacters: TaxDocumentLimits.maximumFieldCharacters
+        )
+        try container.encode(redacted, forKey: .value)
         try container.encode(evidence, forKey: .evidence)
     }
 }
@@ -371,8 +508,19 @@ public struct TaxAmount: Codable, Equatable, Sendable {
     public var evidence: TaxEvidence
 
     public init(value: String, label: String, evidence: TaxEvidence) {
-        self.value = String(TaxPrivacy.redactFinancialValue(value).prefix(TaxDocumentLimits.maximumFieldCharacters))
-        self.label = String(TaxPrivacy.redactIdentifiers(in: label).prefix(TaxDocumentLimits.maximumFieldCharacters))
+        let redactedValue = TaxPrivacy.redactUnlabelledAlphaNumericIdentifiers(
+            in: TaxPrivacy.redactFinancialValue(value),
+            maximumCharacters: TaxDocumentLimits.maximumFieldCharacters
+        )
+        let redactedLabel = TaxPrivacy.redactUnlabelledAlphaNumericIdentifiers(
+            in: TaxPrivacy.redactIdentifiers(
+                in: label,
+                maximumCharacters: TaxDocumentLimits.maximumFieldCharacters
+            ),
+            maximumCharacters: TaxDocumentLimits.maximumFieldCharacters
+        )
+        self.value = String(redactedValue.prefix(TaxDocumentLimits.maximumFieldCharacters))
+        self.label = String(redactedLabel.prefix(TaxDocumentLimits.maximumFieldCharacters))
         self.evidence = evidence
     }
 
@@ -393,8 +541,19 @@ public struct TaxAmount: Codable, Equatable, Sendable {
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(TaxPrivacy.redactFinancialValue(value), forKey: .value)
-        try container.encode(TaxPrivacy.redactIdentifiers(in: label), forKey: .label)
+        let redactedValue = TaxPrivacy.redactUnlabelledAlphaNumericIdentifiers(
+            in: TaxPrivacy.redactFinancialValue(value),
+            maximumCharacters: TaxDocumentLimits.maximumFieldCharacters
+        )
+        let redactedLabel = TaxPrivacy.redactUnlabelledAlphaNumericIdentifiers(
+            in: TaxPrivacy.redactIdentifiers(
+                in: label,
+                maximumCharacters: TaxDocumentLimits.maximumFieldCharacters
+            ),
+            maximumCharacters: TaxDocumentLimits.maximumFieldCharacters
+        )
+        try container.encode(redactedValue, forKey: .value)
+        try container.encode(redactedLabel, forKey: .label)
         try container.encode(evidence, forKey: .evidence)
     }
 }
@@ -404,7 +563,14 @@ public struct TaxCandidate: Codable, Equatable, Sendable {
     public var evidence: TaxEvidence
 
     public init(value: String, evidence: TaxEvidence) {
-        self.value = String(TaxPrivacy.redactIdentifiers(in: value).prefix(TaxDocumentLimits.maximumFieldCharacters))
+        let redacted = TaxPrivacy.redactUnlabelledAlphaNumericIdentifiers(
+            in: TaxPrivacy.redactIdentifiers(
+                in: value,
+                maximumCharacters: TaxDocumentLimits.maximumFieldCharacters
+            ),
+            maximumCharacters: TaxDocumentLimits.maximumFieldCharacters
+        )
+        self.value = String(redacted.prefix(TaxDocumentLimits.maximumFieldCharacters))
         self.evidence = evidence
     }
 
@@ -423,7 +589,14 @@ public struct TaxCandidate: Codable, Equatable, Sendable {
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(TaxPrivacy.redactIdentifiers(in: value), forKey: .value)
+        let redacted = TaxPrivacy.redactUnlabelledAlphaNumericIdentifiers(
+            in: TaxPrivacy.redactIdentifiers(
+                in: value,
+                maximumCharacters: TaxDocumentLimits.maximumFieldCharacters
+            ),
+            maximumCharacters: TaxDocumentLimits.maximumFieldCharacters
+        )
+        try container.encode(redacted, forKey: .value)
         try container.encode(evidence, forKey: .evidence)
     }
 }
@@ -495,10 +668,7 @@ public struct TaxDocument: Codable, Equatable, Identifiable, Sendable {
         self.amounts = amounts.prefix(TaxDocumentLimits.maximumAmounts).map {
             Self.redactedAmount($0, replacements: replacements)
         }
-        let mappedPages = pages.map {
-            TaxPrivacy.replacingKnownIdentifierValues(in: $0, replacements: replacements)
-        }
-        self.pages = Self.boundedPagesForParsing(mappedPages).pages
+        self.pages = Self.boundedPagesForParsing(pages, replacements: replacements).pages
         self.warnings = Array(warnings.prefix(TaxDocumentLimits.maximumWarnings)).map {
             Self.redactedField($0, replacements: replacements)
         }
@@ -608,9 +778,21 @@ public struct TaxDocument: Codable, Equatable, Identifiable, Sendable {
         _ value: String,
         replacements: [String: String] = [:]
     ) -> String {
-        let replaced = TaxPrivacy.replacingKnownIdentifierValues(in: value, replacements: replacements)
+        let bounded = TaxPrivacy.boundedText(
+            value,
+            maximumCharacters: TaxDocumentLimits.maximumFieldCharacters
+        )
+        let replaced = TaxPrivacy.replacingKnownIdentifierValues(
+            in: bounded,
+            replacements: replacements,
+            maximumCharacters: TaxDocumentLimits.maximumFieldCharacters
+        )
         let redacted = TaxPrivacy.redactUnlabelledAlphaNumericIdentifiers(
-            in: TaxPrivacy.redactIdentifiers(in: replaced)
+            in: TaxPrivacy.redactIdentifiers(
+                in: replaced,
+                maximumCharacters: TaxDocumentLimits.maximumFieldCharacters
+            ),
+            maximumCharacters: TaxDocumentLimits.maximumFieldCharacters
         )
         return String(redacted.prefix(TaxDocumentLimits.maximumFieldCharacters))
     }
@@ -619,9 +801,25 @@ public struct TaxDocument: Codable, Equatable, Identifiable, Sendable {
         _ evidence: TaxEvidence,
         replacements: [String: String]
     ) -> TaxEvidence {
-        TaxEvidence(
+        let bounded = TaxPrivacy.boundedText(
+            evidence.snippet,
+            maximumCharacters: TaxDocumentLimits.maximumEvidenceCharacters
+        )
+        let replaced = TaxPrivacy.replacingKnownIdentifierValues(
+            in: bounded,
+            replacements: replacements,
+            maximumCharacters: TaxDocumentLimits.maximumEvidenceCharacters
+        )
+        let redacted = TaxPrivacy.redactUnlabelledAlphaNumericIdentifiers(
+            in: TaxPrivacy.redactIdentifiers(
+                in: replaced,
+                maximumCharacters: TaxDocumentLimits.maximumEvidenceCharacters
+            ),
+            maximumCharacters: TaxDocumentLimits.maximumEvidenceCharacters
+        )
+        return TaxEvidence(
             page: evidence.page,
-            snippet: redactedField(evidence.snippet, replacements: replacements)
+            snippet: redacted
         )
     }
 
@@ -679,6 +877,13 @@ public struct TaxDocument: Codable, Equatable, Identifiable, Sendable {
     }
 
     static func boundedPagesForParsing(_ pages: [String]) -> (pages: [String], truncated: Bool) {
+        boundedPagesForParsing(pages, replacements: [:])
+    }
+
+    static func boundedPagesForParsing(
+        _ pages: [String],
+        replacements: [String: String]
+    ) -> (pages: [String], truncated: Bool) {
         var remainingBytes = TaxDocumentLimits.maximumTotalPageBytes
         var truncated = pages.count > TaxDocumentLimits.maximumPages
         var bounded: [String] = []
@@ -696,9 +901,19 @@ public struct TaxDocument: Codable, Equatable, Identifiable, Sendable {
             let value = String(decoding: prefix, as: UTF8.self)
             truncated = truncated || value.utf8.count != encoded.count
             remainingBytes -= value.utf8.count
+            let replaced = TaxPrivacy.replacingKnownIdentifierValues(
+                in: value,
+                replacements: replacements,
+                maximumCharacters: TaxDocumentLimits.maximumPageCharacters
+            )
+            let redacted = TaxPrivacy.redactIdentifiers(
+                in: replaced,
+                maximumCharacters: TaxDocumentLimits.maximumPageCharacters
+            )
             bounded.append(
                 TaxPrivacy.redactUnlabelledAlphaNumericIdentifiers(
-                    in: TaxPrivacy.redactIdentifiers(in: value)
+                    in: redacted,
+                    maximumCharacters: TaxDocumentLimits.maximumPageCharacters
                 )
             )
         }
@@ -720,7 +935,15 @@ enum TaxDocumentParser {
     ) -> TaxDocument {
         let bounded = TaxDocument.boundedPagesForParsing(pages)
         let cleanedPages = bounded.pages.map { $0.replacingOccurrences(of: "\u{FFFD}", with: "") }
-        let safePages = cleanedPages.map { TaxPrivacy.redactIdentifiers(in: $0) }
+        let safePages = cleanedPages.map {
+            TaxPrivacy.redactUnlabelledAlphaNumericIdentifiers(
+                in: TaxPrivacy.redactIdentifiers(
+                    in: $0,
+                    maximumCharacters: TaxDocumentLimits.maximumPageCharacters
+                ),
+                maximumCharacters: TaxDocumentLimits.maximumPageCharacters
+            )
+        }
         var dates: [TaxDate] = []
         var amounts: [TaxAmount] = []
         var years: [Int] = []
