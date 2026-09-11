@@ -70,7 +70,7 @@ private enum TaxPrivacy {
         options: .caseInsensitive
     )
     private static let ordinaryYearSpanRegex = try! NSRegularExpression(
-        pattern: #"(?i)\b(?:tax[ \t]+year|year)[ \t]*[:#-]?[ \t]*[0-9]{4}\b"#
+        pattern: #"(?i)\b(?:tax[ \t]+year|steuerjahr|year)[ \t]*[:#-]?[ \t]*[0-9]{4}\b"#
     )
     private static let ordinaryIdentifierEndingSpanRegex = try! NSRegularExpression(
         pattern: #"(?i)\bidentifier[ \t]+ending[ \t]*[0-9]{2}\b"#
@@ -79,7 +79,7 @@ private enum TaxPrivacy {
         pattern: #"(?i)\b(?:page|seite)[ \t]*[:#-]?[ \t]*[0-9]{1,3}\b"#
     )
     private static let ordinaryYearContextRegex = try! NSRegularExpression(
-        pattern: #"(?i)(?:tax[ \t]+year|year)[\s:#()/.\\-]*$"#
+        pattern: #"(?i)(?:tax[ \t]+year|steuerjahr|year)[\s:#()/.\\-]*$"#
     )
     private static let ordinaryIdentifierEndingContextRegex = try! NSRegularExpression(
         pattern: #"(?i)identifier[ \t]+ending[\s:#()/.\\-]*$"#
@@ -88,7 +88,7 @@ private enum TaxPrivacy {
         pattern: #"(?i)(?:page|seite)[\s:#()/.\\-]*$"#
     )
     private static let ordinaryEvidenceWordRegex = try! NSRegularExpression(
-        pattern: #"(?i)\b(?:page|seite|date|datum|amount|betrag|summe|total|owed|tax|year|id|identifier|ending|reference|ref|taxpayer|issuer|steuer|steuernummer|aktenzeichen|identifikationsnummer|eur|usd|gbp|chf)\b"#
+        pattern: #"(?i)\b(?:page|seite|date|datum|amount|betrag|summe|total|owed|tax|year|steuerjahr|id|identifier|ending|reference|ref|taxpayer|issuer|steuer|steuernummer|aktenzeichen|identifikationsnummer|einkommensteuer|ust|finanzamt|berlin|rechnung|vom|bescheid|eur|usd|gbp|chf)\b"#
     )
     private static let formDocumentLabelPrefixRegex = try! NSRegularExpression(
         pattern: #"(?i)form[ \t]*$"#
@@ -399,6 +399,26 @@ private enum TaxPrivacy {
         return redacted
     }
 
+    /// The one privacy boundary for evidence snippets. Every evidence field
+    /// uses this bounded strict pass before it can be held in memory or
+    /// serialized. Identifier replacements are applied first so a known
+    /// candidate can retain its canonical mask; the strict classifier then
+    /// withholds anything that still contains untrusted reference material.
+    static func sanitizeEvidenceSnippet(
+        _ text: String,
+        replacements: [String: String] = [:]
+    ) -> String {
+        let bounded = boundedText(
+            text,
+            maximumCharacters: TaxDocumentLimits.maximumEvidenceCharacters
+        )
+        let sanitized = redactIdentifierEvidence(bounded, replacements: replacements)
+        return boundedText(
+            sanitized,
+            maximumCharacters: TaxDocumentLimits.maximumEvidenceCharacters
+        )
+    }
+
     static func maskIdentifierValue(_ value: String) -> String {
         let trimmed = boundedText(value, maximumCharacters: TaxDocumentLimits.maximumFieldCharacters)
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -484,18 +504,7 @@ public struct TaxEvidence: Codable, Equatable, Sendable {
 
     public init(page: Int, snippet: String) {
         self.page = max(1, page)
-        let bounded = TaxPrivacy.boundedText(
-            snippet,
-            maximumCharacters: TaxDocumentLimits.maximumEvidenceCharacters
-        )
-        let redacted = TaxPrivacy.redactUnlabelledAlphaNumericIdentifiers(
-            in: TaxPrivacy.redactIdentifiers(
-                in: bounded,
-                maximumCharacters: TaxDocumentLimits.maximumEvidenceCharacters
-            ),
-            maximumCharacters: TaxDocumentLimits.maximumEvidenceCharacters
-        )
-        self.snippet = String(redacted.prefix(TaxDocumentLimits.maximumEvidenceCharacters))
+        self.snippet = TaxPrivacy.sanitizeEvidenceSnippet(snippet)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -514,18 +523,10 @@ public struct TaxEvidence: Codable, Equatable, Sendable {
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(page, forKey: .page)
-        let bounded = TaxPrivacy.boundedText(
-            snippet,
-            maximumCharacters: TaxDocumentLimits.maximumEvidenceCharacters
+        try container.encode(
+            TaxPrivacy.sanitizeEvidenceSnippet(snippet),
+            forKey: .snippet
         )
-        let redacted = TaxPrivacy.redactUnlabelledAlphaNumericIdentifiers(
-            in: TaxPrivacy.redactIdentifiers(
-                in: bounded,
-                maximumCharacters: TaxDocumentLimits.maximumEvidenceCharacters
-            ),
-            maximumCharacters: TaxDocumentLimits.maximumEvidenceCharacters
-        )
-        try container.encode(redacted, forKey: .snippet)
     }
 }
 
@@ -865,25 +866,12 @@ public struct TaxDocument: Codable, Equatable, Identifiable, Sendable {
         _ evidence: TaxEvidence,
         replacements: [String: String]
     ) -> TaxEvidence {
-        let bounded = TaxPrivacy.boundedText(
-            evidence.snippet,
-            maximumCharacters: TaxDocumentLimits.maximumEvidenceCharacters
-        )
-        let replaced = TaxPrivacy.replacingKnownIdentifierValues(
-            in: bounded,
-            replacements: replacements,
-            maximumCharacters: TaxDocumentLimits.maximumEvidenceCharacters
-        )
-        let redacted = TaxPrivacy.redactUnlabelledAlphaNumericIdentifiers(
-            in: TaxPrivacy.redactIdentifiers(
-                in: replaced,
-                maximumCharacters: TaxDocumentLimits.maximumEvidenceCharacters
-            ),
-            maximumCharacters: TaxDocumentLimits.maximumEvidenceCharacters
-        )
         return TaxEvidence(
             page: evidence.page,
-            snippet: redacted
+            snippet: TaxPrivacy.sanitizeEvidenceSnippet(
+                evidence.snippet,
+                replacements: replacements
+            )
         )
     }
 
@@ -909,7 +897,7 @@ public struct TaxDocument: Codable, Equatable, Identifiable, Sendable {
             replacements: replacements
         )
         let safeValue = TaxPrivacy.maskIdentifierValue(replacedValue)
-        let safeEvidenceSnippet = TaxPrivacy.redactIdentifierEvidence(
+        let safeEvidenceSnippet = TaxPrivacy.sanitizeEvidenceSnippet(
             candidate.evidence.snippet,
             replacements: replacements
         )

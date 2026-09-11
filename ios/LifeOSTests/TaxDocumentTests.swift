@@ -232,6 +232,83 @@ final class TaxDocumentTests: XCTestCase {
         XCTAssertEqual(decoded.amounts.first?.value, "1234.56")
     }
 
+    func testStrictEvidenceSanitizesIssuerDateAmountAcrossDecodeEncodeAndPersistence() throws {
+        let rawReference = "secretref 8642"
+        let sourceJSON = """
+        {
+          "id": "00000000-0000-0000-0000-000000000001",
+          "title": "Tax year 2026",
+          "documentType": "tax_return",
+          "taxYear": 2026,
+          "issuer": {
+            "value": "Finanzamt",
+            "evidence": {"page": 1, "snippet": "Finanzamt \(rawReference)"}
+          },
+          "taxpayerIdentifier": null,
+          "referenceIdentifier": null,
+          "dates": [
+            {"value": "08.09.2026", "evidence": {"page": 1, "snippet": "Date \(rawReference)"}}
+          ],
+          "amounts": [
+            {"value": "1234.56", "label": "Amount", "evidence": {"page": 1, "snippet": "Amount \(rawReference)"}}
+          ],
+          "warnings": [],
+          "confidence": "medium"
+        }
+        """
+
+        let decoded = try JSONDecoder().decode(TaxDocument.self, from: Data(sourceJSON.utf8))
+        let evidence = [
+            decoded.issuer?.evidence.snippet,
+            decoded.dates.first?.evidence.snippet,
+            decoded.amounts.first?.evidence.snippet
+        ].compactMap { $0 }
+        XCTAssertEqual(evidence.count, 3)
+        XCTAssertTrue(evidence.allSatisfy { $0 == "Evidence withheld for privacy." })
+
+        let encoded = try JSONEncoder().encode(decoded)
+        let encodedText = String(decoding: encoded, as: UTF8.self)
+        XCTAssertFalse(encodedText.contains(rawReference))
+        XCTAssertFalse(encodedText.contains("secretref"))
+        XCTAssertFalse(encodedText.contains("8642"))
+        XCTAssertTrue(encodedText.contains("Evidence withheld for privacy."))
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = TaxDocumentStore(directory: directory)
+        try store.save([decoded])
+        let persisted = String(
+            decoding: try Data(contentsOf: directory.appendingPathComponent("documents.json")),
+            as: UTF8.self
+        )
+        XCTAssertFalse(persisted.contains(rawReference))
+        XCTAssertFalse(persisted.contains("secretref"))
+        XCTAssertFalse(persisted.contains("8642"))
+        XCTAssertTrue(persisted.contains("Evidence withheld for privacy."))
+
+        let loaded = try store.load()
+        XCTAssertEqual(loaded.first?.issuer?.evidence.snippet, "Evidence withheld for privacy.")
+        XCTAssertEqual(loaded.first?.dates.first?.evidence.snippet, "Evidence withheld for privacy.")
+        XCTAssertEqual(loaded.first?.amounts.first?.evidence.snippet, "Evidence withheld for privacy.")
+    }
+
+    func testParserEvidenceUsesStrictSanitizerForRawReferences() {
+        let result = TaxDocumentParser.parse(
+            pages: [
+                "Datum 08.09.2026\nsecretref 8642",
+                "Einkommensteuer 1.234,56 EUR\nsecretref 8642"
+            ],
+            documentName: "bescheid.pdf"
+        )
+
+        XCTAssertEqual(result.dates.count, 1)
+        XCTAssertEqual(result.amounts.count, 1)
+        let evidence = result.dates.map { $0.evidence.snippet }
+            + result.amounts.map { $0.evidence.snippet }
+        XCTAssertTrue(evidence.allSatisfy { $0 == "Evidence withheld for privacy." })
+    }
+
     func testEvidenceCanonicalizesMaskedGroupedRawAndMixedIdentifierForms() {
         let formsAndExpected = [
             ("*90", "********90"),
