@@ -1391,8 +1391,8 @@ public struct LifeOSSheet<Content: View, Footer: View>: View {
     public var body: some View {
 #if os(macOS)
         LifeOSSheetPresentationLayout(
-            availableHeightInset: LifeOSSheetGeometry.macSafeHeightInset,
-            availableHeight: macAvailableHeight
+            availableHeight: macAvailableHeight,
+            availableHeightInset: LifeOSSheetGeometry.macSafeHeightInset
         ) {
             scrollContent
             Divider()

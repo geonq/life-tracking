@@ -144,13 +144,18 @@ public struct LifeOSResponsiveContainer<Content: View>: View {
 
 /// Keeps the complete result of a public `@ViewBuilder` invocation together
 /// as one direct child of the custom layout. The payload may itself be a
-/// `TupleView` or a `ForEach`; SwiftUI measures and places that complete
-/// result through this wrapper instead of allowing the layout to drop every
-/// child after the first one.
+/// `TupleView` or a `ForEach`; the explicit leading, zero-spacing `VStack`
+/// owns that complete result so every builder child is measured and placed.
 private struct LifeOSResponsiveContentPayload<Content: View>: View {
     let content: Content
 
-    var body: some View { content }
+    var body: some View {
+        // `Content` can be a TupleView from sibling expressions or a ForEach
+        // collection. Keep either expansion inside one layout-owning stack.
+        VStack(alignment: .leading, spacing: 0) {
+            content
+        }
+    }
 }
 
 /// The structural invariant owned by `LifeOSResponsiveContentPayload`.

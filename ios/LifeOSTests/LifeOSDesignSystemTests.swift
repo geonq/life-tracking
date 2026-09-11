@@ -568,7 +568,38 @@ final class LifeOSDesignSystemTests: XCTestCase {
 #endif
     }
 
-    func testResponsiveContentPayloadOwnsEveryBuilderChild() {
+    func testResponsiveContentPayloadOwnsEveryBuilderChild() throws {
+        let iosRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: iosRoot.appendingPathComponent("Shared/LifeOSResponsiveContainer.swift"),
+            encoding: .utf8
+        )
+        guard
+            let payloadStart = source.range(of: "private struct LifeOSResponsiveContentPayload"),
+            let payloadEnd = source.range(
+                of: "/// The structural invariant owned by `LifeOSResponsiveContentPayload`",
+                range: payloadStart.upperBound..<source.endIndex
+            )
+        else {
+            XCTFail("The responsive payload wrapper is missing")
+            return
+        }
+
+        let payloadSource = String(source[payloadStart.lowerBound..<payloadEnd.lowerBound])
+        XCTAssertTrue(
+            payloadSource.contains("VStack(alignment: .leading, spacing: 0)"),
+            "The payload must own builder expansion in a leading, zero-spacing VStack"
+        )
+        XCTAssertTrue(
+            payloadSource.contains("TupleView") && payloadSource.contains("ForEach"),
+            "The wrapper contract must document both sibling and collection expansion"
+        )
+
+        // Two sibling expressions become a TupleView, while a ForEach may
+        // expand to an arbitrary number of rows. Both remain one child of the
+        // outer custom layout because the payload owns their vertical layout.
         XCTAssertEqual(
             LifeOSResponsiveContentLayoutContract.directLayoutChildCount(forBuilderChildCount: 0),
             0
