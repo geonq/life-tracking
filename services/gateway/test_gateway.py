@@ -3812,6 +3812,39 @@ def test_document_upload_sanitizes_masked_identifier_evidence_before_versioning(
     )
 
 
+def test_document_upload_sanitizes_every_evidence_field_before_versioning(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(main, "DOCUMENTS_INDEX_PATH", tmp_path / "documents.json")
+    monkeypatch.setattr(main, "DOCUMENTS_DIR", tmp_path / "documents")
+
+    document_id = "30303030-3030-4030-8030-303030303030"
+    leaked_evidence = "AZ123456 secretref 8642"
+    metadata = native_tax_document_metadata(document_id)
+    metadata["issuer"]["evidence"]["snippet"] = leaked_evidence
+    metadata["taxpayerIdentifier"]["evidence"]["snippet"] = leaked_evidence
+    metadata["referenceIdentifier"]["evidence"]["snippet"] = leaked_evidence
+    metadata["dates"][0]["evidence"]["snippet"] = leaked_evidence
+    metadata["amounts"][0]["evidence"]["snippet"] = leaked_evidence
+
+    uploaded = client.post(
+        "/documents",
+        headers=AUTH,
+        data={"metadata": json.dumps(metadata)},
+        files={"file": ("return.pdf", b"safe", "application/pdf")},
+    )
+
+    assert uploaded.status_code == 200
+    listed = client.get("/documents", headers=AUTH)
+    assert listed.status_code == 200
+    assert leaked_evidence not in listed.text
+    assert listed.text.count(main.DOCUMENT_PRIVACY_PLACEHOLDER) >= 5
+    assert json.loads(main.DOCUMENTS_INDEX_PATH.read_text())[0]["_privacyVersion"] == (
+        main.DOCUMENT_PRIVACY_VERSION
+    )
+
+
 def test_document_upload_rejects_untrusted_cross_field_text_before_storage(
     tmp_path, monkeypatch
 ):

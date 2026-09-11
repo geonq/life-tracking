@@ -709,10 +709,29 @@ _TAX_LEGACY_SAFE_NUMBER_PATTERN = re.compile(
     r"(?<![A-Za-z0-9])(?:"
     r"[0-9]{1,4}[./-][0-9]{1,2}[./-][0-9]{1,4}|"
     r"[0-9]{1,3}(?:[ .][0-9]{3})+(?:[.,][0-9]{1,2})?|"
-    r"[0-9]+[.,][0-9]{1,2}|"
-    r"[0-9]+[ \t]*(?:EUR|USD|GBP|CHF|€|\$|£)"
+    r"[0-9]+[.,][0-9]{1,2}"
     r")(?![A-Za-z0-9])",
     re.IGNORECASE,
+)
+_TAX_LEGACY_ALLOWED_EVIDENCE_WORDS = frozenset({
+    "already", "amount", "and", "assessment", "backed", "begins", "date",
+    "datum", "document", "evidence", "ending", "ends", "eur", "gbp",
+    "finanzamt", "berlin", "here", "id", "identifier", "income", "issuer", "legacy", "masked",
+    "normal", "owed", "page", "reference", "ref", "review", "seite",
+    "source", "steuer", "steuernummer", "summe", "tax", "taxpayer", "total",
+    "usd", "year",
+})
+_TAX_LEGACY_EVIDENCE_WORD_PATTERN = re.compile(
+    r"(?i)[A-Za-zÄÖÜäöüß]+"
+)
+_TAX_LEGACY_ORDINARY_EVIDENCE_PAGE_PATTERN = re.compile(
+    r"(?i)\b(?:page|seite)[ \t]*[:#-]?[ \t]*([0-9]{1,3})\b"
+)
+_TAX_LEGACY_ORDINARY_EVIDENCE_YEAR_PATTERN = re.compile(
+    r"(?i)\b(?:tax[ \t]+year|year)[ \t]*[:#-]?[ \t]*([0-9]{4})\b"
+)
+_TAX_LEGACY_ORDINARY_EVIDENCE_IDENTIFIER_ENDING_PATTERN = re.compile(
+    r"(?i)\bidentifier[ \t]+ending[ \t]*[:#-]?[ \t]*([0-9]{2})\b"
 )
 
 # Sensitive keys that must not appear in the usage payload
@@ -4640,6 +4659,17 @@ def _legacy_text_contains_unproven_identifier(
 
     for match in _TAX_LEGACY_NUMERIC_TOKEN_PATTERN.finditer(residual):
         prefix = residual[:match.start()]
+        page_context = re.search(
+            r"(?i)\b(?:page|seite)[ \t]*[:#()/.\\-]*$",
+            prefix[-64:],
+        )
+        if page_context:
+            try:
+                if int(match.group(0)) <= DOCUMENT_MAX_EVIDENCE_PAGE:
+                    continue
+            except ValueError:
+                pass
+            return True
         if _TAX_LEGACY_ORDINARY_NUMBER_CONTEXT_PATTERN.search(prefix[-64:]):
             continue
         if any(start <= match.start() and match.end() <= end for start, end in safe_spans):
@@ -4662,6 +4692,73 @@ def _legacy_text_contains_unproven_identifier(
         if evidence:
             return True
     return False
+
+
+def _document_evidence_is_clearly_ordinary(
+    value: str,
+    *,
+    visible_suffixes: set[str] | frozenset[str] = frozenset(),
+) -> bool:
+    """Allow only bounded, ordinary evidence vocabulary after redaction."""
+    redacted = _redact_tax_text(value)
+    if _legacy_text_contains_unproven_identifier(
+        redacted,
+        visible_suffixes=visible_suffixes,
+        evidence=True,
+    ):
+        return False
+    residual = _TAX_LEGACY_ORDINARY_EVIDENCE_PAGE_PATTERN.sub("", redacted)
+    residual = _TAX_LEGACY_ORDINARY_EVIDENCE_YEAR_PATTERN.sub("", residual)
+    residual = _TAX_LEGACY_ORDINARY_EVIDENCE_IDENTIFIER_ENDING_PATTERN.sub("", residual)
+    residual = _TAX_LEGACY_SAFE_NUMBER_PATTERN.sub("", residual)
+    residual = _TAX_CANONICAL_MASK_PATTERN.sub("", residual)
+    residual = _TAX_MASKED_IDENTIFIER_PATTERN.sub("", residual)
+    for match in _TAX_LEGACY_EVIDENCE_WORD_PATTERN.finditer(residual):
+        if match.group(0).casefold() not in _TAX_LEGACY_ALLOWED_EVIDENCE_WORDS:
+            return False
+    residual = _TAX_LEGACY_EVIDENCE_WORD_PATTERN.sub("", residual)
+    separators = frozenset("·•,:;|/()[]{}#.+-–—")
+    return all(
+        character.isspace() or character in separators
+        for character in residual
+    )
+
+
+def _sanitize_document_evidence_fields(
+    value: object,
+    *,
+    visible_suffixes: set[str] | frozenset[str] = frozenset(),
+    in_evidence: bool = False,
+) -> object:
+    if isinstance(value, str):
+        if not in_evidence:
+            return value
+        safe = _redact_tax_text(value)
+        if not _document_evidence_is_clearly_ordinary(
+            safe,
+            visible_suffixes=visible_suffixes,
+        ):
+            return DOCUMENT_PRIVACY_PLACEHOLDER
+        return safe
+    if isinstance(value, list):
+        return [
+            _sanitize_document_evidence_fields(
+                item,
+                visible_suffixes=visible_suffixes,
+                in_evidence=in_evidence,
+            )
+            for item in value
+        ]
+    if isinstance(value, dict):
+        return {
+            key: _sanitize_document_evidence_fields(
+                item,
+                visible_suffixes=visible_suffixes,
+                in_evidence=in_evidence or key == "evidence",
+            )
+            for key, item in value.items()
+        }
+    return value
 
 
 def _migrate_legacy_document_privacy(
@@ -4711,6 +4808,13 @@ def _migrate_legacy_document_privacy(
     for text, in_evidence in _document_text_values(normalized):
         if in_evidence and not legacy:
             continue
+        if in_evidence and not _document_evidence_is_clearly_ordinary(
+            text,
+            visible_suffixes=visible_suffixes,
+        ):
+            raise _LegacyDocumentPrivacyError(
+                "legacy document evidence cannot be established"
+            )
         if _legacy_text_contains_unproven_identifier(
             text,
             visible_suffixes=visible_suffixes,
@@ -4758,6 +4862,11 @@ def _sanitize_uploaded_document_privacy(original: dict, normalized: dict) -> dic
                 "snippet": DOCUMENT_PRIVACY_PLACEHOLDER,
             },
         }
+
+    normalized = _sanitize_document_evidence_fields(
+        normalized,
+        visible_suffixes=visible_suffixes,
+    )
 
     # Cross-field text is never made safe by the presence of a mask in an
     # unrelated field. Reject it before the upload can create a trusted entry.
