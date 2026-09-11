@@ -32,7 +32,6 @@ export type UsageHistoryErrorCode =
   | 'batch_too_large'
   | 'invalid_idempotency_key'
   | 'idempotency_key_reuse'
-  | 'idempotency_store_full'
   | 'queue_full'
   | 'storage_unavailable';
 
@@ -188,9 +187,6 @@ export class UsageHistory {
         if (previous.fingerprint !== fingerprint) throw new UsageHistoryError('idempotency_key_reuse');
         return { kind: 'replay', revision: state.metadata.revision };
       }
-      if (idempotencyKey !== undefined && state.metadata.idempotency.length >= MAX_HISTORY_IDEMPOTENCY_RECORDS) {
-        throw new UsageHistoryError('idempotency_store_full');
-      }
 
       const nextEntries = [...state.entries];
       for (const incoming of safe) {
@@ -242,7 +238,7 @@ export class UsageHistory {
           : [
             ...state.metadata.idempotency,
             { key: idempotencyKey, fingerprint, revision },
-          ],
+          ].slice(-MAX_HISTORY_IDEMPOTENCY_RECORDS),
       });
       const metadataChanged = idempotencyKey !== undefined;
       if (!bodyChanged && !metadataChanged) return { kind: 'stale', revision };

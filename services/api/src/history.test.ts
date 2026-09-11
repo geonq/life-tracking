@@ -31,6 +31,27 @@ function writeQueues(): Map<string, unknown> {
   return (UsageHistory as unknown as { writeQueues: Map<string, unknown> }).writeQueues;
 }
 
+async function writeFullJournal(file: string): Promise<void> {
+  const emptyDigest = createHash('sha256').update(Buffer.alloc(0)).digest('hex');
+  const metadata = {
+    schemaVersion: 1,
+    domain: 'usage',
+    authority: 'api',
+    revision: 0,
+    bodyDigest: emptyDigest,
+    idempotency: Array.from({ length: MAX_HISTORY_IDEMPOTENCY_RECORDS }, (_, index) => ({
+      key: `seed-${index}`,
+      fingerprint: '0'.repeat(64),
+      revision: 0,
+    })),
+    tombstones: [],
+  };
+  await writeFile(`${file}.state.json`, JSON.stringify({ schemaVersion: 1, rawBase64: '', metadata }), {
+    encoding: 'utf8',
+    mode: 0o600,
+  });
+}
+
 describe('UsageHistory bounded mutation and retention behavior', () => {
   it('publishes an ordinary bounded file atomically and leaves no temporary entry', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'lifeos-history-atomic-'));
@@ -107,32 +128,45 @@ describe('UsageHistory bounded mutation and retention behavior', () => {
     expect(writeQueues().has(resolve(file))).toBe(false);
   });
 
-  it('leaves the last committed state readable when the durable idempotency bound is full', async () => {
+  it('keeps a bounded replay window while retiring its oldest idempotency records', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'lifeos-history-journal-'));
     const file = join(directory, 'history.jsonl');
     const statePath = `${file}.state.json`;
-    const emptyDigest = createHash('sha256').update(Buffer.alloc(0)).digest('hex');
-    const metadata = {
-      schemaVersion: 1,
-      domain: 'usage',
-      authority: 'api',
-      revision: 0,
-      bodyDigest: emptyDigest,
-      idempotency: Array.from({ length: MAX_HISTORY_IDEMPOTENCY_RECORDS }, (_, index) => ({
-        key: `seed-${index}`,
-        fingerprint: '0'.repeat(64),
-        revision: 0,
-      })),
-      tombstones: [],
-    };
-    const committed = JSON.stringify({ schemaVersion: 1, rawBase64: '', metadata });
-    await writeFile(statePath, committed, { encoding: 'utf8', mode: 0o600 });
+    await writeFullJournal(file);
 
     const store = new UsageHistory(file, 10, 60 * 60_000, () => Date.parse(timestamp(2)));
-    await expect(store.add(entry(1, 10), 'new-key')).rejects.toMatchObject({ code: 'idempotency_store_full' });
-    expect(await readFile(statePath, 'utf8')).toBe(committed);
-    await expect(store.list()).resolves.toEqual([]);
-    expect(await store.currentRevision()).toBe(0);
+    await expect(store.add(entry(1, 10), 'new-key')).resolves.toMatchObject({ kind: 'accepted', revision: 1 });
+
+    const acceptedState = JSON.parse(await readFile(statePath, 'utf8')) as {
+      metadata: { idempotency: Array<{ key: string }> };
+    };
+    const acceptedKeys = acceptedState.metadata.idempotency.map(record => record.key);
+    expect(acceptedState.metadata.idempotency).toHaveLength(MAX_HISTORY_IDEMPOTENCY_RECORDS);
+    expect(acceptedKeys.slice(-2)).toEqual([`seed-${MAX_HISTORY_IDEMPOTENCY_RECORDS - 1}`, 'new-key']);
+    expect(acceptedKeys).not.toContain('seed-0');
+
+    const stateBeforeReplay = await readFile(statePath, 'utf8');
+    await expect(store.add(entry(1, 10), 'new-key')).resolves.toMatchObject({ kind: 'replay', revision: 1 });
+    expect(await readFile(statePath, 'utf8')).toBe(stateBeforeReplay);
+    await expect(store.add(entry(1, 11), 'new-key')).rejects.toMatchObject({ code: 'idempotency_key_reuse' });
+    expect(await readFile(statePath, 'utf8')).toBe(stateBeforeReplay);
+
+    // seed-0 is outside the retained replay window, so it is accepted as a new
+    // request and becomes the newest record under the same bounded journal.
+    await expect(store.add(entry(2, 20), 'seed-0')).resolves.toMatchObject({ kind: 'accepted', revision: 2 });
+    const retiredState = JSON.parse(await readFile(statePath, 'utf8')) as {
+      metadata: { idempotency: Array<{ key: string }> };
+    };
+    const retiredKeys = retiredState.metadata.idempotency.map(record => record.key);
+    expect(retiredState.metadata.idempotency.length).toBeLessThanOrEqual(MAX_HISTORY_IDEMPOTENCY_RECORDS);
+    expect(retiredKeys).toContain('seed-0');
+    expect(retiredKeys).not.toContain('seed-1');
+
+    const reloaded = new UsageHistory(file, 10, 60 * 60_000, () => Date.parse(timestamp(2)));
+    await expect(reloaded.currentRevision()).resolves.toBe(2);
+    await expect(reloaded.list()).resolves.toEqual([entry(1, 10), entry(2, 20)]);
+    await expect(reloaded.add(entry(2, 20), 'seed-0')).resolves.toMatchObject({ kind: 'replay', revision: 2 });
+    expect(await readFile(statePath, 'utf8')).toBe(JSON.stringify(retiredState));
     expect(writeQueues().has(resolve(file))).toBe(false);
   });
 
