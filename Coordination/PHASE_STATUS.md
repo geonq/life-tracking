@@ -2,15 +2,16 @@
 
 Updated 2026-09-11 Europe/Berlin.
 
-- Overall: **source security gate GREEN; shared visual foundation RED pending
-  repair; release remains NO-GO pending operational, provider, device, and
+- Overall: **source security gate GREEN; shared visual foundation GREEN at
+  `6751bb5`; release remains NO-GO pending operational, provider, device, and
   visual evidence**.
 - Final Astra Medium review at `eb9ca620…` reproduced and cleared the
   versioned-tax-record evidence bypass. No source-code blocker remains under
   the review criteria.
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- Source checkpoint: `5767204`, synchronized with origin. Astra's foundation
-  review at this checkpoint is RED; Luna Max is repairing the shared files.
+- Source checkpoint: `6751bb5`, synchronized with origin. Astra's final
+  foundation re-review is GREEN. Both responsive containers now own their
+  builder content, and the iPhone hosted-view regression suite passes.
 - No Claude usage watcher, overnight supervisor, generic assistant, or
   conversational AI is in the product. Calorie-photo AI remains allowed.
 
@@ -18,8 +19,8 @@ Updated 2026-09-11 Europe/Berlin.
 
 1. Shared visual system: compact SF Pro/system type, semantic icons, distinct
    accents, responsive cards, widget contrast, and restrained motion. The
-   token alignment is landed, but selector compositing, semantic action/target
-   roles, responsive width, motion, and focus details still need repair.
+   shared foundation is reviewed GREEN; screen-level visual acceptance remains
+   open.
 2. Calendar: authenticated pairing/sync, bounded validation, mobile scrolling,
    paging/editing, minute-precise restoration, bottom-edge clamping, and Mac
    trackpad magnification. Gateway and native maxima now both equal 1,024;
@@ -48,7 +49,8 @@ Updated 2026-09-11 Europe/Berlin.
 
 ## Blocking acceptance
 
-- Resolve and review the shared foundation RED result before screen migration.
+- Complete ChartKit/Usage, then the icon/component and screen tranches with
+  an Astra review after each bounded batch.
 - Preserve the Astra source verdict in the release record; it does not replace
   operational or device evidence.
 - Candidate synchronization and PR state refresh.

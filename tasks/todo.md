@@ -2,17 +2,16 @@
 
 Updated 2026-09-11 Europe/Berlin.
 
-Current checkpoint: `5767204` on `lifeos-foundation-checkpoint-20260812`,
-synchronized with origin. Final Astra Medium source security review is GREEN;
-the shared visual foundation review is RED pending one Luna Max repair. Release
-status remains pending external gates.
+Current checkpoint: `6751bb5` on `lifeos-foundation-checkpoint-20260812`,
+synchronized with origin. Final Astra Medium source security and shared
+foundation reviews are GREEN. Release status remains pending external gates.
 
 ## Active gates
 
-1. Land and review the shared visual foundation repair, then refresh GitHub PR
-   state.
-2. Complete icon/component, chart, shell/truth-gate, and screen visual batches
-   with bounded Astra reviews.
+1. Implement and review the ChartKit/Usage visual tranche from the approved
+   foundation, then refresh GitHub PR state.
+2. Complete icon/component, shell/truth-gate, and screen visual batches with
+   bounded Astra reviews.
 3. Complete bounded Windows recovery, candidate install, standalone runtime,
    protected readback, Tailscale Serve, restart recovery, and health checks on
    `domke@tailscaleip`. Current host evidence is stopped `LifeOSAPI`, no

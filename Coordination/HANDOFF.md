@@ -5,11 +5,11 @@ Updated 2026-09-11 Europe/Berlin.
 ## Current verdict
 
 The source security checkpoint is **GREEN** after the final Astra Medium
-review. The shared visual foundation is currently **RED pending repair**:
-Astra found selector-state, semantic-color, contrast, responsive, motion, and
-focus-contract defects at `5767204`; one Luna Max worker is repairing those
-shared files. Release remains pending operational, provider, device, and
-visual acceptance. Do not infer runtime/device acceptance from source checks.
+review. The shared visual foundation is **GREEN** at `6751bb5` after Astra
+re-reviewed the macOS sheet repair, public responsive builder composition,
+hosted-view coverage, and interaction layering. Release remains pending
+operational, provider, device, and visual acceptance. Do not infer
+runtime/device acceptance from source checks.
 
 Do not claim a production release, remote backend availability, or device
 acceptance from the local source results. No generic conversational
@@ -20,7 +20,7 @@ product.
 ## Git and review state
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- Source checkpoint: `5767204` (`Align shared visual foundation tokens`).
+- Source checkpoint: `6751bb5` (`Prove responsive builder content is preserved`).
 - The local branch is synchronized with its origin-tracking ref. The latest
   security checkpoints are `b82f23b` (fail closed on versioned tax evidence),
   `2fb2b9b` (native privacy test typing), and `eb9ca62` (bounded native tax
@@ -90,11 +90,15 @@ recovery, live penetration results, or physical-device behavior.
 - Unsigned `LifeOSMacLogic` build, unsigned `LifeOSLogic` build, direct
   `LifeOSWidget` iOS target, `LifeOSPrereleaseIOS`, and macOS logic XCTest
   passed; the macOS XCTest result contains **54 passed tests**.
+- Foundation repair evidence: unsigned `LifeOSMac` build passed, and the
+  focused iPhone 17 `LifeOSDesignSystemTests` suite passed **39 tests with
+  0 failures**, including mounted sibling/`ForEach` layout probes.
 - The named `LifeOSWidgets` scheme exposes only macOS destinations; that is
   scheme metadata, not a source failure.
-- The shared-foundation token change at `5767204` compiled for unsigned iOS
-  logic and macOS. Full native XCTest and runtime visual acceptance remain
-  unverified; Astra's follow-up review is the current blocker.
+- The shared-foundation repair through `6751bb5` compiled for unsigned iOS
+  logic and macOS and passed the focused hosted-view suite. Full native XCTest
+  and runtime visual acceptance remain unverified; Mac sheet presentation and
+  resize behavior remain explicit runtime checks.
 
 ## External acceptance gates
 
@@ -118,9 +122,9 @@ recovery, live penetration results, or physical-device behavior.
 
 ## Next serialized queue
 
-1. Land and review the shared-foundation repair, then synchronize the branch
-   and refresh PR state.
-2. Complete the icon/component, chart, shell/truth-gate, and screen visual
+1. Start the ChartKit/Usage visual tranche from the approved foundation, with
+   one bounded Luna Max implementation and an Astra Medium review.
+2. Complete the icon/component, shell/truth-gate, and screen visual
    tranches with an Astra review after each bounded batch.
 3. Complete bounded Windows recovery,
    installation, and remote runtime verification.
