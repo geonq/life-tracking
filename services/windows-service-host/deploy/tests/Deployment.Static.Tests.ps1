@@ -29,9 +29,17 @@ function Assert-InstallOrder {
 
 $preflightNamedArgs = [regex]::Match(
     $installText,
-    '(?ms)\$preflightArgs\s*=\s*@\{(?<body>.*?)\r?\n\}\s*& \(Join-Path \$PSScriptRoot ''preflight\.ps1''\) @preflightArgs'
+    '(?ms)\$preflightArgs\s*=\s*@\{(?<body>.*?)\r?\n\}'
 )
-if (-not $preflightNamedArgs.Success) { throw 'FAIL: Preflight must be invoked with a named hashtable splat.' }
+$preflightInvocation = [regex]::Match(
+    $installText,
+    '(?m)^[ \t]*& \(Join-Path \$PSScriptRoot ''preflight\.ps1''\) @preflightArgs(?:[ \t]*\|[ \t]*Out-Host)?[ \t]*(?=\r?\n|\z)'
+)
+if (-not $preflightNamedArgs.Success -or
+    -not $preflightInvocation.Success -or
+    $preflightInvocation.Index -lt $preflightNamedArgs.Index) {
+    throw 'FAIL: Preflight must be invoked with a named hashtable splat.'
+}
 if ($installText -match '(?m)\$preflightArgs\s*=\s*@\(') { throw 'FAIL: Preflight arguments must not use an array splat.' }
 foreach ($parameter in @(
     'CandidateRoot', 'ExpectedSourceSha',
