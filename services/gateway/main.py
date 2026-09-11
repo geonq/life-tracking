@@ -4700,6 +4700,8 @@ def _document_evidence_is_clearly_ordinary(
     visible_suffixes: set[str] | frozenset[str] = frozenset(),
 ) -> bool:
     """Allow only bounded, ordinary evidence vocabulary after redaction."""
+    if value == DOCUMENT_PRIVACY_PLACEHOLDER:
+        return True
     redacted = _redact_tax_text(value)
     if _legacy_text_contains_unproven_identifier(
         redacted,
@@ -4806,15 +4808,15 @@ def _migrate_legacy_document_privacy(
             )
 
     for text, in_evidence in _document_text_values(normalized):
-        if in_evidence and not legacy:
+        if in_evidence:
+            if not _document_evidence_is_clearly_ordinary(
+                text,
+                visible_suffixes=visible_suffixes,
+            ):
+                raise _LegacyDocumentPrivacyError(
+                    "document evidence privacy cannot be established"
+                )
             continue
-        if in_evidence and not _document_evidence_is_clearly_ordinary(
-            text,
-            visible_suffixes=visible_suffixes,
-        ):
-            raise _LegacyDocumentPrivacyError(
-                "legacy document evidence cannot be established"
-            )
         if _legacy_text_contains_unproven_identifier(
             text,
             visible_suffixes=visible_suffixes,

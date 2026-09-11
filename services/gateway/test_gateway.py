@@ -3718,6 +3718,57 @@ def test_document_index_withholds_unverifiable_legacy_identifier_evidence(
     assert snippet not in listed.text
 
 
+def test_current_document_index_rejects_raw_evidence_without_mutation(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(main, "DOCUMENTS_INDEX_PATH", tmp_path / "documents.json")
+    monkeypatch.setattr(main, "DOCUMENTS_DIR", tmp_path / "documents")
+
+    document_id = "27272727-2727-4272-8272-272727272727"
+    raw_evidence = "AZ123456 secretref 8642"
+    entry = native_tax_document_metadata(document_id)
+    entry["_originalFile"] = "original.pdf"
+    entry["_privacyVersion"] = main.DOCUMENT_PRIVACY_VERSION
+    entry["issuer"]["evidence"]["snippet"] = raw_evidence
+    entry["dates"][0]["evidence"]["snippet"] = raw_evidence
+    entry["amounts"][0]["evidence"]["snippet"] = raw_evidence
+
+    original = json.dumps(
+        [entry],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    main.DOCUMENTS_INDEX_PATH.write_bytes(original)
+
+    with pytest.raises(main._DocumentIndexError):
+        main._load_document_index()
+
+    assert main.DOCUMENTS_INDEX_PATH.read_bytes() == original
+    listed = client.get("/documents", headers=AUTH)
+    assert listed.status_code == 503
+    assert listed.json() == {"error": "documents_unavailable"}
+
+
+def test_document_index_loads_safe_current_privacy_version(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(main, "DOCUMENTS_INDEX_PATH", tmp_path / "documents.json")
+
+    document_id = "28282828-2828-4282-8282-282828282828"
+    entry = native_tax_document_metadata(document_id)
+    entry["_originalFile"] = "original.pdf"
+    entry["_privacyVersion"] = main.DOCUMENT_PRIVACY_VERSION
+    main.DOCUMENTS_INDEX_PATH.write_bytes(
+        json.dumps([entry], ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    )
+
+    entries, _body = main._load_document_index()
+
+    assert [item["id"] for item in entries] == [document_id]
+    assert entries[0]["_privacyVersion"] == main.DOCUMENT_PRIVACY_VERSION
+
+
 def test_document_index_migration_preserves_safe_form_w2_entry(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DOCUMENTS_INDEX_PATH", tmp_path / "documents.json")
 
