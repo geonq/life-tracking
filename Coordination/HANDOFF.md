@@ -1,6 +1,6 @@
 # HANDOFF — LifeOS native app
 
-Updated 2026-09-11 Europe/Berlin.
+Updated 2026-09-12 Europe/Berlin.
 
 ## Current verdict
 
@@ -20,6 +20,11 @@ The truthful empty-state, icon, and tax privacy tranche is **GREEN** at
 compact unavailable panels and settings wiring, aligns the fitness symbol and
 platform icon geometry, and closes the partial monetary-span identifier leak.
 
+The Calendar density tranche is **GREEN** at `b05c4fb` after Astra Medium
+reviewed the complete three-file diff. It establishes a 40/64/120 pt density
+contract, keeps Mac trackpad pinch as the primary interaction, and removes the
+visible slider-like treatment from the secondary preset control.
+
 Do not claim a production release, remote backend availability, or device
 acceptance from the local source results. No generic conversational
 assistant/advisor/AI product exists. Calorie-photo tracking is the only
@@ -29,11 +34,11 @@ product.
 ## Git and review state
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- Source checkpoint: `6713de1` (`Harden Usage chart rendering and selection`).
+- Source checkpoint: `b05c4fb` (`Align Calendar density with pinch-first design`).
 - Shared-foundation checkpoint: `6751bb5` (`Prove responsive builder content is preserved`).
-- Latest reviewed local tranche: `82b4eb1` (`Polish truthful empty states and harden tax privacy`).
-- The local branch contains the reviewed `82b4eb1` commit and is pending its
-  next push. The latest
+- Latest reviewed tranche: `b05c4fb` (`Align Calendar density with pinch-first design`).
+- The branch, its remote-tracking ref, and draft PR #1 head are synchronized at
+  `b05c4fb`, confirmed through direct Git and GitHub CLI ref checks. The latest
   security checkpoints are `b82f23b` (fail closed on versioned tax evidence),
   `2fb2b9b` (native privacy test typing), and `eb9ca62` (bounded native tax
   lookahead). Keep these small, attributable commits when synchronizing.
@@ -50,8 +55,9 @@ product.
   responsive surfaces, widget contrast, and restrained route/microinteraction
   behavior.
 - Calendar scrolling, minute-precise restoration, paging/editing, Mac
-  trackpad magnification, explicit pairing, authenticated payloads, bounded
-  decoding, timestamp validation, and fail-closed oversized-state handling.
+  trackpad magnification, pinch-first 40/64/120 pt density, explicit pairing,
+  authenticated payloads, bounded decoding, timestamp validation, and
+  fail-closed oversized-state handling.
 - Finance live-source contracts, manual Trade Republic import, durable
   reconciliation, and truthful unavailable/provenance states.
 - Fitness recovery/biology/nutrition plus local workout templates, exercises,
@@ -120,6 +126,9 @@ recovery, live penetration results, or physical-device behavior.
 - The `82b4eb1` unsigned universal `LifeOSMac` build passed using an isolated
   `/private/tmp` DerivedData path. Standalone Swift privacy probes passed for
   text, numeric, Unicode, bounded, long-amount, and partial-overlap cases.
+- Calendar density review passed Astra Medium with no HIGH/MEDIUM/LOW findings;
+  `git diff --check` passed and the serialized universal unsigned `LifeOSMac`
+  build passed at `b05c4fb`.
 - The focused native test rerun is blocked by the current CoreSimulatorService
   failure (`simdiskimaged` unavailable); do not treat the source GREEN verdict
   as simulator evidence.
@@ -128,9 +137,10 @@ recovery, live penetration results, or physical-device behavior.
 
 - Complete bounded Windows recovery, candidate installation, standalone
   runtime, ACL/readback, Tailscale Serve, restart recovery, and health checks
-  on `domke@tailscaleip`. Current evidence is: `LifeOSAPI` stopped, no
-  listener on expected ports, deployment marker active, recovery phase
-  `artifacts`, 31,226 recovery units.
+  on `domke@tailscaleip`. The latest read-only SSH check reached `geonqserver`:
+  `LifeOSAPI` and `LifeOSGateway` are not installed, no expected listener was
+  reported, and only `LifeOSAPIStaging` and `LifeOSSyncServer` scheduled tasks
+  were present.
 - Synchronize the candidate and refresh PR state before using the Windows
   release builder.
 - Complete real Enable Banking consent/readback and one real Trade Republic
@@ -146,8 +156,8 @@ recovery, live penetration results, or physical-device behavior.
 
 ## Next serialized queue
 
-1. Complete the icon/component, shell/truth-gate, and screen visual
-   tranches with an Astra review after each bounded batch.
+1. Complete the remaining screen-level visual tranches with an Astra review
+   after each bounded batch.
 2. Complete bounded Windows recovery,
    installation, and remote runtime verification.
 3. Complete provider, physical-device, signing, visual, widget, and

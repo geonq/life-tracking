@@ -1,21 +1,20 @@
 # TODO — LifeOS completion gates
 
-Updated 2026-09-11 Europe/Berlin.
+Updated 2026-09-12 Europe/Berlin.
 
-Current checkpoint: `6713de1` on `lifeos-foundation-checkpoint-20260812`,
-synchronized with origin. Final Astra Medium source security, shared
-foundation, and ChartKit/Usage reviews are GREEN. Release status remains
-pending external gates.
+Current checkpoint: `b05c4fb` on `lifeos-foundation-checkpoint-20260812`,
+synchronized with origin and draft PR #1. Final Astra Medium source security,
+shared foundation, ChartKit/Usage, and Calendar density reviews are GREEN.
+Release status remains pending external gates.
 
 ## Active gates
 
-1. Complete icon/component, shell/truth-gate, and screen visual batches with
-   bounded Astra reviews.
+1. Complete remaining screen visual batches with bounded Astra reviews.
 2. Complete bounded Windows recovery, candidate install, standalone runtime,
    protected readback, Tailscale Serve, restart recovery, and health checks on
-   `domke@tailscaleip`. Current host evidence is stopped `LifeOSAPI`, no
-   expected listeners, an active deployment transaction, recovery phase
-   `artifacts`, and 31,226 units.
+   `domke@tailscaleip`. Latest read-only SSH reached `geonqserver`; the new
+   services are not installed, no expected listener was reported, and only
+   `LifeOSAPIStaging` and `LifeOSSyncServer` scheduled tasks were present.
 3. Complete real Enable Banking consent/readback and one real Trade Republic
    import. Keep missing-provider states truthful.
 4. Exercise iPhone 17 HealthKit, Zepp sync, morning refresh and USB Shortcuts,
@@ -43,6 +42,9 @@ pending external gates.
   (17 chart, 39 design); unsigned `LifeOSMac` build passed at `6713de1`.
 - Calendar authority now rejects more than 1,024 items, matching native. An
   oversized persisted snapshot fails closed without truncating raw state.
+- Calendar density review: Astra Medium GREEN with no findings; `git diff
+  --check` and the serialized universal unsigned `LifeOSMac` build passed at
+  `b05c4fb`. The contract is 40/64/120 pt with Mac pinch as primary.
 
 ## Constraints
 

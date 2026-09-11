@@ -1,6 +1,6 @@
 # DECISIONS — LifeOS native app
 
-Updated 2026-09-11 Europe/Berlin.
+Updated 2026-09-12 Europe/Berlin.
 
 ## Product and design
 
@@ -11,7 +11,10 @@ Updated 2026-09-11 Europe/Berlin.
   rings. Usage is an operational monitoring surface with truthful live or
   explicit fixture provenance.
 - Calendar owns iPhone vertical scrolling and Mac trackpad magnification.
-  Paging, editing, and zoom must not compete for the same gesture.
+  Paging, editing, and zoom must not compete for the same gesture. Its
+  density contract is 40 pt minimum, 64 pt default, and 120 pt maximum; Mac
+  pinch is primary and the secondary preset menu has no slider or dotted
+  track.
 - Use direct user motion and restrained transitions. Rapid route reversal must
   start from the currently visible state.
 - Generic conversational assistant/advisor/AI is removed from every product
