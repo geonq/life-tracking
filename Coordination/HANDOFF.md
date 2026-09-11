@@ -5,10 +5,13 @@ Updated 2026-09-11 Europe/Berlin.
 ## Current verdict
 
 Local source checks are current and passing, but the release is **pending a
-fresh Astra Medium security review**. The previous final Astra review was
-**RED** because the Windows deployment was in unfinished recovery and because
-the gateway accepted more calendar items than native clients. The calendar
-contract defect is fixed; the Windows runtime is still not green.
+new final Astra Medium security review** plus external acceptance gates. The
+previous final Astra review was **RED** because Windows recovery was
+unfinished and because the gateway accepted more calendar items than native
+clients. The local source patches now cover that calendar boundary, bounded
+PNG/JPEG validation, native-shaped TaxDocument publication, privacy-safe
+document responses, and bounded usage idempotency replay. The Windows runtime
+is still not green.
 
 Do not claim a production release, remote backend availability, or device
 acceptance from the local source results. No generic conversational
@@ -19,15 +22,18 @@ product.
 ## Git and review state
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- Local `HEAD`: `ebbfff2c1eda6d017669cc391050f45296b4429d`.
-- The local branch is 20 commits ahead of its origin-tracking ref and has not
-  been pushed. Synchronized remote or PR state is therefore unverified.
+- Source checkpoint: `1d79a1306717a03eae2bcf48daf847bb40e9e4ba`.
+- After this coordination commit, the local branch is 24 commits ahead of its
+  origin-tracking ref and has not been pushed. The coordination snapshot is
+  committed in the local history.
+  Source/security commits `f425b2a` and `1d79a13` are committed locally but
+  remain unsynchronized with origin, so remote or PR state is unverified.
 - Recent source checkpoints include `ceddd2b` (design validator contract),
   `c814299` (widget typography compile fix), `544633b` (finance detail return),
-  and `ebbfff2` (gateway/native calendar-limit alignment).
-- This coordination refresh must remain uncommitted and unpushed per the
-  current task. Preserve small, attributable commits when synchronization is
-  later authorized.
+  `ebbfff2` (gateway/native calendar-limit alignment), `f425b2a` (bounded
+  usage idempotency replay journal), and `1d79a13` (calendar image and tax
+  document boundary hardening). Preserve small, attributable commits when
+  synchronization is later authorized.
 
 ## Implemented source slices
 
@@ -46,13 +52,23 @@ product.
 - Bounded API/gateway reads, localhost/JSON headers, constant-time secret
   comparison, explicit Codex executable paths, Windows manifest/ACL/recovery
   checks, and bounded protected-storage admission.
+- Gateway calendar images now undergo bounded PNG/JPEG structure and CRC
+  validation before publication. Tax metadata follows the native-shaped
+  `TaxDocument` contract, rejects raw page payloads, validates the index, and
+  exposes privacy-safe list responses. Usage idempotency retains a bounded
+  replay window by retiring the oldest keys instead of stopping permanently.
 
 ## Security status
 
-The twelve Claude findings have source mitigations and regression coverage.
-The gateway calendar maximum is now exactly 1,024, matching the native limit.
-Overflow requests are rejected before persistence, and an already oversized
-persisted snapshot fails closed without truncating or modifying the raw state.
+Known Claude/Astra source findings have local mitigations and regression
+coverage, but the independent release gate is still pending. The gateway
+calendar maximum is exactly 1,024, matching the native limit. Overflow
+requests are rejected before persistence, and an already oversized persisted
+snapshot fails closed without truncating or modifying the raw state. Calendar
+image structure/CRC checks and native-shaped TaxDocument/index checks now
+protect the other affected publication paths. Usage replay remains bounded;
+retired keys may be accepted as new requests while retained keys preserve
+replay and fingerprint-reuse behavior.
 
 The current native sync boundary uses Tailscale connection identity plus an
 edge capability. The native app does not persist that bearer token; do not
@@ -68,7 +84,7 @@ deployment, and dependency checks and issue the release gate.
 ## Verification evidence
 
 - Full repository source validator: **163 passed**, **47 subtests passed**.
-- Gateway: **483 passed**, with two dependency deprecation warnings.
+- Gateway: **490 passed**, with two dependency warnings.
 - API: **141 tests passed** and TypeScript typecheck passed.
 - Contracts: **198 tests passed** and build passed.
 - Full and production-only `npm audit`: **zero vulnerabilities**.
@@ -100,7 +116,7 @@ deployment, and dependency checks and issue the release gate.
 
 ## Next serialized queue
 
-1. Run a fresh Astra Medium security review after this documentation refresh.
+1. Run the new final Astra Medium security review after this documentation refresh.
 2. Synchronize the candidate and PR, then complete bounded Windows recovery,
    installation, and remote runtime verification.
 3. Complete provider, physical-device, signing, visual, widget, and

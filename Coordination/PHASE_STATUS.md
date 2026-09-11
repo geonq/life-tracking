@@ -2,13 +2,16 @@
 
 Updated 2026-09-11 Europe/Berlin.
 
-- Overall: **local source gates pass; release is NO-GO pending a fresh Astra
-  Medium review and external runtime/device evidence**.
+- Overall: **local source gates pass; release is NO-GO pending a new final
+  Astra Medium review and external runtime/device evidence**.
 - Previous final Astra review: **RED**. Its Windows operational blocker
-  remains unresolved; its calendar contract finding is fixed in `ebbfff2`.
+  remains unresolved. Local commits `f425b2a` and `1d79a13` address the
+  bounded usage replay, calendar image, and TaxDocument publication findings;
+  the new review must verify them independently.
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- `HEAD`: `ebbfff2c1eda6d017669cc391050f45296b4429d`, local and not pushed;
-  20 commits ahead of the origin-tracking ref.
+- Source checkpoint: `1d79a1306717a03eae2bcf48daf847bb40e9e4ba`, local and not
+  pushed. After this coordination commit, the branch is 24 commits ahead of
+  the origin-tracking ref; the source/security commits remain unsynchronized.
 - No Claude usage watcher, overnight supervisor, generic assistant, or
   conversational AI is in the product. Calorie-photo AI remains allowed.
 
@@ -25,14 +28,16 @@ Updated 2026-09-11 Europe/Berlin.
    intents.
 4. API/gateway/Windows source: bounded reads/bodies, Host/auth checks, secret
    handling, executable resolution, ACL/recovery/staging rules, and bounded
-   protected-storage concurrency.
+   protected-storage concurrency. Calendar image structure/CRC validation,
+   native-shaped TaxDocument/index validation with privacy-safe list
+   responses, and bounded usage idempotency replay are also implemented.
 5. Navigation/state: retained module state, stable Mac module identity, and
    reversal-aware transitions.
 
 ## Verification
 
 - Repository source validator: **163 passed**, **47 subtests passed**.
-- Gateway: **483 passed**, with two dependency deprecation warnings.
+- Gateway: **490 passed**, with two dependency warnings.
 - API: **141 tests passed** and typecheck passed.
 - Contracts: **198 tests passed** and build passed.
 - `npm audit` and production audit: **zero vulnerabilities**.

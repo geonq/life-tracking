@@ -38,14 +38,24 @@ Updated 2026-09-11 Europe/Berlin.
   checks, and journal-bound Node staging.
 - Gateway and native calendar limits are both 1,024. Oversized incoming or
   persisted state fails closed without destructive truncation.
+- Calendar icon publication must perform bounded PNG/JPEG structure and CRC
+  validation before persistence, so a signature-only or corrupted image
+  cannot pass the gateway while failing native decoding.
+- Tax document publication follows the native-shaped `TaxDocument` schema,
+  rejects raw page payloads, validates stored index entries, and returns only
+  privacy-safe metadata. The gateway must not become a raw-page sync path.
+- Usage idempotency is a bounded replay journal: retained keys preserve
+  replay and fingerprint-reuse behavior, while the oldest keys are retired so
+  ingestion does not permanently stop at the capacity limit.
 - The current native sync boundary is Tailscale connection identity plus an
   edge capability. The app does not persist that bearer token; do not document
   it as a Keychain-stored sync token. Legacy credential cleanup and physical
   transport remain verification items.
 - Keep secrets out of source, prompts, logs, and archives. Do not claim
   provider, Windows-native, physical-device, or visual evidence from source
-  checks alone. The previous Astra final review was RED; a fresh Astra Medium
-  review is required before a release green light.
+  checks alone. The previous Astra final review was RED. Local source patches
+  are covered by the current validator and focused suites, but a new final
+  Astra Medium review is required before a release green light.
 - Native Shortcuts may open Zepp and report LifeOS refresh/status; a public
   Zepp API is not assumed. Personal Team signing and seven-day renewal remain
   platform-managed steps.
