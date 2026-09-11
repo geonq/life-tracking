@@ -56,11 +56,17 @@ final class LifeOSDesignSystemTests: XCTestCase {
 
     func testCanonicalPaletteValuesStayDistinctAndSourcedFromOneContract() {
         XCTAssertEqual(LifeOSPalette.brandBlueHex, 0x0253C4)
-        XCTAssertEqual(LifeOSPalette.observedBlueHex, 0x5DA0FD)
+        XCTAssertEqual(LifeOSPalette.observedBlueHex, 0x3085FD)
+        XCTAssertEqual(LifeOSPalette.focusBlueHex, 0x5DA0FD)
         XCTAssertEqual(LifeOSPalette.estimateGreenHex, 0x60D386)
         XCTAssertEqual(LifeOSPalette.calorieOrangeHex, 0xFFB06E)
         XCTAssertEqual(LifeOSPalette.proteinTealHex, 0x63D2D2)
         XCTAssertEqual(LifeOSPalette.canvasDarkHex, 0x000000)
+        XCTAssertEqual(LifeOSPalette.canvasLightHex, 0xF7F7F8)
+        XCTAssertEqual(LifeOSPalette.surfaceDarkHex, 0x08080A)
+        XCTAssertEqual(LifeOSPalette.surfaceLightHex, 0xFFFFFF)
+        XCTAssertEqual(LifeOSPalette.borderDarkHex, 0x29292F)
+        XCTAssertEqual(LifeOSPalette.borderLightHex, 0xD0D0D6)
         XCTAssertEqual(LifeOSPalette.transparentWidgetSupportingHex, 0xE6E6E6)
 
         XCTAssertEqual(
@@ -69,7 +75,7 @@ final class LifeOSDesignSystemTests: XCTestCase {
         )
         XCTAssertEqual(
             LifeOSSemanticColorPairs.focus.darkForegroundHex,
-            LifeOSPalette.observedBlueHex
+            LifeOSPalette.focusBlueHex
         )
         XCTAssertEqual(
             LifeOSSemanticColorPairs.estimate.darkForegroundHex,
@@ -227,10 +233,11 @@ final class LifeOSDesignSystemTests: XCTestCase {
                 LifeOSTokens.Space.xl,
                 LifeOSTokens.Space.xxl,
                 LifeOSTokens.Space.xxxl,
+                LifeOSTokens.Space.xxxxl,
             ],
-            [4, 8, 12, 16, 24, 24, 32, 48]
+            [4, 8, 12, 16, 24, 24, 32, 48, 64]
         )
-        XCTAssertEqual([LifeOSTokens.Radius.control, LifeOSTokens.Radius.card, LifeOSTokens.Radius.hero], [10, 16, 24])
+        XCTAssertEqual([LifeOSTokens.Radius.control, LifeOSTokens.Radius.card, LifeOSTokens.Radius.hero], [8, 12, 16])
         XCTAssertEqual(LifeOSTokens.Control.minimumTarget, 44)
         XCTAssertEqual(LifeOSTokens.pagePadding, 16)
         XCTAssertEqual(LifeOSTokens.sectionGap, LifeOSTokens.Space.xl)

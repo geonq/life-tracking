@@ -12,12 +12,17 @@ import UIKit
 /// place prevents a light/dark token from drifting away from the palette.
 enum LifeOSPalette {
     static let brandBlueHex: UInt32 = 0x0253C4
-    static let observedBlueHex: UInt32 = 0x5DA0FD
+    static let observedBlueHex: UInt32 = 0x3085FD
+    static let focusBlueHex: UInt32 = 0x5DA0FD
     static let estimateGreenHex: UInt32 = 0x60D386
     static let calorieOrangeHex: UInt32 = 0xFFB06E
     static let proteinTealHex: UInt32 = 0x63D2D2
     static let canvasDarkHex: UInt32 = 0x000000
-    static let canvasLightHex: UInt32 = 0xFAFAFA
+    static let canvasLightHex: UInt32 = 0xF7F7F8
+    static let surfaceDarkHex: UInt32 = 0x08080A
+    static let surfaceLightHex: UInt32 = 0xFFFFFF
+    static let borderDarkHex: UInt32 = 0x29292F
+    static let borderLightHex: UInt32 = 0xD0D0D6
     static let transparentWidgetBackingOpacity: Double = 0.60
     static let transparentWidgetSupportingHex: UInt32 = 0xE6E6E6
 }
@@ -164,46 +169,46 @@ enum LifeOSSemanticColorPairs {
         lightBackgroundHex: LifeOSSelectedNavigationPalette.lightBackgroundHex
     )
     static let focus = LifeOSColorPair(
-        darkForegroundHex: LifeOSPalette.observedBlueHex,
-        darkBackgroundHex: 0x131315,
-        lightForegroundHex: 0x0253C4,
-        lightBackgroundHex: 0xFFFFFF
+        darkForegroundHex: LifeOSPalette.focusBlueHex,
+        darkBackgroundHex: LifeOSPalette.surfaceDarkHex,
+        lightForegroundHex: LifeOSPalette.brandBlueHex,
+        lightBackgroundHex: LifeOSPalette.surfaceLightHex
     )
     static let neutralTarget = LifeOSColorPair(
         darkForegroundHex: 0xA1A1AA,
-        darkBackgroundHex: 0x131315,
+        darkBackgroundHex: LifeOSPalette.surfaceDarkHex,
         lightForegroundHex: 0x52525B,
-        lightBackgroundHex: 0xFFFFFF
+        lightBackgroundHex: LifeOSPalette.surfaceLightHex
     )
     static let estimate = LifeOSColorPair(
         darkForegroundHex: LifeOSPalette.estimateGreenHex,
-        darkBackgroundHex: 0x131315,
+        darkBackgroundHex: LifeOSPalette.surfaceDarkHex,
         lightForegroundHex: 0x01773B,
-        lightBackgroundHex: 0xFFFFFF
+        lightBackgroundHex: LifeOSPalette.surfaceLightHex
     )
     static let calories = LifeOSColorPair(
         darkForegroundHex: LifeOSPalette.calorieOrangeHex,
-        darkBackgroundHex: 0x131315,
+        darkBackgroundHex: LifeOSPalette.surfaceDarkHex,
         lightForegroundHex: 0xA25A03,
-        lightBackgroundHex: 0xFFFFFF
+        lightBackgroundHex: LifeOSPalette.surfaceLightHex
     )
     static let protein = LifeOSColorPair(
         darkForegroundHex: LifeOSPalette.proteinTealHex,
-        darkBackgroundHex: 0x131315,
+        darkBackgroundHex: LifeOSPalette.surfaceDarkHex,
         lightForegroundHex: 0x067878,
-        lightBackgroundHex: 0xFFFFFF
+        lightBackgroundHex: LifeOSPalette.surfaceLightHex
     )
     static let link = LifeOSColorPair(
         darkForegroundHex: 0xB8D5FE,
-        darkBackgroundHex: 0x131315,
+        darkBackgroundHex: LifeOSPalette.surfaceDarkHex,
         lightForegroundHex: 0x013174,
-        lightBackgroundHex: 0xFFFFFF
+        lightBackgroundHex: LifeOSPalette.surfaceLightHex
     )
     static let disabled = LifeOSColorPair(
         darkForegroundHex: 0xA1A1AA,
-        darkBackgroundHex: 0x1B1B1E,
+        darkBackgroundHex: LifeOSPalette.surfaceDarkHex,
         lightForegroundHex: 0x52525B,
-        lightBackgroundHex: 0xF4F4F5
+        lightBackgroundHex: LifeOSPalette.surfaceLightHex
     )
 }
 
@@ -360,29 +365,29 @@ public extension Color {
     static let lifeOSLightCanvas = Color(hex: LifeOSPalette.canvasLightHex)
 
     /// Neutral structural roles used by the shared foundation.
-    static let lifeOSDarkSurface = Color(hex: 0x131315)
-    static let lifeOSLightSurface = Color(hex: 0xFFFFFF)
-    static let lifeOSDarkRaised = Color(hex: 0x1B1B1E)
-    static let lifeOSLightRaised = Color(hex: 0xF4F4F5)
-    static let lifeOSDarkFloatingOverlay = Color(hex: 0x232327)
-    static let lifeOSLightFloatingOverlay = Color(hex: 0xFFFFFF)
+    static let lifeOSDarkSurface = Color(hex: LifeOSPalette.surfaceDarkHex)
+    static let lifeOSLightSurface = Color(hex: LifeOSPalette.surfaceLightHex)
+    static let lifeOSDarkRaised = lifeOSDarkSurface
+    static let lifeOSLightRaised = lifeOSLightSurface
+    static let lifeOSDarkFloatingOverlay = lifeOSDarkSurface
+    static let lifeOSLightFloatingOverlay = lifeOSLightSurface
 
     static let lifeOSPrimaryText = lifeOSAdaptiveColor(
-        darkRed: 0xF7/255, darkGreen: 0xF7/255, darkBlue: 0xF8/255,
-        lightRed: 0x10/255, lightGreen: 0x10/255, lightBlue: 0x12/255
+        darkRed: 0xF5/255, darkGreen: 0xF5/255, darkBlue: 0xF7/255,
+        lightRed: 0x11/255, lightGreen: 0x11/255, lightBlue: 0x13/255
     )
 
     static let lifeOSSecondaryText = lifeOSAdaptiveColor(
-        darkRed: 0xA1/255, darkGreen: 0xA1/255, darkBlue: 0xAA/255,
-        lightRed: 0x52/255, lightGreen: 0x52/255, lightBlue: 0x5B/255
+        darkRed: 0xAD/255, darkGreen: 0xAD/255, darkBlue: 0xB4/255,
+        lightRed: 0x5C/255, lightGreen: 0x5C/255, lightBlue: 0x63/255
     )
 
     /// Adaptive metadata/tertiary text for normal-size supporting copy. These
     /// values preserve the quiet hierarchy while clearing the 4.5:1 small-text
     /// threshold on the dark card and light canvas surfaces.
     static let lifeOSMetadataText = lifeOSAdaptiveColor(
-        darkRed: 0x8C/255, darkGreen: 0x8C/255, darkBlue: 0x96/255,
-        lightRed: 0x5F/255, lightGreen: 0x60/255, lightBlue: 0x68/255
+        darkRed: 0x84/255, darkGreen: 0x84/255, darkBlue: 0x8C/255,
+        lightRed: 0x6D/255, lightGreen: 0x6D/255, lightBlue: 0x74/255
     )
 
     /// Disabled text only.
@@ -391,10 +396,14 @@ public extension Color {
         lightRed: 0xA1/255, lightGreen: 0xA1/255, lightBlue: 0xAA/255
     )
 
-    /// THE hairline border (#232329 / #E4E4E7), solid, drawn at 1pt.
+    /// THE structural border (#29292F / #D0D0D6), solid, drawn at 1pt.
     static let lifeOSSubtleBorder = lifeOSAdaptiveColor(
-        darkRed: 0x23/255, darkGreen: 0x23/255, darkBlue: 0x29/255,
-        lightRed: 0xE4/255, lightGreen: 0xE4/255, lightBlue: 0xE7/255
+        darkRed: Double((LifeOSPalette.borderDarkHex >> 16) & 0xFF)/255,
+        darkGreen: Double((LifeOSPalette.borderDarkHex >> 8) & 0xFF)/255,
+        darkBlue: Double(LifeOSPalette.borderDarkHex & 0xFF)/255,
+        lightRed: Double((LifeOSPalette.borderLightHex >> 16) & 0xFF)/255,
+        lightGreen: Double((LifeOSPalette.borderLightHex >> 8) & 0xFF)/255,
+        lightBlue: Double(LifeOSPalette.borderLightHex & 0xFF)/255
     )
 
     /// Pressed/selected edges only.
@@ -403,15 +412,18 @@ public extension Color {
         lightRed: 0xD4/255, lightGreen: 0xD4/255, lightBlue: 0xD8/255
     )
 
-    /// Observed chart blue: #5DA0FD in dark mode and #0253C4 in light mode.
+    /// Observed chart blue: #3085FD in dark mode and #0253C4 in light mode.
     static let lifeOSObservedBlue = lifeOSAdaptiveHex(
         dark: LifeOSPalette.observedBlueHex,
         light: LifeOSPalette.brandBlueHex
     )
 
-    /// Focus blue shares the observed blue pair so focus and measured data
-    /// remain distinct from the filled action blue without drifting apart.
-    static let lifeOSFocusBlue = lifeOSObservedBlue
+    /// Focus uses the lighter blue 300 dark-mode pair while observed data uses
+    /// blue 400; both resolve to the deeper brand blue in light mode.
+    static let lifeOSFocusBlue = lifeOSAdaptiveHex(
+        dark: LifeOSPalette.focusBlueHex,
+        light: LifeOSPalette.brandBlueHex
+    )
 
     // Explicit action, link, focus, and data-meaning roles. These are kept
     // separate from the general accent so a future screen cannot accidentally
@@ -502,20 +514,15 @@ public extension Color {
         light: LifeOSPalette.canvasLightHex
     )
 
-    static let lifeOSNeutralSurface = lifeOSAdaptiveColor(
-        darkRed: 0x13/255, darkGreen: 0x13/255, darkBlue: 0x15/255,
-        lightRed: 0xFF/255, lightGreen: 0xFF/255, lightBlue: 0xFF/255
+    static let lifeOSNeutralSurface = lifeOSAdaptiveHex(
+        dark: LifeOSPalette.surfaceDarkHex,
+        light: LifeOSPalette.surfaceLightHex
     )
 
-    static let lifeOSNeutralRaised = lifeOSAdaptiveColor(
-        darkRed: 0x1B/255, darkGreen: 0x1B/255, darkBlue: 0x1E/255,
-        lightRed: 0xF4/255, lightGreen: 0xF4/255, lightBlue: 0xF5/255
-    )
-
-    static let lifeOSNeutralFloatingOverlay = lifeOSAdaptiveColor(
-        darkRed: 0x23/255, darkGreen: 0x23/255, darkBlue: 0x27/255,
-        lightRed: 0xFF/255, lightGreen: 0xFF/255, lightBlue: 0xFF/255
-    )
+    /// Compatibility aliases intentionally resolve to the one structural
+    /// surface. Interaction states add transient overlays at call sites.
+    static let lifeOSNeutralRaised = lifeOSNeutralSurface
+    static let lifeOSNeutralFloatingOverlay = lifeOSNeutralSurface
 
     /// Accent hover: lighter on dark, darker on light (inverted direction).
     static let lifeOSAccentHover = lifeOSAdaptiveColor(
@@ -571,13 +578,15 @@ public enum LifeOSTokens {
         public static let xxl: CGFloat = 32
         /// The 48pt page-level separation step.
         public static let xxxl: CGFloat = 48
+        /// The 64pt page-end/major composition step.
+        public static let xxxxl: CGFloat = 64
     }
 
     /// Allowed corner radii. Capsules are used for status/selectors.
     public enum Radius {
-        public static let control: CGFloat = 10
-        public static let card: CGFloat = 16
-        public static let hero: CGFloat = 24
+        public static let control: CGFloat = 8
+        public static let card: CGFloat = 12
+        public static let hero: CGFloat = 16
         public static let tooltip: CGFloat = 8
         public static let widget: CGFloat = 12
     }
