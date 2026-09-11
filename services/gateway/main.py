@@ -668,6 +668,40 @@ _TAX_GROUPED_IDENTIFIER_PATTERN = re.compile(
 _TAX_MASKED_IDENTIFIER_PATTERN = re.compile(
     r"(?<![0-9*])\*{1,32}(?P<suffix>[0-9]{2})(?![0-9])"
 )
+_TAX_MASKED_IDENTIFIER_INPUT_PATTERN = re.compile(r"\*{1,32}(?:[0-9]{2})?")
+_TAX_CANONICAL_MASK_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9*])\*{8}(?:[0-9]{2})?(?![A-Za-z0-9*])"
+)
+_TAX_LEGACY_IDENTIFIER_TOKEN_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9*])[A-Za-z0-9*]{2,32}(?![A-Za-z0-9*])"
+)
+_TAX_LEGACY_NUMERIC_TOKEN_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9*])[0-9]{1,32}(?![0-9*])"
+)
+_TAX_LEGACY_ORDINARY_NUMBER_CONTEXT_PATTERN = re.compile(
+    r"(?i)(?:"
+    r"\b(?:tax\s+)?year|\byear|\bpage|\bseite|"
+    r"\b(?:date|datum|amount|betrag|summe|total|owed)"
+    r")[\s:#()/.\\-]*$"
+)
+_TAX_LEGACY_IDENTIFIER_CONTEXT_PATTERN = re.compile(
+    r"(?i)(?:"
+    r"\btaxpayer(?:\s+identifier|\s+id)?|\btax\s+(?:identifier|id)|"
+    r"\b(?:identifier|reference|ref|aktenzeichen|steuernummer|id)"
+    r")[\s:#()/.\\-]*$"
+)
+# These complete tokens are retained when checking an old entry. Their
+# digits are ordinary date/money text, so they cannot establish that a
+# masked candidate's original identifier was absent from the field.
+_TAX_LEGACY_SAFE_NUMBER_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])(?:"
+    r"[0-9]{1,4}[./-][0-9]{1,2}[./-][0-9]{1,4}|"
+    r"[0-9]{1,3}(?:[ .][0-9]{3})+(?:[.,][0-9]{1,2})?|"
+    r"[0-9]+[.,][0-9]{1,2}|"
+    r"[0-9]+[ \t]*(?:EUR|USD|GBP|CHF|€|\$|£)"
+    r")(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
 
 # Sensitive keys that must not appear in the usage payload
 SENSITIVE_KEYS = {
@@ -4365,6 +4399,10 @@ class _DocumentIndexTooLarge(_DocumentIndexError):
     """A new document index cannot fit the published response contract."""
 
 
+class _LegacyDocumentPrivacyError(_DocumentIndexError):
+    """A legacy entry cannot be published without exposing unknown data."""
+
+
 def _valid_document_index_filename(value: object) -> bool:
     return isinstance(value, str) and DOCUMENT_INDEX_FILENAME_PATTERN.fullmatch(value) is not None
 
@@ -4485,6 +4523,163 @@ def _mask_tax_identifier_value(value: str) -> str:
     return _mask_tax_identifier(trimmed)
 
 
+def _collect_document_identifier_replacements(value: object) -> dict[str, str]:
+    """Collect bounded raw identifier values before any field is normalized."""
+    if not isinstance(value, dict):
+        return {}
+    replacements: dict[str, str] = {}
+    for field in ("taxpayerIdentifier", "referenceIdentifier"):
+        candidate = value.get(field)
+        if not isinstance(candidate, dict):
+            continue
+        raw_value = candidate.get("value")
+        if type(raw_value) is not str or len(raw_value) > DOCUMENT_MAX_FIELD_CHARACTERS:
+            continue
+        safe_value = _mask_tax_identifier_value(raw_value)
+        for source in {raw_value, raw_value.strip()}:
+            if source and source != safe_value:
+                replacements[source] = safe_value
+    return replacements
+
+
+def _replace_document_identifier_mappings(
+    value: object,
+    replacements: dict[str, str],
+    *,
+    top_level: bool = False,
+) -> object:
+    """Replace known raw identifiers in every native publication text leaf."""
+    if isinstance(value, str):
+        replaced = value
+        for source, safe_value in sorted(
+            replacements.items(), key=lambda item: len(item[0]), reverse=True
+        ):
+            replaced = re.sub(
+                re.escape(source),
+                lambda _match: safe_value,
+                replaced,
+                flags=re.IGNORECASE,
+            )
+        return replaced
+    if isinstance(value, list):
+        return [
+            _replace_document_identifier_mappings(item, replacements)
+            for item in value
+        ]
+    if isinstance(value, dict):
+        return {
+            key: item if top_level and key == "id" else _replace_document_identifier_mappings(item, replacements)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _document_text_values(value: object, *, in_evidence: bool = False):
+    """Yield bounded publication text leaves with their evidence context."""
+    if isinstance(value, str):
+        yield value, in_evidence
+    elif isinstance(value, list):
+        for item in value:
+            yield from _document_text_values(item, in_evidence=in_evidence)
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            if key == "id":
+                continue
+            yield from _document_text_values(
+                item,
+                in_evidence=in_evidence or key == "evidence",
+            )
+
+
+def _legacy_text_contains_unproven_identifier(
+    value: str,
+    *,
+    visible_suffixes: set[str] | frozenset[str] = frozenset(),
+    evidence: bool = False,
+) -> bool:
+    """Detect legacy identifier text without treating ordinary numbers as secrets."""
+    redacted = _redact_tax_text(value)
+    residual = _TAX_CANONICAL_MASK_PATTERN.sub("", redacted)
+    residual = _TAX_MASKED_IDENTIFIER_PATTERN.sub("", residual)
+    safe_spans = [match.span() for match in _TAX_LEGACY_SAFE_NUMBER_PATTERN.finditer(residual)]
+
+    for match in _TAX_LEGACY_IDENTIFIER_TOKEN_PATTERN.finditer(residual):
+        token = match.group(0)
+        if any(character.isalpha() for character in token) and any(character.isdigit() for character in token):
+            return True
+
+    for match in _TAX_LEGACY_NUMERIC_TOKEN_PATTERN.finditer(residual):
+        if any(start <= match.start() and match.end() <= end for start, end in safe_spans):
+            continue
+        prefix = residual[:match.start()]
+        if _TAX_LEGACY_ORDINARY_NUMBER_CONTEXT_PATTERN.search(prefix[-64:]):
+            continue
+        if _TAX_LEGACY_IDENTIFIER_CONTEXT_PATTERN.search(prefix[-64:]):
+            return True
+        # Evidence is published verbatim and may contain a bare legacy
+        # identifier such as ``8642``.  A non-evidence numeric token is only
+        # suspicious when it matches the visible suffix of a masked candidate;
+        # this keeps tax years, page numbers, and ordinary prose available.
+        if evidence or any(
+            suffix and match.group(0) != suffix and match.group(0).endswith(suffix)
+            for suffix in visible_suffixes
+        ):
+            return True
+    return False
+
+
+def _migrate_legacy_document_privacy(
+    original: dict,
+    normalized: dict,
+) -> dict:
+    """Repair only privacy-safe legacy differences; reject uncertain entries."""
+    masked_candidates = []
+    visible_suffixes: set[str] = set()
+    for field in ("taxpayerIdentifier", "referenceIdentifier"):
+        candidate = original.get(field)
+        if not isinstance(candidate, dict):
+            continue
+        raw_value = candidate.get("value")
+        if (
+            type(raw_value) is not str
+            or _TAX_MASKED_IDENTIFIER_INPUT_PATTERN.fullmatch(raw_value.strip()) is None
+        ):
+            continue
+        safe_candidate = normalized.get(field)
+        if not isinstance(safe_candidate, dict):
+            continue
+        masked_candidates.append((field, safe_candidate))
+        safe_value = safe_candidate.get("value")
+        if type(safe_value) is str and re.fullmatch(r"\*{8}[0-9]{2}", safe_value):
+            visible_suffixes.add(safe_value[-2:])
+
+    for field, candidate in masked_candidates:
+        evidence = candidate.get("evidence")
+        snippet = evidence.get("snippet") if isinstance(evidence, dict) else None
+        if type(snippet) is not str or not _legacy_text_contains_unproven_identifier(
+            snippet,
+            visible_suffixes=visible_suffixes,
+            evidence=True,
+        ):
+            continue
+        normalized[field] = {
+            **candidate,
+            "evidence": {
+                **evidence,
+                "snippet": "Evidence withheld for privacy.",
+            },
+        }
+
+    for text, in_evidence in _document_text_values(normalized):
+        if _legacy_text_contains_unproven_identifier(
+            text,
+            visible_suffixes=visible_suffixes,
+            evidence=in_evidence,
+        ):
+            raise _LegacyDocumentPrivacyError("legacy document privacy cannot be established")
+    return normalized
+
+
 def _validate_document_evidence(value: object, *, redact: bool = True) -> dict:
     if not isinstance(value, dict) or set(value) != {"page", "snippet"}:
         raise ValueError("document evidence fields are invalid")
@@ -4554,6 +4749,9 @@ def _validate_document_amounts(value: object) -> list[dict]:
 def _validate_document_publication(value: object, *, normalize: bool) -> dict:
     if not isinstance(value, dict):
         raise ValueError("document publication is not an object")
+    replacements = _collect_document_identifier_replacements(value)
+    if replacements:
+        value = _replace_document_identifier_mappings(value, replacements, top_level=True)
     if set(value) - DOCUMENT_PUBLICATION_KEYS or not DOCUMENT_REQUIRED_PUBLICATION_KEYS.issubset(value):
         raise ValueError("document publication fields are invalid")
 
@@ -4596,7 +4794,7 @@ def _validate_document_publication(value: object, *, normalize: bool) -> dict:
     return normalized
 
 
-def _validate_document_index_entry(value: object) -> dict:
+def _validate_document_index_entry(value: object, *, migrate_legacy: bool = False) -> dict:
     if not isinstance(value, dict) or "_originalFile" not in value:
         raise ValueError("document index entry is invalid")
     if set(value) - DOCUMENT_PUBLICATION_KEYS - {"_originalFile"}:
@@ -4611,8 +4809,10 @@ def _validate_document_index_entry(value: object) -> dict:
     normalized = _validate_document_publication(publication, normalize=True)
     comparable = dict(publication)
     comparable["id"] = normalized["id"]
-    if normalized != comparable:
+    if not migrate_legacy and normalized != comparable:
         raise ValueError("document index entry is not canonical or privacy-safe")
+    if migrate_legacy:
+        normalized = _migrate_legacy_document_privacy(publication, normalized)
     normalized["_originalFile"] = original_file
     return normalized
 
@@ -4653,9 +4853,15 @@ def _load_document_index() -> tuple[list[dict], bytes | None]:
         raise _DocumentIndexError("document index entry limit exceeded")
     identifiers: set[str] = set()
     validated_entries = []
+    migration_required = False
     for entry in decoded:
         try:
-            validated = _validate_document_index_entry(entry)
+            validated = _validate_document_index_entry(entry, migrate_legacy=True)
+        except _LegacyDocumentPrivacyError:
+            # Omit only the uncertain entry. No legacy text is serialized or
+            # returned, while all other valid documents remain available.
+            migration_required = True
+            continue
         except (TypeError, ValueError, UnicodeError, OverflowError, RecursionError) as exc:
             raise _DocumentIndexError("document index entry is invalid") from exc
         identifier = validated["id"]
@@ -4664,7 +4870,13 @@ def _load_document_index() -> tuple[list[dict], bytes | None]:
         identifiers.add(identifier)
         validated_entries.append(validated)
     # Validate the canonical publication form as well as the raw read bound.
-    _serialize_document_index(validated_entries)
+    repaired_body = _serialize_document_index(validated_entries)
+    if migration_required or repaired_body != body:
+        try:
+            _atomic_write_bytes(DOCUMENTS_INDEX_PATH, repaired_body)
+        except (OSError, ValueError) as exc:
+            raise _DocumentIndexError("document index migration failed") from exc
+        body = repaired_body
     return validated_entries, body
 
 

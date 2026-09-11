@@ -3419,6 +3419,75 @@ def test_document_publication_redacts_identifiers_and_hides_internal_fields(tmp_
     ("8642", "********42"),
     ("A7", "********"),
 ])
+def test_document_upload_replaces_known_identifier_across_all_publication_text(
+    tmp_path, monkeypatch, raw_identifier, safe_identifier
+):
+    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(main, "DOCUMENTS_INDEX_PATH", tmp_path / "documents.json")
+    monkeypatch.setattr(main, "DOCUMENTS_DIR", tmp_path / "documents")
+    document_id = "18181818-1818-4181-8181-181818181818"
+    ordinary_date = "31.12.2025"
+    ordinary_amount = "1.234,56 EUR"
+    metadata = tax_document_metadata(
+        document_id,
+        title=f"Assessment {raw_identifier}",
+        documentType=f"tax_assessment {raw_identifier}",
+        issuer=tax_candidate(
+            f"Finanzamt {raw_identifier}",
+            snippet=f"Issuer evidence {raw_identifier}",
+        ),
+        taxpayerIdentifier=tax_candidate(
+            raw_identifier,
+            snippet=f"Taxpayer evidence {raw_identifier}",
+        ),
+        referenceIdentifier=tax_candidate(
+            raw_identifier,
+            snippet=f"Reference evidence {raw_identifier}",
+        ),
+        dates=[{
+            "value": f"{ordinary_date} {raw_identifier}",
+            "evidence": tax_evidence(1, f"Date evidence {raw_identifier}"),
+        }],
+        amounts=[{
+            "value": f"{ordinary_amount} · {raw_identifier}",
+            "label": f"Amount label {raw_identifier}",
+            "evidence": tax_evidence(1, f"Amount evidence {raw_identifier}"),
+        }],
+        warnings=[f"Review {raw_identifier}"],
+    )
+
+    uploaded = client.post(
+        "/documents",
+        headers=AUTH,
+        data={"metadata": json.dumps(metadata)},
+        files={"file": ("return.pdf", b"safe", "application/pdf")},
+    )
+    assert uploaded.status_code == 200
+
+    persisted = (tmp_path / "documents.json").read_text()
+    reloaded, reloaded_body = main._load_document_index()
+    listed = client.get("/documents", headers=AUTH)
+    assert listed.status_code == 200
+    publication = listed.json()[0]
+    serialized_reload = json.dumps(reloaded, ensure_ascii=False)
+
+    assert raw_identifier not in uploaded.text
+    for serialized in (persisted, reloaded_body.decode("utf-8"), serialized_reload, listed.text):
+        assert raw_identifier not in serialized
+        assert safe_identifier in serialized
+    assert publication["title"] == f"Assessment {safe_identifier}"
+    assert publication["issuer"]["value"] == f"Finanzamt {safe_identifier}"
+    assert publication["taxpayerIdentifier"]["value"] == safe_identifier
+    assert publication["referenceIdentifier"]["value"] == safe_identifier
+    assert publication["dates"][0]["value"] == f"{ordinary_date} {safe_identifier}"
+    assert publication["amounts"][0]["value"] == f"{ordinary_amount} · {safe_identifier}"
+
+
+@pytest.mark.parametrize(("raw_identifier", "safe_identifier"), [
+    ("AZ123456", "********56"),
+    ("8642", "********42"),
+    ("A7", "********"),
+])
 def test_document_identifier_evidence_is_redacted_before_index_reload_and_publication(
     tmp_path, monkeypatch, raw_identifier, safe_identifier
 ):
@@ -3482,6 +3551,51 @@ def test_tax_text_keeps_ordinary_date_and_money_text_intact():
     assert main._redact_tax_text("Unlabelled 12/345/67890") == "Unlabelled ********90"
     assert main._redact_tax_text("Unlabelled 123 456 789 01") == "Unlabelled ********01"
     assert main._redact_tax_text("Already masked *90") == "Already masked ********90"
+
+
+@pytest.mark.parametrize("ordinary_text", ["Tax year 2026", "Page 1"])
+def test_legacy_identifier_classifier_keeps_ordinary_numeric_context(ordinary_text):
+    assert not main._legacy_text_contains_unproven_identifier(ordinary_text)
+    assert not main._legacy_text_contains_unproven_identifier(
+        ordinary_text,
+        visible_suffixes={"26"},
+        evidence=True,
+    )
+
+
+def test_document_index_migration_keeps_masked_candidate_with_ordinary_context(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(main, "DOCUMENTS_INDEX_PATH", tmp_path / "documents.json")
+    monkeypatch.setattr(main, "DOCUMENTS_DIR", tmp_path / "documents")
+
+    document_id = "22222222-2222-4222-8222-222222222222"
+    entry = native_tax_document_metadata(document_id)
+    entry["_originalFile"] = "original.pdf"
+    entry["title"] = "Tax year 2026"
+    entry["taxpayerIdentifier"] = tax_candidate("********26", snippet="Page 1")
+    entry["dates"] = [{
+        "value": "31.12.2025",
+        "evidence": tax_evidence(1, "Date 31.12.2025"),
+    }]
+    entry["amounts"] = [{
+        "value": "1.234,56 EUR",
+        "label": "Normal amount",
+        "evidence": tax_evidence(1, "Amount 1.234,56 EUR"),
+    }]
+    main.DOCUMENTS_INDEX_PATH.write_bytes(json.dumps([entry]).encode("utf-8"))
+
+    entries, reloaded_body = main._load_document_index()
+
+    assert [item["id"] for item in entries] == [document_id]
+    assert entries[0]["title"] == "Tax year 2026"
+    assert entries[0]["taxpayerIdentifier"]["evidence"]["snippet"] == "Page 1"
+    assert entries[0]["dates"][0]["value"] == "31.12.2025"
+    assert entries[0]["amounts"][0]["value"] == "1.234,56 EUR"
+    serialized = reloaded_body.decode("utf-8")
+    for raw_identifier in ("AZ123456", "8642", "A7"):
+        assert raw_identifier not in serialized
 
 
 def test_document_publication_redacts_unlabelled_identifiers_across_all_text_fields_and_persistence(
@@ -3572,6 +3686,64 @@ def test_document_publication_remasks_mixed_identifier_tokens(tmp_path, monkeypa
     assert publication["referenceIdentifier"]["value"] == "********01"
     assert raw_identifier not in listed.text
     assert "12345678901" not in listed.text
+
+
+def test_document_index_migrates_legacy_masked_identifier_privacy_without_leak(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(main, "DOCUMENTS_INDEX_PATH", tmp_path / "documents.json")
+    monkeypatch.setattr(main, "DOCUMENTS_DIR", tmp_path / "documents")
+
+    safe_id = "19191919-1919-4191-8191-191919191919"
+    evidence_id = "20202020-2020-4202-8202-202020202020"
+    cross_field_id = "21212121-2121-4212-8212-212121212121"
+
+    safe_entry = native_tax_document_metadata(safe_id)
+    safe_entry["_originalFile"] = "original.pdf"
+
+    evidence_entry = native_tax_document_metadata(evidence_id)
+    evidence_entry["_originalFile"] = "original-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.pdf"
+    evidence_entry["taxpayerIdentifier"] = tax_candidate(
+        "********56", snippet="Legacy evidence AZ123456"
+    )
+
+    cross_field_entry = native_tax_document_metadata(cross_field_id)
+    cross_field_entry["_originalFile"] = "original-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.pdf"
+    cross_field_entry["title"] = "Assessment AZ123456 8642 A7"
+    cross_field_entry["taxpayerIdentifier"] = tax_candidate(
+        "********56", snippet="Already masked"
+    )
+    cross_field_entry["referenceIdentifier"] = tax_candidate(
+        "********42", snippet="Legacy evidence 8642"
+    )
+
+    original = json.dumps(
+        [safe_entry, evidence_entry, cross_field_entry],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    main.DOCUMENTS_INDEX_PATH.write_bytes(original)
+
+    entries, reloaded_body = main._load_document_index()
+    entry_ids = {entry["id"] for entry in entries}
+    assert entry_ids == {safe_id, evidence_id}
+    assert entries[1]["taxpayerIdentifier"]["evidence"]["snippet"] == (
+        "Evidence withheld for privacy."
+    )
+
+    persisted = main.DOCUMENTS_INDEX_PATH.read_bytes()
+    assert persisted == reloaded_body
+    for raw_identifier in ("AZ123456", "8642", "A7"):
+        assert raw_identifier.encode("utf-8") not in persisted
+
+    listed = client.get("/documents", headers=AUTH)
+    assert listed.status_code == 200
+    assert cross_field_id not in listed.text
+    for raw_identifier in ("AZ123456", "8642", "A7"):
+        assert raw_identifier not in listed.text
+    assert evidence_id in listed.text
+    assert safe_id in listed.text
 
 
 def test_document_index_accepts_uppercase_foundation_uuid_spelling(tmp_path, monkeypatch):
