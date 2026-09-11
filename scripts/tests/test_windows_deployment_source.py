@@ -793,6 +793,7 @@ def test_windows_install_requires_exact_locked_python_inventory_and_manifest_evi
     install = read("install.ps1")
     candidate = read("verify-candidate.ps1")
     builder = (ROOT / "scripts" / "build_windows_release.sh").read_text(encoding="utf-8")
+    behavior = read("tests/Deployment.Behavior.Tests.ps1")
 
     assert "function Read-GatewayDependencyLock" in install
     assert "function Normalize-GatewayDependencyName" in install
@@ -800,6 +801,17 @@ def test_windows_install_requires_exact_locked_python_inventory_and_manifest_evi
     assert "function Assert-GatewayWheelhouse" in install
     assert "function Assert-PythonWheelInstallReport" in install
     assert "function Assert-PythonPackagingToolsAbsent" in install
+    assert "function Get-PythonPackagingToolNames" in install
+    assert "function Remove-PythonPackagingTools" in install
+    assert "pip's harmless" in install
+    assert "Remove-PythonPackagingTools -PythonExecutable $PythonExecutable" in install
+    assert install.index("Remove-PythonPackagingTools -PythonExecutable $PythonExecutable") < install.index(
+        "Assert-PythonPackagingToolsAbsent -PythonExecutable $PythonExecutable"
+    )
+    assert "'--no-input', '-y', 'pip', 'setuptools', 'wheel'" not in install
+    assert "packagingToolNativeCalls" in behavior
+    assert "avoiding absent-package warnings" in behavior
+    assert "skips pip when no packaging tools are installed" in behavior
     assert "function New-PythonVirtualEnvironmentAtomic" in install
     assert "'-m', 'venv', '--clear', '--copies'" in install
     assert "--no-index" in install

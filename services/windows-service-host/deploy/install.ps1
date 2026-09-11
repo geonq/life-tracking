@@ -470,6 +470,54 @@ if any(path.name.lower().startswith("pip") for path in scripts.glob("pip*")):
     }
 }
 
+function Get-PythonPackagingToolNames {
+    param([Parameter(Mandatory)][string]$PythonExecutable)
+    # Query the venv metadata before invoking pip. Windows PowerShell 5.1
+    # merges native stderr into the pipeline; with ErrorActionPreference Stop,
+    # pip's harmless "Skipping ... as it is not installed" warning becomes a
+    # terminating RemoteException even when pip exits successfully.
+    $pythonCode = @'
+import importlib.metadata as metadata
+import re
+
+packaging_tools = {"pip", "setuptools", "wheel"}
+installed = set()
+for distribution_count, distribution in enumerate(metadata.distributions(), 1):
+    if distribution_count > 1027:
+        raise SystemExit("Packaging-tool inventory exceeds its bound.")
+    name = distribution.metadata.get("Name") or ""
+    normalized = re.sub(r"[-_.]+", "-", name).lower()
+    if normalized in packaging_tools:
+        installed.add(normalized)
+for name in sorted(installed):
+    print(name)
+'@
+    $previousCode = $env:LIFEOS_DEPLOY_PACKAGING_TOOLS
+    try {
+        $env:LIFEOS_DEPLOY_PACKAGING_TOOLS = $pythonCode
+        $runner = 'import os;exec(os.environ.get(chr(76)+chr(73)+chr(70)+chr(69)+chr(79)+chr(83)+chr(95)+chr(68)+chr(69)+chr(80)+chr(76)+chr(79)+chr(89)+chr(95)+chr(80)+chr(65)+chr(67)+chr(75)+chr(65)+chr(71)+chr(73)+chr(78)+chr(71)+chr(95)+chr(84)+chr(79)+chr(79)+chr(76)+chr(83)))'
+        $result = Invoke-NativeChecked -FilePath $PythonExecutable -ArgumentList ([string[]]@('-B', '-I', '-c', $runner))
+        return @($result.Output | ForEach-Object {
+            $name = ([string]$_).Trim().ToLowerInvariant()
+            if ($name -in @('pip', 'setuptools', 'wheel')) { $name }
+        })
+    } finally {
+        if ($null -eq $previousCode) { Remove-Item Env:LIFEOS_DEPLOY_PACKAGING_TOOLS -ErrorAction SilentlyContinue }
+        else { $env:LIFEOS_DEPLOY_PACKAGING_TOOLS = $previousCode }
+    }
+}
+
+function Remove-PythonPackagingTools {
+    param([Parameter(Mandatory)][string]$PythonExecutable)
+    $installed = @(Get-PythonPackagingToolNames -PythonExecutable $PythonExecutable)
+    if ($installed.Count -eq 0) { return }
+    $arguments = @(
+        '-B', '-I', '-m', 'pip', 'uninstall', '--disable-pip-version-check',
+        '--no-input', '-y'
+    ) + $installed
+    Invoke-NativeChecked -FilePath $PythonExecutable -ArgumentList ([string[]]$arguments) -Quiet | Out-Null
+}
+
 function Assert-PythonWheelInstallReport {
     param(
         [Parameter(Mandatory)][string]$PythonExecutable,
@@ -925,10 +973,7 @@ function Install-GatewayDependencies {
         )) -Quiet | Out-Null
         Assert-PythonWheelInstallReport -PythonExecutable $PythonExecutable -ReportPath $reportPath -WheelhousePath $WheelhousePath -DependencyContract $DependencyContract
         Assert-PythonRuntimeDependencyInventory -PythonExecutable $PythonExecutable -DependencyContract $DependencyContract -Description 'Fresh Python runtime dependency inventory' -AllowPackagingTools | Out-Null
-        Invoke-NativeChecked -FilePath $PythonExecutable -ArgumentList ([string[]]@(
-            '-B', '-I', '-m', 'pip', 'uninstall', '--disable-pip-version-check',
-            '--no-input', '-y', 'pip', 'setuptools', 'wheel'
-        )) -Quiet | Out-Null
+        Remove-PythonPackagingTools -PythonExecutable $PythonExecutable
         Assert-PythonPackagingToolsAbsent -PythonExecutable $PythonExecutable
         $finalInventory = Assert-PythonRuntimeDependencyInventory -PythonExecutable $PythonExecutable -DependencyContract $DependencyContract -Description 'Final Python runtime dependency inventory'
         $venvRoot = Split-Path -Parent (Split-Path -Parent (Get-FullPath $PythonExecutable))

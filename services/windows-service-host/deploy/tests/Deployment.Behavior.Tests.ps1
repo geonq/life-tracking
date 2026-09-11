@@ -36,6 +36,35 @@ function Assert-BehaviorThrowsSafe {
     if ($caught -like "*$ForbiddenText*") { throw "FAIL: token value was not displayed: rejection diagnostic exposed token material: $Message" }
 }
 
+& {
+    # Windows PowerShell promotes native stderr merged by 2>&1 into a
+    # terminating error under ErrorActionPreference Stop. The installer must
+    # therefore query the fresh venv first and uninstall only tools that are
+    # actually present, rather than asking pip to warn about every absent tool.
+    $script:packagingToolNativeCalls = New-Object System.Collections.ArrayList
+    function Invoke-NativeChecked {
+        param([string]$FilePath, [string[]]$ArgumentList, [switch]$Quiet)
+        [void]$script:packagingToolNativeCalls.Add([pscustomobject]@{ FilePath = $FilePath; Arguments = @($ArgumentList) })
+        if ($ArgumentList -contains 'uninstall') {
+            return [pscustomobject]@{ ExitCode = 0; Output = @() }
+        }
+        return [pscustomobject]@{ ExitCode = 0; Output = @('pip', 'setuptools') }
+    }
+    try {
+        Remove-PythonPackagingTools -PythonExecutable 'fixture-python.exe'
+        $uninstallCalls = @($script:packagingToolNativeCalls | Where-Object { $_.Arguments -contains 'uninstall' })
+        Assert-Behavior ($uninstallCalls.Count -eq 1) 'packaging removal invokes pip exactly once when tools are installed.'
+        Assert-Behavior (($uninstallCalls[0].Arguments -join '|') -ceq '-B|-I|-m|pip|uninstall|--disable-pip-version-check|--no-input|-y|pip|setuptools') 'packaging removal passes only the discovered tools, avoiding absent-package warnings.'
+
+        $script:packagingToolNativeCalls = New-Object System.Collections.ArrayList
+        function Get-PythonPackagingToolNames { param([string]$PythonExecutable) return @() }
+        Remove-PythonPackagingTools -PythonExecutable 'fixture-python.exe'
+        Assert-Behavior ($script:packagingToolNativeCalls.Count -eq 0) 'packaging removal skips pip when no packaging tools are installed.'
+    } finally {
+        Remove-Variable -Name packagingToolNativeCalls -Scope Script -ErrorAction SilentlyContinue
+    }
+}
+
 # Isolate the fake CIM command in a child scope; it must never escape into
 # the real preflight listener query after this suite returns.
 & {
