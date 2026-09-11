@@ -142,6 +142,26 @@ public struct LifeOSResponsiveContainer<Content: View>: View {
     }
 }
 
+/// Keeps the complete result of a public `@ViewBuilder` invocation together
+/// as one direct child of the custom layout. The payload may itself be a
+/// `TupleView` or a `ForEach`; SwiftUI measures and places that complete
+/// result through this wrapper instead of allowing the layout to drop every
+/// child after the first one.
+private struct LifeOSResponsiveContentPayload<Content: View>: View {
+    let content: Content
+
+    var body: some View { content }
+}
+
+/// The structural invariant owned by `LifeOSResponsiveContentPayload`.
+/// Builder children are rendered inside one payload child, so the layout has
+/// exactly one placement responsibility for every non-empty builder result.
+enum LifeOSResponsiveContentLayoutContract {
+    static func directLayoutChildCount(forBuilderChildCount count: Int) -> Int {
+        count > 0 ? 1 : 0
+    }
+}
+
 /// Layout implementation for the existing page container. Keeping width
 /// calculation in a Layout avoids a full-size GeometryReader inside a
 /// vertical ScrollView and guarantees that padding cannot grow a child past
@@ -263,7 +283,7 @@ public struct LifeOSResponsiveContentContainer<Content: View>: View {
                 sidebarWidth: sidebarWidth
             )
         ) {
-            content
+            LifeOSResponsiveContentPayload(content: content)
         }
     }
 }

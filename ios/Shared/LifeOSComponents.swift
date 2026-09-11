@@ -1,5 +1,9 @@
 import SwiftUI
 
+#if os(macOS)
+import AppKit
+#endif
+
 // MARK: - Solid surfaces
 
 public enum LifeOSSurfaceLevel: String, CaseIterable, Sendable {
@@ -1138,12 +1142,14 @@ public struct LifeOSStateView: View {
 // MARK: - Canonical sheet surface
 
 /// Pure sheet geometry constants shared by the native presentation and its
-/// regression tests. The macOS layout receives the window proposal from
-/// SwiftUI, so its rendered width and height are bounded at layout time.
+/// regression tests. macOS measures the usable height of the presenting
+/// window and passes that value into the layout; the finite fallback keeps
+/// ideal-size measurement safe before the sheet is attached to a window.
 public enum LifeOSSheetGeometry {
     public static let macStandardWidth: CGFloat = 520
     public static let macMaximumHeightFraction: CGFloat = 0.80
     public static let macSafeHeightInset: CGFloat = 48
+    public static let macFallbackAvailableHeight: CGFloat = 720
 
     public static func macWidth(for availableWidth: CGFloat) -> CGFloat {
         guard availableWidth.isFinite else {
@@ -1152,20 +1158,146 @@ public enum LifeOSSheetGeometry {
         return min(max(0, availableWidth), macStandardWidth)
     }
 
+    public static func macAvailableHeight(for measuredHeight: CGFloat?) -> CGFloat {
+        guard let measuredHeight,
+              measuredHeight.isFinite,
+              measuredHeight > 0 else {
+            return macFallbackAvailableHeight
+        }
+        return measuredHeight
+    }
+
     public static func macMaximumHeight(
         for availableHeight: CGFloat,
         safeInset: CGFloat = macSafeHeightInset
     ) -> CGFloat {
-        guard availableHeight.isFinite else {
-            return availableHeight == .infinity ? .infinity : 0
-        }
-        let safeHeight = max(0, availableHeight - max(0, safeInset))
+        let boundedHeight = macAvailableHeight(for: availableHeight)
+        let boundedInset = safeInset.isFinite ? max(0, safeInset) : macSafeHeightInset
+        let safeHeight = max(0, boundedHeight - boundedInset)
         return safeHeight * macMaximumHeightFraction
     }
 }
 
 #if os(macOS)
+private final class LifeOSSheetWindowHeightView: NSView {
+    var onHeightChange: ((CGFloat) -> Void)?
+
+    private var notificationTokens: [NSObjectProtocol] = []
+    private var lastHeight: CGFloat?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+
+        if window == nil {
+            stopObservingWindows()
+            return
+        }
+
+        startObservingWindows()
+        scheduleRefresh()
+    }
+
+    func scheduleRefresh() {
+        DispatchQueue.main.async { [weak self] in
+            self?.refresh()
+        }
+    }
+
+    func refresh() {
+        guard let measurementWindow = window?.sheetParent ?? window else { return }
+        let measuredHeight = Self.usableHeight(of: measurementWindow)
+        guard measuredHeight.isFinite, measuredHeight > 0 else { return }
+
+        if let lastHeight, abs(lastHeight - measuredHeight) < 0.5 { return }
+        lastHeight = measuredHeight
+        onHeightChange?(measuredHeight)
+    }
+
+    override var intrinsicContentSize: NSSize { .zero }
+
+    deinit {
+        stopObservingWindows()
+    }
+
+    private func startObservingWindows() {
+        guard notificationTokens.isEmpty else { return }
+
+        let center = NotificationCenter.default
+        let names: [Notification.Name] = [
+            NSWindow.didResizeNotification,
+            NSWindow.didEndLiveResizeNotification,
+            NSWindow.didMoveNotification,
+            NSWindow.didBecomeKeyNotification,
+            NSWindow.didBecomeMainNotification,
+        ]
+
+        notificationTokens = names.map { name in
+            center.addObserver(
+                forName: name,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.refresh()
+            }
+        }
+        notificationTokens.append(
+            center.addObserver(
+                forName: NSApplication.didChangeScreenParametersNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.refresh()
+            }
+        )
+    }
+
+    private func stopObservingWindows() {
+        let center = NotificationCenter.default
+        notificationTokens.forEach(center.removeObserver)
+        notificationTokens.removeAll()
+        lastHeight = nil
+    }
+
+    private static func usableHeight(of window: NSWindow) -> CGFloat {
+        let contentLayoutHeight = window.contentLayoutRect.height
+        if contentLayoutHeight.isFinite, contentLayoutHeight > 0 {
+            return contentLayoutHeight
+        }
+
+        let contentHeight = window.contentView?.bounds.height ?? 0
+        if contentHeight.isFinite, contentHeight > 0 {
+            return contentHeight
+        }
+
+        let frameHeight = window.frame.height
+        return frameHeight.isFinite ? frameHeight : 0
+    }
+}
+
+private struct LifeOSSheetWindowHeightReader: NSViewRepresentable {
+    @Binding var availableHeight: CGFloat
+
+    func makeNSView(context: Context) -> LifeOSSheetWindowHeightView {
+        LifeOSSheetWindowHeightView()
+    }
+
+    func updateNSView(_ nsView: LifeOSSheetWindowHeightView, context: Context) {
+        let heightBinding = $availableHeight
+        nsView.onHeightChange = { measuredHeight in
+            let boundedHeight = LifeOSSheetGeometry.macAvailableHeight(for: measuredHeight)
+            guard abs(heightBinding.wrappedValue - boundedHeight) >= 0.5 else { return }
+            heightBinding.wrappedValue = boundedHeight
+        }
+        nsView.scheduleRefresh()
+    }
+
+    static func dismantleNSView(_ nsView: LifeOSSheetWindowHeightView, coordinator: ()) {
+        nsView.onHeightChange = nil
+    }
+}
+
 private struct LifeOSSheetPresentationLayout: Layout {
+    let availableHeight: CGFloat
     let availableHeightInset: CGFloat
 
     func sizeThatFits(
@@ -1182,16 +1314,10 @@ private struct LifeOSSheetPresentationLayout: Layout {
         let footerSize = subviews[2].sizeThatFits(childProposal)
         let naturalHeight = scrollSize.height + dividerSize.height + footerSize.height
         let safeNaturalHeight = naturalHeight.isFinite ? max(0, naturalHeight) : 0
-        let availableBound: CGFloat = {
-            guard let value = proposal.height else { return .infinity }
-            guard value.isFinite else {
-                return value == .infinity ? .infinity : 0
-            }
-            return LifeOSSheetGeometry.macMaximumHeight(
-                for: value,
-                safeInset: availableHeightInset
-            )
-        }()
+        let availableBound = LifeOSSheetGeometry.macMaximumHeight(
+            for: availableHeight,
+            safeInset: availableHeightInset
+        )
         let height = min(safeNaturalHeight, availableBound)
         let naturalWidth = max(scrollSize.width, max(dividerSize.width, footerSize.width))
         let renderedWidth = width ?? LifeOSSheetGeometry.macWidth(for: naturalWidth)
@@ -1244,6 +1370,9 @@ public struct LifeOSSheet<Content: View, Footer: View>: View {
     private let onDismiss: (() -> Void)?
 
     @Environment(\.dismiss) private var dismiss
+#if os(macOS)
+    @State private var macAvailableHeight = LifeOSSheetGeometry.macFallbackAvailableHeight
+#endif
 
     public init(
         title: String,
@@ -1262,7 +1391,8 @@ public struct LifeOSSheet<Content: View, Footer: View>: View {
     public var body: some View {
 #if os(macOS)
         LifeOSSheetPresentationLayout(
-            availableHeightInset: LifeOSSheetGeometry.macSafeHeightInset
+            availableHeightInset: LifeOSSheetGeometry.macSafeHeightInset,
+            availableHeight: macAvailableHeight
         ) {
             scrollContent
             Divider()
@@ -1273,6 +1403,10 @@ public struct LifeOSSheet<Content: View, Footer: View>: View {
             idealWidth: LifeOSSheetGeometry.macStandardWidth,
             maxWidth: LifeOSSheetGeometry.macStandardWidth
         )
+        .background {
+            LifeOSSheetWindowHeightReader(availableHeight: $macAvailableHeight)
+                .frame(width: 0, height: 0)
+        }
 #elseif os(iOS)
         sheetStack
             .presentationDetents([.medium, .large])

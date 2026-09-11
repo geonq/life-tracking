@@ -1215,14 +1215,14 @@ private struct LifeOSButtonBody: View {
                 minWidth: LifeOSTokens.Control.minimumTarget,
                 minHeight: LifeOSTokens.Control.standardHeight
             )
-            .background(
-                fillColor(pressed: pressed, highlighted: isEnabled && hovered),
-                in: RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
-            )
-            .overlay {
+            .background {
+                let shape = RoundedRectangle(
+                    cornerRadius: LifeOSTokens.Radius.control,
+                    style: .continuous
+                )
+                shape.fill(fillColor(pressed: pressed, highlighted: isEnabled && hovered))
                 if isEnabled && variant != .primary && appearance.fillOpacity > 0 {
-                    RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
-                        .fill(LifeOSTokens.primaryText.opacity(appearance.fillOpacity))
+                    shape.fill(LifeOSTokens.primaryText.opacity(appearance.fillOpacity))
                 }
             }
             .overlay {

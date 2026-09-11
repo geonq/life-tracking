@@ -313,31 +313,18 @@ private struct LifeOSSpringPillButtonStyle: ButtonStyle {
             selected: isSelected
         )
         let appearance = LifeOSInteractionAppearance.resolve(for: state)
-        let transientOpacity: Double = if state.isPressed {
-            appearance.fillOpacity
-        } else if state.isHovered {
-            // The selected highlight supplies .06. A separate .04 hover
-            // overlay keeps selected+hover visibly distinct without moving
-            // or scaling the pill.
-            state.isSelected
-                ? appearance.fillOpacity - LifeOSInteractionAppearance.selectedFillOpacity
-                : appearance.fillOpacity
-        } else {
-            0
-        }
 
         return configuration.label
             .background {
-                if state.isSelected {
-                    Capsule()
-                        .fill(LifeOSTokens.primaryText.opacity(LifeOSInteractionAppearance.selectedFillOpacity))
-                        .matchedGeometryEffect(id: highlightID, in: namespace)
-                }
-            }
-            .overlay {
-                if transientOpacity > 0 {
-                    Capsule()
-                        .fill(LifeOSTokens.primaryText.opacity(transientOpacity))
+                if appearance.fillOpacity > 0 {
+                    if state.isSelected {
+                        Capsule()
+                            .fill(LifeOSTokens.primaryText.opacity(appearance.fillOpacity))
+                            .matchedGeometryEffect(id: highlightID, in: namespace)
+                    } else {
+                        Capsule()
+                            .fill(LifeOSTokens.primaryText.opacity(appearance.fillOpacity))
+                    }
                 }
             }
             .overlay {

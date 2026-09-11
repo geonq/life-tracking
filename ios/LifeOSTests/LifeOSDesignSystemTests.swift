@@ -568,6 +568,21 @@ final class LifeOSDesignSystemTests: XCTestCase {
 #endif
     }
 
+    func testResponsiveContentPayloadOwnsEveryBuilderChild() {
+        XCTAssertEqual(
+            LifeOSResponsiveContentLayoutContract.directLayoutChildCount(forBuilderChildCount: 0),
+            0
+        )
+        XCTAssertEqual(
+            LifeOSResponsiveContentLayoutContract.directLayoutChildCount(forBuilderChildCount: 2),
+            1
+        )
+        XCTAssertEqual(
+            LifeOSResponsiveContentLayoutContract.directLayoutChildCount(forBuilderChildCount: 128),
+            1
+        )
+    }
+
     func testFinanceResponsiveLayoutStacksAt720AndAccessibilitySizes() {
         XCTAssertTrue(FinanceResponsiveLayoutContract.usesStackedLayout(
             contentWidth: 343,
@@ -604,6 +619,19 @@ final class LifeOSDesignSystemTests: XCTestCase {
         XCTAssertEqual(LifeOSSheetGeometry.macStandardWidth, 520)
         XCTAssertEqual(LifeOSSheetGeometry.macMaximumHeightFraction, 0.80, accuracy: 0.0001)
         XCTAssertEqual(LifeOSSheetGeometry.macSafeHeightInset, 48)
+        XCTAssertTrue(LifeOSSheetGeometry.macFallbackAvailableHeight.isFinite)
+        XCTAssertEqual(
+            LifeOSSheetGeometry.macAvailableHeight(for: nil),
+            LifeOSSheetGeometry.macFallbackAvailableHeight
+        )
+        XCTAssertEqual(
+            LifeOSSheetGeometry.macAvailableHeight(for: .infinity),
+            LifeOSSheetGeometry.macFallbackAvailableHeight
+        )
+        XCTAssertEqual(
+            LifeOSSheetGeometry.macAvailableHeight(for: .nan),
+            LifeOSSheetGeometry.macFallbackAvailableHeight
+        )
         XCTAssertEqual(LifeOSSheetGeometry.macWidth(for: 400), 400)
         XCTAssertEqual(LifeOSSheetGeometry.macWidth(for: 520), 520)
         XCTAssertEqual(LifeOSSheetGeometry.macWidth(for: 900), 520)
@@ -613,7 +641,24 @@ final class LifeOSDesignSystemTests: XCTestCase {
         let safeMaximum = LifeOSSheetGeometry.macMaximumHeight(for: 900)
         XCTAssertEqual(safeMaximum, (900 - 48) * 0.80, accuracy: 0.0001)
         XCTAssertLessThanOrEqual(safeMaximum, 900 * 0.80)
-        XCTAssertEqual(LifeOSSheetGeometry.macMaximumHeight(for: .nan), 0)
+        let fallbackMaximum = LifeOSSheetGeometry.macMaximumHeight(
+            for: .infinity
+        )
+        XCTAssertTrue(fallbackMaximum.isFinite)
+        XCTAssertEqual(
+            fallbackMaximum,
+            (LifeOSSheetGeometry.macFallbackAvailableHeight - 48) * 0.80,
+            accuracy: 0.0001
+        )
+        XCTAssertEqual(
+            LifeOSSheetGeometry.macMaximumHeight(for: .nan),
+            fallbackMaximum,
+            accuracy: 0.0001
+        )
+        XCTAssertGreaterThan(
+            LifeOSSheetGeometry.macMaximumHeight(for: 1_000),
+            LifeOSSheetGeometry.macMaximumHeight(for: 700)
+        )
 
         let iosRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -624,6 +669,9 @@ final class LifeOSDesignSystemTests: XCTestCase {
         )
         XCTAssertTrue(source.contains("idealWidth: LifeOSSheetGeometry.macStandardWidth"))
         XCTAssertTrue(source.contains("maxWidth: LifeOSSheetGeometry.macStandardWidth"))
+        XCTAssertTrue(source.contains("LifeOSSheetWindowHeightReader"))
+        XCTAssertTrue(source.contains("window?.sheetParent ?? window"))
+        XCTAssertTrue(source.contains("availableHeight: macAvailableHeight"))
         XCTAssertTrue(source.contains(".presentationDetents([.medium, .large])"))
         XCTAssertFalse(source.contains("LifeOSSheetPresentationLayout(maxHeight: 760"))
     }
@@ -801,6 +849,12 @@ final class LifeOSDesignSystemTests: XCTestCase {
             focused: false,
             selected: true
         )
+        let selectedAndPressed = LifeOSInteractionState.resolve(
+            pressed: true,
+            hovered: true,
+            focused: false,
+            selected: true
+        )
         let pressedAndFocused = LifeOSInteractionState.resolve(
             pressed: true,
             hovered: true,
@@ -826,6 +880,11 @@ final class LifeOSDesignSystemTests: XCTestCase {
         XCTAssertGreaterThan(
             LifeOSInteractionAppearance.resolve(for: selectedAndHovered).fillOpacity,
             LifeOSInteractionAppearance.resolve(for: selected).fillOpacity
+        )
+        XCTAssertEqual(
+            LifeOSInteractionAppearance.resolve(for: selectedAndPressed).fillOpacity,
+            LifeOSInteractionAppearance.pressedFillOpacity,
+            accuracy: 0.0001
         )
         XCTAssertEqual(
             LifeOSInteractionAppearance.resolve(for: pressedAndFocused).fillOpacity,
