@@ -151,7 +151,7 @@ def native_tax_document_metadata(document_id):
         taxYear=2025,
         issuer=tax_candidate(),
         taxpayerIdentifier=tax_candidate("********01"),
-        referenceIdentifier=tax_candidate("**34"),
+        referenceIdentifier=tax_candidate("********34"),
         dates=[{
             "value": "2025-01-31",
             "evidence": tax_evidence(1, "Assessment date"),
@@ -593,6 +593,37 @@ def test_forged_alternate_identity_headers_cannot_authorize_protected_routes():
 
 def test_health_probe_remains_available_without_identity_or_bearer():
     assert client.get("/health").status_code == 200
+
+
+def test_protected_routes_require_the_snapshot_host_contract_and_emit_nosniff(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "ALLOWED_HOSTS", frozenset({
+        "machine.example.ts.net",
+        "machine.example.ts.net:8420",
+    }))
+    monkeypatch.setattr(main, "CALENDAR_PATH", tmp_path / "calendar.json")
+
+    for host in ("machine.example.ts.net", "machine.example.ts.net:8420"):
+        response = client.get("/calendar", headers={**AUTH, "Host": host})
+        assert response.status_code == 200
+        assert response.headers["x-content-type-options"] == "nosniff"
+
+    for host in (
+        "testserver",
+        "machine.example.ts.net:8421",
+        "machine.example.ts.net.evil.example",
+        "machine.example.ts.net:8420.evil.example",
+    ):
+        response = client.get("/calendar", headers={**AUTH, "Host": host})
+        assert response.status_code == 400
+        assert response.headers["x-content-type-options"] == "nosniff"
+
+    duplicate_host = client.get(
+        "/calendar",
+        headers=[*AUTH.items(), ("Host", "machine.example.ts.net:8420"),
+                 ("Host", "machine.example.ts.net:8420")],
+    )
+    assert duplicate_host.status_code == 400
+    assert duplicate_host.headers["x-content-type-options"] == "nosniff"
 
 
 def test_browser_origin_policy_comes_from_the_enable_banking_redirect_origin(monkeypatch):
@@ -1109,6 +1140,59 @@ def test_calendar_requires_every_required_item_field(field):
     assert rejected.value.status_code == 400
 
 
+@pytest.mark.parametrize("overrides", [
+    {"updatedAt": "2026-09-11T12:05:01Z"},
+    {"createdAt": "2026-09-07T09:00:00Z", "updatedAt": "2026-09-07T08:00:00Z"},
+    {"deletedAt": "2026-09-07T07:59:59Z"},
+    {"deletedAt": "2026-09-07T08:00:01Z"},
+])
+def test_calendar_rejects_untrusted_clock_values(overrides):
+    item = calendar_item(**overrides)
+    with pytest.raises(main.HTTPException) as rejected:
+        main._parse_calendar_document(
+            json.dumps({"schemaVersion": 1, "items": [item]}).encode(),
+            now=datetime(2026, 9, 11, 12, 0, tzinfo=timezone.utc),
+        )
+    assert rejected.value.status_code == 400
+
+
+def test_calendar_allows_future_event_schedule_when_mutation_clock_is_bounded():
+    item = calendar_item(
+        start="2099-01-01T08:00:00Z",
+        end="2099-01-01T09:00:00Z",
+    )
+    body = {"schemaVersion": 1, "items": [item]}
+    assert main._parse_calendar_document(
+        json.dumps(body).encode(),
+        now=datetime(2026, 9, 11, 12, 0, tzinfo=timezone.utc),
+    ) == body
+
+
+@pytest.mark.parametrize("field", ["createdAt", "updatedAt", "deletedAt"])
+@pytest.mark.parametrize("offset,accepted", [
+    (main.CALENDAR_MAX_CLOCK_SKEW, True),
+    (main.CALENDAR_MAX_CLOCK_SKEW + timedelta(microseconds=1), False),
+])
+def test_calendar_clock_skew_boundary_is_exact(field, offset, accepted):
+    now = datetime(2026, 9, 11, 12, 0, tzinfo=timezone.utc)
+    boundary = (now + offset).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    item = calendar_item()
+    if field == "createdAt":
+        item.update(createdAt=boundary, updatedAt=boundary)
+    elif field == "updatedAt":
+        item["updatedAt"] = boundary
+    else:
+        item.update(updatedAt=boundary, deletedAt=boundary)
+    body = {"schemaVersion": 1, "items": [item]}
+
+    if accepted:
+        assert main._parse_calendar_document(json.dumps(body).encode(), now=now) == body
+    else:
+        with pytest.raises(main.HTTPException) as rejected:
+            main._parse_calendar_document(json.dumps(body).encode(), now=now)
+        assert rejected.value.status_code == 400
+
+
 def test_calendar_enforces_item_count_without_dropping_existing_data(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "CALENDAR_PATH", tmp_path / "calendar.json")
     monkeypatch.setattr(main, "CALENDAR_MAX_ITEMS", 2)
@@ -1245,6 +1329,33 @@ def test_calendar_icon_wire_contract_and_legacy_optional_hash():
             main._parse_calendar_document(json.dumps(invalid).encode())
         assert rejected.value.status_code == 400
 
+    valid_jpeg = base64.b64decode(
+        "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAABAAEDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDwqiiiv3M/HD//2Q=="
+    )
+    jpeg_document = {"schemaVersion": 1, "items": [calendar_item(iconAsset={
+        "format": "jpeg", "bytes": base64.b64encode(valid_jpeg).decode()
+    })]}
+    assert main._parse_calendar_document(json.dumps(jpeg_document).encode()) == jpeg_document
+
+    # ImageIO-style sequential JPEGs may use a single non-interleaved scan
+    # while retaining a 2x2 SOF sampling factor. The gateway must accept this
+    # valid baseline form without invoking an unbounded decoder.
+    imageio_style_jpeg = base64.b64decode(
+        "/9j/4AAQSkZJRgABAQEAAQABAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/wAALCAATABEBASIA/8QAFgABAQEAAAAAAAAAAAAAAAAAAAgJ/8QAHRAAAQMFAQAAAAAAAAAAAAAAABhUogEDBRVkkf/aAAgBAQAAPwCz1A9sgoHtkFA9sjNFQNX0goGr6QUDV9IhfeZZ/d9G8yz+76N5ln930//Z"
+    )
+    imageio_document = {"schemaVersion": 1, "items": [calendar_item(iconAsset={
+        "format": "jpeg", "bytes": base64.b64encode(imageio_style_jpeg).decode()
+    })]}
+    assert main._parse_calendar_document(json.dumps(imageio_document).encode()) == imageio_document
+
+    marker_only = b"\xff\xd8\xff\xc0\x00\x11\x08\x00\x01\x00\x01\x01\x01\x11\x00\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00\x00\xff\xd9"
+    invalid = {"schemaVersion": 1, "items": [calendar_item(iconAsset={
+        "format": "jpeg", "bytes": base64.b64encode(marker_only).decode()
+    })]}
+    with pytest.raises(main.HTTPException) as rejected:
+        main._parse_calendar_document(json.dumps(invalid).encode())
+    assert rejected.value.status_code == 400
+
     # The production validator explicitly claims PNG chunk integrity. Flip
     # the IDAT CRC while retaining the otherwise valid, bounded image.
     tampered = bytearray(raw)
@@ -1284,6 +1395,14 @@ def test_websocket_requires_identity():
 def test_websocket_accepts_trusted_serve_identity():
     with client.websocket_connect("/ws", headers=AUTH) as websocket:
         websocket.close()
+
+
+def test_websocket_requires_the_snapshot_host_contract(monkeypatch):
+    monkeypatch.setattr(main, "ALLOWED_HOSTS", frozenset({"machine.example.ts.net:8420"}))
+    with pytest.raises(WebSocketDisconnect) as rejected:
+        with client.websocket_connect("/ws", headers={**AUTH, "Host": "testserver"}):
+            pass
+    assert rejected.value.code == 4403
 
 
 def test_websocket_is_push_only_and_rejects_oversized_client_messages():
@@ -3281,6 +3400,128 @@ def test_document_publication_redacts_identifiers_and_hides_internal_fields(tmp_
     assert "pages" not in publication
     assert publication["taxpayerIdentifier"]["value"] == "********01"
     assert "12345678901" not in listed.text
+
+
+@pytest.mark.parametrize(("raw", "expected"), [
+    ("*90", "********90"),
+    ("**90", "********90"),
+    ("***90", "********90"),
+    ("12345678901", "********01"),
+    ("12 345 678 901", "********01"),
+    ("12345678901*", "********01"),
+    ("*2345678901", "********01"),
+    ("12345*78901", "********01"),
+    ("identifier-without-digits", "********"),
+])
+def test_tax_identifier_mask_contract_is_canonical(raw, expected):
+    assert main._mask_tax_identifier_value(raw) == expected
+
+
+def test_tax_text_keeps_ordinary_date_and_money_text_intact():
+    ordinary = "Invoice date 31.12.2025; amount 1.234,56 EUR; short code 1234567890"
+    assert main._redact_tax_text(ordinary) == ordinary
+    assert main._redact_tax_text("Unlabelled 12345678901") == "Unlabelled ********01"
+    assert main._redact_tax_text("Unlabelled 12 345 678 901") == "Unlabelled ********01"
+
+
+def test_document_publication_redacts_unlabelled_identifiers_across_all_text_fields_and_persistence(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(main, "DOCUMENTS_INDEX_PATH", tmp_path / "documents.json")
+    monkeypatch.setattr(main, "DOCUMENTS_DIR", tmp_path / "documents")
+    document_id = "16161616-1616-4161-8161-161616161616"
+    raw = "12345678901"
+    grouped = "12 345 678 901"
+    mixed = "12345*78901"
+    metadata = tax_document_metadata(
+        document_id,
+        title=f"Assessment {raw}",
+        documentType=f"tax_assessment {grouped}",
+        issuer=tax_candidate(f"Finanzamt {mixed}", snippet=f"Issuer {raw}"),
+        taxpayerIdentifier=tax_candidate(raw, snippet=f"Taxpayer {grouped}"),
+        referenceIdentifier=tax_candidate("*90", snippet=f"Reference {mixed}"),
+        dates=[{
+            "value": f"31.12.2025 ({raw})",
+            "evidence": tax_evidence(1, f"Date {grouped}"),
+        }],
+        amounts=[{
+            "value": f"1.234,56 EUR · {raw}",
+            "label": f"Amount {mixed}",
+            "evidence": tax_evidence(1, f"Amount 1.234,56 EUR {grouped}"),
+        }],
+        warnings=[f"Review {raw} and {grouped}"],
+    )
+
+    uploaded = client.post(
+        "/documents",
+        headers=AUTH,
+        data={"metadata": json.dumps(metadata)},
+        files={"file": ("return.pdf", b"safe", "application/pdf")},
+    )
+    assert uploaded.status_code == 200
+
+    listed = client.get("/documents", headers=AUTH)
+    assert listed.status_code == 200
+    publication = listed.json()[0]
+    persisted = (tmp_path / "documents.json").read_text()
+    for text in (listed.text, persisted):
+        for leaked in (raw, grouped, mixed):
+            assert leaked not in text
+        assert '"*90"' not in text
+    assert "31.12.2025" in listed.text
+    assert "1.234,56 EUR" in listed.text
+    assert publication["title"] == "Assessment ********01"
+    assert publication["documentType"] == "tax_assessment ********01"
+    assert publication["issuer"]["value"] == "Finanzamt ********01"
+    assert publication["issuer"]["evidence"]["snippet"] == "Issuer ********01"
+    assert publication["taxpayerIdentifier"]["value"] == "********01"
+    assert publication["taxpayerIdentifier"]["evidence"]["snippet"] == "Taxpayer ********01"
+    assert publication["referenceIdentifier"]["value"] == "********90"
+    assert publication["referenceIdentifier"]["evidence"]["snippet"] == "Reference ********01"
+    assert publication["dates"][0]["value"] == "31.12.2025 (********01)"
+    assert publication["dates"][0]["evidence"]["snippet"] == "Date ********01"
+    assert publication["amounts"][0]["value"] == "1.234,56 EUR · ********01"
+    assert publication["amounts"][0]["label"] == "Amount ********01"
+    assert publication["amounts"][0]["evidence"]["snippet"] == "Amount 1.234,56 EUR ********01"
+    assert publication["warnings"] == ["Review ********01 and ********01"]
+
+
+@pytest.mark.parametrize("raw_identifier", ["12345678901*", "*2345678901", "12345*78901"])
+def test_document_publication_remasks_mixed_identifier_tokens(tmp_path, monkeypatch, raw_identifier):
+    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(main, "DOCUMENTS_INDEX_PATH", tmp_path / "documents.json")
+    monkeypatch.setattr(main, "DOCUMENTS_DIR", tmp_path / "documents")
+    document_id = "15151515-1515-4151-8151-151515151515"
+    metadata = native_tax_document_metadata(document_id)
+    metadata["taxpayerIdentifier"] = tax_candidate(raw_identifier)
+    metadata["referenceIdentifier"] = tax_candidate(raw_identifier)
+
+    uploaded = client.post(
+        "/documents",
+        headers=AUTH,
+        data={"metadata": json.dumps(metadata)},
+        files={"file": ("return.pdf", b"safe", "application/pdf")},
+    )
+    assert uploaded.status_code == 200
+    listed = client.get("/documents", headers=AUTH)
+    assert listed.status_code == 200
+    publication = listed.json()[0]
+    assert publication["taxpayerIdentifier"]["value"] == "********01"
+    assert publication["referenceIdentifier"]["value"] == "********01"
+    assert raw_identifier not in listed.text
+    assert "12345678901" not in listed.text
+
+
+def test_document_index_accepts_uppercase_foundation_uuid_spelling(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DOCUMENTS_INDEX_PATH", tmp_path / "documents.json")
+    entry = native_tax_document_metadata("abcdefab-cdef-4abc-8def-abcdefabcdef")
+    entry["id"] = entry["id"].upper()
+    entry["_originalFile"] = "original.pdf"
+    main.DOCUMENTS_INDEX_PATH.write_bytes(json.dumps([entry]).encode())
+
+    entries, _body = main._load_document_index()
+    assert entries[0]["id"] == "abcdefab-cdef-4abc-8def-abcdefabcdef"
 
 
 @pytest.mark.parametrize("unsafe_field", [

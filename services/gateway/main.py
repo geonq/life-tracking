@@ -109,6 +109,7 @@ def _required_tailscale_login() -> str:
 
 TAILSCALE_EDGE_CAPABILITY_HEADER = b"x-lifeos-trusted-edge"
 TAILSCALE_EDGE_TOKEN_ENV = "LIFEOS_TAILSCALE_EDGE_TOKEN"
+LIFEOS_ALLOWED_HOSTS_ENV = "LIFEOS_ALLOWED_HOSTS"
 TAILSCALE_EDGE_TOKEN_MIN_LENGTH = 32
 TAILSCALE_EDGE_TOKEN_MAX_LENGTH = 256
 
@@ -193,6 +194,89 @@ def _scope_header_values(scope, name: str) -> list[bytes]:
         and isinstance(value, bytes)
         and header.lower() == wanted
     ]
+
+
+_HOST_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+
+
+def _canonical_host_header(value: object) -> str | None:
+    """Canonicalize one HTTP Host value without accepting ambiguous syntax."""
+    if not isinstance(value, str) or not value or len(value) > 512 or value != value.strip():
+        return None
+    if any(ord(char) < 0x21 or ord(char) == 0x7F for char in value) or any(
+        char in ",/\\?#@" for char in value
+    ):
+        return None
+    try:
+        parsed = urlsplit(f"//{value}")
+        port = parsed.port
+    except (TypeError, ValueError):
+        return None
+    hostname = parsed.hostname
+    if (
+        not hostname
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+        or parsed.username is not None
+        or parsed.password is not None
+        or hostname.endswith(".")
+    ):
+        return None
+    try:
+        hostname = hostname.encode("idna").decode("ascii").casefold()
+    except UnicodeError:
+        return None
+    if not all(_HOST_LABEL_PATTERN.fullmatch(label) for label in hostname.split(".")):
+        return None
+    if port is None:
+        return hostname
+    if not 1 <= port <= 65535:
+        return None
+    return f"{hostname}:{port}"
+
+
+def _configured_allowed_hosts() -> frozenset[str]:
+    """Read the launcher-owned exact Host contract.
+
+    A missing contract leaves the app usable by the synthetic TestClient host
+    used by the local unit suite only; the reviewed Windows launcher always
+    installs a single hostname:Serve-port value before importing this module.
+    A real loopback listener with no contract therefore rejects every Host.
+    """
+    raw = os.environ.get(LIFEOS_ALLOWED_HOSTS_ENV)
+    if raw is None:
+        return frozenset()
+    values = raw.split(",")
+    if not values or any(not value for value in values):
+        raise RuntimeError(f"{LIFEOS_ALLOWED_HOSTS_ENV} is invalid")
+    canonical = [_canonical_host_header(value) for value in values]
+    if any(value is None for value in canonical) or len(set(canonical)) != len(canonical):
+        raise RuntimeError(f"{LIFEOS_ALLOWED_HOSTS_ENV} is invalid")
+    return frozenset(canonical)
+
+
+def _request_has_allowed_host(scope) -> bool:
+    values = _scope_header_values(scope, "host")
+    if len(values) != 1:
+        return False
+    try:
+        raw_value = values[0].decode("ascii")
+    except UnicodeDecodeError:
+        return False
+    canonical = _canonical_host_header(raw_value)
+    if canonical is None:
+        return False
+    if ALLOWED_HOSTS:
+        return canonical in ALLOWED_HOSTS
+    # Starlette's TestClient uses this non-network synthetic server when the
+    # deployment contract is intentionally absent. No real uvicorn listener
+    # can have this server tuple, so this compatibility branch cannot widen a
+    # deployed route.
+    server = scope.get("server")
+    return canonical == "testserver" and (
+        server == ("testserver", 80) or server == ["testserver", 80]
+    )
 
 
 def _canonical_browser_origin(value: str) -> str | None:
@@ -413,6 +497,7 @@ CLAUDE_INGEST_SECRET_FILENAME = "claude-ingest.secret"
 
 ALLOWED_TAILSCALE_LOGIN = _required_tailscale_login()
 LIFEOS_TAILSCALE_EDGE_TOKEN = _configured_tailscale_edge_token()
+ALLOWED_HOSTS = _configured_allowed_hosts()
 
 # Upstream configuration for read-only data endpoints. Finance is deliberately
 # absent: `/finance/summary` is owned by the direct Enable Banking adapter
@@ -531,25 +616,53 @@ DOCUMENT_PUBLICATION_KEYS = frozenset({
 DOCUMENT_REQUIRED_PUBLICATION_KEYS = DOCUMENT_PUBLICATION_KEYS - {"taxYear"}
 DOCUMENT_CONFIDENCE_VALUES = frozenset({"low", "medium", "high"})
 
-_TAX_GERMAN_IDENTIFIER_PATTERN = re.compile(
-    r"(?i)\b(?:steuerliche[ \t]+(?:identifikationsnummer|id)|"
+_TAX_GERMAN_LABEL = (
+    r"(?:steuerliche[ \t]+(?:identifikationsnummer|id)|"
     r"steueridentifikationsnummer|identifikationsnummer|"
     r"steuer[ \t]*[-–—]?[ \t]*id(?:[ \t]*[-–—.]?[ \t]*nr\.?)?|"
     r"id[ \t]*[-–—.]?[ \t]*nr\.?|ident[ \t]*[-–—.]?[ \t]*nr\.?|"
     r"tax[ \t]+identification[ \t]+number|tax[ \t]+id(?:entifier)?|"
-    r"taxpayer[ \t]+id(?:entifier)?|tin)(?=[ \t]*[:#-]?[ \t]*[0-9])"
-    r"[ \t]*[:#-]?[ \t]*([0-9](?:[ \t]?[0-9]){10})(?![0-9])"
+    r"taxpayer[ \t]+id(?:entifier)?|tin)"
+)
+_TAX_GENERIC_LABEL = (
+    _TAX_GERMAN_LABEL[:-1]
+    + r"|steuer[- ]?nummer|aktenzeichen|reference(?:[ \t]+identifier)?|identifier|id)"
+)
+
+# Values are deliberately bounded and made from identifier-like characters.
+# The generic labelled branch requires a digit, which prevents prose such as
+# ``ID is ...`` from being swallowed.  The two grouped branches cover the
+# common German 11-digit rendering and mixed-mask variants without a nested
+# unbounded quantifier.
+_TAX_IDENTIFIER_VALUE = (
+    r"(?:[0-9*]{2}(?:[ \t]{1,3}[0-9*]{3}){3}|"
+    r"[0-9*]{11,32}|\*+[0-9]{2,30}|"
+    r"(?:AZ|AKZ|REF|ID)[ \t]+[0-9A-Z*][0-9A-Z*./-]{0,30}|"
+    r"(?=[0-9A-Z*./-]{0,30}[0-9])[0-9A-Z*][0-9A-Z*./-]{2,30})"
+)
+
+_TAX_GERMAN_IDENTIFIER_PATTERN = re.compile(
+    rf"(?i)\b{_TAX_GERMAN_LABEL}\b[ \t]*[:#-]?[ \t]*"
+    rf"(?P<value>{_TAX_IDENTIFIER_VALUE})(?![0-9A-Z*./-])"
 )
 _TAX_IDENTIFIER_PATTERN = re.compile(
-    r"(?i)\b(?:steuerliche[ \t]+(?:identifikationsnummer|id)|"
-    r"steueridentifikationsnummer|identifikationsnummer|"
-    r"steuer[ \t]*[-–—]?[ \t]*id(?:[ \t]*[-–—.]?[ \t]*nr\.?)?|"
-    r"id[ \t]*[-–—.]?[ \t]*nr\.?|ident[ \t]*[-–—.]?[ \t]*nr\.?|"
-    r"tax[ \t]+identification[ \t]+number|tax[ \t]+id(?:entifier)?|"
-    r"taxpayer[ \t]+id(?:entifier)?|tin|steuer[- ]?nummer|aktenzeichen|"
-    r"reference(?:[ \t]+identifier)?|identifier|id)\b[ \t]*[:#-]?[ \t]*"
-    r"(\*+[0-9]{2}|(?:AZ|AKZ|REF|ID)[ \t]+[0-9A-Z][0-9A-Z./-]{2,30}|"
-    r"[0-9A-Z][0-9A-Z./-]{2,30})(?![0-9A-Z./-])"
+    rf"(?i)\b{_TAX_GENERIC_LABEL}\b[ \t]*[:#-]?[ \t]*"
+    rf"(?P<value>{_TAX_IDENTIFIER_VALUE})(?![0-9A-Z*./-])"
+)
+
+# A bare German tax identifier is exactly eleven decimal digits.  The mixed
+# form is bounded at 32 characters so an attacker cannot turn redaction into
+# a backtracking scan, and the replacement callback still requires exactly
+# eleven digits before changing the token.  A separate grouped form avoids
+# treating ordinary short numbers as identifiers.
+_TAX_BARE_IDENTIFIER_PATTERN = re.compile(
+    r"(?<![0-9])(?P<value>[0-9*]{11,32})(?![0-9])"
+)
+_TAX_GROUPED_IDENTIFIER_PATTERN = re.compile(
+    r"(?<![0-9])(?P<value>\*?[0-9*]{2}(?:[ \t]{1,3}[0-9*]{3}){3}\*?)(?![0-9])"
+)
+_TAX_MASKED_IDENTIFIER_PATTERN = re.compile(
+    r"(?<![0-9*])\*{1,32}(?P<suffix>[0-9]{2})(?![0-9])"
 )
 
 # Sensitive keys that must not appear in the usage payload
@@ -602,20 +715,33 @@ async def protected_storage_capacity_error(
 async def require_tailscale_identity(request: Request, call_next):
     path = request.scope.get("path")
     if path != "/health":
+        if not _request_has_allowed_host(request.scope):
+            return JSONResponse(
+                {"detail": "Invalid or missing Host"},
+                status_code=400,
+                headers={"X-Content-Type-Options": "nosniff"},
+            )
         if not _request_has_allowed_tailscale_identity(request.scope):
             response = JSONResponse(
                 {"detail": "Invalid or missing Tailscale identity"},
                 status_code=403,
+                headers={"X-Content-Type-Options": "nosniff"},
             )
             if path in {"/usage/claude-ingest", "/usage/claude-ingest/"}:
                 response.headers["Cache-Control"] = "no-store"
             return response
         if _is_browser_mutation_scope(request.scope) and not _request_has_allowed_browser_origin(request.scope):
-            return JSONResponse({"detail": "Untrusted browser origin"}, status_code=403)
+            return JSONResponse(
+                {"detail": "Untrusted browser origin"},
+                status_code=403,
+                headers={"X-Content-Type-Options": "nosniff"},
+            )
         transport_error = _document_transport_error(request.scope)
         if transport_error is not None:
+            transport_error.headers["X-Content-Type-Options"] = "nosniff"
             return transport_error
     response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
     if path in {"/usage/claude-ingest", "/usage/claude-ingest/"}:
         response.headers["Cache-Control"] = "no-store"
     return response
@@ -1930,6 +2056,9 @@ async def get_finance_callback(request: Request) -> Response:
 
 @app.websocket("/ws")
 async def ws_changes(websocket: WebSocket) -> None:
+    if not _request_has_allowed_host(websocket.scope):
+        await websocket.close(code=4403)
+        return
     if not _request_has_allowed_tailscale_identity(websocket.scope):
         await websocket.close(code=4403)
         return
@@ -2848,6 +2977,13 @@ def _calendar_timestamp(value: object) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+CALENDAR_MAX_CLOCK_SKEW = timedelta(minutes=5)
+
+
+def _calendar_now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 CALENDAR_ICON_MAX_BYTES = 256 * 1024
 CALENDAR_ICON_MAX_DIMENSION = 2_048
 CALENDAR_ICON_MAX_PIXELS = 4_000_000
@@ -3017,13 +3153,146 @@ def _validate_png_structure(raw: bytes) -> bool:
 
 
 def _validate_jpeg_structure(raw: bytes) -> bool:
+    """Validate one bounded baseline JPEG without invoking a decoder.
+
+    ImageIO rejects marker-only fakes, so checking SOI/SOF/SOS/EOI is not a
+    sufficient publication boundary. This parser validates the quantization
+    and Huffman tables and consumes every baseline Huffman block, including
+    stuffed bytes, restart intervals, and sequential multi-scan images. It
+    deliberately rejects progressive, arithmetic, and abbreviated streams.
+    """
     if len(raw) < 4 or raw[:2] != b"\xff\xd8":
         return False
+
+    def parse_huffman_table(segment: bytes, offset: int):
+        if offset + 16 > len(segment):
+            return None
+        counts = segment[offset:offset + 16]
+        symbol_count = sum(counts)
+        symbols_start = offset + 16
+        symbols_end = symbols_start + symbol_count
+        if not 1 <= symbol_count <= 162 or symbols_end > len(segment):
+            return None
+        symbols = segment[symbols_start:symbols_end]
+        table: dict[tuple[int, int], int] = {}
+        code = 0
+        symbol_offset = 0
+        for bit_length, count in enumerate(counts, start=1):
+            if code + count > (1 << bit_length):
+                return None
+            for _ in range(count):
+                table[(bit_length, code)] = symbols[symbol_offset]
+                symbol_offset += 1
+                code += 1
+            code <<= 1
+        return table, symbols_end
+
+    def consume_scan(
+        entropy_chunks: list[bytes],
+        restart_markers: list[int],
+        total_units: int,
+        scan_blocks: list[tuple[dict[tuple[int, int], int], dict[tuple[int, int], int]]],
+        restart_interval: int,
+    ) -> bool:
+        if total_units <= 0 or not scan_blocks:
+            return False
+        if restart_interval:
+            expected_chunks = (total_units + restart_interval - 1) // restart_interval
+            if len(entropy_chunks) != expected_chunks or len(restart_markers) != expected_chunks - 1:
+                return False
+            if any(marker != 0xD0 + (index % 8) for index, marker in enumerate(restart_markers)):
+                return False
+            unit_counts = [
+                min(restart_interval, total_units - index * restart_interval)
+                for index in range(expected_chunks)
+            ]
+        else:
+            if restart_markers or len(entropy_chunks) != 1:
+                return False
+            unit_counts = [total_units]
+
+        for chunk, unit_count in zip(entropy_chunks, unit_counts):
+            if not chunk:
+                return False
+            bit_offset = 0
+
+            def read_bits(count: int) -> int | None:
+                nonlocal bit_offset
+                if count < 0 or bit_offset + count > len(chunk) * 8:
+                    return None
+                result = 0
+                for _ in range(count):
+                    byte = chunk[bit_offset // 8]
+                    result = (result << 1) | ((byte >> (7 - bit_offset % 8)) & 1)
+                    bit_offset += 1
+                return result
+
+            def read_huffman(table: dict[tuple[int, int], int]) -> int | None:
+                code = 0
+                for bit_length in range(1, 17):
+                    bit = read_bits(1)
+                    if bit is None:
+                        return None
+                    code = (code << 1) | bit
+                    symbol = table.get((bit_length, code))
+                    if symbol is not None:
+                        return symbol
+                return None
+
+            def consume_block(
+                dc_table: dict[tuple[int, int], int],
+                ac_table: dict[tuple[int, int], int],
+            ) -> bool:
+                dc_size = read_huffman(dc_table)
+                if dc_size is None or dc_size > 11 or read_bits(dc_size) is None:
+                    return False
+                coefficient = 1
+                while coefficient < 64:
+                    symbol = read_huffman(ac_table)
+                    if symbol is None:
+                        return False
+                    if symbol == 0:
+                        break
+                    if symbol == 0xF0:
+                        if coefficient + 16 > 64:
+                            return False
+                        coefficient += 16
+                        continue
+                    run = symbol >> 4
+                    ac_size = symbol & 0x0F
+                    if ac_size == 0 or ac_size > 10 or coefficient + run >= 64:
+                        return False
+                    coefficient += run
+                    if read_bits(ac_size) is None:
+                        return False
+                    coefficient += 1
+                return True
+
+            for _ in range(unit_count):
+                for dc_table, ac_table in scan_blocks:
+                    if not consume_block(dc_table, ac_table):
+                        return False
+            remaining = len(chunk) * 8 - bit_offset
+            if remaining < 0 or remaining > 7:
+                return False
+            if remaining:
+                padding_mask = (1 << remaining) - 1
+                if chunk[-1] & padding_mask != padding_mask:
+                    return False
+        return True
+
     position = 2
-    frame_count = 0
-    saw_scan = False
-    saw_entropy = False
-    sof_markers = {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
+    quantization_tables: dict[int, bytes] = {}
+    huffman_tables: dict[tuple[int, int], dict[tuple[int, int], int]] = {}
+    frame: dict | None = None
+    seen_components: set[int] = set()
+    scan_count = 0
+    restart_interval = 0
+    sof_markers = {
+        0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+        0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF,
+    }
+
     while position < len(raw):
         if raw[position] != 0xFF:
             return False
@@ -3033,12 +3302,16 @@ def _validate_jpeg_structure(raw: bytes) -> bool:
             return False
         marker = raw[position]
         position += 1
+
         if marker == 0xD9:
-            return frame_count == 1 and saw_scan and saw_entropy and position == len(raw)
-        if marker in {0xD8, *range(0xD0, 0xD8)} or marker == 0x00:
+            return (
+                frame is not None
+                and scan_count > 0
+                and seen_components == frame["component_ids"]
+                and position == len(raw)
+            )
+        if marker in {0xD8, *range(0xD0, 0xD8), 0x00, 0x01}:
             return False
-        if marker == 0x01:
-            continue
         if position + 2 > len(raw):
             return False
         segment_length = int.from_bytes(raw[position:position + 2], "big")
@@ -3048,51 +3321,196 @@ def _validate_jpeg_structure(raw: bytes) -> bool:
         position += segment_length
 
         if marker in sof_markers:
-            if frame_count or len(segment) < 6:
+            if marker != 0xC0 or frame is not None or len(segment) < 6:
                 return False
             precision = segment[0]
             height = int.from_bytes(segment[1:3], "big")
             width = int.from_bytes(segment[3:5], "big")
-            components = segment[5]
+            component_count = segment[5]
             if (
-                precision == 0 or width <= 0 or height <= 0
+                precision != 8 or width <= 0 or height <= 0
                 or width > CALENDAR_ICON_MAX_DIMENSION
                 or height > CALENDAR_ICON_MAX_DIMENSION
                 or width * height > CALENDAR_ICON_MAX_PIXELS
-                or not 1 <= components <= 4
-                or len(segment) != 6 + 3 * components
+                or not 1 <= component_count <= 4
+                or len(segment) != 6 + 3 * component_count
             ):
                 return False
-            frame_count = 1
-        elif marker == 0xDA:
-            if frame_count != 1 or len(segment) < 4:
+            components = []
+            component_ids: set[int] = set()
+            offset = 6
+            for _ in range(component_count):
+                component_id = segment[offset]
+                sampling = segment[offset + 1]
+                quantization_id = segment[offset + 2]
+                horizontal = sampling >> 4
+                vertical = sampling & 0x0F
+                if (
+                    component_id in component_ids
+                    or not 1 <= horizontal <= 4
+                    or not 1 <= vertical <= 4
+                ):
+                    return False
+                component_ids.add(component_id)
+                components.append((component_id, horizontal, vertical, quantization_id))
+                offset += 3
+            frame = {
+                "width": width,
+                "height": height,
+                "components": components,
+                "component_ids": component_ids,
+            }
+            continue
+
+        if marker == 0xDB:
+            offset = 0
+            while offset < len(segment):
+                if offset + 1 > len(segment):
+                    return False
+                info = segment[offset]
+                offset += 1
+                precision = info >> 4
+                table_id = info & 0x0F
+                if precision not in {0, 1} or table_id > 3:
+                    return False
+                value_bytes = 128 if precision else 64
+                if offset + value_bytes > len(segment):
+                    return False
+                values = [
+                    int.from_bytes(
+                        segment[offset + index:offset + index + (2 if precision else 1)],
+                        "big",
+                    )
+                    for index in range(0, value_bytes, 2 if precision else 1)
+                ]
+                if any(value <= 0 for value in values):
+                    return False
+                quantization_tables[table_id] = segment[offset:offset + value_bytes]
+                offset += value_bytes
+            if offset != len(segment) or not quantization_tables:
                 return False
-            components = segment[0]
-            if not 1 <= components <= 4 or len(segment) != 4 + 2 * components:
+            continue
+
+        if marker == 0xC4:
+            offset = 0
+            while offset < len(segment):
+                info = segment[offset]
+                offset += 1
+                table_class = info >> 4
+                table_id = info & 0x0F
+                if table_class not in {0, 1} or table_id > 3:
+                    return False
+                parsed = parse_huffman_table(segment, offset)
+                if parsed is None:
+                    return False
+                table, offset = parsed
+                huffman_tables[(table_class, table_id)] = table
+            if offset != len(segment) or not huffman_tables:
                 return False
-            saw_scan = True
+            continue
+
+        if marker == 0xDD:
+            if len(segment) != 2:
+                return False
+            restart_interval = int.from_bytes(segment, "big")
+            continue
+
+        if marker == 0xDA:
+            if frame is None or len(segment) < 4:
+                return False
+            component_count = segment[0]
+            if not 1 <= component_count <= len(frame["components"]):
+                return False
+            if len(segment) != 4 + 2 * component_count or segment[-3:] != b"\x00\x3f\x00":
+                return False
+            frame_by_id = {component[0]: component for component in frame["components"]}
+            scan_components = []
+            scan_ids: set[int] = set()
+            offset = 1
+            for _ in range(component_count):
+                component_id = segment[offset]
+                table_selectors = segment[offset + 1]
+                dc_id = table_selectors >> 4
+                ac_id = table_selectors & 0x0F
+                component = frame_by_id.get(component_id)
+                if (
+                    component_id in scan_ids
+                    or component_id in seen_components
+                    or component is None
+                    or component[3] not in quantization_tables
+                    or (0, dc_id) not in huffman_tables
+                    or (1, ac_id) not in huffman_tables
+                ):
+                    return False
+                scan_components.append((
+                    component_id,
+                    component[1],
+                    component[2],
+                    huffman_tables[(0, dc_id)],
+                    huffman_tables[(1, ac_id)],
+                ))
+                scan_ids.add(component_id)
+                offset += 2
+
+            if len(scan_components) == 1:
+                # A non-interleaved sequential scan is made of ordinary 8x8
+                # data units. Some ImageIO/ImageMagick outputs retain a
+                # larger SOF sampling factor even though the scan is not
+                # interleaved; using frame max sampling here rejects them.
+                total_units = ((frame["width"] + 7) // 8) * ((frame["height"] + 7) // 8)
+                scan_blocks = [(scan_components[0][3], scan_components[0][4])]
+            else:
+                max_h = max(component[1] for component in frame["components"])
+                max_v = max(component[2] for component in frame["components"])
+                total_units = (
+                    (frame["width"] + 8 * max_h - 1) // (8 * max_h)
+                ) * ((frame["height"] + 8 * max_v - 1) // (8 * max_v))
+                scan_blocks = [
+                    (component[3], component[4])
+                    for component in scan_components
+                    for _ in range(component[1] * component[2])
+                ]
+            entropy_chunks: list[bytes] = []
+            restart_markers: list[int] = []
+            entropy = bytearray()
+            entropy_start = position
             while position < len(raw):
                 if raw[position] != 0xFF:
-                    saw_entropy = True
+                    entropy.append(raw[position])
                     position += 1
                     continue
                 marker_start = position
+                position += 1
                 while position < len(raw) and raw[position] == 0xFF:
                     position += 1
                 if position >= len(raw):
                     return False
                 entropy_marker = raw[position]
+                position += 1
                 if entropy_marker == 0x00:
-                    saw_entropy = True
-                    position += 1
+                    entropy.append(0xFF)
                     continue
                 if 0xD0 <= entropy_marker <= 0xD7:
-                    saw_entropy = True
-                    position += 1
+                    entropy_chunks.append(bytes(entropy))
+                    entropy.clear()
+                    restart_markers.append(entropy_marker)
                     continue
-                # Leave the next non-entropy marker for the outer parser.
                 position = marker_start
                 break
+            if position <= entropy_start or not entropy:
+                return False
+            entropy_chunks.append(bytes(entropy))
+            if not consume_scan(entropy_chunks, restart_markers, total_units, scan_blocks, restart_interval):
+                return False
+            seen_components.update(scan_ids)
+            scan_count += 1
+            continue
+
+        # APPn/COM and other metadata segments are bounded by the outer image
+        # size. Unsupported coding markers have already been rejected above.
+        if marker in {0xCC, 0xDC, 0xDE, 0xDF}:
+            return False
+
     return False
 
 
@@ -3121,7 +3539,7 @@ def _validate_calendar_icon_asset(value: object) -> None:
         raise ValueError("invalid calendar icon digest")
 
 
-def _validate_calendar_item(value: object) -> None:
+def _validate_calendar_item(value: object, *, now: datetime | None = None) -> None:
     required = {"id", "title", "status", "start", "end", "createdAt", "updatedAt"}
     optional = {"kind", "icon", "iconAsset", "systemIconName", "timeZoneIdentifier", "recurrence", "deletedAt"}
     if not isinstance(value, dict) or not required.issubset(value) or set(value) - required - optional:
@@ -3144,10 +3562,19 @@ def _validate_calendar_item(value: object) -> None:
         raise ValueError("invalid calendar kind")
     if _calendar_timestamp(value["end"]) <= _calendar_timestamp(value["start"]):
         raise ValueError("invalid calendar interval")
-    for field in ("createdAt", "updatedAt"):
-        _calendar_timestamp(value[field])
-    if value.get("deletedAt") is not None:
-        _calendar_timestamp(value["deletedAt"])
+    created_at = _calendar_timestamp(value["createdAt"])
+    updated_at = _calendar_timestamp(value["updatedAt"])
+    deleted_at = _calendar_timestamp(value["deletedAt"]) if value.get("deletedAt") is not None else None
+    validation_now = _calendar_now_utc() if now is None else now
+    if validation_now.tzinfo is None:
+        raise ValueError("invalid calendar validation clock")
+    clock_limit = validation_now.astimezone(timezone.utc) + CALENDAR_MAX_CLOCK_SKEW
+    if any(timestamp > clock_limit for timestamp in (created_at, updated_at, deleted_at) if timestamp is not None):
+        raise ValueError("calendar clock is too far in the future")
+    if created_at > updated_at:
+        raise ValueError("calendar clock ordering is invalid")
+    if deleted_at is not None and not created_at <= deleted_at <= updated_at:
+        raise ValueError("calendar deletion clock ordering is invalid")
     # Optional icon/timezone strings are normalized by the native decoder
     # (unsupported symbols/zones are discarded). Preserve that legacy policy.
     for field in ("icon", "systemIconName", "timeZoneIdentifier"):
@@ -3169,7 +3596,7 @@ def _validate_calendar_item(value: object) -> None:
             _calendar_timestamp(recurrence["until"])
 
 
-def _parse_calendar_document(body: bytes) -> dict:
+def _parse_calendar_document(body: bytes, *, now: datetime | None = None) -> dict:
     if len(body) > CALENDAR_MAX_BODY_SIZE:
         raise HTTPException(status_code=413, detail="calendar body exceeds limit")
     try:
@@ -3189,9 +3616,10 @@ def _parse_calendar_document(body: bytes) -> dict:
             or len(decoded["items"]) > CALENDAR_MAX_ITEMS
         ):
             raise ValueError("invalid calendar resource")
+        validation_now = _calendar_now_utc() if now is None else now
         identifiers = set()
         for item in decoded["items"]:
-            _validate_calendar_item(item)
+            _validate_calendar_item(item, now=validation_now)
             identifier = item["id"].lower()
             if identifier in identifiers:
                 raise ValueError("duplicate calendar item id")
@@ -3951,23 +4379,23 @@ def _serialize_document_index(index: list[dict]) -> bytes:
 
 
 def _document_index_id(value: object) -> str:
-    if not isinstance(value, str):
-        raise _DocumentIndexError("document index id is invalid")
     try:
-        return str(uuid.UUID(value))
-    except (ValueError, AttributeError) as exc:
+        return _canonical_document_id(value)
+    except ValueError as exc:
         raise _DocumentIndexError("document index id is invalid") from exc
 
 
 def _canonical_document_id(value: object) -> str:
     if type(value) is not str:
         raise ValueError("document id is not a string")
+    if re.fullmatch(
+        r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", value
+    ) is None:
+        raise ValueError("document id is invalid")
     try:
         canonical = str(uuid.UUID(value))
     except (ValueError, AttributeError) as exc:
         raise ValueError("document id is invalid") from exc
-    if canonical != value:
-        raise ValueError("document id is not canonical")
     return canonical
 
 
@@ -3979,40 +4407,87 @@ def _bounded_document_string(value: object, maximum: int) -> str:
 
 def _mask_tax_identifier(value: str) -> str:
     trimmed = value.strip()
-    if len(trimmed) < 4:
+    if not trimmed:
         return trimmed
-    prefix = trimmed[:-2]
-    if prefix and all(character == "*" for character in prefix):
-        return trimmed
-    return "*" * min(8, max(1, len(prefix))) + trimmed[-2:]
+    digits = "".join(character for character in trimmed if "0" <= character <= "9")
+    if len(digits) < 2:
+        # Never expose a non-digit suffix from malformed identifier input.
+        return "*" * 8
+    return "*" * 8 + digits[-2:]
 
 
-def _redact_tax_text(value: str) -> str:
-    def replace_match(match: re.Match[str]) -> str:
-        whole = match.group(0)
-        start = match.start(1) - match.start(0)
-        end = match.end(1) - match.start(0)
-        return whole[:start] + _mask_tax_identifier(match.group(1)) + whole[end:]
-
-    redacted = _TAX_GERMAN_IDENTIFIER_PATTERN.sub(replace_match, value)
-    return _TAX_IDENTIFIER_PATTERN.sub(replace_match, redacted)
+_CANONICAL_MASKED_TAX_IDENTIFIER_PATTERN = re.compile(r"^\*{8}[0-9]{2}$")
 
 
-def _mask_tax_identifier_value(value: str) -> str:
-    redacted = _redact_tax_text(value)
-    if redacted != value or "*" in value:
-        return redacted
+def _replace_tax_identifier_match(match: re.Match[str]) -> str:
+    whole = match.group(0)
+    start = match.start("value") - match.start()
+    return whole[:start] + _mask_tax_identifier(match.group("value"))
+
+
+def _replace_bare_tax_identifier_match(match: re.Match[str], source: str) -> str:
+    value = match.group("value")
+    digits = "".join(character for character in value if "0" <= character <= "9")
+    compact = "".join(character for character in value if character not in " \t")
+    marker_count = len(compact) - len(digits)
+    # A star can stand in for a hidden identifier digit (for example
+    # ``*2345678901`` or ``12345*78901``), while a trailing star may be a
+    # legacy redaction marker after all eleven digits.  A plain 12-digit
+    # number remains ordinary numeric text.
+    is_eleven_digit_identifier = len(digits) == 11 or (
+        len(compact) == 11 and marker_count >= 1 and len(digits) >= 2
+    )
+    if not is_eleven_digit_identifier:
+        return value
+
+    # An amount with an explicit decimal fraction is ordinary numeric text,
+    # not an unlabelled 11-digit identifier.  Tax-labelled values are handled
+    # before this callback and are always redacted.
+    end = match.end()
+    suffix = source[end:end + 4]
+    if "*" not in value and re.match(r"[.,][0-9]{1,2}(?![0-9])", suffix):
+        return value
     return _mask_tax_identifier(value)
 
 
-def _validate_document_evidence(value: object) -> dict:
+def _redact_tax_text(value: str, *, normalize_masked: bool = False) -> str:
+    redacted = _TAX_GERMAN_IDENTIFIER_PATTERN.sub(_replace_tax_identifier_match, value)
+    redacted = _TAX_IDENTIFIER_PATTERN.sub(_replace_tax_identifier_match, redacted)
+    redacted = _TAX_GROUPED_IDENTIFIER_PATTERN.sub(
+        lambda match: _replace_bare_tax_identifier_match(match, redacted),
+        redacted,
+    )
+    redacted = _TAX_BARE_IDENTIFIER_PATTERN.sub(
+        lambda match: _replace_bare_tax_identifier_match(match, redacted),
+        redacted,
+    )
+    if normalize_masked:
+        redacted = _TAX_MASKED_IDENTIFIER_PATTERN.sub(
+            lambda match: "*" * 8 + match.group("suffix"),
+            redacted,
+        )
+    return redacted
+
+
+def _mask_tax_identifier_value(value: str) -> str:
+    trimmed = value.strip()
+    redacted = _redact_tax_text(trimmed, normalize_masked=True)
+    if redacted != trimmed:
+        return redacted
+    return _mask_tax_identifier(trimmed)
+
+
+def _validate_document_evidence(value: object, *, identifier: bool = False) -> dict:
     if not isinstance(value, dict) or set(value) != {"page", "snippet"}:
         raise ValueError("document evidence fields are invalid")
     page = value["page"]
     if type(page) is not int or not 1 <= page <= DOCUMENT_MAX_EVIDENCE_PAGE:
         raise ValueError("document evidence page is invalid")
     snippet = _bounded_document_string(value["snippet"], DOCUMENT_MAX_EVIDENCE_CHARACTERS)
-    return {"page": page, "snippet": _redact_tax_text(snippet)}
+    return {
+        "page": page,
+        "snippet": _redact_tax_text(snippet, normalize_masked=identifier),
+    }
 
 
 def _validate_document_candidate(value: object, *, identifier: bool) -> dict | None:
@@ -4021,12 +4496,8 @@ def _validate_document_candidate(value: object, *, identifier: bool) -> dict | N
     if not isinstance(value, dict) or set(value) != {"value", "evidence"}:
         raise ValueError("document candidate fields are invalid")
     raw_value = _bounded_document_string(value["value"], DOCUMENT_MAX_FIELD_CHARACTERS)
-    evidence = _validate_document_evidence(value["evidence"])
+    evidence = _validate_document_evidence(value["evidence"], identifier=identifier)
     safe_value = _mask_tax_identifier_value(raw_value) if identifier else _redact_tax_text(raw_value)
-    safe_snippet = evidence["snippet"]
-    if identifier:
-        safe_snippet = safe_snippet.replace(raw_value, safe_value)
-    evidence["snippet"] = safe_snippet
     return {"value": safe_value, "evidence": evidence}
 
 
@@ -4067,8 +4538,12 @@ def _validate_document_publication(value: object, *, normalize: bool) -> dict:
 
     normalized = {
         "id": _canonical_document_id(value["id"]),
-        "title": _bounded_document_string(value["title"], DOCUMENT_MAX_FIELD_CHARACTERS),
-        "documentType": _bounded_document_string(value["documentType"], DOCUMENT_MAX_FIELD_CHARACTERS),
+        "title": _redact_tax_text(
+            _bounded_document_string(value["title"], DOCUMENT_MAX_FIELD_CHARACTERS)
+        ),
+        "documentType": _redact_tax_text(
+            _bounded_document_string(value["documentType"], DOCUMENT_MAX_FIELD_CHARACTERS)
+        ),
         "issuer": _validate_document_candidate(value["issuer"], identifier=False),
         "taxpayerIdentifier": _validate_document_candidate(value["taxpayerIdentifier"], identifier=True),
         "referenceIdentifier": _validate_document_candidate(value["referenceIdentifier"], identifier=True),
@@ -4109,7 +4584,14 @@ def _validate_document_index_entry(value: object) -> dict:
     if not _valid_document_index_filename(original_file):
         raise ValueError("document index file name is invalid")
     publication = {key: item for key, item in value.items() if key != "_originalFile"}
-    normalized = _validate_document_publication(publication, normalize=False)
+    # Native Foundation's UUID encoder emits uppercase hexadecimal characters.
+    # Accept that case-only spelling at this durable boundary, while still
+    # rejecting every other non-canonical or privacy-unsafe difference.
+    normalized = _validate_document_publication(publication, normalize=True)
+    comparable = dict(publication)
+    comparable["id"] = normalized["id"]
+    if normalized != comparable:
+        raise ValueError("document index entry is not canonical or privacy-safe")
     normalized["_originalFile"] = original_file
     return normalized
 

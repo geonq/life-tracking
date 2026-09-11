@@ -624,7 +624,7 @@ def test_bounded_config_and_secret_reads_fail_closed_on_growth_or_replacement(
 SNAPSHOT_ENVIRONMENT_NAMES = (
     "LIFEOS_DATA_DIR", "LIFEOS_CALENDAR_PATH", "LIFEOS_DOCUMENTS_DIR",
     "CLAUDE_INGEST_SECRET_FILE", "LIFEOS_CLAUDE_SECRET_FILE",
-    "LIFEOS_TAILSCALE_ALLOWED_LOGIN", "LIFEOS_TAILSCALE_EDGE_TOKEN",
+    "LIFEOS_TAILSCALE_ALLOWED_LOGIN", "LIFEOS_ALLOWED_HOSTS", "LIFEOS_TAILSCALE_EDGE_TOKEN",
     "LIFEOS_TAILSCALE_SERVICE_NAME", "LIFEOS_TAILSCALE_SNAPSHOT_PATH",
     "LIFEOS_GATEWAY_CONFIG_PATH", "PORT",
 )
@@ -638,6 +638,7 @@ def run_launcher_with_snapshot(monkeypatch, tmp_path: Path, payload) -> None:
         "documentsPath": str(tmp_path / "data" / "documents"),
         "claudeSecretPath": str(tmp_path / "secret"),
         "tailscaleEdgeTokenPath": str(tmp_path / "tailscale-edge.token"),
+        "tailscaleServePort": 8420,
     }
     (tmp_path / "tailscale-edge.token").write_bytes(b"t" * 32)
     tailscale = tmp_path / "tailscale.exe"
@@ -673,6 +674,7 @@ def run_launcher_with_snapshot(monkeypatch, tmp_path: Path, payload) -> None:
     try:
         assert launcher.run(tmp_path / "gateway.json", tmp_path / "gateway.py", tailscale) == 0
         assert launcher.os.environ["LIFEOS_TAILSCALE_ALLOWED_LOGIN"] == FIXTURE_LOGIN
+        assert launcher.os.environ["LIFEOS_ALLOWED_HOSTS"] == "machine.example.ts.net,machine.example.ts.net:8420"
     finally:
         for name, value in original_environment.items():
             if value is None:

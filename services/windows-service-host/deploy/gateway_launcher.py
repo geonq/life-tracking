@@ -1382,6 +1382,10 @@ def run(config_path: Path, entry_point: Path, tailscale: Path) -> int:
             "CLAUDE_INGEST_SECRET_FILE": config["claudeSecretPath"],
             "LIFEOS_CLAUDE_SECRET_FILE": config["claudeSecretPath"],
             "LIFEOS_TAILSCALE_ALLOWED_LOGIN": login,
+            # The gateway rejects every public Host spelling except the DNS
+            # identity from this fresh snapshot, with and without the
+            # configured Serve port. Keep this contract in memory only.
+            "LIFEOS_ALLOWED_HOSTS": f"{expected_dns_name},{expected_dns_name}:{config['tailscaleServePort']}",
             # This is an in-process gateway contract only. It is never put in
             # a config file, manifest, command argument, log, or Serve header.
             "LIFEOS_TAILSCALE_EDGE_TOKEN": edge_token,
