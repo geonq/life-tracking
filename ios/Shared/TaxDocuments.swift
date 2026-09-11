@@ -173,17 +173,29 @@ private enum TaxPrivacy {
         _ source: NSString,
         after valueRange: NSRange
     ) -> Bool {
-        let start = NSMaxRange(valueRange)
-        guard start < source.length else { return false }
-        let suffix = source.substring(from: start)
-        let scalars = Array(suffix.unicodeScalars.prefix(4))
-        guard scalars.count >= 3,
-              scalars[0].value == 46 || scalars[0].value == 44,
-              (48...57).contains(scalars[1].value),
-              (48...57).contains(scalars[2].value) else {
+        guard valueRange.location >= 0,
+              valueRange.length >= 0,
+              valueRange.location <= source.length,
+              valueRange.length <= source.length - valueRange.location else {
             return false
         }
-        return scalars.count == 3 || !(48...57).contains(scalars[3].value)
+        let start = valueRange.location + valueRange.length
+        guard start < source.length else { return false }
+
+        let isASCIIDigit: (unichar) -> Bool = { unit in
+            unit >= 48 && unit <= 57
+        }
+        let separator = source.character(at: start)
+        guard separator == 46 || separator == 44,
+              start + 2 < source.length,
+              isASCIIDigit(source.character(at: start + 1)),
+              isASCIIDigit(source.character(at: start + 2)) else {
+            return false
+        }
+
+        let fourthIndex = start + 3
+        guard fourthIndex < source.length else { return true }
+        return !isASCIIDigit(source.character(at: fourthIndex))
     }
 
     static func redactIdentifiers(
