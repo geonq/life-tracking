@@ -36,7 +36,7 @@ private enum LifeOSAppTab: Hashable, CaseIterable {
         case .home: "house"
         case .calendar: "calendar"
         case .finance: "creditcard"
-        case .fitness: "heart"
+        case .fitness: LifeOSIconName.fitness.systemImageName
         case .more: "ellipsis"
         }
     }

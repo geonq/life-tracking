@@ -342,7 +342,7 @@ private struct LifeOSMacSceneRoot: View {
     @SceneStorage("LifeOS.mac.route.v1") private var restoredRouteIdentifier = ""
     @SceneStorage("LifeOS.mac.showingUsage.v1") private var restoredShowingUsage = false
     @SceneStorage("LifeOS.mac.sidebarCollapsed.v1") private var restoredSidebarCollapsed = false
-    @SceneStorage("LifeOS.mac.sidebarWidth.v1") private var restoredSidebarWidth = 224.0
+    @SceneStorage("LifeOS.mac.sidebarWidth.v1") private var restoredSidebarWidth = 232.0
 
     var body: some View {
         let module = LifeOSModule(rawValue: restoredModuleIdentifier).flatMap {
@@ -401,7 +401,7 @@ struct LifeOSMacRootView: View {
     @State private var showingUsage: Bool
     @State private var requestingNewCalendarEvent = false
     @State private var sidebarCollapsed = false
-    @State private var sidebarWidth: Double = 224
+    @State private var sidebarWidth: Double = 232
     @State private var hoveredSidebarModule: LifeOSModule?
     @State private var showingCommandPalette = false
     @State private var showingDestinationUnavailable = false
@@ -432,7 +432,7 @@ struct LifeOSMacRootView: View {
         initialRoute: LifeOSDeepLink? = nil,
         initiallyShowingUsage: Bool = false,
         initialSidebarCollapsed: Bool = false,
-        initialSidebarWidth: Double = 224,
+        initialSidebarWidth: Double = 232,
         onSceneStateChange: ((LifeOSMacSceneState) -> Void)? = nil
     ) {
         self.calendarCoordinator = calendarCoordinator
@@ -558,12 +558,12 @@ struct LifeOSMacRootView: View {
 
     private var resolvedSidebarWidth: CGFloat {
         let value = CGFloat(sidebarWidth)
-        guard value.isFinite else { return 224 }
+        guard value.isFinite else { return 232 }
         return min(max(value, 200), 260)
     }
 
     private func effectiveSidebarWidth(isCompact: Bool) -> CGFloat {
-        sidebarCollapsed || isCompact ? 68 : resolvedSidebarWidth
+        sidebarCollapsed || isCompact ? 64 : resolvedSidebarWidth
     }
 
     private var sidebarResizeHandle: some View {
@@ -587,33 +587,46 @@ struct LifeOSMacRootView: View {
             .accessibilityIdentifier("mac-sidebar-resize")
     }
 
+    private var sidebarCollapseButton: some View {
+        Button {
+            withAnimation(reduceMotion ? nil : LifeOSMotion.snappy) {
+                sidebarCollapsed.toggle()
+            }
+        } label: {
+            LifeOSIcon(
+                sidebarCollapsed ? .chevronRight : .chevronLeft,
+                context: .disclosure
+            )
+            .frame(width: 32, height: 32)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(LifeOSTokens.tertiaryText)
+        .accessibilityLabel(sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar")
+        .accessibilityIdentifier("mac-sidebar-collapse")
+    }
+
     private func sidebar(isCompact: Bool) -> some View {
         let collapsed = sidebarCollapsed || isCompact
         return VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 8) {
-                LifeOSIcon(.home)
-                    .foregroundStyle(LifeOSTokens.accent)
-                    .frame(width: 18, height: 18)
-                if !collapsed {
-                    Text("LIFE OS")
-                        .lifeOSTypography(.pageTitle, weight: .bold)
-                        .tracking(0.8)
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
-                }
-                Spacer(minLength: 0)
-                if !isCompact {
-                    Button {
-                        withAnimation(reduceMotion ? nil : LifeOSMotion.snappy) {
-                            sidebarCollapsed.toggle()
+            Group {
+                if sidebarCollapsed && !isCompact {
+                    sidebarCollapseButton
+                        .frame(maxWidth: .infinity, alignment: .center)
+                } else {
+                    HStack(spacing: 8) {
+                        LifeOSIcon(.overview, context: .navigation)
+                            .foregroundStyle(LifeOSTokens.accent)
+                        if !collapsed {
+                            Text("Life OS")
+                                .lifeOSTypography(.label, weight: .semibold)
+                                .foregroundStyle(LifeOSTokens.tertiaryText)
                         }
-                    } label: {
-                        LifeOSIcon(sidebarCollapsed ? .chevronRight : .chevronLeft)
-                            .frame(width: 16, height: 16)
+                        Spacer(minLength: 0)
+                        if !isCompact {
+                            sidebarCollapseButton
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
-                    .accessibilityLabel(sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar")
-                    .accessibilityIdentifier("mac-sidebar-collapse")
                 }
             }
             .padding(.horizontal, collapsed ? 14 : 12)
@@ -678,12 +691,11 @@ struct LifeOSMacRootView: View {
             Button { showingCommandPalette = true } label: {
                 Group {
                     if isCompact {
-                        LifeOSIcon(.search)
-                            .frame(width: 16, height: 16)
+                        LifeOSIcon(.search, context: .toolbar)
                             .frame(width: 32, height: 32)
                     } else {
                         HStack(spacing: 8) {
-                            LifeOSIcon(.search).frame(width: 15, height: 15)
+                            LifeOSIcon(.search, context: .toolbar)
                             Text("Search or jump").lifeOSTypography(.body)
                             Text("⌘K").lifeOSTypography(.body, weight: .semibold)
                                 .foregroundStyle(LifeOSTokens.tertiaryText)
@@ -701,8 +713,8 @@ struct LifeOSMacRootView: View {
             .accessibilityLabel("Open command palette")
             .accessibilityIdentifier("mac-command-palette-trigger")
         }
-        .padding(.horizontal, isCompact ? 12 : 18)
-        .frame(height: 56)
+        .padding(.horizontal, isCompact ? 12 : 24)
+        .frame(height: 52)
         .background(LifeOSTokens.canvas)
         .accessibilityIdentifier("mac-global-top-bar")
     }
@@ -960,25 +972,29 @@ struct LifeOSMacRootView: View {
         return Button {
             select(module)
         } label: {
-            HStack(spacing: 12) {
-                Capsule(style: .continuous)
-                    .fill(selected ? LifeOSTokens.accent : .clear)
-                    .frame(width: 3, height: 20)
-                LifeOSIcon(module.icon).frame(width: 24, height: 24)
-                if !collapsed {
-                    Text(module.title)
-                        .lifeOSTypography(.body, weight: selected ? .semibold : .regular)
-                    Spacer(minLength: 0)
+            ZStack(alignment: .leading) {
+                HStack(spacing: 10) {
+                    LifeOSIcon(module.icon, context: .navigation)
+                    if !collapsed {
+                        Text(module.title)
+                            .lifeOSTypography(.label, weight: selected ? .semibold : .regular)
+                        Spacer(minLength: 0)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: collapsed ? .center : .leading)
+                if selected {
+                    Capsule(style: .continuous)
+                        .fill(LifeOSTokens.accent)
+                        .frame(width: 2, height: 18)
                 }
             }
             .foregroundStyle(selected ? LifeOSTokens.selectedNavigationText : LifeOSTokens.secondaryText)
-            .padding(.horizontal, 12)
-            .frame(height: 40)
+            .padding(.horizontal, collapsed ? 0 : 10)
+            .frame(height: 34)
             .background(
                 selected ? LifeOSTokens.selectedNavigationFill : (hovered ? LifeOSTokens.raised : .clear),
                 in: RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
             )
-            .frame(maxWidth: .infinity, alignment: collapsed ? .center : .leading)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
