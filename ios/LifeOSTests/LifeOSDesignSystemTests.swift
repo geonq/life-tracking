@@ -568,49 +568,101 @@ final class LifeOSDesignSystemTests: XCTestCase {
 #endif
     }
 
-    func testResponsiveContentPayloadOwnsEveryBuilderChild() throws {
+    @MainActor
+    func testResponsiveContainersRenderEveryBuilderChild() {
+        let publicController = UIHostingController(
+            rootView: LifeOSResponsiveContainer { _ in
+                ResponsiveLayoutMarker(identifier: "responsive-public-first")
+                    .frame(height: 24)
+                ResponsiveLayoutMarker(identifier: "responsive-public-second")
+                    .frame(height: 24)
+            }
+            .frame(width: 400, height: 200)
+        )
+        let publicFrames = hostedFrames(
+            for: ["responsive-public-first", "responsive-public-second"],
+            in: publicController
+        )
+        assertVerticallyStacked(publicFrames, in: publicController.view)
+
+        let collectionController = UIHostingController(
+            rootView: LifeOSResponsiveContentContainer(
+                horizontalPadding: 0,
+                maxReadableWidth: nil
+            ) {
+                ForEach(["first", "second"], id: \.self) { row in
+                    ResponsiveLayoutMarker(identifier: "responsive-collection-\(row)")
+                        .frame(height: 24)
+                }
+            }
+            .frame(width: 400, height: 200)
+        )
+        let collectionFrames = hostedFrames(
+            for: ["responsive-collection-first", "responsive-collection-second"],
+            in: collectionController
+        )
+        assertVerticallyStacked(collectionFrames, in: collectionController.view)
+
         let iosRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let source = try String(
+        let source = (try? String(
             contentsOf: iosRoot.appendingPathComponent("Shared/LifeOSResponsiveContainer.swift"),
             encoding: .utf8
-        )
-        guard
-            let payloadStart = source.range(of: "private struct LifeOSResponsiveContentPayload"),
-            let payloadEnd = source.range(
-                of: "/// The structural invariant owned by `LifeOSResponsiveContentPayload`",
-                range: payloadStart.upperBound..<source.endIndex
-            )
-        else {
-            XCTFail("The responsive payload wrapper is missing")
-            return
-        }
-
-        let payloadSource = String(source[payloadStart.lowerBound..<payloadEnd.lowerBound])
+        )) ?? ""
         XCTAssertTrue(
-            payloadSource.contains("VStack(alignment: .leading, spacing: 0)"),
+            source.contains("LifeOSResponsiveContentPayload(content: content(metrics))"),
+            "The public responsive container must use the same owning payload as the content container"
+        )
+        XCTAssertTrue(
+            source.contains("VStack(alignment: .leading, spacing: 0)"),
             "The payload must own builder expansion in a leading, zero-spacing VStack"
         )
-        XCTAssertTrue(
-            payloadSource.contains("TupleView") && payloadSource.contains("ForEach"),
-            "The wrapper contract must document both sibling and collection expansion"
-        )
+    }
 
-        // Two sibling expressions become a TupleView, while a ForEach may
-        // expand to an arbitrary number of rows. Both remain one child of the
-        // outer custom layout because the payload owns their vertical layout.
-        XCTAssertEqual(
-            LifeOSResponsiveContentLayoutContract.directLayoutChildCount(forBuilderChildCount: 0),
-            0
-        )
-        XCTAssertEqual(
-            LifeOSResponsiveContentLayoutContract.directLayoutChildCount(forBuilderChildCount: 2),
-            1
-        )
-        XCTAssertEqual(
-            LifeOSResponsiveContentLayoutContract.directLayoutChildCount(forBuilderChildCount: 128),
-            1
+    @MainActor
+    private func hostedFrames(
+        for identifiers: [String],
+        in controller: UIHostingController<some View>
+    ) -> [CGRect] {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 400, height: 200))
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        controller.view.frame = window.bounds
+        controller.view.setNeedsLayout()
+        controller.view.layoutIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        let frames = identifiers.compactMap { identifier in
+            findView(withAccessibilityIdentifier: identifier, in: controller.view).map {
+                $0.convert($0.bounds, to: controller.view)
+            }
+        }
+        window.isHidden = true
+        window.rootViewController = nil
+        return frames
+    }
+
+    private func findView(withAccessibilityIdentifier identifier: String, in view: UIView) -> UIView? {
+        if view.accessibilityIdentifier == identifier { return view }
+        for child in view.subviews {
+            if let match = findView(withAccessibilityIdentifier: identifier, in: child) {
+                return match
+            }
+        }
+        return nil
+    }
+
+    private func assertVerticallyStacked(_ frames: [CGRect], in rootView: UIView) {
+        XCTAssertEqual(frames.count, 2, "Every responsive builder child must remain hosted")
+        guard frames.count == 2 else { return }
+        XCTAssertTrue(rootView.bounds.contains(frames[0]))
+        XCTAssertTrue(rootView.bounds.contains(frames[1]))
+        XCTAssertGreaterThan(frames[0].height, 0)
+        XCTAssertGreaterThan(frames[1].height, 0)
+        XCTAssertGreaterThanOrEqual(
+            frames[1].minY,
+            frames[0].maxY - 0.5,
+            "Builder children must be laid out sequentially instead of overlapping"
         )
     }
 
@@ -1155,4 +1207,18 @@ final class LifeOSDesignSystemTests: XCTestCase {
         XCTAssertTrue(presentation.hasPresented)
     }
 
+}
+
+private struct ResponsiveLayoutMarker: UIViewRepresentable {
+    let identifier: String
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.accessibilityIdentifier = identifier
+        return view
+    }
+
+    func updateUIView(_ view: UIView, context: Context) {
+        view.accessibilityIdentifier = identifier
+    }
 }

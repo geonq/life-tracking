@@ -131,7 +131,7 @@ public struct LifeOSResponsiveContainer<Content: View>: View {
                 sidebarWidth: sidebarWidth
             )
 
-            content(metrics)
+            LifeOSResponsiveContentPayload(content: content(metrics))
                 .frame(width: metrics.renderedContentWidth, alignment: .topLeading)
                 .frame(width: metrics.contentWidth, alignment: .topLeading)
                 .padding(.leading, metrics.horizontalGutter)
@@ -155,15 +155,6 @@ private struct LifeOSResponsiveContentPayload<Content: View>: View {
         VStack(alignment: .leading, spacing: 0) {
             content
         }
-    }
-}
-
-/// The structural invariant owned by `LifeOSResponsiveContentPayload`.
-/// Builder children are rendered inside one payload child, so the layout has
-/// exactly one placement responsibility for every non-empty builder result.
-enum LifeOSResponsiveContentLayoutContract {
-    static func directLayoutChildCount(forBuilderChildCount count: Int) -> Int {
-        count > 0 ? 1 : 0
     }
 }
 
