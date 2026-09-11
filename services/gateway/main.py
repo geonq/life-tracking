@@ -4722,6 +4722,7 @@ def _migrate_legacy_document_privacy(
 
 def _sanitize_uploaded_document_privacy(original: dict, normalized: dict) -> dict:
     """Sanitize masked upload evidence before the entry can be versioned."""
+    visible_suffixes: set[str] = set()
     for field in ("taxpayerIdentifier", "referenceIdentifier"):
         candidate = original.get(field)
         if not isinstance(candidate, dict):
@@ -4735,6 +4736,9 @@ def _sanitize_uploaded_document_privacy(original: dict, normalized: dict) -> dic
         safe_candidate = normalized.get(field)
         if not isinstance(safe_candidate, dict):
             continue
+        safe_value = safe_candidate.get("value")
+        if type(safe_value) is str and re.fullmatch(r"\*{8}[0-9]{2}", safe_value):
+            visible_suffixes.add(safe_value[-2:])
         evidence = safe_candidate.get("evidence")
         if not isinstance(evidence, dict):
             continue
@@ -4760,7 +4764,11 @@ def _sanitize_uploaded_document_privacy(original: dict, normalized: dict) -> dic
     for text, in_evidence in _document_text_values(normalized):
         if in_evidence:
             continue
-        if _legacy_text_contains_unproven_identifier(text, evidence=False):
+        if _legacy_text_contains_unproven_identifier(
+            text,
+            visible_suffixes=visible_suffixes,
+            evidence=False,
+        ):
             raise _LegacyDocumentPrivacyError(
                 "document publication privacy cannot be established"
             )

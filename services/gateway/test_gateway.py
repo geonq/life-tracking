@@ -3835,6 +3835,30 @@ def test_document_upload_rejects_untrusted_cross_field_text_before_storage(
     assert not main.DOCUMENTS_DIR.exists()
 
 
+def test_document_upload_rejects_untrusted_numeric_cross_field_text_before_storage(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(main, "DOCUMENTS_INDEX_PATH", tmp_path / "documents.json")
+    monkeypatch.setattr(main, "DOCUMENTS_DIR", tmp_path / "documents")
+
+    document_id = "29292929-2929-4292-8292-292929292929"
+    metadata = native_tax_document_metadata(document_id)
+    metadata["title"] = "Assessment 8642"
+    metadata["taxpayerIdentifier"] = tax_candidate("********42", snippet="********42")
+
+    uploaded = client.post(
+        "/documents",
+        headers=AUTH,
+        data={"metadata": json.dumps(metadata)},
+        files={"file": ("return.pdf", b"safe", "application/pdf")},
+    )
+
+    assert uploaded.status_code == 400
+    assert not main.DOCUMENTS_INDEX_PATH.exists()
+    assert not main.DOCUMENTS_DIR.exists()
+
+
 def test_document_index_rejects_untrusted_form_identifier_without_mutation(
     tmp_path, monkeypatch
 ):
