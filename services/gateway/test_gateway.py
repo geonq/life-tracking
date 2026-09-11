@@ -113,6 +113,58 @@ def streamed_request(body, *, boundary="lifeos-test-boundary", chunk_size=7, con
 def run_document_upload(body, **request_options):
     return asyncio.run(main.upload_document(streamed_request(body, **request_options)))
 
+
+def tax_document_metadata(document_id, **overrides):
+    metadata = {
+        "id": document_id,
+        "title": "Tax document",
+        "documentType": "tax_return",
+        "taxYear": None,
+        "issuer": None,
+        "taxpayerIdentifier": None,
+        "referenceIdentifier": None,
+        "dates": [],
+        "amounts": [],
+        "warnings": [],
+        "confidence": "low",
+    }
+    metadata.update(overrides)
+    return metadata
+
+
+def tax_evidence(page=1, snippet="Source-backed evidence"):
+    return {"page": page, "snippet": snippet}
+
+
+def tax_candidate(value="Finanzamt Berlin", *, page=1, snippet=None):
+    return {
+        "value": value,
+        "evidence": tax_evidence(page, value if snippet is None else snippet),
+    }
+
+
+def native_tax_document_metadata(document_id):
+    return tax_document_metadata(
+        document_id,
+        title="Income tax assessment",
+        documentType="tax_assessment",
+        taxYear=2025,
+        issuer=tax_candidate(),
+        taxpayerIdentifier=tax_candidate("********01"),
+        referenceIdentifier=tax_candidate("**34"),
+        dates=[{
+            "value": "2025-01-31",
+            "evidence": tax_evidence(1, "Assessment date"),
+        }],
+        amounts=[{
+            "value": "1234.56 EUR",
+            "label": "Tax owed",
+            "evidence": tax_evidence(1, "Tax owed 1234.56 EUR"),
+        }],
+        warnings=["Review source document"],
+        confidence="high",
+    )
+
 FINANCE_PROVENANCE = {
     "source": "no-authorized-finance-source",
     "observedAt": "2026-08-08T12:00:00Z",
@@ -1168,13 +1220,45 @@ def test_calendar_all_persisted_revision_branches_are_bounded(branch, revision):
 
 
 def test_calendar_icon_wire_contract_and_legacy_optional_hash():
-    # A real single-pixel PNG. Native ImageIO remains responsible for decoding.
-    raw = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=")
+    # A real single-pixel PNG accepted by both the gateway and native ImageIO.
+    raw = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
     asset = {"format": "png", "bytes": base64.b64encode(raw).decode()}
     document = {"schemaVersion": 1, "items": [calendar_item(iconAsset=asset)]}
     assert main._parse_calendar_document(json.dumps(document).encode()) == document
     asset.update(schemaVersion=1, contentHash=hashlib.sha256(raw).hexdigest())
     assert main._parse_calendar_document(json.dumps(document).encode()) == document
+
+    invalid_images = (
+        ("png", raw[:8]),
+        ("png", raw[:-1]),
+        ("jpeg", b"\xff\xd8"),
+        ("jpeg", b"\xff\xd8\xff\xe0\x00\x10JFIF\x00"),
+    )
+    for image_format, invalid_raw in invalid_images:
+        invalid = {"schemaVersion": 1, "items": [calendar_item(
+            iconAsset={
+                "format": image_format,
+                "bytes": base64.b64encode(invalid_raw).decode(),
+            }
+        )]}
+        with pytest.raises(main.HTTPException) as rejected:
+            main._parse_calendar_document(json.dumps(invalid).encode())
+        assert rejected.value.status_code == 400
+
+    # The production validator explicitly claims PNG chunk integrity. Flip
+    # the IDAT CRC while retaining the otherwise valid, bounded image.
+    tampered = bytearray(raw)
+    idat_offset = raw.index(b"IDAT")
+    idat_length = int.from_bytes(raw[idat_offset - 4:idat_offset], "big")
+    idat_crc_offset = idat_offset + 4 + idat_length
+    tampered[idat_crc_offset] ^= 0x01
+    invalid_crc = {"schemaVersion": 1, "items": [calendar_item(
+        iconAsset={"format": "png", "bytes": base64.b64encode(tampered).decode()}
+    )]}
+    with pytest.raises(main.HTTPException) as rejected:
+        main._parse_calendar_document(json.dumps(invalid_crc).encode())
+    assert rejected.value.status_code == 400
+
     for override in ({"format": "jpeg"}, {"format": []}, {"bytes": "!"}, {"schemaVersion": True},
                      {"schemaVersion": 1.0}, {"contentHash": "f" * 64}, {"unknown": "path"}):
         invalid = {"schemaVersion": 1, "items": [calendar_item(iconAsset={**asset, **override})]}
@@ -2776,7 +2860,7 @@ def test_document_upload_rejects_invalid_and_traversal_ids(document_id, tmp_path
     response = client.post(
         "/documents",
         headers=AUTH,
-        data={"metadata": json.dumps({"id": document_id})},
+        data={"metadata": json.dumps(tax_document_metadata(document_id))},
         files={"file": ("return.pdf", b"safe", "application/pdf")},
     )
     assert response.status_code == 400
@@ -2793,7 +2877,7 @@ def test_document_upload_normalizes_unsafe_filename_extension(tmp_path, monkeypa
     response = client.post(
         "/documents",
         headers=AUTH,
-        data={"metadata": json.dumps({"id": document_id})},
+        data={"metadata": json.dumps(tax_document_metadata(document_id))},
         files={"file": ("tax.exe", b"safe", "application/octet-stream")},
     )
     assert response.status_code == 200
@@ -2809,7 +2893,7 @@ def test_document_upload_rejects_chunked_oversized_metadata_without_content_leng
     body = multipart_body([
         multipart_part(
             "metadata",
-            json.dumps({"id": "11111111-1111-4111-8111-111111111111"}).encode(),
+            json.dumps(tax_document_metadata("11111111-1111-4111-8111-111111111111")).encode(),
         ),
         multipart_part("file", b"safe", filename="tax.pdf", content_type="application/pdf"),
     ])
@@ -2821,14 +2905,15 @@ def test_document_upload_rejects_chunked_oversized_metadata_without_content_leng
 
 
 def test_document_upload_accepts_chunked_request_without_content_length():
+    metadata = json.dumps(tax_document_metadata("11111111-1111-4111-8111-111111111111"))
     body = multipart_body([
-        multipart_part("metadata", b'{"id":"11111111-1111-4111-8111-111111111111"}'),
+        multipart_part("metadata", metadata.encode()),
         multipart_part("file", b"safe", filename="tax.pdf", content_type="application/pdf"),
     ])
 
     payload = asyncio.run(main._read_document_multipart(streamed_request(body, chunk_size=2)))
     try:
-        assert payload.metadata == '{"id":"11111111-1111-4111-8111-111111111111"}'
+        assert payload.metadata == metadata
         assert payload.file.read() == b"safe"
     finally:
         payload.close()
@@ -2839,7 +2924,10 @@ def test_document_upload_rejects_a_slow_chunked_body_with_a_bounded_timeout(monk
 
     monkeypatch.setattr(main, "DOCUMENT_BODY_TIMEOUT", 0.001)
     body = multipart_body([
-        multipart_part("metadata", b'{"id":"11111111-1111-4111-8111-111111111111"}'),
+        multipart_part(
+            "metadata",
+            json.dumps(tax_document_metadata("11111111-1111-4111-8111-111111111111")).encode(),
+        ),
         multipart_part("file", b"safe", filename="tax.pdf", content_type="application/pdf"),
     ])
     messages = [{"type": "http.request", "body": body, "more_body": False}]
@@ -2884,11 +2972,20 @@ def test_document_upload_rejects_oversized_part_headers(header):
 
 @pytest.mark.parametrize("parts", [
     [
-        multipart_part("metadata", b'{"id":"11111111-1111-4111-8111-111111111111"}'),
-        multipart_part("metadata", b'{"id":"22222222-2222-4222-8222-222222222222"}'),
+        multipart_part(
+            "metadata",
+            json.dumps(tax_document_metadata("11111111-1111-4111-8111-111111111111")).encode(),
+        ),
+        multipart_part(
+            "metadata",
+            json.dumps(tax_document_metadata("22222222-2222-4222-8222-222222222222")).encode(),
+        ),
     ],
     [
-        multipart_part("metadata", b'{"id":"11111111-1111-4111-8111-111111111111"}'),
+        multipart_part(
+            "metadata",
+            json.dumps(tax_document_metadata("11111111-1111-4111-8111-111111111111")).encode(),
+        ),
         multipart_part("file", b"safe", filename="tax.pdf", content_type="application/pdf"),
         multipart_part("extra", b"unexpected"),
     ],
@@ -2905,7 +3002,10 @@ def test_document_upload_rejects_oversized_file_before_storage(monkeypatch):
 
     monkeypatch.setattr(main, "DOCUMENT_MAX_UPLOAD_SIZE", 4)
     body = multipart_body([
-        multipart_part("metadata", b'{"id":"11111111-1111-4111-8111-111111111111"}'),
+        multipart_part(
+            "metadata",
+            json.dumps(tax_document_metadata("11111111-1111-4111-8111-111111111111")).encode(),
+        ),
         multipart_part("file", b"12345", filename="tax.pdf", content_type="application/pdf"),
     ])
 
@@ -2922,7 +3022,10 @@ def test_document_upload_rejects_oversized_aggregate_body_before_parser(monkeypa
     monkeypatch.setattr(main, "DOCUMENT_METADATA_MAX_SIZE", 128)
     monkeypatch.setattr(main, "DOCUMENT_MULTIPART_OVERHEAD", 8)
     body = multipart_body([
-        multipart_part("metadata", b'{"id":"11111111-1111-4111-8111-111111111111"}'),
+        multipart_part(
+            "metadata",
+            json.dumps(tax_document_metadata("11111111-1111-4111-8111-111111111111")).encode(),
+        ),
         multipart_part("file", b"12345678", filename="tax.pdf", content_type="application/pdf"),
     ])
 
@@ -2986,7 +3089,7 @@ def test_document_upload_rejects_corrupt_index_without_replacing_it(tmp_path, mo
     response = client.post(
         "/documents",
         headers=AUTH,
-        data={"metadata": json.dumps({"id": "55555555-5555-4555-8555-555555555555"})},
+        data={"metadata": json.dumps(tax_document_metadata("55555555-5555-4555-8555-555555555555"))},
         files={"file": ("return.pdf", b"new", "application/pdf")},
     )
     assert response.status_code == 503
@@ -3004,7 +3107,7 @@ def test_document_upload_rejects_serialized_index_threshold_before_file_publicat
     first = client.post(
         "/documents",
         headers=AUTH,
-        data={"metadata": json.dumps({"id": first_id, "label": "first"})},
+        data={"metadata": json.dumps(tax_document_metadata(first_id, title="first"))},
         files={"file": ("return.pdf", b"old", "application/pdf")},
     )
     assert first.status_code == 200
@@ -3014,7 +3117,7 @@ def test_document_upload_rejects_serialized_index_threshold_before_file_publicat
     response = client.post(
         "/documents",
         headers=AUTH,
-        data={"metadata": json.dumps({"id": second_id, "label": "x" * 128})},
+        data={"metadata": json.dumps(tax_document_metadata(second_id, title="x" * 128))},
         files={"file": ("return.pdf", b"new", "application/pdf")},
     )
     assert response.status_code == 413
@@ -3033,7 +3136,7 @@ def test_document_upload_rejects_entry_count_threshold_before_file_publication(t
     assert client.post(
         "/documents",
         headers=AUTH,
-        data={"metadata": json.dumps({"id": first_id})},
+        data={"metadata": json.dumps(tax_document_metadata(first_id))},
         files={"file": ("return.pdf", b"old", "application/pdf")},
     ).status_code == 200
     before = main.DOCUMENTS_INDEX_PATH.read_bytes()
@@ -3041,7 +3144,7 @@ def test_document_upload_rejects_entry_count_threshold_before_file_publication(t
     response = client.post(
         "/documents",
         headers=AUTH,
-        data={"metadata": json.dumps({"id": second_id})},
+        data={"metadata": json.dumps(tax_document_metadata(second_id))},
         files={"file": ("return.pdf", b"new", "application/pdf")},
     )
     assert response.status_code == 413
@@ -3059,7 +3162,7 @@ def test_document_upload_failed_index_publication_preserves_previous_file_and_in
     assert client.post(
         "/documents",
         headers=AUTH,
-        data={"metadata": json.dumps({"id": document_id})},
+        data={"metadata": json.dumps(tax_document_metadata(document_id))},
         files={"file": ("return.pdf", b"old", "application/pdf")},
     ).status_code == 200
     before_index = main.DOCUMENTS_INDEX_PATH.read_bytes()
@@ -3074,7 +3177,7 @@ def test_document_upload_failed_index_publication_preserves_previous_file_and_in
     response = client.post(
         "/documents",
         headers=AUTH,
-        data={"metadata": json.dumps({"id": document_id})},
+        data={"metadata": json.dumps(tax_document_metadata(document_id))},
         files={"file": ("return.png", b"new", "image/png")},
     )
     assert response.status_code == 503
@@ -3094,7 +3197,7 @@ def test_document_reupload_replaces_prior_original(tmp_path, monkeypatch):
         response = client.post(
             "/documents",
             headers=AUTH,
-            data={"metadata": json.dumps({"id": document_id})},
+            data={"metadata": json.dumps(tax_document_metadata(document_id))},
             files={"file": (filename, content, "application/octet-stream")},
         )
         assert response.status_code == 200
@@ -3114,7 +3217,7 @@ def test_document_upload_and_retrieval_safe_valid_path(tmp_path, monkeypatch):
     uploaded = client.post(
         "/documents",
         headers=AUTH,
-        data={"metadata": json.dumps({"id": document_id, "kind": "tax"})},
+        data={"metadata": json.dumps(tax_document_metadata(document_id, documentType="tax"))},
         files={"file": ("return.pdf", content, "application/pdf")},
     )
     assert uploaded.status_code == 200
@@ -3124,6 +3227,80 @@ def test_document_upload_and_retrieval_safe_valid_path(tmp_path, monkeypatch):
     assert retrieved.status_code == 200
     assert retrieved.content == content
     assert retrieved.headers["content-type"] == "application/pdf"
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda metadata: metadata.update(pages=["raw extracted page text"]),
+    lambda metadata: metadata.update(unexpected="must be rejected"),
+    lambda metadata: metadata.update(issuer={"value": "Issuer", "evidence": {"page": 1}}),
+    lambda metadata: metadata.update(dates=[{
+        "value": "2025-01-31",
+        "evidence": tax_evidence(main.DOCUMENT_MAX_EVIDENCE_PAGE + 1),
+    }]),
+])
+def test_document_upload_rejects_non_publication_metadata_without_storage(tmp_path, monkeypatch, mutation):
+    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(main, "DOCUMENTS_INDEX_PATH", tmp_path / "documents.json")
+    monkeypatch.setattr(main, "DOCUMENTS_DIR", tmp_path / "documents")
+    document_id = "12121212-1212-4121-8121-121212121212"
+    metadata = native_tax_document_metadata(document_id)
+    mutation(metadata)
+
+    response = client.post(
+        "/documents",
+        headers=AUTH,
+        data={"metadata": json.dumps(metadata)},
+        files={"file": ("return.pdf", b"safe", "application/pdf")},
+    )
+
+    assert response.status_code == 400
+    assert not (tmp_path / "documents.json").exists()
+    assert not (tmp_path / "documents").exists()
+
+
+def test_document_publication_redacts_identifiers_and_hides_internal_fields(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(main, "DOCUMENTS_INDEX_PATH", tmp_path / "documents.json")
+    monkeypatch.setattr(main, "DOCUMENTS_DIR", tmp_path / "documents")
+    document_id = "13131313-1313-4131-8131-131313131313"
+    metadata = native_tax_document_metadata(document_id)
+    metadata["taxpayerIdentifier"] = tax_candidate("12345678901")
+
+    uploaded = client.post(
+        "/documents",
+        headers=AUTH,
+        data={"metadata": json.dumps(metadata)},
+        files={"file": ("return.pdf", b"safe", "application/pdf")},
+    )
+    assert uploaded.status_code == 200
+
+    listed = client.get("/documents", headers=AUTH)
+    assert listed.status_code == 200
+    publication = listed.json()[0]
+    assert "_originalFile" not in publication
+    assert "pages" not in publication
+    assert publication["taxpayerIdentifier"]["value"] == "********01"
+    assert "12345678901" not in listed.text
+
+
+@pytest.mark.parametrize("unsafe_field", [
+    ("pages", ["raw extracted page text"]),
+    ("unexpected", "must be rejected"),
+])
+def test_document_index_rejects_raw_or_unknown_publication_fields_without_mutation(
+    tmp_path, monkeypatch, unsafe_field
+):
+    monkeypatch.setattr(main, "DOCUMENTS_INDEX_PATH", tmp_path / "documents.json")
+    entry = native_tax_document_metadata("14141414-1414-4141-8141-141414141414")
+    entry["_originalFile"] = "original.pdf"
+    entry[unsafe_field[0]] = unsafe_field[1]
+    original = json.dumps([entry], separators=(",", ":")).encode()
+    main.DOCUMENTS_INDEX_PATH.write_bytes(original)
+
+    response = client.get("/documents", headers=AUTH)
+
+    assert response.status_code == 503
+    assert main.DOCUMENTS_INDEX_PATH.read_bytes() == original
 
 
 def test_document_retrieval_rejects_oversized_existing_file(tmp_path, monkeypatch):

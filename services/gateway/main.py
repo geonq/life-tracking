@@ -37,6 +37,7 @@ import re
 import stat
 import tempfile
 import uuid
+import zlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import BinaryIO, Callable
@@ -516,6 +517,39 @@ DOCUMENT_MULTIPART_HEADER_VALUE_MAX_SIZE = 4 * 1024
 DOCUMENT_MULTIPART_MAX_HEADERS_PER_PART = 16
 DOCUMENT_INDEX_FILENAME_PATTERN = re.compile(
     r"^original(?:-[0-9a-f]{32})?\.(?:pdf|png|jpg|jpeg|heic|bin)$"
+)
+DOCUMENT_MAX_FIELD_CHARACTERS = 2_048
+DOCUMENT_MAX_EVIDENCE_CHARACTERS = 512
+DOCUMENT_MAX_DATES = 2_048
+DOCUMENT_MAX_AMOUNTS = 2_048
+DOCUMENT_MAX_WARNINGS = 64
+DOCUMENT_MAX_EVIDENCE_PAGE = 200
+DOCUMENT_PUBLICATION_KEYS = frozenset({
+    "id", "title", "documentType", "taxYear", "issuer", "taxpayerIdentifier",
+    "referenceIdentifier", "dates", "amounts", "warnings", "confidence",
+})
+DOCUMENT_REQUIRED_PUBLICATION_KEYS = DOCUMENT_PUBLICATION_KEYS - {"taxYear"}
+DOCUMENT_CONFIDENCE_VALUES = frozenset({"low", "medium", "high"})
+
+_TAX_GERMAN_IDENTIFIER_PATTERN = re.compile(
+    r"(?i)\b(?:steuerliche[ \t]+(?:identifikationsnummer|id)|"
+    r"steueridentifikationsnummer|identifikationsnummer|"
+    r"steuer[ \t]*[-–—]?[ \t]*id(?:[ \t]*[-–—.]?[ \t]*nr\.?)?|"
+    r"id[ \t]*[-–—.]?[ \t]*nr\.?|ident[ \t]*[-–—.]?[ \t]*nr\.?|"
+    r"tax[ \t]+identification[ \t]+number|tax[ \t]+id(?:entifier)?|"
+    r"taxpayer[ \t]+id(?:entifier)?|tin)(?=[ \t]*[:#-]?[ \t]*[0-9])"
+    r"[ \t]*[:#-]?[ \t]*([0-9](?:[ \t]?[0-9]){10})(?![0-9])"
+)
+_TAX_IDENTIFIER_PATTERN = re.compile(
+    r"(?i)\b(?:steuerliche[ \t]+(?:identifikationsnummer|id)|"
+    r"steueridentifikationsnummer|identifikationsnummer|"
+    r"steuer[ \t]*[-–—]?[ \t]*id(?:[ \t]*[-–—.]?[ \t]*nr\.?)?|"
+    r"id[ \t]*[-–—.]?[ \t]*nr\.?|ident[ \t]*[-–—.]?[ \t]*nr\.?|"
+    r"tax[ \t]+identification[ \t]+number|tax[ \t]+id(?:entifier)?|"
+    r"taxpayer[ \t]+id(?:entifier)?|tin|steuer[- ]?nummer|aktenzeichen|"
+    r"reference(?:[ \t]+identifier)?|identifier|id)\b[ \t]*[:#-]?[ \t]*"
+    r"(\*+[0-9]{2}|(?:AZ|AKZ|REF|ID)[ \t]+[0-9A-Z][0-9A-Z./-]{2,30}|"
+    r"[0-9A-Z][0-9A-Z./-]{2,30})(?![0-9A-Z./-])"
 )
 
 # Sensitive keys that must not appear in the usage payload
@@ -2814,6 +2848,254 @@ def _calendar_timestamp(value: object) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+CALENDAR_ICON_MAX_BYTES = 256 * 1024
+CALENDAR_ICON_MAX_DIMENSION = 2_048
+CALENDAR_ICON_MAX_PIXELS = 4_000_000
+CALENDAR_ICON_MAX_DECOMPRESSED_BYTES = 34 * 1024 * 1024
+
+
+def _png_scanline_lengths(width: int, height: int, bits_per_pixel: int, interlace: int) -> list[int]:
+    bytes_per_scanline = (width * bits_per_pixel + 7) // 8 + 1
+    if interlace == 0:
+        return [bytes_per_scanline] * height
+
+    # Adam7 pass geometry from the PNG specification.  The resulting list is
+    # bounded by seven passes over the native 2,048-pixel dimension limit.
+    passes = ((0, 0, 8, 8), (4, 0, 8, 8), (0, 4, 4, 8), (2, 0, 4, 4),
+              (0, 2, 2, 4), (1, 0, 2, 2), (0, 1, 1, 2))
+    lengths: list[int] = []
+    for x_start, y_start, x_step, y_step in passes:
+        pass_width = max(0, (width - x_start + x_step - 1) // x_step)
+        pass_height = max(0, (height - y_start + y_step - 1) // y_step)
+        if pass_width and pass_height:
+            pass_scanline = (pass_width * bits_per_pixel + 7) // 8 + 1
+            lengths.extend([pass_scanline] * pass_height)
+    return lengths
+
+
+def _validate_png_structure(raw: bytes) -> bool:
+    signature = b"\x89PNG\r\n\x1a\n"
+    if not raw.startswith(signature):
+        return False
+
+    offset = len(signature)
+    saw_ihdr = False
+    saw_idat = False
+    idat_closed = False
+    saw_iend = False
+    saw_plte = False
+    idat = bytearray()
+    width = height = bits_per_pixel = interlace = bit_depth = color_type = 0
+
+    while offset < len(raw):
+        if len(raw) - offset < 12:
+            return False
+        length = int.from_bytes(raw[offset:offset + 4], "big")
+        chunk_type = raw[offset + 4:offset + 8]
+        data_start = offset + 8
+        data_end = data_start + length
+        chunk_end = data_end + 4
+        if (
+            any(not (0x41 <= byte <= 0x5A or 0x61 <= byte <= 0x7A) for byte in chunk_type)
+            or data_end < data_start
+            or chunk_end > len(raw)
+        ):
+            return False
+        data = raw[data_start:data_end]
+        if (binascii.crc32(chunk_type + data) & 0xFFFFFFFF) != int.from_bytes(raw[data_end:chunk_end], "big"):
+            return False
+        # APNG frame-control/data chunks would make ImageIO expose more than
+        # one image.  They are rejected even though they are ancillary PNG
+        # chunks and otherwise have valid CRCs.
+        if chunk_type in {b"acTL", b"fcTL", b"fdAT"}:
+            return False
+        if chunk_type[:1].isupper() and chunk_type not in {b"IHDR", b"PLTE", b"IDAT", b"IEND"}:
+            return False
+        if not saw_ihdr:
+            if chunk_type != b"IHDR" or length != 13:
+                return False
+            saw_ihdr = True
+            width = int.from_bytes(data[0:4], "big")
+            height = int.from_bytes(data[4:8], "big")
+            bit_depth = data[8]
+            color_type = data[9]
+            if (
+                width <= 0 or height <= 0
+                or width > CALENDAR_ICON_MAX_DIMENSION
+                or height > CALENDAR_ICON_MAX_DIMENSION
+                or width * height > CALENDAR_ICON_MAX_PIXELS
+                or data[10] != 0
+                or data[11] != 0
+                or data[12] not in {0, 1}
+            ):
+                return False
+            allowed_bit_depths = {
+                0: {1, 2, 4, 8, 16},
+                2: {8, 16},
+                3: {1, 2, 4, 8},
+                4: {8, 16},
+                6: {8, 16},
+            }
+            if color_type not in allowed_bit_depths or bit_depth not in allowed_bit_depths[color_type]:
+                return False
+            channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[color_type]
+            bits_per_pixel = channels * bit_depth
+            interlace = data[12]
+        elif chunk_type == b"IHDR" or saw_iend:
+            return False
+
+        if chunk_type == b"PLTE":
+            if saw_plte or saw_idat or length == 0 or length > 768 or length % 3:
+                return False
+            saw_plte = True
+        elif chunk_type == b"IDAT":
+            if idat_closed:
+                return False
+            saw_idat = True
+            if not data:
+                return False
+            idat.extend(data)
+        elif saw_idat:
+            idat_closed = True
+
+        if chunk_type == b"IEND":
+            if length != 0 or not saw_idat:
+                return False
+            saw_iend = True
+            offset = chunk_end
+            break
+        offset = chunk_end
+
+    if not saw_ihdr or not saw_idat or not saw_iend or offset != len(raw):
+        return False
+
+    # Indexed PNGs must have a palette, and its entry count cannot exceed the
+    # representable index range.  This catches structurally complete but
+    # undecodable palette images without loading a decoder.
+    if color_type == 3:
+        if not saw_plte or len(raw) < 8:
+            return False
+        # The palette length was checked while parsing; inspect IHDR's depth
+        # and the first PLTE chunk without retaining another large object.
+        palette_length = None
+        cursor = 8
+        while cursor < len(raw):
+            chunk_length = int.from_bytes(raw[cursor:cursor + 4], "big")
+            chunk_type = raw[cursor + 4:cursor + 8]
+            if chunk_type == b"PLTE":
+                palette_length = chunk_length // 3
+                break
+            cursor += 12 + chunk_length
+        if palette_length is None or palette_length > (1 << bit_depth):
+            return False
+
+    row_lengths = _png_scanline_lengths(width, height, bits_per_pixel, interlace)
+    expected_output = sum(row_lengths)
+    if not row_lengths or expected_output > CALENDAR_ICON_MAX_DECOMPRESSED_BYTES:
+        return False
+    try:
+        decompressor = zlib.decompressobj()
+        decoded = decompressor.decompress(bytes(idat), expected_output + 1)
+        if len(decoded) > expected_output or decompressor.unused_data or decompressor.unconsumed_tail:
+            return False
+        remaining = expected_output - len(decoded)
+        flushed = decompressor.flush(remaining + 1)
+        if len(flushed) > remaining or not decompressor.eof or len(decoded) + len(flushed) != expected_output:
+            return False
+        output_offset = 0
+        for scanline_length in row_lengths:
+            if output_offset < len(decoded):
+                filter_byte = decoded[output_offset]
+            else:
+                filter_byte = flushed[output_offset - len(decoded)]
+            if filter_byte > 4:
+                return False
+            output_offset += scanline_length
+    except (zlib.error, ValueError, OverflowError):
+        return False
+    return True
+
+
+def _validate_jpeg_structure(raw: bytes) -> bool:
+    if len(raw) < 4 or raw[:2] != b"\xff\xd8":
+        return False
+    position = 2
+    frame_count = 0
+    saw_scan = False
+    saw_entropy = False
+    sof_markers = {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
+    while position < len(raw):
+        if raw[position] != 0xFF:
+            return False
+        while position < len(raw) and raw[position] == 0xFF:
+            position += 1
+        if position >= len(raw):
+            return False
+        marker = raw[position]
+        position += 1
+        if marker == 0xD9:
+            return frame_count == 1 and saw_scan and saw_entropy and position == len(raw)
+        if marker in {0xD8, *range(0xD0, 0xD8)} or marker == 0x00:
+            return False
+        if marker == 0x01:
+            continue
+        if position + 2 > len(raw):
+            return False
+        segment_length = int.from_bytes(raw[position:position + 2], "big")
+        if segment_length < 2 or position + segment_length > len(raw):
+            return False
+        segment = raw[position + 2:position + segment_length]
+        position += segment_length
+
+        if marker in sof_markers:
+            if frame_count or len(segment) < 6:
+                return False
+            precision = segment[0]
+            height = int.from_bytes(segment[1:3], "big")
+            width = int.from_bytes(segment[3:5], "big")
+            components = segment[5]
+            if (
+                precision == 0 or width <= 0 or height <= 0
+                or width > CALENDAR_ICON_MAX_DIMENSION
+                or height > CALENDAR_ICON_MAX_DIMENSION
+                or width * height > CALENDAR_ICON_MAX_PIXELS
+                or not 1 <= components <= 4
+                or len(segment) != 6 + 3 * components
+            ):
+                return False
+            frame_count = 1
+        elif marker == 0xDA:
+            if frame_count != 1 or len(segment) < 4:
+                return False
+            components = segment[0]
+            if not 1 <= components <= 4 or len(segment) != 4 + 2 * components:
+                return False
+            saw_scan = True
+            while position < len(raw):
+                if raw[position] != 0xFF:
+                    saw_entropy = True
+                    position += 1
+                    continue
+                marker_start = position
+                while position < len(raw) and raw[position] == 0xFF:
+                    position += 1
+                if position >= len(raw):
+                    return False
+                entropy_marker = raw[position]
+                if entropy_marker == 0x00:
+                    saw_entropy = True
+                    position += 1
+                    continue
+                if 0xD0 <= entropy_marker <= 0xD7:
+                    saw_entropy = True
+                    position += 1
+                    continue
+                # Leave the next non-entropy marker for the outer parser.
+                position = marker_start
+                break
+    return False
+
+
 def _validate_calendar_icon_asset(value: object) -> None:
     # CalendarIconAsset's legacy decoder permits omitted/null version/hash.
     if not isinstance(value, dict) or not {"format", "bytes"}.issubset(value) or set(value) - {
@@ -2825,17 +3107,18 @@ def _validate_calendar_icon_asset(value: object) -> None:
         raise ValueError("invalid calendar icon version")
     if not _is_choice(value["format"], {"png", "jpeg"}) or not isinstance(value["bytes"], str):
         raise ValueError("invalid calendar icon encoding")
-    raw = base64.b64decode(value["bytes"].encode("ascii"), validate=True)
-    if not raw or len(raw) > 256 * 1024 or base64.b64encode(raw).decode("ascii") != value["bytes"]:
+    try:
+        raw = base64.b64decode(value["bytes"].encode("ascii"), validate=True)
+    except (UnicodeEncodeError, binascii.Error):
+        raise ValueError("invalid calendar icon bytes") from None
+    if not raw or len(raw) > CALENDAR_ICON_MAX_BYTES or base64.b64encode(raw).decode("ascii") != value["bytes"]:
         raise ValueError("invalid calendar icon bytes")
-    signature = b"\x89PNG\r\n\x1a\n" if value["format"] == "png" else b"\xff\xd8\xff"
-    if not raw.startswith(signature):
-        raise ValueError("invalid calendar icon format")
+    valid = _validate_png_structure(raw) if value["format"] == "png" else _validate_jpeg_structure(raw)
+    if not valid:
+        raise ValueError("invalid calendar icon structure")
     digest = value.get("contentHash")
     if digest is not None and (not isinstance(digest, str) or digest != hashlib.sha256(raw).hexdigest()):
         raise ValueError("invalid calendar icon digest")
-    # Actual single-frame image decoding/dimension validation remains the
-    # native ImageIO boundary; the gateway has no image decoder dependency.
 
 
 def _validate_calendar_item(value: object) -> None:
@@ -3676,8 +3959,179 @@ def _document_index_id(value: object) -> str:
         raise _DocumentIndexError("document index id is invalid") from exc
 
 
+def _canonical_document_id(value: object) -> str:
+    if type(value) is not str:
+        raise ValueError("document id is not a string")
+    try:
+        canonical = str(uuid.UUID(value))
+    except (ValueError, AttributeError) as exc:
+        raise ValueError("document id is invalid") from exc
+    if canonical != value:
+        raise ValueError("document id is not canonical")
+    return canonical
+
+
+def _bounded_document_string(value: object, maximum: int) -> str:
+    if type(value) is not str or len(value) > maximum:
+        raise ValueError("document string exceeds its bound")
+    return value
+
+
+def _mask_tax_identifier(value: str) -> str:
+    trimmed = value.strip()
+    if len(trimmed) < 4:
+        return trimmed
+    prefix = trimmed[:-2]
+    if prefix and all(character == "*" for character in prefix):
+        return trimmed
+    return "*" * min(8, max(1, len(prefix))) + trimmed[-2:]
+
+
+def _redact_tax_text(value: str) -> str:
+    def replace_match(match: re.Match[str]) -> str:
+        whole = match.group(0)
+        start = match.start(1) - match.start(0)
+        end = match.end(1) - match.start(0)
+        return whole[:start] + _mask_tax_identifier(match.group(1)) + whole[end:]
+
+    redacted = _TAX_GERMAN_IDENTIFIER_PATTERN.sub(replace_match, value)
+    return _TAX_IDENTIFIER_PATTERN.sub(replace_match, redacted)
+
+
+def _mask_tax_identifier_value(value: str) -> str:
+    redacted = _redact_tax_text(value)
+    if redacted != value or "*" in value:
+        return redacted
+    return _mask_tax_identifier(value)
+
+
+def _validate_document_evidence(value: object) -> dict:
+    if not isinstance(value, dict) or set(value) != {"page", "snippet"}:
+        raise ValueError("document evidence fields are invalid")
+    page = value["page"]
+    if type(page) is not int or not 1 <= page <= DOCUMENT_MAX_EVIDENCE_PAGE:
+        raise ValueError("document evidence page is invalid")
+    snippet = _bounded_document_string(value["snippet"], DOCUMENT_MAX_EVIDENCE_CHARACTERS)
+    return {"page": page, "snippet": _redact_tax_text(snippet)}
+
+
+def _validate_document_candidate(value: object, *, identifier: bool) -> dict | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {"value", "evidence"}:
+        raise ValueError("document candidate fields are invalid")
+    raw_value = _bounded_document_string(value["value"], DOCUMENT_MAX_FIELD_CHARACTERS)
+    evidence = _validate_document_evidence(value["evidence"])
+    safe_value = _mask_tax_identifier_value(raw_value) if identifier else _redact_tax_text(raw_value)
+    safe_snippet = evidence["snippet"]
+    if identifier:
+        safe_snippet = safe_snippet.replace(raw_value, safe_value)
+    evidence["snippet"] = safe_snippet
+    return {"value": safe_value, "evidence": evidence}
+
+
+def _validate_document_dates(value: object) -> list[dict]:
+    if not isinstance(value, list) or len(value) > DOCUMENT_MAX_DATES:
+        raise ValueError("document dates exceed their bound")
+    dates = []
+    for date in value:
+        if not isinstance(date, dict) or set(date) != {"value", "evidence"}:
+            raise ValueError("document date fields are invalid")
+        dates.append({
+            "value": _redact_tax_text(_bounded_document_string(date["value"], DOCUMENT_MAX_FIELD_CHARACTERS)),
+            "evidence": _validate_document_evidence(date["evidence"]),
+        })
+    return dates
+
+
+def _validate_document_amounts(value: object) -> list[dict]:
+    if not isinstance(value, list) or len(value) > DOCUMENT_MAX_AMOUNTS:
+        raise ValueError("document amounts exceed their bound")
+    amounts = []
+    for amount in value:
+        if not isinstance(amount, dict) or set(amount) != {"value", "label", "evidence"}:
+            raise ValueError("document amount fields are invalid")
+        amounts.append({
+            "value": _redact_tax_text(_bounded_document_string(amount["value"], DOCUMENT_MAX_FIELD_CHARACTERS)),
+            "label": _redact_tax_text(_bounded_document_string(amount["label"], DOCUMENT_MAX_FIELD_CHARACTERS)),
+            "evidence": _validate_document_evidence(amount["evidence"]),
+        })
+    return amounts
+
+
+def _validate_document_publication(value: object, *, normalize: bool) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError("document publication is not an object")
+    if set(value) - DOCUMENT_PUBLICATION_KEYS or not DOCUMENT_REQUIRED_PUBLICATION_KEYS.issubset(value):
+        raise ValueError("document publication fields are invalid")
+
+    normalized = {
+        "id": _canonical_document_id(value["id"]),
+        "title": _bounded_document_string(value["title"], DOCUMENT_MAX_FIELD_CHARACTERS),
+        "documentType": _bounded_document_string(value["documentType"], DOCUMENT_MAX_FIELD_CHARACTERS),
+        "issuer": _validate_document_candidate(value["issuer"], identifier=False),
+        "taxpayerIdentifier": _validate_document_candidate(value["taxpayerIdentifier"], identifier=True),
+        "referenceIdentifier": _validate_document_candidate(value["referenceIdentifier"], identifier=True),
+        "dates": _validate_document_dates(value["dates"]),
+        "amounts": _validate_document_amounts(value["amounts"]),
+        "warnings": [],
+        "confidence": value["confidence"],
+    }
+    if "taxYear" in value:
+        tax_year = value["taxYear"]
+        if tax_year is not None and (
+            type(tax_year) is not int or not -(2**63) <= tax_year <= 2**63 - 1
+        ):
+            raise ValueError("document tax year is invalid")
+        normalized["taxYear"] = tax_year
+    warnings = value["warnings"]
+    if not isinstance(warnings, list) or len(warnings) > DOCUMENT_MAX_WARNINGS:
+        raise ValueError("document warnings exceed their bound")
+    normalized["warnings"] = [
+        _redact_tax_text(_bounded_document_string(warning, DOCUMENT_MAX_FIELD_CHARACTERS))
+        for warning in warnings
+    ]
+    confidence = value["confidence"]
+    if confidence is not None and confidence not in DOCUMENT_CONFIDENCE_VALUES:
+        raise ValueError("document confidence is invalid")
+
+    if not normalize and normalized != value:
+        raise ValueError("document publication is not canonical or privacy-safe")
+    return normalized
+
+
+def _validate_document_index_entry(value: object) -> dict:
+    if not isinstance(value, dict) or "_originalFile" not in value:
+        raise ValueError("document index entry is invalid")
+    if set(value) - DOCUMENT_PUBLICATION_KEYS - {"_originalFile"}:
+        raise ValueError("document index entry fields are invalid")
+    original_file = value["_originalFile"]
+    if not _valid_document_index_filename(original_file):
+        raise ValueError("document index file name is invalid")
+    publication = {key: item for key, item in value.items() if key != "_originalFile"}
+    normalized = _validate_document_publication(publication, normalize=False)
+    normalized["_originalFile"] = original_file
+    return normalized
+
+
+def _serialize_public_document_index(index: list[dict]) -> bytes:
+    try:
+        body = json.dumps(
+            [{key: value for key, value in entry.items() if key != "_originalFile"} for entry in index],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (UnicodeError, TypeError, ValueError, OverflowError, RecursionError) as exc:
+        raise _DocumentIndexError("document publication cannot be serialized") from exc
+    if len(body) > DOCUMENT_INDEX_MAX_SIZE:
+        raise _DocumentIndexTooLarge("document publication size limit exceeded")
+    return body
+
+
 def _load_document_index() -> tuple[list[dict], bytes | None]:
-    """Load the index without filtering or repairing corrupt durable state."""
+    """Load only canonical, privacy-safe index entries without repairing state."""
     try:
         body = _read_bounded_state_file(DOCUMENTS_INDEX_PATH, DOCUMENT_INDEX_MAX_SIZE)
     except (OSError, _CalendarStateUnavailable) as exc:
@@ -3695,18 +4149,20 @@ def _load_document_index() -> tuple[list[dict], bytes | None]:
     if not isinstance(decoded, list) or len(decoded) > DOCUMENT_INDEX_MAX_ENTRIES:
         raise _DocumentIndexError("document index entry limit exceeded")
     identifiers: set[str] = set()
+    validated_entries = []
     for entry in decoded:
-        if not isinstance(entry, dict):
-            raise _DocumentIndexError("document index entry is invalid")
-        identifier = _document_index_id(entry.get("id"))
+        try:
+            validated = _validate_document_index_entry(entry)
+        except (TypeError, ValueError, UnicodeError, OverflowError, RecursionError) as exc:
+            raise _DocumentIndexError("document index entry is invalid") from exc
+        identifier = validated["id"]
         if identifier in identifiers:
             raise _DocumentIndexError("document index contains duplicate ids")
         identifiers.add(identifier)
-        if "_originalFile" in entry and not _valid_document_index_filename(entry["_originalFile"]):
-            raise _DocumentIndexError("document index file name is invalid")
+        validated_entries.append(validated)
     # Validate the canonical publication form as well as the raw read bound.
-    _serialize_document_index(decoded)
-    return decoded, body
+    _serialize_document_index(validated_entries)
+    return validated_entries, body
 
 
 def _parse_document_metadata(value: object) -> dict:
@@ -3730,11 +4186,10 @@ def _parse_document_metadata(value: object) -> dict:
         raise HTTPException(status_code=400, detail="metadata must be a JSON object")
     if len(meta) > DOCUMENT_METADATA_MAX_FIELDS:
         raise HTTPException(status_code=413, detail="metadata field limit exceeded")
-    raw_doc_id = meta.get("id")
-    if not raw_doc_id:
-        raise HTTPException(status_code=400, detail="metadata.id is required")
-    doc_id = _safe_document_id(raw_doc_id)
-    meta["id"] = doc_id
+    try:
+        meta = _validate_document_publication(meta, normalize=True)
+    except (TypeError, ValueError, UnicodeError, OverflowError, RecursionError) as exc:
+        raise HTTPException(status_code=400, detail="metadata is not a valid TaxDocument") from exc
     try:
         canonical_size = len(
             json.dumps(meta, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
@@ -4085,11 +4540,13 @@ async def put_calendar(request: Request) -> Response:
 async def list_documents() -> Response:
     async with documents_lock:
         try:
-            _index, body = await _run_gateway_storage(_load_document_index)
+            index, _body = await _run_gateway_storage(_load_document_index)
         except _DocumentIndexError:
             return JSONResponse({"error": "documents_unavailable"}, status_code=503)
-        if body is None:
-            body = b"[]"
+        try:
+            body = _serialize_public_document_index(index)
+        except _DocumentIndexError:
+            return JSONResponse({"error": "documents_unavailable"}, status_code=503)
         return Response(content=body, media_type="application/json")
 
 
