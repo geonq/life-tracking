@@ -368,6 +368,181 @@ final class TaxDocumentTests: XCTestCase {
         XCTAssertFalse(persisted.contains("\"pages\""))
     }
 
+    func testKnownIdentifierMappingCoversEveryPublicationField() throws {
+        let rawIdentifier = "AZ123456"
+        let evidence = { (label: String) in
+            TaxEvidence(page: 1, snippet: "\(label) \(rawIdentifier)")
+        }
+        let document = TaxDocument(
+            title: "Assessment \(rawIdentifier)",
+            documentType: "tax_assessment \(rawIdentifier)",
+            taxYear: 2026,
+            issuer: TaxCandidate(value: "Finanzamt \(rawIdentifier)", evidence: evidence("Issuer")),
+            taxpayerIdentifier: TaxCandidate(value: rawIdentifier, evidence: evidence("Taxpayer")),
+            referenceIdentifier: TaxCandidate(value: rawIdentifier, evidence: evidence("Reference")),
+            dates: [TaxDate(
+                value: "31.12.2025 \(rawIdentifier)",
+                evidence: evidence("Date")
+            )],
+            amounts: [TaxAmount(
+                value: "1.234,56 EUR \(rawIdentifier)",
+                label: "Amount \(rawIdentifier)",
+                evidence: evidence("Amount")
+            )],
+            pages: ["Page \(rawIdentifier)"],
+            warnings: ["Review \(rawIdentifier)"],
+            confidence: .high
+        )
+
+        let inMemoryValues = [
+            document.title,
+            document.documentType,
+            document.issuer?.value,
+            document.issuer?.evidence.snippet,
+            document.taxpayerIdentifier?.value,
+            document.taxpayerIdentifier?.evidence.snippet,
+            document.referenceIdentifier?.value,
+            document.referenceIdentifier?.evidence.snippet,
+            document.dates.first?.value,
+            document.dates.first?.evidence.snippet,
+            document.amounts.first?.value,
+            document.amounts.first?.label,
+            document.amounts.first?.evidence.snippet,
+            document.warnings.first ?? "",
+            document.pages.first ?? ""
+        ].compactMap { $0 }
+        XCTAssertTrue(inMemoryValues.allSatisfy { !$0.contains(rawIdentifier) })
+        XCTAssertTrue(inMemoryValues.contains { $0.contains("********56") })
+
+        let encoded = try JSONEncoder().encode(document)
+        let persisted = String(decoding: encoded, as: UTF8.self)
+        XCTAssertFalse(persisted.contains(rawIdentifier))
+        XCTAssertTrue(persisted.contains("********56"))
+        XCTAssertFalse(persisted.contains("\"pages\""))
+
+        let decoded = try JSONDecoder().decode(TaxDocument.self, from: encoded)
+        XCTAssertFalse(String(decoding: try JSONEncoder().encode(decoded), as: UTF8.self).contains(rawIdentifier))
+
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = TaxDocumentStore(directory: directory)
+        try store.save([document])
+        let stored = String(
+            decoding: try Data(contentsOf: directory.appendingPathComponent("documents.json")),
+            as: UTF8.self
+        )
+        XCTAssertFalse(stored.contains(rawIdentifier))
+        XCTAssertTrue(stored.contains("********56"))
+        XCTAssertFalse(stored.contains("\"pages\""))
+        let loaded = try store.load()
+        XCTAssertFalse(String(decoding: try JSONEncoder().encode(loaded.first!), as: UTF8.self).contains(rawIdentifier))
+    }
+
+    func testMaskedIdentifierEvidenceWithholdsUnknownLegacyTextDuringStoreMigration() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let identifier = UUID().uuidString
+        let legacyJSON = """
+        [{
+          "id": "\(identifier)",
+          "title": "Tax year 2026",
+          "documentType": "tax_return",
+          "taxYear": 2026,
+          "issuer": null,
+          "taxpayerIdentifier": {
+            "value": "********56",
+            "evidence": {"page": 1, "snippet": "Legacy evidence AZ123456"}
+          },
+          "referenceIdentifier": {
+            "value": "********42",
+            "evidence": {"page": 1, "snippet": "Page 1 · 31.12.2025 · 1.234,56 EUR"}
+          },
+          "dates": [],
+          "amounts": [],
+          "warnings": [],
+          "confidence": "low"
+        }]
+        """
+        let fileURL = directory.appendingPathComponent("documents.json")
+        try Data(legacyJSON.utf8).write(to: fileURL)
+
+        let store = TaxDocumentStore(directory: directory)
+        let loaded = try store.load()
+        XCTAssertEqual(loaded.first?.taxpayerIdentifier?.evidence.snippet,
+                       "Evidence withheld for privacy.")
+        XCTAssertEqual(loaded.first?.referenceIdentifier?.evidence.snippet,
+                       "Page 1 · 31.12.2025 · 1.234,56 EUR")
+
+        let migrated = String(decoding: try Data(contentsOf: fileURL), as: UTF8.self)
+        XCTAssertFalse(migrated.contains("AZ123456"))
+        XCTAssertTrue(migrated.contains("Evidence withheld for privacy."))
+        XCTAssertFalse(migrated.contains("\"pages\""))
+    }
+
+    func testIdentifierPrivacyKeepsOrdinaryContextAndMasksShortUnknownTokens() {
+        let ordinary = TaxDocument(
+            title: "Tax year 2026",
+            documentType: "tax_return",
+            taxYear: 2026,
+            issuer: nil,
+            taxpayerIdentifier: TaxCandidate(
+                value: "********26",
+                evidence: TaxEvidence(page: 1, snippet: "Page 1 · 31.12.2025 · 1.234,56 EUR")
+            ),
+            referenceIdentifier: nil,
+            dates: [],
+            amounts: [],
+            pages: []
+        )
+        XCTAssertEqual(ordinary.title, "Tax year 2026")
+        XCTAssertEqual(ordinary.taxpayerIdentifier?.evidence.snippet,
+                       "Page 1 · 31.12.2025 · 1.234,56 EUR")
+
+        let shortToken = TaxDocument(
+            title: "Assessment A7",
+            documentType: "tax_return",
+            taxYear: nil,
+            issuer: nil,
+            taxpayerIdentifier: TaxCandidate(
+                value: "********",
+                evidence: TaxEvidence(page: 1, snippet: "Legacy A7")
+            ),
+            referenceIdentifier: nil,
+            dates: [],
+            amounts: [],
+            pages: []
+        )
+        XCTAssertFalse(shortToken.title.contains("A7"))
+        XCTAssertEqual(shortToken.taxpayerIdentifier?.evidence.snippet,
+                       "Evidence withheld for privacy.")
+    }
+
+    func testMaskedIdentifierEvidenceWithholdsUntrustedNumericAndOpaqueText() {
+        for snippet in ["Page 8642", "8642 EUR", "SECRETREF"] {
+            let document = TaxDocument(
+                title: "Tax year 2026",
+                documentType: "tax_return",
+                taxYear: 2026,
+                issuer: nil,
+                taxpayerIdentifier: TaxCandidate(
+                    value: "********42",
+                    evidence: TaxEvidence(page: 1, snippet: snippet)
+                ),
+                referenceIdentifier: nil,
+                dates: [],
+                amounts: [],
+                pages: []
+            )
+            XCTAssertEqual(
+                document.taxpayerIdentifier?.evidence.snippet,
+                "Evidence withheld for privacy.",
+                "masked candidate must not publish unverifiable evidence: \(snippet)"
+            )
+        }
+    }
+
     func testEmptyPagesWarnAndRemainLowConfidence() {
         let result = TaxDocumentParser.parse(pages: ["", "   "], documentName: "scan.pdf")
         XCTAssertTrue(result.warnings.contains("No embedded text was found."))
