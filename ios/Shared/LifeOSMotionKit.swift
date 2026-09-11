@@ -346,12 +346,13 @@ public struct SpringPillSelector<T: Hashable, Label: View>: View {
                         .frame(minHeight: LifeOSTokens.Control.minimumTarget)
                         .background {
                             if isSelected {
-                                // Monochrome selection: brightness, not hue —
-                                // elevated fill only, no border stroke (§5.3).
+                                // Monochrome selection: a transient primary-text
+                                // overlay keeps the labels stable and visible
+                                // without introducing a blue capsule.
                                 if reduceMotion {
-                                    Capsule().fill(LifeOSTokens.raised)
+                                    Capsule().fill(LifeOSTokens.primaryText.opacity(0.08))
                                 } else {
-                                    Capsule().fill(LifeOSTokens.raised)
+                                    Capsule().fill(LifeOSTokens.primaryText.opacity(0.08))
                                         .matchedGeometryEffect(id: highlightID, in: namespace)
                                 }
                             }

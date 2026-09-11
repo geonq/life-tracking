@@ -7,9 +7,8 @@ public struct LifeOSResponsiveMetrics: Equatable, Sendable {
     /// independent from the two-column capability boundary.
     public static let compactBreakpoint: CGFloat = 600
 
-    /// The shared content width at which a page may choose a two-column
-    /// composition. The metric exposes capability; it never creates columns
-    /// for a caller that does not opt into them.
+    /// The usable content width at which a page may choose a two-column
+    /// composition. Gutters are removed before this threshold is evaluated.
     public static let twoColumnBreakpoint: CGFloat = 720
 
     /// The maximum width for a standard page frame. Keeping this in the
@@ -30,24 +29,29 @@ public struct LifeOSResponsiveMetrics: Equatable, Sendable {
     }
 
     public var isCompact: Bool { width < Self.compactBreakpoint }
-    public var supportsTwoColumnLayout: Bool { width >= Self.twoColumnBreakpoint }
+    public var supportsTwoColumnLayout: Bool { contentWidth >= Self.twoColumnBreakpoint }
 
     public var horizontalGutter: CGFloat {
+#if os(macOS)
         if width >= 1_512 { return 32 }
-        if width >= 900 { return 24 }
-        return 16
+#endif
+        return LifeOSTokens.pageGutter
     }
 
-    public var sectionSpacing: CGFloat {
-        width >= 900 ? LifeOSTokens.Space.xxxl : LifeOSTokens.Space.xxl
+    /// Width remaining after the outer page gutters. This is the width that
+    /// screen composition may safely allocate to columns and controls.
+    public var contentWidth: CGFloat {
+        max(0, width - (horizontalGutter * 2))
     }
+
+    public var sectionSpacing: CGFloat { LifeOSTokens.sectionGap }
 
     public var maxContentWidth: CGFloat {
-        min(width, Self.standardPageMaxWidth)
+        min(contentWidth, Self.standardPageMaxWidth)
     }
 
     public var maxChartWidth: CGFloat {
-        min(width, LifeOSTokens.chartMaxWidth)
+        min(contentWidth, LifeOSTokens.chartMaxWidth)
     }
 }
 
@@ -120,9 +124,6 @@ public struct LifeOSResponsiveContentContainer<Content: View>: View {
                 ? LifeOSResponsiveMetrics.standardPageMaxWidth
                 : 0
         }
-        return min(
-            max(0, maxReadableWidth),
-            LifeOSResponsiveMetrics.standardPageMaxWidth
-        )
+        return max(0, maxReadableWidth)
     }
 }

@@ -71,7 +71,11 @@ final class LifeOSDesignSystemTests: XCTestCase {
 
         XCTAssertEqual(
             LifeOSSemanticColorPairs.primaryAction.darkBackgroundHex,
-            LifeOSPalette.brandBlueHex
+            LifeOSPalette.primaryTextDarkHex
+        )
+        XCTAssertEqual(
+            LifeOSSemanticColorPairs.primaryAction.darkForegroundHex,
+            LifeOSPalette.canvasDarkHex
         )
         XCTAssertEqual(
             LifeOSSemanticColorPairs.focus.darkForegroundHex,
@@ -80,6 +84,10 @@ final class LifeOSDesignSystemTests: XCTestCase {
         XCTAssertEqual(
             LifeOSSemanticColorPairs.estimate.darkForegroundHex,
             LifeOSPalette.estimateGreenHex
+        )
+        XCTAssertEqual(
+            LifeOSSemanticColorPairs.target.darkForegroundHex,
+            LifeOSPalette.targetGreenHex
         )
         XCTAssertEqual(
             LifeOSSemanticColorPairs.calories.darkForegroundHex,
@@ -241,6 +249,7 @@ final class LifeOSDesignSystemTests: XCTestCase {
         XCTAssertEqual(LifeOSTokens.Control.minimumTarget, 44)
         XCTAssertEqual(LifeOSTokens.pagePadding, 16)
         XCTAssertEqual(LifeOSTokens.sectionGap, LifeOSTokens.Space.xl)
+        XCTAssertEqual(LifeOSTokens.pageEndSpacing, LifeOSTokens.Space.xxl)
         XCTAssertEqual(LifeOSTokens.siblingGap, LifeOSTokens.Space.md)
         XCTAssertEqual(LifeOSTokens.labelValueGap, LifeOSTokens.Space.xs)
         XCTAssertEqual(LifeOSTokens.labelHelperGap, LifeOSTokens.Space.xxs)
@@ -265,11 +274,11 @@ final class LifeOSDesignSystemTests: XCTestCase {
         XCTAssertEqual(LifeOSTokens.info, LifeOSTokens.accent)
 
         // Chart series semantics per §2.4.
-        // Estimates are vivid green and the target is a neutral reference;
-        // they must remain distinct from each other and from warning amber.
+        // Target and estimate share the green semantic, while their line
+        // patterns and labels remain distinct in the chart renderer.
         XCTAssertEqual(LifeOSTokens.Series.estimate, LifeOSTokens.estimate)
         XCTAssertNotEqual(LifeOSTokens.Series.estimate, LifeOSTokens.warning)
-        XCTAssertNotEqual(LifeOSTokens.Series.estimate, LifeOSTokens.Series.target)
+        XCTAssertEqual(LifeOSTokens.Series.target, LifeOSTokens.estimate)
         XCTAssertEqual(LifeOSTokens.Series.target, LifeOSTokens.neutralTarget)
         XCTAssertEqual(LifeOSTokens.Series.history, LifeOSTokens.metadataText)
     }
@@ -301,8 +310,22 @@ final class LifeOSDesignSystemTests: XCTestCase {
             LifeOSSemanticColorPairs.calories.darkForegroundHex,
             LifeOSSemanticColorPairs.protein.darkForegroundHex
         )
-        XCTAssertEqual(Color.lifeOSPrimaryActionFill, Color.lifeOSBlue600)
-        XCTAssertEqual(Color.lifeOSOnPrimaryAction, Color.white)
+        XCTAssertEqual(
+            LifeOSSemanticColorPairs.primaryAction.darkForegroundHex,
+            LifeOSPalette.canvasDarkHex
+        )
+        XCTAssertEqual(
+            LifeOSSemanticColorPairs.primaryAction.lightForegroundHex,
+            LifeOSPalette.canvasLightHex
+        )
+        XCTAssertEqual(
+            LifeOSSemanticColorPairs.primaryAction.lightBackgroundHex,
+            LifeOSPalette.primaryTextLightHex
+        )
+        XCTAssertGreaterThanOrEqual(
+            LifeOSSemanticColorPairs.warningText.lightContrastRatio,
+            4.5
+        )
     }
 
     func testTransparentWidgetBackingRemainsReadableOnReviewedGreyWallpapers() {
@@ -403,8 +426,9 @@ final class LifeOSDesignSystemTests: XCTestCase {
     func testResponsiveMetricsKeepMobileAndWideDesktopContracts() {
         let phone = LifeOSResponsiveMetrics(width: 390)
         XCTAssertTrue(phone.isCompact)
-        XCTAssertEqual(phone.horizontalGutter, 16)
-        XCTAssertEqual(phone.sectionSpacing, 32)
+        XCTAssertEqual(phone.horizontalGutter, LifeOSTokens.pageGutter)
+        XCTAssertEqual(phone.sectionSpacing, 24)
+        XCTAssertEqual(phone.contentWidth, 390 - (LifeOSTokens.pageGutter * 2))
         XCTAssertFalse(phone.supportsTwoColumnLayout)
 
         let regularSingleColumn = LifeOSResponsiveMetrics(width: 600)
@@ -415,33 +439,56 @@ final class LifeOSDesignSystemTests: XCTestCase {
         XCTAssertFalse(justBelow.isCompact)
         XCTAssertFalse(justBelow.supportsTwoColumnLayout)
 
-        let atBreakpoint = LifeOSResponsiveMetrics(width: 720)
+        let atBreakpoint = LifeOSResponsiveMetrics(width: 720 + (LifeOSTokens.pageGutter * 2))
         XCTAssertFalse(atBreakpoint.isCompact)
+        XCTAssertEqual(atBreakpoint.contentWidth, 720)
         XCTAssertTrue(atBreakpoint.supportsTwoColumnLayout)
 
-        let justAbove = LifeOSResponsiveMetrics(width: 721)
+        let justAbove = LifeOSResponsiveMetrics(width: 721 + (LifeOSTokens.pageGutter * 2))
         XCTAssertFalse(justAbove.isCompact)
         XCTAssertTrue(justAbove.supportsTwoColumnLayout)
 
-        let wideMac = LifeOSResponsiveMetrics(width: 1_600)
-        XCTAssertEqual(wideMac.horizontalGutter, 32)
-        XCTAssertEqual(wideMac.sectionSpacing, 48)
-        XCTAssertEqual(wideMac.maxContentWidth, 1_120)
-        XCTAssertEqual(wideMac.maxChartWidth, 1_440)
+        let wideWindow = LifeOSResponsiveMetrics(width: 1_600)
+#if os(macOS)
+        XCTAssertEqual(wideWindow.horizontalGutter, 32)
+#else
+        XCTAssertEqual(wideWindow.horizontalGutter, 16)
+#endif
+        XCTAssertEqual(wideWindow.sectionSpacing, 24)
+        XCTAssertEqual(wideWindow.maxContentWidth, 1_120)
+        XCTAssertEqual(wideWindow.maxChartWidth, 1_440)
     }
 
     func testResponsiveMetricsClampStandardPageWidthAtEveryWidthClass() {
         XCTAssertEqual(LifeOSResponsiveMetrics.compactBreakpoint, 600)
         XCTAssertEqual(LifeOSResponsiveMetrics.twoColumnBreakpoint, 720)
         XCTAssertEqual(LifeOSTokens.contentMaxWidth, 1_120)
-        XCTAssertEqual(LifeOSResponsiveMetrics(width: 320).maxContentWidth, 320)
-        XCTAssertEqual(LifeOSResponsiveMetrics(width: 719).maxContentWidth, 719)
-        XCTAssertEqual(LifeOSResponsiveMetrics(width: 720).maxContentWidth, 720)
-        XCTAssertEqual(LifeOSResponsiveMetrics(width: 1_119).maxContentWidth, 1_119)
-        XCTAssertEqual(LifeOSResponsiveMetrics(width: 1_120).maxContentWidth, 1_120)
+        XCTAssertEqual(
+            LifeOSResponsiveMetrics(width: 320).maxContentWidth,
+            320 - (LifeOSTokens.pageGutter * 2)
+        )
+        XCTAssertEqual(
+            LifeOSResponsiveMetrics(width: 719).maxContentWidth,
+            719 - (LifeOSTokens.pageGutter * 2)
+        )
+        XCTAssertEqual(
+            LifeOSResponsiveMetrics(width: 720).maxContentWidth,
+            720 - (LifeOSTokens.pageGutter * 2)
+        )
+        XCTAssertEqual(
+            LifeOSResponsiveMetrics(width: 1_119).maxContentWidth,
+            1_119 - (LifeOSTokens.pageGutter * 2)
+        )
+        XCTAssertEqual(
+            LifeOSResponsiveMetrics(width: 1_120).maxContentWidth,
+            1_120 - (LifeOSTokens.pageGutter * 2)
+        )
         XCTAssertEqual(LifeOSResponsiveMetrics(width: 1_600).maxContentWidth, 1_120)
         XCTAssertEqual(LifeOSResponsiveMetrics(width: -.infinity).maxContentWidth, 0)
-        XCTAssertEqual(LifeOSResponsiveMetrics(width: .infinity).maxContentWidth, 1_120)
+        XCTAssertEqual(
+            LifeOSResponsiveMetrics(width: .infinity).maxContentWidth,
+            1_120 - (LifeOSTokens.pageGutter * 2)
+        )
         XCTAssertEqual(LifeOSResponsiveMetrics(width: .nan).maxContentWidth, 0)
     }
 
@@ -654,18 +701,18 @@ final class LifeOSDesignSystemTests: XCTestCase {
     }
     func testCanonicalMotionTimingsAndCompatibilityAliases() {
         XCTAssertEqual(LifeOSMotion.Timing.press, .easeOut(0.08))
-        XCTAssertEqual(LifeOSMotion.Timing.release, .easeOut(0.14))
+        XCTAssertEqual(LifeOSMotion.Timing.release, .easeOut(0.18))
         XCTAssertEqual(LifeOSMotion.Timing.hover, .easeOut(0.12))
-        XCTAssertEqual(LifeOSMotion.Timing.primary, .spring(response: 0.42, damping: 0.86))
-        XCTAssertEqual(LifeOSMotion.Timing.snappy, .spring(response: 0.24, damping: 0.90))
-        XCTAssertEqual(LifeOSMotion.Timing.hero, .spring(response: 0.32, damping: 0.92))
+        XCTAssertEqual(LifeOSMotion.Timing.primary, .spring(response: 0.42, damping: 0.82))
+        XCTAssertEqual(LifeOSMotion.Timing.snappy, .spring(response: 0.30, damping: 0.86))
+        XCTAssertEqual(LifeOSMotion.Timing.hero, .spring(response: 0.50, damping: 0.85))
         XCTAssertEqual(LifeOSMotion.Timing.calendarSettle, .spring(response: 0.28, damping: 0.92))
         XCTAssertEqual(LifeOSMotion.Timing.tooltip, .easeOut(0.08))
         XCTAssertEqual(LifeOSMotion.Timing.sheet, .easeOut(0.18))
         XCTAssertEqual(LifeOSMotion.Timing.refresh, .easeOut(0.10))
-        XCTAssertEqual(LifeOSMotion.Timing.ring, .easeOut(0.42))
+        XCTAssertEqual(LifeOSMotion.Timing.ring, .spring(response: 0.70, damping: 0.90))
         XCTAssertEqual(LifeOSMotion.Timing.tracking, .direct)
-        XCTAssertEqual(LifeOSMotion.Timing.chart, .easeOut(0.36))
+        XCTAssertEqual(LifeOSMotion.Timing.chart, .easeOut(0.72))
         XCTAssertEqual(LifeOSMotion.spring, LifeOSMotion.primary)
         XCTAssertEqual(LifeOSMotion.springSnappy, LifeOSMotion.snappy)
         XCTAssertEqual(LifeOSMotion.selector, LifeOSMotion.snappy)

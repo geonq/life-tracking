@@ -46,7 +46,7 @@ public struct LifeOSCard<Content: View>: View {
     public var body: some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         let hairlineWidth = displayScale.isFinite && displayScale > 0 ? 1 / displayScale : 1
-        let shadowOpacity = colorScheme == .dark ? 0.24 : 0.12
+        let shadowOpacity = colorScheme == .dark ? 0.35 : 0.18
 
         content
             .padding(padding)
@@ -54,9 +54,9 @@ public struct LifeOSCard<Content: View>: View {
             .overlay(shape.stroke(LifeOSTokens.subtleBorder, lineWidth: hairlineWidth))
             .shadow(
                 color: level.usesShadow ? Color.black.opacity(shadowOpacity) : .clear,
-                radius: level.usesShadow ? 16 : 0,
+                radius: level.usesShadow ? 32 : 0,
                 x: 0,
-                y: level.usesShadow ? 8 : 0
+                y: level.usesShadow ? 12 : 0
             )
             .contentShape(shape)
     }
@@ -83,13 +83,11 @@ private struct LifeOSIconButtonStyle: ButtonStyle {
             reduceMotion: reducedMotion
         )
         let appearance = LifeOSInteractionAppearance.resolve(for: state)
-        let shouldScale = !reducedMotion
-
         configuration.label
             .frame(width: targetSize, height: targetSize)
             .foregroundStyle(tint)
             .background(
-                LifeOSTokens.raised.opacity(appearance.fillOpacity),
+                LifeOSTokens.primaryText.opacity(appearance.fillOpacity),
                 in: RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
             )
             .overlay {
@@ -98,9 +96,10 @@ private struct LifeOSIconButtonStyle: ButtonStyle {
                         isFocused ? LifeOSTokens.focusStroke : LifeOSTokens.essentialBorder,
                         lineWidth: isFocused ? 2 : 1
                     )
+                    .opacity(isFocused ? 1 : max(0.45, appearance.borderOpacity))
+                    .padding(isFocused ? -3 : 0)
             }
             .opacity(appearance.contentOpacity)
-            .scaleEffect(shouldScale && pressed ? 0.98 : 1)
             .animation(
                 LifeOSMotion.curve(
                     for: pressed ? .press : .release,
@@ -427,6 +426,7 @@ public struct LifeOSSelector<ID: Hashable>: View {
                             if focusedOption == option.id {
                                 RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
                                     .stroke(LifeOSTokens.focusStroke, lineWidth: 2)
+                                    .padding(-3)
                             }
                         }
                 }
@@ -450,12 +450,19 @@ public struct LifeOSSelector<ID: Hashable>: View {
     private func optionBackground(for option: LifeOSSelectorOption<ID>) -> some View {
         let isSelected = option.id == selection
         let isHovered = hoveredOption == option.id
-        let fill = option.isEnabled && (isSelected || isHovered)
-            ? LifeOSTokens.raised
-            : (option.isEnabled ? Color.clear : LifeOSTokens.disabledFill)
+        let fillOpacity: Double = isSelected ? 0.08 : (isHovered ? 0.05 : 0)
+        let fill = option.isEnabled
+            ? LifeOSTokens.primaryText.opacity(fillOpacity)
+            : LifeOSTokens.disabledFill
+        let shape = RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
 
-        return RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
+        return shape
             .fill(fill)
+            .overlay {
+                if option.isEnabled && isSelected {
+                    shape.stroke(LifeOSTokens.essentialBorder, lineWidth: 1)
+                }
+            }
             // Only the highlight surface animates. The option label and its
             // measured geometry remain stationary during selection.
             .animation(reduceMotion ? nil : LifeOSMotion.selector, value: isSelected)
@@ -486,7 +493,10 @@ public struct LifeOSSelector<ID: Hashable>: View {
             }
             .padding(.horizontal, LifeOSTokens.Space.sm)
             .frame(minWidth: LifeOSSelectorLayout.minimumCellWidth, minHeight: LifeOSTokens.Control.standardHeight)
-            .background(LifeOSTokens.raised, in: RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous))
+            .background(
+                LifeOSTokens.primaryText.opacity(0.06),
+                in: RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
+            )
             .overlay {
                 RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
                     .stroke(LifeOSTokens.essentialBorder, lineWidth: 1)
@@ -709,8 +719,8 @@ public enum LifeOSStatusTone: String, CaseIterable, Sendable {
         switch self {
         case .neutral: LifeOSTokens.secondaryText
         case .info: LifeOSTokens.info
-        case .success: LifeOSTokens.success
-        case .warning, .demo: LifeOSTokens.warning
+        case .success: LifeOSTokens.successText
+        case .warning, .demo: LifeOSTokens.warningText
         case .danger: LifeOSTokens.danger
         }
     }
@@ -821,7 +831,8 @@ public enum LifeOSProvenanceKind: String, CaseIterable, Sendable {
     fileprivate var tone: LifeOSStatusTone {
         switch self {
         case .observed: .success
-        case .stale, .estimated, .partial: .warning
+        case .stale, .partial: .warning
+        case .estimated: .success
         case .demo: .demo
         case .unavailable: .neutral
         }

@@ -202,14 +202,14 @@ public struct LifeOSInteractionModifier: ViewModifier {
         content
             .opacity(appearance.contentOpacity)
             .background(
-                LifeOSTokens.raised.opacity(appearance.fillOpacity),
+                LifeOSTokens.primaryText.opacity(appearance.fillOpacity),
                 in: RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
             )
             .overlay {
                 if effectiveState.isFocused {
                     RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
                         .stroke(LifeOSTokens.focusStroke, lineWidth: 2)
-                        .padding(2)
+                        .padding(-3)
                 }
             }
             .animation(
