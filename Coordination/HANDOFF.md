@@ -22,8 +22,15 @@ platform icon geometry, and closes the partial monetary-span identifier leak.
 
 The Calendar density tranche is **GREEN** at `b05c4fb` after Astra Medium
 reviewed the complete three-file diff. It establishes a 40/64/120 pt density
-contract, keeps Mac trackpad pinch as the primary interaction, and removes the
-visible slider-like treatment from the secondary preset control.
+contract and keeps Mac trackpad pinch as the primary interaction. Runtime
+visual confirmation of the control treatment remains open.
+
+The Usage presentation tranche is **GREEN** at `8c2c097` after Astra Medium
+re-reviewed the repaired diff. It applies the 112pt summary band, 96pt/8pt
+trailing ring with a 72pt narrow fallback, accessibility-safe ring omission,
+metadata-sized chart controls, flat supplementary sections, and no unsourced
+Suggested pace/Runway rows. The serialized unsigned universal `LifeOSMac`
+build passed; runtime visual acceptance remains open.
 
 Do not claim a production release, remote backend availability, or device
 acceptance from the local source results. No generic conversational
@@ -34,13 +41,14 @@ product.
 ## Git and review state
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- Source checkpoint: `b05c4fb` (`Align Calendar density with pinch-first design`).
-- Coordination checkpoint: `84b8336` (`Refresh LifeOS coordination after Calendar review`).
+- Source checkpoint: `8c2c097` (`Polish Usage hierarchy and chart controls`).
+- Coordination state is tracked in these files at the current branch HEAD;
+  this refresh follows source checkpoint `8c2c097`.
 - Shared-foundation checkpoint: `6751bb5` (`Prove responsive builder content is preserved`).
-- Latest reviewed tranche: `b05c4fb` (`Align Calendar density with pinch-first design`).
-- The branch, its remote-tracking ref, and draft PR #1 head are synchronized at
-  `84b8336`, confirmed through direct Git and GitHub CLI ref checks. The source
-  code through `b05c4fb` is included; the latest
+- Latest reviewed tranche: `8c2c097` (`Polish Usage hierarchy and chart controls`).
+- The branch push for `8c2c097` succeeded. PR #1 was previously recorded as
+  open/draft/CLEAN; GitHub API refresh is pending when connectivity returns.
+  The source code through `8c2c097` is included; the latest
   security checkpoints are `b82f23b` (fail closed on versioned tax evidence),
   `2fb2b9b` (native privacy test typing), and `eb9ca62` (bounded native tax
   lookahead). Keep these small, attributable commits when synchronizing.
@@ -131,6 +139,10 @@ recovery, live penetration results, or physical-device behavior.
 - Calendar density review passed Astra Medium with no HIGH/MEDIUM/LOW findings;
   `git diff --check` passed and the serialized universal unsigned `LifeOSMac`
   build passed at `b05c4fb`.
+- Usage presentation review passed Astra Medium after one RED repair cycle;
+  `git diff --check` and the serialized unsigned universal `LifeOSMac` build
+  passed at `8c2c097`. The build emitted only the known CoreSimulator/
+  `simdiskimaged` diagnostics; no iPhone runtime evidence was inferred.
 - The focused native test rerun is blocked by the current CoreSimulatorService
   failure (`simdiskimaged` unavailable); do not treat the source GREEN verdict
   as simulator evidence.
@@ -149,6 +161,10 @@ recovery, live penetration results, or physical-device behavior.
   import; keep missing-provider states truthful.
 - Exercise HealthKit, Zepp sync, morning refresh/USB Shortcuts, and seven-day
   Personal Team signing renewal on the iPhone 17 and Mac.
+- Signing automation is not complete: `LifeOSAppIntents.swift` reports USB and
+  reauthentication as unavailable/manual, and the checklist's
+  `scripts/install_personal_device.sh` is absent. Treat this as an open
+  deliverable, not a passed device gate.
 - Inspect the Mac UI and iPhone behavior for compact hierarchy, transparent
   grey-wallpaper widgets, calendar scroll/pinch, sheets, hover, route
   reversal, and animation quality. CoreSimulator/device evidence is not yet
@@ -158,14 +174,22 @@ recovery, live penetration results, or physical-device behavior.
 
 ## Next serialized queue
 
-1. Complete the remaining screen-level visual tranches with an Astra review
-   after each bounded batch.
+1. Reconcile the acceptance ledger and stale active plans against current
+   source/commit evidence; keep source, live, device, visual, and operator
+   claims separate.
 2. Complete bounded Windows recovery,
    installation, and remote runtime verification.
-3. Complete provider, physical-device, signing, visual, widget, and
+3. Complete the remaining screen-level visual tranches with an Astra review
+   after each bounded batch.
+4. Complete provider, physical-device, signing, visual, widget, and
    CoreSimulator acceptance gates.
-4. Resolve the issue #2 Obsidian/Zepp decisions with evidence before calling
+5. Resolve the issue #2 Obsidian/Zepp decisions with evidence before calling
    the app complete.
+
+Two recent delegated tasks were closed after bounded waits without changes:
+the Usage implementation and Windows audit workers stalled. Peirce's Calendar
+implementation and Halley's Astra review did complete and were integrated.
+Stalled delegations are not counted as progress.
 
 Keep this file and the other coordination files below 200 lines. Record new
 external evidence here before marking a gate complete.

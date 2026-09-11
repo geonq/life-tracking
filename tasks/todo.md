@@ -2,10 +2,10 @@
 
 Updated 2026-09-12 Europe/Berlin.
 
-Current source checkpoint: `b05c4fb`; coordination tip: `84b8336` on
-`lifeos-foundation-checkpoint-20260812`, synchronized with origin and draft PR
-#1. Final Astra Medium source security, shared foundation, ChartKit/Usage, and
-Calendar density reviews are GREEN.
+Current source checkpoint: `8c2c097` on `lifeos-foundation-checkpoint-20260812`;
+the branch push succeeded and the coordination refresh follows it. Final
+Astra Medium source security, shared foundation, ChartKit/Usage, Calendar
+density, and Usage presentation reviews are GREEN.
 Release status remains pending external gates.
 
 ## Active gates
@@ -26,6 +26,10 @@ Release status remains pending external gates.
    reversal.
 6. Resolve the Obsidian graph/mind-map feasibility and storage decision in
    GitHub issue #2. Do not mark it complete without evidence.
+
+7. Deliver signing automation or document the operator path explicitly:
+   current App Intents report USB/reauthentication as manual/unavailable and
+   `scripts/install_personal_device.sh` is absent.
 
 ## Completed local verification
 

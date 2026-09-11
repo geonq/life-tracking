@@ -4,20 +4,21 @@ Updated 2026-09-12 Europe/Berlin.
 
 - Overall: **source security gate GREEN; shared visual foundation GREEN at
   `6751bb5`; ChartKit/Usage GREEN at `6713de1`; empty-state/icon/tax tranche
-  GREEN at `82b4eb1`; Calendar density GREEN at `b05c4fb`; release remains
+  GREEN at `82b4eb1`; Calendar density GREEN at `b05c4fb`; Usage presentation
+  GREEN at `8c2c097`; release remains
   NO-GO pending operational, provider, device, and visual evidence**.
 - Final Astra Medium review at `eb9ca620…` reproduced and cleared the
   versioned-tax-record evidence bypass. No source-code blocker remains under
   the review criteria.
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- Source code checkpoint: `b05c4fb`; coordination tip: `84b8336`, both
-  synchronized with origin and draft PR #1. Astra's final
+- Source code checkpoint: `8c2c097`; this coordination refresh follows that
+  source commit on the same branch. Astra's final
   foundation re-review is GREEN at `6751bb5`, and the ChartKit/Usage review is
   GREEN at `6713de1`. Both responsive containers own their builder content;
   chart gaps, selection, and bounded rendering are covered.
-- Latest reviewed commit: `b05c4fb`; its source review and universal unsigned
+- Latest reviewed commit: `8c2c097`; its source review and universal unsigned
   `LifeOSMac` build are GREEN. CoreSimulatorService is unavailable for the
-  focused native rerun.
+  focused native rerun, and the PR API refresh is pending network access.
 - No Claude usage watcher, overnight supervisor, generic assistant, or
   conversational AI is in the product. Calorie-photo AI remains allowed.
 
@@ -47,6 +48,9 @@ Updated 2026-09-12 Europe/Berlin.
    cached pointer selection, duplicate authority, and singleton visibility.
 7. Truthful unavailable panels, compact responsive supporting layout, settings
    action wiring, platform icon geometry, and context-aware tax redaction.
+8. Usage presentation hierarchy: compact responsive ring/band geometry,
+   accessibility-safe fallback, metadata-sized chart toolbar, and flat
+   supplementary sections.
 
 ## Verification
 
@@ -84,9 +88,13 @@ Updated 2026-09-12 Europe/Berlin.
 - Real Enable Banking consent/readback and Trade Republic import.
 - Physical iPhone 17 HealthKit/Zepp/Shortcut/USB behavior and seven-day
   signing renewal.
+- Signing automation is still open: App Intents report USB/reauthentication as
+  manual/unavailable and `scripts/install_personal_device.sh` is absent.
 - Mac/iPhone visual, gesture, widget, and animation evidence; CoreSimulator
   acceptance remains unrecorded.
 - Obsidian graph/mind-map feasibility and storage decision in issue #2.
+- Two delegated Usage/Windows tasks stalled and were closed without changes;
+  only completed worker output is counted in the source checkpoints.
 
 ## Operating rule
 
