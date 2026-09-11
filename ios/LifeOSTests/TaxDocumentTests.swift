@@ -122,6 +122,193 @@ final class TaxDocumentTests: XCTestCase {
         }
     }
 
+    func testIdentifierMaskingRequiresBoundedMaskAndTwoDigitSuffix() {
+        let valuesAndExpected = [
+            ("********90", "********90"),
+            ("*90", "********90"),
+            ("**90", "********90"),
+            ("***90", "********90"),
+            ("****1234", "********34"),
+            ("12/345/67890", "********90"),
+            ("12 345 678 901", "********01"),
+            ("123-456-789-01", "********01"),
+            ("12345678901*", "********01"),
+            ("*2345678901", "********01"),
+            ("12345*78901", "********01"),
+            ("1", "*"),
+            ("*9", "**"),
+            ("abc", "***")
+        ]
+
+        for (value, expected) in valuesAndExpected {
+            let document = TaxDocument(
+                title: "Identifier test",
+                documentType: "Tax",
+                taxYear: nil,
+                issuer: nil as String?,
+                taxpayerIdentifier: value,
+                referenceIdentifier: value,
+                dates: [],
+                amounts: [],
+                pages: []
+            )
+
+            XCTAssertEqual(document.taxpayerIdentifier?.value, expected, value)
+            XCTAssertEqual(document.referenceIdentifier?.value, expected, value)
+        }
+    }
+
+    func testConstructionSanitizesAllFreeTextFieldsAndPreservesDatesAndAmounts() throws {
+        let rawIdentifier = "12345678901"
+        let groupedIdentifier = "12 345 678 901"
+        let document = TaxDocument(
+            title: "(rawIdentifier).pdf",
+            documentType: "(groupedIdentifier)",
+            taxYear: 2026,
+            issuer: TaxCandidate(
+                value: "Finanzamt (rawIdentifier)",
+                evidence: TaxEvidence(page: 1, snippet: "Issuer (groupedIdentifier)")),
+            taxpayerIdentifier: TaxCandidate(
+                value: "*01",
+                evidence: TaxEvidence(page: 1, snippet: "Tax ID (rawIdentifier)")),
+            referenceIdentifier: TaxCandidate(
+                value: "12/345/67890",
+                evidence: TaxEvidence(page: 1, snippet: "Reference (groupedIdentifier)")),
+            dates: [TaxDate(
+                value: "08.09.2026",
+                evidence: TaxEvidence(page: 1, snippet: "Date 08.09.2026 (rawIdentifier)"))],
+            amounts: [TaxAmount(
+                value: "1234.56",
+                label: "Einkommensteuer",
+                evidence: TaxEvidence(page: 1, snippet: "Amount 1.234,56 EUR (rawIdentifier)"))],
+            pages: ["Page (rawIdentifier)", "Grouped (groupedIdentifier)"],
+            warnings: ["Warning (rawIdentifier)"]
+        )
+
+        XCTAssertEqual(document.title, "********01.pdf")
+        XCTAssertEqual(document.documentType, "********01")
+        XCTAssertEqual(document.issuer?.value, "Finanzamt ********01")
+        XCTAssertEqual(document.issuer?.evidence.snippet, "Issuer ********01")
+        XCTAssertEqual(document.taxpayerIdentifier?.value, "********01")
+        XCTAssertEqual(document.referenceIdentifier?.value, "********90")
+        XCTAssertEqual(document.dates.first?.value, "08.09.2026")
+        XCTAssertEqual(document.amounts.first?.value, "1234.56")
+        XCTAssertEqual(document.amounts.first?.label, "Einkommensteuer")
+        XCTAssertEqual(document.warnings, ["Warning ********01"])
+        XCTAssertTrue(document.pages.allSatisfy { !$0.contains(rawIdentifier) && !$0.contains(groupedIdentifier) })
+
+        let encoded = try JSONEncoder().encode(document)
+        let persisted = String(decoding: encoded, as: UTF8.self)
+        XCTAssertFalse(persisted.contains(rawIdentifier))
+        XCTAssertFalse(persisted.contains(groupedIdentifier))
+        XCTAssertFalse(persisted.contains("\"pages\""))
+
+        let decoded = try JSONDecoder().decode(TaxDocument.self, from: encoded)
+        XCTAssertEqual(decoded.title, document.title)
+        XCTAssertEqual(decoded.documentType, document.documentType)
+        XCTAssertEqual(decoded.dates.first?.value, "08.09.2026")
+        XCTAssertEqual(decoded.amounts.first?.value, "1234.56")
+    }
+
+    func testEvidenceCanonicalizesMaskedGroupedRawAndMixedIdentifierForms() {
+        let forms = ["*90", "**90", "***90", "12345678901", "12/345/67890", "123-456-789-01", "12345*78901"]
+        for form in forms {
+            let evidence = TaxEvidence(page: 1, snippet: "ID (form)")
+            XCTAssertEqual(evidence.snippet, "ID ********90", form)
+        }
+    }
+
+    func testFilenameDerivedFieldsAreSanitizedWithoutChangingFinancialValues() throws {
+        let rawIdentifier = "12345678901"
+        let result = TaxDocumentParser.parse(
+            text: "08.09.2026\nEinkommensteuer 1.234,56 EUR",
+            documentName: "(rawIdentifier).pdf"
+        )
+
+        XCTAssertEqual(result.title, "********01.pdf")
+        XCTAssertEqual(result.documentType, "********01")
+        XCTAssertEqual(result.dates.first?.value, "08.09.2026")
+        XCTAssertEqual(result.amounts.first?.value, "1234.56")
+        let encoded = try JSONEncoder().encode(result)
+        XCTAssertFalse(String(decoding: encoded, as: UTF8.self).contains(rawIdentifier))
+    }
+
+    func testRawMaskedIdentifierIsSanitizedAcrossConstructionDecodeEvidencePagesAndPersistence() throws {
+        let rawIdentifier = "12345678901*"
+        let mixedIdentifier = "*2345678901"
+        let taxpayerEvidence = TaxEvidence(page: 1, snippet: "Tax ID: \(rawIdentifier)")
+        let referenceEvidence = TaxEvidence(page: 1, snippet: "Reference \(mixedIdentifier)")
+        let constructed = TaxDocument(
+            title: "Privacy test",
+            documentType: "Tax",
+            taxYear: 2026,
+            issuer: nil,
+            taxpayerIdentifier: TaxCandidate(value: rawIdentifier, evidence: taxpayerEvidence),
+            referenceIdentifier: TaxCandidate(value: mixedIdentifier, evidence: referenceEvidence),
+            dates: [],
+            amounts: [],
+            pages: ["Page text: \(rawIdentifier)", "Other text: \(mixedIdentifier)"]
+        )
+
+        let inMemoryValues = [
+            constructed.taxpayerIdentifier?.value,
+            constructed.referenceIdentifier?.value,
+            constructed.taxpayerIdentifier?.evidence.snippet,
+            constructed.referenceIdentifier?.evidence.snippet
+        ].compactMap { $0 } + constructed.pages
+        XCTAssertEqual(constructed.taxpayerIdentifier?.value, "********01")
+        XCTAssertEqual(constructed.referenceIdentifier?.value, "********01")
+        XCTAssertTrue(inMemoryValues.allSatisfy {
+            !$0.contains(rawIdentifier) && !$0.contains(mixedIdentifier) && !$0.contains("12345678901")
+        })
+
+        let identifier = UUID()
+        let wireJSON = """
+        {
+          "id": "\(identifier.uuidString)",
+          "title": "Privacy test",
+          "documentType": "Tax",
+          "taxYear": 2026,
+          "issuer": null,
+          "taxpayerIdentifier": {
+            "value": "\(rawIdentifier)",
+            "evidence": {"page": 1, "snippet": "Tax ID: \(rawIdentifier)"}
+          },
+          "referenceIdentifier": {
+            "value": "\(mixedIdentifier)",
+            "evidence": {"page": 1, "snippet": "Reference \(mixedIdentifier)"}
+          },
+          "dates": [],
+          "amounts": [],
+          "warnings": [],
+          "confidence": "low"
+        }
+        """
+        let decoded = try JSONDecoder().decode(TaxDocument.self, from: Data(wireJSON.utf8))
+        let decodedValues = [
+            decoded.taxpayerIdentifier?.value,
+            decoded.referenceIdentifier?.value,
+            decoded.taxpayerIdentifier?.evidence.snippet,
+            decoded.referenceIdentifier?.evidence.snippet
+        ].compactMap { $0 } + decoded.pages
+        XCTAssertTrue(decodedValues.allSatisfy {
+            !$0.contains(rawIdentifier) && !$0.contains(mixedIdentifier) && !$0.contains("12345678901")
+        })
+
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = TaxDocumentStore(directory: directory)
+        try store.save([constructed])
+        let persisted = String(
+            decoding: try Data(contentsOf: directory.appendingPathComponent("documents.json")),
+            as: UTF8.self
+        )
+        XCTAssertFalse(persisted.contains(rawIdentifier))
+        XCTAssertFalse(persisted.contains(mixedIdentifier))
+        XCTAssertFalse(persisted.contains("12345678901"))
+        XCTAssertFalse(persisted.contains("\"pages\""))
+    }
+
     func testEmptyPagesWarnAndRemainLowConfidence() {
         let result = TaxDocumentParser.parse(pages: ["", "   "], documentName: "scan.pdf")
         XCTAssertTrue(result.warnings.contains("No embedded text was found."))
@@ -139,6 +326,15 @@ final class TaxDocumentTests: XCTestCase {
         XCTAssertTrue(TaxCSVExporter.export([doc]).contains("\"A, \"\"quoted\"\"\""))
         try store.delete(doc)
         XCTAssertTrue(try store.load().isEmpty)
+    }
+
+    func testTaxDocumentStoreUsesPlatformAppropriateDurableWriteOptions() {
+#if os(iOS)
+        XCTAssertTrue(TaxDocumentStore.durableWriteOptions.contains(.atomic))
+        XCTAssertTrue(TaxDocumentStore.durableWriteOptions.contains(.completeFileProtection))
+#elseif os(macOS)
+        XCTAssertEqual(TaxDocumentStore.durableWriteOptions, [.atomic])
+#endif
     }
 
     func testCanonicalPersistenceExcludesPageTextAndMigratesLegacyPageField() throws {
@@ -178,6 +374,64 @@ final class TaxDocumentTests: XCTestCase {
         persisted = String(decoding: try Data(contentsOf: fileURL), as: UTF8.self)
         XCTAssertFalse(persisted.contains(legacyRawPageText))
         XCTAssertFalse(persisted.contains("\"pages\""))
+    }
+
+    func testStoreMigrationSanitizesLegacyFreeTextAndKeepsDatesAndAmounts() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let rawIdentifier = "12345678901"
+        let groupedIdentifier = "12 345 678 901"
+        let evidence = ["page": 1, "snippet": "Evidence (groupedIdentifier)"] as [String: Any]
+        let legacyDocument: [String: Any] = [
+            "id": UUID().uuidString,
+            "title": "(rawIdentifier).pdf",
+            "documentType": groupedIdentifier,
+            "taxYear": 2026,
+            "issuer": [
+                "value": "Finanzamt (rawIdentifier)",
+                "evidence": evidence
+            ],
+            "taxpayerIdentifier": [
+                "value": "*90",
+                "evidence": ["page": 1, "snippet": "Tax ID (rawIdentifier)"]
+            ],
+            "referenceIdentifier": [
+                "value": "12345*78901",
+                "evidence": ["page": 1, "snippet": "Reference (groupedIdentifier)"]
+            ],
+            "dates": [[
+                "value": "08.09.2026",
+                "evidence": ["page": 1, "snippet": "Date (rawIdentifier) 08.09.2026"]
+            ]],
+            "amounts": [[
+                "value": "1234.56",
+                "label": "Einkommensteuer",
+                "evidence": ["page": 1, "snippet": "Amount 1.234,56 EUR (rawIdentifier)"]
+            ]],
+            "pages": ["Legacy raw page (rawIdentifier)"],
+            "warnings": ["Warning (rawIdentifier)"],
+            "confidence": "high"
+        ]
+        let fileURL = directory.appendingPathComponent("documents.json")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: [legacyDocument]).write(to: fileURL)
+
+        let loaded = try TaxDocumentStore(directory: directory).load()
+        let document = try XCTUnwrap(loaded.first)
+        XCTAssertEqual(document.title, "********01.pdf")
+        XCTAssertEqual(document.documentType, "********01")
+        XCTAssertEqual(document.issuer?.value, "Finanzamt ********01")
+        XCTAssertEqual(document.taxpayerIdentifier?.value, "********90")
+        XCTAssertEqual(document.referenceIdentifier?.value, "********01")
+        XCTAssertEqual(document.dates.first?.value, "08.09.2026")
+        XCTAssertEqual(document.amounts.first?.value, "1234.56")
+        XCTAssertEqual(document.warnings, ["Warning ********01"])
+        XCTAssertTrue(document.pages.isEmpty)
+
+        let migrated = String(decoding: try Data(contentsOf: fileURL), as: UTF8.self)
+        XCTAssertFalse(migrated.contains(rawIdentifier))
+        XCTAssertFalse(migrated.contains(groupedIdentifier))
+        XCTAssertFalse(migrated.contains("\"pages\""))
     }
 
     func testLegacyRawIdentifierEvidenceIsSanitizedDuringDecodeAndRewrite() throws {
