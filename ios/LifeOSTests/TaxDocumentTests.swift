@@ -336,7 +336,7 @@ final class TaxDocumentTests: XCTestCase {
             confidence: parsed.confidence
         )
 
-        let publishedValues = [
+        let publishedValues: [String] = [
             document.title,
             document.documentType,
             document.issuer?.value,
@@ -405,7 +405,7 @@ final class TaxDocumentTests: XCTestCase {
         """
 
         let decoded = try JSONDecoder().decode(TaxDocument.self, from: Data(sourceJSON.utf8))
-        let decodedValues = [
+        let decodedValues: [String] = [
             decoded.title,
             decoded.documentType,
             decoded.issuer?.value,
