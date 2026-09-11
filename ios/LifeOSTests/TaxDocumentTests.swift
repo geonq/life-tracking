@@ -309,6 +309,147 @@ final class TaxDocumentTests: XCTestCase {
         XCTAssertTrue(evidence.allSatisfy { $0 == "Evidence withheld for privacy." })
     }
 
+    func testExactParserReferenceDoesNotReachPublishedFieldsOrStore() throws {
+        let source = """
+        Finanzamt secretref 8642
+        Steuernummer: 8642
+        Tax year 2025
+        Datum 08.09.2026
+        Einkommensteuer 12345678901.00 EUR
+        """
+        let parsed = TaxDocumentParser.parse(
+            text: source,
+            documentName: "secretref 8642.pdf"
+        )
+        let document = TaxDocument(
+            id: parsed.id,
+            title: parsed.title,
+            documentType: parsed.documentType,
+            taxYear: parsed.taxYear,
+            issuer: parsed.issuer,
+            taxpayerIdentifier: parsed.taxpayerIdentifier,
+            referenceIdentifier: parsed.referenceIdentifier,
+            dates: parsed.dates,
+            amounts: parsed.amounts,
+            pages: parsed.pages,
+            warnings: parsed.warnings + ["secretref 8642"],
+            confidence: parsed.confidence
+        )
+
+        let publishedValues = [
+            document.title,
+            document.documentType,
+            document.issuer?.value,
+            document.taxpayerIdentifier?.value,
+            document.referenceIdentifier?.value,
+            document.dates.first?.value,
+            document.amounts.first?.value,
+            document.amounts.first?.label,
+            document.warnings.first,
+            document.issuer?.evidence.snippet,
+            document.taxpayerIdentifier?.evidence.snippet,
+            document.dates.first?.evidence.snippet,
+            document.amounts.first?.evidence.snippet
+        ].compactMap { $0 }
+        XCTAssertTrue(publishedValues.allSatisfy { !$0.contains("secretref") && !$0.contains("8642") })
+        XCTAssertEqual(document.dates.first?.value, "08.09.2026")
+        XCTAssertEqual(document.amounts.first?.value, "12345678901.00")
+
+        let encoded = try JSONEncoder().encode(document)
+        let encodedText = String(decoding: encoded, as: UTF8.self)
+        XCTAssertFalse(encodedText.contains("secretref"))
+        XCTAssertFalse(encodedText.contains("8642"))
+        XCTAssertTrue(encodedText.contains("12345678901.00"))
+        XCTAssertFalse(encodedText.contains("\"pages\""))
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = TaxDocumentStore(directory: directory)
+        try store.save([document])
+        let stored = String(
+            decoding: try Data(contentsOf: directory.appendingPathComponent("documents.json")),
+            as: UTF8.self
+        )
+        XCTAssertFalse(stored.contains("secretref"))
+        XCTAssertFalse(stored.contains("8642"))
+        XCTAssertTrue(stored.contains("12345678901.00"))
+        XCTAssertFalse(stored.contains("\"pages\""))
+    }
+
+    func testMaskedCandidateWithholdsAmbiguousShortReferencesAcrossDecodeEncodeAndStore() throws {
+        let sourceJSON = """
+        {
+          "id": "00000000-0000-0000-0000-000000000042",
+          "title": "Assessment 8642",
+          "documentType": "reference 42",
+          "taxYear": 2025,
+          "issuer": {
+            "value": "Finanzamt secretref 42",
+            "evidence": {"page": 1, "snippet": "Issuer"}
+          },
+          "taxpayerIdentifier": {
+            "value": "********42",
+            "evidence": {"page": 1, "snippet": "identifier ending 42"}
+          },
+          "referenceIdentifier": null,
+          "dates": [
+            {"value": "08.09.2026 secretref 42", "evidence": {"page": 1, "snippet": "Date 08.09.2026"}}
+          ],
+          "amounts": [
+            {"value": "12345678901.00", "label": "reference 8642", "evidence": {"page": 1, "snippet": "Amount 12345678901.00"}}
+          ],
+          "warnings": ["ref 42"],
+          "confidence": "medium"
+        }
+        """
+
+        let decoded = try JSONDecoder().decode(TaxDocument.self, from: Data(sourceJSON.utf8))
+        let decodedValues = [
+            decoded.title,
+            decoded.documentType,
+            decoded.issuer?.value,
+            decoded.dates.first?.value,
+            decoded.amounts.first?.label,
+            decoded.warnings.first,
+            decoded.issuer?.evidence.snippet,
+            decoded.taxpayerIdentifier?.evidence.snippet
+        ].compactMap { $0 }
+        XCTAssertTrue(decodedValues.allSatisfy { !$0.contains("secretref") && !$0.contains("8642") })
+        XCTAssertFalse(decoded.title.contains("42"))
+        XCTAssertEqual(decoded.taxpayerIdentifier?.value, "********42")
+        XCTAssertEqual(decoded.taxpayerIdentifier?.evidence.snippet, "identifier ending 42")
+        XCTAssertEqual(decoded.dates.first?.value, "Evidence withheld for privacy.")
+        XCTAssertEqual(decoded.amounts.first?.value, "12345678901.00")
+
+        let encoded = try JSONEncoder().encode(decoded)
+        let encodedText = String(decoding: encoded, as: UTF8.self)
+        XCTAssertFalse(encodedText.contains("secretref"))
+        XCTAssertFalse(encodedText.contains("8642"))
+        XCTAssertFalse(encodedText.contains("ref 42"))
+        XCTAssertTrue(encodedText.contains("12345678901.00"))
+        XCTAssertFalse(encodedText.contains("\"pages\""))
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = TaxDocumentStore(directory: directory)
+        try store.save([decoded])
+        let stored = String(
+            decoding: try Data(contentsOf: directory.appendingPathComponent("documents.json")),
+            as: UTF8.self
+        )
+        XCTAssertFalse(stored.contains("secretref"))
+        XCTAssertFalse(stored.contains("8642"))
+        XCTAssertFalse(stored.contains("ref 42"))
+        XCTAssertTrue(stored.contains("12345678901.00"))
+        XCTAssertFalse(stored.contains("\"pages\""))
+
+        let loaded = try store.load()
+        XCTAssertEqual(loaded.first?.amounts.first?.value, "12345678901.00")
+        XCTAssertEqual(loaded.first?.dates.first?.value, "Evidence withheld for privacy.")
+    }
+
     func testEvidenceCanonicalizesMaskedGroupedRawAndMixedIdentifierForms() {
         let formsAndExpected = [
             ("*90", "********90"),
@@ -325,7 +466,7 @@ final class TaxDocumentTests: XCTestCase {
         }
     }
 
-    func testLongNumericAmountRemainsEvidenceAndAmountTextButIdentifierCandidatesMask() {
+    func testLongNumericAmountRemainsEvidenceAndAmountTextButIdentifierCandidatesMask() throws {
         let amount = "12345678901.00"
         let evidence = TaxEvidence(page: 1, snippet: "Amount \(amount)")
         XCTAssertEqual(evidence.snippet, "Amount \(amount)")
@@ -352,6 +493,23 @@ final class TaxDocumentTests: XCTestCase {
         )
         XCTAssertEqual(document.taxpayerIdentifier?.value, "********00")
         XCTAssertEqual(document.amounts.first?.value, amount)
+
+        let encoded = try JSONEncoder().encode(document)
+        let decoded = try JSONDecoder().decode(TaxDocument.self, from: encoded)
+        XCTAssertEqual(decoded.amounts.first?.value, amount)
+        XCTAssertEqual(decoded.amounts.first?.evidence.snippet, "Amount \(amount)")
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = TaxDocumentStore(directory: directory)
+        try store.save([document])
+        let stored = String(
+            decoding: try Data(contentsOf: directory.appendingPathComponent("documents.json")),
+            as: UTF8.self
+        )
+        XCTAssertTrue(stored.contains(amount))
+        XCTAssertEqual(try store.load().first?.amounts.first?.value, amount)
     }
 
     func testFilenameDerivedFieldsAreSanitizedWithoutChangingFinancialValues() throws {
