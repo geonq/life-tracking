@@ -22,13 +22,16 @@ Updated 2026-09-12 Europe/Berlin. Release: **NO-GO**.
 
 ## Verified checkpoint
 
-`1d1af18` is pushed. Usage visual/source, macOS route, and personal installer
+`87e7db6` is pushed. Usage visual/source, macOS route, personal installer
 security slices are Astra-reviewed GREEN; iPhone focused tests are 95/95; macOS route tests are
 2/2 with exit 0; the Usage settled and breakpoint renders are 1/1 each;
 the full macOS snapshot run executed 51/51 cases with zero test failures before
 result-archive I/O failure. Windows source tests are 61 passed, 1 skipped.
 The installer has 13/13 tests and `bash -n`; this does not prove physical
-signing, installation, or whole-product completion.
+signing, installation, or whole-product completion. Backend boundary security
+is also Astra-reviewed GREEN at `87e7db6` with 148/148 API tests; native
+Windows execution and deployment ACLs remain open. Calendar repair is still
+uncommitted and RED pending two P1 fixes.
 These results do not prove live, runtime, device, visual, or operational
 completion.
 

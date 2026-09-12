@@ -11,7 +11,7 @@ device, and end-to-end security evidence is still incomplete.
 ## Current source checkpoint
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- HEAD and origin: `1d1af18 Harden personal device installation flow`.
+- HEAD and origin: `87e7db6 Harden backend boundaries and Codex launch`.
 - macOS now has one value-driven Home `NavigationStack` with a bounded typed
   path. Sidebar Home resets it; Back pops one detail and preserves origin.
 - Cross-module Usage/Finance/Calendar deep links preserve the saved Home
@@ -32,12 +32,22 @@ device, and end-to-end security evidence is still incomplete.
   redirect regression, signed app/widget validation, bounded output, and
   timeout/cancellation checks are covered. Physical signing and install are
   still unverified.
+- Backend security tranche: Astra scoped GREEN at `87e7db6`; API typecheck and
+  the full API suite pass (**15 files, 148 tests**). Secret bounds, Host
+  allowlisting, bounded history/atomic writes, and Windows Codex path/quoting
+  checks are covered. Native Windows execution, deployed ACL/reparse behavior,
+  and Windows rename durability remain unverified.
 
 ## Still open
 
 - Windows is reachable and BitLocker is fully encrypted/protected. The
   rollback marker has cleared but its PowerShell cleanup process is still
   present; no reinstall retry or live Enable Banking readback is certified.
+- Calendar security repair is uncommitted and **RED** after review: queued
+  peer mutations still need a revocable session generation, and creation-date
+  identity needs a legacy/fractional compatibility rule. The macOS production
+  build passes; iPhone XCTest execution is blocked by the unavailable iPhone
+  17 simulator/runtime.
 - Runtime route transitions, whole-app visual captures, calendar gestures,
   widgets, physical iPhone, signing, and Shortcuts.
 - Zepp workout fidelity/sync and the Obsidian Canvas mind map; see issue #2.

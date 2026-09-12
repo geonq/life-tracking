@@ -3,7 +3,7 @@
 Updated 2026-09-12 Europe/Berlin.
 
 - Release: **NO-GO**.
-- Source checkpoint: `1d1af18` on `lifeos-foundation-checkpoint-20260812`.
+- Source checkpoint: `87e7db6` on `lifeos-foundation-checkpoint-20260812`.
 - Usage packet, per-scope authority, omission handling, persistence retry,
   identity handling, cancellation, and viewport bounds are implemented and
   independently reviewed **GREEN**.
@@ -22,6 +22,12 @@ Updated 2026-09-12 Europe/Berlin.
   **13/13 tests**, `bash -n`, exact production command allowlist, minimal
   environment, and toolchain/Python injection regressions pass. Physical
   signing and install remain unverified.
+- Backend boundary security is Astra scoped GREEN at `87e7db6`: typecheck and
+  **148/148** API tests pass with loopback permission. Native Windows launch,
+  deployed ACL/reparse protection, and rename durability are unverified.
+- Calendar repair remains uncommitted and Astra **RED** on queued-mutation
+  revocation and legacy/fractional creation identity. macOS build/parser checks
+  pass; iPhone XCTest execution is blocked by the missing iPhone 17 runtime.
 - The earlier Xcode exit 65 was a shared derived-data database lock from two
   overlapping invocations; the serialized fresh-path rerun passed.
 
