@@ -3,7 +3,7 @@
 Updated 2026-09-12 Europe/Berlin.
 
 - Release: **NO-GO**.
-- Source checkpoint: `d9563d6` on `lifeos-foundation-checkpoint-20260812`.
+- Source checkpoint: `1d1af18` on `lifeos-foundation-checkpoint-20260812`.
 - Usage packet, per-scope authority, omission handling, persistence retry,
   identity handling, cancellation, and viewport bounds are implemented and
   independently reviewed **GREEN**.
@@ -18,6 +18,10 @@ Updated 2026-09-12 Europe/Berlin.
   **2/2 with exit 0**; the full macOS snapshot run executed **51/51 cases with
   0 failures** before a result-archive I/O crash; Windows source suite **61
   passed, 1 skipped**.
+- Personal device installer security slice is Astra scoped GREEN at `1d1af18`:
+  **13/13 tests**, `bash -n`, exact production command allowlist, minimal
+  environment, and toolchain/Python injection regressions pass. Physical
+  signing and install remain unverified.
 - The earlier Xcode exit 65 was a shared derived-data database lock from two
   overlapping invocations; the serialized fresh-path rerun passed.
 

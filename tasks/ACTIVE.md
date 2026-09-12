@@ -24,7 +24,7 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
 - Tax document local feature foundation.
 - Provenance-aware read-only Usage ingestion/API/native UI.
 - Fail-closed Finance summary and disabled connector contracts.
-- Current working checkpoint: `d9563d6` on `lifeos-foundation-checkpoint-20260812`.
+- Current working checkpoint: `1d1af18` on `lifeos-foundation-checkpoint-20260812`.
   The branch push succeeded; PR #1 is the matching open draft checkpoint.
 
 ## Execution phases
@@ -89,7 +89,9 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
 - [ ] Trade Republic remains import-only unless official access exists; no production `pytr`.
 - [ ] Physical-device signing/provisioning, actual account data, folder conventions,
   and hardware-specific visual acceptance. Current USB/reauthentication intents
-  remain manual/unavailable and the referenced install script is absent.
+  remain manual/unavailable. The personal installer source is now present and
+  Astra scoped GREEN with 13/13 tests; physical signing/provisioning/install
+  evidence is still required.
 
 ## Tranche completion witness
 A tranche is complete only when exact current source has passing focused/full tests, fresh iPhone and macOS screenshots are inspected, production paths fail closed, an independent review is reconciled, approved files are committed/pushed, the working branch matches its remote and its PR head, and canonical status is clean. Whole-product completion additionally requires all non-external phases above and the user's final visual/product review.

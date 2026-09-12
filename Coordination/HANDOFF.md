@@ -4,14 +4,14 @@ Updated 2026-09-12 Europe/Berlin.
 
 ## Release state
 
-**NO-GO.** The Usage visual/source and macOS route slices are GREEN. Runtime,
-live provider, whole-app visual, security, and device evidence is still
-incomplete.
+**NO-GO.** The Usage visual/source, macOS route, and personal installer
+security slices are GREEN. Runtime, live provider, whole-app visual, physical
+device, and end-to-end security evidence is still incomplete.
 
 ## Current source checkpoint
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- HEAD and origin: `d9563d6 Refresh live LifeOS coordination checkpoint`.
+- HEAD and origin: `1d1af18 Harden personal device installation flow`.
 - macOS now has one value-driven Home `NavigationStack` with a bounded typed
   path. Sidebar Home resets it; Back pops one detail and preserves origin.
 - Cross-module Usage/Finance/Calendar deep links preserve the saved Home
@@ -26,12 +26,18 @@ incomplete.
   macOS route tests **2/2, exit 0**; full macOS snapshot run executed
   **51/51 test cases with 0 failures** before its result-archive I/O crash.
 - Windows source suite: **61 passed, 1 skipped, 0 failures**.
+- Personal installer security slice: Astra Medium scoped GREEN at `1d1af18`;
+  **13/13 tests** and `bash -n` pass. Exact Apple command allowlisting,
+  minimal child environment, hostile Python-startup rejection, toolchain
+  redirect regression, signed app/widget validation, bounded output, and
+  timeout/cancellation checks are covered. Physical signing and install are
+  still unverified.
 
 ## Still open
 
-- Windows is reachable and BitLocker is fully encrypted/protected. A bounded
-  rollback of the interrupted deployment is currently active; no reinstall
-  retry or live Enable Banking readback is certified yet.
+- Windows is reachable and BitLocker is fully encrypted/protected. The
+  rollback marker has cleared but its PowerShell cleanup process is still
+  present; no reinstall retry or live Enable Banking readback is certified.
 - Runtime route transitions, whole-app visual captures, calendar gestures,
   widgets, physical iPhone, signing, and Shortcuts.
 - Zepp workout fidelity/sync and the Obsidian Canvas mind map; see issue #2.
