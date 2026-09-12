@@ -1,9 +1,13 @@
 import asyncio
 import importlib.util
 import json
+import os
 import re
+import shutil
+import subprocess
 from tempfile import TemporaryDirectory
 from pathlib import Path
+from unittest import SkipTest
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -12,6 +16,517 @@ DEPLOY = ROOT / "services" / "windows-service-host" / "deploy"
 
 def read(name: str) -> str:
     return (DEPLOY / name).read_text(encoding="utf-8")
+
+
+PYTHON_PROVENANCE_FIELDS = frozenset(
+    {
+        "contract",
+        "lockPath",
+        "lockSha256",
+        "packageCount",
+        "wheelhousePath",
+        "wheelhouseAllowlistSha256",
+        "wheelhouseBytes",
+        "wheelhouseFileCount",
+        "venvTreeBytes",
+        "venvTreeFileCount",
+        "venvTreeMaxBytes",
+        "venvTreeMaxFiles",
+        "venvTreeMaxDirectories",
+        "packagingToolsRemoved",
+    }
+)
+
+
+def _strip_ps_comments(source: str) -> str:
+    characters: list[str] = []
+    quote = ""
+    index = 0
+    while index < len(source):
+        character = source[index]
+        if quote == "'":
+            characters.append(character)
+            if character == "'":
+                if index + 1 < len(source) and source[index + 1] == "'":
+                    characters.append(source[index + 1])
+                    index += 2
+                    continue
+                quote = ""
+        elif quote == '"':
+            characters.append(character)
+            if character == "`" and index + 1 < len(source):
+                characters.append(source[index + 1])
+                index += 2
+                continue
+            if character == '"':
+                quote = ""
+        elif character in ("'", '"'):
+            quote = character
+            characters.append(character)
+        elif character == "#":
+            newline = source.find("\n", index)
+            if newline == -1:
+                break
+            characters.append("\n")
+            index = newline + 1
+            continue
+        else:
+            characters.append(character)
+        index += 1
+    return "".join(characters)
+
+
+def _extract_ps_delimited_body(source: str, start: int, opener: str, closer: str) -> str:
+    depth = 0
+    quote = ""
+    index = start
+    while index < len(source):
+        character = source[index]
+        if quote == "'":
+            if character == "'":
+                if index + 1 < len(source) and source[index + 1] == "'":
+                    index += 2
+                    continue
+                quote = ""
+        elif quote == '"':
+            if character == "`":
+                index += 2
+                continue
+            if character == '"':
+                quote = ""
+        else:
+            if character in ("'", '"'):
+                quote = character
+            elif source.startswith(opener, index):
+                depth += 1
+                index += len(opener)
+                continue
+            elif source.startswith(closer, index):
+                depth -= 1
+                if depth == 0:
+                    return source[start + len(opener) : index]
+                index += len(closer)
+                continue
+        index += 1
+    raise AssertionError(f"Unclosed PowerShell delimiter {opener!r}.")
+
+
+def _extract_ps_array_items(source: str, variable_name: str) -> list[str]:
+    source = _strip_ps_comments(source)
+    assignment = re.search(
+        rf"\${re.escape(variable_name)}\s*=\s*@\s*\(",
+        source,
+    )
+    assert assignment is not None, f"PowerShell array assignment is missing: {variable_name}"
+    open_index = source.find("(", assignment.start(), assignment.end())
+    body = _extract_ps_delimited_body(source, open_index, "(", ")")
+    return re.findall(r"'([^']+)'", body)
+
+
+def _extract_python_provenance_writer_fields(source: str) -> list[str]:
+    source = _strip_ps_comments(source)
+    assignment = re.search(
+        r"\$manifest\s*\[\s*['\"]pythonDependencyProvenance['\"]\s*\]\s*"
+        r"=\s*\[ordered\]\s*@\s*\{",
+        source,
+    )
+    assert assignment is not None
+    open_index = source.find("{", assignment.start(), assignment.end())
+    body = _extract_ps_delimited_body(source, open_index, "{", "}")
+    return re.findall(r"(?<![\w$])([A-Za-z][A-Za-z0-9_]*)\s*=", body)
+
+
+def _assert_python_provenance_source_contract(common: str, install: str) -> None:
+    helper = common.split("function Assert-LifeOSPythonDependencyProvenance", 1)[1].split(
+        "function Assert-CanonicalRollbackManifest", 1
+    )[0]
+    canonical = common.split("function Assert-CanonicalRollbackManifest", 1)[1]
+    helper_source = _strip_ps_comments(helper)
+    canonical_source = _strip_ps_comments(canonical)
+
+    validator_fields = _extract_ps_array_items(helper_source, "expectedNames")
+    writer_fields = _extract_python_provenance_writer_fields(install)
+    assert len(PYTHON_PROVENANCE_FIELDS) == 14
+    assert len(validator_fields) == len(PYTHON_PROVENANCE_FIELDS)
+    assert len(writer_fields) == len(PYTHON_PROVENANCE_FIELDS)
+    assert set(validator_fields) == PYTHON_PROVENANCE_FIELDS
+    assert set(writer_fields) == PYTHON_PROVENANCE_FIELDS
+
+    # The raw property path must be used at the manifest boundary, while the
+    # existing required/optional unknown-field guard remains authoritative.
+    assert re.search(
+        r"\$provenanceProperty\s*=\s*\$Manifest\.PSObject\.Properties\[\s*"
+        r"['\"]pythonDependencyProvenance['\"]\s*\]",
+        canonical_source,
+    )
+    assert re.search(
+        r"Assert-LifeOSPythonDependencyProvenance\s+-Provenance\s+"
+        r"\$provenanceProperty\.Value",
+        canonical_source,
+    )
+    assert "pythonDependencyProvenance" in _extract_ps_array_items(canonical_source, "optional")
+    assert not re.search(
+        r"elseif\s*\(.*?System\.Collections\.IDictionary.*?pythonDependencyProvenance",
+        canonical_source,
+        re.S,
+    )
+    assert re.search(
+        r"\$unknown\s*=\s*@\(\s*\$actual\s*\|\s*Where-Object\s*\{\s*"
+        r"\$_\s*-notin\s*\(\$required\s*\+\s*\$optional\s*\)\s*\}",
+        canonical_source,
+    )
+
+    # The validator reads PSPropertyInfo.Value directly, applies one
+    # collection guard to every member, and performs scalar type checks before
+    # hashes, integers, or booleans are converted or compared.
+    assert re.search(
+        r"\$property\s*=\s*\$Provenance\.PSObject\.Properties\[\$propertyName\]"
+        r".*?\$rawValues\[\$propertyName\]\s*=\s*\$property\.Value",
+        helper_source,
+        re.S,
+    )
+    assert re.search(r"\$Provenance\s*-is\s*\[System\.Array\]", helper_source)
+    assert re.search(
+        r"\$rawValues\[\$propertyName\]\s*=\s*\$Provenance\[\$propertyName\]",
+        helper_source,
+    )
+    assert re.search(r"\$Provenance\s*-is\s*\[System\.Collections\.IDictionary\]", helper_source)
+    assert re.search(
+        r"\$value\s*=\s*\$rawValues\[\$propertyName\].*?"
+        r"\$value\s*-is\s*\[System\.Collections\.IEnumerable\].*?"
+        r"\$value\s*-isnot\s*\[string\]",
+        helper_source,
+        re.S,
+    )
+    assert not re.search(r"Get-JournalProperty\s+\$Provenance", helper_source)
+    assert re.search(
+        r"\$numberValue\s*=\s*\$rawValues\[\$numberName\].*?"
+        r"Test-LifeOSIntegralNumber\s+\$numberValue.*?"
+        r"\$numberValues\[\$numberName\]\s*=\s*\[long\]\$numberValue",
+        helper_source,
+        re.S,
+    )
+    assert re.search(
+        r"\$packagingToolsRemoved\s*=\s*\$rawValues\['packagingToolsRemoved'\].*?"
+        r"\$packagingToolsRemoved\s*-isnot\s*\[bool\].*?"
+        r"\$packagingToolsRemoved\s*-ne\s*\$true",
+        helper_source,
+        re.S,
+    )
+    for field in (
+        "packageCount",
+        "lockSha256",
+        "wheelhouseAllowlistSha256",
+        "packagingToolsRemoved",
+    ):
+        assert field in helper_source
+    for bound in (
+        "packageCount -lt 1",
+        "LifeOSPythonDependencyMaxPackages",
+        "maxWheelhouseBytes",
+        "wheelhouseFileCount -ne $packageCount",
+        "expectedVenvMaxBytes",
+        "expectedVenvMaxFiles",
+        "expectedVenvMaxDirectories",
+        "venvTreeBytes -gt $venvMaxBytes",
+        "venvTreeFileCount -gt $venvMaxFiles",
+    ):
+        assert re.sub(r"\s+", "", bound) in re.sub(r"\s+", "", helper_source)
+    assert re.search(
+        r"if\s*\(\s*\$null\s*-eq\s*\$Provenance\s*\)\s*\{\s*return\s*\}",
+        helper_source,
+    )
+    assert re.search(r"\$null\s*-ne\s*\$provenanceProperty", canonical_source)
+
+
+def _find_windows_powershell_5_1() -> str | None:
+    if os.name != "nt":
+        return None
+    for command in ("powershell.exe", "powershell"):
+        executable = shutil.which(command)
+        if executable is None:
+            continue
+        try:
+            result = subprocess.run(
+                [
+                    executable,
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "$PSVersionTable.PSEdition + ' ' + $PSVersionTable.PSVersion.ToString()",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if result.returncode == 0 and result.stdout.strip().startswith("Desktop 5.1."):
+            return executable
+    return None
+
+
+def _run_python_provenance_powershell_behavior(common_path: Path, executable: str) -> None:
+    powershell_path = str(common_path).replace("'", "''")
+    script = r"""
+$ErrorActionPreference = 'Stop'
+. '__COMMON_PATH__'
+
+$testFilesystemDrive = Get-PSDrive -PSProvider FileSystem |
+    Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.Root) } |
+    Sort-Object Name |
+    Select-Object -First 1
+if ($null -eq $testFilesystemDrive) {
+    throw 'The PowerShell behavior harness found no filesystem drive.'
+}
+$script:testHermesRoot = Join-Path ([string]$testFilesystemDrive.Root) ('Hermes\LifeOS-ProvenanceHarness-' + [Guid]::NewGuid().ToString('N'))
+$script:testProgramFilesRoot = [Environment]::GetFolderPath('ProgramFiles')
+if ([string]::IsNullOrWhiteSpace($script:testProgramFilesRoot) -or
+    -not (Test-Path -LiteralPath $script:testProgramFilesRoot -PathType Container)) {
+    throw 'The PowerShell behavior harness found no Program Files directory.'
+}
+
+# Keep this harness at the canonical-manifest boundary while replacing only
+# the later machine-state checks. Provenance validation remains production code.
+function Assert-ExistingFile { param($Path, $Description) }
+function Assert-SafeTaskName { param($Name) }
+function Assert-SafeTaskPath { param($Path) }
+function Assert-CanonicalLegacyListenerManifest { param($Listener, $Manifest) }
+function Assert-LifeOSInstalledIntegrityContract { param($Manifest) }
+function Assert-AuthenticatedBackup { param($Manifest, $ManifestPath, $BackupDirectory) }
+function Get-FullPath {
+    param([AllowNull()][object]$Path)
+    if ($null -eq $Path) { return $null }
+    return [string]$Path
+}
+function Get-LifeOSDefaultPaths {
+    $root = $script:testHermesRoot
+    $installRoot = Join-Path $root 'lifeos-services'
+    $runtimeRoot = Join-Path $root 'lifeos-runtime'
+    $dataRoot = Join-Path $root 'lifeos-data'
+    $secretRoot = Join-Path $root 'lifeos-secrets'
+    $logRoot = Join-Path $root 'lifeos-logs'
+    $backupRoot = Join-Path $root 'lifeos-backups'
+    return [pscustomobject]@{
+        ApiSource = Join-Path $root 'lifeos-api'
+        GatewaySource = Join-Path $root 'lifeos-server'
+        InstallRoot = $installRoot
+        RuntimeRoot = $runtimeRoot
+        DataRoot = $dataRoot
+        SecretRoot = $secretRoot
+        LogRoot = $logRoot
+        BackupRoot = $backupRoot
+        ServiceHostPath = Join-Path $installRoot 'host\LifeOS.ServiceHost.exe'
+    }
+}
+function Get-LifeOSTailscaleEdgeTokenPath {
+    param([string]$SecretRoot)
+    return Join-Path $SecretRoot 'tailscale-edge.token'
+}
+
+function New-ValidProvenance {
+    $hash = ('a' * 64) -join ''
+    return [pscustomobject]@{
+        contract = 'fresh-venv-offline-hash-pinned-wheelhouse'
+        lockPath = 'gateway/requirements.lock'
+        lockSha256 = $hash
+        packageCount = 25
+        wheelhousePath = 'gateway/wheelhouse'
+        wheelhouseAllowlistSha256 = $hash
+        wheelhouseBytes = 1
+        wheelhouseFileCount = 25
+        venvTreeBytes = 0
+        venvTreeFileCount = 0
+        venvTreeMaxBytes = 1073741824
+        venvTreeMaxFiles = 65536
+        venvTreeMaxDirectories = 55296
+        packagingToolsRemoved = $true
+    }
+}
+
+function New-CanonicalManifest {
+    param(
+        [AllowNull()][object]$Provenance,
+        [switch]$IncludeProvenance,
+        [switch]$IncludeOuterUnknown
+    )
+    $defaults = Get-LifeOSDefaultPaths
+    $backupDirectory = Join-Path $defaults.BackupRoot 'install-20260912T120000Z-12345678'
+    $paths = [pscustomobject]@{
+        host = Join-Path $defaults.InstallRoot 'host\LifeOS.ServiceHost.exe'
+        api = Join-Path $defaults.InstallRoot 'api'
+        gateway = Join-Path $defaults.InstallRoot 'gateway'
+        node = Join-Path $defaults.RuntimeRoot 'node'
+        pythonBase = Join-Path $defaults.RuntimeRoot 'python312'
+        pythonVenv = Join-Path $defaults.RuntimeRoot 'python-venv'
+        installRoot = $defaults.InstallRoot
+        runtimeRoot = $defaults.RuntimeRoot
+        dataRoot = $defaults.DataRoot
+        logRoot = $defaults.LogRoot
+        hostDirectory = Join-Path $defaults.InstallRoot 'host'
+        apiTemp = Join-Path $defaults.DataRoot 'api\tmp'
+        gatewayTemp = Join-Path $defaults.DataRoot 'gateway\tmp'
+        gatewayDocuments = Join-Path $defaults.DataRoot 'gateway\documents'
+        apiData = Join-Path $defaults.DataRoot 'api'
+        gatewayData = Join-Path $defaults.DataRoot 'gateway'
+        apiLogs = Join-Path $defaults.LogRoot 'api'
+        gatewayLogs = Join-Path $defaults.LogRoot 'gateway'
+        secretRoot = $defaults.SecretRoot
+        claudeSecret = Join-Path $defaults.SecretRoot 'claude-ingest.secret'
+        codexSecret = Join-Path $defaults.SecretRoot 'codex-ingest.secret'
+        clipperSecret = Join-Path $defaults.SecretRoot 'clipper-ingest.secret'
+        googleAIStudioApiKey = Join-Path $defaults.SecretRoot 'google-ai-studio.key'
+        enableBankingPrivateKey = Join-Path $defaults.SecretRoot 'enable-banking.private-key'
+        enableBankingCertificate = Join-Path $defaults.SecretRoot 'enable-banking.certificate'
+        usageHistory = Join-Path $defaults.DataRoot 'api\usage-history.jsonl'
+        supplementCatalog = Join-Path $defaults.DataRoot 'gateway\supplements.sqlite3'
+        configDirectory = Join-Path $defaults.InstallRoot 'host\config'
+        apiConfig = Join-Path $defaults.InstallRoot 'host\config\LifeOSAPI.json'
+        gatewayConfig = Join-Path $defaults.InstallRoot 'host\config\LifeOSGateway.json'
+        gatewayAppConfig = Join-Path $defaults.InstallRoot 'host\config\gateway.app.json'
+        backupDirectory = $backupDirectory
+        tailscaleExecutable = Join-Path $script:testProgramFilesRoot 'Tailscale\tailscale.exe'
+    }
+    $manifest = [pscustomobject]@{
+        schemaVersion = 2
+        createdAt = '2026-09-12T12:00:00Z'
+        operatorSid = 'S-1-5-18'
+        legacyTask = [pscustomobject]@{ Name = 'LifeOSSyncServer'; TaskPath = '\\'; Exists = $false }
+        codexTask = [pscustomobject]@{ Name = 'LifeOSCodexCollector'; TaskPath = '\\'; Exists = $false }
+        serviceSnapshots = [pscustomobject]@{}
+        services = [string[]]@('LifeOSAPI', 'LifeOSGateway')
+        paths = $paths
+        backups = @()
+        aclSnapshots = @()
+        tailscaleStatusBefore = [pscustomobject]@{}
+    }
+    if ($IncludeProvenance) {
+        $manifest | Add-Member -MemberType NoteProperty -Name pythonDependencyProvenance -Value ([object]$Provenance)
+    }
+    if ($IncludeOuterUnknown) {
+        $manifest | Add-Member -MemberType NoteProperty -Name unexpectedOuterField -Value 1
+    }
+    return $manifest
+}
+
+function Set-ProvenanceField {
+    param(
+        [Parameter(Mandatory)][psobject]$Manifest,
+        [Parameter(Mandatory)][string]$Name,
+        [AllowNull()][object]$Value
+    )
+    $property = $Manifest.PSObject.Properties['pythonDependencyProvenance']
+    if ($null -eq $property) { throw 'Test manifest has no provenance property.' }
+    $property.Value | Add-Member -MemberType NoteProperty -Name $Name -Value ([object]$Value) -Force
+}
+
+function Assert-ManifestAccepted {
+    param([psobject]$Manifest, [string]$Name, [string]$ManifestPath)
+    try {
+        Assert-CanonicalRollbackManifest -Manifest $Manifest -ManifestPath $ManifestPath
+    } catch {
+        throw "Expected manifest acceptance ($Name): $($_.Exception.Message)"
+    }
+}
+
+function Assert-ManifestRejected {
+    param([psobject]$Manifest, [string]$Name, [string]$ManifestPath, [string]$ExpectedMessage)
+    try {
+        Assert-CanonicalRollbackManifest -Manifest $Manifest -ManifestPath $ManifestPath
+    } catch {
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedMessage) -and
+            $_.Exception.Message -notlike ('*' + $ExpectedMessage + '*')) {
+            throw "Manifest rejection ($Name) had an unexpected reason: $($_.Exception.Message)"
+        }
+        return
+    }
+    throw "Expected manifest rejection: $Name"
+}
+
+$manifestDefaults = Get-LifeOSDefaultPaths
+$manifestPath = Join-Path (Join-Path $manifestDefaults.BackupRoot 'install-20260912T120000Z-12345678') 'manifest.json'
+$validProvenance = New-ValidProvenance
+
+$manifest = New-CanonicalManifest -Provenance $validProvenance -IncludeProvenance
+Assert-ManifestAccepted $manifest 'valid manifest with provenance' $manifestPath
+Assert-ManifestAccepted (New-CanonicalManifest) 'absent provenance' $manifestPath
+Assert-ManifestAccepted (New-CanonicalManifest -Provenance $null -IncludeProvenance) 'null provenance' $manifestPath
+Assert-ManifestRejected (New-CanonicalManifest -Provenance $validProvenance -IncludeProvenance -IncludeOuterUnknown) 'unknown outer field' $manifestPath
+
+$topLevelArray = [object[]]@($validProvenance)
+Assert-ManifestRejected (New-CanonicalManifest -Provenance ([object]$topLevelArray) -IncludeProvenance) 'top-level provenance array' $manifestPath
+
+$dictionaryProvenance = [ordered]@{}
+foreach ($property in $validProvenance.PSObject.Properties) {
+    $dictionaryProvenance[$property.Name] = $property.Value
+}
+Assert-ManifestAccepted (New-CanonicalManifest -Provenance $dictionaryProvenance -IncludeProvenance) 'dictionary-valued provenance' $manifestPath
+
+$emptyCollection = [System.Array]::CreateInstance([object], 0)
+$manifest = New-CanonicalManifest -Provenance (New-ValidProvenance) -IncludeProvenance
+Set-ProvenanceField $manifest 'packageCount' ([object]$emptyCollection)
+Assert-ManifestRejected $manifest 'empty member collection' $manifestPath
+
+$arrayValues = @{
+    contract = [object[]]@($validProvenance.contract)
+    lockPath = [object[]]@($validProvenance.lockPath)
+    lockSha256 = [object[]]@($validProvenance.lockSha256)
+    packageCount = [object[]]@(25)
+    wheelhousePath = [object[]]@($validProvenance.wheelhousePath)
+    wheelhouseAllowlistSha256 = [object[]]@($validProvenance.wheelhouseAllowlistSha256)
+    wheelhouseBytes = [object[]]@(1)
+    wheelhouseFileCount = [object[]]@(25)
+    venvTreeBytes = [object[]]@(0)
+    venvTreeFileCount = [object[]]@(0)
+    venvTreeMaxBytes = [object[]]@(1073741824)
+    venvTreeMaxFiles = [object[]]@(65536)
+    venvTreeMaxDirectories = [object[]]@(55296)
+    packagingToolsRemoved = [object[]]@($true)
+}
+foreach ($name in $arrayValues.Keys) {
+    $manifest = New-CanonicalManifest -Provenance (New-ValidProvenance) -IncludeProvenance
+    Set-ProvenanceField $manifest $name ([object]$arrayValues[$name])
+    Assert-ManifestRejected $manifest "member collection: $name" $manifestPath
+}
+
+foreach ($badValue in @('25', 25.5, $true)) {
+    $manifest = New-CanonicalManifest -Provenance (New-ValidProvenance) -IncludeProvenance
+    Set-ProvenanceField $manifest 'packageCount' $badValue
+    Assert-ManifestRejected $manifest "wrong numeric type: $badValue" $manifestPath
+}
+
+$manifest = New-CanonicalManifest -Provenance (New-ValidProvenance) -IncludeProvenance
+Set-ProvenanceField $manifest 'packageCount' 1025
+Set-ProvenanceField $manifest 'wheelhouseFileCount' 1025
+Set-ProvenanceField $manifest 'venvTreeMaxBytes' 1073741824
+Set-ProvenanceField $manifest 'venvTreeMaxFiles' 65536
+Set-ProvenanceField $manifest 'venvTreeMaxDirectories' 65536
+Assert-ManifestRejected $manifest 'package count ceiling' $manifestPath 'package count is out of bounds'
+
+foreach ($boundCase in @(
+    [pscustomobject]@{ Name = 'package count lower bound'; Field = 'packageCount'; Value = 0 }
+    [pscustomobject]@{ Name = 'wheelhouse byte lower bound'; Field = 'wheelhouseBytes'; Value = 0 }
+    [pscustomobject]@{ Name = 'wheelhouse file count binding'; Field = 'wheelhouseFileCount'; Value = 24 }
+    [pscustomobject]@{ Name = 'venv byte upper bound'; Field = 'venvTreeBytes'; Value = 1073741825 }
+    [pscustomobject]@{ Name = 'venv file count upper bound'; Field = 'venvTreeFileCount'; Value = 65537 }
+    [pscustomobject]@{ Name = 'venv max byte contract'; Field = 'venvTreeMaxBytes'; Value = 0 }
+    [pscustomobject]@{ Name = 'venv max directory contract'; Field = 'venvTreeMaxDirectories'; Value = 1 }
+)) {
+    $manifest = New-CanonicalManifest -Provenance (New-ValidProvenance) -IncludeProvenance
+    Set-ProvenanceField $manifest $boundCase.Field $boundCase.Value
+    Assert-ManifestRejected $manifest $boundCase.Name $manifestPath
+}
+"python provenance canonical-manifest behavior checks passed"
+""".replace("__COMMON_PATH__", powershell_path)
+    result = subprocess.run(
+        [executable, "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert result.returncode == 0, f"PowerShell provenance harness failed:\n{result.stdout}\n{result.stderr}"
 
 
 def test_gateway_uses_separate_serve_and_identity_payloads() -> None:
@@ -2001,6 +2516,21 @@ def test_remaining_recovery_invariants_are_wired_into_production() -> None:
     assert 'Get-Service -ErrorAction Stop | Where-Object' in common
     assert "([IO.Path]::GetExtension($target.FullName) -in @('.exe', '.dll'))" in common
     assert '[long]$rights::' not in common  # Windows PowerShell 5.1 uses the concrete enum type.
+
+
+def test_python_dependency_provenance_source_contract() -> None:
+    common = read("Deployment.Common.ps1")
+    install = read("install.ps1")
+    _assert_python_provenance_source_contract(common, install)
+
+
+def test_python_dependency_provenance_windows_powershell_5_1_behavior() -> None:
+    powershell = _find_windows_powershell_5_1()
+    if powershell is None:
+        raise SkipTest(
+            "Windows PowerShell 5.1 is unavailable; deployment-gate runtime execution remains unverified locally."
+        )
+    _run_python_provenance_powershell_behavior(DEPLOY / "Deployment.Common.ps1", powershell)
 
 
 def test_windows_behavior_suite_exercises_failure_and_service_identity_adapters() -> None:

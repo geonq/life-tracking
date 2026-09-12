@@ -51,6 +51,9 @@ $script:LifeOSDeploymentMarkerMaxBytes = 64 * 1024
 $script:LifeOSGenerationManifestMaxBytes = 16 * 1024 * 1024
 $script:LifeOSRecoveryJournalMaxBytes = 64 * 1024 * 1024
 $script:LifeOSRecoveryProgressMaxBytes = 64 * 1024 * 1024
+# Keep rollback provenance aligned with the installer and candidate verifier's
+# bounded gateway dependency lock.
+$script:LifeOSPythonDependencyMaxPackages = 1024
 $script:LifeOSRecoveryProgressMaxRecords = $script:LifeOSRecoveryMaxFileUnits * 2
 $script:LifeOSRecoveryProgressMaxRecordBytes = 16 * 1024
 $script:LifeOSRecoveryProgressMagic = [byte[]]@(0x4c, 0x50, 0x52, 0x47)
@@ -1521,10 +1524,119 @@ function Assert-LifeOSInstalledIntegrityContract {
     }
 }
 
+function Assert-LifeOSPythonDependencyProvenance {
+    param([AllowNull()][object]$Provenance)
+    if ($null -eq $Provenance) { return }
+    if ($Provenance -is [System.Array] -or
+        ($Provenance -is [System.Collections.IEnumerable] -and
+            $Provenance -isnot [System.Collections.IDictionary])) {
+        throw 'Python dependency provenance must be an object, not a collection.'
+    }
+    $expectedNames = @(
+        'contract', 'lockPath', 'lockSha256', 'packageCount', 'wheelhousePath',
+        'wheelhouseAllowlistSha256', 'wheelhouseBytes', 'wheelhouseFileCount',
+        'venvTreeBytes', 'venvTreeFileCount', 'venvTreeMaxBytes',
+        'venvTreeMaxFiles', 'venvTreeMaxDirectories', 'packagingToolsRemoved'
+    )
+    $actualNames = @(Get-LifeOSPropertyNames $Provenance)
+    if ($actualNames.Count -ne $expectedNames.Count -or
+        @($expectedNames | Where-Object { $_ -notin $actualNames }).Count -ne 0 -or
+        @($actualNames | Where-Object { $_ -notin $expectedNames }).Count -ne 0) {
+        throw 'Python dependency provenance has a non-canonical property set.'
+    }
+
+    # Read property values through PSPropertyInfo.Value (or direct dictionary
+    # indexing) so an array remains an array.  Get-JournalProperty writes to
+    # the success stream and therefore enumerates array-valued properties.
+    $rawValues = @{}
+    foreach ($propertyName in $expectedNames) {
+        if ($Provenance -is [System.Collections.IDictionary]) {
+            $rawValues[$propertyName] = $Provenance[$propertyName]
+        } else {
+            $property = $Provenance.PSObject.Properties[$propertyName]
+            $rawValues[$propertyName] = $property.Value
+        }
+    }
+    foreach ($propertyName in $expectedNames) {
+        $value = $rawValues[$propertyName]
+        if ($value -is [System.Collections.IEnumerable] -and $value -isnot [string]) {
+            throw "Python dependency provenance field must be scalar: $propertyName"
+        }
+    }
+
+    $contract = $rawValues['contract']
+    $lockPath = $rawValues['lockPath']
+    $wheelhousePath = $rawValues['wheelhousePath']
+    if ($contract -isnot [string] -or $contract -cne 'fresh-venv-offline-hash-pinned-wheelhouse' -or
+        $lockPath -isnot [string] -or $lockPath -cne 'gateway/requirements.lock' -or
+        $wheelhousePath -isnot [string] -or $wheelhousePath -cne 'gateway/wheelhouse') {
+        throw 'Python dependency provenance paths or contract are not canonical.'
+    }
+    foreach ($hashName in @('lockSha256', 'wheelhouseAllowlistSha256')) {
+        $hash = $rawValues[$hashName]
+        if ($hash -isnot [string]) {
+            throw "Python dependency provenance hash is not a scalar string: $hashName"
+        }
+        if ($hash -cnotmatch '\A[0-9a-f]{64}\z') {
+            throw "Python dependency provenance hash is malformed: $hashName"
+        }
+    }
+    $numberValues = @{}
+    foreach ($numberName in @(
+        'packageCount', 'wheelhouseBytes', 'wheelhouseFileCount', 'venvTreeBytes',
+        'venvTreeFileCount', 'venvTreeMaxBytes', 'venvTreeMaxFiles', 'venvTreeMaxDirectories'
+    )) {
+        $numberValue = $rawValues[$numberName]
+        if (-not (Test-LifeOSIntegralNumber $numberValue)) {
+            throw "Python dependency provenance number is malformed: $numberName"
+        }
+        $numberValues[$numberName] = [long]$numberValue
+    }
+    $packageCount = $numberValues['packageCount']
+    if ($packageCount -lt 1 -or $packageCount -gt [long]$script:LifeOSPythonDependencyMaxPackages) {
+        throw 'Python dependency provenance package count is out of bounds.'
+    }
+    $wheelhouseBytes = $numberValues['wheelhouseBytes']
+    $wheelhouseFileCount = $numberValues['wheelhouseFileCount']
+    $maxWheelhouseBytes = $packageCount * [long]$script:LifeOSRecoveryMaxFileBytes
+    if ($wheelhouseBytes -le 0 -or $wheelhouseBytes -gt $maxWheelhouseBytes -or
+        $wheelhouseFileCount -ne $packageCount) {
+        throw 'Python dependency provenance wheelhouse bounds are invalid.'
+    }
+    $expectedVenvMaxBytes = [Math]::Min(
+        [long]$script:LifeOSRecoveryMaxTreeBytes,
+        ($packageCount * [long]$script:LifeOSRecoveryMaxFileBytes) + (256 * 1024 * 1024)
+    )
+    $expectedVenvMaxFiles = [Math]::Min(
+        [long]$script:LifeOSRecoveryMaxFileUnits,
+        8192 + ($packageCount * 4096)
+    )
+    $expectedVenvMaxDirectories = [Math]::Min(
+        [long]$script:LifeOSRecoveryMaxFileUnits,
+        4096 + ($packageCount * 2048)
+    )
+    $venvTreeBytes = $numberValues['venvTreeBytes']
+    $venvTreeFileCount = $numberValues['venvTreeFileCount']
+    $venvMaxBytes = $numberValues['venvTreeMaxBytes']
+    $venvMaxFiles = $numberValues['venvTreeMaxFiles']
+    $venvMaxDirectories = $numberValues['venvTreeMaxDirectories']
+    if ($venvTreeBytes -lt 0 -or $venvTreeBytes -gt $venvMaxBytes -or
+        $venvTreeFileCount -lt 0 -or $venvTreeFileCount -gt $venvMaxFiles -or
+        $venvMaxBytes -ne $expectedVenvMaxBytes -or
+        $venvMaxFiles -ne $expectedVenvMaxFiles -or
+        $venvMaxDirectories -ne $expectedVenvMaxDirectories) {
+        throw 'Python dependency provenance venv bounds are invalid.'
+    }
+    $packagingToolsRemoved = $rawValues['packagingToolsRemoved']
+    if ($packagingToolsRemoved -isnot [bool] -or $packagingToolsRemoved -ne $true) {
+        throw 'Python dependency provenance does not prove packaging-tool removal.'
+    }
+}
+
 function Assert-CanonicalRollbackManifest {
     param([Parameter(Mandatory)][psobject]$Manifest, [Parameter(Mandatory)][string]$ManifestPath, [switch]$AllowPending)
     $required = @('schemaVersion', 'createdAt', 'operatorSid', 'legacyTask', 'codexTask', 'serviceSnapshots', 'services', 'paths', 'backups', 'aclSnapshots', 'tailscaleStatusBefore')
-    $optional = @('apiServiceSid', 'gatewayServiceSid', 'supplementCatalogInitialized', 'tailscaleStatusAfter', 'cutoverCompletedAt', 'legacyListener', 'snapshotTask', 'codexCollectorVerification', 'transactionId', 'generation', 'manifestPath', 'installMode', 'collectorTransition', 'priorInstalledGeneration', 'installedIntegrity')
+    $optional = @('apiServiceSid', 'gatewayServiceSid', 'supplementCatalogInitialized', 'tailscaleStatusAfter', 'cutoverCompletedAt', 'legacyListener', 'snapshotTask', 'codexCollectorVerification', 'transactionId', 'generation', 'manifestPath', 'installMode', 'collectorTransition', 'priorInstalledGeneration', 'installedIntegrity', 'pythonDependencyProvenance')
     $actual = @($Manifest.PSObject.Properties.Name | Sort-Object)
     $unknown = @($actual | Where-Object { $_ -notin ($required + $optional) })
     $missing = @($required | Where-Object { $_ -notin $actual })
@@ -1593,6 +1705,10 @@ function Assert-CanonicalRollbackManifest {
     }
     if ($null -ne $Manifest.PSObject.Properties['priorInstalledGeneration']) {
         Assert-LifeOSGenerationReference $Manifest.priorInstalledGeneration
+    }
+    $provenanceProperty = $Manifest.PSObject.Properties['pythonDependencyProvenance']
+    if ($null -ne $provenanceProperty) {
+        Assert-LifeOSPythonDependencyProvenance -Provenance $provenanceProperty.Value
     }
     if ($null -ne $Manifest.PSObject.Properties['codexCollectorVerification']) {
         $verification = $Manifest.codexCollectorVerification
