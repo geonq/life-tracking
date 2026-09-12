@@ -1512,7 +1512,8 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
         $pending.phase = 'restoring'
         Write-JsonAtomic $journalPath $interrupted
         [IO.File]::WriteAllText($pending.stagingPath, 'partial-copy')
-        Restore-ManifestArtifacts $manifest $backup
+        $restoreOutput = @(Restore-ManifestArtifacts $manifest $backup)
+        Assert-Behavior ($restoreOutput.Count -eq 0) 'recovery restore emits no success-stream status or checkpoint values.'
         Assert-Behavior ((Get-Content $first -Raw) -eq 'old' -and (Get-Content $second -Raw) -eq 'old') 'rollback resumes permitted pre/post states.'
         Restore-ManifestArtifacts $manifest $backup
         Assert-Behavior (Test-Path $firstBackup) 'retry does not consume backups.'

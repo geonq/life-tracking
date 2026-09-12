@@ -4191,13 +4191,13 @@ function Restore-ManifestArtifacts {
             progressPath=(Get-RecoveryProgressPath $Manifest)
         }
         $progressCapacity = Assert-RecoveryProgressCapacity -Manifest $Manifest -Journal $journal
-        Assert-RecoveryJournalCheckpointCapacity -Manifest $Manifest -Journal $journal -FinalProgressSequence $progressCapacity.FinalSequence
+        [void](Assert-RecoveryJournalCheckpointCapacity -Manifest $Manifest -Journal $journal -FinalProgressSequence $progressCapacity.FinalSequence)
         Write-JsonAtomic $journalPath $journal -OperatorSid $Manifest.operatorSid -MaxBytes $script:LifeOSRecoveryJournalMaxBytes
         $journalCreated = $true
     }
     if (-not $journalCreated) {
         $progressCapacity = Assert-RecoveryProgressCapacity -Manifest $Manifest -Journal $journal
-        Assert-RecoveryJournalCheckpointCapacity -Manifest $Manifest -Journal $journal -FinalProgressSequence $progressCapacity.FinalSequence
+        [void](Assert-RecoveryJournalCheckpointCapacity -Manifest $Manifest -Journal $journal -FinalProgressSequence $progressCapacity.FinalSequence)
     }
     $unitIndex = 0
     foreach ($unit in @($journal.units)) {
@@ -4206,7 +4206,7 @@ function Restore-ManifestArtifacts {
         $current = Get-RecoveryArtifactState $unit.destination -AllowNodeRuntime:$allowNodeRuntime -AllowServiceHostBinary:$allowServiceHostBinary -Manifest $Manifest
         Assert-RecoveryUnitState $unit $current
         if ($current -ne $unit.post) {
-            Append-RecoveryProgress -Manifest $Manifest -Journal $journal -UnitIndex $unitIndex -Phase 'restoring'
+            [void](Append-RecoveryProgress -Manifest $Manifest -Journal $journal -UnitIndex $unitIndex -Phase 'restoring')
             if ($unit.post -ne 'absent') {
                 $backupAllowsNodeRuntime = Test-LifeOSNodeRuntimeArtifactPath -Manifest $Manifest -Path $unit.backup
                 $backupAllowsServiceHostBinary = Test-LifeOSServiceHostArtifactPath -Manifest $Manifest -Path $unit.backup
@@ -4220,7 +4220,7 @@ function Restore-ManifestArtifacts {
             Assert-NoReparsePath $unit.stagingPath
             Remove-Item -LiteralPath $unit.stagingPath -Force -ErrorAction Stop
         }
-        Append-RecoveryProgress -Manifest $Manifest -Journal $journal -UnitIndex $unitIndex -Phase 'complete'
+        [void](Append-RecoveryProgress -Manifest $Manifest -Journal $journal -UnitIndex $unitIndex -Phase 'complete')
         $unitIndex++
     }
     Set-JournalProperty $journal 'phase' 'artifacts-complete'
@@ -4669,7 +4669,7 @@ function Remove-TransientLogonAclRules {
         # rights/inheritance tuple.  A parent traversal grant can be
         # materialized on a descendant with a different tuple, and
         # RemoveAccessRule() may leave that sibling ACE behind.
-        foreach ($rule in $entry.Rules) { $acl.RemoveAccessRuleAll($rule) }
+        foreach ($rule in $entry.Rules) { [void]$acl.RemoveAccessRuleAll($rule) }
         if ($entry.Rules.Count -gt 0) {
             Set-LifeOSAclWithBoundHandle -Path $entry.Path -Acl $acl -Directory ([bool]$entry.IsContainer) -ExpectedChain $entry.PathIdentityChain
         }

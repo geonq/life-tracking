@@ -2221,6 +2221,24 @@ def test_recovery_progress_is_append_only_and_bounded_per_unit() -> None:
     assert 'foreach ($partialLength in 1..8)' in read('tests/Deployment.Behavior.Tests.ps1')
 
 
+def test_recovery_progress_statuses_are_suppressed_and_behavior_capture_guards_the_real_loop() -> None:
+    common = read('Deployment.Common.ps1')
+    restore = common.split('function Restore-ManifestArtifacts', 1)[1].split(
+        'function Copy-FileVerifiedAtomic', 1
+    )[0]
+    for phase in ("'restoring'", "'complete'"):
+        assert re.search(
+            rf'(?m)^\s*\[void\]\(Append-RecoveryProgress -Manifest \$Manifest -Journal \$journal '
+            rf'-UnitIndex \$unitIndex -Phase {re.escape(phase)}\)',
+            restore,
+        )
+    assert restore.count('[void](Assert-RecoveryJournalCheckpointCapacity -Manifest $Manifest -Journal $journal') == 2
+
+    behavior = read('tests/Deployment.Behavior.Tests.ps1')
+    assert '$restoreOutput = @(Restore-ManifestArtifacts $manifest $backup)' in behavior
+    assert "Assert-Behavior ($restoreOutput.Count -eq 0) 'recovery restore emits no success-stream status or checkpoint values.'" in behavior
+
+
 def test_deployment_json_readers_reject_oversized_files_before_convert_from_json() -> None:
     common = read('Deployment.Common.ps1')
     rollback = read('rollback.ps1')
@@ -2417,6 +2435,28 @@ def test_native_acl_and_descriptor_stream_contracts_are_synchronous_and_bool_saf
     streams = [line.strip() for line in common.splitlines() if '[IO.FileStream]::new' in line]
     assert len(streams) == 3
     assert all(line.endswith('$false)') for line in streams)
+
+
+def test_acl_mutation_helpers_do_not_leak_side_effect_results() -> None:
+    common = read('Deployment.Common.ps1')
+    cleanup = common.split('function Remove-TransientLogonAclRules', 1)[1].split(
+        'function Set-DirectoryTraversalAcl', 1
+    )[0]
+    normalized = re.sub(r'\s+', ' ', cleanup)
+
+    # RemoveAccessRuleAll is a mutation boundary. Keep any implementation or
+    # PowerShell adapter result out of the function pipeline; otherwise a
+    # recursive ACL cleanup can retain one scalar per rule in remoting.
+    assert 'foreach ($rule in $entry.Rules) { [void]$acl.RemoveAccessRuleAll($rule) }' in normalized
+    assert not re.search(
+        r'foreach \(\$rule in \$entry\.Rules\) \{\s*\$acl\.RemoveAccessRuleAll\(\$rule\)',
+        cleanup,
+    )
+
+    # The neighboring ACL construction path must keep its collection result
+    # suppression as well; this guards against reintroducing the same class of
+    # leak while changing the rule set.
+    assert '[void]$Acl.AddAccessRule($rule)' in common
 
 
 def test_recovery_inventory_uses_bounded_hash_sets_without_per_file_full_scans() -> None:
