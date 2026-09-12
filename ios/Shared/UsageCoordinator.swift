@@ -43,6 +43,46 @@ public enum UsageRefreshFailure: String, Codable, Equatable, Sendable {
     case historyStorage
 }
 
+public enum UsagePresentationUpdateKind: Equatable, Sendable {
+    case initial
+    case loading
+    case resolved
+    case failed
+    case cancelled
+    /// A valid source result contains no observed usage, so empty/unavailable
+    /// data must not be mistaken for a failed request or synthetic zeros.
+    case authoritativeEmpty
+}
+
+/// The one coherent handoff for Usage presentation. `generation` is sourced
+/// from `UsageCoordinator.refreshGeneration`, so consumers can ignore stale
+/// packets without keeping a second history of provider or analytics values.
+public struct UsagePresentationPacket: Equatable, Sendable {
+    public let generation: Int
+    public let providers: [ProviderSnapshot]
+    public let analytics: [UsageAnalyticsSnapshot]
+    public let loadState: UsageLoadState
+    public let failure: UsageRefreshFailure
+    public let lastUpdated: Date?
+    public let updateKind: UsagePresentationUpdateKind
+
+    public init(generation: Int,
+                providers: [ProviderSnapshot],
+                analytics: [UsageAnalyticsSnapshot],
+                loadState: UsageLoadState,
+                failure: UsageRefreshFailure,
+                lastUpdated: Date?,
+                updateKind: UsagePresentationUpdateKind) {
+        self.generation = generation
+        self.providers = providers
+        self.analytics = analytics
+        self.loadState = loadState
+        self.failure = failure
+        self.lastUpdated = lastUpdated
+        self.updateKind = updateKind
+    }
+}
+
 public protocol UsagePayloadFetching: Sendable {
     func fetchUsage() async throws -> Data
 }
@@ -106,6 +146,7 @@ public final class UsageCoordinator: ObservableObject {
     @Published public private(set) var state: UsageLoadState = .unavailable
     @Published public private(set) var providers: [ProviderSnapshot] = []
     @Published public private(set) var analytics: [UsageAnalyticsSnapshot] = []
+    @Published public private(set) var presentationPacket: UsagePresentationPacket
     @Published public private(set) var connectorStates: [Provider: ConnectorState] = [:]
     @Published public private(set) var errorMessage: String?
     @Published public private(set) var lastUpdated: Date?
@@ -141,19 +182,27 @@ public final class UsageCoordinator: ObservableObject {
         self.historyLedger = loadedHistory.ledger
         self.historyStatus = loadedHistory.ledger.isEmpty ? .empty : .available
         self.historyErrorMessage = loadedHistory.errorMessage
-        self.failure = loadedHistory.errorMessage == nil ? .none : .historyStorage
+        let initialFailure: UsageRefreshFailure = loadedHistory.errorMessage == nil ? .none : .historyStorage
+        self.failure = initialFailure
         self.providers = initialProviders
-        self.analytics = UsageAnalyticsHistoryBuilder.snapshots(
+        let initialAnalytics = UsageAnalyticsHistoryBuilder.snapshots(
             from: loadedHistory.ledger, providers: initialProviders
         )
+        self.analytics = initialAnalytics
         self.lastUpdated = initialUpdatedAt
-        if initialProviders.contains(where: { $0.provenance.quality == .observed }) {
-            let timestampIsStale = initialUpdatedAt.map { Date.now.timeIntervalSince($0) >= staleAfter } ?? true
-            state = timestampIsStale || initialProviders.contains {
-                let freshness = $0.provenance.freshness(now: .now, staleAfter: staleAfter)
-                return freshness == .stale || freshness == .unavailable
-            } ? .stale : .observed
-        }
+        let initialState = Self.initialState(
+            providers: initialProviders, updatedAt: initialUpdatedAt, staleAfter: staleAfter
+        )
+        self.state = initialState
+        self.presentationPacket = UsagePresentationPacket(
+            generation: 0,
+            providers: initialProviders,
+            analytics: initialAnalytics,
+            loadState: initialState,
+            failure: initialFailure,
+            lastUpdated: initialUpdatedAt,
+            updateKind: .initial
+        )
     }
 
     public init(fetch: @escaping @Sendable () async throws -> APIUsagePayload,
@@ -171,19 +220,27 @@ public final class UsageCoordinator: ObservableObject {
         self.historyLedger = loadedHistory.ledger
         self.historyStatus = loadedHistory.ledger.isEmpty ? .empty : .available
         self.historyErrorMessage = loadedHistory.errorMessage
-        self.failure = loadedHistory.errorMessage == nil ? .none : .historyStorage
+        let initialFailure: UsageRefreshFailure = loadedHistory.errorMessage == nil ? .none : .historyStorage
+        self.failure = initialFailure
         self.providers = initialProviders
-        self.analytics = UsageAnalyticsHistoryBuilder.snapshots(
+        let initialAnalytics = UsageAnalyticsHistoryBuilder.snapshots(
             from: loadedHistory.ledger, providers: initialProviders
         )
+        self.analytics = initialAnalytics
         self.lastUpdated = initialUpdatedAt
-        if initialProviders.contains(where: { $0.provenance.quality == .observed }) {
-            let timestampIsStale = initialUpdatedAt.map { Date.now.timeIntervalSince($0) >= staleAfter } ?? true
-            state = timestampIsStale || initialProviders.contains {
-                let freshness = $0.provenance.freshness(now: .now, staleAfter: staleAfter)
-                return freshness == .stale || freshness == .unavailable
-            } ? .stale : .observed
-        }
+        let initialState = Self.initialState(
+            providers: initialProviders, updatedAt: initialUpdatedAt, staleAfter: staleAfter
+        )
+        self.state = initialState
+        self.presentationPacket = UsagePresentationPacket(
+            generation: 0,
+            providers: initialProviders,
+            analytics: initialAnalytics,
+            loadState: initialState,
+            failure: initialFailure,
+            lastUpdated: initialUpdatedAt,
+            updateKind: .initial
+        )
     }
 
     /// Creates the dependency graph used by screenshot and visual-fixture
@@ -240,19 +297,27 @@ public final class UsageCoordinator: ObservableObject {
         self.historyLedger = loadedHistory.ledger
         self.historyStatus = loadedHistory.ledger.isEmpty ? .empty : .available
         self.historyErrorMessage = loadedHistory.errorMessage
-        self.failure = loadedHistory.errorMessage == nil ? .none : .historyStorage
+        let initialFailure: UsageRefreshFailure = loadedHistory.errorMessage == nil ? .none : .historyStorage
+        self.failure = initialFailure
         self.providers = initialProviders
-        self.analytics = UsageAnalyticsHistoryBuilder.snapshots(
+        let initialAnalytics = UsageAnalyticsHistoryBuilder.snapshots(
             from: loadedHistory.ledger, providers: initialProviders
         )
+        self.analytics = initialAnalytics
         self.lastUpdated = initialUpdatedAt
-        if initialProviders.contains(where: { $0.provenance.quality == .observed }) {
-            let timestampIsStale = initialUpdatedAt.map { Date.now.timeIntervalSince($0) >= staleAfter } ?? true
-            state = timestampIsStale || initialProviders.contains {
-                let freshness = $0.provenance.freshness(now: .now, staleAfter: staleAfter)
-                return freshness == .stale || freshness == .unavailable
-            } ? .stale : .observed
-        }
+        let initialState = Self.initialState(
+            providers: initialProviders, updatedAt: initialUpdatedAt, staleAfter: staleAfter
+        )
+        self.state = initialState
+        self.presentationPacket = UsagePresentationPacket(
+            generation: 0,
+            providers: initialProviders,
+            analytics: initialAnalytics,
+            loadState: initialState,
+            failure: initialFailure,
+            lastUpdated: initialUpdatedAt,
+            updateKind: .initial
+        )
     }
 
     public func refresh() async {
@@ -268,20 +333,24 @@ public final class UsageCoordinator: ObservableObject {
         let operation = Task { [weak self] in
             guard let self else { return }
             await MainActor.run {
+                guard generation == self.refreshGeneration else { return }
                 self.state = .loading
                 self.failure = self.historyErrorMessage == nil ? .none : .historyStorage
                 self.errorMessage = self.historyErrorMessage
+                self.publishPresentationPacket(generation: generation, updateKind: .loading)
             }
             do {
                 try Task.checkCancellation()
                 let payload = try await self.fetchPayload()
                 try Task.checkCancellation()
                 let mapped = try UsageIngestion.map(payload, now: .now)
-                await MainActor.run { self.apply(mapped, generatedAt: payload.generatedAt) }
+                await MainActor.run {
+                    self.apply(mapped, generatedAt: payload.generatedAt, generation: generation)
+                }
             } catch is CancellationError {
                 // A newer refresh or lifecycle cancellation owns the next truthful state.
             } catch {
-                await MainActor.run { self.fail(error) }
+                await MainActor.run { self.fail(error, generation: generation) }
             }
         }
         refreshTask = operation
@@ -293,9 +362,14 @@ public final class UsageCoordinator: ObservableObject {
         refreshGeneration &+= 1
         refreshTask?.cancel()
         state = providers.contains(where: { $0.provenance.quality == .observed }) ? .stale : .unavailable
+        publishPresentationPacket(
+            generation: refreshGeneration,
+            updateKind: .cancelled
+        )
     }
 
-    private func apply(_ mapped: UsageMappingResult, generatedAt: Date) {
+    private func apply(_ mapped: UsageMappingResult, generatedAt: Date, generation: Int) {
+        guard generation == refreshGeneration else { return }
         providers = mapped.providers
         connectorStates = mapped.connectorStates
         lastUpdated = generatedAt
@@ -349,9 +423,14 @@ public final class UsageCoordinator: ObservableObject {
         state = observed.isEmpty ? .unavailable : (hasStale ? .stale : .observed)
         errorMessage = historyErrorMessage ?? (observed.isEmpty ? "Usage data unavailable" : nil)
         publishSnapshot(mapped.providers, generatedAt: generatedAt)
+        publishPresentationPacket(
+            generation: generation,
+            updateKind: observed.isEmpty ? .authoritativeEmpty : .resolved
+        )
     }
 
-    private func fail(_ error: Error) {
+    private func fail(_ error: Error, generation: Int) {
+        guard generation == refreshGeneration else { return }
         if error is UsageIngestionError || error is DecodingError {
             failure = .invalidPayload
             errorMessage = "Usage payload unavailable"
@@ -361,6 +440,40 @@ public final class UsageCoordinator: ObservableObject {
         }
         state = providers.contains(where: { $0.provenance.quality == .observed }) ? .stale : .unavailable
         if !providers.isEmpty { publishSnapshot(providers, generatedAt: lastUpdated ?? .now) }
+        publishPresentationPacket(generation: generation, updateKind: .failed)
+    }
+
+    private func publishPresentationPacket(
+        generation: Int,
+        updateKind: UsagePresentationUpdateKind
+    ) {
+        guard generation == refreshGeneration else { return }
+        let snapshot = UsagePresentationPacket(
+            generation: generation,
+            providers: providers,
+            analytics: analytics,
+            loadState: state,
+            failure: failure,
+            lastUpdated: lastUpdated,
+            updateKind: updateKind
+        )
+        presentationPacket = snapshot
+    }
+
+    private static func initialState(
+        providers: [ProviderSnapshot],
+        updatedAt: Date?,
+        staleAfter: TimeInterval
+    ) -> UsageLoadState {
+        guard providers.contains(where: { $0.provenance.quality == .observed }) else {
+            return .unavailable
+        }
+        let timestampIsStale = updatedAt.map { Date.now.timeIntervalSince($0) >= staleAfter } ?? true
+        let providerIsStale = providers.contains {
+            let freshness = $0.provenance.freshness(now: .now, staleAfter: staleAfter)
+            return freshness == .stale || freshness == .unavailable
+        }
+        return timestampIsStale || providerIsStale ? .stale : .observed
     }
 
     private func persistHistory() throws {

@@ -694,10 +694,11 @@ private struct LifeOSIOSSceneRoot: View {
         switch selection {
         case .home:
             if showingUsage {
+                let usagePacket = usageCoordinator.presentationPacket
                 UsageView(
-                    snapshots: usesVisualFixtures ? DemoDataProvider.providers : usageCoordinator.providers,
-                    analytics: usesVisualFixtures ? DemoUsageAnalytics.snapshots : usageCoordinator.analytics,
-                    state: usesVisualFixtures ? .demo : usageCoordinator.state,
+                    snapshots: usesVisualFixtures ? DemoDataProvider.providers : usagePacket.providers,
+                    analytics: usesVisualFixtures ? DemoUsageAnalytics.snapshots : usagePacket.analytics,
+                    state: usesVisualFixtures ? .demo : usagePacket.loadState,
                     refreshAction: usesVisualFixtures ? nil : { await usageCoordinator.refresh() },
                     onBack: {
                         withAnimation(reduceMotion ? nil : LifeOSMotion.heroMorph) {
@@ -709,13 +710,14 @@ private struct LifeOSIOSSceneRoot: View {
                 )
                 .transition(routeTransition)
             } else {
+                let usagePacket = usageCoordinator.presentationPacket
                 OverviewView(
                     snapshot: usesVisualFixtures
                         ? DemoDataProvider.overview
                         : OverviewSnapshot.production(clipper: clipperCoordinator.snapshot),
-                    usageSnapshots: usesVisualFixtures ? DemoDataProvider.providers : usageCoordinator.providers,
-                    usageAnalytics: usesVisualFixtures ? DemoUsageAnalytics.snapshots : usageCoordinator.analytics,
-                    usageState: usesVisualFixtures ? .demo : usageCoordinator.state,
+                    usageSnapshots: usesVisualFixtures ? DemoDataProvider.providers : usagePacket.providers,
+                    usageAnalytics: usesVisualFixtures ? DemoUsageAnalytics.snapshots : usagePacket.analytics,
+                    usageState: usesVisualFixtures ? .demo : usagePacket.loadState,
                     refreshAction: usesVisualFixtures ? nil : {
                         await calendarCoordinator.manualRefresh()
                         await usageCoordinator.refresh()
