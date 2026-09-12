@@ -17,6 +17,10 @@ Updated 2026-09-12 Europe/Berlin.
   track.
 - Use direct user motion and restrained transitions. Rapid route reversal must
   start from the currently visible state.
+- The macOS shell uses one value-driven Home `NavigationStack` with a bounded
+  typed path and mount-generation guarded one-shot Calendar commands. This
+  supersedes the AppKit route-host/raster-compositor proposal in the route
+  repair plan; do not reintroduce a second navigation authority.
 - Generic conversational assistant/advisor/AI is removed from every product
   layer. Calorie-photo tracking is the only permitted in-app AI behavior.
 - The shared foundation is reviewed GREEN at `6751bb5`. Both responsive

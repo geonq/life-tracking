@@ -4,11 +4,12 @@ Updated 2026-09-12 Europe/Berlin. Release: **NO-GO**.
 
 ## Ordered work
 
-1. Implement bounded AppKit route host/reducer; test Home → Usage → Back →
-   Clipper, rapid reversal, and unavailable states.
-2. Obtain Astra medium review, then run serialized native builds and runtime
-   captures. Fix hierarchy, SF Symbols, motion, calendar scroll/pinch, and
-   widget states against the approved design plan.
+1. **Done for source:** the native macOS route reducer/NavigationStack is in
+   `070b7db`, with bounded Home history, stale-mount rejection, Calendar
+   callback retirement, and Astra GREEN review. Interactive route reversal and
+   deferred-editor runtime evidence remain open.
+2. Run serialized native runtime captures. Fix hierarchy, SF Symbols, motion,
+   calendar scroll/pinch, and widget states against the approved design plan.
 3. Run Windows recovery/install and verify service listeners, health, ACLs,
    Tailscale Serve, and live Enable Banking reads on the reachable PC.
 4. Verify iPhone install, App Group/HealthKit, personal signing renewal, and
@@ -20,9 +21,11 @@ Updated 2026-09-12 Europe/Berlin. Release: **NO-GO**.
 
 ## Verified checkpoint
 
-`7877ec5` is pushed. Usage is Astra-reviewed GREEN; iPhone focused tests are
-108/108 and current macOS snapshots are 54/54. Windows source tests are
-61 passed, 1 skipped. These results do not prove live, runtime, device,
-visual, or operational completion.
+`070b7db` is pushed. Usage and macOS route source slices are Astra-reviewed
+GREEN; iPhone focused tests are 95/95; macOS route tests are 2/2 with exit 0;
+the full macOS snapshot run executed 51/51 cases with zero test failures before
+result-archive I/O failure. Windows source tests are 61 passed, 1 skipped.
+These results do not prove live, runtime, device, visual, or operational
+completion.
 
 Keep generic advisor/AI and the Claude usage watcher out of the product.
