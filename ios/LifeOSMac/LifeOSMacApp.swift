@@ -232,104 +232,6 @@ struct LifeOSMacSceneState {
     let sidebarWidth: Double
 }
 
-/// The shell keeps a small route snapshot while a new surface enters. The
-/// snapshot is presentation-only: coordinators and module data remain owned by
-/// their existing scene objects.
-struct LifeOSMacRouteSnapshot: Equatable {
-    let module: LifeOSModule
-    let route: LifeOSDeepLink?
-    let showingUsage: Bool
-    let showingDestinationUnavailable: Bool
-
-    /// Identity for the mounted module view. Route and detail selection are
-    /// presentation state; including them here would tear down a live module
-    /// and rerun its `.task`/`.onAppear` work on every detail change.
-    /// Destination-unavailable is a separate surface and therefore gets its
-    /// own mount while retaining the originating module in the snapshot.
-    var mountedIdentity: String {
-        "module:\(module.rawValue):\(showingDestinationUnavailable ? "unavailable" : "ready")"
-    }
-}
-
-enum LifeOSMacNavigationDirection: Equatable {
-    case forward
-    case backward
-
-    var incomingOffset: CGFloat {
-        self == .forward ? 8 : -8
-    }
-}
-
-enum LifeOSMacNavigationTransition: Equatable {
-    case none
-    case module
-    case detail(LifeOSMacNavigationDirection)
-
-    var duration: TimeInterval {
-        switch self {
-        case .none: 0
-        case .module: 0.12
-        case .detail: 0.18
-        }
-    }
-
-    var animation: Animation {
-        .easeOut(duration: duration)
-    }
-
-    var outgoingDuration: TimeInterval {
-        switch self {
-        case .detail:
-            0.12
-        case .module:
-            duration
-        case .none:
-            0
-        }
-    }
-
-    var outgoingAnimation: Animation {
-        .easeOut(duration: outgoingDuration)
-    }
-}
-
-enum LifeOSMacNavigationTransitionPolicy {
-    static func transition(
-        from source: LifeOSMacRouteSnapshot,
-        to destination: LifeOSMacRouteSnapshot
-    ) -> LifeOSMacNavigationTransition {
-        guard source != destination else { return .none }
-        guard !source.showingDestinationUnavailable,
-              !destination.showingDestinationUnavailable else {
-            return .module
-        }
-
-        if source.module == .home,
-           destination.module == .home,
-           !source.showingUsage,
-           destination.showingUsage {
-            return .detail(.forward)
-        }
-
-        if source.module == .home,
-           destination.module == .home,
-           source.showingUsage,
-           !destination.showingUsage {
-            return .detail(.backward)
-        }
-
-        // A route within an already-mounted module is handled by that
-        // module's scene-owned presentation state. The shell must not fade or
-        // remount the whole page for a chart/detail selection.
-        if source.module == destination.module,
-           source.showingUsage == destination.showingUsage {
-            return .none
-        }
-
-        return .module
-    }
-}
-
 private struct LifeOSMacSceneRoot: View {
     let calendarCoordinator: CalendarCoordinator
     let usageCoordinator: UsageCoordinator
@@ -396,23 +298,12 @@ struct LifeOSMacRootView: View {
     @ObservedObject private var fitnessTrainingCoordinator: FitnessTrainingCoordinator
     private let usesVisualFixtures: Bool
     private let fitnessObservation: FitnessObservationEnvelope?
-    @State private var selection: LifeOSModule
-    @State private var selectedRoute: LifeOSDeepLink?
-    @State private var showingUsage: Bool
-    @State private var requestingNewCalendarEvent = false
+    @State private var routeState: LifeOSMacRouteState
     @State private var sidebarCollapsed = false
     @State private var sidebarWidth: Double = 232
     @State private var hoveredSidebarModule: LifeOSModule?
     @State private var showingCommandPalette = false
-    @State private var showingDestinationUnavailable = false
-    @State private var unavailableOriginModule: LifeOSModule = .home
-    @State private var unavailableOriginRoute: LifeOSDeepLink?
-    @State private var unavailableOriginShowingUsage = false
     @State private var sidebarResizeStart: CGFloat?
-    @State private var routeTransitionProgress: CGFloat = 1
-    @State private var outgoingTransitionProgress: CGFloat = 1
-    @State private var navigationGeneration: UInt64 = 0
-    @State private var navigationTransition: LifeOSMacNavigationTransition = .none
     @StateObject private var calendarPresentationState: CalendarPresentationState
     @StateObject private var financePresentationState: FinancePresentationState
     @StateObject private var fitnessPresentationState: FitnessPresentationState
@@ -443,9 +334,11 @@ struct LifeOSMacRootView: View {
         self.fitnessTrainingCoordinator = fitnessTrainingCoordinator
             ?? FitnessTrainingCoordinator(usesVisualFixtures: usesVisualFixtures)
         self.fitnessObservation = fitnessObservation
-        _selection = State(initialValue: initialModule)
-        _selectedRoute = State(initialValue: initialRoute)
-        _showingUsage = State(initialValue: initiallyShowingUsage || initialRoute == .usage)
+        _routeState = State(initialValue: LifeOSMacRouteState(
+            initialModule: initialModule,
+            initialRoute: initialRoute,
+            initiallyShowingUsage: initiallyShowingUsage
+        ))
         _sidebarCollapsed = State(initialValue: initialSidebarCollapsed)
         _sidebarWidth = State(initialValue: initialSidebarWidth)
         _calendarPresentationState = StateObject(wrappedValue: CalendarPresentationState())
@@ -504,46 +397,16 @@ struct LifeOSMacRootView: View {
                         case .home:
                             select(.home)
                         case .destinationUnavailable:
-                            guard !showingDestinationUnavailable else { break }
-                            let target = LifeOSMacRouteSnapshot(
-                                module: selection,
-                                route: nil,
-                                showingUsage: false,
-                                showingDestinationUnavailable: true
-                            )
-                            performNavigationChange(to: target) {
-                                unavailableOriginModule = selection
-                                unavailableOriginRoute = selectedRoute
-                                unavailableOriginShowingUsage = showingUsage
-                                clearSelectedRoute()
-                                showingUsage = false
-                                requestingNewCalendarEvent = false
-                                showingDestinationUnavailable = true
-                            }
+                            applyRoute(.showDestinationUnavailable)
                         }
                     }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(LifeOSTokens.screenCanvas)
-        .onChange(of: selection) { _, _ in reportSceneState() }
-        .onChange(of: selectedRoute) { _, _ in reportSceneState() }
-        .onChange(of: showingUsage) { _, _ in reportSceneState() }
+        .onChange(of: routeState) { _, _ in reportSceneState() }
         .onChange(of: sidebarCollapsed) { _, _ in reportSceneState() }
         .onChange(of: sidebarWidth) { _, _ in reportSceneState() }
-        .onChange(of: requestingNewCalendarEvent) { _, requested in
-            guard !requested, selectedRoute == .newCalendarEvent else { return }
-            let target = LifeOSMacRouteSnapshot(
-                module: .calendar,
-                route: .calendar,
-                showingUsage: false,
-                showingDestinationUnavailable: false
-            )
-            performNavigationChange(to: target) {
-                selectedRoute = .calendar
-                reportSceneState()
-            }
-        }
         .sheet(isPresented: $showingCommandPalette) {
             LifeOSMacCommandPalette(onSelect: { module in select(module) })
                 .frame(width: 560, height: 420)
@@ -653,7 +516,7 @@ struct LifeOSMacRootView: View {
     }
 
     private var moduleOwnsPageIdentity: Bool {
-        switch selection {
+        switch routeState.module {
         case .home, .finance, .fitness, .tax:
             return true
         default:
@@ -663,22 +526,22 @@ struct LifeOSMacRootView: View {
 
     private func topBar(isCompact: Bool) -> some View {
         HStack(spacing: 10) {
-            if isHomeUsageDetail {
-                Button { select(.home) } label: {
+            if isHomeDetail {
+                Button { backHome() } label: {
                     LifeOSIcon(.chevronLeft)
                         .frame(width: 15, height: 15)
                         .frame(width: 32, height: 32)
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(LifeOSTokens.secondaryText)
-                .accessibilityLabel("Back to Home")
-                .accessibilityIdentifier("mac-usage-back")
+                .accessibilityLabel("Back")
+                .accessibilityIdentifier(routeState.showingUsage ? "mac-usage-back" : "mac-home-detail-back")
             }
             if !moduleOwnsPageIdentity {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(selection.title)
+                        Text(routeState.module.title)
                         .lifeOSTypography(.sectionTitle, weight: .bold)
-                    if let section = selectedRoute?.sectionTitle ?? (selectedRoute == .usage ? "Usage" : nil) {
+                    if let section = routeState.route?.sectionTitle ?? (routeState.showingUsage ? "Usage" : nil) {
                         Text(section)
                             .lifeOSTypography(.body)
                             .foregroundStyle(LifeOSTokens.tertiaryText)
@@ -720,55 +583,21 @@ struct LifeOSMacRootView: View {
     }
 
     private var detail: some View {
-        detail(for: currentRouteSnapshot, interactive: true)
+        detail(for: routeState, interactive: true)
             // The route snapshot changes frequently, but the module view owns
             // its lifecycle. A module-only identity lets scene-owned
             // presentation state handle route/detail changes in place.
-            .id(currentRouteSnapshot.mountedIdentity)
+            .id(routeState.mountedIdentity)
             // SwiftUI removes the already-mounted outgoing module when this
             // identity changes. That preserves its lifecycle history during
             // the fade without constructing a second live module tree.
-            .transition(currentRouteTransition)
+            .transition(.opacity)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .clipped()
-        .task(id: navigationGeneration) {
-            guard !reduceMotion, navigationTransition != .none else { return }
-            let generation = navigationGeneration
-            let nanoseconds = UInt64(max(0, navigationTransition.duration) * 1_000_000_000)
-            try? await Task.sleep(nanoseconds: nanoseconds)
-            guard !Task.isCancelled, generation == navigationGeneration else { return }
-            LifeOSMotion.withoutAnimation {
-                routeTransitionProgress = 1
-                outgoingTransitionProgress = 1
-                navigationTransition = .none
-            }
-        }
-    }
-
-    private var currentRouteSnapshot: LifeOSMacRouteSnapshot {
-        LifeOSMacRouteSnapshot(
-            module: selection,
-            route: selectedRoute,
-            showingUsage: showingUsage,
-            showingDestinationUnavailable: showingDestinationUnavailable
-        )
-    }
-
-    private var currentRouteTransition: AnyTransition {
-        switch navigationTransition {
-        case .module:
-            return .opacity
-        case .none, .detail:
-            return .identity
-        }
-    }
-
-    private var detailTransitionProgress: Double {
-        min(max(Double(routeTransitionProgress), 0), 1)
     }
 
     @ViewBuilder
-    private func detail(for route: LifeOSMacRouteSnapshot, interactive: Bool) -> some View {
+    private func detail(for route: LifeOSMacRouteState, interactive: Bool) -> some View {
         if route.showingDestinationUnavailable {
             destinationUnavailableDetail(interactive: interactive)
         } else {
@@ -785,14 +614,26 @@ struct LifeOSMacRootView: View {
     }
 
     @ViewBuilder
-    private func moduleDetail(for route: LifeOSMacRouteSnapshot, interactive: Bool) -> some View {
+    private func moduleDetail(for route: LifeOSMacRouteState, interactive: Bool) -> some View {
         switch route.module {
         case .home:
             homeDetail(for: route, interactive: interactive)
         case .calendar:
+            let expectedMountGeneration = route.mountGeneration
+            let expectedMountedIdentity = route.mountedIdentity
             CalendarView(
                 coordinator: calendarCoordinator,
-                requestNewEvent: interactive ? $requestingNewCalendarEvent : .constant(false),
+                requestNewEvent: .constant(false),
+                requestNewEventID: interactive ? route.pendingCalendarEventID : nil,
+                consumeNewEventRequest: interactive ? { id in
+                    consumeCalendarEvent(id: id, expectedMountGeneration: route.mountGeneration)
+                } : nil,
+                isRouteActive: interactive ? {
+                    isCalendarMountActive(
+                        expectedMountGeneration: expectedMountGeneration,
+                        expectedMountedIdentity: expectedMountedIdentity
+                    )
+                } : nil,
                 presentationState: calendarPresentationState
             )
         case .finance:
@@ -812,64 +653,53 @@ struct LifeOSMacRootView: View {
         }
     }
 
+    private func homeDetail(for route: LifeOSMacRouteState, interactive: Bool) -> some View {
+        let mountGeneration = route.mountGeneration
+        let pathBinding = Binding<[LifeOSHomeDestination]>(
+            get: { routeState.homePath },
+            set: { path in
+                guard interactive else { return }
+                applyRoute(.setHomePath(path, expectedMountGeneration: mountGeneration))
+            }
+        )
+
+        return NavigationStack(path: pathBinding) {
+            overviewDetail(for: route, interactive: interactive)
+                .navigationDestination(for: LifeOSHomeDestination.self) { destination in
+                    homeDestination(destination, interactive: interactive)
+                }
+        }
+        .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
+    }
+
     @ViewBuilder
-    private func homeDetail(for route: LifeOSMacRouteSnapshot, interactive: Bool) -> some View {
-        let showingUsage = route.showingUsage
-        let progress = detailTransitionProgress
-
-        ZStack(alignment: .topLeading) {
-            // Keep both Home detail surfaces mounted for the lifetime of the
-            // Home module. The detail route changes presentation state in
-            // place, so Usage's local selections are not recreated for a
-            // Home ↔ Usage transition.
-            overviewDetail(for: route, interactive: interactive && !showingUsage)
-                .opacity(homeOverviewOpacity(showingUsage: showingUsage, progress: progress))
-                .offset(x: homeOverviewOffset(progress: progress))
-                .allowsHitTesting(interactive && !showingUsage)
-                .accessibilityHidden(showingUsage)
-
-            usageDetail(interactive: interactive && showingUsage)
-                .opacity(homeUsageOpacity(showingUsage: showingUsage, progress: progress))
-                .offset(x: homeUsageOffset(progress: progress))
-                .allowsHitTesting(interactive && showingUsage)
-                .accessibilityHidden(!showingUsage)
+    private func homeDestination(_ destination: LifeOSHomeDestination, interactive: Bool) -> some View {
+        switch destination {
+        case .usage:
+            usageDetail(interactive: interactive)
+        case .clipper:
+            ClipperAnalyticsView(
+                section: currentClipperSection,
+                snapshot: currentOverviewSnapshot.clipperSnapshot,
+                refreshAction: usesVisualFixtures ? nil : { await clipperCoordinator.refresh() },
+                clipperState: usesVisualFixtures ? .demo : clipperCoordinator.state
+            )
+        case .financeWealth:
+            OverviewFinanceWealthDetail(
+                financeSummary: usesVisualFixtures ? nil : financeCoordinator.summary
+            )
         }
     }
 
-    private func homeOverviewOpacity(showingUsage: Bool, progress: Double) -> Double {
-        switch navigationTransition {
-        case .detail(.forward):
-            return 1 - detailOutgoingTransitionProgress
-        case .detail(.backward):
-            return progress
-        case .none, .module:
-            return showingUsage ? 0 : 1
-        }
+    private var currentOverviewSnapshot: OverviewSnapshot {
+        usesVisualFixtures
+            ? DemoDataProvider.overview
+            : OverviewSnapshot.production(clipper: clipperCoordinator.snapshot)
     }
 
-    private func homeUsageOpacity(showingUsage: Bool, progress: Double) -> Double {
-        switch navigationTransition {
-        case .detail(.forward):
-            return progress
-        case .detail(.backward):
-            return 1 - detailOutgoingTransitionProgress
-        case .none, .module:
-            return showingUsage ? 1 : 0
-        }
-    }
-
-    private func homeOverviewOffset(progress: Double) -> CGFloat {
-        guard case .detail(.backward) = navigationTransition else { return 0 }
-        return LifeOSMacNavigationDirection.backward.incomingOffset * (1 - progress)
-    }
-
-    private func homeUsageOffset(progress: Double) -> CGFloat {
-        guard case .detail(.forward) = navigationTransition else { return 0 }
-        return LifeOSMacNavigationDirection.forward.incomingOffset * (1 - progress)
-    }
-
-    private var detailOutgoingTransitionProgress: Double {
-        min(max(Double(outgoingTransitionProgress), 0), 1)
+    private var currentClipperSection: OverviewSection {
+        currentOverviewSnapshot.sections.first(where: { $0.kind == .clipper })
+            ?? OverviewSnapshot.unavailable().sections.first(where: { $0.kind == .clipper })!
     }
 
     private func usageDetail(interactive: Bool) -> some View {
@@ -879,13 +709,13 @@ struct LifeOSMacRootView: View {
             analytics: usesVisualFixtures ? DemoUsageAnalytics.snapshots : usagePacket.analytics,
             state: usesVisualFixtures ? .demo : usagePacket.loadState,
             refreshAction: usesVisualFixtures ? nil : { await usageCoordinator.refresh() },
-            onBack: interactive ? { select(.home) } : nil,
+            onBack: interactive ? { backHome() } : nil,
             onOpenSettings: interactive ? { navigate(to: .settings) } : nil,
             presentationPacket: usesVisualFixtures ? nil : usagePacket
         )
     }
 
-    private func overviewDetail(for route: LifeOSMacRouteSnapshot, interactive: Bool) -> some View {
+    private func overviewDetail(for route: LifeOSMacRouteState, interactive: Bool) -> some View {
         let usagePacket = usageCoordinator.presentationPacket
         let overviewSnapshot: OverviewSnapshot = usesVisualFixtures
             ? DemoDataProvider.overview
@@ -912,8 +742,6 @@ struct LifeOSMacRootView: View {
         let destination: ((LifeOSDeepLink) -> Void)? = interactive ? { link in
             navigate(to: link)
         } : nil
-        let usageBinding: Binding<Bool> = interactive ? $showingUsage : .constant(route.showingUsage)
-
         return OverviewView(
             snapshot: overviewSnapshot,
             usageSnapshots: usageSnapshots,
@@ -925,11 +753,14 @@ struct LifeOSMacRootView: View {
             financeSummary: financeSummary,
             financeState: financeState,
             openDestination: destination,
-            showingUsage: usageBinding
+            openHomeDestination: interactive ? { destination in
+                openHomeDestination(destination)
+            } : nil,
+            isExternallyRouted: true
         )
     }
 
-    private func financeDetail(for route: LifeOSMacRouteSnapshot, interactive: Bool) -> some View {
+    private func financeDetail(for route: LifeOSMacRouteState, interactive: Bool) -> some View {
         FinanceView(
             summary: financeCoordinator.summary,
             usesVisualFixtures: usesVisualFixtures,
@@ -942,7 +773,7 @@ struct LifeOSMacRootView: View {
         )
     }
 
-    private func fitnessDetail(for route: LifeOSMacRouteSnapshot, interactive: Bool) -> some View {
+    private func fitnessDetail(for route: LifeOSMacRouteState, interactive: Bool) -> some View {
         FitnessView(
             snapshot: usesVisualFixtures ? .demo : .unavailable,
             snapshotProvider: usesVisualFixtures ? nil : { date in
@@ -970,7 +801,7 @@ struct LifeOSMacRootView: View {
     }
 
     private func sidebarButton(_ module: LifeOSModule, collapsed: Bool) -> some View {
-        let selected = selection == module
+        let selected = routeState.module == module
         let hovered = hoveredSidebarModule == module
         return Button {
             select(module)
@@ -1013,8 +844,10 @@ struct LifeOSMacRootView: View {
         .accessibilityIdentifier("mac-sidebar-\(module.rawValue)")
     }
 
-    private var isHomeUsageDetail: Bool {
-        selection == .home && showingUsage && !showingDestinationUnavailable
+    private var isHomeDetail: Bool {
+        routeState.module == .home
+            && !routeState.homePath.isEmpty
+            && !routeState.showingDestinationUnavailable
     }
 
     private static func financeDetailRoute(for route: LifeOSDeepLink?) -> FinanceDetailRoute? {
@@ -1025,153 +858,79 @@ struct LifeOSMacRootView: View {
         }
     }
 
-    private func navigationTarget(for destination: LifeOSDeepLink) -> LifeOSMacRouteSnapshot {
-        LifeOSMacRouteSnapshot(
-            module: destination.module,
-            route: destination,
-            showingUsage: destination == .usage,
-            showingDestinationUnavailable: false
-        )
-    }
-
     private func reportSceneState() {
         onSceneStateChange?(LifeOSMacSceneState(
-            module: selection,
-            route: selectedRoute == .newCalendarEvent ? .calendar : selectedRoute,
-            showingUsage: showingUsage,
+            module: routeState.module,
+            route: routeState.route,
+            showingUsage: routeState.showingUsage,
             sidebarCollapsed: sidebarCollapsed,
             sidebarWidth: sidebarWidth
         ))
     }
 
     private func restoreUnavailableOrigin() {
-        let originModule = unavailableOriginModule
-        let originRoute = unavailableOriginRoute
-        let originShowingUsage = unavailableOriginShowingUsage
-        let target = LifeOSMacRouteSnapshot(
-            module: originModule,
-            route: originRoute == .newCalendarEvent ? .calendar : originRoute,
-            showingUsage: originShowingUsage,
-            showingDestinationUnavailable: false
-        )
-        performNavigationChange(to: target) {
-            showingDestinationUnavailable = false
-            selection = originModule
-            selectedRoute = target.route
-            recordModuleRouteIntent(selectedRoute)
-            showingUsage = originShowingUsage
-            requestingNewCalendarEvent = false
-            clearUnavailableOrigin()
-        }
+        applyRoute(.restoreUnavailableOrigin)
     }
 
     private func select(_ module: LifeOSModule) {
-        let target = LifeOSMacRouteSnapshot(
-            module: module,
-            route: nil,
-            showingUsage: false,
-            showingDestinationUnavailable: false
-        )
-        performNavigationChange(to: target) {
-            showingDestinationUnavailable = false
-            clearUnavailableOrigin()
-            clearSelectedRoute()
-            showingUsage = false
-            requestingNewCalendarEvent = false
-            selection = module
-        }
+        applyRoute(.selectModule(module))
     }
 
     private func navigate(to destination: LifeOSDeepLink) {
-        let target = navigationTarget(for: destination)
-        performNavigationChange(to: target) {
-            showingDestinationUnavailable = false
-            clearUnavailableOrigin()
-            selectedRoute = destination
-            recordModuleRouteIntent(destination)
-            switch destination {
-            case .usage:
-                selection = .home
-                showingUsage = true
-                requestingNewCalendarEvent = false
-            case .newCalendarEvent:
-                selection = .calendar
-                showingUsage = false
-                requestingNewCalendarEvent = true
-            default:
-                selection = destination.module
-                showingUsage = false
-                requestingNewCalendarEvent = false
-            }
-        }
+        applyRoute(.navigate(destination))
     }
 
-    private func performNavigationChange(
-        to target: LifeOSMacRouteSnapshot,
-        update: () -> Void
-    ) {
-        let source = currentRouteSnapshot
-        let transition = LifeOSMacNavigationTransitionPolicy.transition(
-            from: source,
-            to: target
+    private func openHomeDestination(_ destination: LifeOSHomeDestination) {
+        applyRoute(.openHomeDestination(destination))
+    }
+
+    private func backHome() {
+        applyRoute(.backHome)
+    }
+
+    @discardableResult
+    private func consumeCalendarEvent(id: UUID, expectedMountGeneration: UInt64) -> Bool {
+        var next = routeState
+        let reduction = LifeOSMacRouteReducer.reduce(
+            &next,
+            action: .consumeCalendarEvent(id: id, expectedMountGeneration: expectedMountGeneration)
         )
-
-        guard transition != .none else {
-            LifeOSMotion.withoutAnimation(update)
-            return
-        }
-
-        navigationGeneration &+= 1
-        if reduceMotion {
-            LifeOSMotion.withoutAnimation {
-                routeTransitionProgress = 1
-                outgoingTransitionProgress = 1
-                navigationTransition = .none
-                update()
-            }
-            return
-        }
-
-        let isDetailReversal: Bool = switch (navigationTransition, transition) {
-        case (.detail(.forward), .detail(.backward)), (.detail(.backward), .detail(.forward)):
-            true
-        default:
-            false
-        }
-
-        // Keep the mounted current module in place until SwiftUI performs its
-        // normal removal transition. A reversal starts from the pixels that
-        // are currently visible rather than jumping back to zero.
+        guard reduction.didChange else { return false }
         LifeOSMotion.withoutAnimation {
-            if isDetailReversal {
-                let currentIncoming = routeTransitionProgress
-                let currentOutgoing = outgoingTransitionProgress
-                routeTransitionProgress = 1 - currentOutgoing
-                outgoingTransitionProgress = 1 - currentIncoming
-            } else {
-                routeTransitionProgress = 0
-                outgoingTransitionProgress = 0
-            }
-            navigationTransition = transition
+            routeState = next
         }
-        withAnimation(transition.animation) {
-            update()
-            routeTransitionProgress = 1
-        }
-        withAnimation(transition.outgoingAnimation) {
-            outgoingTransitionProgress = 1
-        }
+        return true
     }
 
-    private func clearUnavailableOrigin() {
-        unavailableOriginModule = .home
-        unavailableOriginRoute = nil
-        unavailableOriginShowingUsage = false
+    private func isCalendarMountActive(
+        expectedMountGeneration: UInt64,
+        expectedMountedIdentity: String
+    ) -> Bool {
+        routeState.module == .calendar
+            && !routeState.showingDestinationUnavailable
+            && routeState.mountGeneration == expectedMountGeneration
+            && routeState.mountedIdentity == expectedMountedIdentity
     }
 
-    private func clearSelectedRoute() {
-        selectedRoute = nil
-        recordModuleRouteIntent(nil)
+    private func applyRoute(_ action: LifeOSMacRouteAction) {
+        var next = routeState
+        let reduction = LifeOSMacRouteReducer.reduce(&next, action: action)
+        guard reduction.didChange else { return }
+
+        let update = {
+            self.routeState = next
+        }
+        let homePathChanged = routeState.module == .home
+            && next.module == .home
+            && routeState.homePath != next.homePath
+        if reduction.mountChanged || homePathChanged {
+            withAnimation(LifeOSMotion.curve(for: .navigation, reduceMotion: reduceMotion)?.animation, update)
+        } else {
+            LifeOSMotion.withoutAnimation(update)
+        }
+        if reduction.routeChanged {
+            recordModuleRouteIntent(next.route)
+        }
     }
 
     private static func financeRoute(for destination: LifeOSDeepLink?) -> FinanceDetailRoute? {

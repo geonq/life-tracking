@@ -204,6 +204,263 @@ enum LifeOSNavigationRoute: Equatable {
     }
 }
 
+/// Typed destinations that can be pushed inside the canonical macOS Home
+/// navigation stack. Keeping this list closed prevents repeated deep-link
+/// delivery from growing an unbounded path.
+enum LifeOSHomeDestination: String, CaseIterable, Hashable, Sendable {
+    case usage
+    case clipper
+    case financeWealth
+}
+
+struct LifeOSMacUnavailableOrigin: Equatable, Sendable {
+    let module: LifeOSModule
+    let route: LifeOSDeepLink?
+    let homePath: [LifeOSHomeDestination]
+}
+
+/// The one logical route state for the macOS shell. Presentation values that
+/// belong to a mounted surface stay in that surface; this state only owns
+/// route identity, bounded Home path, and one-shot commands.
+struct LifeOSMacRouteState: Equatable, Sendable {
+    var module: LifeOSModule
+    var route: LifeOSDeepLink?
+    var homePath: [LifeOSHomeDestination]
+    var unavailableOrigin: LifeOSMacUnavailableOrigin?
+    var pendingCalendarEventID: UUID?
+    var showingDestinationUnavailable: Bool
+    var mountGeneration: UInt64
+
+    var showingUsage: Bool {
+        module == .home && !showingDestinationUnavailable && homePath.last == .usage
+    }
+
+    var mountedIdentity: String {
+        if showingDestinationUnavailable {
+            return "unavailable:\(module.rawValue)"
+        }
+        return module == .home ? "home" : "module:\(module.rawValue)"
+    }
+
+    init(
+        initialModule: LifeOSModule = .home,
+        initialRoute: LifeOSDeepLink? = nil,
+        initiallyShowingUsage: Bool = false,
+        mountGeneration: UInt64 = 0
+    ) {
+        let opensUsage = initiallyShowingUsage || initialRoute == .usage
+        if opensUsage {
+            module = .home
+            route = .usage
+            homePath = [.usage]
+        } else {
+            module = initialRoute?.module ?? initialModule
+            route = initialRoute == .newCalendarEvent ? .calendar : initialRoute
+            homePath = []
+        }
+        unavailableOrigin = nil
+        // A restored usage route wins over any conflicting command input; a
+        // command must never be left pending on a non-Calendar surface.
+        pendingCalendarEventID = initialRoute == .newCalendarEvent && !opensUsage ? UUID() : nil
+        showingDestinationUnavailable = false
+        self.mountGeneration = mountGeneration
+    }
+}
+
+enum LifeOSMacRouteAction: Equatable, Sendable {
+    case selectModule(LifeOSModule)
+    case navigate(LifeOSDeepLink)
+    case openHomeDestination(LifeOSHomeDestination)
+    case backHome
+    case setHomePath([LifeOSHomeDestination], expectedMountGeneration: UInt64)
+    case showDestinationUnavailable
+    case restoreUnavailableOrigin
+    case consumeCalendarEvent(id: UUID, expectedMountGeneration: UInt64)
+}
+
+struct LifeOSMacRouteReduction: Equatable, Sendable {
+    let didChange: Bool
+    let routeChanged: Bool
+    let mountChanged: Bool
+
+    static let noChange = Self(didChange: false, routeChanged: false, mountChanged: false)
+}
+
+enum LifeOSMacRouteReducer {
+    static func reduce(
+        _ state: inout LifeOSMacRouteState,
+        action: LifeOSMacRouteAction
+    ) -> LifeOSMacRouteReduction {
+        let oldModule = state.module
+        let oldRoute = state.route
+        let oldPath = state.homePath
+        let oldUnavailable = state.showingDestinationUnavailable
+        let oldOrigin = state.unavailableOrigin
+        let oldPending = state.pendingCalendarEventID
+        let oldMountedIdentity = state.mountedIdentity
+
+        switch action {
+        case .selectModule(let module):
+            guard state.module != module
+                    || !state.homePath.isEmpty
+                    || state.route != nil
+                    || state.showingDestinationUnavailable
+                    || state.pendingCalendarEventID != nil else {
+                return .noChange
+            }
+            state.module = module
+            state.route = nil
+            if module == .home {
+                // Selecting Home from the sidebar is an explicit return to the
+                // dashboard, so it clears any nested Home destination. When a
+                // different module is selected, keep the bounded Home path in
+                // memory for a later restoration within this scene.
+                state.homePath = []
+            }
+            state.unavailableOrigin = nil
+            state.pendingCalendarEventID = nil
+            state.showingDestinationUnavailable = false
+
+        case .navigate(let destination):
+            navigate(&state, to: destination)
+
+        case .openHomeDestination(let destination):
+            guard !state.showingDestinationUnavailable else { return .noChange }
+            state.module = .home
+            state.pendingCalendarEventID = nil
+            state.homePath = homePath(afterOpening: destination, from: state.homePath)
+            state.route = route(for: state.homePath)
+            state.unavailableOrigin = nil
+
+        case .backHome:
+            guard state.module == .home,
+                  !state.showingDestinationUnavailable,
+                  !state.homePath.isEmpty else { return .noChange }
+            state.homePath.removeLast()
+            state.route = route(for: state.homePath)
+
+        case .setHomePath(let path, let expectedMountGeneration):
+            guard state.module == .home,
+                  !state.showingDestinationUnavailable,
+                  expectedMountGeneration == state.mountGeneration,
+                  isValidHomePath(path) else { return .noChange }
+            state.homePath = path
+            state.route = route(for: path)
+            state.pendingCalendarEventID = nil
+
+        case .showDestinationUnavailable:
+            guard !state.showingDestinationUnavailable else { return .noChange }
+            state.unavailableOrigin = LifeOSMacUnavailableOrigin(
+                module: state.module,
+                route: state.route,
+                homePath: state.homePath
+            )
+            state.showingDestinationUnavailable = true
+            state.route = nil
+            state.homePath = []
+            state.pendingCalendarEventID = nil
+
+        case .restoreUnavailableOrigin:
+            guard state.showingDestinationUnavailable,
+                  let origin = state.unavailableOrigin else { return .noChange }
+            state.module = origin.module
+            state.route = origin.route
+            state.homePath = origin.homePath
+            state.showingDestinationUnavailable = false
+            state.unavailableOrigin = nil
+            state.pendingCalendarEventID = nil
+
+        case .consumeCalendarEvent(let id, let expectedMountGeneration):
+            guard state.module == .calendar,
+                  !state.showingDestinationUnavailable,
+                  expectedMountGeneration == state.mountGeneration,
+                  state.pendingCalendarEventID == id else { return .noChange }
+            state.pendingCalendarEventID = nil
+        }
+
+        let routeChanged = oldModule != state.module
+            || oldRoute != state.route
+            || oldPath != state.homePath
+            || oldUnavailable != state.showingDestinationUnavailable
+            || oldOrigin != state.unavailableOrigin
+        let didChange = routeChanged || oldPending != state.pendingCalendarEventID
+        guard didChange else { return .noChange }
+
+        let mountChanged = oldMountedIdentity != state.mountedIdentity
+        if mountChanged {
+            state.mountGeneration &+= 1
+        }
+        return Self.reduction(didChange: true, routeChanged: routeChanged, mountChanged: mountChanged)
+    }
+
+    private static func reduction(
+        didChange: Bool,
+        routeChanged: Bool,
+        mountChanged: Bool
+    ) -> LifeOSMacRouteReduction {
+        LifeOSMacRouteReduction(
+            didChange: didChange,
+            routeChanged: routeChanged,
+            mountChanged: mountChanged
+        )
+    }
+
+    private static func navigate(_ state: inout LifeOSMacRouteState, to destination: LifeOSDeepLink) {
+        state.showingDestinationUnavailable = false
+        state.unavailableOrigin = nil
+
+        switch destination {
+        case .usage:
+            // Usage is a Home destination even when an external deep link
+            // arrives while another module is mounted. Keep the bounded Home
+            // path so Back can return to the detail that launched the link.
+            let previousHomePath = state.homePath
+            state.module = .home
+            state.homePath = homePath(afterOpening: .usage, from: previousHomePath)
+            state.route = .usage
+            state.pendingCalendarEventID = nil
+
+        case .newCalendarEvent:
+            state.module = .calendar
+            state.route = .calendar
+            if state.pendingCalendarEventID == nil {
+                state.pendingCalendarEventID = UUID()
+            }
+
+        default:
+            state.module = destination.module
+            state.route = destination
+            state.pendingCalendarEventID = nil
+        }
+    }
+
+    private static func homePath(afterOpening destination: LifeOSHomeDestination, from current: [LifeOSHomeDestination]) -> [LifeOSHomeDestination] {
+        switch destination {
+        case .usage:
+            guard current.last != .usage else { return current }
+            if current.count == 1, current.first == .clipper || current.first == .financeWealth {
+                return current + [.usage]
+            }
+            return [.usage]
+        case .clipper, .financeWealth:
+            return [destination]
+        }
+    }
+
+    private static func route(for path: [LifeOSHomeDestination]) -> LifeOSDeepLink? {
+        path.last == .usage ? .usage : nil
+    }
+
+    private static func isValidHomePath(_ path: [LifeOSHomeDestination]) -> Bool {
+        switch path {
+        case [], [.usage], [.clipper], [.financeWealth], [.clipper, .usage], [.financeWealth, .usage]:
+            true
+        default:
+            false
+        }
+    }
+}
+
 /// Shown when an external link does not resolve to a supported LifeOS route.
 /// The shell owns recovery so this view never guesses a module or presents a
 /// loading state for an address it cannot interpret.

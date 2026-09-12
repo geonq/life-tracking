@@ -84,154 +84,38 @@ final class LifeOSMacSnapshotTests: XCTestCase {
         render(LifeOSMacRootView(calendarCoordinator: coordinator, usesVisualFixtures: true, usageCoordinator: UsageCoordinator()), named: "LifeOSMacRootView-overview")
     }
 
-    func testMacNavigationPolicyUsesDetailMotionOnlyForHomeUsage() {
-        let home = LifeOSMacRouteSnapshot(
-            module: .home,
-            route: nil,
-            showingUsage: false,
-            showingDestinationUnavailable: false
-        )
-        let usage = LifeOSMacRouteSnapshot(
-            module: .home,
-            route: .usage,
-            showingUsage: true,
-            showingDestinationUnavailable: false
-        )
-        let finance = LifeOSMacRouteSnapshot(
-            module: .finance,
-            route: .finance,
-            showingUsage: false,
-            showingDestinationUnavailable: false
-        )
+    func testMacRouteStateKeepsHomeMountStableAcrossNativePathChanges() {
+        var state = LifeOSMacRouteState()
+        let homeIdentity = state.mountedIdentity
 
-        XCTAssertEqual(
-            LifeOSMacNavigationTransitionPolicy.transition(from: home, to: usage),
-            .detail(.forward)
-        )
-        XCTAssertEqual(
-            LifeOSMacNavigationTransitionPolicy.transition(from: usage, to: home),
-            .detail(.backward)
-        )
-        XCTAssertEqual(
-            LifeOSMacNavigationTransitionPolicy.transition(from: home, to: finance),
-            .module
-        )
-        XCTAssertEqual(
-            LifeOSMacNavigationTransitionPolicy.transition(from: finance, to: finance),
-            .none
-        )
+        _ = LifeOSMacRouteReducer.reduce(&state, action: .openHomeDestination(.clipper))
+        _ = LifeOSMacRouteReducer.reduce(&state, action: .openHomeDestination(.usage))
+
+        XCTAssertEqual(state.homePath, [.clipper, .usage])
+        XCTAssertEqual(state.mountedIdentity, homeIdentity)
+        XCTAssertTrue(state.showingUsage)
+
+        _ = LifeOSMacRouteReducer.reduce(&state, action: .backHome)
+        XCTAssertEqual(state.homePath, [.clipper])
+        XCTAssertEqual(state.mountedIdentity, homeIdentity)
     }
 
-    func testMacNavigationMotionContractKeepsEntryOffsetAndDurationsBounded() {
-        XCTAssertEqual(LifeOSMacNavigationTransition.detail(.forward).duration, 0.18, accuracy: 0.0001)
-        XCTAssertEqual(LifeOSMacNavigationTransition.module.duration, 0.12, accuracy: 0.0001)
-        XCTAssertEqual(LifeOSMacNavigationTransition.detail(.forward).outgoingDuration, 0.12, accuracy: 0.0001)
-        XCTAssertEqual(LifeOSMacNavigationDirection.forward.incomingOffset, 8, accuracy: 0.0001)
-        XCTAssertEqual(LifeOSMacNavigationDirection.backward.incomingOffset, -8, accuracy: 0.0001)
-    }
+    func testMacRouteStateSeparatesCalendarCommandFromStableCalendarRoute() throws {
+        var state = LifeOSMacRouteState()
+        _ = LifeOSMacRouteReducer.reduce(&state, action: .navigate(.calendar))
+        let calendarIdentity = state.mountedIdentity
+        _ = LifeOSMacRouteReducer.reduce(&state, action: .navigate(.newCalendarEvent))
+        let requestID = try XCTUnwrap(state.pendingCalendarEventID)
 
-    func testMacMountedIdentityStaysStableAcrossSameModuleDetailRoutes() {
-        let financeSpend = LifeOSMacRouteSnapshot(
-            module: .finance,
-            route: .financeSpend,
-            showingUsage: false,
-            showingDestinationUnavailable: false
+        XCTAssertEqual(state.route, .calendar)
+        XCTAssertEqual(state.mountedIdentity, calendarIdentity)
+        XCTAssertTrue(
+            LifeOSMacRouteReducer.reduce(
+                &state,
+                action: .consumeCalendarEvent(id: requestID, expectedMountGeneration: state.mountGeneration)
+            ).didChange
         )
-        let financeCashFlow = LifeOSMacRouteSnapshot(
-            module: .finance,
-            route: .financeCashFlow,
-            showingUsage: false,
-            showingDestinationUnavailable: false
-        )
-        let home = LifeOSMacRouteSnapshot(
-            module: .home,
-            route: nil,
-            showingUsage: false,
-            showingDestinationUnavailable: false
-        )
-        let usage = LifeOSMacRouteSnapshot(
-            module: .home,
-            route: .usage,
-            showingUsage: true,
-            showingDestinationUnavailable: false
-        )
-
-        XCTAssertEqual(financeSpend.mountedIdentity, financeCashFlow.mountedIdentity)
-        XCTAssertEqual(home.mountedIdentity, usage.mountedIdentity)
-        XCTAssertNotEqual(financeSpend.mountedIdentity, home.mountedIdentity)
-        XCTAssertNotEqual(
-            financeSpend.mountedIdentity,
-            LifeOSMacRouteSnapshot(
-                module: .finance,
-                route: nil,
-                showingUsage: false,
-                showingDestinationUnavailable: true
-            ).mountedIdentity
-        )
-    }
-
-    func testMacNavigationReversalKeepsMotionPolicyAndAvoidsSameModuleReplacement() {
-        let home = LifeOSMacRouteSnapshot(
-            module: .home,
-            route: nil,
-            showingUsage: false,
-            showingDestinationUnavailable: false
-        )
-        let usage = LifeOSMacRouteSnapshot(
-            module: .home,
-            route: .usage,
-            showingUsage: true,
-            showingDestinationUnavailable: false
-        )
-        let financeSpend = LifeOSMacRouteSnapshot(
-            module: .finance,
-            route: .financeSpend,
-            showingUsage: false,
-            showingDestinationUnavailable: false
-        )
-        let financeCashFlow = LifeOSMacRouteSnapshot(
-            module: .finance,
-            route: .financeCashFlow,
-            showingUsage: false,
-            showingDestinationUnavailable: false
-        )
-
-        XCTAssertEqual(
-            LifeOSMacNavigationTransitionPolicy.transition(from: home, to: usage),
-            .detail(.forward)
-        )
-        XCTAssertEqual(
-            LifeOSMacNavigationTransitionPolicy.transition(from: usage, to: home),
-            .detail(.backward)
-        )
-        XCTAssertEqual(
-            LifeOSMacNavigationTransitionPolicy.transition(from: financeSpend, to: financeCashFlow),
-            .none
-        )
-        XCTAssertEqual(
-            LifeOSMacNavigationTransitionPolicy.transition(from: financeCashFlow, to: financeSpend),
-            .none
-        )
-    }
-
-    func testMacRouteLifecycleUsesTheMountedCurrentLayerOnly() throws {
-        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-        let appSourceURL = testsDirectory
-            .deletingLastPathComponent()
-            .appendingPathComponent("LifeOSMac/LifeOSMacApp.swift")
-        let source = try String(contentsOf: appSourceURL, encoding: .utf8)
-
-        XCTAssertTrue(source.contains(".id(currentRouteSnapshot.mountedIdentity)"))
-        XCTAssertTrue(source.contains(".transition(currentRouteTransition)"))
-        XCTAssertTrue(source.contains("detail(for: currentRouteSnapshot, interactive: true)"))
-        XCTAssertTrue(source.contains("guard !reduceMotion, navigationTransition != .none else { return }"))
-        XCTAssertTrue(source.contains("generation == navigationGeneration"))
-        XCTAssertTrue(source.contains("outgoingTransitionProgress"))
-        XCTAssertTrue(source.contains("transition.outgoingAnimation"))
-        XCTAssertTrue(source.contains("Keep both Home detail surfaces mounted"))
-        XCTAssertFalse(source.contains("outgoingRouteLayer"))
-        XCTAssertFalse(source.contains("detail(for: outgoingRouteLayer"))
-        XCTAssertFalse(source.contains("currentRouteSnapshot.identity"))
+        XCTAssertNil(state.pendingCalendarEventID)
     }
 
     func testOverviewResponsiveLightDarkAndUnavailableEvidence() {

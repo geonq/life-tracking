@@ -311,6 +311,154 @@ final class OverviewDomainTests: XCTestCase {
         XCTAssertNil(invalid.restorationKey)
     }
 
+    func testMacRouteReducerKeepsHomeDetailsInOneBoundedPath() {
+        var state = LifeOSMacRouteState()
+
+        let clipper = LifeOSMacRouteReducer.reduce(&state, action: .openHomeDestination(.clipper))
+        XCTAssertTrue(clipper.didChange)
+        XCTAssertTrue(clipper.routeChanged)
+        XCTAssertFalse(clipper.mountChanged)
+        XCTAssertEqual(state.homePath, [.clipper])
+        XCTAssertFalse(state.showingUsage)
+
+        let usage = LifeOSMacRouteReducer.reduce(&state, action: .navigate(.usage))
+        XCTAssertTrue(usage.didChange)
+        XCTAssertEqual(state.homePath, [.clipper, .usage])
+        XCTAssertEqual(state.route, .usage)
+        XCTAssertTrue(state.showingUsage)
+
+        let back = LifeOSMacRouteReducer.reduce(&state, action: .backHome)
+        XCTAssertTrue(back.didChange)
+        XCTAssertEqual(state.homePath, [.clipper])
+        XCTAssertNil(state.route)
+
+        let repeated = LifeOSMacRouteReducer.reduce(&state, action: .openHomeDestination(.clipper))
+        XCTAssertEqual(repeated, .noChange)
+        XCTAssertEqual(state.homePath, [.clipper])
+    }
+
+    func testMacRouteReducerRestoresHomeDetailAfterCrossModuleUsageDeepLink() {
+        var state = LifeOSMacRouteState()
+        _ = LifeOSMacRouteReducer.reduce(&state, action: .openHomeDestination(.clipper))
+        _ = LifeOSMacRouteReducer.reduce(&state, action: .selectModule(.finance))
+        _ = LifeOSMacRouteReducer.reduce(&state, action: .navigate(.financeCashFlow))
+
+        let usage = LifeOSMacRouteReducer.reduce(&state, action: .navigate(.usage))
+        XCTAssertTrue(usage.didChange)
+        XCTAssertEqual(state.homePath, [.clipper, .usage])
+
+        let back = LifeOSMacRouteReducer.reduce(&state, action: .backHome)
+        XCTAssertTrue(back.didChange)
+        XCTAssertEqual(state.homePath, [.clipper])
+        XCTAssertNil(state.route)
+    }
+
+    func testMacRouteReducerRejectsStaleHomePathWritesAndNoOpsRepeatedHome() {
+        var state = LifeOSMacRouteState()
+        let finance = LifeOSMacRouteReducer.reduce(&state, action: .selectModule(.finance))
+        XCTAssertTrue(finance.didChange)
+        let home = LifeOSMacRouteReducer.reduce(&state, action: .selectModule(.home))
+        XCTAssertTrue(home.didChange)
+        let staleGeneration = state.mountGeneration &- 1
+
+        let stale = LifeOSMacRouteReducer.reduce(
+            &state,
+            action: .setHomePath([.usage], expectedMountGeneration: staleGeneration)
+        )
+        XCTAssertEqual(stale, .noChange)
+        XCTAssertEqual(state.module, .home)
+        XCTAssertTrue(state.homePath.isEmpty)
+
+        let repeatedHome = LifeOSMacRouteReducer.reduce(&state, action: .selectModule(.home))
+        XCTAssertEqual(repeatedHome, .noChange)
+    }
+
+    func testMacRouteInitializerNeverLeavesCalendarCommandOnUsageSurface() {
+        let state = LifeOSMacRouteState(
+            initialRoute: .newCalendarEvent,
+            initiallyShowingUsage: true
+        )
+
+        XCTAssertEqual(state.module, .home)
+        XCTAssertEqual(state.homePath, [.usage])
+        XCTAssertNil(state.pendingCalendarEventID)
+    }
+
+    func testMacRouteReducerCalendarCommandIsTokenizedCoalescedAndMountBound() throws {
+        var state = LifeOSMacRouteState()
+        _ = LifeOSMacRouteReducer.reduce(&state, action: .navigate(.newCalendarEvent))
+        let token = try XCTUnwrap(state.pendingCalendarEventID)
+        let calendarGeneration = state.mountGeneration
+
+        let repeated = LifeOSMacRouteReducer.reduce(&state, action: .navigate(.newCalendarEvent))
+        XCTAssertEqual(repeated, .noChange)
+        XCTAssertEqual(state.pendingCalendarEventID, token)
+
+        let staleToken = LifeOSMacRouteReducer.reduce(
+            &state,
+            action: .consumeCalendarEvent(id: UUID(), expectedMountGeneration: calendarGeneration)
+        )
+        XCTAssertEqual(staleToken, .noChange)
+        XCTAssertEqual(state.pendingCalendarEventID, token)
+
+        let staleMount = LifeOSMacRouteReducer.reduce(
+            &state,
+            action: .consumeCalendarEvent(id: token, expectedMountGeneration: calendarGeneration &+ 1)
+        )
+        XCTAssertEqual(staleMount, .noChange)
+        XCTAssertEqual(state.pendingCalendarEventID, token)
+
+        let consumed = LifeOSMacRouteReducer.reduce(
+            &state,
+            action: .consumeCalendarEvent(id: token, expectedMountGeneration: calendarGeneration)
+        )
+        XCTAssertTrue(consumed.didChange)
+        XCTAssertFalse(consumed.routeChanged)
+        XCTAssertFalse(consumed.mountChanged)
+        XCTAssertNil(state.pendingCalendarEventID)
+
+        let repeatedConsume = LifeOSMacRouteReducer.reduce(
+            &state,
+            action: .consumeCalendarEvent(id: token, expectedMountGeneration: calendarGeneration)
+        )
+        XCTAssertEqual(repeatedConsume, .noChange)
+
+        _ = LifeOSMacRouteReducer.reduce(&state, action: .navigate(.newCalendarEvent))
+        XCTAssertNotEqual(state.pendingCalendarEventID, token)
+    }
+
+    func testMacRouteReducerKeepsHomeDetailAcrossCalendarCommand() throws {
+        var state = LifeOSMacRouteState()
+        _ = LifeOSMacRouteReducer.reduce(&state, action: .openHomeDestination(.clipper))
+
+        _ = LifeOSMacRouteReducer.reduce(&state, action: .navigate(.newCalendarEvent))
+        XCTAssertEqual(state.homePath, [.clipper])
+        XCTAssertNotNil(state.pendingCalendarEventID)
+
+        _ = LifeOSMacRouteReducer.reduce(&state, action: .navigate(.usage))
+        XCTAssertEqual(state.homePath, [.clipper, .usage])
+    }
+
+    func testMacRouteReducerUnavailableRestoreIsExplicitAndDoesNotReviveCommands() {
+        var state = LifeOSMacRouteState()
+        _ = LifeOSMacRouteReducer.reduce(&state, action: .openHomeDestination(.financeWealth))
+        let before = state.homePath
+
+        let shown = LifeOSMacRouteReducer.reduce(&state, action: .showDestinationUnavailable)
+        XCTAssertTrue(shown.didChange)
+        XCTAssertTrue(state.showingDestinationUnavailable)
+        XCTAssertTrue(state.homePath.isEmpty)
+
+        let restored = LifeOSMacRouteReducer.reduce(&state, action: .restoreUnavailableOrigin)
+        XCTAssertTrue(restored.didChange)
+        XCTAssertEqual(state.homePath, before)
+        XCTAssertFalse(state.showingDestinationUnavailable)
+        XCTAssertNil(state.pendingCalendarEventID)
+
+        let invalid = LifeOSMacRouteReducer.reduce(&state, action: .restoreUnavailableOrigin)
+        XCTAssertEqual(invalid, .noChange)
+    }
+
     private func makeClipperSnapshot(quality: String = "observed", amountCents: Int = 8_420,
                                      trends: [[String: Any]] = []) throws -> ClipperSnapshot {
         let now = Date()

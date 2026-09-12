@@ -285,6 +285,12 @@ public struct CalendarView: View {
     @State private var editorPresentationGeneration = 0
 #endif
     @Binding private var requestNewEvent: Bool
+    private let requestNewEventID: UUID?
+    private let consumeNewEventRequest: ((UUID) -> Bool)?
+    /// The macOS shell supplies a mount identity guard for one-shot editor
+    /// presentation. Deferred AppKit work must not outlive the Calendar route
+    /// that scheduled it.
+    private let isRouteActive: (() -> Bool)?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Namespace private var calendarMonthNamespace
     private let externalSelectedDate: Date?
@@ -321,6 +327,9 @@ public struct CalendarView: View {
         coordinator: CalendarCoordinator,
         startsInMonthMode: Bool = false,
         requestNewEvent: Binding<Bool> = .constant(false),
+        requestNewEventID: UUID? = nil,
+        consumeNewEventRequest: ((UUID) -> Bool)? = nil,
+        isRouteActive: (() -> Bool)? = nil,
         presentationState: CalendarPresentationState? = nil
     ) {
         let initialDate = selectedDate ?? .now
@@ -336,6 +345,9 @@ public struct CalendarView: View {
             initialValue: Self.displayItemsSourceKey(for: initialItems)
         )
         _requestNewEvent = requestNewEvent
+        self.requestNewEventID = requestNewEventID
+        self.consumeNewEventRequest = consumeNewEventRequest
+        self.isRouteActive = isRouteActive
         self.externalSelectedDate = selectedDate
         self.calendar = calendar
         self.coordinator = coordinator
@@ -444,6 +456,14 @@ public struct CalendarView: View {
             mobileLayout
 #endif
         }
+        .onChange(of: requestNewEventID, initial: true) { _, requestID in
+            guard let requestID,
+                  let consumeNewEventRequest,
+                  consumeNewEventRequest(requestID) else { return }
+            // Consume before creating so a retired Calendar mount cannot open a
+            // stale editor after the shell has moved elsewhere.
+            create()
+        }
         .onChange(of: requestNewEvent, initial: true) { _, requested in
             guard requested else { return }
             create()
@@ -472,6 +492,15 @@ public struct CalendarView: View {
                 timedCreationPreview = nil
             }
         }
+#if os(macOS)
+        .onDisappear {
+            // Invalidate queued AppKit callbacks when this Calendar mount is
+            // retired by the shell. The active-route guard below also covers
+            // a callback that reaches the queue before SwiftUI tears down the
+            // outgoing view.
+            cancelMacEditor()
+        }
+#endif
         .task(id: displayItemsSourceKey) {
             let snapshotReadStartedAt = Date.now
             let sourceItems = visibleItems
@@ -1444,7 +1473,8 @@ public struct CalendarView: View {
     }
 
     private func presentMacEditor(_ presentation: CalendarEditorPresentation, sourceFrame: CGRect) {
-        guard sourceFrame.minX.isFinite,
+        guard (isRouteActive?() ?? true),
+              sourceFrame.minX.isFinite,
               sourceFrame.minY.isFinite,
               sourceFrame.width > 0,
               sourceFrame.height > 0 else {
@@ -1460,10 +1490,12 @@ public struct CalendarView: View {
         // the frame first, then present on the following turn so the observer
         // that clears dismissed anchors cannot erase a replacement frame.
         DispatchQueue.main.async {
-            guard editorPresentationGeneration == generation else { return }
+            guard (isRouteActive?() ?? true),
+                  editorPresentationGeneration == generation else { return }
             editorAnchorFrame = sourceFrame
             DispatchQueue.main.async {
-                guard editorPresentationGeneration == generation,
+                guard (isRouteActive?() ?? true),
+                      editorPresentationGeneration == generation,
                       editorAnchorFrame == sourceFrame else { return }
                 anchoredEditorPresentation = presentation
             }

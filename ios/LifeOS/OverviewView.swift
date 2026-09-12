@@ -14,10 +14,12 @@ struct OverviewView: View {
     private let financeSummary: FinanceSummary?
     private let financeState: FinanceLoadState
     private let openDestination: ((LifeOSDeepLink) -> Void)?
+    private let openHomeDestination: ((LifeOSHomeDestination) -> Void)?
+    private let isExternallyRouted: Bool
     @Binding private var showingUsage: Bool
     @State private var selectedDetail: OverviewDetail?
 
-    private enum OverviewDetail: Hashable {
+    enum OverviewDetail: Hashable {
         case clipper
         /// RF-20: pushed from the Finance card's Wealth row. Renders the
         /// exact same real wealth surface Finance's own screen uses
@@ -38,6 +40,8 @@ struct OverviewView: View {
         financeSummary: FinanceSummary? = nil,
         financeState: FinanceLoadState = .unavailable,
         openDestination: ((LifeOSDeepLink) -> Void)? = nil,
+        openHomeDestination: ((LifeOSHomeDestination) -> Void)? = nil,
+        isExternallyRouted: Bool = false,
         showingUsage: Binding<Bool> = .constant(false)
     ) {
         self.snapshot = snapshot
@@ -51,43 +55,55 @@ struct OverviewView: View {
         self.financeSummary = financeSummary
         self.financeState = financeState
         self.openDestination = openDestination
+        self.openHomeDestination = openHomeDestination
+        self.isExternallyRouted = isExternallyRouted
         _showingUsage = showingUsage
     }
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                LifeOSResponsiveContentContainer(
-                    horizontalPadding: responsiveHorizontalInset,
-                    topPadding: headerTopSpacing,
-                    bottomPadding: contentBottomPadding,
-                    maxReadableWidth: OverviewLayoutContract.maxContentWidth
-                ) {
-                    VStack(alignment: .leading, spacing: LifeOSTokens.sectionGap) {
-                        header
-                        dashboard
-                    }
-                }
-            }
-#if os(iOS)
-            .accessibilityIdentifier("overview-screen")
-#endif
-            .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
-            .refreshable { await refreshAction?() }
-            .navigationDestination(item: $selectedDetail) { destination in
-                switch destination {
-                case .clipper:
-                    ClipperAnalyticsView(
-                        section: clipperSection,
-                        snapshot: snapshot.clipperSnapshot,
-                        refreshAction: clipperRefreshAction,
-                        clipperState: clipperState
-                    )
-                case .financeWealth:
-                    OverviewFinanceWealthDetail(financeSummary: financeSummary)
+        Group {
+            if isExternallyRouted {
+                dashboardContent
+            } else {
+                NavigationStack {
+                    dashboardContent
+                        .navigationDestination(item: $selectedDetail) { destination in
+                            switch destination {
+                            case .clipper:
+                                ClipperAnalyticsView(
+                                    section: clipperSection,
+                                    snapshot: snapshot.clipperSnapshot,
+                                    refreshAction: clipperRefreshAction,
+                                    clipperState: clipperState
+                                )
+                            case .financeWealth:
+                                OverviewFinanceWealthDetail(financeSummary: financeSummary)
+                            }
+                        }
                 }
             }
         }
+    }
+
+    private var dashboardContent: some View {
+        ScrollView {
+            LifeOSResponsiveContentContainer(
+                horizontalPadding: responsiveHorizontalInset,
+                topPadding: headerTopSpacing,
+                bottomPadding: contentBottomPadding,
+                maxReadableWidth: OverviewLayoutContract.maxContentWidth
+            ) {
+                VStack(alignment: .leading, spacing: LifeOSTokens.sectionGap) {
+                    header
+                    dashboard
+                }
+            }
+        }
+#if os(iOS)
+        .accessibilityIdentifier("overview-screen")
+#endif
+        .background(LifeOSTokens.screenCanvas.ignoresSafeArea())
+        .refreshable { await refreshAction?() }
     }
 
     private var responsiveHorizontalInset: CGFloat {
@@ -330,6 +346,24 @@ struct OverviewView: View {
     private func openNoSourceModule(_ kind: OverviewSectionKind) {
         switch kind {
         case .llm:
+            openHome(.usage)
+        case .clipper:
+            openHome(.clipper)
+        case .health:
+            openDestination?(.fitness)
+        case .finance:
+            openDestination?(.finance)
+        }
+    }
+
+    private func openHome(_ destination: LifeOSHomeDestination) {
+        if let openHomeDestination {
+            openHomeDestination(destination)
+            return
+        }
+
+        switch destination {
+        case .usage:
             if let openDestination {
                 openDestination(.usage)
             } else {
@@ -337,10 +371,8 @@ struct OverviewView: View {
             }
         case .clipper:
             selectedDetail = .clipper
-        case .health:
-            openDestination?(.fitness)
-        case .finance:
-            openDestination?(.finance)
+        case .financeWealth:
+            selectedDetail = .financeWealth
         }
     }
 
@@ -522,9 +554,9 @@ struct OverviewView: View {
     private func sectionRow(_ section: OverviewSection, featured: Bool = false) -> some View {
         switch section.kind {
         case .llm:
-            if openDestination != nil {
+            if openDestination != nil || openHomeDestination != nil {
                 Button {
-                    openDestination?(.usage)
+                    openHome(.usage)
                 } label: {
                     OverviewMetricCard(
                         section: section,
@@ -554,7 +586,7 @@ struct OverviewView: View {
             }
         case .clipper:
             Button {
-                selectedDetail = .clipper
+                openHome(.clipper)
             } label: {
                 OverviewMetricCard(
                     section: section,
@@ -630,7 +662,7 @@ struct OverviewView: View {
     @ViewBuilder
     private var financeWealthLink: some View {
         Button {
-            selectedDetail = .financeWealth
+            openHome(.financeWealth)
         } label: {
             HStack(spacing: 8) {
                 LifeOSIcon(.investments, context: .card)
@@ -796,7 +828,7 @@ private struct OverviewSupportingLayout: Layout {
 /// Reuses `FinanceWealthCard` verbatim (constructing the same
 /// `FinanceDisplaySnapshot` Finance's own screen builds), so this is the
 /// exact same real wealth surface, not a second implementation of it.
-private struct OverviewFinanceWealthDetail: View {
+struct OverviewFinanceWealthDetail: View {
     let financeSummary: FinanceSummary?
 
     var body: some View {
@@ -1546,7 +1578,7 @@ private struct ValueMetric: View {
     }
 }
 
-private struct ClipperAnalyticsView: View {
+struct ClipperAnalyticsView: View {
     let section: OverviewSection
     let snapshot: ClipperSnapshot?
     let refreshAction: (() async -> Void)?
