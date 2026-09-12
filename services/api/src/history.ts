@@ -18,9 +18,13 @@ import {
 
 /** Keep malformed or unexpectedly large history files from causing an unbounded allocation. */
 export const MAX_HISTORY_BYTES = 1 * 1024 * 1024;
+/** A single record must remain small enough to parse without monopolising the API. */
+export const MAX_HISTORY_LINE_BYTES = 64 * 1024;
 export const MAX_HISTORY_METADATA_BYTES = 4 * 1024 * 1024;
 export const MAX_HISTORY_STATE_BYTES = 6 * 1024 * 1024;
 export const MAX_HISTORY_SAMPLES = 10_000;
+/** Keep a malformed or adversarial JSONL file bounded even when its lines are tiny. */
+export const MAX_HISTORY_RECORDS = MAX_HISTORY_SAMPLES;
 export const MAX_HISTORY_IDEMPOTENCY_RECORDS = 10_000;
 export const MAX_HISTORY_BATCH_ENTRIES = 128;
 export const MAX_HISTORY_QUEUE_DEPTH = 64;
@@ -189,10 +193,21 @@ export class UsageHistory {
       }
 
       const nextEntries = [...state.entries];
+      // The history file is bounded, but scanning it once per incoming sample
+      // would still make a large batch needlessly quadratic. Keep the latest
+      // observation for each provider/window in one linear pass and update it
+      // as accepted entries are appended.
+      const latestBySeries = new Map<string, Entry>();
+      for (const existing of nextEntries) {
+        const key = `${existing.provider}\u0000${existing.window}`;
+        const latest = latestBySeries.get(key);
+        if (latest === undefined || Date.parse(existing.observedAt) > Date.parse(latest.observedAt)) {
+          latestBySeries.set(key, existing);
+        }
+      }
       for (const incoming of safe) {
-        const latest = nextEntries
-          .filter(item => item.provider === incoming.provider && item.window === incoming.window)
-          .reduce<Entry | undefined>((current, item) => !current || Date.parse(item.observedAt) > Date.parse(current.observedAt) ? item : current, undefined);
+        const key = `${incoming.provider}\u0000${incoming.window}`;
+        const latest = latestBySeries.get(key);
         const sameValues = latest?.usedPercent === incoming.usedPercent && latest?.resetAt === incoming.resetAt;
         // A keyed replay returns above before reaching this loop. For a new,
         // newer capture, retain equal-value observations as freshness
@@ -200,7 +215,10 @@ export class UsageHistory {
         // not move. This keeps the current window fresh without confusing a
         // transport retry with a new sample.
         if (latest !== undefined && sameValues) {
-          if (Date.parse(incoming.observedAt) > Date.parse(latest.observedAt)) nextEntries.push(incoming);
+          if (Date.parse(incoming.observedAt) > Date.parse(latest.observedAt)) {
+            nextEntries.push(incoming);
+            latestBySeries.set(key, incoming);
+          }
           continue;
         }
         // A delayed collector retry must never become the apparent current
@@ -209,6 +227,7 @@ export class UsageHistory {
         // sample for that same quota window.
         if (latest !== undefined && Date.parse(incoming.observedAt) <= Date.parse(latest.observedAt)) continue;
         nextEntries.push(incoming);
+        latestBySeries.set(key, incoming);
       }
 
       // Retention is applied only after an accepted observation, preserving the
@@ -319,9 +338,19 @@ export class UsageHistory {
       const text = new TextDecoder('utf-8', { fatal: true }).decode(body);
       const entries: Entry[] = [];
       let nonEmptyLines = 0;
-      for (const line of text.split(/\r?\n/)) {
+      let lineStart = 0;
+      for (let lineEnd = 0; lineEnd <= text.length; lineEnd += 1) {
+        if (lineEnd < text.length && text.charCodeAt(lineEnd) !== 0x0a) continue;
+        let line = text.slice(lineStart, lineEnd);
+        lineStart = lineEnd + 1;
+        if (line.endsWith('\r')) line = line.slice(0, -1);
         if (!line) continue;
         nonEmptyLines += 1;
+        if (nonEmptyLines > MAX_HISTORY_RECORDS) throw new Error('history has too many records');
+        // Skip one oversized/corrupt record while preserving valid neighbours.
+        // The complete file remains bounded by readBoundedFile, so this is a
+        // constant upper bound on parser work and allocation per record.
+        if (Buffer.byteLength(line, 'utf8') > MAX_HISTORY_LINE_BYTES) continue;
         try {
           entries.push(UsageHistoryEntry.parse(parseStrictJSON(line)));
         } catch {

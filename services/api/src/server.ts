@@ -7,7 +7,7 @@ import { CalendarAuthorityUnavailable, FinanceConnectorCatalog, FinanceSummary a
 import { parseCodexIngestEnvelope, readCodexLive } from './codex-adapter.js';
 import { isUsageIdempotencyKey, UsageHistory, UsageHistoryError } from './history.js';
 import { projectUsage } from './projection.js';
-import { constantTimeEqual, ingestClaudeStatusline, MAX_BODY_BYTES } from './claude-ingest.js';
+import { constantTimeEqual, ingestClaudeStatusline, isValidClaudeSecret, MAX_BODY_BYTES } from './claude-ingest.js';
 import { financeConnectors } from './finance-connectors.js';
 import { readIngestSecretFile } from './ingest-secret.js';
 import { createConfiguredOpenFoodFactsClient, type OpenFoodFactsClient } from './open-food-facts.js';
@@ -82,7 +82,8 @@ async function readClaudeSecretFile(pathValue: string): Promise<string | undefin
 async function claudeIngestSecret(): Promise<string | undefined> {
   const configuredFile = process.env.CLAUDE_INGEST_SECRET_FILE;
   if (configuredFile === undefined) return undefined;
-  return readClaudeSecretFile(configuredFile);
+  const value = await readClaudeSecretFile(configuredFile);
+  return isValidClaudeSecret(value) ? value : undefined;
 }
 const claudeIngestEnabled = () => process.env.CLAUDE_INGEST_ENABLED === 'true' || process.env.CLAUDE_STATUSLINE_ENABLED === 'true';
 const codexIngestEnabled = () => process.env.CODEX_INGEST_ENABLED === 'true';
@@ -167,7 +168,8 @@ const unavailableFinanceSummary = () => {
   });
 };
 const loopback = (req: IncomingMessage) => ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress ?? '');
-const allowedHostNames = new Set(['localhost', '127.0.0.1', '::1', '::ffff:127.0.0.1']);
+const IPV4_HOST_NAMES = new Set(['localhost', '127.0.0.1']);
+const IPV6_HOST_NAMES = new Set(['localhost', '::1', '::ffff:127.0.0.1']);
 
 function parseHostHeader(value: string): { name: string; port: number } | undefined {
   if (!value || value.trim() !== value) return undefined;
@@ -186,7 +188,15 @@ export function validApiHost(req: IncomingMessage): boolean {
   if (typeof localPort !== 'number' || !Number.isSafeInteger(localPort) || localPort < 1 || localPort > 65_535) return false;
   const host = singleHeader(req, 'host');
   const parsed = host === undefined ? undefined : parseHostHeader(host);
-  return parsed !== undefined && parsed.port === localPort && allowedHostNames.has(parsed.name);
+  if (parsed === undefined || parsed.port !== localPort) return false;
+  // startApiServer binds 127.0.0.1. Only a caller that deliberately binds
+  // this handler to an IPv6 loopback address may use an IPv6 Host spelling;
+  // accepting it for an IPv4 listener would make the allowlist broader than
+  // the actual server boundary.
+  const boundAddress = req.socket.localAddress;
+  const hostNames = boundAddress === '::1' || boundAddress === '::ffff:127.0.0.1'
+    ? IPV6_HOST_NAMES : IPV4_HOST_NAMES;
+  return hostNames.has(parsed.name);
 }
 
 async function body(req: IncomingMessage, maximumBytes = MAX_BODY_BYTES): Promise<Buffer> {

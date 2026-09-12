@@ -397,6 +397,11 @@ async function descriptorRelativePath(
   return undefined;
 }
 
+/** @internal Deterministic seam used only by direct atomic-write security tests. */
+export type AtomicWriteOptions = {
+  tempNameFactory?: (target: string, processId: number) => string;
+};
+
 /**
  * Publish a bounded file as a durable commit point.
  *
@@ -406,7 +411,12 @@ async function descriptorRelativePath(
  * filesystem supports directory fsync; Windows does not expose that contract
  * through Node and relies on the atomic rename/ReplaceFile implementation.
  */
-export async function atomicWriteFile(path: string, data: string | Buffer, mode = 0o600): Promise<void> {
+export async function atomicWriteFile(
+  path: string,
+  data: string | Buffer,
+  mode = 0o600,
+  options?: AtomicWriteOptions,
+): Promise<void> {
   const target = resolve(path);
   const parent = dirname(target);
   await mkdir(parent, { recursive: true, mode: 0o700 });
@@ -418,7 +428,15 @@ export async function atomicWriteFile(path: string, data: string | Buffer, mode 
   });
   if (existing !== undefined && !existing.isFile()) throw new Error('unsafe_write_target');
 
-  const temporaryName = `.${basename(target)}.tmp-${process.pid}-${randomUUID()}`;
+  const temporaryPrefix = `.${basename(target)}.tmp-${process.pid}-`;
+  const temporaryName = options?.tempNameFactory?.(target, process.pid) ?? `${temporaryPrefix}${randomUUID()}`;
+  if (
+    !temporaryName.startsWith(temporaryPrefix)
+    || basename(temporaryName) !== temporaryName
+    || temporaryName.length <= temporaryPrefix.length
+  ) {
+    throw new Error('unsafe_write_target');
+  }
   const temporary = join(parent, temporaryName);
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   let directory: Awaited<ReturnType<typeof open>> | undefined;

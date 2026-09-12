@@ -144,23 +144,31 @@ function windowsSystemRoot(value: string | undefined): string | undefined {
   return win32.normalize(value);
 }
 
-function approvedWindowsPath(value: string): boolean {
-  return /^[A-Za-z]:[\\/]/.test(value)
+function approvedWindowsPath(value: unknown): value is string {
+  return typeof value === 'string'
+    && /^[A-Za-z]:[\\/]/.test(value)
     && win32.isAbsolute(value)
     && value.length <= maxExecutablePathLength
     && !/[\u0000-\u001f\u007f"<>|?*%&^!;:]/.test(value.slice(2));
 }
 
-function approvedPosixPath(value: string): boolean {
-  return posix.isAbsolute(value)
+function approvedPosixPath(value: unknown): value is string {
+  return typeof value === 'string'
+    && posix.isAbsolute(value)
     && value.length <= maxExecutablePathLength
     && !/[\u0000-\u001f\u007f]/.test(value);
 }
 
 /**
  * Resolve the only process paths the adapter may launch. The executable is
- * deliberately explicit; no PATH lookup is performed. Windows uses the
- * system cmd.exe only, and both paths must be existing non-symlink files.
+ * deliberately explicit; no PATH lookup is performed. CODEX_EXECUTABLE_PATH
+ * is deployment-owned configuration: the Windows installer validates the
+ * configured file as an existing non-reparse file, while this adapter adds a
+ * second boundary against relative names, PATH/CWD shadowing, and shell
+ * metacharacters. The deployment permits a configurable install location, so
+ * this layer must not invent a narrower directory and silently break that
+ * contract. A caller able to replace the service environment or file ACL is
+ * outside this adapter's trust boundary.
  */
 export function codexSpawnSpec(options: CodexSpawnOptions = {}): CodexSpawnSpec | undefined {
   const platform = options.platform ?? process.platform;
@@ -171,20 +179,30 @@ export function codexSpawnSpec(options: CodexSpawnOptions = {}): CodexSpawnSpec 
   if (platform === 'win32') {
     const systemRoot = windowsSystemRoot(options.systemRoot ?? process.env.SystemRoot);
     if (!systemRoot) return undefined;
-    const expectedShell = win32.join(systemRoot, 'System32', 'cmd.exe');
-    const shellPath = options.shellPath ?? process.env.CODEX_SHELL_PATH ?? process.env.ComSpec ?? expectedShell;
-    if (!approvedWindowsPath(shellPath) || win32.normalize(shellPath).toLowerCase() !== expectedShell.toLowerCase()) return undefined;
     if (!approvedWindowsPath(executablePath)) return undefined;
     const normalizedExecutable = win32.normalize(executablePath);
     const executableName = win32.basename(normalizedExecutable).toLowerCase();
     if (executableName !== 'codex.cmd' && executableName !== 'codex.exe') return undefined;
+    if (!isRegularFile(normalizedExecutable)) return undefined;
+
+    // A trusted .exe needs no command interpreter. This also avoids making
+    // ComSpec part of the direct-executable launch surface.
+    if (executableName === 'codex.exe') {
+      return { command: normalizedExecutable, args: ['app-server'] };
+    }
+
+    const expectedShell = win32.join(systemRoot, 'System32', 'cmd.exe');
+    const shellPath = options.shellPath ?? process.env.CODEX_SHELL_PATH ?? process.env.ComSpec ?? expectedShell;
+    if (!approvedWindowsPath(shellPath) || win32.normalize(shellPath).toLowerCase() !== expectedShell.toLowerCase()) return undefined;
     const normalizedShell = win32.normalize(shellPath);
-    if (!isRegularFile(normalizedShell) || !isRegularFile(normalizedExecutable)) return undefined;
+    if (!isRegularFile(normalizedShell)) return undefined;
     return {
       command: normalizedShell,
-      // Keep the command passed to /c as one argument and quote the explicit
-      // path so spaces in the approved installation directory stay inert.
-      args: ['/d', '/s', '/c', `"${normalizedExecutable}" app-server`],
+      // With /s, cmd.exe removes the outer quote pair from the /c payload.
+      // The extra pair below therefore leaves the executable path quoted after
+      // that step: /c ""C:\\Program Files\\Codex\\codex.cmd" app-server".
+      // windowsVerbatimArguments in spawnCodex preserves this exact payload.
+      args: ['/d', '/s', '/c', `""${normalizedExecutable}" app-server"`],
     };
   }
 
@@ -206,7 +224,14 @@ function spawnCodex(): ChildProcess {
   const spec = codexSpawnSpec({ platform: process.platform, systemRoot });
   if (!spec) throw new Error('Codex app-server unavailable');
   return spawn(spec.command, spec.args, {
-    cwd: codexWorkingDirectory(process.platform, systemRoot), stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true,
+    // The command and every argument are fixed by codexSpawnSpec. Keep shell
+    // parsing disabled, and on Windows preserve the already-quoted /c
+    // payload instead of letting Node re-quote it into a different command.
+    shell: false,
+    windowsVerbatimArguments: process.platform === 'win32',
+    cwd: codexWorkingDirectory(process.platform, systemRoot),
+    stdio: ['pipe', 'pipe', 'ignore'],
+    windowsHide: true,
   });
 }
 

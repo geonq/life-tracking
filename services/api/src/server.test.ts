@@ -12,6 +12,7 @@ import {
   app,
   createApiServer,
   startApiServer,
+  validApiHost,
   validateStartupConfiguration,
 } from './server.js';
 
@@ -119,13 +120,29 @@ describe('HTTP API', () => {
         req.on('error', reject); req.end();
       });
       await expect(call(`localhost:${address.port}`)).resolves.toEqual({ status: 200, nosniff: 'nosniff' });
-      await expect(call(`[::1]:${address.port}`)).resolves.toEqual({ status: 200, nosniff: 'nosniff' });
+      await expect(call(`127.0.0.1:${address.port}`)).resolves.toEqual({ status: 200, nosniff: 'nosniff' });
+      // This server is bound to IPv4 loopback. An IPv6 Host spelling is
+      // accepted only when the listener itself is IPv6-bound.
+      await expect(call(`[::1]:${address.port}`)).resolves.toEqual({ status: 400, nosniff: 'nosniff' });
       await expect(call(`evil.example:${address.port}`)).resolves.toEqual({ status: 400, nosniff: 'nosniff' });
       await expect(call(`127.0.0.1:${address.port + 1}`)).resolves.toEqual({ status: 400, nosniff: 'nosniff' });
       await expect(call('localhost')).resolves.toEqual({ status: 400, nosniff: 'nosniff' });
     } finally {
       await closeApiServer(server);
     }
+  });
+
+  it('keeps the Host allowlist tied to the actual listener address', () => {
+    const requestFor = (host: string, localAddress?: string) => ({
+      headers: { host },
+      socket: { localPort: 8787, localAddress },
+    }) as Parameters<typeof validApiHost>[0];
+    expect(validApiHost(requestFor('localhost:8787'))).toBe(true);
+    expect(validApiHost(requestFor('127.0.0.1:8787'))).toBe(true);
+    expect(validApiHost(requestFor('[::1]:8787'))).toBe(false);
+    expect(validApiHost(requestFor('[::1]:8787', '::1'))).toBe(true);
+    expect(validApiHost(requestFor('evil.example:8787', '::1'))).toBe(false);
+    expect(validApiHost(requestFor('localhost:8788'))).toBe(false);
   });
 
   it('rejects malformed and mismatched Content-Length before parsing JSON', async () => {

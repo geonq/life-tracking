@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
-import { chmod, mkdir, mkdtemp, readFile, readdir, rename, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, stat, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { UsageHistoryEntry } from '@iphone-life-os/contracts';
 import {
@@ -12,6 +12,7 @@ import {
 import {
   MAX_HISTORY_BATCH_ENTRIES,
   MAX_HISTORY_IDEMPOTENCY_RECORDS,
+  MAX_HISTORY_LINE_BYTES,
   MAX_HISTORY_QUEUE_DEPTH,
   MAX_HISTORY_SAMPLES,
   UsageHistory,
@@ -61,6 +62,81 @@ describe('UsageHistory bounded mutation and retention behavior', () => {
 
     expect(await readFile(file, 'utf8')).toBe('{"value":"bounded"}');
     expect(await readdir(resolve(file, '..'))).toEqual(['state.json']);
+  });
+
+  it('creates private storage directories and atomicWriteFile rejects a destination symlink', async () => {
+    if (process.platform === 'win32') return;
+    const directory = await mkdtemp(join(tmpdir(), 'lifeos-history-write-boundary-'));
+    const storage = join(directory, 'nested');
+    const file = join(storage, 'history.jsonl');
+    const attackedFile = join(storage, 'attacked.jsonl');
+    const victim = join(directory, 'victim.txt');
+    await writeFile(victim, 'must remain unchanged', { encoding: 'utf8', mode: 0o600 });
+
+    await atomicWriteFile(file, 'destination bytes');
+    const storageMode = (await stat(storage)).mode & 0o777;
+    if (process.platform !== 'win32') expect(storageMode).toBe(0o700);
+    expect((await readdir(storage)).filter(name => name.includes('.tmp-'))).toEqual([]);
+
+    await symlink(victim, attackedFile);
+    await expect(atomicWriteFile(attackedFile, 'attacker bytes')).rejects.toThrow('unsafe_path_component');
+    expect(await readFile(victim, 'utf8')).toBe('must remain unchanged');
+    await unlink(attackedFile);
+  });
+
+  it('rejects a pre-planted production UUID temp symlink without changing victim or destination bytes', async () => {
+    if (process.platform === 'win32') return;
+    const directory = await mkdtemp(join(tmpdir(), 'lifeos-history-temp-attack-'));
+    const storage = join(directory, 'nested');
+    const file = join(storage, 'history.jsonl');
+    const victim = join(directory, 'victim.txt');
+    const uuid = '00000000-0000-4000-8000-000000000000';
+    const temporaryName = `.${basename(file)}.tmp-${process.pid}-${uuid}`;
+    const temporaryPath = join(storage, temporaryName);
+    await mkdir(storage, { recursive: true, mode: 0o700 });
+    await writeFile(file, 'destination bytes', { encoding: 'utf8', mode: 0o600 });
+    await writeFile(victim, 'victim bytes', { encoding: 'utf8', mode: 0o600 });
+    await symlink(victim, temporaryPath);
+
+    await expect(atomicWriteFile(file, 'attacker bytes', 0o600, {
+      tempNameFactory: () => temporaryName,
+    })).rejects.toThrow();
+    expect(await readFile(victim, 'utf8')).toBe('victim bytes');
+    expect(await readFile(file, 'utf8')).toBe('destination bytes');
+    expect((await readdir(storage)).filter(name => name.includes('.tmp-'))).toEqual([]);
+  });
+
+  it('salvages valid records around corrupt and oversized JSONL lines', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'lifeos-history-salvage-'));
+    const file = join(directory, 'history.jsonl');
+    const validFirst = JSON.stringify(entry(0, 10));
+    const validSecond = JSON.stringify(entry(1, 20));
+    const oversized = 'x'.repeat(MAX_HISTORY_LINE_BYTES + 1);
+    await writeFile(file, `${validFirst}\n{corrupt-json}\n${oversized}\n${validSecond}\n`, {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
+
+    const store = new UsageHistory(file, 10, 60 * 60_000, () => Date.parse(timestamp(2)));
+    await expect(store.list()).resolves.toEqual([entry(0, 10), entry(1, 20)]);
+    await expect(store.add(entry(2, 30))).resolves.toMatchObject({ kind: 'accepted' });
+    expect((await readFile(file, 'utf8')).trim().split('\n')).toHaveLength(3);
+  });
+
+  it('keeps the latest accepted heartbeat as the batch ordering boundary', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'lifeos-history-heartbeat-order-'));
+    const file = join(directory, 'history.jsonl');
+    const resetAt = timestamp(300);
+    const store = new UsageHistory(file, 20, 60 * 60_000, () => Date.parse(timestamp(4)));
+    const first = { ...entry(0, 10), resetAt };
+    const heartbeat = { ...entry(2, 10), resetAt };
+    const conflictingSameTimestamp = { ...entry(2, 20), resetAt };
+    const delayedConflict = { ...entry(1, 99), resetAt };
+
+    await store.add(first);
+    await expect(store.addMany([heartbeat, conflictingSameTimestamp, delayedConflict]))
+      .resolves.toMatchObject({ kind: 'accepted' });
+    await expect(store.list()).resolves.toEqual([first, heartbeat]);
   });
 
   it('fails readiness when an existing ancestor violates the protected storage contract', async () => {

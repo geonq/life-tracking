@@ -16,10 +16,32 @@ describe('Codex app-server boundary', () => {
     expect(codexSpawnSpec({
       platform: 'win32', systemRoot: 'C:\\Windows', shellPath: 'C:\\Windows\\System32\\cmd.exe',
       executablePath: 'C:\\Program Files\\Codex\\codex.cmd', isRegularFile,
-    })).toEqual({ command: 'C:\\Windows\\System32\\cmd.exe', args: ['/d', '/s', '/c', '"C:\\Program Files\\Codex\\codex.cmd" app-server'] });
+    })).toEqual({ command: 'C:\\Windows\\System32\\cmd.exe', args: ['/d', '/s', '/c', '""C:\\Program Files\\Codex\\codex.cmd" app-server"'] });
+    expect(codexSpawnSpec({
+      platform: 'win32', systemRoot: 'C:\\Windows',
+      executablePath: 'C:\\Program Files\\Codex\\codex.exe', isRegularFile,
+    })).toEqual({ command: 'C:\\Program Files\\Codex\\codex.exe', args: ['app-server'] });
+    // A planted prefix or suffix must never become the executable selected by
+    // basename matching, even when the injected file predicate says it exists.
+    expect(codexSpawnSpec({
+      platform: 'win32', systemRoot: 'C:\\Windows',
+      executablePath: 'C:\\Program Files\\Codex\\codex.cmd.bak', isRegularFile: () => true,
+    })).toBeUndefined();
     expect(codexSpawnSpec({
       platform: 'win32', systemRoot: 'C:\\Windows', shellPath: 'cmd.exe',
       executablePath: 'C:\\Program Files\\Codex\\codex.cmd', isRegularFile,
+    })).toBeUndefined();
+    // A writable working directory must never supply the executable through
+    // PATH or a relative .cmd name.
+    expect(codexSpawnSpec({
+      platform: 'win32', systemRoot: 'C:\\Windows', shellPath: 'C:\\Windows\\System32\\cmd.exe',
+      executablePath: 'codex.cmd', isRegularFile,
+    })).toBeUndefined();
+    expect(codexSpawnSpec({
+      platform: 'darwin', executablePath: './codex', isRegularFile,
+    })).toBeUndefined();
+    expect(codexSpawnSpec({
+      platform: 'darwin', executablePath: 42 as never, isRegularFile,
     })).toBeUndefined();
     expect(codexSpawnSpec({
       platform: 'win32', systemRoot: 'C:\\Windows', shellPath: 'C:\\Windows\\System32\\cmd.exe',
@@ -27,7 +49,7 @@ describe('Codex app-server boundary', () => {
     })).toBeUndefined();
     expect(codexSpawnSpec({ platform: 'win32', executablePath: 'C:\\Temp\\other.cmd', isRegularFile })).toBeUndefined();
     expect(codexSpawnSpec({ platform: 'darwin', executablePath: 'codex', isRegularFile })).toBeUndefined();
-    expect(isRegularFile).toHaveBeenCalledTimes(2);
+    expect(isRegularFile).toHaveBeenCalledTimes(4);
 
     for (const unsafePath of [
       'C:\\Program Files\\Codex\\codex&safe.cmd',
@@ -45,6 +67,22 @@ describe('Codex app-server boundary', () => {
     }
 
     expect(codexSpawnSpec({ platform: 'darwin', executablePath: `/${'x'.repeat(4096)}/codex`, isRegularFile: () => true })).toBeUndefined();
+  });
+
+  it('fails closed for an env command-name override instead of searching PATH', () => {
+    const previousExecutable = process.env.CODEX_EXECUTABLE_PATH;
+    try {
+      process.env.CODEX_EXECUTABLE_PATH = 'codex.cmd';
+      expect(codexSpawnSpec({
+        platform: 'win32',
+        systemRoot: 'C:\\Windows',
+        shellPath: 'C:\\Windows\\System32\\cmd.exe',
+        isRegularFile: () => true,
+      })).toBeUndefined();
+    } finally {
+      if (previousExecutable === undefined) delete process.env.CODEX_EXECUTABLE_PATH;
+      else process.env.CODEX_EXECUTABLE_PATH = previousExecutable;
+    }
   });
 
   it('keeps disabled live mode from resolving or spawning Codex', async () => {
