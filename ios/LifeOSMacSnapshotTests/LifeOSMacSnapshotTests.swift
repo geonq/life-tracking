@@ -881,6 +881,26 @@ final class LifeOSMacSnapshotTests: XCTestCase {
         )
     }
 
+    func testUsageResponsiveBreakpointSnapshots() {
+        let usage = UsageView(
+            snapshots: DemoDataProvider.providers,
+            analytics: DemoUsageAnalytics.snapshots,
+            state: .demo
+        )
+        // UsageView reserves the authored 24pt Mac gutter on each side. These
+        // outer widths therefore exercise the actual 719/720 and 959/960pt
+        // content boundaries used by the quota and chart layouts.
+        for (contentWidth, outerWidth) in [(719, 767), (720, 768), (959, 1007), (960, 1008)] {
+            render(
+                usage,
+                named: "UsageView-dark-content-\(contentWidth)",
+                frameSize: CGSize(width: outerWidth, height: 900),
+                colorScheme: .dark,
+                settleInterval: 0.2
+            )
+        }
+    }
+
     func testUsageEntranceMotionComparisonSnapshot() {
         render(
             UsageView(snapshots: DemoDataProvider.providers, analytics: DemoUsageAnalytics.snapshots, state: .demo),

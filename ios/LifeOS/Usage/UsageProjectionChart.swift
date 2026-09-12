@@ -3,7 +3,7 @@ import Charts
 
 // MARK: - Projection chart (02-charts-rings-widgets.md §2) — 4-series model.
 //
-// Target (green dashed) / Actual (blue solid, area fill) / Current estimate (green dashed) /
+// Target (neutral dashed) / Actual (blue solid, area fill) / Current estimate (green dashed) /
 // Past estimate (metadata dotted, only if a prior-estimate series is actually stored — it is not,
 // see DemoUsageAnalytics / UsageAnalyticsSnapshot, so this series is omitted rather than
 // fabricated).
@@ -1254,13 +1254,21 @@ struct UsageProjectionChart: View {
 
     private var chartHeight: CGFloat {
 #if os(macOS)
-        280
+        224
 #else
-        220
+        200
 #endif
     }
 
     private func strokeStyle(for kind: LifeOSChartSeriesKind) -> StrokeStyle {
+        if kind == .target {
+            return StrokeStyle(
+                lineWidth: 1,
+                lineCap: .round,
+                lineJoin: .round,
+                dash: [2, 4]
+            )
+        }
         let style = kind.style
         return StrokeStyle(
             lineWidth: style.lineWidth,
@@ -1270,71 +1278,18 @@ struct UsageProjectionChart: View {
         )
     }
 
+    private func seriesColor(for kind: LifeOSChartSeriesKind) -> Color {
+        kind == .target ? LifeOSTokens.secondaryText : kind.color
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 8) {
+                sizedReferenceChart
+
                 legend
 
-                referenceChart
-                .chartOverlay { proxy in
-                    GeometryReader { geometry in
-                        if let plotFrame = proxy.plotFrame {
-                            let frame = geometry[plotFrame]
-#if os(iOS)
-                                FinanceDirectionalScrubOverlay(
-                                    onTap: { x in select(at: x, frame: frame) },
-                                    onChanged: { x in
-                                        motion.send(.scrub)
-                                        select(at: x, frame: frame)
-                                    },
-                                    onFinished: { cancelled in finishScrub(cancelled: cancelled) }
-                                )
-#elseif os(macOS)
-                                Rectangle().fill(.clear).contentShape(Rectangle())
-                                    .gesture(DragGesture(minimumDistance: 0)
-                        .updating($dragIsActive) { _, active, _ in active = true }
-                                        .onChanged { value in
-                                            motion.send(.scrub)
-                                            select(at: value.location.x, frame: frame)
-                                        }
-                                        .onEnded { _ in finishScrub(cancelled: false) })
-                                    .onContinuousHover(coordinateSpace: .local) { phase in
-                                        switch phase {
-                                        case .active(let location):
-                                            guard motion.phase != .scrubbing else { return }
-                                            motion.send(.hover(true))
-                                            guard let date = LifeOSChartKit.timestamp(
-                                                forPlotX: location.x,
-                                                in: frame,
-                                                domain: chartDomain
-                                            ) else { return }
-                                            selectClosest(to: date)
-                                        case .ended:
-                                            motion.send(.hover(false))
-                                        }
-                                }
-#endif
-                            if let selectedPoint,
-                               let x = proxy.position(forX: selectedPoint.date),
-                               let y = proxy.position(forY: selectedPoint.usedPercent) {
-                                ScrubBubble(
-                                    x: frame.origin.x + x,
-                                    y: frame.origin.y + y,
-                                    bounds: frame
-                                ) {
-                                    Text("\(Int((1 - selectedPoint.usedPercent) * 100))% remaining")
-                                }
-                                .allowsHitTesting(false)
-                            }
-                        }
-                    }
-                }
-                .frame(height: chartHeight)
-
-
-                detailRow
-
-                keyboardStepper
+                inspectionRow
 
                 belowChartRows
             }
@@ -1360,6 +1315,82 @@ struct UsageProjectionChart: View {
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(provider.displayName) usage remaining chart")
         .accessibilityValue(chartAccessibilitySummary)
+    }
+
+    private var sizedReferenceChart: some View {
+#if os(macOS)
+        ViewThatFits(in: .horizontal) {
+            interactiveReferenceChart
+                .frame(minWidth: 960)
+                .frame(height: 256)
+            interactiveReferenceChart
+                .frame(height: chartHeight)
+        }
+#else
+        interactiveReferenceChart
+            .frame(height: chartHeight)
+#endif
+    }
+
+    private var interactiveReferenceChart: some View {
+        referenceChart
+            .chartOverlay { proxy in
+                GeometryReader { geometry in
+                    if let plotFrame = proxy.plotFrame {
+                        let frame = geometry[plotFrame]
+#if os(iOS)
+                        FinanceDirectionalScrubOverlay(
+                            onTap: { x in select(at: x, frame: frame) },
+                            onChanged: { x in
+                                motion.send(.scrub)
+                                select(at: x, frame: frame)
+                            },
+                            onFinished: { cancelled in finishScrub(cancelled: cancelled) }
+                        )
+#elseif os(macOS)
+                        Rectangle()
+                            .fill(.clear)
+                            .contentShape(Rectangle())
+                            .gesture(
+                                DragGesture(minimumDistance: 0)
+                                    .updating($dragIsActive) { _, active, _ in active = true }
+                                    .onChanged { value in
+                                        motion.send(.scrub)
+                                        select(at: value.location.x, frame: frame)
+                                    }
+                                    .onEnded { _ in finishScrub(cancelled: false) }
+                            )
+                            .onContinuousHover(coordinateSpace: .local) { phase in
+                                switch phase {
+                                case .active(let location):
+                                    guard motion.phase != .scrubbing else { return }
+                                    motion.send(.hover(true))
+                                    guard let date = LifeOSChartKit.timestamp(
+                                        forPlotX: location.x,
+                                        in: frame,
+                                        domain: chartDomain
+                                    ) else { return }
+                                    selectClosest(to: date)
+                                case .ended:
+                                    motion.send(.hover(false))
+                                }
+                            }
+#endif
+                        if let selectedPoint,
+                           let x = proxy.position(forX: selectedPoint.date),
+                           let y = proxy.position(forY: selectedPoint.usedPercent) {
+                            ScrubBubble(
+                                x: frame.origin.x + x,
+                                y: frame.origin.y + y,
+                                bounds: frame
+                            ) {
+                                Text("\(Int((1 - selectedPoint.usedPercent) * 100))% remaining")
+                            }
+                            .allowsHitTesting(false)
+                        }
+                    }
+                }
+            }
     }
 
     private func reconcileInspectionState() {
@@ -1466,7 +1497,7 @@ struct UsageProjectionChart: View {
                             y: .value("Target", point.usedPercent),
                             series: .value("Series", segment.id)
                         )
-                        .foregroundStyle(LifeOSChartSeriesKind.target.color)
+                        .foregroundStyle(seriesColor(for: .target))
                         .lineStyle(strokeStyle(for: .target))
                         .interpolationMethod(.catmullRom)
                     }
@@ -1602,54 +1633,153 @@ struct UsageProjectionChart: View {
     }
 
     private var legend: some View {
-        LazyVGrid(
-            columns: [GridItem(.adaptive(minimum: 130, maximum: 240), alignment: .leading)],
-            alignment: .leading,
-            spacing: 8
-        ) {
-            if !targetPoints.isEmpty {
-                UsageProjectionLegendKey(kind: .target, label: "Target pace")
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 16) {
+                legendItems
             }
-            if !actualPoints.isEmpty {
-                UsageProjectionLegendKey(kind: .observed, label: "Actual")
-            }
-            if !estimatePoints.isEmpty {
-                UsageProjectionLegendKey(kind: .estimate, label: "Current estimate")
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 130, maximum: 240), alignment: .leading)],
+                alignment: .leading,
+                spacing: 8
+            ) {
+                legendItems
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    // MARK: Scrub detail row (02 §2 "Scrub bubble row")
-
-    private var detailRow: some View {
-        HStack(alignment: .center, spacing: 10) {
-            if let selectedPoint {
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
-                        Text(selectedPoint.isProjected ? "Estimate" : "Actual")
-                            .lifeOSTypography(.button)
-                            .foregroundStyle(selectedPoint.isProjected ? LifeOSTokens.Series.estimate : LifeOSTokens.Series.actual)
-                        Text("\(Int((1 - selectedPoint.usedPercent) * 100))% remaining")
-                            .lifeOSTypography(.button)
-                        Text(selectedPoint.date, format: .dateTime.month(.abbreviated).day().hour().minute())
-                            .lifeOSTypography(.metadata)
-                            .foregroundStyle(LifeOSTokens.secondaryText)
-                    }
-                    Text("\(accountLabel) · \(qualityTag)")
-                        .lifeOSTypography(.metadata)
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
-                }
-            } else {
-                Text(scrubHintText)
-                    .lifeOSTypography(.body)
-                    .foregroundStyle(LifeOSTokens.secondaryText)
-            }
-            Spacer(minLength: 8)
+    @ViewBuilder
+    private var legendItems: some View {
+        if !targetPoints.isEmpty {
+            UsageProjectionLegendKey(kind: .target, label: "Target pace")
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        if !actualPoints.isEmpty {
+            UsageProjectionLegendKey(kind: .observed, label: "Actual")
+        }
+        if !estimatePoints.isEmpty {
+            UsageProjectionLegendKey(kind: .estimate, label: "Current estimate")
+        }
+    }
+
+    // MARK: Inspection row (02 §2 "Scrub bubble row")
+
+    private var inspectionRow: some View {
+        HStack(alignment: .center, spacing: 8) {
+            stepButton(direction: -1, icon: .chevronLeft, label: "Previous usage chart point")
+
+            Group {
+                if let selectedPoint {
+                    ViewThatFits(in: .horizontal) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 6) {
+                                Text(selectedPoint.isProjected ? "Estimate" : "Actual")
+                                    .lifeOSTypography(.button)
+                                    .foregroundStyle(selectedPoint.isProjected ? LifeOSTokens.Series.estimate : LifeOSTokens.Series.actual)
+                                Text("\(Int((1 - selectedPoint.usedPercent) * 100))% remaining")
+                                    .lifeOSTypography(.button)
+                                Text(selectedPoint.date, format: .dateTime.month(.abbreviated).day().hour().minute())
+                                    .lifeOSTypography(.metadata)
+                                    .foregroundStyle(LifeOSTokens.secondaryText)
+                            }
+                            Text(accountLabel)
+                                .lifeOSTypography(.metadata)
+                                .foregroundStyle(LifeOSTokens.tertiaryText)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                            Text(qualityTag)
+                                .lifeOSTypography(.metadata)
+                                .foregroundStyle(LifeOSTokens.tertiaryText)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
+                        .fixedSize(horizontal: true, vertical: false)
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 6) {
+                                Text(selectedPoint.isProjected ? "Estimate" : "Actual")
+                                    .lifeOSTypography(.button)
+                                    .foregroundStyle(selectedPoint.isProjected ? LifeOSTokens.Series.estimate : LifeOSTokens.Series.actual)
+                                Text("\(Int((1 - selectedPoint.usedPercent) * 100))% remaining")
+                                    .lifeOSTypography(.button)
+                            }
+                            Text(selectedPoint.date, format: .dateTime.month(.abbreviated).day().hour().minute())
+                                .lifeOSTypography(.metadata)
+                                .foregroundStyle(LifeOSTokens.secondaryText)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text(accountLabel)
+                                .lifeOSTypography(.metadata)
+                                .foregroundStyle(LifeOSTokens.tertiaryText)
+                                .lineLimit(2)
+                                .truncationMode(.tail)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text(qualityTag)
+                                .lifeOSTypography(.metadata)
+                                .foregroundStyle(LifeOSTokens.tertiaryText)
+                                .lineLimit(2)
+                                .truncationMode(.tail)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                } else {
+                    Text(scrubHintText)
+                        .lifeOSTypography(.metadata)
+                        .foregroundStyle(LifeOSTokens.secondaryText)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            stepButton(direction: 1, icon: .chevronRight, label: "Next usage chart point")
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .frame(minHeight: inspectionRowHeight)
         .background(LifeOSTokens.primaryText.opacity(0.045), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Usage chart point inspection")
+    }
+
+    private var inspectionRowHeight: CGFloat {
+#if os(macOS)
+        36
+#else
+        44
+#endif
+    }
+
+    private var compactControlSize: CGFloat {
+#if os(iOS)
+        44
+#else
+        32
+#endif
+    }
+
+    private func canStep(direction: Int) -> Bool {
+        guard !allSelectablePoints.isEmpty else { return false }
+        guard let selectedID,
+              let index = acceptedModel?.selectionOffsets[selectedID] else {
+            // With no selected point, the previous and next controls establish
+            // the first selection from opposite ends of the series.
+            return true
+        }
+        if direction < 0 {
+            return index > 0
+        }
+        return index < allSelectablePoints.count - 1
+    }
+
+    private func stepButton(direction: Int, icon: LifeOSIconName, label: String) -> some View {
+        Button { stepSelection(by: direction) } label: {
+            LifeOSIcon(icon)
+                .frame(width: compactControlSize, height: compactControlSize)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(FinanceMotionControlStyle())
+        .disabled(!canStep(direction: direction))
+#if os(macOS)
+        .keyboardShortcut(direction < 0 ? .leftArrow : .rightArrow, modifiers: [])
+#endif
+        .accessibilityLabel(label)
+        .help(label)
     }
 
     private var scrubHintText: String {
@@ -1695,7 +1825,7 @@ struct UsageProjectionChart: View {
         VStack(alignment: .leading, spacing: 10) {
             Divider().opacity(0.3)
             ViewThatFits(in: .horizontal) {
-                HStack(alignment: .center, spacing: 12) {
+                HStack(alignment: .center, spacing: 8) {
                     rangeStartControl
                     Spacer(minLength: 0)
                     zoomControls
@@ -1705,116 +1835,100 @@ struct UsageProjectionChart: View {
                     zoomControls
                 }
             }
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text("Reset")
-                    .lifeOSTypography(.metadata)
-                    .foregroundStyle(LifeOSTokens.secondaryText)
-                Spacer(minLength: 0)
-                Text(resetText)
-                    .lifeOSTypography(.metadata)
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
-                    .monospacedDigit()
-            }
         }
         .padding(.top, 2)
     }
 
     private var rangeStartControl: some View {
         Button(action: pinRangeStart) {
-            HStack(alignment: .center, spacing: 6) {
-                LifeOSIcon(.calendar, context: .disclosure)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Range start")
+                    .lifeOSTypography(.metadata, weight: .medium)
+                    .foregroundStyle(LifeOSTokens.primaryText)
+                Text(
+                    effectiveRangeStart?.formatted(.dateTime.month(.abbreviated).day().hour().minute())
+                        ?? (selectedPoint == nil ? "Choose a point" : "Needs more history")
+                )
+                    .lifeOSTypography(.metadata)
                     .foregroundStyle(LifeOSTokens.secondaryText)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Range start")
-                        .lifeOSTypography(.metadata, weight: .medium)
-                        .foregroundStyle(LifeOSTokens.primaryText)
-                    Text(selectedPoint?.date.formatted(.dateTime.month(.abbreviated).day().hour().minute()) ?? "Choose a point")
-                        .lifeOSTypography(.metadata)
-                        .foregroundStyle(LifeOSTokens.secondaryText)
-                        .lineLimit(1)
-                }
+                    .lineLimit(1)
             }
+            .frame(minWidth: compactControlSize, minHeight: compactControlSize, alignment: .leading)
+            .contentShape(Rectangle())
         }
         .buttonStyle(FinanceMotionControlStyle())
-        .disabled(selectedPoint == nil)
-        .accessibilityLabel(selectedPoint.map {
-            "Set chart range start to \($0.date.formatted(.dateTime.month(.abbreviated).day().hour().minute()))"
-        } ?? "Set chart range start, choose a point first")
+        .disabled(!canPinRangeStart)
+        .accessibilityLabel(effectiveRangeStart.map {
+            "Set chart range start to \($0.formatted(.dateTime.month(.abbreviated).day().hour().minute()))"
+        } ?? (selectedPoint == nil
+            ? "Set chart range start, choose a point first"
+            : "Set chart range start, more history is required"))
     }
 
     private var zoomControls: some View {
-        HStack(spacing: 12) {
-            iconLabelButton(icon: .zoomIn, label: "Zoom in") { changeZoom(by: 0.6) }
-            iconLabelButton(icon: .zoomOut, label: "Zoom out") { changeZoom(by: 1 / 0.6) }
-        }
-    }
-
-    private var keyboardStepper: some View {
         HStack(spacing: 8) {
-            Button { stepSelection(by: -1) } label: {
-                LifeOSIcon(.chevronLeft).frame(width: 11, height: 11)
-            }
-            .buttonStyle(FinanceMotionControlStyle())
-            .disabled(allSelectablePoints.isEmpty)
-#if os(macOS)
-            .keyboardShortcut(.leftArrow, modifiers: [])
-#endif
-            .accessibilityLabel("Previous usage chart point")
-
-            Text(selectedPoint.map {
-                "\($0.date.formatted(.dateTime.month(.abbreviated).day().hour().minute())) · \(Int((1 - $0.usedPercent) * 100))% remaining"
-            } ?? "Select a chart point")
-                .lifeOSTypography(.metadata).monospacedDigit()
-                .foregroundStyle(LifeOSTokens.secondaryText)
-                .lineLimit(2)
-                .minimumScaleFactor(0.8)
-                .frame(minWidth: 150, alignment: .center)
-                .accessibilityLabel(selectedPoint.map {
-                    "Selected \($0.isProjected ? "projected" : "observed") usage point, \(Int((1 - $0.usedPercent) * 100)) percent remaining at \($0.date.formatted(.dateTime.month(.abbreviated).day().hour().minute()))"
-                } ?? "No usage chart point selected")
-
-            Button { stepSelection(by: 1) } label: {
-                LifeOSIcon(.chevronRight).frame(width: 11, height: 11)
-            }
-            .buttonStyle(FinanceMotionControlStyle())
-            .disabled(allSelectablePoints.isEmpty)
-#if os(macOS)
-            .keyboardShortcut(.rightArrow, modifiers: [])
-#endif
-            .accessibilityLabel("Next usage chart point")
+            iconLabelButton(icon: .zoomIn, label: "Zoom in", isDisabled: !canZoomIn) { changeZoom(by: 0.6) }
+            iconLabelButton(icon: .zoomOut, label: "Zoom out", isDisabled: !canZoomOut) { changeZoom(by: 1 / 0.6) }
         }
-        .foregroundStyle(LifeOSTokens.secondaryText)
-        .padding(.horizontal, 9)
-        .padding(.vertical, 6)
-        .background(LifeOSTokens.primaryText.opacity(0.045), in: Capsule())
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Usage chart point stepper")
     }
 
-    private var resetText: String {
-        guard let resetAt = window?.resetAt else { return "Not available" }
-        return resetAt.formatted(.dateTime.month(.abbreviated).day().year().hour().minute())
-    }
-
-    private func iconLabelButton(icon: LifeOSIconName, label: String, action: @escaping () -> Void) -> some View {
+    private func iconLabelButton(
+        icon: LifeOSIconName,
+        label: String,
+        isDisabled: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
         Button(action: action) {
-            HStack(spacing: 5) {
-                LifeOSIcon(icon).frame(width: 12, height: 12)
-                Text(label)
-            }
-            .lifeOSTypography(.metadata, weight: .medium)
-            .foregroundStyle(LifeOSTokens.secondaryText)
+            LifeOSIcon(icon)
+                .frame(width: compactControlSize, height: compactControlSize)
+                .contentShape(Rectangle())
+                .foregroundStyle(LifeOSTokens.secondaryText)
         }
         .buttonStyle(FinanceMotionControlStyle())
+        .disabled(isDisabled)
+        .accessibilityLabel(label)
+        .help(label)
+    }
+
+    private var effectiveRangeStart: Date? {
+        guard canPinRangeStart,
+              let selectedPoint,
+              let earliest = acceptedModel?.earliestDate,
+              let latest = acceptedModel?.latestDate else { return nil }
+        let latestValidStart = latest.addingTimeInterval(-UsageChartEffectiveDomain.minimumDuration)
+        return min(max(selectedPoint.date, earliest), latestValidStart)
+    }
+
+    private var canPinRangeStart: Bool {
+        selectedPoint != nil && chartExtent != nil
+    }
+
+    private var chartExtent: TimeInterval? {
+        guard let earliest = acceptedModel?.earliestDate,
+              let latest = acceptedModel?.latestDate else { return nil }
+        let duration = latest.timeIntervalSince(earliest)
+        return duration.isFinite && duration >= UsageChartEffectiveDomain.minimumDuration ? duration : nil
+    }
+
+    private var visibleChartDuration: TimeInterval {
+        max(chartDomain.upperBound.timeIntervalSince(chartDomain.lowerBound), UsageChartEffectiveDomain.minimumDuration)
+    }
+
+    private var canZoomIn: Bool {
+        guard let chartExtent else { return false }
+        return visibleChartDuration > min(chartExtent, UsageChartEffectiveDomain.minimumDuration) * 1.001
+    }
+
+    private var canZoomOut: Bool {
+        guard let chartExtent else { return false }
+        return visibleChartDuration < chartExtent * 0.999
     }
 
     private func pinRangeStart() {
-        guard let selectedPoint,
-              let earliest = acceptedModel?.earliestDate,
+        guard let earliest = acceptedModel?.earliestDate,
               let latest = acceptedModel?.latestDate,
-              latest.timeIntervalSince(earliest) >= UsageChartEffectiveDomain.minimumDuration else { return }
-        let latestValidStart = latest.addingTimeInterval(-UsageChartEffectiveDomain.minimumDuration)
-        let start = min(max(selectedPoint.date, earliest), latestValidStart)
+              latest.timeIntervalSince(earliest) >= UsageChartEffectiveDomain.minimumDuration,
+              let start = effectiveRangeStart else { return }
         guard let nextViewport = UsageChartInspectionViewport(
             start: start,
             end: latest
@@ -1827,6 +1941,8 @@ struct UsageProjectionChart: View {
               multiplier.isFinite,
               let earliest = acceptedModel?.earliestDate,
               let latest = acceptedModel?.latestDate else { return }
+        if multiplier < 1, !canZoomIn { return }
+        if multiplier > 1, !canZoomOut { return }
         let maximumDuration = latest.timeIntervalSince(earliest)
         guard maximumDuration >= UsageChartEffectiveDomain.minimumDuration else { return }
         let current = chartDomain
@@ -1865,22 +1981,27 @@ private struct UsageProjectionLegendKey: View {
     let kind: LifeOSChartSeriesKind
     let label: String
 
+    private var lineColor: Color {
+        kind == .target ? LifeOSTokens.secondaryText : kind.color
+    }
+
     var body: some View {
         let style = kind.style
+        let lineWidth = kind == .target ? 1.0 : style.lineWidth
 
         HStack(spacing: 5) {
             if style.lineStyle == .solid {
                 Capsule()
-                    .fill(kind.color)
-                    .frame(width: 14, height: max(2, style.lineWidth))
+                    .fill(lineColor)
+                    .frame(width: 14, height: max(2, lineWidth))
             } else {
                 UsageProjectionLegendLine()
                     .stroke(
-                        kind.color,
+                        lineColor,
                         style: StrokeStyle(
-                            lineWidth: style.lineWidth,
+                            lineWidth: lineWidth,
                             lineCap: .round,
-                            dash: style.dashPattern
+                            dash: kind == .target ? [2, 4] : style.dashPattern
                         )
                     )
                     .frame(width: 14, height: 4)
