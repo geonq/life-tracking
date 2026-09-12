@@ -110,6 +110,63 @@ enum UsageChartInspectionViewport: Equatable {
     }
 }
 
+/// Resolves the stored absolute viewport against the accepted model. The
+/// model's extent is always the outer bound, so a contracted revision cannot
+/// leave the chart looking beyond the data it accepted.
+enum UsageChartEffectiveDomain {
+    static let minimumDuration: TimeInterval = 60
+
+    static func range(
+        earliest: Date?,
+        latest: Date?,
+        viewport: UsageChartInspectionViewport
+    ) -> ClosedRange<Date>? {
+        guard let earliest,
+              let latest,
+              earliest.timeIntervalSinceReferenceDate.isFinite,
+              latest.timeIntervalSinceReferenceDate.isFinite,
+              latest >= earliest else {
+            return nil
+        }
+
+        let extent = latest.timeIntervalSince(earliest)
+        guard extent.isFinite else { return nil }
+        guard latest > earliest else {
+            // Charts needs a non-zero domain for a singleton. Keep the only
+            // accepted point at the right edge and add bounded history space.
+            return latest.addingTimeInterval(-minimumDuration)...latest
+        }
+
+        switch viewport.validated {
+        case .automatic:
+            // A short model is truthful as-is; extending it would invent a
+            // second endpoint or future blank space.
+            return earliest...latest
+        case .explicit(let requestedStart, let requestedEnd):
+            let clampedStart = min(max(requestedStart, earliest), latest)
+            let clampedEnd = min(max(requestedEnd, earliest), latest)
+            guard clampedEnd > clampedStart else {
+                return extent < minimumDuration
+                    ? earliest...latest
+                    : latest.addingTimeInterval(-minimumDuration)...latest
+            }
+
+            let visibleDuration = clampedEnd.timeIntervalSince(clampedStart)
+            guard extent >= minimumDuration, visibleDuration < minimumDuration else {
+                return clampedStart...clampedEnd
+            }
+
+            if clampedEnd.timeIntervalSince(earliest) >= minimumDuration {
+                return clampedEnd.addingTimeInterval(-minimumDuration)...clampedEnd
+            }
+            return earliest...min(
+                latest,
+                earliest.addingTimeInterval(minimumDuration)
+            )
+        }
+    }
+}
+
 struct UsageChartInspectionUpdate {
     enum Phase {
         case loading
@@ -121,17 +178,20 @@ struct UsageChartInspectionUpdate {
     let key: UsageChartDatasetKey
     let resetEpoch: UsageChartResetEpoch
     let generation: Int
+    let authority: UsagePresentationAuthority
     let phase: Phase
 
     init(
         key: UsageChartDatasetKey,
         resetEpoch: UsageChartResetEpoch,
         generation: Int,
-        phase: Phase
+        phase: Phase,
+        authority: UsagePresentationAuthority = .unknown
     ) {
         self.key = key
         self.resetEpoch = resetEpoch
         self.generation = generation
+        self.authority = authority
         self.phase = phase
     }
 }
@@ -151,6 +211,7 @@ struct UsageChartInspectionState {
     private(set) var key: UsageChartDatasetKey?
     private(set) var resetEpoch: UsageChartResetEpoch?
     private(set) var generation = 0
+    private(set) var presentationAuthority: UsagePresentationAuthority = .unknown
     private(set) var status: Status = .loading
     private(set) var acceptedModel: UsageProjectionDisplayModel?
     private(set) var selectedPointID: String?
@@ -165,19 +226,45 @@ struct UsageChartInspectionState {
     mutating func reduce(_ update: UsageChartInspectionUpdate) {
         guard !hasAcceptedUpdate || update.generation >= generation else { return }
 
-        let identityChanged = !hasAcceptedUpdate
-            || key != update.key
-            || resetEpoch != update.resetEpoch
+        let sameIdentity = hasAcceptedUpdate
+            && key == update.key
+            && resetEpoch == update.resetEpoch
+        let effectiveAuthority: UsagePresentationAuthority
+        if update.authority == .unknown, sameIdentity {
+            effectiveAuthority = presentationAuthority
+        } else {
+            effectiveAuthority = update.authority
+        }
+        let identityChanged = !sameIdentity
         hasAcceptedUpdate = true
         key = update.key
         resetEpoch = update.resetEpoch
         generation = update.generation
+        presentationAuthority = effectiveAuthority
 
         if identityChanged {
             selectedPointID = nil
             viewport = .automatic
             acceptedModel = nil
-            installNewIdentity(phase: update.phase)
+            installNewIdentity(phase: update.phase, authority: effectiveAuthority)
+            return
+        }
+
+        if effectiveAuthority == .authoritativeEmpty {
+            acceptedModel = nil
+            selectedPointID = nil
+            switch update.phase {
+            case .loading:
+                status = .loading
+            case .resolvedAuthoritativeEmpty:
+                status = .authoritativeEmpty
+            case .failed:
+                status = .failed
+            case .resolvedPopulated:
+                // The authority is stronger than a stale or inconsistent
+                // lifecycle label and must never install cached analytics.
+                status = .authoritativeEmpty
+            }
             return
         }
 
@@ -209,7 +296,21 @@ struct UsageChartInspectionState {
         self.viewport = viewport.validated
     }
 
-    private mutating func installNewIdentity(phase: UsageChartInspectionUpdate.Phase) {
+    private mutating func installNewIdentity(
+        phase: UsageChartInspectionUpdate.Phase,
+        authority: UsagePresentationAuthority
+    ) {
+        if authority == .authoritativeEmpty {
+            switch phase {
+            case .loading:
+                status = .loading
+            case .resolvedAuthoritativeEmpty, .resolvedPopulated:
+                status = .authoritativeEmpty
+            case .failed:
+                status = .failed
+            }
+            return
+        }
         switch phase {
         case .loading:
             status = .loading
@@ -231,14 +332,25 @@ struct UsageChartInspectionState {
     }
 }
 
-struct UsageChartViewport: Equatable {
-    var pinnedRangeStart: Date?
-    var zoomFactor: Double = 1
-
-    mutating func reconcile(windowChanged: Bool, hasObservations: Bool) {
-        guard windowChanged || !hasObservations else { return }
-        pinnedRangeStart = nil
-        zoomFactor = 1
+enum UsageChartPresentationPolicy {
+    static func seedModel(
+        for updateKind: UsagePresentationUpdateKind,
+        authority: UsagePresentationAuthority,
+        analytics: UsageAnalyticsSnapshot,
+        window: UsageWindow?
+    ) -> UsageProjectionDisplayModel? {
+        switch updateKind {
+        case .initial:
+            guard authority.permitsChartSeed else { return nil }
+            let model = UsageProjectionDisplayModel(analytics: analytics, window: window)
+            return model.actualPoints.isEmpty ? nil : model
+        case .loading, .failed, .cancelled:
+            guard authority == .observed else { return nil }
+            let model = UsageProjectionDisplayModel(analytics: analytics, window: window)
+            return model.actualPoints.isEmpty ? nil : model
+        case .resolved, .authoritativeEmpty:
+            return nil
+        }
     }
 }
 
@@ -946,18 +1058,148 @@ struct UsageProjectionChart: View {
     let provider: Provider
     let window: UsageWindow?
     let analytics: UsageAnalyticsSnapshot
+    let accountScope: String
+    let generation: Int
+    let presentationAuthority: UsagePresentationAuthority
+    let updateKind: UsagePresentationUpdateKind
 
-    @State private var displayModel: UsageProjectionDisplayModel
-    @State private var selectedID: String?
+    @State private var inspectionState: UsageChartInspectionState
     @State private var motion = LifeOSMotionLifecycle()
     @GestureState private var dragIsActive = false
-    @State private var viewport = UsageChartViewport()
 
-    init(provider: Provider, window: UsageWindow?, analytics: UsageAnalyticsSnapshot) {
+    init(
+        provider: Provider,
+        window: UsageWindow?,
+        analytics: UsageAnalyticsSnapshot,
+        accountScope: String = "",
+        generation: Int = 0,
+        presentationAuthority: UsagePresentationAuthority = .unknown,
+        updateKind: UsagePresentationUpdateKind = .resolved
+    ) {
         self.provider = provider
         self.window = window
         self.analytics = analytics
-        _displayModel = State(initialValue: UsageProjectionDisplayModel(analytics: analytics, window: window))
+        self.accountScope = accountScope
+        self.generation = generation
+        self.presentationAuthority = presentationAuthority
+        self.updateKind = updateKind
+
+        var initialState = UsageChartInspectionState()
+        let key = Self.datasetKey(
+            accountScope: accountScope,
+            analytics: analytics,
+            window: window
+        )
+        let resetEpoch = Self.resetEpoch(for: window)
+        if let seedModel = UsageChartPresentationPolicy.seedModel(
+            for: updateKind,
+            authority: presentationAuthority,
+            analytics: analytics,
+            window: window
+        ) {
+            initialState.reduce(
+                UsageChartInspectionUpdate(
+                    key: key,
+                    resetEpoch: resetEpoch,
+                    generation: generation,
+                    phase: .resolvedPopulated(seedModel),
+                    authority: presentationAuthority
+                )
+            )
+        }
+        initialState.reduce(
+            UsageChartInspectionUpdate(
+                key: key,
+                resetEpoch: resetEpoch,
+                generation: generation,
+                phase: Self.inspectionPhase(
+                    for: updateKind,
+                    authority: presentationAuthority,
+                    analytics: analytics,
+                    window: window
+                ),
+                authority: presentationAuthority
+            )
+        )
+        _inspectionState = State(initialValue: initialState)
+    }
+
+    private struct InputRevision: Equatable {
+        let analytics: UsageAnalyticsSnapshot
+        let window: UsageWindow?
+        let accountScope: String
+        let generation: Int
+        let presentationAuthority: UsagePresentationAuthority
+        let updateKind: UsagePresentationUpdateKind
+    }
+
+    private var inputRevision: InputRevision {
+        InputRevision(
+            analytics: analytics,
+            window: window,
+            accountScope: accountScope,
+            generation: generation,
+            presentationAuthority: presentationAuthority,
+            updateKind: updateKind
+        )
+    }
+
+    private static func datasetKey(
+        accountScope: String,
+        analytics: UsageAnalyticsSnapshot,
+        window: UsageWindow?
+    ) -> UsageChartDatasetKey {
+        UsageChartDatasetKey(
+            analytics: analytics,
+            window: window,
+            accountScope: accountScope,
+            metric: "used_percent"
+        )
+    }
+
+    private static func resetEpoch(for window: UsageWindow?) -> UsageChartResetEpoch {
+        guard let resetAt = window?.resetAt,
+              resetAt.timeIntervalSinceReferenceDate.isFinite else {
+            return .unknown
+        }
+        return .boundary(resetAt)
+    }
+
+    private static func inspectionPhase(
+        for updateKind: UsagePresentationUpdateKind,
+        authority: UsagePresentationAuthority,
+        analytics: UsageAnalyticsSnapshot,
+        window: UsageWindow?
+    ) -> UsageChartInspectionUpdate.Phase {
+        switch updateKind {
+        case .resolved:
+            guard authority != .authoritativeEmpty else { return .resolvedAuthoritativeEmpty }
+            return .resolvedPopulated(UsageProjectionDisplayModel(analytics: analytics, window: window))
+        case .authoritativeEmpty:
+            return authority == .authoritativeEmpty ? .resolvedAuthoritativeEmpty : .loading
+        case .failed:
+            return .failed
+        case .loading, .initial:
+            if authority == .authoritativeEmpty {
+                return .resolvedAuthoritativeEmpty
+            }
+            // These lifecycle packets contain no source result. Loading is the
+            // reducer phase that retains an accepted model without installing
+            // the packet's current values as resolved data.
+            return .loading
+        case .cancelled:
+            // Cancellation is terminal for this request. The reducer retains
+            // an accepted model as stale instead of showing endless refresh.
+            return .failed
+        }
+    }
+
+    private var acceptedModel: UsageProjectionDisplayModel? {
+        inspectionState.acceptedModel
+    }
+
+    private var selectedID: String? {
+        inspectionState.selectedID
     }
 
     // MARK: Series data
@@ -965,7 +1207,7 @@ struct UsageProjectionChart: View {
     /// Actual = observed activity points in the selected window. The activity transport is
     /// hourly, so a selected 5-hour window must not quietly plot older observations.
     private var actualPoints: [UsageProjectionPoint] {
-        displayModel.actualPoints
+        acceptedModel?.actualPoints ?? []
     }
 
     /// Current estimate = the forward projection engine's points, only when the analytics
@@ -981,35 +1223,33 @@ struct UsageProjectionChart: View {
     /// stroke (a lone point draws no visible segment) — that was the root cause of the line
     /// never rendering.
     private var estimatePoints: [UsageProjectionPoint] {
-        displayModel.estimatePoints
+        acceptedModel?.estimatePoints ?? []
     }
 
     /// Target = straight-line ideal pace from the first observed point to 100% at reset.
     private var targetPoints: [UsageProjectionPoint] {
-        displayModel.targetPoints
+        acceptedModel?.targetPoints ?? []
     }
 
     private var allSelectablePoints: [UsageSelectionPoint] {
-        displayModel.selectablePoints
+        acceptedModel?.selectablePoints ?? []
     }
 
     private var selectedPoint: UsageSelectionPoint? {
         guard let selectedID else { return nil }
-        return displayModel.selectionIndex[selectedID]
+        return acceptedModel?.selectionIndex[selectedID]
     }
 
     private var chartDomain: ClosedRange<Date> {
-        guard let earliest = displayModel.earliestDate,
-              let latest = displayModel.latestDate,
-              latest > earliest else {
-            let now = Date.now
-            return now.addingTimeInterval(-3_600)...now
+        if let domain = UsageChartEffectiveDomain.range(
+            earliest: acceptedModel?.earliestDate,
+            latest: acceptedModel?.latestDate,
+            viewport: inspectionState.viewport
+        ) {
+            return domain
         }
-
-        let lowerBound = max(viewport.pinnedRangeStart ?? earliest, earliest)
-        let availableInterval = max(latest.timeIntervalSince(lowerBound), 60)
-        let visibleInterval = availableInterval * viewport.zoomFactor
-        return latest.addingTimeInterval(-visibleInterval)...latest
+        let now = Date.now
+        return now.addingTimeInterval(-UsageChartEffectiveDomain.minimumDuration)...now
     }
 
     private var chartHeight: CGFloat {
@@ -1109,24 +1349,9 @@ struct UsageProjectionChart: View {
             }
         }
         // This owner stays mounted even when the plot has no observations.
-        .onChange(of: analytics) { _, newAnalytics in
-            updateDisplayModel(
-                analytics: newAnalytics,
-                window: window,
-                resetViewport: false
-            )
-        }
-        .onChange(of: window) { _, newWindow in
-            updateDisplayModel(
-                analytics: analytics,
-                window: newWindow,
-                resetViewport: true
-            )
-        }
-        .onChange(of: selectionDomainID) { _, _ in
-            if let selectedID, displayModel.selectionIndex[selectedID] == nil {
-                LifeOSMotion.withoutAnimation { self.selectedID = nil }
-            }
+        .onAppear { reconcileInspectionState() }
+        .onChange(of: inputRevision) { _, _ in
+            reconcileInspectionState()
         }
         .onChange(of: dragIsActive) { _, active in
             if !active { finishScrub(cancelled: true) }
@@ -1137,23 +1362,51 @@ struct UsageProjectionChart: View {
         .accessibilityValue(chartAccessibilitySummary)
     }
 
-    private func updateDisplayModel(
-        analytics: UsageAnalyticsSnapshot,
-        window: UsageWindow?,
-        resetViewport: Bool
-    ) {
-        let nextModel = UsageProjectionDisplayModel(analytics: analytics, window: window)
-        guard resetViewport || !nextModel.actualPoints.isEmpty else {
-            // A same-window refresh can briefly have no transport points. Keep
-            // the last observed model mounted so the user never sees a blank
-            // chart or an invented zero while the coordinator reconciles it.
-            return
-        }
+    private func reconcileInspectionState() {
+        finishScrub(cancelled: true)
         LifeOSMotion.withoutAnimation {
-            finishScrub(cancelled: true)
-            selectedID = nil
-            displayModel = nextModel
-            viewport.reconcile(windowChanged: resetViewport, hasObservations: !nextModel.actualPoints.isEmpty)
+            let key = Self.datasetKey(
+                accountScope: accountScope,
+                analytics: analytics,
+                window: window
+            )
+            let resetEpoch = Self.resetEpoch(for: window)
+            let identityChanged = inspectionState.key != key
+                || inspectionState.resetEpoch != resetEpoch
+            if identityChanged,
+               let seedModel = UsageChartPresentationPolicy.seedModel(
+                   for: updateKind,
+                   authority: presentationAuthority,
+                   analytics: analytics,
+                   window: window
+               ) {
+                // A provider/window change must adopt only the matching packet
+                // model before applying its lifecycle status. The reducer's
+                // identity transition still clears the previous dataset.
+                inspectionState.reduce(
+                    UsageChartInspectionUpdate(
+                        key: key,
+                        resetEpoch: resetEpoch,
+                        generation: generation,
+                        phase: .resolvedPopulated(seedModel),
+                        authority: presentationAuthority
+                    )
+                )
+            }
+            inspectionState.reduce(
+                UsageChartInspectionUpdate(
+                    key: key,
+                    resetEpoch: resetEpoch,
+                    generation: generation,
+                    phase: Self.inspectionPhase(
+                        for: updateKind,
+                        authority: presentationAuthority,
+                        analytics: analytics,
+                        window: window
+                    ),
+                    authority: presentationAuthority
+                )
+            )
         }
     }
 
@@ -1170,11 +1423,19 @@ struct UsageProjectionChart: View {
     }
 
     private var selectionDomainID: String {
-        displayModel.revisionID
+        acceptedModel?.revisionID
+            ?? [
+                provider.rawValue,
+                accountScope,
+                window?.id ?? "none",
+                String(generation),
+                String(describing: presentationAuthority),
+                String(describing: updateKind)
+            ].joined(separator: "|")
     }
 
     private var chartAvailabilityIdentity: String {
-        "\(provider.rawValue)|\(window?.id ?? "none")"
+        "\(provider.rawValue)|\(accountScope)|\(window?.id ?? "none")|\(String(describing: inspectionState.resetEpoch ?? .unknown))|\(String(describing: presentationAuthority))"
     }
 
     private var chartAccessibilitySummary: String {
@@ -1194,11 +1455,11 @@ struct UsageProjectionChart: View {
         Chart {
                 // Actual telemetry is hourly; each segment gets its own Charts
                 // series ID so a missing sample or cadence break is never bridged.
-                ForEach(displayModel.renderedActualSegments) { segment in
+                ForEach(acceptedModel?.renderedActualSegments ?? []) { segment in
                     observedSegmentMarks(for: segment)
                 }
 
-                ForEach(displayModel.renderedTargetSegments) { segment in
+                ForEach(acceptedModel?.renderedTargetSegments ?? []) { segment in
                     ForEach(segment.points) { point in
                         LineMark(
                             x: .value("Time", point.date),
@@ -1211,7 +1472,7 @@ struct UsageProjectionChart: View {
                     }
                 }
 
-                ForEach(displayModel.renderedEstimateSegments) { segment in
+                ForEach(acceptedModel?.renderedEstimateSegments ?? []) { segment in
                     ForEach(segment.points) { point in
                         LineMark(
                             x: .value("Time", point.date),
@@ -1346,13 +1607,13 @@ struct UsageProjectionChart: View {
             alignment: .leading,
             spacing: 8
         ) {
-            if !displayModel.targetPoints.isEmpty {
+            if !targetPoints.isEmpty {
                 UsageProjectionLegendKey(kind: .target, label: "Target pace")
             }
-            if !displayModel.actualPoints.isEmpty {
+            if !actualPoints.isEmpty {
                 UsageProjectionLegendKey(kind: .observed, label: "Actual")
             }
-            if !displayModel.estimatePoints.isEmpty {
+            if !estimatePoints.isEmpty {
                 UsageProjectionLegendKey(kind: .estimate, label: "Current estimate")
             }
         }
@@ -1375,7 +1636,7 @@ struct UsageProjectionChart: View {
                             .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.secondaryText)
                     }
-                    Text("\(provider.displayName) · \(qualityTag)")
+                    Text("\(accountLabel) · \(qualityTag)")
                         .lifeOSTypography(.metadata)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
                 }
@@ -1408,17 +1669,22 @@ struct UsageProjectionChart: View {
         }
     }
 
+    private var accountLabel: String {
+        accountScope.isEmpty ? provider.displayName : accountScope
+    }
+
     private func selectClosest(to date: Date) {
-        guard let selection = displayModel.nearestSelection(to: date) else {
+        guard let model = acceptedModel,
+              let selection = model.nearestSelection(to: date) else {
             // Moving from a valid point into an observed gap must remove the
             // old marker and tooltip immediately; otherwise stale data remains
             // visible while the pointer is over a no-data interval.
             guard selectedID != nil else { return }
-            LifeOSMotion.withoutAnimation { selectedID = nil }
+            LifeOSMotion.withoutAnimation { inspectionState.select(pointID: nil) }
             return
         }
         if selection.id != selectedID {
-            LifeOSMotion.withoutAnimation { selectedID = selection.id }
+            LifeOSMotion.withoutAnimation { inspectionState.select(pointID: selection.id) }
             ScrubBubble<EmptyView>.snapHaptic()
         }
     }
@@ -1489,7 +1755,7 @@ struct UsageProjectionChart: View {
                 LifeOSIcon(.chevronLeft).frame(width: 11, height: 11)
             }
             .buttonStyle(FinanceMotionControlStyle())
-            .disabled(displayModel.selectablePoints.isEmpty)
+            .disabled(allSelectablePoints.isEmpty)
 #if os(macOS)
             .keyboardShortcut(.leftArrow, modifiers: [])
 #endif
@@ -1511,7 +1777,7 @@ struct UsageProjectionChart: View {
                 LifeOSIcon(.chevronRight).frame(width: 11, height: 11)
             }
             .buttonStyle(FinanceMotionControlStyle())
-            .disabled(displayModel.selectablePoints.isEmpty)
+            .disabled(allSelectablePoints.isEmpty)
 #if os(macOS)
             .keyboardShortcut(.rightArrow, modifiers: [])
 #endif
@@ -1543,24 +1809,55 @@ struct UsageProjectionChart: View {
     }
 
     private func pinRangeStart() {
-        guard let selectedPoint else { return }
-        viewport.pinnedRangeStart = selectedPoint.date
-        viewport.zoomFactor = 1
+        guard let selectedPoint,
+              let earliest = acceptedModel?.earliestDate,
+              let latest = acceptedModel?.latestDate,
+              latest.timeIntervalSince(earliest) >= UsageChartEffectiveDomain.minimumDuration else { return }
+        let latestValidStart = latest.addingTimeInterval(-UsageChartEffectiveDomain.minimumDuration)
+        let start = min(max(selectedPoint.date, earliest), latestValidStart)
+        guard let nextViewport = UsageChartInspectionViewport(
+            start: start,
+            end: latest
+        ) else { return }
+        inspectionState.setViewport(nextViewport)
     }
 
     private func changeZoom(by multiplier: Double) {
-        viewport.zoomFactor = min(max(viewport.zoomFactor * multiplier, 0.25), 1)
+        guard multiplier > 0,
+              multiplier.isFinite,
+              let earliest = acceptedModel?.earliestDate,
+              let latest = acceptedModel?.latestDate else { return }
+        let maximumDuration = latest.timeIntervalSince(earliest)
+        guard maximumDuration >= UsageChartEffectiveDomain.minimumDuration else { return }
+        let current = chartDomain
+        let currentDuration = min(
+            max(
+                current.upperBound.timeIntervalSince(current.lowerBound),
+                UsageChartEffectiveDomain.minimumDuration
+            ),
+            maximumDuration
+        )
+        let nextDuration = min(
+            max(currentDuration * multiplier, UsageChartEffectiveDomain.minimumDuration),
+            maximumDuration
+        )
+        let start = latest.addingTimeInterval(-nextDuration)
+        guard let nextViewport = UsageChartInspectionViewport(
+            start: start,
+            end: latest
+        ) else { return }
+        inspectionState.setViewport(nextViewport)
     }
 
     private func stepSelection(by offset: Int) {
-        guard !displayModel.selectablePoints.isEmpty else { return }
+        guard let model = acceptedModel, !model.selectablePoints.isEmpty else { return }
         let currentIndex = selectedID.flatMap { selected in
-            displayModel.selectionOffsets[selected]
-        } ?? (offset < 0 ? displayModel.selectablePoints.count : -1)
-        let nextIndex = min(max(currentIndex + offset, 0), displayModel.selectablePoints.count - 1)
-        let next = displayModel.selectablePoints[nextIndex]
+            model.selectionOffsets[selected]
+        } ?? (offset < 0 ? model.selectablePoints.count : -1)
+        let nextIndex = min(max(currentIndex + offset, 0), model.selectablePoints.count - 1)
+        let next = model.selectablePoints[nextIndex]
         if next.id != selectedID { ScrubBubble<EmptyView>.snapHaptic() }
-        LifeOSMotion.withoutAnimation { selectedID = next.id }
+        LifeOSMotion.withoutAnimation { inspectionState.select(pointID: next.id) }
     }
 }
 

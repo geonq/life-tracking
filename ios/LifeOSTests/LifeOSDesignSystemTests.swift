@@ -1243,22 +1243,58 @@ final class LifeOSDesignSystemTests: XCTestCase {
         XCTAssertEqual(LifeOSChartMotionPolicy.progress(.infinity), 1)
     }
 
-    func testUsageViewportResetsAcrossObservationLossAndWindowSwitchWhileEmpty() {
-        var viewport = UsageChartViewport()
-        viewport.pinnedRangeStart = Date(timeIntervalSince1970: 1_780_000_000)
-        viewport.zoomFactor = 0.25
-        viewport.reconcile(windowChanged: false, hasObservations: true)
-        XCTAssertNotNil(viewport.pinnedRangeStart)
-        XCTAssertEqual(viewport.zoomFactor, 0.25)
-        // Populated A → empty/loading A → empty B → populated B.
-        for transition in [(false, false), (true, false), (false, true)] {
-            viewport.reconcile(windowChanged: transition.0, hasObservations: transition.1)
-            XCTAssertNil(viewport.pinnedRangeStart)
-            XCTAssertEqual(viewport.zoomFactor, 1)
-        }
-        viewport.zoomFactor = 0.6
-        viewport.reconcile(windowChanged: true, hasObservations: true)
-        XCTAssertEqual(viewport.zoomFactor, 1)
+    func testUsageViewportResetsAcrossObservationLossAndWindowSwitchWhileEmpty() throws {
+        let base = Date(timeIntervalSince1970: 1_780_000_000)
+        let explicit = try XCTUnwrap(
+            UsageChartInspectionViewport(start: base, end: base.addingTimeInterval(3_600))
+        )
+        let keyA = UsageChartDatasetKey(
+            provider: .codex,
+            accountScope: "Codex account",
+            windowID: "five_hour",
+            durationMinutes: 300,
+            metric: "used_percent",
+            source: "test",
+            provenanceClass: .observed
+        )
+        let keyB = UsageChartDatasetKey(
+            provider: .codex,
+            accountScope: "Codex account",
+            windowID: "seven_day",
+            durationMinutes: 10_080,
+            metric: "used_percent",
+            source: "test",
+            provenanceClass: .observed
+        )
+
+        var state = UsageChartInspectionState()
+        state.setViewport(explicit)
+        XCTAssertEqual(state.viewport, explicit)
+        state.reduce(UsageChartInspectionUpdate(
+            key: keyA,
+            resetEpoch: .unknown,
+            generation: 1,
+            phase: .loading
+        ))
+        XCTAssertEqual(state.viewport, .automatic, "A first dataset starts with an automatic domain")
+
+        state.setViewport(explicit)
+        state.reduce(UsageChartInspectionUpdate(
+            key: keyA,
+            resetEpoch: .unknown,
+            generation: 2,
+            phase: .resolvedAuthoritativeEmpty,
+            authority: .authoritativeEmpty
+        ))
+        XCTAssertEqual(state.viewport, explicit, "A same-dataset empty result keeps the inspect range")
+
+        state.reduce(UsageChartInspectionUpdate(
+            key: keyB,
+            resetEpoch: .unknown,
+            generation: 3,
+            phase: .loading
+        ))
+        XCTAssertEqual(state.viewport, .automatic, "A window switch cannot inherit the old inspect range")
     }
 
     func testChartPresentationSurvivesEmptyLoadingFailureWithoutReplayOrSpaceLoss() {

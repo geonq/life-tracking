@@ -85,6 +85,8 @@ struct UsageView: View {
     private let onBack: (() -> Void)?
     private let onOpenSettings: (() -> Void)?
     private let analytics: [UsageAnalyticsSnapshot]
+    private let presentationPacket: UsagePresentationPacket?
+    private let presentationAuthorities: [UsagePresentationScope: UsagePresentationAuthority]
 
     // These selections belong to the scene, not to one mounted copy of the
     // screen. Route changes can replace UsageView, but they must not reset the
@@ -99,14 +101,17 @@ struct UsageView: View {
         state: UsageLoadState = .observed,
         refreshAction: (() async -> Void)? = nil,
         onBack: (() -> Void)? = nil,
-        onOpenSettings: (() -> Void)? = nil
+        onOpenSettings: (() -> Void)? = nil,
+        presentationPacket: UsagePresentationPacket? = nil
     ) {
-        self.snapshots = snapshots
-        self.state = state
+        self.snapshots = presentationPacket?.providers ?? snapshots
+        self.state = presentationPacket?.loadState ?? state
         self.refreshAction = refreshAction
         self.onBack = onBack
         self.onOpenSettings = onOpenSettings
-        self.analytics = analytics
+        self.analytics = presentationPacket?.analytics ?? analytics
+        self.presentationPacket = presentationPacket
+        self.presentationAuthorities = presentationPacket?.presentationAuthorities ?? [:]
     }
 
     private var selectedProvider: Provider {
@@ -181,6 +186,33 @@ struct UsageView: View {
         return snapshot.provenance.quality == .demo
             ? candidate.provenance.quality == .demo
             : candidate.provenance.quality != .demo
+    }
+
+    private func chartAnalytics(for snapshot: ProviderSnapshot) -> UsageAnalyticsSnapshot {
+        if let activeAnalytics { return activeAnalytics }
+        let window = selectedWindow(in: snapshot)
+        return UsageAnalyticsSnapshot(
+            provider: snapshot.provider,
+            windowID: window?.id ?? selectedRange.sourceWindowIDs.first,
+            activity: [],
+            projection: [],
+            modelBreakdowns: [],
+            heatmap: [],
+            provenance: window?.provenance ?? snapshot.provenance
+        )
+    }
+
+    private var activePresentationAuthority: UsagePresentationAuthority {
+        guard let activeSnapshot else { return .unknown }
+        let windowID = selectedWindow(in: activeSnapshot)?.id
+            ?? activeAnalytics?.windowID
+            ?? selectedRange.sourceWindowIDs.first
+        guard let windowID,
+              let scope = UsagePresentationScope.canonical(
+                  provider: activeSnapshot.provider,
+                  windowID: windowID
+              ) else { return .unknown }
+        return presentationAuthorities[scope] ?? .unknown
     }
 
     private func reconcileSelectedRange(for snapshot: ProviderSnapshot?) {
@@ -496,18 +528,15 @@ struct UsageView: View {
                 }
             }
 
-            if let activeAnalytics {
-                UsageProjectionChart(
-                    provider: snapshot.provider,
-                    window: selectedWindow(in: snapshot),
-                    analytics: activeAnalytics
-                )
-            } else {
-                UsageEmptyState(
-                    title: "No chart observations",
-                    detail: "The source has not supplied history for this window, so LifeOS will not invent a plot."
-                )
-            }
+            UsageProjectionChart(
+                provider: snapshot.provider,
+                window: selectedWindow(in: snapshot),
+                analytics: chartAnalytics(for: snapshot),
+                accountScope: snapshot.accountLabel,
+                generation: presentationPacket?.generation ?? 0,
+                presentationAuthority: activePresentationAuthority,
+                updateKind: presentationPacket?.updateKind ?? .initial
+            )
         }
     }
 

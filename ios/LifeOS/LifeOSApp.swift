@@ -706,7 +706,8 @@ private struct LifeOSIOSSceneRoot: View {
                             selectedModuleRoute = nil
                         }
                     },
-                    onOpenSettings: { navigate(.settings) }
+                    onOpenSettings: { navigate(.settings) },
+                    presentationPacket: usesVisualFixtures ? nil : usagePacket
                 )
                 .transition(routeTransition)
             } else {

@@ -54,6 +54,20 @@ public enum UsagePresentationUpdateKind: Equatable, Sendable {
     case authoritativeEmpty
 }
 
+/// Describes whether the current presentation values are still provisional or
+/// were explicitly established by the latest source result. Lifecycle packets
+/// retain this authority so cached history cannot repopulate a dataset that a
+/// valid empty result cleared.
+public enum UsagePresentationAuthority: Equatable, Sendable {
+    case unknown
+    case observed
+    case authoritativeEmpty
+
+    var permitsChartSeed: Bool {
+        self != .authoritativeEmpty
+    }
+}
+
 /// The one coherent handoff for Usage presentation. `generation` is sourced
 /// from `UsageCoordinator.refreshGeneration`, so consumers can ignore stale
 /// packets without keeping a second history of provider or analytics values.
@@ -64,6 +78,7 @@ public struct UsagePresentationPacket: Equatable, Sendable {
     public let loadState: UsageLoadState
     public let failure: UsageRefreshFailure
     public let lastUpdated: Date?
+    public let presentationAuthorities: [UsagePresentationScope: UsagePresentationAuthority]
     public let updateKind: UsagePresentationUpdateKind
 
     public init(generation: Int,
@@ -72,14 +87,20 @@ public struct UsagePresentationPacket: Equatable, Sendable {
                 loadState: UsageLoadState,
                 failure: UsageRefreshFailure,
                 lastUpdated: Date?,
-                updateKind: UsagePresentationUpdateKind) {
+                updateKind: UsagePresentationUpdateKind,
+                presentationAuthorities: [UsagePresentationScope: UsagePresentationAuthority] = [:]) {
         self.generation = generation
         self.providers = providers
         self.analytics = analytics
         self.loadState = loadState
         self.failure = failure
         self.lastUpdated = lastUpdated
+        self.presentationAuthorities = presentationAuthorities
         self.updateKind = updateKind
+    }
+
+    public func authority(for scope: UsagePresentationScope) -> UsagePresentationAuthority {
+        presentationAuthorities[scope] ?? .unknown
     }
 }
 
@@ -163,6 +184,11 @@ public final class UsageCoordinator: ObservableObject {
     private let reloadWidgets: () -> Void
     private let allowsRefresh: Bool
     private var historyLedger: UsageHistoryLedger
+    private var presentationAuthorities: [UsagePresentationScope: UsagePresentationAuthority]
+    /// A ledger mutation remains pending until its encoded archive has
+    /// reached durable storage. This lets a later identical refresh retry a
+    /// transient write failure instead of treating it as a no-op.
+    private var historyPersistencePending = false
 
     public init(client: UsagePayloadFetching = TailscaleSyncClient(),
                 staleAfter: TimeInterval = 15 * 60,
@@ -185,6 +211,11 @@ public final class UsageCoordinator: ObservableObject {
         let initialFailure: UsageRefreshFailure = loadedHistory.errorMessage == nil ? .none : .historyStorage
         self.failure = initialFailure
         self.providers = initialProviders
+        let initialAuthorities = Self.initialPresentationAuthorities(
+            for: initialProviders,
+            ledger: loadedHistory.ledger
+        )
+        self.presentationAuthorities = initialAuthorities
         let initialAnalytics = UsageAnalyticsHistoryBuilder.snapshots(
             from: loadedHistory.ledger, providers: initialProviders
         )
@@ -201,7 +232,8 @@ public final class UsageCoordinator: ObservableObject {
             loadState: initialState,
             failure: initialFailure,
             lastUpdated: initialUpdatedAt,
-            updateKind: .initial
+            updateKind: .initial,
+            presentationAuthorities: initialAuthorities
         )
     }
 
@@ -223,6 +255,11 @@ public final class UsageCoordinator: ObservableObject {
         let initialFailure: UsageRefreshFailure = loadedHistory.errorMessage == nil ? .none : .historyStorage
         self.failure = initialFailure
         self.providers = initialProviders
+        let initialAuthorities = Self.initialPresentationAuthorities(
+            for: initialProviders,
+            ledger: loadedHistory.ledger
+        )
+        self.presentationAuthorities = initialAuthorities
         let initialAnalytics = UsageAnalyticsHistoryBuilder.snapshots(
             from: loadedHistory.ledger, providers: initialProviders
         )
@@ -239,7 +276,8 @@ public final class UsageCoordinator: ObservableObject {
             loadState: initialState,
             failure: initialFailure,
             lastUpdated: initialUpdatedAt,
-            updateKind: .initial
+            updateKind: .initial,
+            presentationAuthorities: initialAuthorities
         )
     }
 
@@ -300,6 +338,11 @@ public final class UsageCoordinator: ObservableObject {
         let initialFailure: UsageRefreshFailure = loadedHistory.errorMessage == nil ? .none : .historyStorage
         self.failure = initialFailure
         self.providers = initialProviders
+        let initialAuthorities = Self.initialPresentationAuthorities(
+            for: initialProviders,
+            ledger: loadedHistory.ledger
+        )
+        self.presentationAuthorities = initialAuthorities
         let initialAnalytics = UsageAnalyticsHistoryBuilder.snapshots(
             from: loadedHistory.ledger, providers: initialProviders
         )
@@ -316,7 +359,8 @@ public final class UsageCoordinator: ObservableObject {
             loadState: initialState,
             failure: initialFailure,
             lastUpdated: initialUpdatedAt,
-            updateKind: .initial
+            updateKind: .initial,
+            presentationAuthorities: initialAuthorities
         )
     }
 
@@ -393,22 +437,83 @@ public final class UsageCoordinator: ObservableObject {
             }
         }
 
+        var observedScopes = Set<UsagePresentationScope>()
+        for provider in mapped.providers {
+            for window in provider.windows {
+                guard let scope = UsagePresentationScope.canonical(
+                    provider: provider.provider,
+                    windowID: window.id
+                ) else { continue }
+                if window.usedPercent != nil && window.provenance?.quality == .observed {
+                    observedScopes.insert(scope)
+                }
+            }
+        }
+
+        // A successfully decoded payload is a complete snapshot for the
+        // supported provider/window matrix. An omitted window therefore means
+        // the source explicitly has no usable value for that scope; retaining
+        // a previous marker here would let durable history reappear on a
+        // remount merely because another provider was observed.
+        let allSupportedScopes = Set(
+            Provider.allCases.flatMap { provider in
+                UsagePresentationScope.supportedWindowIDs.map {
+                    UsagePresentationScope(provider: provider, windowID: $0)
+                }
+            }
+        )
+        let emptyScopes = allSupportedScopes.subtracting(observedScopes)
+
+        var historyStorageFailed = false
+        var historyChanged = false
         if !incoming.isEmpty {
+            let before = historyLedger.archive()
             do {
                 let key = UsageHistoryDigest.idempotencyKey(for: incoming)
                 _ = try historyLedger.append(incoming, idempotencyKey: key, now: .now)
-                try persistHistory()
-                historyStatus = historyLedger.isEmpty ? .empty : .available
-                historyErrorMessage = nil
-                failure = .none
+                historyChanged = historyLedger.archive() != before
             } catch {
-                // Current gateway values remain usable; only the durable
-                // history capability is unavailable. Do not turn that into a
-                // zero-length or synthetic history series.
-                historyStatus = .storageError
-                historyErrorMessage = "Usage history unavailable"
-                failure = .historyStorage
+                historyStorageFailed = true
             }
+        }
+
+        // The current valid snapshot replaces the previous scope decisions in
+        // full. This makes omission terminal and keeps each scope independent
+        // of the availability of other providers.
+        let nextEmptyScopes = emptyScopes
+        if nextEmptyScopes != historyLedger.authoritativeEmptyScopes {
+            do {
+                try historyLedger.setAuthoritativeEmptyScopes(nextEmptyScopes)
+                historyChanged = true
+            } catch {
+                historyStorageFailed = true
+            }
+        }
+
+        if historyChanged {
+            historyPersistencePending = true
+        }
+        var historyPersistenceSucceeded = false
+        if historyPersistencePending {
+            do {
+                try persistHistory()
+                historyPersistencePending = false
+                historyPersistenceSucceeded = true
+            } catch {
+                historyStorageFailed = true
+            }
+        }
+        if historyStorageFailed {
+            // Current gateway values remain usable; only the durable history
+            // capability is unavailable. Do not fabricate numeric values.
+            historyStatus = .storageError
+            historyErrorMessage = "Usage history unavailable"
+            failure = .historyStorage
+        } else if historyPersistenceSucceeded ||
+                    (!historyPersistencePending && historyErrorMessage == nil && !incoming.isEmpty) {
+            historyStatus = historyLedger.isEmpty ? .empty : .available
+            historyErrorMessage = nil
+            failure = .none
         }
 
         analytics = mergedAnalytics(
@@ -416,6 +521,10 @@ public final class UsageCoordinator: ObservableObject {
             history: UsageAnalyticsHistoryBuilder.snapshots(from: historyLedger, providers: mapped.providers)
         )
         let observed = mapped.providers.filter { $0.provenance.quality == .observed }
+        presentationAuthorities = updatedPresentationAuthorities(
+            for: mapped.providers,
+            emptyScopes: nextEmptyScopes
+        )
         let hasStale = !observed.isEmpty && (Date.now.timeIntervalSince(generatedAt) >= staleAfter || observed.contains {
             let freshness = $0.provenance.freshness(now: .now, staleAfter: staleAfter)
             return freshness == .stale || freshness == .unavailable
@@ -455,7 +564,8 @@ public final class UsageCoordinator: ObservableObject {
             loadState: state,
             failure: failure,
             lastUpdated: lastUpdated,
-            updateKind: updateKind
+            updateKind: updateKind,
+            presentationAuthorities: presentationAuthorities
         )
         presentationPacket = snapshot
     }
@@ -474,6 +584,64 @@ public final class UsageCoordinator: ObservableObject {
             return freshness == .stale || freshness == .unavailable
         }
         return timestampIsStale || providerIsStale ? .stale : .observed
+    }
+
+    private static func initialPresentationAuthorities(
+        for providers: [ProviderSnapshot],
+        ledger: UsageHistoryLedger
+    ) -> [UsagePresentationScope: UsagePresentationAuthority] {
+        var result: [UsagePresentationScope: UsagePresentationAuthority] = [:]
+        for scope in ledger.authoritativeEmptyScopes where scope.isValid {
+            result[scope] = .authoritativeEmpty
+        }
+        for entry in ledger.entries {
+            guard let scope = UsagePresentationScope.canonical(
+                provider: entry.provider,
+                windowID: entry.window
+            ), result[scope] == nil else { continue }
+            result[scope] = .observed
+        }
+        for provider in providers {
+            for window in provider.windows {
+                guard let scope = UsagePresentationScope.canonical(
+                    provider: provider.provider,
+                    windowID: window.id
+                ), result[scope] == nil else { continue }
+                guard window.usedPercent != nil,
+                      window.provenance?.quality == .observed else { continue }
+                result[scope] = .observed
+            }
+        }
+        return result
+    }
+
+    private func updatedPresentationAuthorities(
+        for providers: [ProviderSnapshot],
+        emptyScopes: Set<UsagePresentationScope>
+    ) -> [UsagePresentationScope: UsagePresentationAuthority] {
+        var result = presentationAuthorities.filter { $0.key.isValid }
+        for entry in historyLedger.entries {
+            guard let scope = UsagePresentationScope.canonical(
+                provider: entry.provider,
+                windowID: entry.window
+            ), result[scope] == nil else { continue }
+            result[scope] = .observed
+        }
+        for scope in emptyScopes where scope.isValid {
+            result[scope] = .authoritativeEmpty
+        }
+        for provider in providers {
+            for window in provider.windows {
+                guard let scope = UsagePresentationScope.canonical(
+                    provider: provider.provider,
+                    windowID: window.id
+                ) else { continue }
+                result[scope] = window.usedPercent != nil && window.provenance?.quality == .observed
+                    ? .observed
+                    : .authoritativeEmpty
+            }
+        }
+        return result
     }
 
     private func persistHistory() throws {

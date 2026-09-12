@@ -324,6 +324,28 @@ final class UsageHistoryTests: XCTestCase {
         XCTAssertEqual(restored.revision, ledger.revision)
     }
 
+    func testAuthoritativeEmptyScopesRoundTripAndLegacyArchivesRemainUnknown() throws {
+        var ledger = UsageHistoryLedger()
+        let scopes: Set<UsagePresentationScope> = [
+            UsagePresentationScope(provider: .codex, windowID: "five_hour"),
+            UsagePresentationScope(provider: .claude, windowID: "seven_day")
+        ]
+        try ledger.setAuthoritativeEmptyScopes(scopes)
+
+        let encoded = try JSONEncoder.lifeOS.encode(ledger.archive())
+        let decoded = try JSONDecoder.lifeOS.decode(UsageHistoryArchive.self, from: encoded)
+        let restored = try UsageHistoryLedger(archive: decoded, now: now)
+        XCTAssertEqual(restored.authoritativeEmptyScopes, scopes)
+
+        var legacyObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        legacyObject.removeValue(forKey: "authoritativeEmptyScopes")
+        let legacyData = try JSONSerialization.data(withJSONObject: legacyObject)
+        let legacyArchive = try JSONDecoder.lifeOS.decode(UsageHistoryArchive.self, from: legacyData)
+        XCTAssertTrue(legacyArchive.authoritativeEmptyScopes.isEmpty)
+    }
+
     func testPersistenceRoundTripIsBoundedAndDoesNotNeedCredentials() throws {
         let persistence = InMemoryUsageHistoryPersistence()
         var ledger = UsageHistoryLedger()

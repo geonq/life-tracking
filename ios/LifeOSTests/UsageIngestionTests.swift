@@ -154,6 +154,245 @@ final class UsageIngestionTests: XCTestCase {
         XCTAssertEqual(result.1, .reauthRequired)
     }
 
+    func testPresentationAuthoritySurvivesEmptyLoadingFailureAndCancellation() async throws {
+        let now = Date.now
+        let observedPayload = APIUsagePayload(
+            generatedAt: now,
+            windows: [window(kind: "five_hour", minutes: 300)],
+            estimates: [],
+            connectors: Self.connectors(codex: .healthy, claude: .unavailable)
+        )
+        let emptyPayload = APIUsagePayload(
+            generatedAt: now,
+            windows: [],
+            estimates: [],
+            connectors: Self.connectors(codex: .unavailable, claude: .unavailable)
+        )
+        let gate = UsageFetchGate()
+        let plan = UsageFetchPlan(
+            responses: [.payload(observedPayload), .payload(emptyPayload), .blocked],
+            gate: gate
+        )
+        let persistence = UsageIngestionHistoryPersistence()
+        let coordinator = await MainActor.run {
+            UsageCoordinator(
+                fetch: { try await plan.next() },
+                historyPersistence: persistence
+            )
+        }
+
+        await coordinator.refresh()
+        let observedScope = UsagePresentationScope(provider: .codex, windowID: "five_hour")
+        let observedAuthority = await MainActor.run {
+            coordinator.presentationPacket.authority(for: observedScope)
+        }
+        XCTAssertEqual(observedAuthority, .observed)
+
+        await coordinator.refresh()
+        let emptyPacket = await MainActor.run { coordinator.presentationPacket }
+        XCTAssertEqual(emptyPacket.updateKind, .authoritativeEmpty)
+        XCTAssertEqual(emptyPacket.authority(for: observedScope), .authoritativeEmpty)
+        XCTAssertFalse(emptyPacket.analytics.isEmpty, "durable history remains available to the packet")
+
+        let loadingTask = Task { await coordinator.refresh() }
+        var loadingPacket: UsagePresentationPacket?
+        for _ in 0..<1_000 {
+            let packet = await MainActor.run { coordinator.presentationPacket }
+            if packet.updateKind == .loading {
+                loadingPacket = packet
+                break
+            }
+            await Task.yield()
+        }
+        let loading = try XCTUnwrap(loadingPacket)
+        XCTAssertEqual(loading.authority(for: observedScope), .authoritativeEmpty)
+
+        await gate.release()
+        await loadingTask.value
+        let failedPacket = await MainActor.run { coordinator.presentationPacket }
+        XCTAssertEqual(failedPacket.updateKind, .failed)
+        XCTAssertEqual(failedPacket.authority(for: observedScope), .authoritativeEmpty)
+
+        await MainActor.run { coordinator.cancel() }
+        let cancelledPacket = await MainActor.run { coordinator.presentationPacket }
+        XCTAssertEqual(cancelledPacket.updateKind, .cancelled)
+        XCTAssertEqual(cancelledPacket.authority(for: observedScope), .authoritativeEmpty)
+    }
+
+    @available(iOS 17.0, macOS 14.0, *)
+    func testPresentationAuthorityIsScopedPerProviderAndSurvivesRecreation() async throws {
+        let now = Date.now
+        let codexObserved = APIUsagePayload(
+            generatedAt: now,
+            windows: [window(provider: .codex, kind: "five_hour", minutes: 300)],
+            estimates: [],
+            connectors: Self.connectors(codex: .healthy, claude: .unavailable)
+        )
+        let claudeObserved = window(provider: .claude, kind: "five_hour", minutes: 300)
+        let mixedProviders = APIUsagePayload(
+            generatedAt: now,
+            // Codex is intentionally omitted. A valid payload must clear its
+            // prior observed history even while Claude remains observed.
+            windows: [claudeObserved],
+            estimates: [],
+            connectors: Self.connectors(codex: .unavailable, claude: .healthy)
+        )
+        let persistence = UsageIngestionHistoryPersistence()
+        let plan = UsageFetchPlan(
+            responses: [.payload(codexObserved), .payload(mixedProviders)],
+            gate: UsageFetchGate()
+        )
+        let coordinator = await MainActor.run {
+            UsageCoordinator(fetch: { try await plan.next() }, historyPersistence: persistence)
+        }
+
+        await coordinator.refresh()
+        await coordinator.refresh()
+
+        let packet = await MainActor.run { coordinator.presentationPacket }
+        let codexScope = UsagePresentationScope(provider: .codex, windowID: "five_hour")
+        let claudeScope = UsagePresentationScope(provider: .claude, windowID: "five_hour")
+        XCTAssertEqual(packet.updateKind, .resolved)
+        XCTAssertEqual(packet.authority(for: codexScope), .authoritativeEmpty)
+        XCTAssertEqual(packet.authority(for: claudeScope), .observed)
+        XCTAssertTrue(
+            packet.analytics.contains { $0.provider == .codex && !$0.history.isEmpty },
+            "history may remain stored, but the empty Codex scope must prevent it from being presented"
+        )
+
+        let reloaded = await MainActor.run {
+            UsageCoordinator(fetch: { mixedProviders }, historyPersistence: persistence)
+        }
+        let reloadedPacket = await MainActor.run { reloaded.presentationPacket }
+        XCTAssertEqual(reloadedPacket.authority(for: codexScope), .authoritativeEmpty)
+        XCTAssertEqual(reloadedPacket.authority(for: claudeScope), .observed)
+    }
+
+    @available(iOS 17.0, macOS 14.0, *)
+    func testPresentationAuthorityIsScopedPerWindow() async throws {
+        let now = Date.now
+        let first = APIUsagePayload(
+            generatedAt: now,
+            windows: [window(provider: .codex, kind: "five_hour", minutes: 300)],
+            estimates: [],
+            connectors: Self.connectors(codex: .healthy, claude: .unavailable)
+        )
+        let fiveHourUnavailable = window(
+            provider: .codex,
+            kind: "five_hour",
+            minutes: 300,
+            used: nil,
+            availability: "unavailable",
+            provenance: APIUsageProvenance(
+                source: "codex-five-hour-unavailable",
+                observedAt: now,
+                freshness: "unknown",
+                official: false,
+                quality: "unavailable",
+                connectorState: .unavailable
+            )
+        )
+        let second = APIUsagePayload(
+            generatedAt: now,
+            windows: [
+                fiveHourUnavailable,
+                window(provider: .codex, kind: "seven_day", minutes: 10_080)
+            ],
+            estimates: [],
+            connectors: Self.connectors(codex: .healthy, claude: .unavailable)
+        )
+        let persistence = UsageIngestionHistoryPersistence()
+        let plan = UsageFetchPlan(
+            responses: [.payload(first), .payload(second)],
+            gate: UsageFetchGate()
+        )
+        let coordinator = await MainActor.run {
+            UsageCoordinator(fetch: { try await plan.next() }, historyPersistence: persistence)
+        }
+
+        await coordinator.refresh()
+        await coordinator.refresh()
+
+        let packet = await MainActor.run { coordinator.presentationPacket }
+        XCTAssertEqual(
+            packet.authority(for: UsagePresentationScope(provider: .codex, windowID: "five_hour")),
+            .authoritativeEmpty
+        )
+        XCTAssertEqual(
+            packet.authority(for: UsagePresentationScope(provider: .codex, windowID: "seven_day")),
+            .observed
+        )
+    }
+
+    @available(iOS 17.0, macOS 14.0, *)
+    func testHistoryWriteFailureIsRetriedByIdenticalRefreshAndSurvivesRecreation() async throws {
+        let now = Date.now
+        let observedPayload = APIUsagePayload(
+            generatedAt: now,
+            windows: [window(provider: .codex, kind: "five_hour", minutes: 300)],
+            estimates: [],
+            connectors: Self.connectors(codex: .healthy, claude: .unavailable)
+        )
+        let emptyPayload = APIUsagePayload(
+            generatedAt: now,
+            windows: [window(
+                provider: .codex,
+                kind: "five_hour",
+                minutes: 300,
+                used: nil,
+                availability: "unavailable",
+                provenance: APIUsageProvenance(
+                    source: "codex-unavailable",
+                    observedAt: now,
+                    freshness: "unknown",
+                    official: false,
+                    quality: "unavailable",
+                    connectorState: .unavailable
+                )
+            )],
+            estimates: [],
+            connectors: Self.connectors(codex: .unavailable, claude: .unavailable)
+        )
+        let persistence = UsageIngestionHistoryPersistence()
+        let plan = UsageFetchPlan(
+            responses: [.payload(observedPayload), .payload(emptyPayload), .payload(emptyPayload)],
+            gate: UsageFetchGate()
+        )
+        let coordinator = await MainActor.run {
+            UsageCoordinator(fetch: { try await plan.next() }, historyPersistence: persistence)
+        }
+
+        await coordinator.refresh()
+        persistence.failNextSave()
+        await coordinator.refresh()
+        let failed = await MainActor.run {
+            (coordinator.failure, coordinator.historyStatus, coordinator.historyErrorMessage)
+        }
+        XCTAssertEqual(failed.0, .historyStorage)
+        XCTAssertEqual(failed.1, .storageError)
+        XCTAssertEqual(failed.2, "Usage history unavailable")
+
+        // The second response is byte-for-byte identical. A correct
+        // coordinator retries the pending archive even though the ledger did
+        // not change on this refresh.
+        await coordinator.refresh()
+        let recovered = await MainActor.run {
+            (coordinator.failure, coordinator.historyStatus, coordinator.historyErrorMessage)
+        }
+        XCTAssertEqual(recovered.0, .none)
+        XCTAssertEqual(recovered.1, .available)
+        XCTAssertNil(recovered.2)
+
+        let scope = UsagePresentationScope(provider: .codex, windowID: "five_hour")
+        let recreated = await MainActor.run {
+            UsageCoordinator(fetch: { emptyPayload }, historyPersistence: persistence)
+        }
+        let recreatedAuthority = await MainActor.run {
+            recreated.presentationPacket.authority(for: scope)
+        }
+        XCTAssertEqual(recreatedAuthority, .authoritativeEmpty)
+    }
+
     func testCurrentConnectorFailureMakesCachedObservationStale() async throws {
         let source = APIUsageProvenance(source: "cached-codex", observedAt: Date.now,
             freshness: "fresh", official: true, quality: "observed", connectorState: .healthy)
@@ -585,4 +824,76 @@ private actor RefreshLock {
     var activeCount: Int { active }
     func enter() { active += 1; maximum = max(maximum, active) }
     func leave() { active -= 1 }
+}
+
+private enum UsageFetchResponse {
+    case payload(APIUsagePayload)
+    case blocked
+}
+
+private enum UsageFetchError: Error {
+    case transport
+    case exhausted
+}
+
+private actor UsageFetchGate {
+    private var isReleased = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        if isReleased { return }
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func release() {
+        isReleased = true
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+private actor UsageFetchPlan {
+    private var responses: [UsageFetchResponse]
+    private let gate: UsageFetchGate
+
+    init(responses: [UsageFetchResponse], gate: UsageFetchGate) {
+        self.responses = responses
+        self.gate = gate
+    }
+
+    func next() async throws -> APIUsagePayload {
+        guard !responses.isEmpty else { throw UsageFetchError.exhausted }
+        switch responses.removeFirst() {
+        case .payload(let payload):
+            return payload
+        case .blocked:
+            await gate.wait()
+            throw UsageFetchError.transport
+        }
+    }
+}
+
+private final class UsageIngestionHistoryPersistence: UsageHistoryPersistence {
+    private var data: Data?
+    private var shouldFailNextSave = false
+
+    func load() throws -> Data? { data }
+
+    func failNextSave() {
+        shouldFailNextSave = true
+    }
+
+    func save(_ data: Data) throws {
+        if shouldFailNextSave {
+            shouldFailNextSave = false
+            throw UsageHistoryPersistenceTestError.injected
+        }
+        self.data = data
+    }
+}
+
+private enum UsageHistoryPersistenceTestError: Error {
+    case injected
 }

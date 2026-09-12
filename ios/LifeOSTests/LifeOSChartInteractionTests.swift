@@ -235,6 +235,216 @@ final class LifeOSChartInteractionTests: XCTestCase {
         XCTAssertEqual(equalGeneration.status, .resolved)
     }
 
+    func testUsageAuthorityBlocksHistorySeedAfterAuthoritativeEmptyAcrossRemount() throws {
+        let base = Date(timeIntervalSince1970: 1_800_000_000)
+        let window = usageWindow(base: base)
+        let analytics = makeAnalyticsSnapshot(
+            base: base,
+            activityValues: [(0, 0.20), (3_600, 0.30)]
+        )
+        let model = UsageProjectionDisplayModel(analytics: analytics, window: window)
+        let key = makeDatasetKey(
+            makeProviderSnapshot(base: base, window: window),
+            analytics,
+            window
+        )
+        let resetEpoch = UsageChartResetEpoch.boundary(base.addingTimeInterval(14_400))
+
+        XCTAssertNotNil(UsageChartPresentationPolicy.seedModel(
+            for: .loading,
+            authority: .observed,
+            analytics: analytics,
+            window: window
+        ))
+        XCTAssertNil(UsageChartPresentationPolicy.seedModel(
+            for: .loading,
+            authority: .authoritativeEmpty,
+            analytics: analytics,
+            window: window
+        ))
+
+        var mounted = UsageChartInspectionState()
+        mounted.reduce(UsageChartInspectionUpdate(
+            key: key,
+            resetEpoch: resetEpoch,
+            generation: 1,
+            phase: .resolvedPopulated(model),
+            authority: .observed
+        ))
+        mounted.reduce(UsageChartInspectionUpdate(
+            key: key,
+            resetEpoch: resetEpoch,
+            generation: 2,
+            phase: .resolvedAuthoritativeEmpty,
+            authority: .authoritativeEmpty
+        ))
+        XCTAssertNil(mounted.acceptedModel)
+
+        // A remount receives retained history with a lifecycle packet. The
+        // empty authority must prevent the old model from being seeded again.
+        var remounted = UsageChartInspectionState()
+        remounted.reduce(UsageChartInspectionUpdate(
+            key: key,
+            resetEpoch: resetEpoch,
+            generation: 3,
+            phase: .loading,
+            authority: .authoritativeEmpty
+        ))
+        XCTAssertNil(remounted.acceptedModel)
+        XCTAssertEqual(remounted.presentationAuthority, .authoritativeEmpty)
+
+        remounted.reduce(UsageChartInspectionUpdate(
+            key: key,
+            resetEpoch: resetEpoch,
+            generation: 4,
+            phase: .failed,
+            authority: .authoritativeEmpty
+        ))
+        XCTAssertNil(remounted.acceptedModel)
+
+        // The explicit authority also wins if a same-key lifecycle packet is
+        // inconsistent and carries a populated phase.
+        remounted.reduce(UsageChartInspectionUpdate(
+            key: key,
+            resetEpoch: resetEpoch,
+            generation: 5,
+            phase: .resolvedPopulated(model),
+            authority: .authoritativeEmpty
+        ))
+        XCTAssertNil(remounted.acceptedModel)
+    }
+
+    func testUnknownAuthorityDoesNotCrossProviderWindowOrAccountIdentity() throws {
+        let base = Date(timeIntervalSince1970: 1_800_000_000)
+        let oldWindow = usageWindow(base: base)
+        let oldAnalytics = makeAnalyticsSnapshot(
+            base: base,
+            activityValues: [(0, 0.20), (3_600, 0.30)]
+        )
+        let oldProvider = makeProviderSnapshot(base: base, window: oldWindow)
+        let oldKey = makeDatasetKey(oldProvider, oldAnalytics, oldWindow)
+        let oldModel = UsageProjectionDisplayModel(analytics: oldAnalytics, window: oldWindow)
+        let oldEpoch = UsageChartResetEpoch.boundary(oldWindow.resetAt!)
+
+        var state = UsageChartInspectionState()
+        state.reduce(UsageChartInspectionUpdate(
+            key: oldKey,
+            resetEpoch: oldEpoch,
+            generation: 1,
+            phase: .resolvedPopulated(oldModel),
+            authority: .observed
+        ))
+        state.reduce(UsageChartInspectionUpdate(
+            key: oldKey,
+            resetEpoch: oldEpoch,
+            generation: 2,
+            phase: .resolvedAuthoritativeEmpty,
+            authority: .authoritativeEmpty
+        ))
+
+        let newWindow = usageWindow(base: base, id: "seven_day", durationMinutes: 10_080)
+        let newAnalytics = makeAnalyticsSnapshot(
+            base: base,
+            activityValues: [(0, 0.40)],
+            provider: .claude,
+            windowID: "seven_day"
+        )
+        let newProvider = makeProviderSnapshot(
+            base: base,
+            provider: .claude,
+            window: newWindow
+        )
+        let newKey = makeDatasetKey(newProvider, newAnalytics, newWindow)
+        let newModel = UsageProjectionDisplayModel(analytics: newAnalytics, window: newWindow)
+
+        // The new provider/window must not inherit Codex's authoritative-empty
+        // marker when the packet omits an authority field.
+        state.reduce(UsageChartInspectionUpdate(
+            key: newKey,
+            resetEpoch: .boundary(newWindow.resetAt!),
+            generation: 3,
+            phase: .resolvedPopulated(newModel)
+        ))
+        XCTAssertEqual(state.presentationAuthority, .unknown)
+        XCTAssertEqual(state.acceptedModel?.revisionID, newModel.revisionID)
+
+        let accountProvider = makeProviderSnapshot(
+            base: base,
+            accountLabel: "Claude secondary account",
+            provider: .claude,
+            window: newWindow
+        )
+        let accountKey = makeDatasetKey(accountProvider, newAnalytics, newWindow)
+        state.reduce(UsageChartInspectionUpdate(
+            key: accountKey,
+            resetEpoch: .boundary(newWindow.resetAt!),
+            generation: 4,
+            phase: .resolvedPopulated(newModel)
+        ))
+        XCTAssertEqual(state.presentationAuthority, .unknown)
+        XCTAssertEqual(state.acceptedModel?.revisionID, newModel.revisionID)
+    }
+
+    func testUsageEffectiveDomainClampsContractedViewportAndEnforcesMinimum() throws {
+        let base = Date(timeIntervalSince1970: 1_800_000_000)
+        let viewport = try XCTUnwrap(
+            UsageChartInspectionViewport(
+                start: base.addingTimeInterval(-3_600),
+                end: base.addingTimeInterval(7_200)
+            )
+        )
+        let contracted = try XCTUnwrap(UsageChartEffectiveDomain.range(
+            earliest: base.addingTimeInterval(1_800),
+            latest: base.addingTimeInterval(3_600),
+            viewport: viewport
+        ))
+        XCTAssertEqual(contracted.lowerBound, base.addingTimeInterval(1_800))
+        XCTAssertEqual(contracted.upperBound, base.addingTimeInterval(3_600))
+
+        let shortViewport = try XCTUnwrap(
+            UsageChartInspectionViewport(
+                start: base.addingTimeInterval(1_800),
+                end: base.addingTimeInterval(1_830)
+            )
+        )
+        let minimum = try XCTUnwrap(UsageChartEffectiveDomain.range(
+            earliest: base.addingTimeInterval(1_800),
+            latest: base.addingTimeInterval(3_600),
+            viewport: shortViewport
+        ))
+        XCTAssertEqual(
+            minimum.upperBound.timeIntervalSince(minimum.lowerBound),
+            UsageChartEffectiveDomain.minimumDuration,
+            accuracy: 0.0001
+        )
+        XCTAssertEqual(minimum.lowerBound, base.addingTimeInterval(1_800))
+        XCTAssertLessThanOrEqual(minimum.upperBound, base.addingTimeInterval(3_600))
+    }
+
+    func testUsageEffectiveDomainKeepsShortAndSingletonModelsTruthful() throws {
+        let base = Date(timeIntervalSince1970: 1_800_000_000)
+        let short = try XCTUnwrap(UsageChartEffectiveDomain.range(
+            earliest: base,
+            latest: base.addingTimeInterval(30),
+            viewport: .automatic
+        ))
+        XCTAssertEqual(short.lowerBound, base)
+        XCTAssertEqual(short.upperBound, base.addingTimeInterval(30))
+
+        let singleton = try XCTUnwrap(UsageChartEffectiveDomain.range(
+            earliest: base,
+            latest: base,
+            viewport: .automatic
+        ))
+        XCTAssertEqual(singleton.upperBound, base)
+        XCTAssertEqual(
+            singleton.upperBound.timeIntervalSince(singleton.lowerBound),
+            UsageChartEffectiveDomain.minimumDuration,
+            accuracy: 0.0001
+        )
+        XCTAssertLessThanOrEqual(singleton.upperBound, base)
+    }
+
     private func inspectionModel(base: Date, activityValues: [(TimeInterval, Double)], estimateOffset: TimeInterval? = nil) -> UsageProjectionDisplayModel {
         UsageProjectionDisplayModel(analytics: makeAnalyticsSnapshot(base: base, activityValues: activityValues, estimateOffset: estimateOffset), window: usageWindow(base: base))
     }

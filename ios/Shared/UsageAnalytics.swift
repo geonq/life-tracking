@@ -155,6 +155,36 @@ public enum UsageHistoryError: Error, Equatable, Sendable {
     case revisionOverflow
 }
 
+/// Stable identity for one provider/window presentation surface. Only the
+/// gateway's canonical window IDs belong in durable authority metadata.
+public struct UsagePresentationScope: Codable, Equatable, Hashable, Sendable {
+    public static let supportedWindowIDs = ["five_hour", "seven_day"]
+
+    public let provider: Provider
+    public let windowID: String
+
+    public init(provider: Provider, windowID: String) {
+        self.provider = provider
+        self.windowID = windowID
+    }
+
+    public var id: String { "\(provider.rawValue):\(windowID)" }
+
+    public var isValid: Bool {
+        Self.supportedWindowIDs.contains(windowID)
+    }
+
+    public static func canonical(provider: Provider, windowID: String) -> Self? {
+        let canonicalID: String
+        switch windowID {
+        case "five_hour", "5h": canonicalID = "five_hour"
+        case "seven_day", "7d": canonicalID = "seven_day"
+        default: return nil
+        }
+        return Self(provider: provider, windowID: canonicalID)
+    }
+}
+
 public enum UsageHistoryAppendResult: Equatable, Sendable {
     case accepted(revision: Int)
     case replay(revision: Int)
@@ -179,10 +209,17 @@ public struct UsageHistoryArchive: Codable, Equatable, Sendable {
     public let entries: [UsageHistoryEntry]
     public let idempotency: [UsageHistoryIdempotencyRecord]
     public let tombstones: [UsageHistoryTombstone]
+    public let authoritativeEmptyScopes: [UsagePresentationScope]
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, domain, authority, revision, bodyDigest, entries, idempotency, tombstones
+        case authoritativeEmptyScopes
+    }
 
     public init(revision: Int = 0, entries: [UsageHistoryEntry] = [],
                 idempotency: [UsageHistoryIdempotencyRecord] = [],
-                tombstones: [UsageHistoryTombstone] = []) {
+                tombstones: [UsageHistoryTombstone] = [],
+                authoritativeEmptyScopes: [UsagePresentationScope] = []) {
         self.schemaVersion = 1
         self.domain = "usage"
         self.authority = "local-observation-cache"
@@ -191,6 +228,42 @@ public struct UsageHistoryArchive: Codable, Equatable, Sendable {
         self.entries = entries
         self.idempotency = idempotency
         self.tombstones = tombstones
+        self.authoritativeEmptyScopes = authoritativeEmptyScopes
+    }
+
+    public init(from decoder: Decoder) throws {
+        try rejectUnknownLifeOSKeys(decoder, allowed: [
+            "schemaVersion", "domain", "authority", "revision", "bodyDigest", "entries",
+            "idempotency", "tombstones", "authoritativeEmptyScopes"
+        ])
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        domain = try container.decode(String.self, forKey: .domain)
+        authority = try container.decode(String.self, forKey: .authority)
+        revision = try container.decode(Int.self, forKey: .revision)
+        bodyDigest = try container.decode(String.self, forKey: .bodyDigest)
+        entries = try container.decode([UsageHistoryEntry].self, forKey: .entries)
+        idempotency = try container.decode([UsageHistoryIdempotencyRecord].self, forKey: .idempotency)
+        tombstones = try container.decode([UsageHistoryTombstone].self, forKey: .tombstones)
+        // The field was added after the first archive shape. Missing metadata
+        // is the old archive's unknown state, not an authoritative empty result.
+        authoritativeEmptyScopes = try container.decodeIfPresent(
+            [UsagePresentationScope].self,
+            forKey: .authoritativeEmptyScopes
+        ) ?? []
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(domain, forKey: .domain)
+        try container.encode(authority, forKey: .authority)
+        try container.encode(revision, forKey: .revision)
+        try container.encode(bodyDigest, forKey: .bodyDigest)
+        try container.encode(entries, forKey: .entries)
+        try container.encode(idempotency, forKey: .idempotency)
+        try container.encode(tombstones, forKey: .tombstones)
+        try container.encode(authoritativeEmptyScopes, forKey: .authoritativeEmptyScopes)
     }
 
     public func validated(now: Date = .now) throws -> UsageHistoryArchive {
@@ -202,6 +275,7 @@ public struct UsageHistoryArchive: Codable, Equatable, Sendable {
               entries.count <= UsageHistoryLedger.maximumSamples,
               idempotency.count <= UsageHistoryLedger.maximumIdempotencyRecords,
               tombstones.count <= UsageHistoryLedger.maximumTombstones,
+              authoritativeEmptyScopes.count <= UsageHistoryLedger.maximumAuthoritativeEmptyScopes,
               bodyDigest == UsageHistoryDigest.entries(entries) else {
             throw UsageHistoryError.archiveInvalid
         }
@@ -229,6 +303,12 @@ public struct UsageHistoryArchive: Codable, Equatable, Sendable {
                 throw UsageHistoryError.archiveInvalid
             }
         }
+        var emptyScopes = Set<UsagePresentationScope>()
+        for scope in authoritativeEmptyScopes {
+            guard scope.isValid, emptyScopes.insert(scope).inserted else {
+                throw UsageHistoryError.archiveInvalid
+            }
+        }
         return self
     }
 }
@@ -241,6 +321,7 @@ public struct UsageHistoryLedger: Equatable, Sendable {
     public static let maximumSamples = 500
     public static let maximumIdempotencyRecords = 10_000
     public static let maximumTombstones = 10_000
+    public static let maximumAuthoritativeEmptyScopes = Provider.allCases.count * 2
     public static let maximumRevision = Int.max
     public static let maximumClockSkew: TimeInterval = 5
     public static let maximumAge: TimeInterval = 30 * 24 * 60 * 60
@@ -250,12 +331,14 @@ public struct UsageHistoryLedger: Equatable, Sendable {
     public private(set) var revision: Int
     public private(set) var idempotency: [UsageHistoryIdempotencyRecord]
     public private(set) var tombstones: [UsageHistoryTombstone]
+    public private(set) var authoritativeEmptyScopes: Set<UsagePresentationScope>
 
     public init() {
         entries = []
         revision = 0
         idempotency = []
         tombstones = []
+        authoritativeEmptyScopes = []
     }
 
     public init(archive: UsageHistoryArchive, now: Date = .now) throws {
@@ -268,13 +351,30 @@ public struct UsageHistoryLedger: Equatable, Sendable {
         revision = archive.revision
         idempotency = archive.idempotency
         tombstones = archive.tombstones
+        authoritativeEmptyScopes = Set(archive.authoritativeEmptyScopes)
     }
 
     public var isEmpty: Bool { entries.isEmpty }
 
     public func archive() -> UsageHistoryArchive {
         UsageHistoryArchive(revision: revision, entries: entries,
-                            idempotency: idempotency, tombstones: tombstones)
+                            idempotency: idempotency, tombstones: tombstones,
+                            authoritativeEmptyScopes: authoritativeEmptyScopes.sorted { $0.id < $1.id })
+    }
+
+    public mutating func setAuthoritativeEmptyScopes(
+        _ scopes: Set<UsagePresentationScope>
+    ) throws {
+        guard scopes.count <= Self.maximumAuthoritativeEmptyScopes,
+              scopes.allSatisfy(\.isValid) else {
+            throw UsageHistoryError.archiveInvalid
+        }
+        guard scopes != authoritativeEmptyScopes else { return }
+        guard revision < Self.maximumRevision else {
+            throw UsageHistoryError.revisionOverflow
+        }
+        authoritativeEmptyScopes = scopes
+        revision += 1
     }
 
     public mutating func append(_ incoming: [UsageHistoryEntry], idempotencyKey: String,
@@ -340,7 +440,8 @@ public struct UsageHistoryLedger: Equatable, Sendable {
             revision: nextRevision,
             entries: nextEntries,
             idempotency: nextIdempotency,
-            tombstones: tombstones
+            tombstones: tombstones,
+            authoritativeEmptyScopes: authoritativeEmptyScopes.sorted { $0.id < $1.id }
         )
         let encoded = try JSONEncoder.lifeOS.encode(prospective)
         guard encoded.count <= Self.maximumArchiveBytes else { throw UsageHistoryError.archiveTooLarge }

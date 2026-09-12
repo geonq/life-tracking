@@ -873,27 +873,30 @@ struct LifeOSMacRootView: View {
     }
 
     private func usageDetail(interactive: Bool) -> some View {
-        UsageView(
-            snapshots: usesVisualFixtures ? DemoDataProvider.providers : usageCoordinator.providers,
-            analytics: usesVisualFixtures ? DemoUsageAnalytics.snapshots : usageCoordinator.analytics,
-            state: usesVisualFixtures ? .demo : usageCoordinator.state,
+        let usagePacket = usageCoordinator.presentationPacket
+        return UsageView(
+            snapshots: usesVisualFixtures ? DemoDataProvider.providers : usagePacket.providers,
+            analytics: usesVisualFixtures ? DemoUsageAnalytics.snapshots : usagePacket.analytics,
+            state: usesVisualFixtures ? .demo : usagePacket.loadState,
             refreshAction: usesVisualFixtures ? nil : { await usageCoordinator.refresh() },
             onBack: interactive ? { select(.home) } : nil,
-            onOpenSettings: interactive ? { navigate(to: .settings) } : nil
+            onOpenSettings: interactive ? { navigate(to: .settings) } : nil,
+            presentationPacket: usesVisualFixtures ? nil : usagePacket
         )
     }
 
     private func overviewDetail(for route: LifeOSMacRouteSnapshot, interactive: Bool) -> some View {
+        let usagePacket = usageCoordinator.presentationPacket
         let overviewSnapshot: OverviewSnapshot = usesVisualFixtures
             ? DemoDataProvider.overview
             : OverviewSnapshot.production(clipper: clipperCoordinator.snapshot)
         let usageSnapshots: [ProviderSnapshot] = usesVisualFixtures
             ? DemoDataProvider.providers
-            : usageCoordinator.providers
+            : usagePacket.providers
         let usageAnalytics: [UsageAnalyticsSnapshot] = usesVisualFixtures
             ? DemoUsageAnalytics.snapshots
-            : usageCoordinator.analytics
-        let usageState: UsageLoadState = usesVisualFixtures ? .demo : usageCoordinator.state
+            : usagePacket.analytics
+        let usageState: UsageLoadState = usesVisualFixtures ? .demo : usagePacket.loadState
         let clipperState: ClipperLoadState = usesVisualFixtures ? .demo : clipperCoordinator.state
         let financeSummary: FinanceSummary? = usesVisualFixtures ? nil : financeCoordinator.summary
         let financeState: FinanceLoadState = usesVisualFixtures ? .demo : financeCoordinator.state
