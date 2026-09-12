@@ -2,62 +2,52 @@
 
 Updated 2026-09-12 Europe/Berlin.
 
-Current source checkpoint: `8c2c097` on `lifeos-foundation-checkpoint-20260812`;
-the branch push succeeded and the coordination refresh follows it. Final
-Astra Medium source security, shared foundation, ChartKit/Usage, Calendar
-density, and Usage presentation reviews are GREEN.
-Release status remains pending external gates.
+Release state: **NO-GO**.
 
-## Active gates
+## Critical path
 
-1. Complete remaining screen visual batches with bounded Astra reviews.
-2. Complete bounded Windows recovery, candidate install, standalone runtime,
-   protected readback, Tailscale Serve, restart recovery, and health checks on
-   `domke@tailscaleip`. Latest read-only SSH reached `geonqserver`; the new
-   services are not installed, no expected listener was reported, and only
-   `LifeOSAPIStaging` and `LifeOSSyncServer` scheduled tasks were present.
-3. Complete real Enable Banking consent/readback and one real Trade Republic
-   import. Keep missing-provider states truthful.
-4. Exercise iPhone 17 HealthKit, Zepp sync, morning refresh and USB Shortcuts,
-   and seven-day Personal Team signing renewal.
-5. Restore/verify CoreSimulator and capture Mac/iPhone visual, gesture,
-   widget, and animation evidence, including compact text, transparent
-   grey-wallpaper widgets, calendar scroll/pinch, sheets, hover, and route
-   reversal.
-6. Resolve the Obsidian graph/mind-map feasibility and storage decision in
-   GitHub issue #2. Do not mark it complete without evidence.
+1. Implement a bounded AppKit route host/reducer.
+2. Implement and wire a coherent Usage packet/reducer.
+3. Obtain Astra review of both bounded UI changes.
+4. Run real target builds/tests and runtime visual checks.
+5. Complete Windows recovery, fresh install, resume/recovery, listener and
+   health verification, Enable Banking readback, and Tailscale Serve readback.
+6. Complete final security and product gates.
 
-7. Deliver signing automation or document the operator path explicitly:
-   current App Intents report USB/reauthentication as manual/unavailable and
-   `scripts/install_personal_device.sh` is absent.
+## Verified checkpoint
 
-## Completed local verification
+- Clean branch `lifeos-foundation-checkpoint-20260812`; HEAD and origin are
+  `e919bed`, `Fix recovery success stream output`.
+- Windows source suite with loopback permission: **61 passed, 1 skipped, 0
+  failed**. The single skip is Windows PowerShell 5.1 unavailable on Mac.
+  `Restore-ManifestArtifacts` success-stream values are suppressed at four
+  call sites; Astra Medium Windows review is **GREEN**.
+- Remote recovery is **NOT complete**. After the stopped recovery attempt
+  (memory growth/stall), journal and backup were retained. Manual restoration
+  of captured legacy state left replacement `LifeOSAPI` stopped,
+  `LifeOSGateway` absent, `LifeOSSyncServer` Ready/enabled, and no replacement
+  listeners verified.
+- Native UI patch is **NOT merged** and is reverted to clean baseline. Astra
+  Medium was **RED** for recursive live-destination rehosting/unbounded
+  composition, Usage identity/reset defects, missing shell Home-detail anchor
+  capture, and inadequate production sequence tests.
 
-- Repository source validator: **163 passed**, **47 subtests passed**.
-- Gateway: **549 passed**, with two dependency deprecation warnings.
-- API: **141 tests passed** and typecheck passed.
-- Contracts: **198 tests passed** and build passed.
-- Final security review did not rerun `npm audit`; advisory status is
-  unrefreshed.
-- Unsigned `LifeOSMacLogic`, `LifeOSLogic`, direct `LifeOSWidget` iOS target,
-  and `LifeOSPrereleaseIOS` passed; macOS logic XCTest passed **54 tests**.
-- The `LifeOSWidgets` macOS-only destination list is a scheme metadata issue,
-  not a source failure.
-- Chart tranche: focused iPhone 17 suites passed **56 tests with 0 failures**
-  (17 chart, 39 design); unsigned `LifeOSMac` build passed at `6713de1`.
-- Calendar authority now rejects more than 1,024 items, matching native. An
-  oversized persisted snapshot fails closed without truncating raw state.
-- Calendar density review: Astra Medium GREEN with no findings; `git diff
-  --check` and the serialized universal unsigned `LifeOSMac` build passed at
-  `b05c4fb`. The contract is 40/64/120 pt with Mac pinch as primary.
+## Explicitly unverified
 
-## Constraints
+Do not claim live finance/provider data, Zepp workout accuracy/sync, Obsidian
+mind-map behavior, real AppKit pixel continuity, physical iPhone/widget
+behavior, signing renewal shortcuts, or final security GREEN until separately
+evidenced.
 
-Use live production data, serialize native builds with one compiler job, keep
-coordination files below 200 lines, use disjoint bounded worker scopes, and
-close workers/processes after use. Keep fixtures explicit and isolated. Do not
-add a Claude usage watcher, overnight supervisor, demo fallback, generic
-assistant/advisor, or unrelated conversational AI. Calorie-photo AI only.
+Preserve prior GREEN source/security tranches and design references, including
+shared foundation `6751bb5`, ChartKit/Usage `6713de1`, empty-state/icon/tax
+privacy `82b4eb1`, Calendar density `b05c4fb`, Usage presentation `8c2c097`,
+and source security review `eb9ca620…`.
 
-Do not claim Windows runtime, provider, physical-device, visual, CoreSimulator,
-or Obsidian completion from source checks alone.
+Rejected artifacts:
+
+- `/private/tmp/lifeos-rejected-ui-e919bed.patch`
+- `/private/tmp/lifeos-usage-reducer-unintegrated-e919bed.patch`
+
+No generic conversational assistant/advisor/AI or Claude usage watcher is part
+of the product; calorie-photo tracking is the only permitted in-app AI flow.

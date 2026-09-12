@@ -2,103 +2,43 @@
 
 Updated 2026-09-12 Europe/Berlin.
 
-- Overall: **source security gate GREEN; shared visual foundation GREEN at
-  `6751bb5`; ChartKit/Usage GREEN at `6713de1`; empty-state/icon/tax tranche
-  GREEN at `82b4eb1`; Calendar density GREEN at `b05c4fb`; Usage presentation
-  GREEN at `8c2c097`; release remains
-  NO-GO pending operational, provider, device, and visual evidence**.
-- Final Astra Medium review at `eb9ca620…` reproduced and cleared the
-  versioned-tax-record evidence bypass. No source-code blocker remains under
-  the review criteria.
-- Branch: `lifeos-foundation-checkpoint-20260812`.
-- Source code checkpoint: `8c2c097`; this coordination refresh follows that
-  source commit on the same branch. Astra's final
-  foundation re-review is GREEN at `6751bb5`, and the ChartKit/Usage review is
-  GREEN at `6713de1`. Both responsive containers own their builder content;
-  chart gaps, selection, and bounded rendering are covered.
-- Latest reviewed commit: `8c2c097`; its source review and universal unsigned
-  `LifeOSMac` build are GREEN. CoreSimulatorService is unavailable for the
-  focused native rerun, and the PR API refresh is pending network access.
-- No Claude usage watcher, overnight supervisor, generic assistant, or
-  conversational AI is in the product. Calorie-photo AI remains allowed.
+- Overall release state: **NO-GO**.
+- Branch `lifeos-foundation-checkpoint-20260812` is clean; HEAD and origin are
+  `e919bed`, `Fix recovery success stream output`.
+- Windows source suite with loopback permission: **61 passed, 1 skipped, 0
+  failed**. The skip is only because Windows PowerShell 5.1 is unavailable on
+  Mac. The patch suppresses real `Restore-ManifestArtifacts` success-stream
+  values at four call sites. Astra Medium Windows review: **GREEN**.
+- Remote Windows recovery: **NOT complete**. Recovery stopped after memory
+  growth/stall; journal and backup retained. Manual restoration of captured
+  legacy state left replacement `LifeOSAPI` present but stopped,
+  `LifeOSGateway` absent, `LifeOSSyncServer` Ready/enabled, and no verified
+  replacement listeners. Fresh install, resume/recovery, listener/health,
+  Enable Banking, and Tailscale Serve readback are **NO-GO**.
+- Native UI patch: **NOT merged**; reverted to clean baseline. Astra Medium
+  review: **RED** for recursive live-destination rehosting/unbounded
+  composition, Usage identity/reset defects, missing shell Home-detail anchor
+  capture, and inadequate production sequence tests.
+- Rejected UI diff: `/private/tmp/lifeos-rejected-ui-e919bed.patch`.
+  Unintegrated Usage reducer experiment:
+  `/private/tmp/lifeos-usage-reducer-unintegrated-e919bed.patch`.
 
-## Completed local work
+## Preserved GREEN source/design tranches
 
-1. Shared visual system: compact SF Pro/system type, semantic icons, distinct
-   accents, responsive cards, widget contrast, and restrained motion. The
-   shared foundation is reviewed GREEN; screen-level visual acceptance remains
-   open.
-2. Calendar: authenticated pairing/sync, bounded validation, mobile scrolling,
-   paging/editing, minute-precise restoration, bottom-edge clamping, and Mac
-   trackpad magnification. The density contract is 40/64/120 pt with a
-   secondary preset menu and pinch-first Mac interaction. Gateway and native
-   maxima now both equal 1,024; oversized persisted state fails closed without
-   truncation.
-3. Finance/Fitness/Nutrition/Tax: live-source contracts, workout tracking,
-   durable imports/receipts, privacy boundaries, atomic stores, and Shortcut
-   intents.
-4. API/gateway/Windows source: bounded reads/bodies, Host/auth checks, secret
-   handling, executable resolution, ACL/recovery/staging rules, and bounded
-   protected-storage concurrency. Calendar image structure/CRC validation,
-   native-shaped TaxDocument/index validation with privacy-safe list
-   responses, and bounded usage idempotency replay are also implemented.
-5. Navigation/state: retained module state, stable Mac module identity, and
-   reversal-aware transitions.
-6. Usage chart: real cadence segmentation, whole-segment render budgets,
-   cached pointer selection, duplicate authority, and singleton visibility.
-7. Truthful unavailable panels, compact responsive supporting layout, settings
-   action wiring, platform icon geometry, and context-aware tax redaction.
-8. Usage presentation hierarchy: compact responsive ring/band geometry,
-   accessibility-safe fallback, metadata-sized chart toolbar, and flat
-   supplementary sections.
+Shared foundation `6751bb5`; ChartKit/Usage `6713de1`; empty-state/icon/tax
+privacy `82b4eb1`; Calendar density `b05c4fb`; Usage presentation `8c2c097`;
+final source security review `eb9ca620…`. Preserve their existing design
+references and source findings. They do not establish live finance/provider
+data, Zepp accuracy/sync, Obsidian mind-map, real AppKit pixel continuity,
+physical iPhone/widget behavior, signing renewal shortcuts, or final security
+GREEN.
 
-## Verification
+## Critical path
 
-- Repository source validator: **163 passed**, **47 subtests passed**.
-- Gateway: **549 passed**, with two dependency warnings.
-- API: **141 tests passed** and typecheck passed.
-- Contracts: **198 tests passed** and build passed.
-- The final review did not rerun `npm audit`; advisory status is unrefreshed.
-- Unsigned macOS logic, unsigned iOS logic, direct iOS widget target, and
-  `LifeOSPrereleaseIOS` passed. macOS logic XCTest passed **54 tests**.
-- `LifeOSWidgets` exposes only macOS destinations; this is scheme metadata.
-- Focused iPhone 17 chart/design suites: **56 tests, 0 failures** (17 chart,
-  39 design); unsigned `LifeOSMac` build passed after `6713de1`.
-- The `82b4eb1` universal unsigned `LifeOSMac` build passed from isolated
-  DerivedData. Standalone Swift privacy probes passed, including partial
-  identifier/amount overlap and JSON round trips.
-- Calendar density: Astra Medium found no HIGH/MEDIUM/LOW issue; `git diff
-  --check` passed and the serialized universal unsigned `LifeOSMac` build
-  passed at `b05c4fb`.
-- Focused native tests could not rerun because CoreSimulatorService and
-  `simdiskimaged` are unavailable on this Mac.
+Implement bounded AppKit route host/reducer; implement and wire coherent Usage
+packet/reducer; obtain Astra review; run real target builds/tests/runtime
+visual checks; complete Windows recovery/install/health verification; then
+complete final security and product gates.
 
-## Blocking acceptance
-
-- Complete the remaining screen tranches with an Astra review after each
-  bounded batch. ChartKit/Usage and Calendar density source work are GREEN;
-  runtime visual acceptance remains open.
-- Preserve the Astra source verdict in the release record; it does not replace
-  operational or device evidence.
-- Candidate synchronization and PR state refresh.
-- Windows recovery/install/runtime/Tailscale Serve/readback. Latest read-only
-  SSH reached `geonqserver`; the new services are not installed, no expected
-  listener was reported, and only `LifeOSAPIStaging` and `LifeOSSyncServer`
-  scheduled tasks were present.
-- Real Enable Banking consent/readback and Trade Republic import.
-- Physical iPhone 17 HealthKit/Zepp/Shortcut/USB behavior and seven-day
-  signing renewal.
-- Signing automation is still open: App Intents report USB/reauthentication as
-  manual/unavailable and `scripts/install_personal_device.sh` is absent.
-- Mac/iPhone visual, gesture, widget, and animation evidence; CoreSimulator
-  acceptance remains unrecorded.
-- Obsidian graph/mind-map feasibility and storage decision in issue #2.
-- Two delegated Usage/Windows tasks stalled and were closed without changes;
-  only completed worker output is counted in the source checkpoints.
-
-## Operating rule
-
-Do not mark this phase complete from automated source checks alone. Keep each
-coordination file under 200 lines, serialize native builds with one compiler
-job, use live data, keep visual fixtures isolated, and stop completed workers,
-builds, tests, and temporary servers before starting another.
+No generic conversational assistant/advisor/AI or usage watcher is part of the
+product. Calorie-photo tracking is the only permitted in-app AI flow.

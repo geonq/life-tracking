@@ -2,194 +2,73 @@
 
 Updated 2026-09-12 Europe/Berlin.
 
-## Current verdict
+## Release state
 
-The source security checkpoint is **GREEN** after the final Astra Medium
-review. The shared visual foundation is **GREEN** at `6751bb5` after Astra
-re-reviewed the macOS sheet repair, public responsive builder composition,
-hosted-view coverage, and interaction layering. Release remains pending
-operational, provider, device, and visual acceptance. Do not infer
-runtime/device acceptance from source checks.
+**NO-GO.** Prior source, security, and design tranches remain GREEN where
+recorded below, but operational recovery, installation, health, provider,
+visual, and device evidence is incomplete.
 
-The ChartKit/Usage source tranche is also **GREEN** at `6713de1` after three
-Astra review cycles. It preserves real cadence gaps, bounded rendering,
-cached selection, duplicate-source authority, and singleton observations.
+## Git and source checkpoint
 
-The truthful empty-state, icon, and tax privacy tranche is **GREEN** at
-`82b4eb1` after Astra independently reviewed the final ten-file diff. It adds
-compact unavailable panels and settings wiring, aligns the fitness symbol and
-platform icon geometry, and closes the partial monetary-span identifier leak.
+- Branch `lifeos-foundation-checkpoint-20260812` is clean.
+- HEAD and `origin/lifeos-foundation-checkpoint-20260812` are `e919bed`:
+  `Fix recovery success stream output`.
+- The Windows source suite, run with loopback permission, passed **61 tests**,
+  skipped **1** because Windows PowerShell 5.1 is unavailable on Mac, and had
+  **0 failures**. The source fix suppresses the real
+  `Restore-ManifestArtifacts` success-stream values at all four call sites.
+  Astra Medium Windows review: **GREEN** for this patch.
 
-The Calendar density tranche is **GREEN** at `b05c4fb` after Astra Medium
-reviewed the complete three-file diff. It establishes a 40/64/120 pt density
-contract and keeps Mac trackpad pinch as the primary interaction. Runtime
-visual confirmation of the control treatment remains open.
+## Remote Windows recovery state
 
-The Usage presentation tranche is **GREEN** at `8c2c097` after Astra Medium
-re-reviewed the repaired diff. It applies the 112pt summary band, 96pt/8pt
-trailing ring with a 72pt narrow fallback, accessibility-safe ring omission,
-metadata-sized chart controls, flat supplementary sections, and no unsourced
-Suggested pace/Runway rows. The serialized unsigned universal `LifeOSMac`
-build passed; runtime visual acceptance remains open.
+Remote recovery is **NOT complete**. The prior recovery was stopped after
+memory growth/stall; the journal and backup were retained. After manually
+restoring the captured legacy state, the contained state is:
 
-Do not claim a production release, remote backend availability, or device
-acceptance from the local source results. No generic conversational
-assistant/advisor/AI product exists. Calorie-photo tracking is the only
-permitted in-app AI flow. No Claude scheduling or usage watcher is part of the
-product.
+- replacement `LifeOSAPI` exists but is stopped;
+- `LifeOSGateway` is absent;
+- `LifeOSSyncServer` is Ready and enabled;
+- no replacement listeners were verified.
 
-## Git and review state
+Fresh install, resume/recovery completion, listener and health readback,
+Enable Banking, and Tailscale Serve readback remain **NO-GO**.
 
-- Branch: `lifeos-foundation-checkpoint-20260812`.
-- Source checkpoint: `8c2c097` (`Polish Usage hierarchy and chart controls`).
-- Coordination state is tracked in these files at the current branch HEAD;
-  this refresh follows source checkpoint `8c2c097`.
-- Shared-foundation checkpoint: `6751bb5` (`Prove responsive builder content is preserved`).
-- Latest reviewed tranche: `8c2c097` (`Polish Usage hierarchy and chart controls`).
-- The branch push for `8c2c097` succeeded. PR #1 was previously recorded as
-  open/draft/CLEAN; GitHub API refresh is pending when connectivity returns.
-  The source code through `8c2c097` is included; the latest
-  security checkpoints are `b82f23b` (fail closed on versioned tax evidence),
-  `2fb2b9b` (native privacy test typing), and `eb9ca62` (bounded native tax
-  lookahead). Keep these small, attributable commits when synchronizing.
-- Recent source checkpoints include `ceddd2b` (design validator contract),
-  `c814299` (widget typography compile fix), `544633b` (finance detail return),
-  `ebbfff2` (gateway/native calendar-limit alignment), `f425b2a` (bounded
-  usage idempotency replay journal), and `1d79a13` (calendar image and tax
-  document boundary hardening). Preserve small, attributable commits when
-  synchronization is later authorized.
+## Native UI state
 
-## Implemented source slices
+The native UI patch is **NOT merged** and is reverted to the clean baseline.
+Astra Medium review was **RED** for recursive live-destination rehosting and
+unbounded composition, Usage identity/reset defects, missing shell Home-detail
+anchor capture, and inadequate production sequence tests.
 
-- Compact SF Pro/system typography, semantic SF Symbols, separated accents,
-  responsive surfaces, widget contrast, and restrained route/microinteraction
-  behavior.
-- Calendar scrolling, minute-precise restoration, paging/editing, Mac
-  trackpad magnification, pinch-first 40/64/120 pt density, explicit pairing,
-  authenticated payloads, bounded decoding, timestamp validation, and
-  fail-closed oversized-state handling.
-- Finance live-source contracts, manual Trade Republic import, durable
-  reconciliation, and truthful unavailable/provenance states.
-- Fitness recovery/biology/nutrition plus local workout templates, exercises,
-  sessions, sets, history, PRs, reports, and bounded HealthKit evidence.
-- Usage charts normalize once per revision, split real telemetry gaps before
-  the render cap, keep derived guides continuous, cache binary-search
-  selection, coalesce duplicates last-source-wins, and retain singleton data.
-- Tax redaction before persistence/evidence, page exclusion from sync,
-  formula-safe CSV export, atomic replacement, and legacy migration.
-- Bounded API/gateway reads, localhost/JSON headers, constant-time secret
-  comparison, explicit Codex executable paths, Windows manifest/ACL/recovery
-  checks, and bounded protected-storage admission.
-- Gateway calendar images now undergo bounded PNG/JPEG structure and CRC
-  validation before publication. Tax metadata follows the native-shaped
-  `TaxDocument` contract, rejects raw page payloads, validates the index, and
-  exposes privacy-safe list responses. Usage idempotency retains a bounded
-  replay window by retiring the oldest keys instead of stopping permanently.
+Rejected artifacts are retained at:
 
-## Security status
+- `/private/tmp/lifeos-rejected-ui-e919bed.patch`
+- `/private/tmp/lifeos-usage-reducer-unintegrated-e919bed.patch`
 
-Known Claude/Astra source findings have local mitigations and regression
-coverage, but the independent release gate is still pending. The gateway
-calendar maximum is exactly 1,024, matching the native limit. Overflow
-requests are rejected before persistence, and an already oversized persisted
-snapshot fails closed without truncating or modifying the raw state. Calendar
-image structure/CRC checks and native-shaped TaxDocument/index checks now
-protect the other affected publication paths. Usage replay remains bounded;
-retired keys may be accepted as new requests while retained keys preserve
-replay and fingerprint-reuse behavior.
+The Usage reducer experiment was unintegrated, reverted, and saved only at the
+second path.
 
-The current native sync boundary uses Tailscale connection identity plus an
-edge capability. The native app does not persist that bearer token; do not
-describe the current transport as a Keychain-stored sync token. Legacy
-credential cleanup and the physical transport still require verification.
+## Preserved GREEN tranches and design references
 
-Final Astra Medium source verdict: **GREEN** at `eb9ca620…`. It independently
-ran the gateway/API suites, reproduced current and legacy raw-evidence cases,
-confirmed authenticated reads fail closed without mutating bytes, and reviewed
-the native, calendar, API, WebSocket, replay, process, and deployment bounds.
-The green verdict does not prove effective Windows ACLs, remote restart
-recovery, live penetration results, or physical-device behavior.
+Preserve the prior GREEN records for the shared visual foundation (`6751bb5`),
+ChartKit/Usage (`6713de1`), empty-state/icon/tax privacy (`82b4eb1`), Calendar
+density (`b05c4fb`), Usage presentation (`8c2c097`), and final source security
+review (`eb9ca620…`). These source results do not prove live finance/provider
+data, Zepp workout accuracy or sync, Obsidian mind-map behavior, real AppKit
+pixel continuity, physical iPhone/widget behavior, signing renewal shortcuts,
+or a final security GREEN gate.
 
-## Verification evidence
+Keep the product boundaries: no generic conversational assistant/advisor/AI;
+calorie-photo tracking is the only permitted in-app AI flow.
 
-- Full repository source validator: **163 passed**, **47 subtests passed**.
-- Gateway: **549 passed**, with two dependency warnings.
-- API: **141 tests passed** and TypeScript typecheck passed.
-- Contracts: **198 tests passed** and build passed.
-- The final security pass did not rerun `npm audit`; advisory status was not
-  refreshed in this checkpoint.
-- Unsigned `LifeOSMacLogic` build, unsigned `LifeOSLogic` build, direct
-  `LifeOSWidget` iOS target, `LifeOSPrereleaseIOS`, and macOS logic XCTest
-  passed; the macOS XCTest result contains **54 passed tests**.
-- Foundation repair evidence: unsigned `LifeOSMac` build passed, and the
-  focused iPhone 17 `LifeOSDesignSystemTests` suite passed **39 tests with
-  0 failures**, including mounted sibling/`ForEach` layout probes.
-- Chart tranche evidence: focused iPhone 17 chart/design suites passed **56
-  tests with 0 failures** (17 chart, 39 design), and unsigned `LifeOSMac`
-  build passed after `6713de1`.
-- The named `LifeOSWidgets` scheme exposes only macOS destinations; that is
-  scheme metadata, not a source failure.
-- The shared-foundation repair through `6751bb5` compiled for unsigned iOS
-  logic and macOS and passed the focused hosted-view suite. Full native XCTest
-  and runtime visual acceptance remain unverified; Mac sheet presentation and
-  resize behavior remain explicit runtime checks.
-- The `82b4eb1` unsigned universal `LifeOSMac` build passed using an isolated
-  `/private/tmp` DerivedData path. Standalone Swift privacy probes passed for
-  text, numeric, Unicode, bounded, long-amount, and partial-overlap cases.
-- Calendar density review passed Astra Medium with no HIGH/MEDIUM/LOW findings;
-  `git diff --check` passed and the serialized universal unsigned `LifeOSMac`
-  build passed at `b05c4fb`.
-- Usage presentation review passed Astra Medium after one RED repair cycle;
-  `git diff --check` and the serialized unsigned universal `LifeOSMac` build
-  passed at `8c2c097`. The build emitted only the known CoreSimulator/
-  `simdiskimaged` diagnostics; no iPhone runtime evidence was inferred.
-- The focused native test rerun is blocked by the current CoreSimulatorService
-  failure (`simdiskimaged` unavailable); do not treat the source GREEN verdict
-  as simulator evidence.
+## Next critical path
 
-## External acceptance gates
-
-- Complete bounded Windows recovery, candidate installation, standalone
-  runtime, ACL/readback, Tailscale Serve, restart recovery, and health checks
-  on `domke@tailscaleip`. The latest read-only SSH check reached `geonqserver`:
-  `LifeOSAPI` and `LifeOSGateway` are not installed, no expected listener was
-  reported, and only `LifeOSAPIStaging` and `LifeOSSyncServer` scheduled tasks
-  were present.
-- Synchronize the candidate and refresh PR state before using the Windows
-  release builder.
-- Complete real Enable Banking consent/readback and one real Trade Republic
-  import; keep missing-provider states truthful.
-- Exercise HealthKit, Zepp sync, morning refresh/USB Shortcuts, and seven-day
-  Personal Team signing renewal on the iPhone 17 and Mac.
-- Signing automation is not complete: `LifeOSAppIntents.swift` reports USB and
-  reauthentication as unavailable/manual, and the checklist's
-  `scripts/install_personal_device.sh` is absent. Treat this as an open
-  deliverable, not a passed device gate.
-- Inspect the Mac UI and iPhone behavior for compact hierarchy, transparent
-  grey-wallpaper widgets, calendar scroll/pinch, sheets, hover, route
-  reversal, and animation quality. CoreSimulator/device evidence is not yet
-  recorded.
-- Obsidian graph/mind-map feasibility remains tracked in GitHub issue #2 and
-  is not silently represented as complete.
-
-## Next serialized queue
-
-1. Reconcile the acceptance ledger and stale active plans against current
-   source/commit evidence; keep source, live, device, visual, and operator
-   claims separate.
-2. Complete bounded Windows recovery,
-   installation, and remote runtime verification.
-3. Complete the remaining screen-level visual tranches with an Astra review
-   after each bounded batch.
-4. Complete provider, physical-device, signing, visual, widget, and
-   CoreSimulator acceptance gates.
-5. Resolve the issue #2 Obsidian/Zepp decisions with evidence before calling
-   the app complete.
-
-Two recent delegated tasks were closed after bounded waits without changes:
-the Usage implementation and Windows audit workers stalled. Peirce's Calendar
-implementation and Halley's Astra review did complete and were integrated.
-Stalled delegations are not counted as progress.
+1. Implement a bounded AppKit route host/reducer.
+2. Implement and wire a coherent Usage packet/reducer.
+3. Run Astra review.
+4. Run real target builds/tests and runtime visual checks.
+5. Complete Windows recovery/install/health verification.
+6. Complete final security and product gates.
 
 Keep this file and the other coordination files below 200 lines. Record new
-external evidence here before marking a gate complete.
+external evidence before changing the release verdict.
