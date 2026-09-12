@@ -8,6 +8,229 @@ import Charts
 // see DemoUsageAnalytics / UsageAnalyticsSnapshot, so this series is omitted rather than
 // fabricated).
 
+// MARK: - Pure inspection reconciliation
+
+/// Identity for one Usage dataset. Observation values and timestamps belong to
+/// revisions; account identity is the existing display label until a stable ID
+/// is available from the source model.
+struct UsageChartDatasetKey: Equatable, Sendable {
+    let provider: Provider
+    let accountScope: String
+    let windowID: String?
+    let durationMinutes: Int?
+    let metric: String
+    let source: String
+    let provenanceClass: DataQuality
+
+    init(
+        provider: Provider,
+        accountScope: String,
+        windowID: String?,
+        durationMinutes: Int?,
+        metric: String,
+        source: String,
+        provenanceClass: DataQuality
+    ) {
+        self.provider = provider
+        self.accountScope = accountScope
+        self.windowID = windowID
+        self.durationMinutes = durationMinutes
+        self.metric = metric
+        self.source = source
+        self.provenanceClass = provenanceClass
+    }
+
+    init(
+        analytics: UsageAnalyticsSnapshot,
+        window: UsageWindow?,
+        accountScope: String,
+        metric: String
+    ) {
+        self.init(
+            provider: analytics.provider,
+            accountScope: accountScope,
+            windowID: window?.id ?? analytics.windowID,
+            durationMinutes: window?.durationMinutes,
+            metric: metric,
+            source: analytics.provenance.source,
+            provenanceClass: analytics.provenance.quality
+        )
+    }
+
+    init(
+        providerSnapshot: ProviderSnapshot,
+        analytics: UsageAnalyticsSnapshot,
+        window: UsageWindow?,
+        metric: String
+    ) {
+        self.init(
+            analytics: analytics,
+            window: window,
+            accountScope: providerSnapshot.accountLabel,
+            metric: metric
+        )
+    }
+}
+
+enum UsageChartResetEpoch: Equatable, Sendable {
+    case unknown
+    case boundary(Date)
+}
+
+/// An inspection viewport is either derived by the chart or an absolute date
+/// interval supplied by the user. Invalid explicit values are normalized to
+/// automatic by the reducer.
+enum UsageChartInspectionViewport: Equatable {
+    case automatic
+    case explicit(start: Date, end: Date)
+
+    init?(start: Date, end: Date) {
+        guard start.timeIntervalSinceReferenceDate.isFinite,
+              end.timeIntervalSinceReferenceDate.isFinite,
+              end > start else {
+            return nil
+        }
+        self = .explicit(start: start, end: end)
+    }
+
+    var absoluteInterval: DateInterval? {
+        guard case let .explicit(start, end) = self,
+              start.timeIntervalSinceReferenceDate.isFinite,
+              end.timeIntervalSinceReferenceDate.isFinite,
+              end > start else {
+            return nil
+        }
+        return DateInterval(start: start, end: end)
+    }
+
+    var interval: DateInterval? { absoluteInterval }
+
+    var validated: Self {
+        absoluteInterval == nil ? .automatic : self
+    }
+}
+
+struct UsageChartInspectionUpdate {
+    enum Phase {
+        case loading
+        case resolvedPopulated(UsageProjectionDisplayModel)
+        case resolvedAuthoritativeEmpty
+        case failed
+    }
+
+    let key: UsageChartDatasetKey
+    let resetEpoch: UsageChartResetEpoch
+    let generation: Int
+    let phase: Phase
+
+    init(
+        key: UsageChartDatasetKey,
+        resetEpoch: UsageChartResetEpoch,
+        generation: Int,
+        phase: Phase
+    ) {
+        self.key = key
+        self.resetEpoch = resetEpoch
+        self.generation = generation
+        self.phase = phase
+    }
+}
+
+/// Pure state transitions for selection and viewport inspection. The existing
+/// chart view can adopt this later without changing its rendering contract.
+struct UsageChartInspectionState {
+    enum Status: Equatable {
+        case loading
+        case resolved
+        case authoritativeEmpty
+        case refreshing
+        case stale
+        case failed
+    }
+
+    private(set) var key: UsageChartDatasetKey?
+    private(set) var resetEpoch: UsageChartResetEpoch?
+    private(set) var generation = 0
+    private(set) var status: Status = .loading
+    private(set) var acceptedModel: UsageProjectionDisplayModel?
+    private(set) var selectedPointID: String?
+    private(set) var viewport: UsageChartInspectionViewport = .automatic
+    private var hasAcceptedUpdate = false
+
+    var model: UsageProjectionDisplayModel? { acceptedModel }
+    var selectedID: String? { selectedPointID }
+    var isRefreshing: Bool { status == .refreshing }
+    var isStale: Bool { status == .stale }
+
+    mutating func reduce(_ update: UsageChartInspectionUpdate) {
+        guard !hasAcceptedUpdate || update.generation >= generation else { return }
+
+        let identityChanged = !hasAcceptedUpdate
+            || key != update.key
+            || resetEpoch != update.resetEpoch
+        hasAcceptedUpdate = true
+        key = update.key
+        resetEpoch = update.resetEpoch
+        generation = update.generation
+
+        if identityChanged {
+            selectedPointID = nil
+            viewport = .automatic
+            acceptedModel = nil
+            installNewIdentity(phase: update.phase)
+            return
+        }
+
+        switch update.phase {
+        case .loading:
+            status = acceptedModel == nil ? .loading : .refreshing
+        case .resolvedPopulated(let model):
+            acceptedModel = model
+            status = .resolved
+            reconcileSelection()
+        case .resolvedAuthoritativeEmpty:
+            acceptedModel = nil
+            selectedPointID = nil
+            status = .authoritativeEmpty
+        case .failed:
+            status = acceptedModel == nil ? .failed : .stale
+        }
+    }
+
+    mutating func select(pointID: String?) {
+        guard let pointID else {
+            selectedPointID = nil
+            return
+        }
+        selectedPointID = acceptedModel?.selectionIndex[pointID] == nil ? nil : pointID
+    }
+
+    mutating func setViewport(_ viewport: UsageChartInspectionViewport) {
+        self.viewport = viewport.validated
+    }
+
+    private mutating func installNewIdentity(phase: UsageChartInspectionUpdate.Phase) {
+        switch phase {
+        case .loading:
+            status = .loading
+        case .resolvedPopulated(let model):
+            acceptedModel = model
+            status = .resolved
+        case .resolvedAuthoritativeEmpty:
+            status = .authoritativeEmpty
+        case .failed:
+            status = .failed
+        }
+    }
+
+    private mutating func reconcileSelection() {
+        guard let selectedPointID else { return }
+        if acceptedModel?.selectionIndex[selectedPointID] == nil {
+            self.selectedPointID = nil
+        }
+    }
+}
+
 struct UsageChartViewport: Equatable {
     var pinnedRangeStart: Date?
     var zoomFactor: Double = 1

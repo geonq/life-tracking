@@ -2,6 +2,266 @@ import XCTest
 @testable import LifeOS
 
 final class LifeOSChartInteractionTests: XCTestCase {
+    func testUsageDatasetKeyUsesOnlyDomainIdentity() {
+        let base = Date(timeIntervalSince1970: 1_800_000_000)
+        let window = usageWindow(base: base)
+        let provider = makeProviderSnapshot(base: base, window: window)
+        let initial = makeAnalyticsSnapshot(base: base, activityValues: [(0, 0.20), (3_600, 0.30)])
+        let key = makeDatasetKey(provider, initial, window)
+
+        let pointRevision = makeAnalyticsSnapshot(
+            base: base.addingTimeInterval(3_600),
+            activityValues: [(0, 0.60), (3_600, 0.80)], observedAt: base
+        )
+        let staleRevision = makeAnalyticsSnapshot(base: base, activityValues: [(0, 0.20)], observedAt: base.addingTimeInterval(-3_600))
+        let unhealthyRevision = makeAnalyticsSnapshot(base: base, activityValues: [(0, 0.20)], connector: .error)
+        XCTAssertNotEqual(initial.activity, pointRevision.activity)
+        XCTAssertNotEqual(initial.activity.map(\.date), pointRevision.activity.map(\.date))
+        XCTAssertNotEqual(initial.provenance.observedAt, staleRevision.provenance.observedAt)
+        XCTAssertNotEqual(initial.provenance.connector, unhealthyRevision.provenance.connector)
+        XCTAssertEqual(initial.provenance.freshness(now: base, staleAfter: 900), .fresh)
+        XCTAssertEqual(staleRevision.provenance.freshness(now: base, staleAfter: 900), .stale)
+        XCTAssertEqual(unhealthyRevision.provenance.freshness(now: base), .unavailable)
+        for revision in [pointRevision, staleRevision, unhealthyRevision] {
+            XCTAssertEqual(key, makeDatasetKey(provider, revision, window))
+        }
+
+        let claudeWindow = usageWindow(base: base)
+        let claudeAnalytics = makeAnalyticsSnapshot(base: base, activityValues: [(0, 0.20)], provider: .claude)
+        let sevenDayWindow = usageWindow(base: base, id: "seven_day", durationMinutes: 300)
+        let sevenDayAnalytics = makeAnalyticsSnapshot(base: base, activityValues: [(0, 0.20)], windowID: "seven_day")
+        let longerWindow = usageWindow(base: base, durationMinutes: 600)
+        let changedKeys = [
+            makeDatasetKey(makeProviderSnapshot(base: base, accountLabel: "Other", window: window), initial, window),
+            makeDatasetKey(makeProviderSnapshot(base: base, provider: .claude, window: claudeWindow), claudeAnalytics, claudeWindow),
+            makeDatasetKey(makeProviderSnapshot(base: base, window: sevenDayWindow), sevenDayAnalytics, sevenDayWindow),
+            makeDatasetKey(provider, initial, longerWindow),
+            makeDatasetKey(provider, makeAnalyticsSnapshot(base: base, activityValues: [(0, 0.20)], source: "Import"), window),
+            makeDatasetKey(provider, makeAnalyticsSnapshot(base: base, activityValues: [(0, 0.20)], quality: .estimated), window),
+            makeDatasetKey(provider, initial, window, metric: "tokens")
+        ]
+        changedKeys.forEach { XCTAssertNotEqual(key, $0) }
+    }
+
+    func testUsageInspectionPreservesSelectionViewportAcrossSameKeyRevisions() throws {
+        let base = Date(timeIntervalSince1970: 1_800_000_000)
+        let key = inspectionKey(base: base)
+        let epoch = UsageChartResetEpoch.boundary(base.addingTimeInterval(14_400))
+        let first = inspectionModel(
+            base: base, activityValues: [(0, 0.20), (3_600, 0.30)], estimateOffset: 7_200
+        )
+        let appended = inspectionModel(
+            base: base, activityValues: [(0, 0.25), (3_600, 0.35), (7_200, 0.45)],
+            estimateOffset: 7_200
+        )
+        var state = UsageChartInspectionState()
+        state.reduce(UsageChartInspectionUpdate(
+            key: key, resetEpoch: epoch, generation: 1, phase: .resolvedPopulated(first)
+        ))
+        let selectedID = try XCTUnwrap(first.selectablePoints.first?.id)
+        state.select(pointID: selectedID)
+        let viewport = try XCTUnwrap(
+            UsageChartInspectionViewport(start: base, end: base.addingTimeInterval(7_200))
+        )
+        state.setViewport(viewport)
+
+        state.reduce(UsageChartInspectionUpdate(
+            key: key, resetEpoch: epoch, generation: 2, phase: .resolvedPopulated(appended)
+        ))
+        XCTAssertEqual(state.acceptedModel?.revisionID, appended.revisionID)
+        XCTAssertEqual(state.acceptedModel?.actualPoints.count, 3)
+        XCTAssertEqual(state.acceptedModel?.actualPoints.first?.usedPercent, 0.25)
+        XCTAssertEqual(state.selectedPointID, selectedID)
+        XCTAssertEqual(state.viewport, viewport)
+
+        let movedEstimate = inspectionModel(
+            base: base, activityValues: [(0, 0.25), (3_600, 0.35), (7_200, 0.45)],
+            estimateOffset: 10_800
+        )
+        state.reduce(UsageChartInspectionUpdate(
+            key: key, resetEpoch: epoch, generation: 3, phase: .resolvedPopulated(movedEstimate)
+        ))
+        XCTAssertEqual(state.acceptedModel?.estimatePoints.last?.date, base.addingTimeInterval(10_800))
+        XCTAssertEqual(state.selectedPointID, selectedID)
+        XCTAssertEqual(state.viewport, viewport)
+
+        var invalid = state
+        invalid.setViewport(.explicit(start: base, end: base))
+        XCTAssertEqual(invalid.viewport, .automatic)
+        invalid.setViewport(.explicit(start: base.addingTimeInterval(7_200), end: base))
+        XCTAssertEqual(invalid.viewport, .automatic)
+        let nonfinite = Date(timeIntervalSinceReferenceDate: Double.nan)
+        invalid.setViewport(.explicit(start: base, end: nonfinite))
+        XCTAssertEqual(invalid.viewport, .automatic)
+        XCTAssertNil(UsageChartInspectionViewport(start: base, end: base))
+        XCTAssertNil(UsageChartInspectionViewport(
+            start: base.addingTimeInterval(7_200), end: base
+        ))
+        XCTAssertNil(UsageChartInspectionViewport(start: base, end: nonfinite))
+        XCTAssertEqual(viewport.absoluteInterval?.start, base)
+        XCTAssertEqual(viewport.absoluteInterval?.end, base.addingTimeInterval(7_200))
+    }
+
+    func testUsageInspectionRetainsModelDuringLoadingAndFailureThenClearsRemovedSelection() throws {
+        let base = Date(timeIntervalSince1970: 1_800_000_000)
+        let key = inspectionKey(base: base)
+        let epoch = UsageChartResetEpoch.boundary(base.addingTimeInterval(14_400))
+        let first = inspectionModel(
+            base: base, activityValues: [(0, 0.20), (3_600, 0.30)]
+        )
+        let withoutSelectedPoint = inspectionModel(
+            base: base, activityValues: [(0, 0.20)]
+        )
+        var state = UsageChartInspectionState()
+        state.reduce(UsageChartInspectionUpdate(
+            key: key, resetEpoch: epoch, generation: 1, phase: .resolvedPopulated(first)
+        ))
+        let selectedID = try XCTUnwrap(first.selectablePoints.last?.id)
+        state.select(pointID: selectedID)
+        let viewport = try XCTUnwrap(
+            UsageChartInspectionViewport(start: base, end: base.addingTimeInterval(3_600))
+        )
+        state.setViewport(viewport)
+
+        state.reduce(UsageChartInspectionUpdate(
+            key: key, resetEpoch: epoch, generation: 2, phase: .loading
+        ))
+        XCTAssertEqual(state.status, .refreshing)
+        XCTAssertTrue(state.isRefreshing)
+        XCTAssertEqual(state.acceptedModel?.revisionID, first.revisionID)
+        XCTAssertEqual(state.selectedPointID, selectedID)
+        XCTAssertEqual(state.viewport, viewport)
+
+        state.reduce(UsageChartInspectionUpdate(
+            key: key, resetEpoch: epoch, generation: 3, phase: .failed
+        ))
+        XCTAssertEqual(state.selectedPointID, selectedID)
+        XCTAssertEqual(state.viewport, viewport)
+        XCTAssertEqual(state.status, .stale)
+        XCTAssertTrue(state.isStale)
+        XCTAssertEqual(state.acceptedModel?.revisionID, first.revisionID)
+
+        state.reduce(UsageChartInspectionUpdate(
+            key: key, resetEpoch: epoch, generation: 4,
+            phase: .resolvedPopulated(withoutSelectedPoint)
+        ))
+        XCTAssertEqual(state.status, .resolved)
+        XCTAssertEqual(state.acceptedModel?.actualPoints.count, 1)
+        XCTAssertNil(state.selectedPointID)
+        XCTAssertEqual(state.viewport, viewport)
+    }
+
+    func testUsageInspectionDistinguishesAuthoritativeEmptyEpochsAndIgnoresStaleGeneration() throws {
+        let base = Date(timeIntervalSince1970: 1_800_000_000)
+        let key = inspectionKey(base: base)
+        let first = inspectionModel(
+            base: base, activityValues: [(0, 0.20), (3_600, 0.30)]
+        )
+        let viewport = try XCTUnwrap(
+            UsageChartInspectionViewport(start: base, end: base.addingTimeInterval(3_600))
+        )
+        func ready(_ epoch: UsageChartResetEpoch, generation: Int) -> UsageChartInspectionState {
+            var state = UsageChartInspectionState()
+            state.reduce(UsageChartInspectionUpdate(
+                key: key, resetEpoch: epoch, generation: generation, phase: .resolvedPopulated(first)
+            ))
+            state.select(pointID: first.selectablePoints.first?.id)
+            state.setViewport(viewport)
+            return state
+        }
+
+        var sameWindowEmpty = ready(.boundary(base), generation: 1)
+        sameWindowEmpty.reduce(UsageChartInspectionUpdate(
+            key: key, resetEpoch: .boundary(base), generation: 2,
+            phase: .resolvedAuthoritativeEmpty
+        ))
+        XCTAssertNil(sameWindowEmpty.acceptedModel)
+        XCTAssertNil(sameWindowEmpty.selectedPointID)
+        XCTAssertEqual(sameWindowEmpty.viewport, viewport)
+        XCTAssertEqual(sameWindowEmpty.status, .authoritativeEmpty)
+
+        var resetEmpty = ready(.boundary(base), generation: 1)
+        resetEmpty.reduce(UsageChartInspectionUpdate(
+            key: key, resetEpoch: .boundary(base.addingTimeInterval(3_600)), generation: 2,
+            phase: .resolvedAuthoritativeEmpty
+        ))
+        XCTAssertNil(resetEmpty.acceptedModel)
+        XCTAssertNil(resetEmpty.selectedPointID)
+        XCTAssertEqual(resetEmpty.viewport, .automatic)
+
+        var resetLoading = ready(.boundary(base), generation: 1)
+        resetLoading.reduce(UsageChartInspectionUpdate(
+            key: key, resetEpoch: .boundary(base.addingTimeInterval(3_600)), generation: 2,
+            phase: .loading
+        ))
+        XCTAssertNil(resetLoading.acceptedModel)
+        XCTAssertNil(resetLoading.selectedPointID)
+        XCTAssertEqual(resetLoading.status, .loading)
+        XCTAssertFalse(resetLoading.isRefreshing)
+        XCTAssertEqual(resetLoading.viewport, .automatic)
+
+        let resolved = inspectionModel(
+            base: base, activityValues: [(0, 0.25), (3_600, 0.35)]
+        )
+        var equalGeneration = ready(.boundary(base), generation: 1)
+        equalGeneration.reduce(UsageChartInspectionUpdate(
+            key: key, resetEpoch: .boundary(base), generation: 2, phase: .loading
+        ))
+        XCTAssertEqual(equalGeneration.status, .refreshing)
+        equalGeneration.reduce(UsageChartInspectionUpdate(
+            key: key, resetEpoch: .boundary(base), generation: 2,
+            phase: .resolvedPopulated(resolved)
+        ))
+        XCTAssertEqual(equalGeneration.generation, 2)
+        XCTAssertEqual(equalGeneration.status, .resolved)
+        XCTAssertEqual(equalGeneration.acceptedModel?.revisionID, resolved.revisionID)
+
+        let otherWindow = usageWindow(base: base, id: "other", durationMinutes: 60)
+        let staleKey = makeDatasetKey(
+            makeProviderSnapshot(base: base, accountLabel: "Other", provider: .claude, window: otherWindow),
+            makeAnalyticsSnapshot(base: base, activityValues: [], provider: .claude, windowID: "other"),
+            otherWindow, metric: "tokens"
+        )
+        equalGeneration.reduce(UsageChartInspectionUpdate(
+            key: staleKey, resetEpoch: .boundary(base.addingTimeInterval(7_200)), generation: 1,
+            phase: .resolvedAuthoritativeEmpty
+        ))
+        XCTAssertEqual(equalGeneration.generation, 2)
+        XCTAssertEqual(equalGeneration.key, key)
+        XCTAssertEqual(equalGeneration.resetEpoch, .boundary(base))
+        XCTAssertEqual(equalGeneration.acceptedModel?.revisionID, resolved.revisionID)
+        XCTAssertEqual(equalGeneration.selectedPointID, first.selectablePoints.first?.id)
+        XCTAssertEqual(equalGeneration.viewport, viewport)
+        XCTAssertEqual(equalGeneration.status, .resolved)
+    }
+
+    private func inspectionModel(base: Date, activityValues: [(TimeInterval, Double)], estimateOffset: TimeInterval? = nil) -> UsageProjectionDisplayModel {
+        UsageProjectionDisplayModel(analytics: makeAnalyticsSnapshot(base: base, activityValues: activityValues, estimateOffset: estimateOffset), window: usageWindow(base: base))
+    }
+
+    private func inspectionKey(base: Date) -> UsageChartDatasetKey {
+        let window = usageWindow(base: base)
+        return makeDatasetKey(makeProviderSnapshot(base: base, window: window), makeAnalyticsSnapshot(base: base, activityValues: []), window)
+    }
+
+    private func makeDatasetKey(_ providerSnapshot: ProviderSnapshot, _ analytics: UsageAnalyticsSnapshot, _ window: UsageWindow?, metric: String = "used_percent") -> UsageChartDatasetKey {
+        UsageChartDatasetKey(providerSnapshot: providerSnapshot, analytics: analytics, window: window, metric: metric)
+    }
+
+    private func usageWindow(base: Date, id: String = "five_hour", durationMinutes: Int? = 300) -> UsageWindow {
+        UsageWindow(id: id, label: "Usage", resetAt: base.addingTimeInterval(14_400), durationMinutes: durationMinutes)
+    }
+
+    private func makeProviderSnapshot(base: Date, accountLabel: String = "Codex account", provider: Provider = .codex, window: UsageWindow) -> ProviderSnapshot {
+        ProviderSnapshot(provider: provider, accountLabel: accountLabel, windows: [window], provenance: Provenance(source: "Gateway", observedAt: base, quality: .observed, connector: .healthy))
+    }
+
+    private func makeAnalyticsSnapshot(base: Date, activityValues: [(TimeInterval, Double)], estimateOffset: TimeInterval? = nil, provider: Provider = .codex, windowID: String? = "five_hour", source: String = "Gateway", observedAt: Date? = nil, quality: DataQuality = .observed, connector: ConnectorState = .healthy) -> UsageAnalyticsSnapshot {
+        let activity = activityValues.map { UsageActivityPoint(date: base.addingTimeInterval($0.0), tokens: 1, usedPercent: $0.1) }
+        let projection = estimateOffset.map { [UsageProjectionPoint(date: base.addingTimeInterval($0), usedPercent: 0.70)] } ?? []
+        return UsageAnalyticsSnapshot(provider: provider, windowID: windowID, activity: activity, projection: projection, modelBreakdowns: [], heatmap: [], provenance: Provenance(source: source, observedAt: observedAt ?? base, quality: quality, connector: connector))
+    }
+
     func testNormalizationSortsKeepsLastDuplicateAndPreservesGaps() {
         let base = Date(timeIntervalSince1970: 1_800_000_000)
         let series = LifeOSChartSeries(
