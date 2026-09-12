@@ -1,5 +1,16 @@
 # CHANGELOG — LifeOS native app
 
+## 2026-09-12 — Usage monitoring hierarchy
+
+- `fce94b9` replaces the oversized Usage presentation with compact quota
+  cards, a truthful chart legend, grouped range controls, and responsive
+  720/960pt layout boundaries.
+- Mac controls meet the 32pt contract and iPhone controls the 44pt target;
+  endpoint stepping disables correctly and selected details wrap safely.
+- Verification: iPhone focused suite **95/95**; macOS settled and breakpoint
+  renders **1/1** each; five rendered captures inspected. Astra Medium review:
+  **GREEN**. Overall release remains **NO-GO**.
+
 ## 2026-09-12 — native macOS route lifecycle
 
 - `070b7db` replaces the shell’s custom route progress state with one typed,

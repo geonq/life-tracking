@@ -8,8 +8,9 @@ Updated 2026-09-12 Europe/Berlin. Release: **NO-GO**.
    `070b7db`, with bounded Home history, stale-mount rejection, Calendar
    callback retirement, and Astra GREEN review. Interactive route reversal and
    deferred-editor runtime evidence remain open.
-2. Run serialized native runtime captures. Fix hierarchy, SF Symbols, motion,
-   calendar scroll/pinch, and widget states against the approved design plan.
+2. Continue serialized native runtime captures. The Usage visual slice is
+   checked in at `fce94b9`; finish hierarchy, SF Symbols, motion, calendar
+   scroll/pinch, and widget states against the approved design plan.
 3. Run Windows recovery/install and verify service listeners, health, ACLs,
    Tailscale Serve, and live Enable Banking reads on the reachable PC.
 4. Verify iPhone install, App Group/HealthKit, personal signing renewal, and
@@ -21,8 +22,9 @@ Updated 2026-09-12 Europe/Berlin. Release: **NO-GO**.
 
 ## Verified checkpoint
 
-`070b7db` is pushed. Usage and macOS route source slices are Astra-reviewed
-GREEN; iPhone focused tests are 95/95; macOS route tests are 2/2 with exit 0;
+`fce94b9` is pushed. Usage visual/source and macOS route slices are
+Astra-reviewed GREEN; iPhone focused tests are 95/95; macOS route tests are
+2/2 with exit 0; the Usage settled and breakpoint renders are 1/1 each;
 the full macOS snapshot run executed 51/51 cases with zero test failures before
 result-archive I/O failure. Windows source tests are 61 passed, 1 skipped.
 These results do not prove live, runtime, device, visual, or operational
