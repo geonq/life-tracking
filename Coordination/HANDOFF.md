@@ -11,7 +11,7 @@ incomplete.
 ## Current source checkpoint
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- HEAD and origin: `ba3a073 Refresh LifeOS completion handoff`.
+- HEAD and origin: `d9563d6 Refresh live LifeOS coordination checkpoint`.
 - macOS now has one value-driven Home `NavigationStack` with a bounded typed
   path. Sidebar Home resets it; Back pops one detail and preserves origin.
 - Cross-module Usage/Finance/Calendar deep links preserve the saved Home
@@ -29,9 +29,9 @@ incomplete.
 
 ## Still open
 
-- Windows is reachable and BitLocker is fully encrypted/protected, but
-  LifeOSAPI is stopped, ports 8787–8790 are closed, and Tailscale Serve has
-  no config. Recovery/install and live Enable Banking readback remain open.
+- Windows is reachable and BitLocker is fully encrypted/protected. A bounded
+  rollback of the interrupted deployment is currently active; no reinstall
+  retry or live Enable Banking readback is certified yet.
 - Runtime route transitions, whole-app visual captures, calendar gestures,
   widgets, physical iPhone, signing, and Shortcuts.
 - Zepp workout fidelity/sync and the Obsidian Canvas mind map; see issue #2.

@@ -24,7 +24,7 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
 - Tax document local feature foundation.
 - Provenance-aware read-only Usage ingestion/API/native UI.
 - Fail-closed Finance summary and disabled connector contracts.
-- Current working checkpoint: `ba3a073` on `lifeos-foundation-checkpoint-20260812`.
+- Current working checkpoint: `d9563d6` on `lifeos-foundation-checkpoint-20260812`.
   The branch push succeeded; PR #1 is the matching open draft checkpoint.
 
 ## Execution phases

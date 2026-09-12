@@ -3,7 +3,7 @@
 Updated 2026-09-12 Europe/Berlin.
 
 - Release: **NO-GO**.
-- Source checkpoint: `ba3a073` on `lifeos-foundation-checkpoint-20260812`.
+- Source checkpoint: `d9563d6` on `lifeos-foundation-checkpoint-20260812`.
 - Usage packet, per-scope authority, omission handling, persistence retry,
   identity handling, cancellation, and viewport bounds are implemented and
   independently reviewed **GREEN**.
@@ -28,7 +28,7 @@ Updated 2026-09-12 Europe/Berlin.
 - Whole-app pixel/runtime QA for hierarchy, icons, motion, scroll, pinch zoom,
   dark transparent homescreen, and widgets. The Usage slice alone is covered;
   this is not whole-app acceptance.
-- Windows recovery/install, listener/health, Tailscale Serve, and live banking.
+- Windows rollback/reinstall, listener/health, Tailscale Serve, and live banking.
 - iPhone install/signing renewal/Shortcuts and physical continuity.
 - Zepp workout import fidelity, Obsidian Canvas round trip, and final security.
 
