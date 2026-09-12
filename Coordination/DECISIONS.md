@@ -64,7 +64,10 @@ Updated 2026-09-12 Europe/Berlin.
   privacy-safe metadata. The gateway must not become a raw-page sync path.
 - Usage idempotency is a bounded replay journal: retained keys preserve
   replay and fingerprint-reuse behavior, while the oldest keys are retired so
-  ingestion does not permanently stop at the capacity limit.
+  ingestion does not permanently stop at the capacity limit. Presentation
+  authority is per provider/window; a valid complete connector payload marks
+  every omitted supported scope authoritative-empty, cached history cannot
+  resurrect it, and failed archive writes remain pending for retry.
 - The current native sync boundary is Tailscale connection identity plus an
   edge capability. The app does not persist that bearer token; do not document
   it as a Keychain-stored sync token. Legacy credential cleanup and physical
