@@ -22,7 +22,7 @@ Updated 2026-09-12 Europe/Berlin. Release: **NO-GO**.
 
 ## Verified checkpoint
 
-`fce94b9` is pushed. Usage visual/source and macOS route slices are
+`ba3a073` is pushed. Usage visual/source and macOS route slices are
 Astra-reviewed GREEN; iPhone focused tests are 95/95; macOS route tests are
 2/2 with exit 0; the Usage settled and breakpoint renders are 1/1 each;
 the full macOS snapshot run executed 51/51 cases with zero test failures before

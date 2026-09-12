@@ -11,7 +11,7 @@ incomplete.
 ## Current source checkpoint
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- HEAD and origin: `fce94b9 Refine Usage monitoring hierarchy`.
+- HEAD and origin: `ba3a073 Refresh LifeOS completion handoff`.
 - macOS now has one value-driven Home `NavigationStack` with a bounded typed
   path. Sidebar Home resets it; Back pops one detail and preserves origin.
 - Cross-module Usage/Finance/Calendar deep links preserve the saved Home
