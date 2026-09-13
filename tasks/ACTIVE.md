@@ -24,7 +24,7 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
 - Tax document local feature foundation.
 - Provenance-aware read-only Usage ingestion/API/native UI.
 - Fail-closed Finance summary and disabled connector contracts.
-- Current working checkpoint: `03a78a1` on `lifeos-foundation-checkpoint-20260812`.
+- Current working checkpoint: `fd8ccfb` on `lifeos-foundation-checkpoint-20260812`.
   The branch push succeeded; PR #1 is the matching open draft checkpoint.
   Backend boundary security is Astra scoped GREEN at `87e7db6`. Calendar
   security and merge hardening is committed at `8942b8e`, with 107/107 focused
@@ -32,6 +32,9 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
   `6f421f8`, with 3/3 focused macOS visual tests and seven inspected captures.
   Fitness Recovery hero repair is committed at `03a78a1`, with 1/1 focused
   macOS snapshot and 1/1 iPhone 17 layout policy test passing.
+  Finance responsive hierarchy is committed at `fd8ccfb`, with 16/16 scoped
+  Mac snapshots, responsive captures at 900/1200/1512/1800, focused iPhone 17
+  contracts, and an Astra Medium GREEN review.
 
 ## Execution phases
 

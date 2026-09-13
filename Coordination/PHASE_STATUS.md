@@ -3,7 +3,7 @@
 Updated 2026-09-13 Europe/Berlin.
 
 - Release: **NO-GO**.
-- Source checkpoint: `03a78a1` on `lifeos-foundation-checkpoint-20260812`.
+- Source checkpoint: `fd8ccfb` on `lifeos-foundation-checkpoint-20260812`.
 - Usage packet, per-scope authority, omission handling, persistence retry,
   identity handling, cancellation, and viewport bounds are implemented and
   independently reviewed **GREEN**.
@@ -20,6 +20,11 @@ Updated 2026-09-13 Europe/Berlin.
 - Fitness Recovery hero repair at `03a78a1` has a **1/1** macOS snapshot
   test and a **1/1** iPhone 17 layout policy test passing. Light/dark macOS
   captures were inspected; separate 900/1200pt captures remain open.
+- Finance responsive hierarchy at `fd8ccfb` has **16/16** scoped Mac
+  snapshots passing, responsive Mac captures at 900/1200/1512/1800 inspected,
+  and the focused iPhone 17 responsive/selector contracts passing. Astra
+  Medium reviewed the corrected diff **GREEN** after the first worker patch
+  was rejected for duplicated hierarchy and a width feedback loop.
 - Earlier route tests remain **2/2 with exit 0**; the full macOS snapshot run
   executed **51/51 cases with 0 failures** before a result-archive I/O crash;
   Windows source suite remains **61 passed, 1 skipped**.

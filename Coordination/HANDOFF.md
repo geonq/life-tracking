@@ -12,7 +12,7 @@ evidence is still incomplete.
 ## Current source checkpoint
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- HEAD and origin: `03a78a1 Repair Fitness recovery hero layout`.
+- HEAD and origin: `fd8ccfb Refine Finance responsive hierarchy`.
 - macOS now has one value-driven Home `NavigationStack` with a bounded typed
   path. Sidebar Home resets it; Back pops one detail and preserves origin.
 - Cross-module Usage/Finance/Calendar deep links preserve the saved Home
@@ -32,6 +32,12 @@ evidence is still incomplete.
   focused macOS snapshot test is **1/1 with 0 failures** and its light/dark
   captures were inspected; the iPhone 17 boundary test is **1/1 with 0
   failures**. Separate 900/1200pt Fitness captures remain open.
+- Finance responsive hierarchy is repaired at `fd8ccfb`. The complete scoped
+  Mac Finance snapshot set is **16/16 with 0 failures**; responsive Mac
+  captures at 900/1200/1512/1800 and focused iPhone 17 layout/selector tests
+  pass. The corrected patch has an Astra Medium **GREEN** review. Width is
+  derived from the enclosing viewport; fixture renders remain explicitly
+  labelled and are not production data.
 - Verification: iOS focused route/Usage suite **95 tests, 0 failures**;
   macOS route tests **2/2, exit 0**; full macOS snapshot run executed
   **51/51 test cases with 0 failures** before its result-archive I/O crash.
@@ -58,6 +64,9 @@ evidence is still incomplete.
   decode and render through a local fallback. The targeted Astra re-review was
   blocked by that worker's inability to read the files, so it is not recorded
   as a green sign-off; local focused tests and the macOS build pass.
+- The first Finance worker patch was rejected before commit for a duplicated
+  hero hierarchy and a zero-width responsive preference loop; the parent
+  replaced it with the viewport-derived implementation above.
 - Runtime route transitions, whole-app visual captures at all review widths,
   calendar gestures, widgets, physical iPhone, signing, and Shortcuts.
 - Zepp workout fidelity/sync and the Obsidian Canvas mind map; see issue #2.
