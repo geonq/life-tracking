@@ -56,8 +56,10 @@ Updated 2026-09-13 Europe/Berlin.
 - The current 191-line visual contract is committed at `5ebc17e`. The latest
   Mac shell candidate passed compile and 6 selected tests but was Astra RED for
   missing shell-state evidence and a possible collapsed-header overflow; it was
-  reverted and quarantined before the reviewed `66953af` repair. A Luna Max security reconciliation is in progress
-  before any further security edits.
+  reverted and quarantined before the reviewed `66953af` repair. Pauli the 4th
+  (Luna Max worker `01a09bb2-0736-77b2-bf11-21ac106ac1cf`) is performing a
+  read-only security reconciliation at coordination HEAD `8904133` before any
+  further security edits.
 - The calendar review found no P0/P1. Its P2 unavailable-symbol finding is
   fixed and locally tested; the targeted Astra re-review was blocked by worker
   file-access limits and is therefore not a sign-off.

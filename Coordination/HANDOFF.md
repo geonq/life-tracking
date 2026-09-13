@@ -111,9 +111,11 @@ evidence is still incomplete.
   calendar gestures, widgets, physical iPhone, signing, and Shortcuts.
 - Zepp workout fidelity/sync and the Obsidian Canvas mind map; see issue #2.
 - Final operational security, transport, and release acceptance checks.
-- A Luna Max read-only audit is reconciling the supplied Claude security findings
-  against current source before any security edit is dispatched. Several reported
-  items already appear fixed; only verified OPEN/PARTIAL findings should change code.
+- Pauli the 4th (Luna Max worker `01a09bb2-0736-77b2-bf11-21ac106ac1cf`) is
+  reconciling the supplied Claude security findings read-only against current
+  source at `8904133` before any security edit is dispatched. Several reported
+  items already appear fixed; only verified OPEN/PARTIAL findings should change
+  code.
 
 ## Boundaries and next action
 
