@@ -12,7 +12,7 @@ evidence is still incomplete.
 ## Current source checkpoint
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- HEAD and origin: `0fc5c7b Add final LifeOS execution plan` (plan-only);
+- HEAD and origin: `33c74c9 Refine usage visual density and inspection layout`;
   deployable code checkpoint remains `6baa1f3`.
 - Finance source checkpoint: `fd8ccfb Refine Finance responsive hierarchy`.
 - macOS now has one value-driven Home `NavigationStack` with a bounded typed
@@ -23,9 +23,10 @@ evidence is still incomplete.
   chart interaction remain GREEN from `7877ec5`.
 - Usage hierarchy, compact quota cards, chart legend/controls, responsive
   720/960pt boundaries, and endpoint hit targets are implemented at
-  `6f421f8`. The focused macOS Usage visual run is **3/3 with 0 failures**;
-  seven exported PNG attachments were inspected. This is a Usage slice, not
-  whole-app visual acceptance.
+  `33c74c9`. The focused macOS Usage run is **3/3 with 0 failures**; fresh
+  900/1512pt route and Facts PNG attachments were inspected. Selected-point
+  metadata fallback remains source-reviewed, not pixel-tested. This is a
+  Usage slice, not whole-app visual acceptance.
 - Calendar pairing/authentication, bounded envelope negotiation, replay and
   merge rules, mutation fencing, durable store writes, and cross-OS symbol
   fallback are committed at `8942b8e`. The focused iPhone 17 suite is

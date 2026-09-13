@@ -3,7 +3,7 @@
 Updated 2026-09-13 Europe/Berlin.
 
 - Release: **NO-GO**.
-- Source checkpoint: `6baa1f3`; current plan/docs HEAD is `0fc5c7b` on
+- Source checkpoint: `6baa1f3`; current branch HEAD is `33c74c9` on
   `lifeos-foundation-checkpoint-20260812`.
 - Usage packet, per-scope authority, omission handling, persistence retry,
   identity handling, cancellation, and viewport bounds are implemented and
@@ -11,9 +11,10 @@ Updated 2026-09-13 Europe/Berlin.
 - Native macOS shell route is implemented and Astra-reviewed **GREEN**. Home
   path preservation, mount-generation checks, Calendar callback retirement,
   and Back semantics are covered by reducer and route tests.
-- Usage hierarchy at `6f421f8` has **3/3** focused macOS visual tests passing;
-  seven exported captures were inspected. The compact layout and truthful
-  source states are verified for the Usage slice only.
+- Usage hierarchy at `33c74c9` has **3/3** focused macOS visual tests passing;
+  fresh 900/1512pt route and Facts captures were inspected. The compact
+  layout and truthful source states are verified for the Usage slice only;
+  selected-point metadata remains source-reviewed.
 - Calendar hardening at `8942b8e` has **107/107** focused iPhone 17 simulator
   tests passing and a macOS production build with exit 0. The source covers
   pairing proof, reconnect fencing, bounded decoding, deterministic merge,

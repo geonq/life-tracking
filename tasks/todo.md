@@ -9,7 +9,7 @@ Updated 2026-09-13 Europe/Berlin. Release: **NO-GO**.
    callback retirement, and Astra GREEN review. Interactive route reversal and
    deferred-editor runtime evidence remain open.
 2. Continue serialized native runtime captures. The Usage visual slice is
-   checked in at `6f421f8`, Fitness Recovery at `03a78a1`, and Finance
+   checked in at `33c74c9`, Fitness Recovery at `03a78a1`, and Finance
    responsive hierarchy at `fd8ccfb`, each with scoped evidence. Finish the
    remaining Finance live-data/interaction pass, then SF Symbols, motion,
    calendar scroll/pinch, and widget states against the approved design plan.
