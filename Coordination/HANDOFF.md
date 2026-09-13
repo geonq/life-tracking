@@ -12,7 +12,7 @@ evidence is still incomplete.
 ## Current source checkpoint
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- HEAD and origin: `a0b60ac Correct LifeOS handoff checkpoint`.
+- HEAD and origin: `6baa1f3 Reduce recovery resume memory pressure`.
 - Finance source checkpoint: `fd8ccfb Refine Finance responsive hierarchy`.
 - macOS now has one value-driven Home `NavigationStack` with a bounded typed
   path. Sidebar Home resets it; Back pops one detail and preserves origin.
@@ -42,7 +42,9 @@ evidence is still incomplete.
 - Verification: iOS focused route/Usage suite **95 tests, 0 failures**;
   macOS route tests **2/2, exit 0**; full macOS snapshot run executed
   **51/51 test cases with 0 failures** before its result-archive I/O crash.
-- Windows source suite: **61 passed, 1 skipped, 0 failures**.
+- Windows source suite: **61 passed, 1 skipped, 0 failures**; the pushed
+  `6baa1f3` candidate verifier passed **108 files**, and the remote static and
+  behavior suites passed.
 - Personal installer security slice: Astra Medium scoped GREEN at `1d1af18`;
   **13/13 tests** and `bash -n` pass. Exact Apple command allowlisting,
   minimal child environment, hostile Python-startup rejection, toolchain
@@ -58,10 +60,17 @@ evidence is still incomplete.
 ## Still open
 
 - Windows is reachable and BitLocker was last read fully encrypted/protected.
-  An explicit rollback is currently reconciling the abandoned transaction
-  marker; the service remains stopped. The immutable candidate verifier and
-  installer-created fresh-venv preflight pass, but install and live Enable
-  Banking readback remain uncertified until recovery reaches `recovered`.
+  The `6baa1f3` rollback was actually run through unit `31,400`; memory stayed
+  near **674 MB** versus the earlier **985 MB** peak, but no final stage
+  checkpoint appeared after 45 minutes, so it was safely stopped. The durable
+  marker remains `active`, the journal remains `artifacts-complete`, and
+  `LifeOSAPI` remains stopped. Install and live Enable Banking readback remain
+  uncertified.
+- Astra rejected an uncommitted follow-up optimization: its second service
+  check could delete a service and its validation context had a TOCTOU gap.
+  That patch was removed from the tree and preserved at
+  `/private/tmp/lifeos-red-runtime-optimization-20260913.patch`; it is not
+  part of the release.
 - The calendar Astra review found and the source fixed one P2 compatibility
   issue: a valid SF Symbol name unavailable on the receiving OS must survive
   decode and render through a local fallback. The targeted Astra re-review was
@@ -80,6 +89,7 @@ evidence is still incomplete.
 Keep SF Pro/system styling, compact Linear/Vercel quality, truthful live data,
 no generic advisor or in-app AI, and calorie-photo tracking as the only AI.
 The old AppKit route-host/raster plan is superseded by the native stack in
-`070b7db`. Next: finish the active Windows recovery, retry the verified
-candidate install, then close live provider, device/signing, whole-app visual,
-Zepp, Obsidian, and security gates with evidence.
+`070b7db`. Next: implement and review the non-mutating recovery validation
+needed to avoid repeated full-journal scans, then resume recovery and close
+live provider, device/signing, whole-app visual, Zepp, Obsidian, and security
+gates with evidence.

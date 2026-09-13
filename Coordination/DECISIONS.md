@@ -60,9 +60,11 @@ Updated 2026-09-13 Europe/Berlin.
 
 ## Security and runtime
 
-- Windows gateway access remains fail-closed with scoped credentials,
-  protected snapshots, atomic recovery, identity-bound bounded reads, ACL
-  checks, and journal-bound Node staging.
+- Windows gateway access remains fail-closed with scoped credentials, protected
+  snapshots, atomic recovery, identity-bound bounded reads, ACL checks, and
+  journal-bound Node staging. `6baa1f3` passed source, candidate, static, and
+  behavior checks; Astra rejected a later optimization for a mutating
+  reconcile-only path and validation-context TOCTOU gap. Do not merge it.
 - Gateway and native calendar limits are both 1,024. Oversized incoming or
   persisted state fails closed without destructive truncation.
 - Calendar icon publication must perform bounded PNG/JPEG structure and CRC
@@ -85,15 +87,14 @@ Updated 2026-09-13 Europe/Berlin.
   provider, Windows-native, physical-device, or visual evidence from source
   checks alone. Final Astra Medium source review is GREEN at `eb9ca620…`;
   operational and device gates remain open.
-- Native Shortcuts may open Zepp and report LifeOS refresh/status; public Zepp
-  API is not assumed. Personal Team signing and seven-day renewal remain
-  platform-managed.
+- Native Shortcuts may open Zepp and report LifeOS refresh/status; public Zepp API is not assumed; Personal Team signing and seven-day renewal remain platform-managed.
 
 ## Workflow
 
 - Use Luna Max for bounded implementation and Astra Medium for batched review;
   keep write scopes disjoint, native builds serialized with `-jobs 1`, and
   close completed workers and processes immediately.
-- Keep coordination files below 200 lines. Use live production reads and keep
-  visual fixtures isolated from production paths.
+- Keep coordination files below 100 lines; use live production reads, isolate
+  fixtures, and treat subagent reports as hypotheses until the parent reviews
+  the diff and runs relevant checks.
 - Do not add a Claude usage-limit watcher, overnight supervisor, demo fallback, generic assistant, or unrelated conversational AI; do not merge PR #1 while Windows, provider, physical-device, and visual gates remain unresolved.
