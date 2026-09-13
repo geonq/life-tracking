@@ -63,9 +63,10 @@ Updated 2026-09-13 Europe/Berlin.
 - Windows gateway access remains fail-closed with scoped credentials, protected
   snapshots, atomic recovery, identity-bound bounded reads, ACL checks, and
   journal-bound Node staging. `6baa1f3` passed source/candidate/static/behavior;
-  diagnostics at `14a3b7f`, strict progress validation at `4e14e38`, and
-  strict journal observation at `9e43dd7` are Astra-reviewed GREEN and were
-  validated only in disposable Windows copies;
+  diagnostics at `14a3b7f`, strict progress validation at `4e14e38`, strict
+  journal observation at `9e43dd7`, and bounded phase telemetry at `0a8d5b6`
+  are Astra-reviewed GREEN and were validated only in disposable Windows
+  copies;
   Astra rejected a mutating reconcile-only path and TOCTOU optimization; do
   not merge it.
 - Gateway and native calendar limits are both 1,024. Oversized incoming or

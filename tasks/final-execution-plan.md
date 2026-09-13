@@ -1,9 +1,9 @@
 # LifeOS final execution plan
-Planning baseline: 2026-09-13, current source HEAD `9e43dd7`. This remains a
+Planning baseline: 2026-09-13, current source HEAD `dc9fc8e`. This remains a
 planning and dispatch authority; it does not claim product completion.
 
 ## 1. Reconciled truth and authority
-- Local HEAD and origin tracking ref match `9e43dd7`; GitHub CLI confirms PR #1
+- Local HEAD and origin tracking ref match `dc9fc8e`; GitHub CLI confirms PR #1
   is OPEN/DRAFT/MERGEABLE against `main` at the same head. Recheck before
   every dispatch.
 - Release is **NO-GO**. `python3 -B scripts/validate_acceptance_registry.py --json` verified FROZEN, 258 leaves, 7 aliases, 0 accepted, no structural errors; `--score` reports the P0 failure. This measures accepted evidence, not zero implemented functionality or a reliable effort percentage.
@@ -117,10 +117,14 @@ planning and dispatch authority; it does not claim product completion.
 - Windows timing alone is not a failure signal: inspect same live PID/CPU/stage; do not restart due polling timeout. Unexpected ACL/identity drift or memory danger stops mutation and retains marker/journal; no automatic destructive cleanup. No scheduling/Claude-limit watcher.
 | Area | Current verified or recorded status | Evidence required next |
 |---|---|---|
-| Git/PR | Observed HEAD/origin/PR `9e43dd7`, draft OPEN/MERGEABLE | Recheck current SHA before every worker; canonical docs now distinguish candidate and current head |
+| Git/PR | Observed HEAD/origin/PR `dc9fc8e`, draft OPEN/MERGEABLE | Recheck current SHA before every worker; canonical docs now distinguish candidate and current head |
 | Registry | Observed valid FROZEN,0/258 accepted; score failure | Audited conflict reconciliation and per-leaf immutable acceptance evidence |
 | Windows | Recorded `6baa1f3` candidate checks; active recovery marker/service stopped | Fresh SSH process/SCM/journal observation, measured reviewed recovery, cutover/live health |
 | Finance/device | Source foundations and historical scoped tests; live/physical unproven here | Existing consent readback; USB/team/HealthKit/widget/renewal receipts from Georg |
 | UI/workouts/Canvas/security | Scoped prior UI/source evidence; issue#2 OPEN; full acceptance absent | Matrix captures, fidelity comparisons, Canvas decisions+round trips, final security receipts |
 
-**First next action:** pin `git status`/HEAD/PR again, then read-only SSH inspect the exact recovery process and canonical manifest/journal/SCM state; give T1 Luna those sanitized facts and the bounded performance/identity test contract. Do not launch install while marker is active. Run T10 entitlement feasibility early when the physical phone is available so a platform constraint cannot surface only at release.
+**First next action:** pin `git status`/HEAD/PR again, then give T1 Luna the
+sanitized recovery facts and the bounded performance/identity test contract.
+Do not launch install while the marker is active. Run T10 entitlement
+feasibility early when the physical phone is available so a platform
+constraint cannot surface only at release.
