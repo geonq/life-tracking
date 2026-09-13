@@ -1323,6 +1323,67 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
                 Assert-Behavior ((Read-RecoveryJournal $fixture.Manifest).phase -eq 'artifacts-complete') "recovery resumes after a $partialLength-byte final partial progress header"
             } finally { Remove-Item -LiteralPath $fixture.Root -Recurse -Force -ErrorAction SilentlyContinue }
         }
+
+        # Strict progress reads are observational: they validate the same
+        # disposable bytes without repairing ACLs or truncating writer tails.
+        $strictTailFixture = New-ProgressFixture -UnitCount 2
+        try {
+            Append-RecoveryProgress -Manifest $strictTailFixture.Manifest -Journal $strictTailFixture.Journal -UnitIndex 0 -Phase 'complete'
+            $strictTailPath = Get-RecoveryProgressPath $strictTailFixture.Manifest
+            $committedBytes = [IO.File]::ReadAllBytes($strictTailPath)
+            $tail = New-Object byte[] 4
+            [Array]::Copy($strictTailFixture.Frames[1].Header, 0, $tail, 0, $tail.Length)
+            $tornBytes = New-Object byte[] ($committedBytes.Length + $tail.Length)
+            [Array]::Copy($committedBytes, 0, $tornBytes, 0, $committedBytes.Length)
+            [Array]::Copy($tail, 0, $tornBytes, $committedBytes.Length, $tail.Length)
+            [IO.File]::WriteAllBytes($strictTailPath, $tornBytes)
+            $beforeStrict = [IO.File]::ReadAllBytes($strictTailPath)
+
+            $strictTailError = $null
+            try {
+                Read-RecoveryProgress -Manifest $strictTailFixture.Manifest -Journal $strictTailFixture.Journal -JournalUnits $strictTailFixture.Journal.units -Strict
+            } catch { $strictTailError = [string]$_.Exception.Message }
+            Assert-Behavior ($strictTailError -ceq 'Recovery progress log contains an incomplete final frame.') 'strict progress verification rejects an incomplete final frame with the expected error.'
+            $afterStrict = [IO.File]::ReadAllBytes($strictTailPath)
+            Assert-Behavior ([Convert]::ToBase64String($afterStrict) -ceq [Convert]::ToBase64String($beforeStrict)) 'strict progress verification leaves torn-tail bytes unchanged.'
+
+            Read-RecoveryProgress -Manifest $strictTailFixture.Manifest -Journal $strictTailFixture.Journal -JournalUnits $strictTailFixture.Journal.units
+            $afterDefault = [IO.File]::ReadAllBytes($strictTailPath)
+            Assert-Behavior ([Convert]::ToBase64String($afterDefault) -ceq [Convert]::ToBase64String($committedBytes)) 'the default progress reader still truncates the same disposable torn tail.'
+        } finally { Remove-Item -LiteralPath $strictTailFixture.Root -Recurse -Force -ErrorAction SilentlyContinue }
+
+        # Force the ACL precondition to fail in a disposable fixture. Strict
+        # verification must stop at that boundary and call no repair adapter.
+        $originalProgressAssertAcl = ${function:Assert-RestrictedAcl}
+        $originalProgressSetAcl = ${function:Set-RestrictedAcl}
+        $originalProgressGetAcl = Get-Item -Path Function:\Get-Acl -ErrorAction SilentlyContinue
+        $aclFixture = $null
+        try {
+            $aclFixture = New-ProgressFixture -UnitCount 1
+            Append-RecoveryProgress -Manifest $aclFixture.Manifest -Journal $aclFixture.Journal -UnitIndex 0 -Phase 'complete'
+            $script:strictProgressSetAclCalls = 0
+            $script:strictProgressGetAclCalls = 0
+            function Assert-RestrictedAcl { param($Path, $OperatorSid, $ReadSids, $ModifySids, [switch]$AllowInherited) throw 'fixture strict ACL rejection' }
+            function Set-RestrictedAcl { $script:strictProgressSetAclCalls++ }
+            function Get-Acl { $script:strictProgressGetAclCalls++; throw 'fixture Get-Acl must not run in strict mode' }
+            $strictAclError = $null
+            try {
+                Read-RecoveryProgress -Manifest $aclFixture.Manifest -Journal $aclFixture.Journal -JournalUnits $aclFixture.Journal.units -Strict
+            } catch { $strictAclError = [string]$_.Exception.Message }
+            Assert-Behavior ($strictAclError -ceq 'fixture strict ACL rejection') 'strict progress verification preserves the ACL rejection error.'
+            Assert-Behavior ($script:strictProgressSetAclCalls -eq 0 -and $script:strictProgressGetAclCalls -eq 0) 'strict ACL rejection calls no ACL repair or inspection adapter.'
+        } finally {
+            if ($null -ne $aclFixture) { Remove-Item -LiteralPath $aclFixture.Root -Recurse -Force -ErrorAction SilentlyContinue }
+            Set-Item -Path Function:\Assert-RestrictedAcl -Value $originalProgressAssertAcl
+            Set-Item -Path Function:\Set-RestrictedAcl -Value $originalProgressSetAcl
+            if ($null -eq $originalProgressGetAcl) {
+                Remove-Item -Path Function:\Get-Acl -ErrorAction SilentlyContinue
+            } else {
+                Set-Item -Path Function:\Get-Acl -Value $originalProgressGetAcl.ScriptBlock
+            }
+            Remove-Variable -Name strictProgressSetAclCalls -Scope Script -ErrorAction SilentlyContinue
+            Remove-Variable -Name strictProgressGetAclCalls -Scope Script -ErrorAction SilentlyContinue
+        }
     } finally {
         Remove-Variable -Name interruptedProgressBoundary -Scope Script
         Remove-Variable -Name corruptRestoreMutation -Scope Script -ErrorAction SilentlyContinue

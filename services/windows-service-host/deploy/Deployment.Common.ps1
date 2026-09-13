@@ -3615,7 +3615,8 @@ function Read-RecoveryProgress {
     param(
         [Parameter(Mandatory)]$Manifest,
         [Parameter(Mandatory)]$Journal,
-        [Parameter(Mandatory)]$JournalUnits
+        [Parameter(Mandatory)]$JournalUnits,
+        [switch]$Strict
     )
     Add-LifeOSRecoveryDiagnosticCounter -Name 'progressReadCalls'
     $progressPathValue = Get-JournalProperty $Journal 'progressPath'
@@ -3638,6 +3639,11 @@ function Read-RecoveryProgress {
     try {
         Assert-RestrictedAcl $progressPath $Manifest.operatorSid @() @() -AllowInherited
     } catch {
+        if ($Strict) {
+            # Strict reads are observational verification; never repair ACLs
+            # while deciding whether recovery state is safe to inspect.
+            throw
+        }
         # A pre-fix recovery attempt could have created this transaction-owned
         # log with the parent ACL (the observed failure was an admin-only ACL
         # with no SYSTEM/operator entries). Repair only when the current owner
@@ -3756,6 +3762,10 @@ function Read-RecoveryProgress {
         if ($sequence -gt $script:LifeOSRecoveryProgressMaxRecords) { throw 'Recovery progress log contains too many records.' }
     }
     if ($incompleteTail) {
+        if ($Strict) {
+            # Strict reads must not truncate an interrupted writer's evidence.
+            throw 'Recovery progress log contains an incomplete final frame.'
+        }
         $truncate = [IO.File]::Open($progressPath, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::Read)
         try {
             $truncate.SetLength($committedOffset)
