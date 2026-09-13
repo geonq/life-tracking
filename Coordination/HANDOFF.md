@@ -12,10 +12,11 @@ evidence is still incomplete.
 ## Current source checkpoint
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- HEAD and origin: `66953af Repair Mac Tax import accessibility flow`;
+- HEAD and origin: `ae1e84b Record security audit worker failures`;
   the source checkpoint remains `0a8d5b6 Instrument recovery runtime phases safely`;
   deployable code checkpoint remains `6baa1f3`. PR #1 is OPEN, DRAFT, and
-  MERGEABLE against `main` at this same head.
+  MERGEABLE against `main` at the last observed branch head; recheck its live
+  state before every dispatch or merge.
 - Finance source checkpoint: `fd8ccfb Refine Finance responsive hierarchy`.
 - macOS now has one value-driven Home `NavigationStack` with a bounded typed
   path. Sidebar Home resets it; Back pops one detail and preserves origin.

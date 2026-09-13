@@ -24,7 +24,7 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
 - Tax document local feature foundation.
 - Provenance-aware read-only Usage ingestion/API/native UI.
 - Fail-closed Finance summary and disabled connector contracts.
-- Current working checkpoint: `66953af` on `lifeos-foundation-checkpoint-20260812`.
+- Current working checkpoint: `ae1e84b` on `lifeos-foundation-checkpoint-20260812`.
   The branch push succeeded; PR #1 is the matching open draft checkpoint. The
   deployable Windows candidate is the verified `6baa1f3` source checkpoint;
   recovery reached journal unit 31,400 and was stopped before its final stage.
