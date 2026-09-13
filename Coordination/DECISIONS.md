@@ -102,4 +102,8 @@ Updated 2026-09-14 Europe/Berlin.
 - Keep coordination files below 200 lines; use live production
   reads, isolate fixtures, and treat subagent reports as hypotheses until the
   parent reviews the diff and runs relevant checks.
-- Do not add a Claude usage-limit watcher, overnight supervisor, demo fallback, generic assistant, or unrelated conversational AI; do not merge PR #1 while Windows, provider, physical-device, and visual gates remain unresolved.
+- Do not add a Claude usage-limit watcher, overnight supervisor, demo fallback,
+  generic assistant, or unrelated conversational AI. geonq has authorized
+  merging this personal checkpoint into `main` as an integration action; that
+  merge does not close Windows, provider, physical-device, visual, or release
+  gates, and must not be described as product acceptance.
