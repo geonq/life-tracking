@@ -1,8 +1,8 @@
 # LifeOS final execution plan
-Planning baseline: 2026-09-13; user-trusted HEAD **ae1e84b**. Documentation-only review; all execution below is prospective.
+Planning baseline: 2026-09-13; current trusted HEAD **628d4b3**. Documentation-only review; all execution below is prospective.
 
 ## 1. Current truth and explicit gates
-- **NO-GO.** Local HEAD and origin now match `ae1e84b`; the last live PR
+- **NO-GO.** Local HEAD and origin now match `628d4b3`; the last live PR
   observation was OPEN/DRAFT/MERGEABLE at the earlier source head and needs a
   fresh recheck. No Windows/GitHub access, build, runtime test or registry
   validation occurred in this plan review.
@@ -12,6 +12,10 @@ Planning baseline: 2026-09-13; user-trusted HEAD **ae1e84b**. Documentation-only
 - Rejected recovery optimization and Mac shell candidate remain excluded. Two security workers closed without reports. Calendar unavailable-symbol fix has local tests, but its blocked targeted Astra re-review remains open. Live banking, physical signing/widgets, whole-app visuals/runtime, Zepp fidelity, Canvas and final operational security remain unverified.
 - Review inputs: Coordination/HANDOFF.md, Coordination/DECISIONS.md, Coordination/PHASE_STATUS.md, tasks/ACTIVE.md, this file, tasks/design.md, docs/LIFEOS_ACCEPTANCE_REGISTRY.md and relevant referenced source filenames only. Issue#2 architecture below is inherited from these inputs; its current remote body/status was not fetched.
 - Current user instructions/DECISIONS govern authority/security; compatible tasks/design.md governs visuals. Both current documents already specify Calendar40/64/120. Keep SF Pro, green estimates, orange calories and native Home NavigationStack.
+- Shared visual foundation `628d4b3` is Astra Medium GREEN after an exact
+  serialized Mac build and opened Home/Calendar captures. It establishes the
+  current compact token/card baseline; route-by-route visual and interaction
+  evidence remains required.
 - T0 must reconcile registry RM-01 hero morph, RM-02 ring reveal/halo, RM-03 chart draw, related atomic/non-overlap metadata and BF coaching language with current design. Preserve original hash, reviewed replacement contracts, rationale, amendment/refreeze history and unrelated thresholds; never silently accept obsolete behavior, prune scope or implement generic AI.
 - All ACTIVE phases1–9 and registry leaves remain scope: Finance/ledger, Tax/Documents, Business, Investments, Reminders Tasks/Grocery/Shopping, shell/settings/reports, bounded full Fitness and hardware; issue#2 Canvas adds explicit completion scope. Honest unavailable states do not erase unfinished functionality.
 - Gates: G0 reconciled contracts/evidence; G1 successful canonical Windows recovery/protected gateway; G2 live bank/import/health provenance; G3 permitted signed Mac+iPhone/widgets/App Groups; G4 full visual/runtime/performance matrix; G5 Canvas decisions/round trip; G6 final security, registry, branch/PR parity and geonq acceptance. All remain open here.

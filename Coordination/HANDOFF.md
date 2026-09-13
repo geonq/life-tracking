@@ -12,7 +12,7 @@ evidence is still incomplete.
 ## Current source checkpoint
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- HEAD and origin: `ae1e84b Record security audit worker failures`;
+- HEAD and origin: `628d4b3 Refine shared visual foundation`;
   the source checkpoint remains `0a8d5b6 Instrument recovery runtime phases safely`;
   deployable code checkpoint remains `6baa1f3`. PR #1 is OPEN, DRAFT, and
   MERGEABLE against `main` at the last observed branch head; recheck its live
@@ -72,6 +72,13 @@ evidence is still incomplete.
   compile, and the exact artifact passed direct AX inspection and native picker
   interaction. The complete Mac UI suite remains unverified because XCTest
   automation initialization is still unreliable in this environment.
+- Shared visual foundation is committed at `628d4b3`: the current `tasks/design.md`
+  palette is applied, the system/SF Pro typography facade remains compact, and
+  `LifeOSCard` uses one hairline border, flat structural fills, and the bounded
+  floating shadow. The exact serialized `LifeOSMac` build succeeded; Home and
+  Calendar were opened from that binary. Astra Medium reviewed the corrected
+  diff **GREEN**. This is foundation evidence only; route-by-route visual,
+  gesture, widget, phone, and physical acceptance remain open.
 - The frozen acceptance registry is structurally valid (**258 scored leaves,
   7 aliases**) but has **0 accepted leaves**; `--score` correctly fails the P0
   gate. Scoped GREEN tranche reviews are not a product-completion percentage.
@@ -123,9 +130,10 @@ evidence is still incomplete.
 Keep SF Pro/system styling, compact Linear/Vercel quality, truthful live data,
 no generic advisor or in-app AI, and calorie-photo tracking as the only AI.
 The old AppKit route-host/raster plan is superseded by the native stack in
-`070b7db`. Current next step: finish the read-only security reconciliation,
-apply only remaining verified fixes with focused tests, then capture the actual
-Mac shell states required by Astra. Keep the Windows marker untouched until a
+`070b7db`. Current next step: continue the bounded T11 shell/Home/Usage/Clipper
+visual pass from the reviewed foundation. The two broad security workers
+returned no report, so any further security reconciliation must use a different,
+completed execution method before code changes. Keep the Windows marker untouched until a
 fresh strict recovery observation, identity/ACL checks, and reviewed performance
 run authorize mutation. Live bank readback, physical signing/widgets, whole-app
 visual/runtime, Zepp, Obsidian, and final release evidence remain open.

@@ -4,7 +4,7 @@ Updated 2026-09-13 Europe/Berlin.
 
 - Release: **NO-GO**.
 - Deployable source checkpoint: `6baa1f3`; current branch HEAD and origin are
-  `ae1e84b` on `lifeos-foundation-checkpoint-20260812`.
+  `628d4b3` on `lifeos-foundation-checkpoint-20260812`.
 - Usage packet, per-scope authority, omission handling, persistence retry,
   identity handling, cancellation, and viewport bounds are implemented and
   independently reviewed **GREEN**.
@@ -50,6 +50,11 @@ Updated 2026-09-13 Europe/Berlin.
   `LifeOSMac` production build and direct AX proof for the `import-tax-pdf`
   button; the full Mac UI suite remains unverified because of XCTest
   automation initialization failures.
+- Shared visual foundation at `628d4b3` has an exact serialized `LifeOSMac`
+  build with **BUILD SUCCEEDED**, inspected Home/Calendar captures, and an
+  Astra Medium **GREEN** review. It applies the current SF Pro/compact token
+  contract and flat card treatment; it does not pass whole-app visual or
+  interaction gates.
 - The frozen acceptance registry validates with 258 scored leaves and 7
   aliases, but records 0 accepted leaves; its `--score` gate fails as designed.
   Tranche GREEN reviews therefore do not represent a completion percentage.
