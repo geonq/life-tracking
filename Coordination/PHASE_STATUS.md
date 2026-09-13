@@ -37,6 +37,9 @@ Updated 2026-09-13 Europe/Berlin.
 - Backend boundary security is Astra scoped GREEN at `87e7db6`: typecheck and
   **148/148** API tests pass with loopback permission. Native Windows launch,
   deployed ACL/reparse protection, and rename durability are unverified.
+- The frozen acceptance registry validates with 258 scored leaves and 7
+  aliases, but records 0 accepted leaves; its `--score` gate fails as designed.
+  Tranche GREEN reviews therefore do not represent a completion percentage.
 - The calendar review found no P0/P1. Its P2 unavailable-symbol finding is
   fixed and locally tested; the targeted Astra re-review was blocked by worker
   file-access limits and is therefore not a sign-off.

@@ -56,6 +56,9 @@ evidence is still incomplete.
   allowlisting, bounded history/atomic writes, and Windows Codex path/quoting
   checks are covered. Native Windows execution, deployed ACL/reparse behavior,
   and Windows rename durability remain unverified.
+- The frozen acceptance registry is structurally valid (**258 scored leaves,
+  7 aliases**) but has **0 accepted leaves**; `--score` correctly fails the P0
+  gate. Scoped GREEN tranche reviews are not a product-completion percentage.
 
 ## Still open
 

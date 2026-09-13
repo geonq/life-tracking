@@ -44,4 +44,8 @@ is not claimed as a sign-off.
 These results do not prove live, runtime, device, visual, or operational
 completion.
 
+The frozen registry is structurally valid but has 0 accepted leaves; do not use
+the earlier 60% estimate as release progress. Acceptance must be earned with
+the required live, runtime, device, visual, and operator evidence.
+
 Keep generic advisor/AI and the Claude usage watcher out of the product.
