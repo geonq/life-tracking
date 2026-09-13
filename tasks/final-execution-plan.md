@@ -2,10 +2,13 @@
 Planning baseline: 2026-09-13; current trusted HEAD **39f2c21**. Documentation-only review; all execution below is prospective.
 
 ## 1. Current truth and explicit gates
-- **NO-GO.** Local HEAD and origin now match `39f2c21`; the last live PR
-  observation was OPEN/DRAFT/MERGEABLE at the earlier source head and needs a
-  fresh recheck. No Windows/GitHub access, build, runtime test or registry
-  validation occurred in this plan review.
+- **NO-GO.** Local HEAD and origin now match `e234af9`; fresh GitHub CLI
+  observation shows PR #1 OPEN/DRAFT/MERGEABLE against `main` with no submitted
+  reviews. A serialized Mac shell build passed; iOS lanes stop at asset
+  compilation because no `iphonesimulator` runtime is installed. Fresh
+  read-only Windows observation shows BitLocker protected C:/D:, stopped
+  `LifeOSAPI`, absent `LifeOSGateway`, no LifeOS process, and an active recovery
+  marker. No final runtime or registry acceptance is implied.
 - HANDOFF records FROZEN registry validation: 258 scored leaves, seven aliases, zero accepted, failing --score. Historical scoped GREEN is neither whole-product acceptance nor an effort percentage.
 - Recorded receipts: Usage visuals3/3; Finance16/16 plus phone contracts; Fitness Recovery1/1 Mac and1/1 phone; Calendar107/107 simulator plus Mac build; installer13/13; backend148/148. Mac snapshots executed51/51 before archive failure; this is not a passing final archive. Tax has scoped AX/picker proof, not a successful whole Mac UI suite.
 - Windows recorded state: C: and D: fully encrypted/protection ON; **BitLocker is healthy**. No recovery/install process; API stopped; gateway absent; marker active, journal artifacts-complete,31,401 units, sequence59,167. Resume stopped after45 minutes without final checkpoint. Candidate6baa1f3 and disposable diagnostics through0a8d5b6 do not certify canonical recovery/install.

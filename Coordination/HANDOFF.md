@@ -14,9 +14,9 @@ evidence is still incomplete.
 - Branch: `lifeos-foundation-checkpoint-20260812`.
 - HEAD and origin: `39f2c21 Refine shell navigation geometry and motion`;
   the source checkpoint remains `0a8d5b6 Instrument recovery runtime phases safely`;
-  deployable code checkpoint remains `6baa1f3`. PR #1 is OPEN, DRAFT, and
-  MERGEABLE against `main` at the last observed branch head; recheck its live
-  state before every dispatch or merge.
+  deployable code checkpoint remains `6baa1f3`. Fresh GitHub CLI observation
+  shows PR #1 OPEN, DRAFT, and MERGEABLE against `main` at `e234af9`, with no
+  submitted reviews; recheck its live state before every dispatch or merge.
 - Finance source checkpoint: `fd8ccfb Refine Finance responsive hierarchy`.
 - macOS now has one value-driven Home `NavigationStack` with a bounded typed
   path. Sidebar Home resets it; Back pops one detail and preserves origin.
