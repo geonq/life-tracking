@@ -137,6 +137,10 @@ evidence is still incomplete.
   to reconcile the supplied Claude security findings read-only against current
   source, but both were closed without a report. Several reported items may be
   fixed; any next audit needs a different execution method before code changes.
+- Two T12 Calendar Luna Max attempts (`01a09cc4-6798-7423-a649-222b9d65af3e`
+  and `01a09cd9-123b-70f0-9da0-872586cfaaf1`) were stopped without a verified
+  build or runtime handoff. Their incomplete patch was archived locally and
+  discarded; no Calendar change from those attempts is in the branch.
 
 ## Boundaries and next action
 
@@ -145,7 +149,8 @@ no generic advisor or in-app AI, and calorie-photo tracking as the only AI.
 The old AppKit route-host/raster plan is superseded by the native stack in
 `070b7db`. Current next step: continue the bounded T11 Home/Usage/Clipper
 visual pass from the reviewed foundation and shell; the latest committed
-Usage tranche is `e8bbefa`. The two broad security workers
+Usage tranche is `e8bbefa`. The Calendar gesture tranche must be re-planned
+with a smaller verified scope before dispatch. The two broad security workers
 returned no report, so any further security reconciliation must use a different,
 completed execution method before code changes. Keep the Windows marker untouched until a
 fresh strict recovery observation, identity/ACL checks, and reviewed performance

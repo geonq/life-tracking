@@ -53,6 +53,9 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
   breakpoints, a successful serialized Mac build, and an Astra Medium GREEN
   review. The focused XCTest command compiled but the sandbox blocked its
   `testmanagerd` connection before assertions.
+  Two T12 Calendar Luna Max attempts were stopped without a verified build or
+  handoff; their incomplete changes were discarded and are not part of the
+  current source. The next Calendar dispatch must use a smaller exact scope.
   Bounded recovery diagnostics are committed at `14a3b7f`; strict progress
   validation is committed at `4e14e38`; strict journal observation is committed
   at `9e43dd7`. Bounded phase telemetry is committed at `0a8d5b6`; the current

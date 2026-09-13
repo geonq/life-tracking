@@ -104,6 +104,10 @@ Updated 2026-09-13 Europe/Berlin.
   passed.
 - iPhone install/signing renewal/Shortcuts and physical continuity.
 - Zepp workout import fidelity, Obsidian Canvas round trip, and final security.
+- T12 Calendar gesture work is not accepted: two Luna Max attempts left
+  incomplete/unverified patches, both were discarded, and the source is clean
+  at the reviewed checkpoint. A smaller implementation scope plus build and
+  Astra review is required before Calendar changes are counted.
 
 No generic advisor, usage watcher, demo fallback, or conversational AI belongs
 in the product. Calorie-photo tracking is the only permitted in-app AI flow.
