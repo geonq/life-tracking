@@ -1,9 +1,9 @@
 # LifeOS final execution plan
-Planning baseline: 2026-09-13, current source HEAD `056c1b4`. This remains a
+Planning baseline: 2026-09-13, current source HEAD `5ebc17e`. This remains a
 planning and dispatch authority; it does not claim product completion.
 
 ## 1. Reconciled truth and authority
-- Local HEAD and origin tracking ref match `056c1b4`; GitHub CLI confirms PR #1
+- Local HEAD and origin tracking ref match `5ebc17e`; GitHub CLI confirms PR #1
   is OPEN/DRAFT/MERGEABLE against `main` at the same head. Recheck before
   every dispatch.
 - Release is **NO-GO**. `python3 -B scripts/validate_acceptance_registry.py --json` verified FROZEN, 258 leaves, 7 aliases, 0 accepted, no structural errors; `--score` reports the P0 failure. This measures accepted evidence, not zero implemented functionality or a reliable effort percentage.

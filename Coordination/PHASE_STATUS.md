@@ -4,7 +4,7 @@ Updated 2026-09-13 Europe/Berlin.
 
 - Release: **NO-GO**.
 - Deployable source checkpoint: `6baa1f3`; current branch HEAD and origin are
-  `056c1b4` on `lifeos-foundation-checkpoint-20260812`.
+  `5ebc17e` on `lifeos-foundation-checkpoint-20260812`.
 - Usage packet, per-scope authority, omission handling, persistence retry,
   identity handling, cancellation, and viewport bounds are implemented and
   independently reviewed **GREEN**.
@@ -49,6 +49,11 @@ Updated 2026-09-13 Europe/Berlin.
 - The frozen acceptance registry validates with 258 scored leaves and 7
   aliases, but records 0 accepted leaves; its `--score` gate fails as designed.
   Tranche GREEN reviews therefore do not represent a completion percentage.
+- The current 191-line visual contract is committed at `5ebc17e`. The latest
+  Mac shell candidate passed compile and 6 selected tests but was Astra RED for
+  missing shell-state evidence and a possible collapsed-header overflow; it was
+  reverted and quarantined. A Luna Max security reconciliation is in progress
+  before any further security edits.
 - The calendar review found no P0/P1. Its P2 unavailable-symbol finding is
   fixed and locally tested; the targeted Astra re-review was blocked by worker
   file-access limits and is therefore not a sign-off.

@@ -12,7 +12,7 @@ evidence is still incomplete.
 ## Current source checkpoint
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- HEAD and origin: `056c1b4 Reconcile execution checkpoints with current HEAD`;
+- HEAD and origin: `5ebc17e Define compact premium visual acceptance contract`;
   the source checkpoint remains `0a8d5b6 Instrument recovery runtime phases safely`;
   deployable code checkpoint remains `6baa1f3`. PR #1 is OPEN, DRAFT, and
   MERGEABLE against `main` at this same head.
@@ -69,6 +69,12 @@ evidence is still incomplete.
 - The frozen acceptance registry is structurally valid (**258 scored leaves,
   7 aliases**) but has **0 accepted leaves**; `--score` correctly fails the P0
   gate. Scoped GREEN tranche reviews are not a product-completion percentage.
+- `tasks/design.md` is the current 191-line visual contract. A narrow Mac shell
+  candidate compiled and passed 6 selected tests, but Astra Medium returned RED
+  because the shell was not captured and the collapsed header may exceed the
+  52-point rail. It was quarantined at `/private/tmp/lifeos-mac-shell-candidate-red.patch`
+  (SHA-256 `7deeb53418ad81bb3eb9c223e9649d88cba33c836c6e4b97ef83daf7aaa17be3`)
+  and the source was restored to `5ebc17e`.
 
 ## Still open
 
@@ -99,14 +105,18 @@ evidence is still incomplete.
   calendar gestures, widgets, physical iPhone, signing, and Shortcuts.
 - Zepp workout fidelity/sync and the Obsidian Canvas mind map; see issue #2.
 - Final operational security, transport, and release acceptance checks.
+- A Luna Max read-only audit is reconciling the supplied Claude security findings
+  against current source before any security edit is dispatched. Several reported
+  items already appear fixed; only verified OPEN/PARTIAL findings should change code.
 
 ## Boundaries and next action
 
 Keep SF Pro/system styling, compact Linear/Vercel quality, truthful live data,
 no generic advisor or in-app AI, and calorie-photo tracking as the only AI.
 The old AppKit route-host/raster plan is superseded by the native stack in
-`070b7db`. Next: use the bounded diagnostics and strict reader in disposable
-recovery validation, resolve the full-journal scan performance gate, then
-resume recovery only after measured strict observation and close live provider,
-device/signing, whole-app visual,
-Zepp, Obsidian, and security gates with evidence.
+`070b7db`. Current next step: finish the read-only security reconciliation,
+apply only remaining verified fixes with focused tests, then capture the actual
+Mac shell states required by Astra. Keep the Windows marker untouched until a
+fresh strict recovery observation, identity/ACL checks, and reviewed performance
+run authorize mutation. Live bank readback, physical signing/widgets, whole-app
+visual/runtime, Zepp, Obsidian, and final release evidence remain open.

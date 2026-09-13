@@ -24,7 +24,7 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
 - Tax document local feature foundation.
 - Provenance-aware read-only Usage ingestion/API/native UI.
 - Fail-closed Finance summary and disabled connector contracts.
-- Current working checkpoint: `056c1b4` on `lifeos-foundation-checkpoint-20260812`.
+- Current working checkpoint: `5ebc17e` on `lifeos-foundation-checkpoint-20260812`.
   The branch push succeeded; PR #1 is the matching open draft checkpoint. The
   deployable Windows candidate is the verified `6baa1f3` source checkpoint;
   recovery reached journal unit 31,400 and was stopped before its final stage.
@@ -49,13 +49,16 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
 
 ## Current dispatch
 
-- Averroes the 3rd (Luna Max) is implementing only descriptor-bound streaming
-  progress replay from base `056c1b4`; no receipt/cache shortcut, service
-  mutation, canonical SSH, or docs changes are authorized.
-- Astra Medium marked the earlier receipt proposal RED until it proves exact
-  byte binding, untouched-unit semantics, validation publish timing, strict
-  resume/terminal boundaries, and same-process invalidation. The streaming
-  tranche must pass differential tests and native PowerShell 5.1 review first.
+- The prior Averroes streaming candidate was stopped, quarantined, and discarded
+  after it returned no handoff; no recovery source changes are present. Astra
+  had already marked the proposal RED for byte binding, untouched-unit semantics,
+  strict boundaries, invalidation, and Windows PowerShell 5.1 safety.
+- A narrow Mac shell candidate was compiled and tested, then rejected by Astra
+  Medium for missing actual shell evidence and collapsed-header geometry risk; its
+  patch is preserved in `/private/tmp/lifeos-mac-shell-candidate-red.patch`.
+- Plato the 3rd (Luna Max) is auditing the complete Claude security finding list
+  read-only against current source and tests. No security patch is authorized
+  until that audit identifies concrete OPEN/PARTIAL findings.
 
 ## Execution phases
 
