@@ -583,6 +583,15 @@ private struct LifeOSIOSSceneRoot: View {
         reduceMotion ? .identity : .opacity
     }
 
+    private var navigationAnimationKey: String {
+        [
+            selection.identifier,
+            showingUsage ? "usage" : "root",
+            selectedModuleRoute?.restorationKey ?? "",
+            showingDestinationUnavailable ? "unavailable" : "available"
+        ].joined(separator: "|")
+    }
+
     init(
         calendarCoordinator: CalendarCoordinator,
         usageCoordinator: UsageCoordinator,
@@ -629,10 +638,7 @@ private struct LifeOSIOSSceneRoot: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .animation(reduceMotion ? nil : LifeOSMotion.tabCrossfade, value: selection)
-            .animation(reduceMotion ? nil : LifeOSMotion.tabCrossfade, value: showingUsage)
-            .animation(reduceMotion ? nil : LifeOSMotion.tabCrossfade, value: selectedModuleRoute)
-            .animation(reduceMotion ? nil : LifeOSMotion.tabCrossfade, value: showingDestinationUnavailable)
+            .animation(reduceMotion ? nil : LifeOSMotion.tabCrossfade, value: navigationAnimationKey)
 
             if !showingUsage {
                 CompactTabBar(selection: $selection) { tab in
@@ -701,7 +707,7 @@ private struct LifeOSIOSSceneRoot: View {
                     state: usesVisualFixtures ? .demo : usagePacket.loadState,
                     refreshAction: usesVisualFixtures ? nil : { await usageCoordinator.refresh() },
                     onBack: {
-                        withAnimation(reduceMotion ? nil : LifeOSMotion.heroMorph) {
+                        withAnimation(reduceMotion ? nil : LifeOSMotion.tabCrossfade) {
                             showingUsage = false
                             selectedModuleRoute = nil
                         }
@@ -1059,7 +1065,7 @@ private struct CompactTabBarItem: View {
             .padding(.vertical, 4)
             .frame(maxWidth: .infinity, minHeight: 44)
             .background(
-                Capsule(style: .continuous)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .fill(isSelected ? LifeOSTokens.selectedNavigationFill : .clear)
             )
             .contentShape(Rectangle())

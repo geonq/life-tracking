@@ -244,7 +244,7 @@ private struct LifeOSMacSceneRoot: View {
     @SceneStorage("LifeOS.mac.route.v1") private var restoredRouteIdentifier = ""
     @SceneStorage("LifeOS.mac.showingUsage.v1") private var restoredShowingUsage = false
     @SceneStorage("LifeOS.mac.sidebarCollapsed.v1") private var restoredSidebarCollapsed = false
-    @SceneStorage("LifeOS.mac.sidebarWidth.v1") private var restoredSidebarWidth = 232.0
+    @SceneStorage("LifeOS.mac.sidebarWidth.v1") private var restoredSidebarWidth = 208.0
 
     var body: some View {
         let module = LifeOSModule(rawValue: restoredModuleIdentifier).flatMap {
@@ -300,7 +300,7 @@ struct LifeOSMacRootView: View {
     private let fitnessObservation: FitnessObservationEnvelope?
     @State private var routeState: LifeOSMacRouteState
     @State private var sidebarCollapsed = false
-    @State private var sidebarWidth: Double = 232
+    @State private var sidebarWidth: Double = 208
     @State private var hoveredSidebarModule: LifeOSModule?
     @State private var showingCommandPalette = false
     @State private var sidebarResizeStart: CGFloat?
@@ -323,7 +323,7 @@ struct LifeOSMacRootView: View {
         initialRoute: LifeOSDeepLink? = nil,
         initiallyShowingUsage: Bool = false,
         initialSidebarCollapsed: Bool = false,
-        initialSidebarWidth: Double = 232,
+        initialSidebarWidth: Double = 208,
         onSceneStateChange: ((LifeOSMacSceneState) -> Void)? = nil
     ) {
         self.calendarCoordinator = calendarCoordinator
@@ -421,12 +421,12 @@ struct LifeOSMacRootView: View {
 
     private var resolvedSidebarWidth: CGFloat {
         let value = CGFloat(sidebarWidth)
-        guard value.isFinite else { return 232 }
-        return min(max(value, 200), 260)
+        guard value.isFinite else { return 208 }
+        return min(max(value, 184), 240)
     }
 
     private func effectiveSidebarWidth(isCompact: Bool) -> CGFloat {
-        sidebarCollapsed || isCompact ? 64 : resolvedSidebarWidth
+        sidebarCollapsed || isCompact ? 52 : resolvedSidebarWidth
     }
 
     private var sidebarResizeHandle: some View {
@@ -439,14 +439,14 @@ struct LifeOSMacRootView: View {
                     .onChanged { value in
                         let start = sidebarResizeStart ?? resolvedSidebarWidth
                         sidebarResizeStart = start
-                        sidebarWidth = Double(min(max(start + value.translation.width, 200), 260))
+                        sidebarWidth = Double(min(max(start + value.translation.width, 184), 240))
                     }
                     .onEnded { _ in sidebarResizeStart = nil }
             )
             .accessibilityElement()
             .accessibilityLabel("Sidebar width")
             .accessibilityValue(Text("\(Int(resolvedSidebarWidth)) points"))
-            .accessibilityHint("Drag to resize between 200 and 260 points")
+            .accessibilityHint("Drag to resize between 184 and 240 points")
             .accessibilityIdentifier("mac-sidebar-resize")
     }
 
@@ -492,7 +492,7 @@ struct LifeOSMacRootView: View {
                     }
                 }
             }
-            .padding(.horizontal, collapsed ? 14 : 12)
+            .padding(.horizontal, collapsed ? 10 : 12)
             .padding(.top, 12)
             .padding(.bottom, 12)
 
@@ -569,8 +569,14 @@ struct LifeOSMacRootView: View {
                 .foregroundStyle(LifeOSTokens.tertiaryText)
                 .padding(.horizontal, 11)
                 .frame(minHeight: 32)
-                .background(LifeOSTokens.surface, in: Capsule())
-                .overlay(Capsule().stroke(LifeOSTokens.quietBorder, lineWidth: 0.75))
+                .background(
+                    LifeOSTokens.surface,
+                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(LifeOSTokens.quietBorder, lineWidth: 0.75)
+                )
             }
             .buttonStyle(.plain)
             .keyboardShortcut("k", modifiers: .command)
@@ -578,7 +584,7 @@ struct LifeOSMacRootView: View {
             .accessibilityIdentifier("mac-command-palette-trigger")
         }
         .padding(.horizontal, isCompact ? 12 : 24)
-        .frame(height: 52)
+        .frame(height: 44)
         .background(LifeOSTokens.canvas)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("mac-global-top-bar")
@@ -808,23 +814,17 @@ struct LifeOSMacRootView: View {
         return Button {
             select(module)
         } label: {
-            ZStack(alignment: .leading) {
-                HStack(spacing: 10) {
-                    LifeOSIcon(module.icon, context: .navigation)
-                    if !collapsed {
-                        Text(module.title)
-                            .lifeOSTypography(.label, weight: selected ? .semibold : .regular)
-                        Spacer(minLength: 0)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: collapsed ? .center : .leading)
-                if selected {
-                    Capsule(style: .continuous)
-                        .fill(LifeOSTokens.accent)
-                        .frame(width: 2, height: 18)
+            HStack(spacing: 10) {
+                LifeOSIcon(module.icon, context: .navigation)
+                    .foregroundStyle(selected ? LifeOSTokens.accent : LifeOSTokens.secondaryText)
+                if !collapsed {
+                    Text(module.title)
+                        .lifeOSTypography(.label, weight: selected ? .semibold : .regular)
+                        .foregroundStyle(selected ? LifeOSTokens.selectedNavigationText : LifeOSTokens.secondaryText)
+                    Spacer(minLength: 0)
                 }
             }
-            .foregroundStyle(selected ? LifeOSTokens.selectedNavigationText : LifeOSTokens.secondaryText)
+            .frame(maxWidth: .infinity, alignment: collapsed ? .center : .leading)
             .padding(.horizontal, collapsed ? 0 : 10)
             .frame(height: 34)
             .background(
