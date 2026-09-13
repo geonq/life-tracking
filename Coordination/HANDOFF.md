@@ -12,7 +12,8 @@ evidence is still incomplete.
 ## Current source checkpoint
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- HEAD and origin: `0a8d5b6 Instrument recovery runtime phases safely`;
+- HEAD and origin: `93c7af3 Refresh active execution context`;
+  the source checkpoint remains `0a8d5b6 Instrument recovery runtime phases safely`;
   deployable code checkpoint remains `6baa1f3`. PR #1 is OPEN, DRAFT, and
   MERGEABLE against `main` at this same head.
 - Finance source checkpoint: `fd8ccfb Refine Finance responsive hierarchy`.

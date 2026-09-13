@@ -3,8 +3,8 @@
 Updated 2026-09-13 Europe/Berlin.
 
 - Release: **NO-GO**.
-- Source checkpoint: `6baa1f3`; current branch HEAD and origin are
-  `0a8d5b6` on `lifeos-foundation-checkpoint-20260812`.
+- Deployable source checkpoint: `6baa1f3`; current branch HEAD and origin are
+  `93c7af3` on `lifeos-foundation-checkpoint-20260812`.
 - Usage packet, per-scope authority, omission handling, persistence retry,
   identity handling, cancellation, and viewport bounds are implemented and
   independently reviewed **GREEN**.

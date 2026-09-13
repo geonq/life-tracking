@@ -1,9 +1,9 @@
 # LifeOS final execution plan
-Planning baseline: 2026-09-13, current source HEAD `dc9fc8e`. This remains a
+Planning baseline: 2026-09-13, current source HEAD `93c7af3`. This remains a
 planning and dispatch authority; it does not claim product completion.
 
 ## 1. Reconciled truth and authority
-- Local HEAD and origin tracking ref match `dc9fc8e`; GitHub CLI confirms PR #1
+- Local HEAD and origin tracking ref match `93c7af3`; GitHub CLI confirms PR #1
   is OPEN/DRAFT/MERGEABLE against `main` at the same head. Recheck before
   every dispatch.
 - Release is **NO-GO**. `python3 -B scripts/validate_acceptance_registry.py --json` verified FROZEN, 258 leaves, 7 aliases, 0 accepted, no structural errors; `--score` reports the P0 failure. This measures accepted evidence, not zero implemented functionality or a reliable effort percentage.
@@ -117,7 +117,7 @@ planning and dispatch authority; it does not claim product completion.
 - Windows timing alone is not a failure signal: inspect same live PID/CPU/stage; do not restart due polling timeout. Unexpected ACL/identity drift or memory danger stops mutation and retains marker/journal; no automatic destructive cleanup. No scheduling/Claude-limit watcher.
 | Area | Current verified or recorded status | Evidence required next |
 |---|---|---|
-| Git/PR | Observed HEAD/origin/PR `dc9fc8e`, draft OPEN/MERGEABLE | Recheck current SHA before every worker; canonical docs now distinguish candidate and current head |
+| Git/PR | Observed HEAD/origin/PR `93c7af3`, draft OPEN/MERGEABLE | Recheck current SHA before every worker; canonical docs now distinguish candidate and current head |
 | Registry | Observed valid FROZEN,0/258 accepted; score failure | Audited conflict reconciliation and per-leaf immutable acceptance evidence |
 | Windows | Recorded `6baa1f3` candidate checks; active recovery marker/service stopped | Fresh SSH process/SCM/journal observation, measured reviewed recovery, cutover/live health |
 | Finance/device | Source foundations and historical scoped tests; live/physical unproven here | Existing consent readback; USB/team/HealthKit/widget/renewal receipts from Georg |
