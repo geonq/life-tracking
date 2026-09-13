@@ -138,6 +138,80 @@ final class CalendarDomainTests: XCTestCase {
         XCTAssertEqual(CalendarEmojiValidation.validated("1️⃣"), "1️⃣")
     }
 
+    func testCalendarItemDecodingRejectsMalformedTitleAndInterval() throws {
+        let item = try CalendarItem(
+            title: "valid",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: base
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .secondsSince1970
+        let encoded = try encoder.encode(item)
+        let original = try XCTUnwrap(try JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+
+        var blankTitle = original
+        blankTitle["title"] = "   "
+        XCTAssertThrowsError(try decoder.decode(
+            CalendarItem.self,
+            from: JSONSerialization.data(withJSONObject: blankTitle)
+        ))
+
+        var oversizedTitle = original
+        oversizedTitle["title"] = String(repeating: "x", count: CalendarItem.maximumTitleUTF8Bytes + 1)
+        XCTAssertThrowsError(try decoder.decode(
+            CalendarItem.self,
+            from: JSONSerialization.data(withJSONObject: oversizedTitle)
+        ))
+
+        var reversedInterval = original
+        reversedInterval["end"] = base.timeIntervalSince1970
+        reversedInterval["start"] = base.addingTimeInterval(60).timeIntervalSince1970
+        XCTAssertThrowsError(try decoder.decode(
+            CalendarItem.self,
+            from: JSONSerialization.data(withJSONObject: reversedInterval)
+        ))
+
+        var invalidIcon = original
+        invalidIcon["icon"] = "not-an-emoji"
+        XCTAssertThrowsError(try decoder.decode(
+            CalendarItem.self,
+            from: JSONSerialization.data(withJSONObject: invalidIcon)
+        ))
+
+        var invalidSystemIcon = original
+        invalidSystemIcon["systemIconName"] = "definitely/not-a-real-symbol"
+        XCTAssertThrowsError(try decoder.decode(
+            CalendarItem.self,
+            from: JSONSerialization.data(withJSONObject: invalidSystemIcon)
+        ))
+
+        var invalidIconAsset = original
+        invalidIconAsset["iconAsset"] = ["format": "png", "bytes": "aW52YWxpZA=="]
+        XCTAssertThrowsError(try decoder.decode(
+            CalendarItem.self,
+            from: JSONSerialization.data(withJSONObject: invalidIconAsset)
+        ))
+
+        var invalidTimeZone = original
+        invalidTimeZone["timeZoneIdentifier"] = "Not/AZone"
+        XCTAssertThrowsError(try decoder.decode(
+            CalendarItem.self,
+            from: JSONSerialization.data(withJSONObject: invalidTimeZone)
+        ))
+
+        var reversedMutationTimestamp = original
+        reversedMutationTimestamp["createdAt"] = base.addingTimeInterval(60).timeIntervalSince1970
+        reversedMutationTimestamp["updatedAt"] = base.timeIntervalSince1970
+        XCTAssertThrowsError(try decoder.decode(
+            CalendarItem.self,
+            from: JSONSerialization.data(withJSONObject: reversedMutationTimestamp)
+        ))
+    }
+
     func testOrderingAndDayQueryAndProgressUpdate() throws {
         let later = try CalendarItem(title: "later", start: base.addingTimeInterval(3600), end: base.addingTimeInterval(3660), createdAt: base, updatedAt: base)
         let earlier = try CalendarItem(title: "earlier", start: base, end: base.addingTimeInterval(60), createdAt: base, updatedAt: base)
@@ -445,6 +519,8 @@ final class CalendarDomainTests: XCTestCase {
             title: "Series",
             start: start,
             end: start.addingTimeInterval(600),
+            createdAt: start,
+            updatedAt: start,
             recurrence: CalendarRecurrenceRule(frequency: .daily)
         )
         let replaced = try original.updating(
@@ -690,6 +766,114 @@ final class CalendarDomainTests: XCTestCase {
         XCTAssertEqual(report.rejectedDeletionCount, 1)
     }
 
+    func testRemoteMergeQuarantinesStaleMutationForExistingIdentity() throws {
+        let id = UUID()
+        let current = try CalendarItem(
+            id: id,
+            title: "local",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: base.addingTimeInterval(20)
+        )
+        let stale = try CalendarItem(
+            id: id,
+            title: "stale remote",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: base.addingTimeInterval(19)
+        )
+
+        let report = CalendarRemoteMergePolicy.sanitize(
+            CalendarSnapshot(items: [stale]),
+            against: CalendarSnapshot(items: [current]),
+            now: base.addingTimeInterval(30)
+        )
+
+        XCTAssertTrue(report.snapshot.items.isEmpty)
+        XCTAssertEqual(report.rejectedItemCount, 1)
+        XCTAssertEqual(report.rejectedDeletionCount, 0)
+    }
+
+    func testRemoteMergeRejectsStaleEnvelopeTimestamp() throws {
+        let remote = try CalendarItem(
+            title: "remote",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: base
+        )
+        let report = CalendarRemoteMergePolicy.sanitize(
+            CalendarSnapshot(items: [remote]),
+            against: CalendarSnapshot(),
+            now: base.addingTimeInterval(CalendarRemoteMergePolicy.maximumClockSkew + 1),
+            sentAt: base
+        )
+
+        XCTAssertTrue(report.snapshot.items.isEmpty)
+        XCTAssertTrue(report.rejectedEnvelope)
+        XCTAssertEqual(report.rejectedItemCount, 1)
+    }
+
+    @MainActor
+    func testFutureRemoteMutationsAreQuarantinedBeforeLocalEditPersists() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let now = base.addingTimeInterval(100)
+        let future = now.addingTimeInterval(240)
+        let localUpdateID = UUID()
+        let localDeleteID = UUID()
+        let localUpdate = try CalendarItem(
+            id: localUpdateID,
+            title: "local update",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: base
+        )
+        let localDelete = try CalendarItem(
+            id: localDeleteID,
+            title: "local delete",
+            start: base.addingTimeInterval(120),
+            end: base.addingTimeInterval(180),
+            createdAt: base,
+            updatedAt: base
+        )
+        let futureUpdate = try CalendarItem(
+            id: localUpdateID,
+            title: "future overwrite",
+            start: localUpdate.start,
+            end: localUpdate.end,
+            createdAt: localUpdate.createdAt,
+            updatedAt: future
+        )
+        let futureDeletion = localDelete.deleting(at: future)
+        let coordinator = CalendarCoordinator(storeURL: directory.appendingPathComponent("calendar.json"))
+
+        let updateSave = await coordinator.save(localUpdate)
+        let deleteSave = await coordinator.save(localDelete)
+        XCTAssertEqual(updateSave, .success)
+        XCTAssertEqual(deleteSave, .success)
+        let mergeResult = await coordinator.merge(
+            CalendarSnapshot(items: [futureUpdate, futureDeletion]),
+            now: now
+        )
+        XCTAssertEqual(mergeResult, .success)
+
+        let editedUpdate = try localUpdate.updating(title: "local edit wins", at: now.addingTimeInterval(1))
+        let editedDelete = try localDelete.updating(title: "local delete edit wins", at: now.addingTimeInterval(1))
+        let editedUpdateSave = await coordinator.save(editedUpdate)
+        let editedDeleteSave = await coordinator.save(editedDelete)
+        XCTAssertEqual(editedUpdateSave, .success)
+        XCTAssertEqual(editedDeleteSave, .success)
+
+        let persisted = try await coordinator.store.load()
+        XCTAssertEqual(persisted.items.first(where: { $0.id == localUpdateID })?.title, "local edit wins")
+        XCTAssertEqual(persisted.items.first(where: { $0.id == localDeleteID })?.title, "local delete edit wins")
+        XCTAssertFalse(persisted.items.contains { $0.isDeleted })
+    }
+
     func testRemoteMergeAcceptsValidMatchingTombstone() throws {
         let current = try CalendarItem(
             title: "meeting",
@@ -740,10 +924,7 @@ final class CalendarDomainTests: XCTestCase {
             local.createdAt.timeIntervalSince1970,
             accuracy: 0.000_001
         )
-        XCTAssertEqual(
-            CalendarTransportDate.canonicalized(receivedItem.createdAt),
-            CalendarTransportDate.canonicalized(local.createdAt)
-        )
+        XCTAssertEqual(receivedItem.createdAt.timeIntervalSince1970, local.createdAt.timeIntervalSince1970, accuracy: 0.000_001)
 
         let report = CalendarRemoteMergePolicy.sanitize(
             received,
@@ -753,6 +934,362 @@ final class CalendarDomainTests: XCTestCase {
 
         XCTAssertEqual(report.snapshot.items.first?.title, "remote edit")
         XCTAssertEqual(report.rejectedItemCount, 0)
+    }
+
+    func testRemoteMergeAcceptsLegacyWholeSecondCreationIdentityForEditAndDeletion() throws {
+        let id = UUID()
+        let local = try CalendarItem(
+            id: id,
+            title: "local",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base.addingTimeInterval(0.375),
+            updatedAt: base.addingTimeInterval(1.375)
+        )
+        let legacyEdit = try CalendarItem(
+            id: id,
+            title: "legacy edit",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: base.addingTimeInterval(2.375)
+        )
+        let editReport = CalendarRemoteMergePolicy.sanitize(
+            CalendarSnapshot(items: [legacyEdit]),
+            against: CalendarSnapshot(items: [local]),
+            now: base.addingTimeInterval(10)
+        )
+        XCTAssertEqual(editReport.snapshot.items, [legacyEdit])
+        XCTAssertEqual(editReport.rejectedItemCount, 0)
+
+        let legacyDeletion = try CalendarItem(
+            id: id,
+            title: "legacy edit",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: base.addingTimeInterval(3.375),
+            deletedAt: base.addingTimeInterval(3.375)
+        )
+        let deletionReport = CalendarRemoteMergePolicy.sanitize(
+            CalendarSnapshot(items: [legacyDeletion]),
+            against: CalendarSnapshot(items: [local]),
+            now: base.addingTimeInterval(10)
+        )
+        XCTAssertEqual(deletionReport.snapshot.items, [legacyDeletion])
+        XCTAssertEqual(deletionReport.acceptedDeletionCount, 1)
+        XCTAssertEqual(deletionReport.rejectedDeletionCount, 0)
+    }
+
+    func testRemoteMergeAcceptsFractionalCreationRoundTripAndRejectsUnrelatedSameSecondIdentity() throws {
+        let id = UUID()
+        let createdAt = base.addingTimeInterval(0.1234567)
+        let local = try CalendarItem(
+            id: id,
+            title: "local",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: createdAt,
+            updatedAt: base.addingTimeInterval(1)
+        )
+        let remote = try CalendarItem(
+            id: id,
+            title: "round trip edit",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: createdAt,
+            updatedAt: base.addingTimeInterval(2)
+        )
+        let wire = try JSONEncoder.calendar.encode(CalendarSnapshot(items: [remote]))
+        let received = try JSONDecoder.calendar.decode(CalendarSnapshot.self, from: wire)
+        let roundTripReport = CalendarRemoteMergePolicy.sanitize(
+            received,
+            against: CalendarSnapshot(items: [local]),
+            now: base.addingTimeInterval(10)
+        )
+        XCTAssertEqual(roundTripReport.snapshot.items.count, 1)
+        XCTAssertEqual(roundTripReport.snapshot.items.first?.title, "round trip edit")
+
+        let unrelated = try CalendarItem(
+            id: id,
+            title: "unrelated",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base.addingTimeInterval(0.75),
+            updatedAt: base.addingTimeInterval(3)
+        )
+        let unrelatedReport = CalendarRemoteMergePolicy.sanitize(
+            CalendarSnapshot(items: [unrelated]),
+            against: CalendarSnapshot(items: [local]),
+            now: base.addingTimeInterval(10)
+        )
+        XCTAssertTrue(unrelatedReport.snapshot.items.isEmpty)
+        XCTAssertEqual(unrelatedReport.rejectedItemCount, 1)
+    }
+
+    func testRemoteMergeConvergesEqualClockNonDeletionConflicts() throws {
+        let id = UUID()
+        let left = try CalendarItem(
+            id: id,
+            title: "left",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: base.addingTimeInterval(5)
+        )
+        let right = try CalendarItem(
+            id: id,
+            title: "right",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: base.addingTimeInterval(5)
+        )
+        let winner = try XCTUnwrap(CalendarSnapshot(items: [left, right]).items.first)
+        let loser = winner == left ? right : left
+
+        let winnerReport = CalendarRemoteMergePolicy.sanitize(
+            CalendarSnapshot(items: [winner]),
+            against: CalendarSnapshot(items: [loser]),
+            now: base.addingTimeInterval(10)
+        )
+        XCTAssertEqual(winnerReport.snapshot.items, [winner])
+        XCTAssertEqual(winnerReport.rejectedItemCount, 0)
+
+        let loserReport = CalendarRemoteMergePolicy.sanitize(
+            CalendarSnapshot(items: [loser]),
+            against: CalendarSnapshot(items: [winner]),
+            now: base.addingTimeInterval(10)
+        )
+        XCTAssertTrue(loserReport.snapshot.items.isEmpty)
+        XCTAssertEqual(loserReport.rejectedItemCount, 1)
+    }
+
+    func testRemoteMergeConvergesEqualClockEditAndDeletionInBothDirections() throws {
+        let id = UUID()
+        let clock = base.addingTimeInterval(5)
+        let edit = try CalendarItem(
+            id: id,
+            title: "edit",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: clock
+        )
+        let deletion = try CalendarItem(
+            id: id,
+            title: "edit",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: clock,
+            deletedAt: clock
+        )
+        let left = CalendarSnapshot(items: [edit])
+        let right = CalendarSnapshot(items: [deletion])
+
+        let leftReport = CalendarRemoteMergePolicy.sanitize(right, against: left, now: base.addingTimeInterval(10))
+        let rightReport = CalendarRemoteMergePolicy.sanitize(left, against: right, now: base.addingTimeInterval(10))
+        let leftConverged = left.merged(with: leftReport.snapshot)
+        let rightConverged = right.merged(with: rightReport.snapshot)
+
+        XCTAssertEqual(leftConverged, rightConverged)
+        XCTAssertEqual(leftConverged, CalendarSnapshot(items: [edit, deletion]))
+        XCTAssertEqual(leftReport.rejectedItemCount + rightReport.rejectedItemCount, 1)
+        XCTAssertEqual(
+            leftReport.acceptedDeletionCount + rightReport.acceptedDeletionCount,
+            leftConverged.items.first?.isDeleted == true ? 1 : 0
+        )
+
+        let reloadedLeft = try JSONDecoder.calendar.decode(
+            CalendarSnapshot.self,
+            from: JSONEncoder.calendar.encode(leftConverged)
+        )
+        let reloadedRight = try JSONDecoder.calendar.decode(
+            CalendarSnapshot.self,
+            from: JSONEncoder.calendar.encode(rightConverged)
+        )
+        XCTAssertEqual(reloadedLeft, reloadedRight)
+    }
+
+    func testRemoteMergeConvergesEqualClockWithSubsequentlyUpdatedTombstone() throws {
+        let id = UUID()
+        let clock = base.addingTimeInterval(5)
+        let edit = try CalendarItem(
+            id: id,
+            title: "edit",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: clock
+        )
+        let original = try CalendarItem(
+            id: id,
+            title: "edit",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: base
+        )
+        let tombstone = try original
+            .deleting(at: clock.addingTimeInterval(-1))
+            .updating(at: clock.addingTimeInterval(1))
+        var left = CalendarSnapshot(items: [edit])
+        var right = CalendarSnapshot(items: [tombstone])
+
+        for _ in 0..<3 {
+            let leftIncoming = CalendarRemoteMergePolicy.sanitize(right, against: left, now: base.addingTimeInterval(10))
+            let rightIncoming = CalendarRemoteMergePolicy.sanitize(left, against: right, now: base.addingTimeInterval(10))
+            left = left.merged(with: leftIncoming.snapshot)
+            right = right.merged(with: rightIncoming.snapshot)
+        }
+
+        XCTAssertEqual(left, right)
+        XCTAssertEqual(left, CalendarSnapshot(items: [edit]))
+        let reloaded = try JSONDecoder.calendar.decode(
+            CalendarSnapshot.self,
+            from: JSONEncoder.calendar.encode(left)
+        )
+        XCTAssertEqual(reloaded, right)
+    }
+
+    func testRemoteMergeConvergesEqualClockDeletionConflictsInBothDirections() throws {
+        let id = UUID()
+        let clock = base.addingTimeInterval(5)
+        let first = try CalendarItem(
+            id: id,
+            title: "first deletion",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: clock,
+            deletedAt: clock
+        )
+        let second = try CalendarItem(
+            id: id,
+            title: "second deletion",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: clock,
+            deletedAt: clock
+        )
+        let left = CalendarSnapshot(items: [first])
+        let right = CalendarSnapshot(items: [second])
+        let leftReport = CalendarRemoteMergePolicy.sanitize(right, against: left, now: base.addingTimeInterval(10))
+        let rightReport = CalendarRemoteMergePolicy.sanitize(left, against: right, now: base.addingTimeInterval(10))
+
+        XCTAssertEqual(left.merged(with: leftReport.snapshot), right.merged(with: rightReport.snapshot))
+        XCTAssertEqual(left.merged(with: leftReport.snapshot), CalendarSnapshot(items: [first, second]))
+        XCTAssertEqual(leftReport.acceptedDeletionCount + rightReport.acceptedDeletionCount, 1)
+        XCTAssertEqual(leftReport.rejectedDeletionCount + rightReport.rejectedDeletionCount, 1)
+    }
+
+    func testEqualDeletionClockUsesAllPersistedFieldsAsFinalTieBreak() throws {
+        let id = UUID()
+        let deletionClock = base.addingTimeInterval(5)
+        let first = try CalendarItem(
+            id: id,
+            title: "first tombstone",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: deletionClock,
+            deletedAt: deletionClock
+        )
+        let second = try CalendarItem(
+            id: id,
+            title: "first tombstone",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: deletionClock.addingTimeInterval(1),
+            deletedAt: deletionClock
+        )
+
+        let left = CalendarSnapshot(items: [first])
+        let right = CalendarSnapshot(items: [second])
+        let leftMerged = left.merged(with: right)
+        let rightMerged = right.merged(with: left)
+
+        XCTAssertEqual(leftMerged, rightMerged)
+        XCTAssertEqual(leftMerged.items.count, 1)
+        XCTAssertEqual(leftMerged.items.first?.updatedAt, deletionClock.addingTimeInterval(1))
+
+        let reloaded = try JSONDecoder.calendar.decode(
+            CalendarSnapshot.self,
+            from: JSONEncoder.calendar.encode(leftMerged)
+        )
+        XCTAssertEqual(reloaded, rightMerged)
+
+        let noDeadline = try CalendarItem(
+            id: id,
+            title: "same tombstone",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: deletionClock,
+            deletedAt: deletionClock,
+            recurrence: try CalendarRecurrenceRule(frequency: .daily)
+        )
+        let epochDeadline = try CalendarItem(
+            id: id,
+            title: "same tombstone",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: deletionClock,
+            deletedAt: deletionClock,
+            recurrence: try CalendarRecurrenceRule(
+                frequency: .daily,
+                until: Date(timeIntervalSince1970: 0)
+            )
+        )
+        let noDeadlineSnapshot = CalendarSnapshot(items: [noDeadline])
+        let epochDeadlineSnapshot = CalendarSnapshot(items: [epochDeadline])
+        XCTAssertEqual(
+            noDeadlineSnapshot.merged(with: epochDeadlineSnapshot),
+            epochDeadlineSnapshot.merged(with: noDeadlineSnapshot)
+        )
+        let recurrenceMerged = noDeadlineSnapshot.merged(with: epochDeadlineSnapshot)
+        let recurrenceReloaded = try JSONDecoder.calendar.decode(
+            CalendarSnapshot.self,
+            from: JSONEncoder.calendar.encode(recurrenceMerged)
+        )
+        XCTAssertEqual(recurrenceReloaded, recurrenceMerged)
+    }
+
+    func testRetiredPeerMutationTokenCannotPersistAtStoreCommitBoundary() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = CalendarStore(url: directory.appendingPathComponent("calendar.json"))
+        let local = try CalendarItem(
+            title: "local",
+            start: base,
+            end: base.addingTimeInterval(60),
+            createdAt: base,
+            updatedAt: base
+        )
+        let remote = try local.updating(title: "remote", at: base.addingTimeInterval(1))
+        _ = try await store.save(CalendarSnapshot(items: [local]))
+
+        let fence = CalendarPeerMutationFence()
+        fence.activate()
+        let token = try XCTUnwrap(fence.capture())
+        fence.invalidate()
+
+        do {
+            _ = try await store.merge(
+                CalendarSnapshot(items: [remote]),
+                authorizedBy: fence,
+                token: token
+            )
+            XCTFail("A retired peer token must not reach the durable write")
+        } catch {
+            XCTAssertEqual(error as? CalendarPeerMutationFenceError, .revoked)
+        }
+        let persisted = try await store.load()
+        XCTAssertEqual(persisted, CalendarSnapshot(items: [local]))
     }
 
     func testRemoteDeletionKeepsSubsecondMutationOrderingAfterRoundTrip() throws {
@@ -948,7 +1485,7 @@ final class CalendarDomainTests: XCTestCase {
         }
     }
 
-    func testSnapshotDeduplicatesRepeatedIDsWithDeterministicLWW() throws {
+    func testSnapshotDeduplicatesInMemoryButRejectsRepeatedIDsOnDecode() throws {
         let id = UUID()
         let older = try CalendarItem(
             id: id,
@@ -976,6 +1513,26 @@ final class CalendarDomainTests: XCTestCase {
         let merged = malformed.merged(with: CalendarSnapshot())
         XCTAssertEqual(merged.items.count, 1)
         XCTAssertEqual(merged.items.first?.title, "newer")
+
+        var invalid = CalendarSnapshot()
+        invalid.items = [older, newer]
+        XCTAssertThrowsError(try invalid.validatedForPersistence()) { error in
+            XCTAssertEqual(error as? CalendarSnapshotError, .duplicateItemID)
+        }
+
+        let duplicateItems = try JSONSerialization.jsonObject(
+            with: JSONEncoder().encode([older, newer])
+        )
+        let duplicatePayload: [String: Any] = [
+            "schemaVersion": CalendarSnapshot.currentSchemaVersion,
+            "items": duplicateItems
+        ]
+        XCTAssertThrowsError(try JSONDecoder().decode(
+            CalendarSnapshot.self,
+            from: JSONSerialization.data(withJSONObject: duplicatePayload)
+        )) { error in
+            XCTAssertEqual(error as? CalendarSnapshotError, .duplicateItemID)
+        }
     }
 
     func testRecurrenceUsesStoredTimeZoneForWallClockExpansion() throws {
@@ -1056,8 +1613,19 @@ final class CalendarDomainTests: XCTestCase {
         XCTAssertEqual(symbol.systemIconName, "calendar")
         XCTAssertNil(symbol.iconAsset)
 
-        let invalid = try item.updating(systemIconName: "definitely.not.a.real.lifeos.symbol", at: base.addingTimeInterval(2))
+        let invalid = try item.updating(systemIconName: "definitely/not-a-real-symbol", at: base.addingTimeInterval(2))
         XCTAssertNil(invalid.systemIconName)
+
+        // A newer OS may know a symbol that this receiver cannot render. Its
+        // bounded name remains durable so the snapshot survives transport;
+        // CalendarIconView supplies the local rendering fallback.
+        let futureSymbolName = "calendar.badge.future-lifeos"
+        let futureSymbol = try item.updating(systemIconName: futureSymbolName, at: base.addingTimeInterval(2))
+        XCTAssertEqual(futureSymbol.systemIconName, futureSymbolName)
+        XCTAssertFalse(CalendarSystemIconSupport.isAvailable(futureSymbolName))
+        let snapshot = CalendarSnapshot(items: [futureSymbol])
+        let decodedSnapshot = try JSONDecoder().decode(CalendarSnapshot.self, from: JSONEncoder().encode(snapshot))
+        XCTAssertEqual(decodedSnapshot, snapshot)
 
         let cleared = try symbol.updating(clearSystemIconName: true, at: base.addingTimeInterval(3))
         XCTAssertNil(cleared.systemIconName)
@@ -1855,6 +2423,45 @@ enum CalendarLayoutDurationProbe {
     }
 }
 
+final class CalendarTestPeerTransport: CalendarPeerTransport {
+    private var statusHandler: ((CalendarPeerConnectionStatus) -> Void)?
+    private var snapshotHandler: ((CalendarPeerSyncEnvelope, String) -> Void)?
+    private var pairingHandler: ((CalendarPairingState) -> Void)?
+
+    func setStatusHandler(_ handler: @escaping (CalendarPeerConnectionStatus) -> Void) {
+        statusHandler = handler
+    }
+
+    func setSnapshotHandler(_ handler: @escaping (CalendarPeerSyncEnvelope, String) -> Void) {
+        snapshotHandler = handler
+    }
+
+    func setPairingHandler(_ handler: @escaping (CalendarPairingState) -> Void) {
+        pairingHandler = handler
+    }
+
+    func createPairing() throws {}
+    func importPairing(_ token: String) throws {}
+    func confirmPairing() throws {}
+    func cancelPairing() {}
+    func retryPairingConnection() {}
+    func start() {}
+    func stop() {}
+    func send(snapshot: CalendarSnapshot, senderID: String, revision: Int) throws {}
+
+    func emitStatus(_ status: CalendarPeerConnectionStatus) {
+        statusHandler?(status)
+    }
+
+    func emitSnapshot(_ envelope: CalendarPeerSyncEnvelope, authenticatedSenderID: String) {
+        snapshotHandler?(envelope, authenticatedSenderID)
+    }
+
+    func emitPairing(_ state: CalendarPairingState) {
+        pairingHandler?(state)
+    }
+}
+
 @MainActor
 final class CalendarPairingFixtureTests: XCTestCase {
     func testFixtureAndInjectedStoreRejectPairingWithoutDiscovery() async {
@@ -1876,5 +2483,39 @@ final class CalendarPairingFixtureTests: XCTestCase {
             coordinator.stopSync()
             XCTAssertNil(coordinator.pairingError)
         }
+    }
+
+    func testRetiredPeerSnapshotCannotPublishWarningAfterTransportReplacement() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let coordinator = CalendarCoordinator(storeURL: directory.appendingPathComponent("calendar.json"))
+        let retired = CalendarTestPeerTransport()
+        let current = CalendarTestPeerTransport()
+        let envelope = try CalendarPeerSyncEnvelope(
+            snapshot: CalendarSnapshot(),
+            senderID: "remote",
+            revision: 1,
+            sentAt: .now
+        )
+
+        coordinator.installPeerTransportForTesting(retired)
+        coordinator.installPeerTransportForTesting(current)
+        let retiredWarning = expectation(description: "retired transport warning")
+        retiredWarning.isInverted = true
+        coordinator.setPeerWarningObserverForTesting {
+            retiredWarning.fulfill()
+        }
+        retired.emitSnapshot(envelope, authenticatedSenderID: "attacker")
+        await fulfillment(of: [retiredWarning], timeout: 0.25)
+        XCTAssertNil(coordinator.syncWarning)
+
+        let currentWarning = expectation(description: "current transport warning")
+        coordinator.setPeerWarningObserverForTesting {
+            currentWarning.fulfill()
+        }
+        current.emitSnapshot(envelope, authenticatedSenderID: "attacker")
+        await fulfillment(of: [currentWarning], timeout: 1)
+        XCTAssertNotNil(coordinator.syncWarning)
     }
 }

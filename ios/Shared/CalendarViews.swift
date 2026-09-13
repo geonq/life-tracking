@@ -602,6 +602,13 @@ public struct CalendarIconView: View {
                     .symbolRenderingMode(.hierarchical)
             } else if let icon = item.icon {
                 Text(icon)
+            } else if item.systemIconName != nil {
+                // A newer peer may have introduced a valid symbol name that
+                // this OS does not know yet. Keep the data and show a stable
+                // semantic fallback instead of leaving an empty icon frame.
+                Image(systemName: "calendar")
+                    .font(.system(size: size * 0.72, weight: .medium))
+                    .symbolRenderingMode(.hierarchical)
             }
         }
         .frame(width: item.hasIcon ? size : 0, height: item.hasIcon ? size : 0)

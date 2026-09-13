@@ -82,11 +82,26 @@ public actor CalendarStore {
     }
 
     public func merge(_ remote: CalendarSnapshot) throws -> CalendarSnapshot {
-        try remote.validatedForPersistence()
-        let current = try load()
-        let merged = current.merged(with: remote)
-        guard merged != current else { return current }
-        return try save(merged)
+        try merge(remote, authorizedBy: nil, token: nil)
+    }
+
+    func merge(
+        _ remote: CalendarSnapshot,
+        authorizedBy peerFence: CalendarPeerMutationFence?,
+        token: CalendarPeerMutationFence.Token?
+    ) throws -> CalendarSnapshot {
+        let operation = { [self] in
+            try remote.validatedForPersistence()
+            let current = try self.load()
+            let merged = current.merged(with: remote)
+            guard merged != current else { return current }
+            return try self.save(merged)
+        }
+        guard let peerFence else {
+            return try operation()
+        }
+        guard let token else { throw CalendarPeerMutationFenceError.revoked }
+        return try peerFence.withAuthorizedCommit(token, operation)
     }
 }
 

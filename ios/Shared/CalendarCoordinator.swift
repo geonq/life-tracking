@@ -59,9 +59,9 @@ private enum CalendarRemoteMutationError: Error {
 /// receive a no-op implementation and therefore cannot create a
 /// MultipeerConnectivity advertiser/browser just by constructing a calendar
 /// coordinator.
-private protocol CalendarPeerTransport: AnyObject {
+protocol CalendarPeerTransport: AnyObject {
     func setStatusHandler(_ handler: @escaping (CalendarPeerConnectionStatus) -> Void)
-    func setSnapshotHandler(_ handler: @escaping (CalendarPeerSyncEnvelope) -> Void)
+    func setSnapshotHandler(_ handler: @escaping (CalendarPeerSyncEnvelope, String) -> Void)
     func setPairingHandler(_ handler: @escaping (CalendarPairingState) -> Void)
     func createPairing() throws
     func importPairing(_ token: String) throws
@@ -85,8 +85,10 @@ private final class LiveCalendarPeerTransport: CalendarPeerTransport {
         service.onStatusChanged = handler
     }
 
-    func setSnapshotHandler(_ handler: @escaping (CalendarPeerSyncEnvelope) -> Void) {
-        service.onSnapshotReceived = { envelope, _ in handler(envelope) }
+    func setSnapshotHandler(_ handler: @escaping (CalendarPeerSyncEnvelope, String) -> Void) {
+        service.onAuthenticatedSnapshotReceived = { envelope, senderID in
+            handler(envelope, senderID)
+        }
     }
 
     func setPairingHandler(_ handler: @escaping (CalendarPairingState) -> Void) { service.onPairingChanged = handler }
@@ -107,7 +109,7 @@ private final class LiveCalendarPeerTransport: CalendarPeerTransport {
 /// real peer service and never invokes a discovery or connection API.
 private final class FixtureCalendarPeerTransport: CalendarPeerTransport {
     func setStatusHandler(_ handler: @escaping (CalendarPeerConnectionStatus) -> Void) {}
-    func setSnapshotHandler(_ handler: @escaping (CalendarPeerSyncEnvelope) -> Void) {}
+    func setSnapshotHandler(_ handler: @escaping (CalendarPeerSyncEnvelope, String) -> Void) {}
     func setPairingHandler(_ handler: @escaping (CalendarPairingState) -> Void) {
         handler(CalendarPairingState(message: "Nearby pairing is unavailable in fixtures and tests.", available: false))
     }
@@ -119,6 +121,97 @@ private final class FixtureCalendarPeerTransport: CalendarPeerTransport {
     func start() {}
     func stop() {}
     func send(snapshot: CalendarSnapshot, senderID: String, revision: Int) throws {}
+}
+
+enum CalendarPeerMutationFenceError: Error, Equatable, Sendable {
+    case revoked
+}
+
+/// Crosses the MainActor/CalendarStore actor boundary for one peer commit.
+/// Revocation and the store's final read/merge/write section use the same
+/// lock, so a retired peer token cannot pass validation and then write later.
+final class CalendarPeerMutationFence: @unchecked Sendable {
+    struct Token: Sendable {
+        fileprivate let generation: UInt64
+        fileprivate let transportGeneration: UInt64
+    }
+
+    struct TransportToken: Sendable {
+        fileprivate let generation: UInt64
+    }
+
+    private let lock = NSLock()
+    private var generation: UInt64 = 0
+    private var transportGeneration: UInt64 = 0
+    private var active = false
+
+    /// Installs one coordinator-owned transport generation. Replacing a
+    /// transport immediately retires all tokens from the previous one, while
+    /// leaving activation to the authenticated-session callback.
+    func installTransport() -> TransportToken {
+        lock.lock(); defer { lock.unlock() }
+        transportGeneration &+= 1
+        generation &+= 1
+        active = false
+        return TransportToken(generation: transportGeneration)
+    }
+
+    func activate() {
+        lock.lock(); defer { lock.unlock() }
+        active = true
+    }
+
+    /// Re-opens the fence only for the currently installed transport. A late
+    /// callback from a stopped or replaced transport therefore cannot
+    /// authorize a new peer mutation.
+    func activate(_ transport: TransportToken) {
+        lock.lock(); defer { lock.unlock() }
+        guard transport.generation == transportGeneration else { return }
+        active = true
+    }
+
+    func invalidate(_ transport: TransportToken? = nil) {
+        lock.lock(); defer { lock.unlock() }
+        if let transport {
+            guard transport.generation == transportGeneration else { return }
+        } else {
+            // Coordinator-owned stop, cancel, or replacement retires the
+            // transport itself. A delayed `.connected` callback from that
+            // instance must not be able to activate it again.
+            transportGeneration &+= 1
+        }
+        active = false
+        generation &+= 1
+    }
+
+    func capture(_ transport: TransportToken? = nil) -> Token? {
+        lock.lock(); defer { lock.unlock() }
+        if let transport, transport.generation != transportGeneration { return nil }
+        guard active else { return nil }
+        return Token(generation: generation, transportGeneration: transportGeneration)
+    }
+
+    func isCurrent(_ token: Token) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return active && token.generation == generation && token.transportGeneration == transportGeneration
+    }
+
+    func isInstalled(_ transport: TransportToken) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return transport.generation == transportGeneration
+    }
+
+    /// Holds the fence through the caller's synchronous durable section.
+    /// `CalendarStore.merge` uses this around its complete read/merge/write
+    /// operation; revocation therefore waits for an already-authorized commit
+    /// and invalidates all later commits.
+    func withAuthorizedCommit<T>(_ token: Token, _ operation: () throws -> T) throws -> T {
+        lock.lock(); defer { lock.unlock() }
+        guard active && token.generation == generation && token.transportGeneration == transportGeneration else {
+            throw CalendarPeerMutationFenceError.revoked
+        }
+        return try operation()
+    }
 }
 
 private enum CalendarWidgetTimelineReloader {
@@ -202,6 +295,10 @@ public final class CalendarCoordinator: ObservableObject {
     }
 
     private var undoToken: UndoToken?
+    private let peerMutationFence = CalendarPeerMutationFence()
+#if DEBUG
+    private var peerWarningObserverForTesting: (() -> Void)?
+#endif
     // Every durable local or remote merge advances this generation. Async
     // network work captures the generation it started from and may only
     // publish its candidate if no newer durable operation completed first.
@@ -343,27 +440,77 @@ public final class CalendarCoordinator: ObservableObject {
     }
 
     private func configurePeerTransport(_ transport: CalendarPeerTransport) {
+        let peerMutationFence = peerMutationFence
+        let transportToken = peerMutationFence.installTransport()
         transport.setPairingHandler { [weak self] state in
-            DispatchQueue.main.async { self?.pairingState = state }
+            DispatchQueue.main.async {
+                guard let self, peerMutationFence.isInstalled(transportToken) else { return }
+                self.pairingState = state
+            }
         }
         transport.setStatusHandler { [weak self] status in
+            // Revoke before handing the status to the MainActor. An
+            // authenticated snapshot may already be queued behind the actor;
+            // it must observe the retired generation before it can enter the
+            // store's durable commit section.
+            switch status {
+            case .disconnected, .stopped, .failed:
+                peerMutationFence.invalidate(transportToken)
+            case .started, .connecting:
+                break
+            case .connected:
+                // CalendarPeerSync emits this only after the pairing-secret
+                // proof succeeds. Activation is scoped to this exact
+                // installed transport, so an old callback cannot resurrect a
+                // stopped or replaced connection.
+                peerMutationFence.activate(transportToken)
+            }
             DispatchQueue.main.async {
                 guard let self else { return }
+                guard peerMutationFence.isInstalled(transportToken) else { return }
                 self.syncStatus = status
                 if case .connected = status, self.isLoaded {
                     self.sendPeer(snapshot: self.snapshot, revision: self.revision)
                 }
             }
         }
-        transport.setSnapshotHandler { [weak self] envelope in
+        let localSenderID = senderID
+        transport.setSnapshotHandler { [weak self] envelope, authenticatedSenderID in
+            guard CalendarPeerEnvelopeAuthorization.isAuthorized(
+                envelope: envelope,
+                authenticatedSenderID: authenticatedSenderID,
+                localSenderID: localSenderID
+            ) else {
+                Task { @MainActor [weak self] in
+                    guard let self, peerMutationFence.isInstalled(transportToken) else { return }
+                    self.rejectPeerEnvelope()
+                }
+                return
+            }
+            guard let peerToken = peerMutationFence.capture(transportToken) else {
+                Task { @MainActor [weak self] in
+                    guard let self, peerMutationFence.isInstalled(transportToken) else { return }
+                    self.rejectPeerEnvelope()
+                }
+                return
+            }
             Task { @MainActor in
                 await self?.merge(
                     envelope.snapshot,
                     remoteRevision: envelope.revision,
-                    remoteSentAt: envelope.sentAt
+                    remoteSentAt: envelope.sentAt,
+                    peerToken: peerToken
                 )
             }
         }
+    }
+
+    private func rejectPeerEnvelope() {
+        peerSyncWarning = "Calendar sync rejected an unapproved peer message."
+#if DEBUG
+        peerWarningObserverForTesting?()
+#endif
+        refreshSyncWarning()
     }
 
     private func ensureLivePeerTransport() {
@@ -374,7 +521,44 @@ public final class CalendarCoordinator: ObservableObject {
         configurePeerTransport(live)
     }
 
+#if DEBUG
+    /// Internal seam for deterministic lifecycle tests. Production construction
+    /// still selects the fixture or live transport above; tests can replace it
+    /// and retain the old callbacks to prove transport generations are fenced.
+    func installPeerTransportForTesting(_ transport: CalendarPeerTransport) {
+        peerMutationFence.invalidate()
+        peerSync.stop()
+        livePeerSync = nil
+        peerSync = transport
+        configurePeerTransport(transport)
+    }
+
+    func setPeerWarningObserverForTesting(_ observer: (() -> Void)?) {
+        peerWarningObserverForTesting = observer
+    }
+#endif
+
+    /// A stopped or cancelled live service retains its callback closures and
+    /// in-memory pairing state. Replace it before the next pairing lifecycle
+    /// so the new session receives a fresh mutation-fence generation and late
+    /// callbacks from the predecessor cannot alter coordinator state.
+    private func replaceLivePeerTransport() {
+        guard allowsLivePeerTransport, let old = livePeerSync else { return }
+        peerMutationFence.invalidate()
+        let fresh = LiveCalendarPeerTransport(displayName: senderID)
+        peerSync = fresh
+        livePeerSync = fresh
+        configurePeerTransport(fresh)
+        old.stop()
+        var state = CalendarPairingState()
+        state.message = "Nearby sync is paused until this device is paired."
+        state.available = true
+        pairingState = state
+        syncStatus = .stopped
+    }
+
     private func deactivatePeerTransport() {
+        peerMutationFence.invalidate()
         peerSync.stop()
         livePeerSync = nil
         peerSync = FixtureCalendarPeerTransport()
@@ -414,7 +598,16 @@ public final class CalendarCoordinator: ObservableObject {
     public func createPairing() { pairingAction { try peerSync.createPairing() } }
     public func importPairing(_ token: String) { pairingAction { try peerSync.importPairing(token) } }
     public func confirmPairing() { pairingAction { try peerSync.confirmPairing() } }
-    public func cancelPairing() { pairingError = nil; peerSync.cancelPairing() }
+    public func cancelPairing() {
+        pairingError = nil
+        if livePeerSync != nil {
+            peerSync.cancelPairing()
+            replaceLivePeerTransport()
+        } else {
+            peerMutationFence.invalidate()
+            peerSync.cancelPairing()
+        }
+    }
     public func retryPairingConnection() {
         guard nearbyDiscoveryEnabled else { return }
         peerSync.retryPairingConnection()
@@ -448,7 +641,12 @@ public final class CalendarCoordinator: ObservableObject {
     }
 
     public func stopSync() {
-        peerSync.stop()
+        if livePeerSync != nil {
+            replaceLivePeerTransport()
+        } else {
+            peerMutationFence.invalidate()
+            peerSync.stop()
+        }
         if !nearbyDiscoveryEnabled { publishDiscoveryDisabledState() }
     }
 
@@ -497,6 +695,7 @@ public final class CalendarCoordinator: ObservableObject {
         _ remote: CalendarSnapshot,
         remoteRevision: Int? = nil,
         remoteSentAt: Date? = nil,
+        peerToken: CalendarPeerMutationFence.Token? = nil,
         now: Date = .now
     ) async -> CalendarLocalSaveResult {
         await enqueueDurableOperation { [weak self] in
@@ -505,6 +704,7 @@ public final class CalendarCoordinator: ObservableObject {
                 remote,
                 remoteRevision: remoteRevision,
                 remoteSentAt: remoteSentAt,
+                peerToken: peerToken,
                 now: now
             )
         }
@@ -627,10 +827,14 @@ public final class CalendarCoordinator: ObservableObject {
         _ remote: CalendarSnapshot,
         remoteRevision: Int?,
         remoteSentAt: Date?,
+        peerToken: CalendarPeerMutationFence.Token?,
         now: Date
     ) async -> CalendarLocalSaveResult {
         let generation = durableGeneration
         do {
+            if let peerToken, !peerMutationFence.isCurrent(peerToken) {
+                return .failure("Calendar sync authorization expired; remote change was discarded.")
+            }
             try remote.validatedForPersistence()
             let durable = try await store.load()
             let local = !isLoaded && durable.items.isEmpty && !snapshot.items.isEmpty ? snapshot : durable
@@ -645,8 +849,24 @@ public final class CalendarCoordinator: ObservableObject {
             } else {
                 clearRemoteMutationWarning()
             }
-            let merged = try await store.merge(report.snapshot)
-            await publishRemoteMerge(merged, startedAt: generation, remoteRevision: remoteRevision)
+            let merged: CalendarSnapshot
+            if let peerToken {
+                merged = try await store.merge(
+                    report.snapshot,
+                    authorizedBy: peerMutationFence,
+                    token: peerToken
+                )
+            } else {
+                merged = try await store.merge(report.snapshot)
+            }
+            let persistedChange = merged != durable
+            await publishRemoteMerge(
+                merged,
+                startedAt: generation,
+                remoteRevision: remoteRevision,
+                peerToken: peerToken,
+                persistedChange: persistedChange
+            )
             requestWidgetTimelineReloadIfNeeded()
             return .success
         } catch {
@@ -913,8 +1133,22 @@ public final class CalendarCoordinator: ObservableObject {
     private func publishRemoteMerge(
         _ merged: CalendarSnapshot,
         startedAt generation: UInt64,
-        remoteRevision: Int?
+        remoteRevision: Int?,
+        peerToken: CalendarPeerMutationFence.Token? = nil,
+        persistedChange: Bool
     ) async {
+        if let peerToken, !peerMutationFence.isCurrent(peerToken) {
+            // `CalendarStore.merge` holds the same fence lock through its
+            // complete read/merge/write transaction. If revocation waited
+            // for that transaction, the peer change is already durable even
+            // though its delivery token is now retired. Reconcile it here so
+            // an older local Undo token cannot later erase the accepted peer
+            // change. An idempotent replay leaves the local Undo available.
+            if persistedChange {
+                adoptCommittedRemoteMerge(merged, remoteRevision: remoteRevision)
+            }
+            return
+        }
         if let remoteRevision {
             revision = max(revision, remoteRevision)
             defaults.set(revision, forKey: "LifeOS.Calendar.revision")
@@ -941,10 +1175,23 @@ public final class CalendarCoordinator: ObservableObject {
             return
         }
 
+        adoptCommittedRemoteMerge(merged, remoteRevision: remoteRevision)
+    }
+
+    /// Publishes a remote snapshot whose store transaction has already
+    /// completed. This path deliberately clears local Undo because the
+    /// previous snapshot no longer represents the durable state immediately
+    /// before the latest accepted change.
+    private func adoptCommittedRemoteMerge(_ merged: CalendarSnapshot, remoteRevision: Int?) {
         durableGeneration &+= 1
         snapshot = merged
+        isLoaded = true
         setUndoToken(nil)
         pendingFailedUndo = false
+        if let remoteRevision {
+            revision = max(revision, remoteRevision)
+            defaults.set(revision, forKey: "LifeOS.Calendar.revision")
+        }
         defaults.set(Date.now.timeIntervalSince1970, forKey: "LifeOS.Sync.LastSuccess")
         if pendingFailedMutation == nil { errorMessage = nil }
     }

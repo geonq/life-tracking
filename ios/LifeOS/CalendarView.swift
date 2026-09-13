@@ -2894,6 +2894,10 @@ private struct CalendarEditorIcon: View {
                     .symbolRenderingMode(.hierarchical)
             } else if let icon {
                 Text(icon).font(.system(size: 22, weight: .regular, design: .default))
+            } else if systemIconName != nil {
+                Image(systemName: "calendar")
+                    .font(.system(size: 21, weight: .medium))
+                    .symbolRenderingMode(.hierarchical)
             } else {
                 HStack(spacing: 5) {
                     Image(systemName: "plus")

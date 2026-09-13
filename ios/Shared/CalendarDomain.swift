@@ -68,6 +68,7 @@ public enum CalendarValidationError: Error, Equatable, Sendable {
     case blankTitle
     case titleTooLong
     case invalidInterval
+    case invalidTimestamp
     case invalidIconAsset
 }
 
@@ -109,6 +110,9 @@ public struct CalendarRecurrenceRule: Codable, Equatable, Sendable {
 
     public init(frequency: CalendarRecurrenceFrequency, interval: Int = 1, until: Date? = nil) throws {
         guard interval >= 1 else { throw CalendarValidationError.invalidInterval }
+        guard until.map({ $0.timeIntervalSinceReferenceDate.isFinite }) ?? true else {
+            throw CalendarValidationError.invalidTimestamp
+        }
         self.frequency = frequency
         self.interval = interval
         self.until = until
@@ -120,11 +124,12 @@ public struct CalendarRecurrenceRule: Codable, Equatable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        frequency = try container.decode(CalendarRecurrenceFrequency.self, forKey: .frequency)
-        // A corrupted interval from a peer must not poison the stored snapshot;
-        // clamp to the nearest valid value instead of failing the whole decode.
-        interval = max(1, try container.decodeIfPresent(Int.self, forKey: .interval) ?? 1)
-        until = try container.decodeIfPresent(Date.self, forKey: .until)
+        let frequency = try container.decode(CalendarRecurrenceFrequency.self, forKey: .frequency)
+        try self.init(
+            frequency: frequency,
+            interval: try container.decodeIfPresent(Int.self, forKey: .interval) ?? 1,
+            until: try container.decodeIfPresent(Date.self, forKey: .until)
+        )
     }
 
     /// Human summary used by the editor row and accessibility labels.
@@ -301,7 +306,8 @@ public enum CalendarRecurrence {
             if let window, start >= window.end { break }
 
             let occurrenceEnd = start.addingTimeInterval(duration)
-            if window == nil || occurrenceEnd > window!.start {
+            let overlapsWindow = window.map { occurrenceEnd > $0.start } ?? true
+            if overlapsWindow {
                 if step == 0 {
                     results.append(item)
                 } else if let occurrence = try? item.updating(start: start, end: occurrenceEnd, at: item.updatedAt) {
@@ -321,6 +327,7 @@ public enum CalendarSnapshotError: Error, Equatable, Sendable, LocalizedError {
     case unsupportedSchemaVersion(Int)
     case tooManyItems
     case payloadTooLarge
+    case duplicateItemID
 
     public var errorDescription: String? {
         switch self {
@@ -330,6 +337,8 @@ public enum CalendarSnapshotError: Error, Equatable, Sendable, LocalizedError {
             return "The calendar contains too many items to load safely."
         case .payloadTooLarge:
             return "The calendar payload is too large to save safely."
+        case .duplicateItemID:
+            return "The calendar contains duplicate item identities."
         }
     }
 }
@@ -350,27 +359,38 @@ public enum CalendarEmojiValidation {
 }
 
 /// SF Symbol names are persisted as names, never as a rendered image. The
-/// availability check is intentionally performed at the boundary so an old,
-/// unavailable, or malformed name is discarded at the domain boundary.
+/// domain boundary validates only the bounded name syntax. Availability is a
+/// rendering concern because a valid symbol can be introduced by a newer OS;
+/// the receiving UI must use its fallback when that symbol is unavailable.
 public enum CalendarSystemIconSupport {
     public static func validatedName(_ value: String?) -> String? {
         guard let value else { return nil }
         let name = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty, name.count <= 128,
-              !name.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F }) else {
+        guard !name.isEmpty,
+              name == value,
+              name.utf8.count <= 128,
+              name.unicodeScalars.allSatisfy({ scalar in
+                  (0x41...0x5A).contains(scalar.value)
+                      || (0x61...0x7A).contains(scalar.value)
+                      || (0x30...0x39).contains(scalar.value)
+                      || scalar.value == 0x2E // .
+                      || scalar.value == 0x2D // -
+                      || scalar.value == 0x5F // _
+              }) else {
             return nil
         }
-#if os(iOS)
-        return UIImage(systemName: name) == nil ? nil : name
-#elseif os(macOS)
-        return NSImage(systemSymbolName: name, accessibilityDescription: nil) == nil ? nil : name
-#else
-        return nil
-#endif
+        return name
     }
 
     public static func isAvailable(_ value: String) -> Bool {
-        validatedName(value) != nil
+        guard let name = validatedName(value) else { return false }
+#if os(iOS)
+        return UIImage(systemName: name) != nil
+#elseif os(macOS)
+        return NSImage(systemSymbolName: name, accessibilityDescription: nil) != nil
+#else
+        return false
+#endif
     }
 }
 
@@ -410,6 +430,16 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
         guard !trimmedTitle.isEmpty else { throw CalendarValidationError.blankTitle }
         guard trimmedTitle.utf8.count <= Self.maximumTitleUTF8Bytes else { throw CalendarValidationError.titleTooLong }
         guard end > start else { throw CalendarValidationError.invalidInterval }
+        let effectiveUpdatedAt = updatedAt ?? createdAt
+        guard start.timeIntervalSinceReferenceDate.isFinite,
+              end.timeIntervalSinceReferenceDate.isFinite,
+              createdAt.timeIntervalSinceReferenceDate.isFinite,
+              effectiveUpdatedAt.timeIntervalSinceReferenceDate.isFinite,
+              deletedAt.map({ $0.timeIntervalSinceReferenceDate.isFinite }) ?? true,
+              createdAt <= effectiveUpdatedAt,
+              deletedAt.map({ $0 >= createdAt && $0 <= effectiveUpdatedAt }) ?? true else {
+            throw CalendarValidationError.invalidTimestamp
+        }
         self.id = id; self.title = trimmedTitle; self.kind = kind
         let validatedSystemIconName = CalendarSystemIconSupport.validatedName(systemIconName)
         self.systemIconName = validatedSystemIconName
@@ -429,28 +459,73 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
         self.updatedAt = updatedAt ?? createdAt; self.deletedAt = deletedAt
     }
 
+    /// Rechecks the mutable value before it crosses a durable or sync
+    /// boundary. The throwing initializer protects decoded values; this
+    /// method also protects callers that mutate a public field afterwards.
+    public func validatedForPersistence() throws {
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty else { throw CalendarValidationError.blankTitle }
+        guard trimmedTitle.utf8.count <= Self.maximumTitleUTF8Bytes else {
+            throw CalendarValidationError.titleTooLong
+        }
+        guard end > start,
+              start.timeIntervalSinceReferenceDate.isFinite,
+              end.timeIntervalSinceReferenceDate.isFinite,
+              createdAt.timeIntervalSinceReferenceDate.isFinite,
+              updatedAt.timeIntervalSinceReferenceDate.isFinite,
+              createdAt <= updatedAt,
+              deletedAt.map({
+                  $0.timeIntervalSinceReferenceDate.isFinite
+                      && $0 >= createdAt
+                      && $0 <= updatedAt
+              }) ?? true else {
+            throw CalendarValidationError.invalidTimestamp
+        }
+        guard icon.map({ CalendarEmojiValidation.validated($0) != nil }) ?? true,
+              systemIconName.map({ CalendarSystemIconSupport.validatedName($0) != nil }) ?? true,
+              timeZoneIdentifier.map({ TimeZone(identifier: $0) != nil }) ?? true else {
+            throw CalendarValidationError.invalidIconAsset
+        }
+        guard (recurrence?.interval ?? 1) >= 1,
+              recurrence?.until.map({ $0.timeIntervalSinceReferenceDate.isFinite }) ?? true else {
+            throw CalendarValidationError.invalidInterval
+        }
+    }
+
     private enum CodingKeys: String, CodingKey {
         case id, title, kind, icon, iconAsset, systemIconName, status, start, end, createdAt, updatedAt, deletedAt, timeZoneIdentifier, recurrence
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        let rawIcon = try container.decodeIfPresent(String.self, forKey: .icon)
+        let rawSystemIconName = try container.decodeIfPresent(String.self, forKey: .systemIconName)
+        let rawTimeZoneIdentifier = try container.decodeIfPresent(String.self, forKey: .timeZoneIdentifier)
+        guard rawIcon.map({ CalendarEmojiValidation.validated($0) == Optional($0) }) ?? true,
+              rawSystemIconName.map({ CalendarSystemIconSupport.validatedName($0) == Optional($0) }) ?? true,
+              rawTimeZoneIdentifier.map({
+                  !$0.isEmpty
+                      && $0 == $0.trimmingCharacters(in: .whitespacesAndNewlines)
+                      && TimeZone(identifier: $0) != nil
+              }) ?? true else {
+            throw CalendarValidationError.invalidIconAsset
+        }
         try self.init(
             id: container.decode(UUID.self, forKey: .id),
             title: container.decode(String.self, forKey: .title),
             kind: container.decodeIfPresent(CalendarItemKind.self, forKey: .kind) ?? .event,
             // Legacy payloads contain a string; new payloads may omit or
             // encode null to represent a deliberate no-icon selection.
-            icon: container.decodeIfPresent(String.self, forKey: .icon),
+            icon: rawIcon,
             iconAsset: container.decodeIfPresent(CalendarIconAsset.self, forKey: .iconAsset),
-            systemIconName: container.decodeIfPresent(String.self, forKey: .systemIconName),
+            systemIconName: rawSystemIconName,
             status: container.decode(CalendarProgress.self, forKey: .status),
             start: container.decode(Date.self, forKey: .start),
             end: container.decode(Date.self, forKey: .end),
             createdAt: container.decode(Date.self, forKey: .createdAt),
             updatedAt: container.decode(Date.self, forKey: .updatedAt),
             deletedAt: container.decodeIfPresent(Date.self, forKey: .deletedAt),
-            timeZoneIdentifier: container.decodeIfPresent(String.self, forKey: .timeZoneIdentifier),
+            timeZoneIdentifier: rawTimeZoneIdentifier,
             recurrence: container.decodeIfPresent(CalendarRecurrenceRule.self, forKey: .recurrence)
         )
     }
@@ -475,7 +550,14 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
     }
 
     fileprivate var conflictKey: String {
-        [
+        // Length-prefix each component so a user-controlled title or icon
+        // cannot create delimiter collisions. The resulting string is a
+        // deterministic total tie-break over every persisted field.
+        func component(_ value: String) -> String {
+            "\(value.utf8.count):\(value)"
+        }
+        return [
+            id.uuidString,
             isDeleted ? "1" : "0",
             title,
             icon ?? "",
@@ -485,10 +567,14 @@ public struct CalendarItem: Codable, Equatable, Identifiable, Sendable {
             status.rawValue,
             String(start.timeIntervalSince1970),
             String(end.timeIntervalSince1970),
+            String(createdAt.timeIntervalSince1970),
+            String(updatedAt.timeIntervalSince1970),
             String(deletedAt?.timeIntervalSince1970 ?? 0),
             timeZoneIdentifier ?? "",
-            recurrence.map { "\($0.frequency.rawValue)|\($0.interval)|\($0.until?.timeIntervalSince1970 ?? 0)" } ?? ""
-        ].joined(separator: "|")
+            recurrence.map {
+                "present|\($0.frequency.rawValue)|\($0.interval)|until:\($0.until.map { String($0.timeIntervalSince1970) } ?? "nil")"
+            } ?? "absent"
+        ].map(component).joined()
     }
 
     public func updatingProgress(_ status: CalendarProgress, at: Date) throws -> CalendarItem {
@@ -636,8 +722,16 @@ public struct CalendarSnapshot: Codable, Equatable, Sendable {
             }
             decodedItems = boundedItems
         }
+        var seenIDs = Set<UUID>()
+        seenIDs.reserveCapacity(decodedItems.count)
+        for item in decodedItems {
+            guard seenIDs.insert(item.id).inserted else {
+                throw CalendarSnapshotError.duplicateItemID
+            }
+        }
         schemaVersion = version
         items = Self.sortedItems(decodedItems)
+        try validatedForPersistence()
     }
 
     private static func sortedItems(_ items: [CalendarItem]) -> [CalendarItem] {
@@ -656,9 +750,18 @@ public struct CalendarSnapshot: Codable, Equatable, Sendable {
         }
     }
 
-    private static func prefers(_ candidate: CalendarItem, over current: CalendarItem) -> Bool {
-        candidate.updatedAt > current.updatedAt ||
-            (candidate.updatedAt == current.updatedAt && candidate.conflictKey > current.conflictKey)
+    fileprivate static func prefers(_ candidate: CalendarItem, over current: CalendarItem) -> Bool {
+        let candidateClock = mutationClock(for: candidate)
+        let currentClock = mutationClock(for: current)
+        return candidateClock > currentClock ||
+            (candidateClock == currentClock && candidate.conflictKey > current.conflictKey)
+    }
+
+    /// A tombstone's deletion is the semantic mutation. Metadata updates that
+    /// happen after deletion must not resurrect a deleted record's precedence
+    /// over a later live edit merely because updatedAt is larger.
+    fileprivate static func mutationClock(for item: CalendarItem) -> Date {
+        item.deletedAt ?? item.updatedAt
     }
 
     /// Validates a snapshot immediately before it crosses a durable or sync
@@ -670,6 +773,14 @@ public struct CalendarSnapshot: Codable, Equatable, Sendable {
         }
         guard items.count <= Self.maximumItemCount else {
             throw CalendarSnapshotError.tooManyItems
+        }
+        var ids = Set<UUID>()
+        ids.reserveCapacity(items.count)
+        for item in items {
+            guard ids.insert(item.id).inserted else {
+                throw CalendarSnapshotError.duplicateItemID
+            }
+            try item.validatedForPersistence()
         }
     }
 
@@ -696,6 +807,8 @@ public struct CalendarSnapshot: Codable, Equatable, Sendable {
             }
             if Self.prefers(candidate, over: current) { byID[candidate.id] = candidate }
         }
+        // The dictionary merge is linear. One final O(n log n) sort is required
+        // for deterministic start/id order used by rendering and persistence.
         return CalendarSnapshot(items: Array(byID.values))
     }
 }
@@ -730,18 +843,6 @@ public struct CalendarRemoteMergeReport: Equatable, Sendable {
     }
 }
 
-/// The calendar store's ISO-8601 encoder emits dates at whole-second
-/// precision. Remote identity checks must use the same boundary so a
-/// legitimate edit written by a peer is not rejected solely because the
-/// in-memory local item still carries sub-second precision.
-public enum CalendarTransportDate {
-    public static func canonicalized(_ date: Date) -> Date {
-        let seconds = date.timeIntervalSince1970
-        guard seconds.isFinite else { return date }
-        return Date(timeIntervalSince1970: seconds.rounded(.down))
-    }
-}
-
 /// Trust policy for snapshots arriving from the server or a paired device.
 /// CalendarItem's normal LWW merge remains useful for local data; remote data
 /// must pass this boundary first because its clocks and tombstones are not
@@ -756,7 +857,7 @@ public enum CalendarRemoteMergePolicy {
         sentAt: Date? = nil
     ) -> CalendarRemoteMergeReport {
         guard acceptableTimestamp(now, now: now),
-              sentAt.map({ acceptableTimestamp($0, now: now) }) ?? true else {
+              sentAt.map({ acceptableEnvelopeTimestamp($0, now: now) }) ?? true else {
             return CalendarRemoteMergeReport(
                 snapshot: CalendarSnapshot(),
                 rejectedItemCount: remote.items.count,
@@ -779,18 +880,43 @@ public enum CalendarRemoteMergePolicy {
         var rejectedItemCount = 0
         var acceptedDeletionCount = 0
         var rejectedDeletionCount = 0
+        var seenRemoteIDs = Set<UUID>()
+        seenRemoteIDs.reserveCapacity(remote.items.count)
 
         for candidate in remote.items {
             let isDeletion = candidate.deletedAt != nil
+            guard seenRemoteIDs.insert(candidate.id).inserted else {
+                rejectedItemCount += 1
+                if isDeletion { rejectedDeletionCount += 1 }
+                continue
+            }
             guard validTimestampedItem(candidate, now: now) else {
                 rejectedItemCount += 1
                 if isDeletion { rejectedDeletionCount += 1 }
                 continue
             }
 
+            // Older remote mutations cannot outrank the durable local record.
+            // Every equal-clock mutation uses the same deterministic conflict
+            // key as CalendarSnapshot.merged so both devices converge even
+            // when their wall clocks produce the same timestamp. A tombstone
+            // participates using its deletion event clock, not a later metadata
+            // update; its deletedAt value must still pass the causal check below.
+            if let current = localByID[candidate.id], candidate != current {
+                let candidateClock = CalendarSnapshot.mutationClock(for: candidate)
+                let currentClock = CalendarSnapshot.mutationClock(for: current)
+                let isOlder = candidateClock < currentClock
+                let isEqualClockLoser = candidateClock == currentClock
+                    && !CalendarSnapshot.prefers(candidate, over: current)
+                if isOlder || isEqualClockLoser {
+                    rejectedItemCount += 1
+                    if isDeletion { rejectedDeletionCount += 1 }
+                    continue
+                }
+            }
+
             if let current = localByID[candidate.id],
-               CalendarTransportDate.canonicalized(candidate.createdAt)
-                != CalendarTransportDate.canonicalized(current.createdAt) {
+               !compatibleCreationIdentity(candidate.createdAt, current.createdAt) {
                 rejectedItemCount += 1
                 if isDeletion { rejectedDeletionCount += 1 }
                 continue
@@ -799,11 +925,15 @@ public enum CalendarRemoteMergePolicy {
             if let deletedAt = candidate.deletedAt,
                let current = localByID[candidate.id] {
                 // An identical tombstone is an idempotent replay. A different
-                // same-generation tombstone must be strictly newer than the
-                // local version and its deletion event must follow that version.
+                // tombstone must be newer than the local semantic mutation, or
+                // must win the deterministic equal-clock conflict above. Its
+                // deletion event must not predate that mutation.
                 if candidate == current { continue }
-                guard candidate.updatedAt > current.updatedAt,
-                      deletedAt >= current.updatedAt else {
+                let candidateClock = CalendarSnapshot.mutationClock(for: candidate)
+                let currentClock = CalendarSnapshot.mutationClock(for: current)
+                guard (candidateClock > currentClock
+                        || CalendarSnapshot.prefers(candidate, over: current)),
+                      deletedAt >= currentClock else {
                     rejectedItemCount += 1
                     rejectedDeletionCount += 1
                     continue
@@ -839,9 +969,40 @@ public enum CalendarRemoteMergePolicy {
             } ?? true)
     }
 
+    /// Creation dates are immutable identity metadata, but version-1 peers
+    /// historically serialized them at whole-second precision. Permit only
+    /// that narrow legacy representation, plus sub-microsecond floating-point
+    /// drift from the current fractional codec. Mutation clocks remain strict.
+    private static func compatibleCreationIdentity(_ candidate: Date, _ current: Date) -> Bool {
+        let candidateSeconds = candidate.timeIntervalSince1970
+        let currentSeconds = current.timeIntervalSince1970
+        guard candidateSeconds.isFinite, currentSeconds.isFinite else { return false }
+        let tolerance = 0.000_001
+        let difference = abs(candidateSeconds - currentSeconds)
+        if difference <= tolerance { return true }
+
+        let candidateIsWholeSecond = abs(candidateSeconds - candidateSeconds.rounded()) <= tolerance
+        let currentIsWholeSecond = abs(currentSeconds - currentSeconds.rounded()) <= tolerance
+        guard candidateIsWholeSecond != currentIsWholeSecond else { return false }
+        return floor(candidateSeconds) == floor(currentSeconds)
+    }
+
+    /// Item mutation clocks are receiver-bounded. The envelope transport may
+    /// tolerate five minutes of clock skew, but a remote created/updated/
+    /// deleted timestamp in the future is quarantined instead of being used as
+    /// an authoritative LWW clock. This preserves legitimate local edits even
+    /// when a paired device has a fast clock; the peer can retry after its clock
+    /// is corrected. Scheduled event start/end values remain independent and
+    /// may of course be in the future.
     private static func acceptableTimestamp(_ date: Date, now: Date) -> Bool {
         guard date.timeIntervalSinceReferenceDate.isFinite,
               now.timeIntervalSinceReferenceDate.isFinite else { return false }
-        return date <= now.addingTimeInterval(Self.maximumClockSkew)
+        return date <= now
+    }
+
+    private static func acceptableEnvelopeTimestamp(_ date: Date, now: Date) -> Bool {
+        guard date.timeIntervalSinceReferenceDate.isFinite,
+              now.timeIntervalSinceReferenceDate.isFinite else { return false }
+        return abs(date.timeIntervalSince(now)) <= Self.maximumClockSkew
     }
 }
