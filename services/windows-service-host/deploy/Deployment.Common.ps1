@@ -4166,7 +4166,10 @@ function Complete-LifeOSRecoveryState {
 }
 
 function Read-RecoveryJournal {
-    param($Manifest)
+    param(
+        $Manifest,
+        [switch]$Strict
+    )
     Add-LifeOSRecoveryDiagnosticCounter -Name 'journalReadCalls'
     $journalScope = Start-LifeOSRecoveryDiagnosticScope -Scope 'journal-validation'
     $journalScopeSucceeded = $false
@@ -4230,7 +4233,7 @@ function Read-RecoveryJournal {
     }
     $manifestBackups = @($Manifest.backups)
     Assert-RecoveryInventoryBounds -TreeRoots $treeRoots -FileUnits $journalUnits -ManifestBackups $manifestBackups
-    Read-RecoveryProgress -Manifest $Manifest -Journal $journal -JournalUnits $journalUnits
+    Read-RecoveryProgress -Manifest $Manifest -Journal $journal -JournalUnits $journalUnits -Strict:$Strict
     $journalHasIncompleteUnit = $false
     foreach ($unit in $journalUnits) {
         if ([string](Get-JournalProperty $unit 'phase') -ne 'complete') {
