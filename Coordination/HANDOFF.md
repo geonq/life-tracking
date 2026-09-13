@@ -12,7 +12,7 @@ evidence is still incomplete.
 ## Current source checkpoint
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- HEAD and origin: `5ebc17e Define compact premium visual acceptance contract`;
+- HEAD and origin: `66953af Repair Mac Tax import accessibility flow`;
   the source checkpoint remains `0a8d5b6 Instrument recovery runtime phases safely`;
   deployable code checkpoint remains `6baa1f3`. PR #1 is OPEN, DRAFT, and
   MERGEABLE against `main` at this same head.
@@ -66,6 +66,11 @@ evidence is still incomplete.
   allowlisting, bounded history/atomic writes, and Windows Codex path/quoting
   checks are covered. Native Windows execution, deployed ACL/reparse behavior,
   and Windows rename durability remain unverified.
+- Mac Tax accessibility repair is committed at `66953af`: macOS exposes one
+  direct `import-tax-pdf` button, platform-specific empty-state actions
+  compile, and the exact artifact passed direct AX inspection and native picker
+  interaction. The complete Mac UI suite remains unverified because XCTest
+  automation initialization is still unreliable in this environment.
 - The frozen acceptance registry is structurally valid (**258 scored leaves,
   7 aliases**) but has **0 accepted leaves**; `--score` correctly fails the P0
   gate. Scoped GREEN tranche reviews are not a product-completion percentage.
@@ -74,7 +79,8 @@ evidence is still incomplete.
   because the shell was not captured and the collapsed header may exceed the
   52-point rail. It was quarantined at `/private/tmp/lifeos-mac-shell-candidate-red.patch`
   (SHA-256 `7deeb53418ad81bb3eb9c223e9649d88cba33c836c6e4b97ef83daf7aaa17be3`)
-  and the source was restored to `5ebc17e`.
+  and the source was restored to `5ebc17e` before the reviewed `66953af`
+  accessibility repair.
 
 ## Still open
 
