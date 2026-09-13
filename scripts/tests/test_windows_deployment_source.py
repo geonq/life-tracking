@@ -2181,9 +2181,14 @@ def test_recovery_progress_is_append_only_and_bounded_per_unit() -> None:
     assert 'function Assert-RecoveryProgressCapacity' in common
     assert 'function Assert-RecoveryJournalCheckpointCapacity' in common
     checkpoint = common.split('function Assert-RecoveryJournalCheckpointCapacity', 1)[1].split('function Test-RecoveryAuthorityPath', 1)[0]
-    assert '$initialCheckpoint' in checkpoint
-    assert '$restoringCheckpoint' in checkpoint
-    assert '$terminalCheckpoint' in checkpoint
+    assert '$checkpointProperties = [ordered]@{}' in checkpoint
+    assert '$unitPhaseSnapshot = New-Object object[] $unitCount' in checkpoint
+    assert 'function Set-RecoveryUnitPhase' in common
+    assert checkpoint.count('Set-RecoveryUnitPhase -Unit $unit -Phase') == 3
+    assert "Set-JournalProperty $unit 'phase'" not in checkpoint
+    assert 'Copy-LifeOSJsonValue' not in checkpoint
+    assert 'ConvertFrom-Json' not in checkpoint
+    assert 'finally' in checkpoint
     assert "'restoring'" in checkpoint
     assert 'foreach ($stageName in $script:LifeOSRecoveryStageNames)' in checkpoint
     unit_loop = restore.rsplit('$unitIndex = 0', 1)[1].split("Set-JournalProperty $journal 'phase' 'artifacts-complete'", 1)[0]
@@ -2209,10 +2214,12 @@ def test_recovery_progress_is_append_only_and_bounded_per_unit() -> None:
     assert "return ,$Journal['units']" in units_accessor
     assert 'return ,$property.Value' in units_accessor
     assert "Get-JournalProperty $Journal 'units'" not in append
+    assert '[object[]]$JournalUnits' not in progress
     behavior_lower = read('tests/Deployment.Behavior.Tests.ps1').lower()
     for case in ('the reader recovers a torn', 'writer output round-trips through the real recovery progress reader',
                  'durable complete transitions are skipped at record and byte limits',
                  'writer output stays within the real reader serialized-size contract',
+                 'checkpoint serialization failure',
                  'oversized count-valid recovery journal is rejected before artifact mutation',
                  'progress capacity is rejected before artifact mutation'):
         assert case in behavior_lower
@@ -2471,8 +2478,24 @@ def test_recovery_inventory_uses_bounded_hash_sets_without_per_file_full_scans()
     assert '$treeRootSet = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)' in reader
     assert '$script:LifeOSRecoveryMaxTreeRoots = 256' in common
     assert '$script:LifeOSRecoveryMaxFileUnits = 65536' in common
-    assert '$treeRoots = @(' in reader
-    assert '$journalUnits = @(' in reader
+    assert '$treeRoots = $journal.treeRoots' in reader
+    assert '$journalUnits = Get-RecoveryJournalUnits $journal' in reader
+    assert '@($journal.units | Where-Object' not in reader
+    assert 'foreach ($unit in $journalUnits)' in reader
+    assert "Get-JournalProperty $unit 'phase') -ne 'complete'" in reader
+    # A singleton PSCustomObject is wrapped once for Windows PowerShell's
+    # scalar JSON behavior; multi-unit collections must remain untouched.
+    assert '$journalUnits = [object[]]@($journalUnits)' in reader
+    bounds = common.split('function Assert-RecoveryInventoryBounds', 1)[1].split('function Get-RecoveryCanonicalTreeRoots', 1)[0]
+    assert '@($TreeRoots)' not in bounds
+    assert '@($FileUnits)' not in bounds
+    assert '@($ManifestBackups)' not in bounds
+    assert 'foreach ($root in $TreeRoots)' in bounds
+    assert 'foreach ($unit in $FileUnits)' in bounds
+    assert 'foreach ($backup in $ManifestBackups)' in bounds
+    assert 'journalHasIncompleteUnit' in reader
+    assert 'foreach ($unit in $journal.units)' in restore
+    assert 'foreach ($unit in @($journal.units))' not in restore
     assert 'return $canonical.ToArray()' in common
     assert 'return ,$canonical.ToArray()' not in common
     assert '$script:LifeOSRecoveryMaxTreeBytes = 1024 * 1024 * 1024' in common
@@ -2510,7 +2533,12 @@ def test_recovery_inventory_uses_bounded_hash_sets_without_per_file_full_scans()
     assert '$journalUnits.Count -gt 256' not in reader
     assert '$manifestBackups.Count -gt 256' not in reader
     assert reader.index('Assert-RecoveryInventoryBounds -TreeRoots $treeRoots') < reader.index('$scanRoots =')
-    assert 'Get-RecoveryTreeManifestIndex -Root $root -Cache $treeIndexCache' in inventory
+    assert 'Get-LifeOSBoundedTreeItem -Root $root' in inventory
+    assert '-MaxFiles $script:LifeOSRecoveryMaxFileUnits' in inventory
+    assert '-MaxBytes $script:LifeOSRecoveryMaxTreeBytes' in inventory
+    assert 'Get-LifeOSFileDigest -Path $filePath -Description' in inventory
+    assert 'Assert-LifeOSTreeItemIdentity -Path $filePath -Expected $itemIdentity' in inventory
+    assert 'Get-RecoveryTreeManifestIndex -Root $root -Cache $treeIndexCache' not in inventory
     assert 'destinationSet.Contains($filePath)' in inventory
     assert 'stagingSet.Contains($filePath)' in inventory
     assert '[void]$stagingSet.Add($stageFull)' in reader

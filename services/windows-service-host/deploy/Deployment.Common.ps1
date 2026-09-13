@@ -2504,11 +2504,11 @@ function Get-LifeOSNodeRuntimeStagingRelativePaths {
     if ([string]::IsNullOrWhiteSpace($transactionId) -or $transactionId.Length -gt 128) {
         throw 'Node runtime staging transaction identity is malformed.'
     }
-    $journalUnits = Get-JournalProperty $Journal 'units'
+    $journalUnits = Get-RecoveryJournalUnits $Journal
     if ($null -eq $journalUnits) { return ,@() }
     $relativePaths = New-Object 'System.Collections.Generic.List[string]'
     $unitIndex = 0
-    foreach ($unit in @($journalUnits)) {
+    foreach ($unit in $journalUnits) {
         if ($null -eq $unit) { throw 'Recovery journal unit is malformed.' }
         if ([string](Get-JournalProperty $unit 'phase') -eq 'restoring') {
             $destination = [string](Get-JournalProperty $unit 'destination')
@@ -3374,7 +3374,7 @@ function Read-RecoveryProgress {
     param(
         [Parameter(Mandatory)]$Manifest,
         [Parameter(Mandatory)]$Journal,
-        [Parameter(Mandatory)][object[]]$JournalUnits
+        [Parameter(Mandatory)]$JournalUnits
     )
     $progressPathValue = Get-JournalProperty $Journal 'progressPath'
     $progressPath = if ($null -eq $progressPathValue) {
@@ -3671,58 +3671,78 @@ function Assert-RecoveryJournalCheckpointCapacity {
     # Measure every journal shape that can be published after this point
     # before any artifact mutation. Restoring checkpoints are longer than
     # pending checkpoints, and stage/writer terminal metadata is added later.
-    # Each candidate uses the same serializer and UTF-8 byte count as
-    # Write-JsonAtomic, while cloning keeps this preflight side-effect free.
-    $maximumBytes = [long]0
-    $initialCheckpoint = ($Journal | ConvertTo-Json -Depth 20 -Compress) | ConvertFrom-Json -ErrorAction Stop
-    $initialBytes = Get-LifeOSJsonSerializedByteCount $initialCheckpoint
-    if ($initialBytes -gt $maximumBytes) { $maximumBytes = $initialBytes }
+    # Keep the unit objects shared with the live journal and change only their
+    # phase temporarily. The old clone/parse candidates duplicated the entire
+    # unit graph several times on every recovery resume.
+    if (-not (Test-LifeOSIntegralNumber (Get-JournalProperty $Journal 'unitCount'))) {
+        throw 'Recovery journal unit count is malformed.'
+    }
+    $unitCount = [int](Get-JournalProperty $Journal 'unitCount')
+    $unitsValue = Get-RecoveryJournalUnits $Journal
+    if ($unitCount -le 0 -or $unitCount -gt $script:LifeOSRecoveryMaxFileUnits -or $null -eq $unitsValue) {
+        throw 'Recovery journal checkpoint inventory is malformed.'
+    }
+    $unitPhaseSnapshot = New-Object object[] $unitCount
+    for ($index = 0; $index -lt $unitCount; $index++) {
+        $unit = Get-RecoveryProgressUnit -Units $unitsValue -UnitIndex $index
+        if ($null -eq $unit) { throw 'Recovery journal checkpoint inventory is malformed.' }
+        $unitPhaseSnapshot[$index] = Get-JournalProperty $unit 'phase'
+    }
 
-    $restoringCheckpoint = ($Journal | ConvertTo-Json -Depth 20 -Compress) | ConvertFrom-Json -ErrorAction Stop
-    Set-JournalProperty $restoringCheckpoint 'progressSequence' $FinalProgressSequence
-    $restoringUnits = Get-RecoveryJournalUnits $restoringCheckpoint
-    if ($null -eq $restoringUnits) { throw 'Recovery journal restoring checkpoint inventory is malformed.' }
-    $restoringUnitValues = if ($restoringUnits -is [System.Collections.IEnumerable] -and $restoringUnits -isnot [string]) {
-        @($restoringUnits)
-    } elseif ($restoringUnits -is [System.Management.Automation.PSCustomObject] -or
-        $restoringUnits -is [System.Collections.IDictionary]) {
-        @($restoringUnits)
-    } else { throw 'Recovery journal restoring checkpoint inventory is malformed.' }
-    foreach ($restoringUnit in $restoringUnitValues) { Set-JournalProperty $restoringUnit 'phase' 'restoring' }
-    $restoringBytes = Get-LifeOSJsonSerializedByteCount $restoringCheckpoint
-    if ($restoringBytes -gt $maximumBytes) { $maximumBytes = $restoringBytes }
+    # Copy only the small top-level envelope. Its units property deliberately
+    # retains the original collection so no second unit graph is allocated.
+    $checkpointProperties = [ordered]@{}
+    if ($Journal -is [System.Collections.IDictionary]) {
+        foreach ($name in $Journal.Keys) { $checkpointProperties[[string]$name] = $Journal[$name] }
+    } else {
+        foreach ($property in $Journal.PSObject.Properties) {
+            $checkpointProperties[[string]$property.Name] = $property.Value
+        }
+    }
+    $checkpoint = [pscustomobject]$checkpointProperties
+    [long]$maximumBytes = 0
+    try {
+        $initialBytes = Get-LifeOSJsonSerializedByteCount $checkpoint
+        if ($initialBytes -gt $maximumBytes) { $maximumBytes = $initialBytes }
 
-    $terminalCheckpoint = ($Journal | ConvertTo-Json -Depth 20 -Compress) | ConvertFrom-Json -ErrorAction Stop
-    Set-JournalProperty $terminalCheckpoint 'phase' 'artifacts-complete'
-    Set-JournalProperty $terminalCheckpoint 'progressSequence' $FinalProgressSequence
-    $checkpointUnits = Get-RecoveryJournalUnits $terminalCheckpoint
-    if ($null -eq $checkpointUnits) { throw 'Recovery journal checkpoint inventory is malformed.' }
-    $checkpointUnitValues = if ($checkpointUnits -is [System.Collections.IEnumerable] -and $checkpointUnits -isnot [string]) {
-        @($checkpointUnits)
-    } elseif ($checkpointUnits -is [System.Management.Automation.PSCustomObject] -or
-        $checkpointUnits -is [System.Collections.IDictionary]) {
-        @($checkpointUnits)
-    } else { throw 'Recovery journal checkpoint inventory is malformed.' }
-    foreach ($checkpointUnit in $checkpointUnitValues) { Set-JournalProperty $checkpointUnit 'phase' 'complete' }
-    $terminalBytes = Get-LifeOSJsonSerializedByteCount $terminalCheckpoint
-    if ($terminalBytes -gt $maximumBytes) { $maximumBytes = $terminalBytes }
-
-    # A stage is published first as restoring and then as complete. Measure
-    # both states for each stage and include the writer-release boundary.
-    Set-JournalProperty $terminalCheckpoint 'writersReleased' $true
-    $stageValues = [ordered]@{}
-    Set-JournalProperty $terminalCheckpoint 'stages' ([pscustomobject]$stageValues)
-    $writerBoundaryBytes = Get-LifeOSJsonSerializedByteCount $terminalCheckpoint
-    if ($writerBoundaryBytes -gt $maximumBytes) { $maximumBytes = $writerBoundaryBytes }
-    foreach ($stageName in $script:LifeOSRecoveryStageNames) {
-        $stageValues[$stageName] = 'restoring'
-        Set-JournalProperty $terminalCheckpoint 'stages' ([pscustomobject]$stageValues)
-        $restoringBytes = Get-LifeOSJsonSerializedByteCount $terminalCheckpoint
+        Set-JournalProperty $checkpoint 'progressSequence' $FinalProgressSequence
+        for ($index = 0; $index -lt $unitCount; $index++) {
+            $unit = Get-RecoveryProgressUnit -Units $unitsValue -UnitIndex $index
+            Set-RecoveryUnitPhase -Unit $unit -Phase 'restoring'
+        }
+        $restoringBytes = Get-LifeOSJsonSerializedByteCount $checkpoint
         if ($restoringBytes -gt $maximumBytes) { $maximumBytes = $restoringBytes }
-        $stageValues[$stageName] = 'complete'
-        Set-JournalProperty $terminalCheckpoint 'stages' ([pscustomobject]$stageValues)
-        $completeBytes = Get-LifeOSJsonSerializedByteCount $terminalCheckpoint
-        if ($completeBytes -gt $maximumBytes) { $maximumBytes = $completeBytes }
+
+        Set-JournalProperty $checkpoint 'phase' 'artifacts-complete'
+        for ($index = 0; $index -lt $unitCount; $index++) {
+            $unit = Get-RecoveryProgressUnit -Units $unitsValue -UnitIndex $index
+            Set-RecoveryUnitPhase -Unit $unit -Phase 'complete'
+        }
+        $terminalBytes = Get-LifeOSJsonSerializedByteCount $checkpoint
+        if ($terminalBytes -gt $maximumBytes) { $maximumBytes = $terminalBytes }
+
+        # A stage is published first as restoring and then as complete. Measure
+        # both states for each stage and include the writer-release boundary.
+        Set-JournalProperty $checkpoint 'writersReleased' $true
+        $stageValues = [ordered]@{}
+        Set-JournalProperty $checkpoint 'stages' ([pscustomobject]$stageValues)
+        $writerBoundaryBytes = Get-LifeOSJsonSerializedByteCount $checkpoint
+        if ($writerBoundaryBytes -gt $maximumBytes) { $maximumBytes = $writerBoundaryBytes }
+        foreach ($stageName in $script:LifeOSRecoveryStageNames) {
+            $stageValues[$stageName] = 'restoring'
+            Set-JournalProperty $checkpoint 'stages' ([pscustomobject]$stageValues)
+            $restoringBytes = Get-LifeOSJsonSerializedByteCount $checkpoint
+            if ($restoringBytes -gt $maximumBytes) { $maximumBytes = $restoringBytes }
+            $stageValues[$stageName] = 'complete'
+            Set-JournalProperty $checkpoint 'stages' ([pscustomobject]$stageValues)
+            $completeBytes = Get-LifeOSJsonSerializedByteCount $checkpoint
+            if ($completeBytes -gt $maximumBytes) { $maximumBytes = $completeBytes }
+        }
+    } finally {
+        for ($index = 0; $index -lt $unitCount; $index++) {
+            $unit = Get-RecoveryProgressUnit -Units $unitsValue -UnitIndex $index
+            Set-RecoveryUnitPhase -Unit $unit -Phase ([string]$unitPhaseSnapshot[$index])
+        }
     }
     if ($maximumBytes -gt $script:LifeOSRecoveryJournalMaxBytes) {
         throw 'Recovery journal checkpoint exceeds its bounded serialized size.'
@@ -3744,33 +3764,47 @@ function Assert-RecoveryInventoryBounds {
         [AllowNull()][object]$FileUnits,
         [AllowNull()][object]$ManifestBackups
     )
-    $rootValues = @()
-    $unitValues = @()
-    $backupValues = @()
-    if ($null -ne $TreeRoots) { $rootValues = @($TreeRoots) }
-    if ($null -ne $FileUnits) { $unitValues = @($FileUnits) }
-    if ($null -ne $ManifestBackups) { $backupValues = @($ManifestBackups) }
-    if ($rootValues.Count -gt $script:LifeOSRecoveryMaxTreeRoots) {
-        throw 'Recovery inventory contains too many tree roots.'
-    }
-    if ($unitValues.Count -gt $script:LifeOSRecoveryMaxFileUnits) {
-        throw 'Recovery inventory contains too many file units.'
-    }
-    if ($backupValues.Count -gt $script:LifeOSRecoveryMaxTreeRoots) {
-        throw 'Recovery manifest contains too many artifact roots.'
-    }
-    foreach ($root in $rootValues) {
+    $rootCount = 0
+    foreach ($root in $TreeRoots) {
+        $rootCount++
+        if ($rootCount -gt $script:LifeOSRecoveryMaxTreeRoots) {
+            throw 'Recovery inventory contains too many tree roots.'
+        }
         if ($root -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$root) -or
             ([string]$root).Length -gt $script:LifeOSRecoveryMaxPathLength) {
             throw 'Recovery inventory contains an invalid tree-root path.'
         }
     }
-    foreach ($unit in $unitValues) {
+    $unitCount = 0
+    foreach ($unit in $FileUnits) {
+        $unitCount++
+        if ($unitCount -gt $script:LifeOSRecoveryMaxFileUnits) {
+            throw 'Recovery inventory contains too many file units.'
+        }
         if ($null -eq $unit) { throw 'Recovery inventory contains a null file unit.' }
         $destination = Get-JournalProperty $unit 'destination'
         if ($destination -is [string] -and $destination.Length -gt $script:LifeOSRecoveryMaxPathLength) {
             throw 'Recovery inventory contains an oversized destination path.'
         }
+    }
+    $backupCount = 0
+    foreach ($backup in $ManifestBackups) {
+        $backupCount++
+        if ($backupCount -gt $script:LifeOSRecoveryMaxTreeRoots) {
+            throw 'Recovery manifest contains too many artifact roots.'
+        }
+    }
+}
+
+function Set-RecoveryUnitPhase {
+    param([Parameter(Mandatory)]$Unit, [Parameter(Mandatory)][string]$Phase)
+    if ($Unit -is [System.Collections.IDictionary]) {
+        $Unit['phase'] = $Phase
+    } else {
+        if ($null -eq $Unit.PSObject.Properties['phase']) { throw 'Recovery journal unit phase is missing.' }
+        # Direct assignment preserves the original PSCustomObject property
+        # order. Add-Member -Force would remove and re-add the property.
+        $Unit.phase = $Phase
     }
 }
 
@@ -3902,21 +3936,21 @@ function Read-RecoveryJournal {
     # Windows PowerShell 5.1 unwraps one-item JSON arrays when they are
     # assigned to a property. Normalize that owned representation back to a
     # collection, while rejecting scalar unit values and empty inventories.
-    $treeRoots = @(
-        if ($journal.treeRoots -is [string]) {
-            @([string]$journal.treeRoots)
-        } elseif ($journal.treeRoots -is [System.Collections.IEnumerable]) {
-            @($journal.treeRoots)
-        } else { throw 'Recovery journal tree-root collection is malformed.' }
-    )
-    $journalUnits = @(
-        if ($journal.units -is [System.Collections.IEnumerable] -and $journal.units -isnot [string]) {
-            @($journal.units)
-        } elseif ($journal.units -is [System.Management.Automation.PSCustomObject] -or
-            $journal.units -is [System.Collections.IDictionary]) {
-            @($journal.units)
+    $treeRoots = $journal.treeRoots
+    if ($treeRoots -is [string]) {
+        # Windows PowerShell 5.1 unwraps a one-item JSON array. Only this
+        # scalar compatibility case needs a new one-item collection.
+        $treeRoots = [object[]]@([string]$treeRoots)
+    } elseif ($treeRoots -isnot [System.Collections.IEnumerable]) {
+        throw 'Recovery journal tree-root collection is malformed.'
+    }
+    $journalUnits = Get-RecoveryJournalUnits $journal
+    if ($journalUnits -isnot [System.Collections.IEnumerable] -or $journalUnits -is [string]) {
+        if ($journalUnits -is [System.Management.Automation.PSCustomObject] -or
+            $journalUnits -is [System.Collections.IDictionary]) {
+            $journalUnits = [object[]]@($journalUnits)
         } else { throw 'Recovery journal unit collection is malformed.' }
-    )
+    }
     if ($treeRoots.Count -eq 0 -or $journalUnits.Count -eq 0) { throw 'Recovery journal inventory is empty.' }
     Set-JournalProperty $journal 'treeRoots' $treeRoots
     Set-JournalProperty $journal 'units' $journalUnits
@@ -3929,6 +3963,13 @@ function Read-RecoveryJournal {
     $manifestBackups = @($Manifest.backups)
     Assert-RecoveryInventoryBounds -TreeRoots $treeRoots -FileUnits $journalUnits -ManifestBackups $manifestBackups
     Read-RecoveryProgress -Manifest $Manifest -Journal $journal -JournalUnits $journalUnits
+    $journalHasIncompleteUnit = $false
+    foreach ($unit in $journalUnits) {
+        if ([string](Get-JournalProperty $unit 'phase') -ne 'complete') {
+            $journalHasIncompleteUnit = $true
+            break
+        }
+    }
     $allowedRoots = @($Manifest.paths.gatewayData, $Manifest.paths.usageHistory) + @($manifestBackups | ForEach-Object { $_.destination })
     $allowedRoots = @($allowedRoots | ForEach-Object { (Get-FullPath $_).TrimEnd('\') })
     if ($allowedRoots.Count -gt ($script:LifeOSRecoveryMaxTreeRoots + 2)) { throw 'Recovery inventory contains too many allowed roots.' }
@@ -4003,34 +4044,51 @@ function Read-RecoveryJournal {
     if ($null -ne $writerState -and $writerState -isnot [bool]) { throw 'Recovery writer boundary is not boolean.' }
     $writersReleased = $writerState -eq $true
     if ($writersReleased -and ($journal.phase -notin @('artifacts-complete', 'completed') -or
-        @($journal.units | Where-Object { $_.phase -ne 'complete' }).Count -gt 0)) { throw 'Recovery writer boundary precedes artifact completion.' }
+        $journalHasIncompleteUnit)) { throw 'Recovery writer boundary precedes artifact completion.' }
     if ($journal.phase -eq 'completed' -and ($writersReleased -ne $true -or
-        @($journal.units | Where-Object { $_.phase -ne 'complete' }).Count -gt 0)) {
+        $journalHasIncompleteUnit)) {
         throw 'Completed recovery journal is not a verified terminal state.'
     }
     $discoveredFileCount = 0
     [long]$discoveredBytes = 0
-    $treeIndexCache = [ordered]@{}
+    # Recovery journals can contain tens of thousands of file units. Build the
+    # current-state map directly from the bounded enumerator instead of
+    # materializing a second Entries/ByPath tree index and then copying its
+    # hashes into another dictionary. This keeps the scan O(n) in time with
+    # memory bounded by the journal units, path sets, and one root enumerator.
     $indexedStates = [System.Collections.Generic.Dictionary[string,string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach ($root in $scanRoots) {
         if ($writersReleased -and (Test-RecoveryAuthorityPath $Manifest $root)) { continue }
         if (Test-Path -LiteralPath $root -PathType Container) {
-            # Build one bounded index for each disjoint root. This avoids the
-            # repeated recursive scans that made overlapping journal roots
-            # scale with root-count multiplied by file-count.
             $allowNodeRuntime = Test-LifeOSNodeRuntimeArtifactPath -Manifest $Manifest -Path $root -TreeRoot
             $largeFileRelativePaths = @(Get-LifeOSNodeRuntimeStagingRelativePaths -Manifest $Manifest -Journal $journal -Root $root)
-            $treeIndex = Get-RecoveryTreeManifestIndex -Root $root -Cache $treeIndexCache -TotalBytes ([ref]$discoveredBytes) -AllowNodeRuntime:$allowNodeRuntime -LargeFileRelativePaths $largeFileRelativePaths
-            $discoveredFileCount += [int]$treeIndex.FileCount
-            if ($discoveredFileCount -gt $script:LifeOSRecoveryMaxFileUnits) { throw 'Recovery inventory contains too many files.' }
-            foreach ($entry in $treeIndex.Entries) {
-                $filePath = Get-FullPath (Join-Path $root $entry.path)
-                if (-not $destinationSet.Contains($filePath)) {
-                    if (-not $stagingSet.Contains($filePath)) { throw 'Unjournaled file appeared during recovery.' }
-                    Assert-NoReparsePath $filePath
+            $largeFileRelativePath = if ($allowNodeRuntime) { 'node.exe' } else { '' }
+            $largeFileMaxBytes = if ($allowNodeRuntime) { [long]$script:LifeOSCandidateNodeMaxFileBytes } else { [long]0 }
+            Get-LifeOSBoundedTreeItem -Root $root -MaxFiles $script:LifeOSRecoveryMaxFileUnits -MaxDirectories $script:LifeOSRecoveryMaxFileUnits -MaxBytes $script:LifeOSRecoveryMaxTreeBytes -MaxFileBytes $script:LifeOSRecoveryMaxFileBytes -LargeFileRelativePath $largeFileRelativePath -LargeFileMaxBytes $largeFileMaxBytes -LargeFileRelativePaths $largeFileRelativePaths |
+                Where-Object { -not $_.PSIsContainer } |
+                ForEach-Object {
+                    $item = $_
+                    $filePath = Get-FullPath ([string]$item.FullName)
+                    if (-not $destinationSet.Contains($filePath)) {
+                        if (-not $stagingSet.Contains($filePath)) { throw 'Unjournaled file appeared during recovery.' }
+                        Assert-NoReparsePath $filePath
+                    }
+                    $discoveredFileCount++
+                    if ($discoveredFileCount -gt $script:LifeOSRecoveryMaxFileUnits) { throw 'Recovery inventory contains too many files.' }
+                    $discoveredBytes += [long]$item.Length
+                    if ($discoveredBytes -gt $script:LifeOSRecoveryMaxInventoryBytes) { throw 'Recovery inventory exceeds its bounded byte size.' }
+                    $itemIdentity = New-LifeOSTreeItemIdentity -Item $item -Description 'Recovery tree item'
+                    try {
+                        $hashRecord = Get-LifeOSFileDigest -Path $filePath -Description 'Recovery tree item' -ExpectedFileId ([string]$itemIdentity.FileId)
+                        Assert-LifeOSTreeItemIdentity -Path $filePath -Expected $itemIdentity -Description 'Recovery tree item' | Out-Null
+                    } catch {
+                        throw "Could not hash recovery tree item ${filePath}: $($_.Exception.Message)"
+                    }
+                    if ($null -eq $hashRecord -or [string]$hashRecord.Sha256 -notmatch '^[0-9a-f]{64}$' -or [long]$hashRecord.Length -ne [long]$item.Length) {
+                        throw "Hash operation returned no SHA-256 value for recovery tree item $filePath."
+                    }
+                    $indexedStates[$filePath] = 'file:' + ([string]$hashRecord.Sha256).ToLowerInvariant()
                 }
-                $indexedStates[$filePath] = 'file:' + [string]$entry.sha256
-            }
         }
     }
     foreach ($unit in $journalUnits) {
@@ -4200,7 +4258,7 @@ function Restore-ManifestArtifacts {
         [void](Assert-RecoveryJournalCheckpointCapacity -Manifest $Manifest -Journal $journal -FinalProgressSequence $progressCapacity.FinalSequence)
     }
     $unitIndex = 0
-    foreach ($unit in @($journal.units)) {
+    foreach ($unit in $journal.units) {
         $allowNodeRuntime = Test-LifeOSNodeRuntimeArtifactPath -Manifest $Manifest -Path $unit.destination
         $allowServiceHostBinary = Test-LifeOSServiceHostArtifactPath -Manifest $Manifest -Path $unit.destination
         $current = Get-RecoveryArtifactState $unit.destination -AllowNodeRuntime:$allowNodeRuntime -AllowServiceHostBinary:$allowServiceHostBinary -Manifest $Manifest

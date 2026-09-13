@@ -37,6 +37,68 @@ function Assert-BehaviorThrowsSafe {
 }
 
 & {
+    # Checkpoint-capacity validation temporarily changes every unit phase while
+    # measuring serialized sizes. Exercise singleton and multi-unit journals,
+    # mixed phase casing, the successful path, and every serializer boundary;
+    # every injected failure must leave the live journal byte-for-byte intact.
+    $script:checkpointSizerImplementation = ${function:Get-LifeOSJsonSerializedByteCount}
+    $script:checkpointSizerCalls = 0
+    $script:checkpointSizerFailure = -1
+    function Get-LifeOSJsonSerializedByteCount {
+        param([Parameter(Mandatory)][object]$Value)
+        $call = $script:checkpointSizerCalls
+        $script:checkpointSizerCalls++
+        if ($call -eq $script:checkpointSizerFailure) {
+            throw "fixture checkpoint serialization failure $call"
+        }
+        & $script:checkpointSizerImplementation -Value $Value
+    }
+    try {
+        foreach ($unitCount in @(1, 2)) {
+            $units = New-Object object[] $unitCount
+            for ($index = 0; $index -lt $unitCount; $index++) {
+                $units[$index] = [pscustomobject]@{
+                    destination = ('D:\checkpoint-fixture\destination-' + $index + '.json')
+                    backup = ''; pre = 'absent'; post = 'absent'
+                    phase = if ($index -eq 1) { 'Complete' } else { 'pending' }
+                    stagingPath = ('D:\checkpoint-fixture\.rollback-restore-checkpoint-' + $index)
+                }
+            }
+            # Keep the one-unit fixture scalar to exercise the Windows
+            # PowerShell 5.1 JSON singleton shape directly.
+            $journalUnits = if ($unitCount -eq 1) { $units[0] } else { $units }
+            $journal = [pscustomobject]@{
+                schemaVersion = 1; transactionId = 'checkpoint-fixture'; generation = 'generation'; operatorSid = 'fixture'; manifestPath = 'D:\checkpoint-fixture\manifest.json'
+                units = $journalUnits; unitCount = $unitCount; treeRoots = @('D:\checkpoint-fixture'); phase = 'artifacts'; progressSequence = 0
+            }
+            $before = $journal | ConvertTo-Json -Depth 20 -Compress
+            $expectedBoundaries = 4 + (2 * @($script:LifeOSRecoveryStageNames).Count)
+            $script:checkpointSizerFailure = -1
+            $script:checkpointSizerCalls = 0
+            [void](Assert-RecoveryJournalCheckpointCapacity -Manifest ([pscustomobject]@{}) -Journal $journal -FinalProgressSequence 0)
+            Assert-Behavior ($script:checkpointSizerCalls -eq $expectedBoundaries) "checkpoint capacity measures all serialized boundaries for $unitCount unit(s)."
+            Assert-Behavior (($journal | ConvertTo-Json -Depth 20 -Compress) -ceq $before) "successful checkpoint capacity validation leaves the $unitCount-unit journal unchanged."
+
+            for ($failure = 0; $failure -lt $expectedBoundaries; $failure++) {
+                $script:checkpointSizerFailure = $failure
+                $script:checkpointSizerCalls = 0
+                $caught = $null
+                try {
+                    Assert-RecoveryJournalCheckpointCapacity -Manifest ([pscustomobject]@{}) -Journal $journal -FinalProgressSequence 0
+                } catch { $caught = $_.Exception.Message }
+                Assert-Behavior ($caught -ceq ("fixture checkpoint serialization failure $failure")) "checkpoint serializer failure $failure is surfaced for $unitCount unit(s)."
+                Assert-Behavior ($script:checkpointSizerCalls -eq ($failure + 1)) "checkpoint serializer failure $failure occurs at the expected boundary for $unitCount unit(s)."
+                Assert-Behavior (($journal | ConvertTo-Json -Depth 20 -Compress) -ceq $before) "checkpoint serializer failure $failure restores the $unitCount-unit journal."
+            }
+        }
+    } finally {
+        Remove-Variable -Name checkpointSizerImplementation -Scope Script -ErrorAction SilentlyContinue
+        Remove-Variable -Name checkpointSizerCalls -Scope Script -ErrorAction SilentlyContinue
+        Remove-Variable -Name checkpointSizerFailure -Scope Script -ErrorAction SilentlyContinue
+    }
+}
+
+& {
     # Windows PowerShell promotes native stderr merged by 2>&1 into a
     # terminating error under ErrorActionPreference Stop. The installer must
     # therefore query the fresh venv first and uninstall only tools that are

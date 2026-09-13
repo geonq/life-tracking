@@ -678,6 +678,15 @@ Write-Host 'PASS: transaction-owned recovery static assertions'
 
 # Scope these assertions to production bodies; test fixtures must not satisfy them.
 $commonText = Get-Content -LiteralPath (Join-Path $root 'Deployment.Common.ps1') -Raw
+$recoveryReaderBody = ($commonText -split 'function Read-RecoveryJournal', 2)[1] -split 'function Save-CollectorReceipt', 2
+if (-not $recoveryReaderBody[0].Contains('Get-LifeOSBoundedTreeItem -Root $root') -or
+    -not $recoveryReaderBody[0].Contains('Get-LifeOSFileDigest -Path $filePath') -or
+    $recoveryReaderBody[0].Contains('Get-RecoveryTreeManifestIndex -Root $root -Cache $treeIndexCache')) {
+    throw 'FAIL: Recovery journal validation must stream one bounded, identity-checked tree scan without a duplicate tree index.'
+}
+if (-not $recoveryReaderBody[0].Contains("Get-JournalProperty `$unit 'phase') -ne 'complete'")) {
+    throw 'FAIL: Recovery journal completion checks must retain case-insensitive phase compatibility.'
+}
 $gatewayBundleBody = ($installText -split 'function Copy-GatewayCodeBundle', 2)[1] -split 'function Initialize-SupplementCatalog', 2
 $bundleFilesAssignment = [regex]::Match($gatewayBundleBody[0], '(?ms)\$bundleFiles\s*=\s*@\(.*?\}\)(?<tail>[^\r\n]*)')
 if (-not $bundleFilesAssignment.Success -or $bundleFilesAssignment.Groups['tail'].Value -match '-MaxBytes') {
