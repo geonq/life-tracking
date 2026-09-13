@@ -111,11 +111,11 @@ evidence is still incomplete.
   calendar gestures, widgets, physical iPhone, signing, and Shortcuts.
 - Zepp workout fidelity/sync and the Obsidian Canvas mind map; see issue #2.
 - Final operational security, transport, and release acceptance checks.
-- Pauli the 4th (Luna Max worker `01a09bb2-0736-77b2-bf11-21ac106ac1cf`) was
-  dispatched to reconcile the supplied Claude security findings read-only
-  against current source at `8904133`, but was closed without a report. Several
-  reported items already appear fixed; run a smaller bounded audit before any
-  security edit, and change code only for verified OPEN/PARTIAL findings.
+- Pauli the 4th (Luna Max worker `01a09bb2-0736-77b2-bf11-21ac106ac1cf`) and
+  Fermat the 4th (worker `01a09bc6-739d-7cb2-b632-cb52466d5b11`) were dispatched
+  to reconcile the supplied Claude security findings read-only against current
+  source, but both were closed without a report. Several reported items may be
+  fixed; any next audit needs a different execution method before code changes.
 
 ## Boundaries and next action
 

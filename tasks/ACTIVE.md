@@ -56,11 +56,12 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
 - A narrow Mac shell candidate was compiled and tested, then rejected by Astra
   Medium for missing actual shell evidence and collapsed-header geometry risk; its
   patch is preserved in `/private/tmp/lifeos-mac-shell-candidate-red.patch`.
-- Pauli the 4th (Luna Max, worker `01a09bb2-0736-77b2-bf11-21ac106ac1cf`)
-  was dispatched for a read-only audit of the complete Claude security finding
-  list at HEAD `8904133`, but was closed after returning no report. No security
-  patch is authorized until a completed audit identifies concrete OPEN/PARTIAL
-  findings; the next audit must use a smaller bounded scope.
+- Pauli the 4th (Luna Max, worker `01a09bb2-0736-77b2-bf11-21ac106ac1cf`) and
+  Fermat the 4th (worker `01a09bc6-739d-7cb2-b632-cb52466d5b11`) were
+  dispatched for read-only audits of the Claude security findings and both were
+  closed after returning no report. No security patch is authorized until a
+  completed audit identifies concrete OPEN/PARTIAL findings; do not dispatch a
+  third broad audit without changing the execution method.
 
 ## Execution phases
 

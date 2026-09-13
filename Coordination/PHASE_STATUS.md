@@ -57,10 +57,10 @@ Updated 2026-09-13 Europe/Berlin.
   Mac shell candidate passed compile and 6 selected tests but was Astra RED for
   missing shell-state evidence and a possible collapsed-header overflow; it was
   reverted and quarantined before the reviewed `66953af` repair. Pauli the 4th
-  (Luna Max worker `01a09bb2-0736-77b2-bf11-21ac106ac1cf`) was dispatched for a
-  read-only security reconciliation at coordination HEAD `8904133`, then
-  closed without a report. A smaller bounded audit is required before any
-  security edit.
+  (Luna Max worker `01a09bb2-0736-77b2-bf11-21ac106ac1cf`) and Fermat the 4th
+  (worker `01a09bc6-739d-7cb2-b632-cb52466d5b11`) were dispatched for
+  read-only security reconciliation and both closed without a report. A third
+  broad audit is not authorized without a different execution method.
 - The calendar review found no P0/P1. Its P2 unavailable-symbol finding is
   fixed and locally tested; the targeted Astra re-review was blocked by worker
   file-access limits and is therefore not a sign-off.
