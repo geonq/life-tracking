@@ -9,8 +9,10 @@ Updated 2026-09-13 Europe/Berlin. Release: **NO-GO**.
    callback retirement, and Astra GREEN review. Interactive route reversal and
    deferred-editor runtime evidence remain open.
 2. Continue serialized native runtime captures. The Usage visual slice is
-   checked in at `6f421f8`; finish hierarchy, SF Symbols, motion, calendar
-   scroll/pinch, and widget states against the approved design plan.
+   checked in at `6f421f8`, and the Fitness Recovery hero repair is checked in
+   at `03a78a1` with focused macOS/iPhone evidence. Finish Finance hierarchy,
+   SF Symbols, motion, calendar scroll/pinch, and widget states against the
+   approved design plan.
 3. Run Windows recovery/install and verify service listeners, health, ACLs,
    Tailscale Serve, and live Enable Banking reads on the reachable PC.
 4. Verify iPhone install, App Group/HealthKit, personal signing renewal, and
@@ -22,7 +24,7 @@ Updated 2026-09-13 Europe/Berlin. Release: **NO-GO**.
 
 ## Verified checkpoint
 
-`6f421f8` is pushed. Calendar hardening is pushed at `8942b8e`; its focused
+`03a78a1` is pushed. Calendar hardening is pushed at `8942b8e`; its focused
 iPhone 17 suite is 107/107 with exit 0 and the macOS production build exits 0.
 Usage visual/source, macOS route, and personal installer security slices have
 source evidence; the Usage focused visual run is 3/3 with seven inspected

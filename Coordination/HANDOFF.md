@@ -12,7 +12,7 @@ evidence is still incomplete.
 ## Current source checkpoint
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- HEAD and origin: `6f421f8 Refine Usage hierarchy and facts layout`.
+- HEAD and origin: `03a78a1 Repair Fitness recovery hero layout`.
 - macOS now has one value-driven Home `NavigationStack` with a bounded typed
   path. Sidebar Home resets it; Back pops one detail and preserves origin.
 - Cross-module Usage/Finance/Calendar deep links preserve the saved Home
@@ -28,6 +28,10 @@ evidence is still incomplete.
   merge rules, mutation fencing, durable store writes, and cross-OS symbol
   fallback are committed at `8942b8e`. The focused iPhone 17 suite is
   **107/107 with 0 failures**; the macOS production build exits 0.
+- Fitness Recovery hero measurement/placement is repaired at `03a78a1`. The
+  focused macOS snapshot test is **1/1 with 0 failures** and its light/dark
+  captures were inspected; the iPhone 17 boundary test is **1/1 with 0
+  failures**. Separate 900/1200pt Fitness captures remain open.
 - Verification: iOS focused route/Usage suite **95 tests, 0 failures**;
   macOS route tests **2/2, exit 0**; full macOS snapshot run executed
   **51/51 test cases with 0 failures** before its result-archive I/O crash.
@@ -54,8 +58,8 @@ evidence is still incomplete.
   decode and render through a local fallback. The targeted Astra re-review was
   blocked by that worker's inability to read the files, so it is not recorded
   as a green sign-off; local focused tests and the macOS build pass.
-- Runtime route transitions, whole-app visual captures, calendar gestures,
-  widgets, physical iPhone, signing, and Shortcuts.
+- Runtime route transitions, whole-app visual captures at all review widths,
+  calendar gestures, widgets, physical iPhone, signing, and Shortcuts.
 - Zepp workout fidelity/sync and the Obsidian Canvas mind map; see issue #2.
 - Final operational security, transport, and release acceptance checks.
 
@@ -64,6 +68,6 @@ evidence is still incomplete.
 Keep SF Pro/system styling, compact Linear/Vercel quality, truthful live data,
 no generic advisor or in-app AI, and calorie-photo tracking as the only AI.
 The old AppKit route-host/raster plan is superseded by the native stack in
-`070b7db`. Next: continue the whole-app visual/runtime pass, then close the
-Windows backend, live provider, device/signing, Zepp, Obsidian, and security
-gates with evidence.
+`070b7db`. Next: continue the Finance and whole-app visual/runtime pass, then
+close the Windows backend, live provider, device/signing, Zepp, Obsidian, and
+security gates with evidence.

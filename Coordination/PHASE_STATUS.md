@@ -3,7 +3,7 @@
 Updated 2026-09-13 Europe/Berlin.
 
 - Release: **NO-GO**.
-- Source checkpoint: `6f421f8` on `lifeos-foundation-checkpoint-20260812`.
+- Source checkpoint: `03a78a1` on `lifeos-foundation-checkpoint-20260812`.
 - Usage packet, per-scope authority, omission handling, persistence retry,
   identity handling, cancellation, and viewport bounds are implemented and
   independently reviewed **GREEN**.
@@ -17,6 +17,9 @@ Updated 2026-09-13 Europe/Berlin.
   tests passing and a macOS production build with exit 0. The source covers
   pairing proof, reconnect fencing, bounded decoding, deterministic merge,
   durable writes, and unavailable-symbol fallback.
+- Fitness Recovery hero repair at `03a78a1` has a **1/1** macOS snapshot
+  test and a **1/1** iPhone 17 layout policy test passing. Light/dark macOS
+  captures were inspected; separate 900/1200pt captures remain open.
 - Earlier route tests remain **2/2 with exit 0**; the full macOS snapshot run
   executed **51/51 cases with 0 failures** before a result-archive I/O crash;
   Windows source suite remains **61 passed, 1 skipped**.
@@ -38,8 +41,8 @@ Updated 2026-09-13 Europe/Berlin.
 - Mounted macOS route transition and deferred Calendar editor behavior still
   need interactive runtime evidence.
 - Whole-app pixel/runtime QA for hierarchy, icons, motion, scroll, pinch zoom,
-  dark transparent homescreen, and widgets. The Usage slice alone is covered;
-  this is not whole-app acceptance.
+  dark transparent homescreen, and widgets. The Usage slice and the repaired
+  Fitness hero have focused evidence; this is not whole-app acceptance.
 - Windows rollback/reinstall, listener/health, Tailscale Serve, and live banking.
 - iPhone install/signing renewal/Shortcuts and physical continuity.
 - Zepp workout import fidelity, Obsidian Canvas round trip, and final security.
