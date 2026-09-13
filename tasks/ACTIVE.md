@@ -24,7 +24,7 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
 - Tax document local feature foundation.
 - Provenance-aware read-only Usage ingestion/API/native UI.
 - Fail-closed Finance summary and disabled connector contracts.
-- Current working checkpoint: `93c7af3` on `lifeos-foundation-checkpoint-20260812`.
+- Current working checkpoint: `056c1b4` on `lifeos-foundation-checkpoint-20260812`.
   The branch push succeeded; PR #1 is the matching open draft checkpoint. The
   deployable Windows candidate is the verified `6baa1f3` source checkpoint;
   recovery reached journal unit 31,400 and was stopped before its final stage.
@@ -41,11 +41,21 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
   Bounded recovery diagnostics are committed at `14a3b7f`; strict progress
   validation is committed at `4e14e38`; strict journal observation is committed
   at `9e43dd7`. Bounded phase telemetry is committed at `0a8d5b6`; the current
-  coordination checkpoint is `93c7af3`. Native Windows PowerShell 5.1 static,
+  coordination checkpoint is `056c1b4`. Native Windows PowerShell 5.1 static,
   behavior, failure-parity, and legacy Serve suites passed with exit 0 for the
   latest slice, and Astra Medium reviewed all four slices GREEN. The digest
   callers use a mutable holder because named `[ref]` arguments are rebound by
   Windows PowerShell 5.1. The canonical transaction remains untouched.
+
+## Current dispatch
+
+- Averroes the 3rd (Luna Max) is implementing only descriptor-bound streaming
+  progress replay from base `056c1b4`; no receipt/cache shortcut, service
+  mutation, canonical SSH, or docs changes are authorized.
+- Astra Medium marked the earlier receipt proposal RED until it proves exact
+  byte binding, untouched-unit semantics, validation publish timing, strict
+  resume/terminal boundaries, and same-process invalidation. The streaming
+  tranche must pass differential tests and native PowerShell 5.1 review first.
 
 ## Execution phases
 
