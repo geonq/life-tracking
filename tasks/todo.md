@@ -24,7 +24,7 @@ Updated 2026-09-13 Europe/Berlin. Release: **NO-GO**.
 
 ## Verified checkpoint
 
-`fd8ccfb` is pushed. Calendar hardening is pushed at `8942b8e`; its focused
+`3bb4f2c` is pushed; the Finance source change is `fd8ccfb`. Calendar hardening is pushed at `8942b8e`; its focused
 iPhone 17 suite is 107/107 with exit 0 and the macOS production build exits 0.
 Usage visual/source, macOS route, and personal installer security slices have
 source evidence; the Usage focused visual run is 3/3 with seven inspected

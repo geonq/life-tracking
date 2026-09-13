@@ -12,7 +12,8 @@ evidence is still incomplete.
 ## Current source checkpoint
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- HEAD and origin: `fd8ccfb Refine Finance responsive hierarchy`.
+- HEAD and origin: `3bb4f2c Refresh LifeOS Finance handoff`.
+- Finance source checkpoint: `fd8ccfb Refine Finance responsive hierarchy`.
 - macOS now has one value-driven Home `NavigationStack` with a bounded typed
   path. Sidebar Home resets it; Back pops one detail and preserves origin.
 - Cross-module Usage/Finance/Calendar deep links preserve the saved Home
@@ -56,9 +57,9 @@ evidence is still incomplete.
 
 ## Still open
 
-- Windows is reachable and BitLocker is fully encrypted/protected. The
-  rollback marker has cleared but its PowerShell cleanup process is still
-  present; no reinstall retry or live Enable Banking readback is certified.
+- Windows is reachable and BitLocker was last read fully encrypted/protected.
+  The stale rollback marker/process has been cleared; the service remains
+  stopped and no reinstall retry or live Enable Banking readback is certified.
 - The calendar Astra review found and the source fixed one P2 compatibility
   issue: a valid SF Symbol name unavailable on the receiving OS must survive
   decode and render through a local fallback. The targeted Astra re-review was
