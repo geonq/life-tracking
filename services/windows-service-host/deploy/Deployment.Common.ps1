@@ -77,6 +77,238 @@ $script:LifeOSCollectorReceiptMaxBytes = 1 * 1024 * 1024
 $script:LifeOSTailscaleSnapshotMaxBytes = 256 * 1024
 $script:LifeOSPathOnlyJsonMaxBytes = 1 * 1024 * 1024
 $script:LifeOSMaxCappedReadBytes = 256 * 1024 * 1024
+$script:LifeOSRecoveryDiagnosticsMaxScopes = 64
+$script:LifeOSRecoveryDiagnosticsMaxRecordBytes = 1024
+$script:LifeOSRecoveryDiagnosticsCounterLimit = [long]9007199254740991
+$script:LifeOSRecoveryDiagnosticsScopeNames = @('journal-validation', 'recovery-finalize') + @($script:LifeOSRecoveryStageNames)
+$script:LifeOSRecoveryDiagnostics = $null
+
+function Convert-LifeOSRecoveryDiagnosticScope {
+    param([AllowNull()][string]$Scope)
+    if ([string]::IsNullOrWhiteSpace($Scope) -or $script:LifeOSRecoveryDiagnosticsScopeNames -notcontains $Scope) { return 'other' }
+    return $Scope
+}
+
+function Start-LifeOSRecoveryDiagnostics {
+    param([switch]$Enabled)
+    try {
+        $activeState = $script:LifeOSRecoveryDiagnostics
+        if ($null -ne $activeState -and $activeState.enabled) { return $null }
+        $script:LifeOSRecoveryDiagnostics = $null
+        if (-not $Enabled) { return $null }
+        $sessionId = [Guid]::NewGuid().ToString('N')
+        $script:LifeOSRecoveryDiagnostics = [pscustomobject]@{
+            enabled                  = $true
+            sessionId                = $sessionId
+            admittedScopes           = [long]0
+            records                  = [long]0
+            summaryWritten           = $false
+            droppedScopes            = [long]0
+            saturated                = $false
+            journalReadCalls         = [long]0
+            journalScanPasses        = [long]0
+            progressReadCalls        = [long]0
+            progressFileOpens        = [long]0
+            progressReadBytes        = [long]0
+            memoryUnavailable        = $false
+        }
+        return ([pscustomobject]@{ sessionId = $sessionId })
+    } catch {
+        # Diagnostics must never affect recovery behavior.
+        return $null
+    }
+}
+
+function Add-LifeOSRecoveryDiagnosticCounter {
+    param(
+        [Parameter(Mandatory)][ValidateSet('journalReadCalls', 'journalScanPasses', 'progressReadCalls', 'progressFileOpens', 'progressReadBytes')][string]$Name,
+        [long]$Delta = 1
+    )
+    try {
+        $state = $script:LifeOSRecoveryDiagnostics
+        if ($null -eq $state -or -not $state.enabled -or $Delta -le 0) { return }
+        $limit = [long]$script:LifeOSRecoveryDiagnosticsCounterLimit
+        $current = [long]$state.$Name
+        if ($current -ge $limit -or $Delta -gt ($limit - $current)) {
+            $state.$Name = $limit
+            $state.saturated = $true
+            return
+        }
+        $state.$Name = $current + $Delta
+    } catch {
+        # Diagnostics must never affect recovery behavior.
+    }
+}
+
+function Get-LifeOSRecoveryAvailablePhysicalMemory {
+    $state = $script:LifeOSRecoveryDiagnostics
+    if ($null -eq $state -or -not $state.enabled -or $state.memoryUnavailable) { return $null }
+    try {
+        if ($null -eq ('LifeOSRecoveryMemoryStatus' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class LifeOSRecoveryMemoryStatus
+{
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MEMORYSTATUSEX
+    {
+        public uint dwLength;
+        public uint dwMemoryLoad;
+        public ulong ullTotalPhys;
+        public ulong ullAvailPhys;
+        public ulong ullTotalPageFile;
+        public ulong ullAvailPageFile;
+        public ulong ullTotalVirtual;
+        public ulong ullAvailVirtual;
+        public ulong ullAvailExtendedVirtual;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX status);
+
+    public static long GetAvailablePhysicalBytes()
+    {
+        var status = new MEMORYSTATUSEX();
+        status.dwLength = (uint)Marshal.SizeOf(typeof(MEMORYSTATUSEX));
+        if (!GlobalMemoryStatusEx(ref status) || status.ullAvailPhys > Int64.MaxValue)
+        {
+            return -1;
+        }
+        return (long)status.ullAvailPhys;
+    }
+}
+'@
+        }
+        $available = [long][LifeOSRecoveryMemoryStatus]::GetAvailablePhysicalBytes()
+        if ($available -lt 0) {
+            $state.memoryUnavailable = $true
+            return $null
+        }
+        return $available
+    } catch {
+        $state.memoryUnavailable = $true
+        return $null
+    }
+}
+
+function Write-LifeOSRecoveryDiagnosticRecord {
+    param(
+        [Parameter(Mandatory)][ValidateSet('begin', 'end', 'summary')][string]$Event,
+        [AllowNull()][string]$Scope = 'other',
+        [long]$Ordinal = 0,
+        [ValidateSet('returned', 'threw', 'summary')][string]$Outcome = 'summary',
+        [long]$ElapsedMs = 0,
+        [AllowNull()][System.Nullable[long]]$AvailablePhysicalBytes = $null
+    )
+    try {
+        $state = $script:LifeOSRecoveryDiagnostics
+        if ($null -eq $state -or -not $state.enabled) { return }
+        if ($Event -ne 'summary' -and $state.records -ge ($script:LifeOSRecoveryDiagnosticsMaxScopes * 2)) {
+            $state.saturated = $true
+            return
+        }
+        if ($Event -eq 'summary' -and $state.summaryWritten) { return }
+        $payload = [ordered]@{
+            v                       = 1
+            event                   = $Event
+            scope                   = Convert-LifeOSRecoveryDiagnosticScope $Scope
+            ordinal                 = $Ordinal
+            outcome                 = $Outcome
+            elapsedMs               = [Math]::Max([long]0, $ElapsedMs)
+            journalReadCalls        = [long]$state.journalReadCalls
+            journalScanPasses       = [long]$state.journalScanPasses
+            progressReadCalls       = [long]$state.progressReadCalls
+            progressFileOpens       = [long]$state.progressFileOpens
+            progressReadBytes       = [long]$state.progressReadBytes
+            availablePhysicalBytes  = $AvailablePhysicalBytes
+            saturated                = [bool]$state.saturated
+            droppedScopes           = [long]$state.droppedScopes
+        }
+        $json = $payload | ConvertTo-Json -Compress -Depth 3
+        $byteCount = [Text.Encoding]::UTF8.GetByteCount($json + "`n")
+        if ($byteCount -gt $script:LifeOSRecoveryDiagnosticsMaxRecordBytes) {
+            $state.saturated = $true
+            $payload.scope = 'other'
+            $payload.saturated = $true
+            $payload.availablePhysicalBytes = $null
+            $json = $payload | ConvertTo-Json -Compress -Depth 3
+            if ([Text.Encoding]::UTF8.GetByteCount($json + "`n") -gt $script:LifeOSRecoveryDiagnosticsMaxRecordBytes) { return }
+        }
+        Write-Information -MessageData $json -Tags 'LifeOSRecoveryDiagnostics' -InformationAction Continue
+        $state.records++
+        if ($Event -eq 'summary') { $state.summaryWritten = $true }
+    } catch {
+        # Diagnostics must never change the deployment result or mask its errors.
+    }
+}
+
+function Start-LifeOSRecoveryDiagnosticScope {
+    param([AllowNull()][string]$Scope = 'other')
+    try {
+        $state = $script:LifeOSRecoveryDiagnostics
+        if ($null -eq $state -or -not $state.enabled) { return $null }
+        if ($state.admittedScopes -ge $script:LifeOSRecoveryDiagnosticsMaxScopes) {
+            if ($state.droppedScopes -lt $script:LifeOSRecoveryDiagnosticsCounterLimit) { $state.droppedScopes++ }
+            $state.saturated = $true
+            return $null
+        }
+        $state.admittedScopes++
+        $available = Get-LifeOSRecoveryAvailablePhysicalMemory
+        $token = [pscustomobject]@{
+            admitted  = $true
+            completed = $false
+            ordinal   = [long]$state.admittedScopes
+            sessionId = [string]$state.sessionId
+            scope     = Convert-LifeOSRecoveryDiagnosticScope $Scope
+            started   = [System.Diagnostics.Stopwatch]::GetTimestamp()
+        }
+        Write-LifeOSRecoveryDiagnosticRecord -Event begin -Scope $token.scope -Ordinal $token.ordinal -AvailablePhysicalBytes $available
+        return $token
+    } catch {
+        # Diagnostics must never affect recovery behavior.
+        return $null
+    }
+}
+
+function Stop-LifeOSRecoveryDiagnosticScope {
+    param(
+        [AllowNull()]$Token,
+        [switch]$Succeeded
+    )
+    try {
+        $state = $script:LifeOSRecoveryDiagnostics
+        if ($null -eq $state -or -not $state.enabled -or $null -eq $Token -or -not $Token.admitted -or $Token.completed -or $Token.sessionId -cne $state.sessionId) { return }
+        $Token.completed = $true
+        $elapsedMs = [long]0
+        $elapsedTicks = [System.Diagnostics.Stopwatch]::GetTimestamp() - [long]$Token.started
+        $elapsedMs = [long][Math]::Max([double]0, ($elapsedTicks * 1000.0) / [System.Diagnostics.Stopwatch]::Frequency)
+        $outcome = if ($Succeeded) { 'returned' } else { 'threw' }
+        Write-LifeOSRecoveryDiagnosticRecord -Event end -Scope $Token.scope -Ordinal $Token.ordinal -Outcome $outcome -ElapsedMs $elapsedMs -AvailablePhysicalBytes (Get-LifeOSRecoveryAvailablePhysicalMemory)
+    } catch { }
+}
+
+function Stop-LifeOSRecoveryDiagnostics {
+    param([AllowNull()]$Session)
+    $ownsSession = $false
+    try {
+        $state = $script:LifeOSRecoveryDiagnostics
+        if ($null -eq $state -or -not $state.enabled) { return }
+        if ($null -eq $Session) { return }
+        $properties = @($Session.PSObject.Properties)
+        if ($properties.Count -ne 1 -or $properties[0].Name -cne 'sessionId') { return }
+        $sessionId = $properties[0].Value
+        if ($sessionId -isnot [string] -or [string]::IsNullOrWhiteSpace($sessionId) -or $sessionId -cne [string]$state.sessionId) { return }
+        $ownsSession = $true
+        Write-LifeOSRecoveryDiagnosticRecord -Event summary -Scope 'other' -Ordinal 0 -Outcome summary -AvailablePhysicalBytes (Get-LifeOSRecoveryAvailablePhysicalMemory)
+    } catch {
+        # Diagnostics cleanup must not mask a deployment or recovery result.
+    } finally {
+        if ($ownsSession) { $script:LifeOSRecoveryDiagnostics = $null }
+    }
+}
 
 function Get-LifeOSNativeFileIdentity {
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Description)
@@ -3115,6 +3347,9 @@ function Invoke-RecoveryStage {
     if ([string]::IsNullOrWhiteSpace($Name) -or $Name.Length -gt 128 -or $Name -notmatch '\A[A-Za-z0-9-]+\z') {
         throw 'Recovery stage name is malformed.'
     }
+    $stageScope = Start-LifeOSRecoveryDiagnosticScope -Scope $Name
+    $stageScopeSucceeded = $false
+    try {
     $path = Get-RecoveryJournalPath $Manifest
     $journal = Read-RecoveryJournal $Manifest
     if ($null -eq $journal) { throw 'Recovery artifacts are not complete.' }
@@ -3128,6 +3363,7 @@ function Invoke-RecoveryStage {
         if ([string]$stageState -ne 'complete') { throw "Completed recovery stage is not durably complete: $Name" }
         if ($null -ne $LiveAction) { & $LiveAction }
         if ($null -ne $Postcondition) { & $Postcondition }
+        $stageScopeSucceeded = $true
         return
     }
     if ($journal.phase -ne 'artifacts-complete') { throw 'Recovery artifacts are not complete.' }
@@ -3137,6 +3373,7 @@ function Invoke-RecoveryStage {
     if ([string]$stageState -eq 'complete') {
         if ($null -ne $LiveAction) { & $LiveAction }
         if ($null -ne $Postcondition) { & $Postcondition }
+        $stageScopeSucceeded = $true
         return
     }
     Set-JournalProperty $stages $Name 'restoring'
@@ -3145,6 +3382,10 @@ function Invoke-RecoveryStage {
     if ($null -ne $Postcondition) { & $Postcondition }
     Set-JournalProperty $stages $Name 'complete'
     Write-JsonAtomic $path $journal -OperatorSid $Manifest.operatorSid -MaxBytes $script:LifeOSRecoveryJournalMaxBytes
+    $stageScopeSucceeded = $true
+    } finally {
+        Stop-LifeOSRecoveryDiagnosticScope -Token $stageScope -Succeeded:$stageScopeSucceeded
+    }
 }
 
 function Restore-LifeOSServiceSnapshots {
@@ -3376,6 +3617,7 @@ function Read-RecoveryProgress {
         [Parameter(Mandatory)]$Journal,
         [Parameter(Mandatory)]$JournalUnits
     )
+    Add-LifeOSRecoveryDiagnosticCounter -Name 'progressReadCalls'
     $progressPathValue = Get-JournalProperty $Journal 'progressPath'
     $progressPath = if ($null -eq $progressPathValue) {
         Get-RecoveryProgressPath $Manifest
@@ -3422,10 +3664,12 @@ function Read-RecoveryProgress {
     $buffer = New-Object byte[] ([int]$progressItem.Length)
     $stream = [IO.File]::Open($progressPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
     try {
+        Add-LifeOSRecoveryDiagnosticCounter -Name 'progressFileOpens'
         $read = 0
         while ($read -lt $buffer.Length) {
             $chunk = $stream.Read($buffer, $read, $buffer.Length - $read)
             if ($chunk -le 0) { throw 'Recovery progress log changed while it was being read.' }
+            Add-LifeOSRecoveryDiagnosticCounter -Name 'progressReadBytes' -Delta ([long]$chunk)
             $read += $chunk
         }
         if ([long]$stream.Length -ne [long]$buffer.Length) { throw 'Recovery progress log changed while it was being read.' }
@@ -3845,6 +4089,9 @@ function Enable-RecoveryWriterRestoration {
 
 function Complete-LifeOSRecoveryState {
     param([Parameter(Mandatory)][psobject]$Manifest)
+    $recoveryScope = Start-LifeOSRecoveryDiagnosticScope -Scope 'recovery-finalize'
+    $recoveryScopeSucceeded = $false
+    try {
     $journalPath = Get-RecoveryJournalPath $Manifest
     $journal = Read-RecoveryJournal $Manifest
     if ($null -eq $journal) { throw 'Verified recovery has no durable recovery journal.' }
@@ -3858,7 +4105,9 @@ function Complete-LifeOSRecoveryState {
             [string](Get-JournalProperty $archived 'phase') -cne 'completed') {
             throw 'Completed recovery archive is not marker-bound.'
         }
-        return (Get-FullPath $archivePath)
+        $archiveResult = Get-FullPath $archivePath
+        $recoveryScopeSucceeded = $true
+        return $archiveResult
     }
     if ($journal.phase -ne 'artifacts-complete' -or (Get-JournalProperty $journal 'writersReleased') -ne $true) {
         throw 'Recovery cannot be finalized before artifacts and writer boundaries are complete.'
@@ -3898,13 +4147,22 @@ function Complete-LifeOSRecoveryState {
     Write-JsonAtomic $journalPath $terminal -OperatorSid $Manifest.operatorSid -MaxBytes $script:LifeOSRecoveryJournalMaxBytes
     $verified = Read-RecoveryJournal $Manifest
     if ($null -eq $verified -or [string]$verified.phase -cne 'completed') { throw 'Completed recovery journal verification failed.' }
-    return (Get-FullPath $archivePath)
+    $archiveResult = Get-FullPath $archivePath
+    $recoveryScopeSucceeded = $true
+    return $archiveResult
+    } finally {
+        Stop-LifeOSRecoveryDiagnosticScope -Token $recoveryScope -Succeeded:$recoveryScopeSucceeded
+    }
 }
 
 function Read-RecoveryJournal {
     param($Manifest)
+    Add-LifeOSRecoveryDiagnosticCounter -Name 'journalReadCalls'
+    $journalScope = Start-LifeOSRecoveryDiagnosticScope -Scope 'journal-validation'
+    $journalScopeSucceeded = $false
+    try {
     $path = Get-RecoveryJournalPath $Manifest
-    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    if (-not (Test-Path -LiteralPath $path)) { $journalScopeSucceeded = $true; return $null }
     Assert-ExistingFile $path 'Recovery journal'
     Assert-RestrictedAcl $path $Manifest.operatorSid @() @() -AllowInherited
     $journal = Read-LifeOSBoundedJsonFile -Path $path -MaxBytes $script:LifeOSRecoveryJournalMaxBytes -Description 'Recovery journal'
@@ -4056,6 +4314,7 @@ function Read-RecoveryJournal {
     # materializing a second Entries/ByPath tree index and then copying its
     # hashes into another dictionary. This keeps the scan O(n) in time with
     # memory bounded by the journal units, path sets, and one root enumerator.
+    Add-LifeOSRecoveryDiagnosticCounter -Name 'journalScanPasses'
     $indexedStates = [System.Collections.Generic.Dictionary[string,string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach ($root in $scanRoots) {
         if ($writersReleased -and (Test-RecoveryAuthorityPath $Manifest $root)) { continue }
@@ -4099,7 +4358,11 @@ function Read-RecoveryJournal {
         $current = if ($indexedStates.ContainsKey($unitDestination)) { $indexedStates[$unitDestination] } else { Get-RecoveryArtifactState $unitDestination -AllowNodeRuntime:$allowNodeRuntime -AllowServiceHostBinary:$allowServiceHostBinary -Manifest $Manifest }
         Assert-RecoveryUnitState $unit $current
     }
+    $journalScopeSucceeded = $true
     return $journal
+    } finally {
+        Stop-LifeOSRecoveryDiagnosticScope -Token $journalScope -Succeeded:$journalScopeSucceeded
+    }
 }
 
 function Save-CollectorReceipt {

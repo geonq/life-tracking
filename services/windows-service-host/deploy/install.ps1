@@ -35,7 +35,8 @@ param(
     [string]$EnableBankingCertificateSource,
     [string]$EnableBankingApiBaseUrl,
     [string]$EnableBankingRedirectUri,
-    [switch]$DefineOnly
+    [switch]$DefineOnly,
+    [switch]$RecoveryDiagnostics
 )
 
 Set-StrictMode -Version Latest
@@ -1313,6 +1314,7 @@ $deploymentMutex = $null
 $deploymentCompleted = $false
 $deploymentRollbackSucceeded = $false
 $deploymentRecoveryCompleted = $false
+$recoveryDiagnosticsSession = $null
 try {
 $paths = Get-LifeOSDefaultPaths
 $operatorSid = Get-InteractiveOperatorSid
@@ -1400,6 +1402,9 @@ $gatewayWheelhouseContract = Assert-GatewayWheelhouse -GatewaySource $GatewaySou
 # after every preflight gate has passed and before any journal or filesystem
 # mutation begins.
 $deploymentMutex = Enter-LifeOSDeploymentTransaction
+if ($RecoveryDiagnostics) {
+    $recoveryDiagnosticsSession = Start-LifeOSRecoveryDiagnostics -Enabled:$true
+}
 $previousGeneration = Get-LifeOSPreviousInstalledGeneration -MarkerState $deploymentMutex.PreviousState -ManifestPath $deploymentMutex.PreviousManifestPath -OperatorSid $operatorSid -ExpectedGeneration ([string]$deploymentMutex.PreviousGeneration)
 
 $hostSource = Resolve-ServiceHostBinary $ServiceHostBinarySource $paths.ServiceHostPath
@@ -2318,8 +2323,12 @@ Save-InstallManifest $manifest $manifestPath
     throw
 }
 } finally {
-    if ($deploymentRecoveryCompleted) { $deploymentMutex.Recovery = $true }
-    Exit-LifeOSDeploymentTransaction $deploymentMutex -Completed:($deploymentCompleted -or $deploymentRecoveryCompleted)
+    try {
+        if ($deploymentRecoveryCompleted) { $deploymentMutex.Recovery = $true }
+        Exit-LifeOSDeploymentTransaction $deploymentMutex -Completed:($deploymentCompleted -or $deploymentRecoveryCompleted)
+    } finally {
+        Stop-LifeOSRecoveryDiagnostics -Session $recoveryDiagnosticsSession
+    }
 }
 
 Write-Host ("Install manifest: {0}" -f (Join-Path $backupDirectory 'manifest.json'))

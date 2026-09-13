@@ -3,7 +3,8 @@ param(
     [Parameter(Mandatory)][string]$ManifestPath,
     [string]$LegacyTaskName = 'LifeOSSyncServer',
     [string]$CodexTaskName = 'LifeOSCodexCollector',
-    [string]$TailscaleSnapshotTaskName = 'LifeOSTailscaleSnapshot'
+    [string]$TailscaleSnapshotTaskName = 'LifeOSTailscaleSnapshot',
+    [switch]$RecoveryDiagnostics
 )
 
 Set-StrictMode -Version Latest
@@ -16,7 +17,9 @@ Assert-SafeTaskName $TailscaleSnapshotTaskName
 Assert-WindowsAdministrator
 $deploymentMutex = $null
 $rollbackCompleted = $false
+$recoveryDiagnosticsSession = $null
 try {
+$recoveryDiagnosticsSession = Start-LifeOSRecoveryDiagnostics -Enabled:$RecoveryDiagnostics
 Assert-ExistingFile $ManifestPath 'Rollback manifest'
 $manifest = Read-LifeOSBoundedJsonFile -Path $ManifestPath -MaxBytes $script:LifeOSGenerationManifestMaxBytes -Description 'Rollback manifest'
 $manifestPath = (Get-FullPath $ManifestPath)
@@ -181,5 +184,9 @@ $recoveryArchivePath = Complete-LifeOSRecoveryState $manifest
 $rollbackCompleted = $true
 Write-Host 'LifeOS Windows rollback completed. Prior task/data/code artifacts were restored or moved to the rollback backup, and captured service state was reconciled.'
 } finally {
-    Exit-LifeOSDeploymentTransaction $deploymentMutex -Completed:$rollbackCompleted
+    try {
+        Exit-LifeOSDeploymentTransaction $deploymentMutex -Completed:$rollbackCompleted
+    } finally {
+        Stop-LifeOSRecoveryDiagnostics -Session $recoveryDiagnosticsSession
+    }
 }

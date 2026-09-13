@@ -9,7 +9,7 @@ $deploy = Split-Path -Parent $PSScriptRoot
 # checkpoint fixtures. Loading definition-only at script scope is required on
 # Windows PowerShell 5.1; a dot-source nested in an `& {}` fixture expires
 # with that child scope.
-. (Join-Path $deploy 'install.ps1') -DefineOnly
+. (Join-Path $deploy 'install.ps1') -DefineOnly -RecoveryDiagnostics
 
 function Assert-Behavior {
     param([Parameter(Mandatory)][bool]$Condition, [Parameter(Mandatory)][string]$Message)
@@ -1256,6 +1256,22 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
             Append-RecoveryProgress -Manifest $roundTrip.Manifest -Journal $roundTrip.Journal -UnitIndex 1 -Phase 'complete'
             $roundTripRead = Read-RecoveryJournal $roundTrip.Manifest
             Assert-Behavior ($roundTripRead.progressSequence -eq 2 -and @($roundTripRead.units | Where-Object { $_.phase -ne 'complete' }).Count -eq 0) 'writer output round-trips through the real recovery progress reader.'
+            $instrumentationSession = Start-LifeOSRecoveryDiagnostics -Enabled
+            $instrumentedRead = Read-RecoveryJournal $roundTrip.Manifest
+            $instrumentationState = [pscustomobject]@{
+                journalReadCalls = [long]$script:LifeOSRecoveryDiagnostics.journalReadCalls
+                journalScanPasses = [long]$script:LifeOSRecoveryDiagnostics.journalScanPasses
+                progressReadCalls = [long]$script:LifeOSRecoveryDiagnostics.progressReadCalls
+                progressFileOpens = [long]$script:LifeOSRecoveryDiagnostics.progressFileOpens
+                progressReadBytes = [long]$script:LifeOSRecoveryDiagnostics.progressReadBytes
+            }
+            Stop-LifeOSRecoveryDiagnostics -Session $instrumentationSession
+            Assert-Behavior ($instrumentedRead.progressSequence -eq 2 -and
+                $instrumentationState.journalReadCalls -eq 1 -and
+                $instrumentationState.journalScanPasses -eq 1 -and
+                $instrumentationState.progressReadCalls -eq 1 -and
+                $instrumentationState.progressFileOpens -eq 1 -and
+                $instrumentationState.progressReadBytes -gt 0) 'diagnostics count the real journal scan and progress read boundaries.'
         } finally { Remove-Item -LiteralPath $roundTrip.Root -Recurse -Force -ErrorAction SilentlyContinue }
 
         $realRestoreArtifact = ${function:Restore-Artifact}
@@ -1999,3 +2015,228 @@ Write-Host 'PASS: remaining Windows deployment/recovery behavioral assertions'
     Assert-BehaviorThrows { Restore-TailscaleServeSnapshot -TailscaleExecutable 'fixture' -Json $before -ExpectedAfterJson '{}' } 'Serve retry rejects a changed route after restoration'
 }
 Write-Host 'PASS: exact legacy Serve restoration is retryable without route mutation'
+
+& {
+    # Diagnostics are deliberately exercised without a manifest or any
+    # deployment mutation. Capture the Information stream and verify the
+    # fixed schema, record cap, byte bound, counters, and cleanup behavior.
+    Start-LifeOSRecoveryDiagnostics -Enabled:$false
+    Assert-Behavior ($null -eq $script:LifeOSRecoveryDiagnostics) 'disabled recovery diagnostics do not allocate state.'
+
+    $oldSession = Start-LifeOSRecoveryDiagnostics -Enabled
+    $oldSessionToken = Start-LifeOSRecoveryDiagnosticScope -Scope 'Restore-AclSnapshots'
+    Assert-Behavior ($null -eq (Start-LifeOSRecoveryDiagnostics -Enabled)) 'a nested diagnostics start cannot claim an active session.'
+    Assert-Behavior ($null -eq (Start-LifeOSRecoveryDiagnostics -Enabled:$false)) 'a disabled nested diagnostics start cannot claim an active session.'
+    Stop-LifeOSRecoveryDiagnostics -Session $oldSession
+    $newSession = Start-LifeOSRecoveryDiagnostics -Enabled
+    $newSessionToken = Start-LifeOSRecoveryDiagnosticScope -Scope 'Restore-AclSnapshots'
+    $recordsBeforeStaleStop = [long]$script:LifeOSRecoveryDiagnostics.records
+    Stop-LifeOSRecoveryDiagnostics -Session ([pscustomobject]@{ sessionId = 'wrong-session' })
+    Assert-Behavior ([long]$script:LifeOSRecoveryDiagnostics.records -eq $recordsBeforeStaleStop) 'a mismatched diagnostics owner cannot clear or summarize the active session.'
+    Stop-LifeOSRecoveryDiagnosticScope -Token $oldSessionToken -Succeeded
+    Assert-Behavior ([long]$script:LifeOSRecoveryDiagnostics.records -eq $recordsBeforeStaleStop) 'a stale scope token cannot write into a newer diagnostics session.'
+    Stop-LifeOSRecoveryDiagnosticScope -Token $newSessionToken -Succeeded
+    Stop-LifeOSRecoveryDiagnostics -Session $newSession
+    Assert-Behavior ($null -eq $script:LifeOSRecoveryDiagnostics) 'the owned diagnostics session is cleared after cleanup.'
+    Stop-LifeOSRecoveryDiagnostics -Session $newSession
+
+    $counterRecords = @(& {
+        $session = Start-LifeOSRecoveryDiagnostics -Enabled
+        $token = Start-LifeOSRecoveryDiagnosticScope -Scope 'Restore-AclSnapshots'
+        Add-LifeOSRecoveryDiagnosticCounter -Name 'journalReadCalls' -Delta 2
+        Add-LifeOSRecoveryDiagnosticCounter -Name 'journalScanPasses'
+        Add-LifeOSRecoveryDiagnosticCounter -Name 'progressReadCalls'
+        Add-LifeOSRecoveryDiagnosticCounter -Name 'progressFileOpens'
+        Add-LifeOSRecoveryDiagnosticCounter -Name 'progressReadBytes' -Delta 128
+        Stop-LifeOSRecoveryDiagnosticScope -Token $token -Succeeded
+        Stop-LifeOSRecoveryDiagnostics -Session $session
+    } 6>&1 | Where-Object { $_ -is [System.Management.Automation.InformationRecord] })
+    Assert-Behavior ($counterRecords.Count -eq 3) 'a single diagnostic scope emits begin, end, and summary records.'
+    $counterSummary = ([string]$counterRecords[-1].MessageData) | ConvertFrom-Json
+    Assert-Behavior ($counterSummary.journalReadCalls -eq 2 -and $counterSummary.journalScanPasses -eq 1 -and
+        $counterSummary.progressReadCalls -eq 1 -and $counterSummary.progressFileOpens -eq 1 -and
+        $counterSummary.progressReadBytes -eq 128) 'diagnostic counters retain their bounded values.'
+    Assert-Behavior ($counterSummary.event -eq 'summary' -and $counterSummary.outcome -eq 'summary') 'the final counter record is a summary.'
+
+    $overflowRecords = @(& {
+        $session = Start-LifeOSRecoveryDiagnostics -Enabled
+        Add-LifeOSRecoveryDiagnosticCounter -Name 'journalReadCalls' -Delta $script:LifeOSRecoveryDiagnosticsCounterLimit
+        Add-LifeOSRecoveryDiagnosticCounter -Name 'journalReadCalls'
+        Add-LifeOSRecoveryDiagnosticCounter -Name 'journalScanPasses' -Delta 0
+        Add-LifeOSRecoveryDiagnosticCounter -Name 'progressReadCalls' -Delta -1
+        Stop-LifeOSRecoveryDiagnostics -Session $session
+    } 6>&1 | Where-Object { $_ -is [System.Management.Automation.InformationRecord] })
+    $overflowSummary = ([string]$overflowRecords[-1].MessageData) | ConvertFrom-Json
+    Assert-Behavior ($overflowSummary.journalReadCalls -eq $script:LifeOSRecoveryDiagnosticsCounterLimit -and $overflowSummary.saturated -eq $true -and $overflowSummary.journalScanPasses -eq 0 -and $overflowSummary.progressReadCalls -eq 0) 'diagnostic counters saturate and ignore nonpositive deltas.'
+
+    # Re-run a maximum-size session after the counter assertions so the
+    # record-cap test also proves a clean start after a prior stop.
+    $records = @(& {
+        $session = Start-LifeOSRecoveryDiagnostics -Enabled
+        for ($index = 0; $index -lt ($script:LifeOSRecoveryDiagnosticsMaxScopes + 4); $index++) {
+            $scopeName = if ($index -eq 0) { 'C:\sentinel\path\from\an\untrusted\caller' } else { 'Restore-AclSnapshots' }
+            $scopeToken = Start-LifeOSRecoveryDiagnosticScope -Scope $scopeName
+            Stop-LifeOSRecoveryDiagnosticScope -Token $scopeToken -Succeeded
+        }
+        Stop-LifeOSRecoveryDiagnostics -Session $session
+    } 6>&1 | Where-Object { $_ -is [System.Management.Automation.InformationRecord] })
+    Assert-Behavior ($records.Count -eq 129) 'diagnostics emit at most 64 begin/end pairs and one summary.'
+    Assert-Behavior ((([string]$records[0].MessageData) | ConvertFrom-Json).event -eq 'begin' -and
+        (([string]$records[127].MessageData) | ConvertFrom-Json).event -eq 'end' -and
+        (([string]$records[128].MessageData) | ConvertFrom-Json).event -eq 'summary') 'diagnostic records preserve begin/end/summary ordering.'
+    $summary = ([string]$records[-1].MessageData) | ConvertFrom-Json
+    Assert-Behavior ($summary.saturated -eq $true -and $summary.droppedScopes -eq 4) 'diagnostics report saturation and dropped scopes after the admission bound.'
+    $expectedFields = @('v', 'event', 'scope', 'ordinal', 'outcome', 'elapsedMs', 'journalReadCalls', 'journalScanPasses', 'progressReadCalls', 'progressFileOpens', 'progressReadBytes', 'availablePhysicalBytes', 'saturated', 'droppedScopes') | Sort-Object
+    foreach ($record in $records) {
+        $message = [string]$record.MessageData
+        Assert-Behavior ([Text.Encoding]::UTF8.GetByteCount($message + "`n") -le $script:LifeOSRecoveryDiagnosticsMaxRecordBytes) 'every diagnostic record stays within its UTF-8 bound.'
+        $parsed = $message | ConvertFrom-Json
+        $actualFields = @($parsed.PSObject.Properties | ForEach-Object { $_.Name } | Sort-Object)
+        Assert-Behavior (($actualFields -join '|') -ceq ($expectedFields -join '|')) 'diagnostic records expose exactly the reviewed property set.'
+        Assert-Behavior ($record.Tags -contains 'LifeOSRecoveryDiagnostics') 'diagnostic records carry the reviewed information tag.'
+        Assert-Behavior ($parsed.event -in @('begin', 'end', 'summary') -and $parsed.outcome -in @('returned', 'threw', 'summary')) 'diagnostic enums remain bounded.'
+        Assert-Behavior ([string]$parsed.scope -notmatch 'sentinel|from|untrusted|caller') 'diagnostic scope output redacts an untrusted path-like scope.'
+    }
+    Assert-Behavior ($null -eq $script:LifeOSRecoveryDiagnostics) 'diagnostic cleanup clears the session state.'
+}
+Write-Host 'PASS: recovery diagnostics are opt-in, bounded, schema-checked, and cleaned up'
+
+& {
+    # Disposable failure-path parity: the recovery stage is real, while its
+    # journal/write boundaries are inert fixture functions. Diagnostics must
+    # observe the same mutations and preserve the recovery exception.
+    $previousDiagnostics = $script:LifeOSRecoveryDiagnostics
+    Assert-Behavior ($null -eq $previousDiagnostics) 'failure-path diagnostics fixture starts without an active session.'
+    $originalJournalPath = ${function:Get-RecoveryJournalPath}
+    $originalReadJournal = ${function:Read-RecoveryJournal}
+    $originalWriteJson = ${function:Write-JsonAtomic}
+    $originalAssertNoReparse = ${function:Assert-NoReparsePath}
+    $originalDiagnosticRecord = ${function:Write-LifeOSRecoveryDiagnosticRecord}
+    $originalMemoryProbe = ${function:Get-LifeOSRecoveryAvailablePhysicalMemory}
+    $fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('lifeos-diagnostic-failure-' + [Guid]::NewGuid().ToString('N'))
+    $markerPath = Join-Path $fixtureRoot 'marker.json'
+    try {
+        Ensure-Directory $fixtureRoot
+        [IO.File]::WriteAllText($markerPath, '{}')
+        function Get-RecoveryJournalPath { param($Manifest) return 'fixture-recovery.json' }
+        function Read-RecoveryJournal { param($Manifest) return $script:diagFailureJournal }
+        function Write-JsonAtomic {
+            param($Path, $Value, $OperatorSid, $MaxBytes)
+            $stages = Get-JournalProperty $Value 'stages'
+            $stageState = Get-JournalProperty $stages 'Restore-AclSnapshots'
+            $script:diagFailureWriteCalls += ('checkpoint:' + [string]$stageState)
+        }
+
+        function Invoke-DiagnosticStageFailureFixture {
+            param([bool]$Enabled, [ValidateSet('action', 'postcondition')][string]$FailurePoint)
+            $script:diagFailureFailurePoint = $FailurePoint
+            $script:diagFailureManifest = [pscustomobject]@{ operatorSid = 'fixture'; paths = [pscustomobject]@{ backupDirectory = 'fixture' } }
+            $script:diagFailureJournal = [pscustomobject]@{
+                schemaVersion = 1; transactionId = 'diagnostic-failure-fixture'; generation = 'fixture-generation'
+                operatorSid = 'fixture'; manifestPath = 'fixture-manifest'; phase = 'artifacts-complete'; stages = [pscustomobject]@{}
+            }
+            $script:diagFailureMutationCalls = @()
+            $script:diagFailureWriteCalls = @()
+            $script:diagFailureErrorText = $null
+            $script:diagFailureReturned = $false
+            $session = Start-LifeOSRecoveryDiagnostics -Enabled:$Enabled
+            $records = @(& {
+                try {
+                    Invoke-RecoveryStage $script:diagFailureManifest 'Restore-AclSnapshots' {
+                        $script:diagFailureMutationCalls += 'action'
+                        if ($script:diagFailureFailurePoint -ceq 'action') { throw 'fixture recovery action failure' }
+                    } -Postcondition {
+                        $script:diagFailureMutationCalls += 'postcondition'
+                        if ($script:diagFailureFailurePoint -ceq 'postcondition') { throw 'fixture recovery postcondition failure' }
+                    }
+                    $script:diagFailureReturned = $true
+                } catch { $script:diagFailureErrorText = [string]$_.Exception.Message }
+                finally { Stop-LifeOSRecoveryDiagnostics -Session $session }
+            } 6>&1 | Where-Object { $_ -is [System.Management.Automation.InformationRecord] })
+            return [pscustomobject]@{
+                ErrorText = [string]$script:diagFailureErrorText; Returned = [bool]$script:diagFailureReturned
+                Mutations = @($script:diagFailureMutationCalls); Writes = @($script:diagFailureWriteCalls)
+                Records = @($records); StateCleared = ($null -eq $script:LifeOSRecoveryDiagnostics)
+            }
+        }
+        function Get-DiagnosticEndRecords {
+            param($Fixture)
+            return @($Fixture.Records | ForEach-Object { ([string]$_.MessageData) | ConvertFrom-Json } | Where-Object { $_.event -ceq 'end' })
+        }
+
+        $actionDisabled = Invoke-DiagnosticStageFailureFixture -Enabled:$false -FailurePoint action
+        $actionEnabled = Invoke-DiagnosticStageFailureFixture -Enabled:$true -FailurePoint action
+        Assert-Behavior (-not $actionDisabled.Returned -and -not $actionEnabled.Returned) 'action failure does not report a successful recovery stage.'
+        Assert-Behavior ($actionDisabled.ErrorText -ceq $actionEnabled.ErrorText -and $actionEnabled.ErrorText -ceq 'fixture recovery action failure') 'diagnostics preserve the original action exception text.'
+        Assert-Behavior (($actionDisabled.Mutations -join '|') -ceq ($actionEnabled.Mutations -join '|') -and ($actionDisabled.Writes -join '|') -ceq ($actionEnabled.Writes -join '|')) 'diagnostics do not change action failure mutation or checkpoint order.'
+        Assert-Behavior ($actionDisabled.StateCleared -and $actionEnabled.StateCleared) 'action failure cleanup clears disabled and enabled diagnostics state.'
+        $actionEnds = @(Get-DiagnosticEndRecords $actionEnabled)
+        Assert-Behavior ($actionEnds.Count -eq 1 -and $actionEnds[0].outcome -ceq 'threw') 'action failure emits an end record with outcome threw.'
+
+        $postconditionDisabled = Invoke-DiagnosticStageFailureFixture -Enabled:$false -FailurePoint postcondition
+        $postconditionEnabled = Invoke-DiagnosticStageFailureFixture -Enabled:$true -FailurePoint postcondition
+        Assert-Behavior (-not $postconditionDisabled.Returned -and -not $postconditionEnabled.Returned) 'postcondition failure does not report a successful recovery stage.'
+        Assert-Behavior ($postconditionDisabled.ErrorText -ceq $postconditionEnabled.ErrorText -and $postconditionEnabled.ErrorText -ceq 'fixture recovery postcondition failure') 'diagnostics preserve the original postcondition exception text.'
+        Assert-Behavior (($postconditionDisabled.Mutations -join '|') -ceq ($postconditionEnabled.Mutations -join '|') -and ($postconditionDisabled.Writes -join '|') -ceq ($postconditionEnabled.Writes -join '|')) 'diagnostics do not change postcondition mutation or checkpoint order.'
+        Assert-Behavior ($postconditionDisabled.StateCleared -and $postconditionEnabled.StateCleared) 'postcondition failure cleanup clears disabled and enabled diagnostics state.'
+        $postconditionEnds = @(Get-DiagnosticEndRecords $postconditionEnabled)
+        Assert-Behavior ($postconditionEnds.Count -eq 1 -and $postconditionEnds[0].outcome -ceq 'threw') 'postcondition failure emits an end record with outcome threw.'
+
+        # Mirror the install/rollback nested finally contract against a real,
+        # locally owned mutex and a disposable marker. The marker boundary is
+        # stubbed to fail before any deployment data is read or written.
+        function Assert-NoReparsePath { param($Path) throw 'fixture transaction-exit failure' }
+        function Invoke-DiagnosticTransactionExitFixture {
+            param([bool]$Enabled)
+            $session = Start-LifeOSRecoveryDiagnostics -Enabled:$Enabled
+            $mutex = [Threading.Mutex]::new($false)
+            [void]$mutex.WaitOne(0)
+            $transaction = [pscustomobject]@{ Mutex = $mutex; MarkerPath = $markerPath; TransactionId = 'diagnostic-transaction-fixture'; Recovery = $false }
+            $script:diagTransactionErrorText = $null
+            $script:diagTransactionReturned = $false
+            $records = @(& {
+                try {
+                    Exit-LifeOSDeploymentTransaction -Transaction $transaction -Completed
+                    $script:diagTransactionReturned = $true
+                } catch { $script:diagTransactionErrorText = [string]$_.Exception.Message }
+                finally { Stop-LifeOSRecoveryDiagnostics -Session $session }
+            } 6>&1 | Where-Object { $_ -is [System.Management.Automation.InformationRecord] })
+            return [pscustomobject]@{
+                ErrorText = [string]$script:diagTransactionErrorText; Returned = [bool]$script:diagTransactionReturned
+                Records = @($records); StateCleared = ($null -eq $script:LifeOSRecoveryDiagnostics)
+            }
+        }
+        $transactionDisabled = Invoke-DiagnosticTransactionExitFixture -Enabled:$false
+        $transactionEnabled = Invoke-DiagnosticTransactionExitFixture -Enabled:$true
+        Assert-Behavior (-not $transactionDisabled.Returned -and -not $transactionEnabled.Returned -and
+            $transactionDisabled.ErrorText -ceq $transactionEnabled.ErrorText -and $transactionEnabled.ErrorText -ceq 'fixture transaction-exit failure') 'transaction-exit failure remains the original error with or without diagnostics.'
+        Assert-Behavior ($transactionDisabled.StateCleared -and $transactionEnabled.StateCleared) 'transaction-exit nested finally clears owned diagnostics state.'
+
+        $diagnosticRecordOriginal = ${function:Write-LifeOSRecoveryDiagnosticRecord}
+        try {
+            function Write-LifeOSRecoveryDiagnosticRecord { param($Event, $Scope, $Ordinal, $Outcome, $ElapsedMs, $AvailablePhysicalBytes) throw 'fixture diagnostic emission failure' }
+            $recordFault = Invoke-DiagnosticStageFailureFixture -Enabled:$true -FailurePoint action
+            Assert-Behavior ($recordFault.ErrorText -ceq $actionDisabled.ErrorText -and ($recordFault.Mutations -join '|') -ceq ($actionDisabled.Mutations -join '|') -and $recordFault.StateCleared) 'diagnostic emission failure cannot replace the recovery error or alter mutations.'
+        } finally { Set-Item -Path Function:\Write-LifeOSRecoveryDiagnosticRecord -Value $diagnosticRecordOriginal }
+
+        $memoryProbeOriginal = ${function:Get-LifeOSRecoveryAvailablePhysicalMemory}
+        try {
+            function Get-LifeOSRecoveryAvailablePhysicalMemory { throw 'fixture diagnostic memory failure' }
+            $memoryFault = Invoke-DiagnosticStageFailureFixture -Enabled:$true -FailurePoint action
+            Assert-Behavior ($memoryFault.ErrorText -ceq $actionDisabled.ErrorText -and ($memoryFault.Mutations -join '|') -ceq ($actionDisabled.Mutations -join '|') -and $memoryFault.StateCleared) 'diagnostic memory-probe failure cannot replace the recovery error or alter mutations.'
+        } finally { Set-Item -Path Function:\Get-LifeOSRecoveryAvailablePhysicalMemory -Value $memoryProbeOriginal }
+    } finally {
+        Set-Item -Path Function:\Get-RecoveryJournalPath -Value $originalJournalPath
+        Set-Item -Path Function:\Read-RecoveryJournal -Value $originalReadJournal
+        Set-Item -Path Function:\Write-JsonAtomic -Value $originalWriteJson
+        Set-Item -Path Function:\Assert-NoReparsePath -Value $originalAssertNoReparse
+        Set-Item -Path Function:\Write-LifeOSRecoveryDiagnosticRecord -Value $originalDiagnosticRecord
+        Set-Item -Path Function:\Get-LifeOSRecoveryAvailablePhysicalMemory -Value $originalMemoryProbe
+        $script:LifeOSRecoveryDiagnostics = $previousDiagnostics
+        foreach ($name in @('diagFailureJournal', 'diagFailureManifest', 'diagFailureFailurePoint', 'diagFailureMutationCalls', 'diagFailureWriteCalls', 'diagFailureErrorText', 'diagFailureReturned', 'diagTransactionErrorText', 'diagTransactionReturned')) {
+            Remove-Variable -Name $name -Scope Script -ErrorAction SilentlyContinue
+        }
+        Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+Write-Host 'PASS: recovery diagnostics failure-path parity and fault isolation assertions'

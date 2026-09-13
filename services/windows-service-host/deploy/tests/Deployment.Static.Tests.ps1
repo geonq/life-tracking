@@ -821,3 +821,53 @@ if ($installText -match '(?m)^\s*Set-RestrictedAcl \$supplementCatalog \$operato
     throw 'FAIL: Supplement catalog must not use an unscoped service-owner relaxation.'
 }
 Write-Host 'PASS: remaining Windows deployment/recovery static assertions'
+
+# Recovery diagnostics are an opt-in observation path. Keep the entry-point
+# wiring separate from normal deployment and assert the bounded record
+# contract so a later refactor cannot turn diagnostics into a second recovery
+# authority or enable them during definition-only source inspection.
+$rollbackText = Get-Content -LiteralPath (Join-Path $root 'rollback.ps1') -Raw
+foreach ($diagnosticContract in @(
+    'function Start-LifeOSRecoveryDiagnostics',
+    'function Stop-LifeOSRecoveryDiagnostics',
+    'function Start-LifeOSRecoveryDiagnosticScope',
+    'function Stop-LifeOSRecoveryDiagnosticScope',
+    '$script:LifeOSRecoveryDiagnosticsMaxScopes = 64',
+    '$script:LifeOSRecoveryDiagnosticsMaxRecordBytes = 1024',
+    'journalReadCalls',
+    'journalScanPasses',
+    'progressReadCalls',
+    'progressFileOpens',
+    'progressReadBytes',
+    'Write-Information',
+    'LifeOSRecoveryDiagnostics'
+)) {
+    if (-not $commonText.Contains($diagnosticContract)) {
+        throw "FAIL: recovery diagnostics contract is missing: $diagnosticContract"
+    }
+}
+if ($installText -notmatch '(?m)^\s*\[switch\]\$RecoveryDiagnostics\s*$' -or
+    $rollbackText -notmatch '(?m)^\s*\[switch\]\$RecoveryDiagnostics\s*$') {
+    throw 'FAIL: install and rollback must expose the opt-in diagnostics switch.'
+}
+$installPreamble = ($installText -split 'function Invoke-LifeOSInstall', 2)[0]
+if ($installPreamble.Contains('Start-LifeOSRecoveryDiagnostics')) {
+    throw 'FAIL: -DefineOnly source loading must not activate recovery diagnostics.'
+}
+$installTransactionIndex = $installText.IndexOf('$deploymentMutex = Enter-LifeOSDeploymentTransaction', [StringComparison]::Ordinal)
+$installStartIndex = $installText.IndexOf('Start-LifeOSRecoveryDiagnostics -Enabled:$true', [StringComparison]::Ordinal)
+$installExitIndex = $installText.LastIndexOf('Exit-LifeOSDeploymentTransaction', [StringComparison]::Ordinal)
+$installStopIndex = $installText.LastIndexOf('Stop-LifeOSRecoveryDiagnostics', [StringComparison]::Ordinal)
+if ($installTransactionIndex -lt 0 -or $installStartIndex -le $installTransactionIndex -or
+    $installExitIndex -lt 0 -or $installStopIndex -le $installExitIndex) {
+    throw 'FAIL: install diagnostics must begin after transaction acquisition and stop after transaction exit.'
+}
+$rollbackTryIndex = $rollbackText.IndexOf('try {', [StringComparison]::Ordinal)
+$rollbackStartIndex = $rollbackText.IndexOf('Start-LifeOSRecoveryDiagnostics -Enabled:$RecoveryDiagnostics', [StringComparison]::Ordinal)
+$rollbackExitIndex = $rollbackText.LastIndexOf('Exit-LifeOSDeploymentTransaction', [StringComparison]::Ordinal)
+$rollbackStopIndex = $rollbackText.LastIndexOf('Stop-LifeOSRecoveryDiagnostics', [StringComparison]::Ordinal)
+if ($rollbackTryIndex -lt 0 -or $rollbackStartIndex -le $rollbackTryIndex -or
+    $rollbackExitIndex -lt 0 -or $rollbackStopIndex -le $rollbackExitIndex) {
+    throw 'FAIL: rollback diagnostics must begin inside the outer try and stop after transaction exit.'
+}
+Write-Host 'PASS: recovery diagnostics are opt-in, bounded, and transaction-scoped'
