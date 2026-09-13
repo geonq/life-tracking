@@ -3,7 +3,7 @@
 Updated 2026-09-13 Europe/Berlin.
 
 - Release: **NO-GO**.
-- Source checkpoint: `6baa1f3`; current branch HEAD is `33c74c9` on
+- Source checkpoint: `6baa1f3`; current branch HEAD is `fdbc5e5` on
   `lifeos-foundation-checkpoint-20260812`.
 - Usage packet, per-scope authority, omission handling, persistence retry,
   identity handling, cancellation, and viewport bounds are implemented and

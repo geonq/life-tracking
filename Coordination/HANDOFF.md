@@ -12,7 +12,7 @@ evidence is still incomplete.
 ## Current source checkpoint
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- HEAD and origin: `33c74c9 Refine usage visual density and inspection layout`;
+- HEAD and origin: `fdbc5e5 Record usage visual verification checkpoint`;
   deployable code checkpoint remains `6baa1f3`.
 - Finance source checkpoint: `fd8ccfb Refine Finance responsive hierarchy`.
 - macOS now has one value-driven Home `NavigationStack` with a bounded typed
