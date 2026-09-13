@@ -12,7 +12,7 @@ evidence is still incomplete.
 ## Current source checkpoint
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- HEAD and origin: `9e43dd7 Add strict recovery journal observation mode`;
+- HEAD and origin: `0a8d5b6 Instrument recovery runtime phases safely`;
   deployable code checkpoint remains `6baa1f3`. PR #1 is OPEN, DRAFT, and
   MERGEABLE against `main` at this same head.
 - Finance source checkpoint: `fd8ccfb Refine Finance responsive hierarchy`.
@@ -48,10 +48,12 @@ evidence is still incomplete.
 - Windows source suite: **61 passed, 1 skipped, 0 failures**; the pushed
   `6baa1f3` candidate verifier passed **108 files**. Native PowerShell 5.1
   static, behavior, failure-parity, and legacy Serve suites passed exit 0 for
-  diagnostics at `14a3b7f`, strict progress validation at `4e14e38`, and
-  strict journal observation at `9e43dd7`; Astra Medium reviewed all three
-  slices **GREEN**. The disposable native run for the latest slice passed
-  static, behavior, and legacy Serve suites under Windows PowerShell 5.1.
+  diagnostics at `14a3b7f`, strict progress validation at `4e14e38`, strict
+  journal observation at `9e43dd7`, and bounded phase telemetry at `0a8d5b6`;
+  Astra Medium reviewed all four slices **GREEN**. The latest disposable
+  native run passed static, behavior, and legacy Serve suites under Windows
+  PowerShell 5.1. The digest telemetry handoff uses a mutable holder because
+  named `[ref]` arguments are rebound incorrectly by Windows PowerShell 5.1.
 - Personal installer security slice: Astra Medium scoped GREEN at `1d1af18`;
   **13/13 tests** and `bash -n` pass. Exact Apple command allowlisting,
   minimal child environment, hostile Python-startup rejection, toolchain
@@ -77,7 +79,7 @@ evidence is still incomplete.
   checkpoint appeared after 45 minutes, so it was safely stopped. The durable
   marker remains `active`, the journal remains `artifacts-complete`, and
   `LifeOSAPI` remains stopped. Install and live Enable Banking readback remain
-  uncertified; diagnostics were tested only in a disposable copy, and the
+  uncertified; diagnostics and phase telemetry were tested only in a disposable copy, and the
   canonical transaction was not resumed or installed. The current marker is
   still `active`; its journal is `artifacts-complete` with 31,401 units and
   progress sequence 59,167.

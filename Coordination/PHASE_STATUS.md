@@ -4,7 +4,7 @@ Updated 2026-09-13 Europe/Berlin.
 
 - Release: **NO-GO**.
 - Source checkpoint: `6baa1f3`; current branch HEAD and origin are
-  `9e43dd7` on `lifeos-foundation-checkpoint-20260812`.
+  `0a8d5b6` on `lifeos-foundation-checkpoint-20260812`.
 - Usage packet, per-scope authority, omission handling, persistence retry,
   identity handling, cancellation, and viewport bounds are implemented and
   independently reviewed **GREEN**.
@@ -33,12 +33,12 @@ Updated 2026-09-13 Europe/Berlin.
   `6baa1f3` candidate verifier passed 108 files; remote static and behavior
   suites also passed.
 - Bounded recovery diagnostics at `14a3b7f`, strict progress validation at
-  `4e14e38`, and strict journal observation at `9e43dd7` have opt-in session
-  ownership, fixed redacted records, counter/memory bounds, failure-path
-  parity, and no strict ACL/tail repair. Native Windows PowerShell 5.1
-  static, behavior, and legacy Serve suites passed exit 0 for the latest
-  slice; Astra Medium reviewed all three slices **GREEN**. This does not
-  certify canonical recovery.
+  `4e14e38`, strict journal observation at `9e43dd7`, and bounded phase
+  telemetry at `0a8d5b6` have opt-in session ownership, fixed redacted records,
+  counter/memory bounds, failure-path parity, and no strict ACL/tail repair.
+  Native Windows PowerShell 5.1 static, behavior, and legacy Serve suites
+  passed exit 0 for the latest slice; Astra Medium reviewed all four slices
+  **GREEN**. This does not certify canonical recovery.
 - Personal device installer security slice is Astra scoped GREEN at `1d1af18`:
   **13/13 tests**, `bash -n`, exact production command allowlist, minimal
   environment, and toolchain/Python injection regressions pass. Physical
@@ -69,7 +69,8 @@ Updated 2026-09-13 Europe/Berlin.
   59,167. The earlier resume stopped after 45 minutes without a stage
   checkpoint; reinstall, listener/health, Tailscale Serve, and live banking
   remain open. The follow-up runtime patch is rejected and is not in the
-  branch; disposable diagnostics/strict-reader validation passed.
+  branch; disposable diagnostics/strict-reader/phase-telemetry validation
+  passed.
 - iPhone install/signing renewal/Shortcuts and physical continuity.
 - Zepp workout import fidelity, Obsidian Canvas round trip, and final security.
 

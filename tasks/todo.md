@@ -20,7 +20,8 @@ Updated 2026-09-13 Europe/Berlin. Release: **NO-GO**.
    Banking reads on the reachable PC. The first real resume reached journal
    unit 31,400 but stopped after 45 minutes without a stage checkpoint; design
    and review non-mutating validation before retrying. Diagnostics at `14a3b7f`
-   passed native Windows PowerShell 5.1 failure-parity and cleanup checks.
+   and phase telemetry at `0a8d5b6` passed native Windows PowerShell 5.1
+   failure-parity and cleanup checks.
 4. Verify iPhone install, App Group/HealthKit, personal signing renewal, and
    the native Shortcut flows.
 5. Resolve Zepp/workout evidence and implement the Obsidian Canvas mind-map
@@ -30,7 +31,7 @@ Updated 2026-09-13 Europe/Berlin. Release: **NO-GO**.
 
 ## Verified checkpoint
 
-`9e43dd7` is pushed; the deployable Windows source checkpoint is `6baa1f3`.
+`0a8d5b6` is pushed; the deployable Windows source checkpoint is `6baa1f3`.
 The strict journal observation mode is native-Windows-validated and Astra
 reviewed GREEN. Fresh SSH readback confirms the canonical marker is still
 active, the journal is artifacts-complete at 31,401 units/sequence 59,167,
@@ -43,7 +44,7 @@ captures. macOS route tests are 2/2 with exit 0; the full macOS snapshot run
 executed 51/51 cases with zero test failures before result-archive I/O failure.
 Windows source tests are 61 passed, 1 skipped; native static, behavior,
 failure-parity, and legacy Serve suites pass for the diagnostics and strict
-progress slices.
+progress/phase-telemetry slices.
 The installer has 13/13 tests and `bash -n`; this does not prove physical
 signing, installation, or whole-product completion. Backend boundary security
 is also Astra-reviewed GREEN at `87e7db6` with 148/148 API tests; native
