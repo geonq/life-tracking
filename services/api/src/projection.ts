@@ -6,8 +6,9 @@ export function projectUsage(samples: UsageHistoryEntry[], now = new Date()): Es
   const base = { provider: first?.provider ?? 'codex' as const, window, confidence: 'insufficient' as const, sampleSpanHours: 0, explanation: 'Insufficient samples from one provider, window, and reset cycle.', official: false as const };
   if (!first || samples.length < 2) return base;
   const same = samples.filter(s => s.provider === first.provider && s.window === first.window && s.durationMinutes === first.durationMinutes && s.resetAt === first.resetAt).sort((a, b) => Date.parse(a.observedAt) - Date.parse(b.observedAt));
-  if (same.length < 2) return base;
-  const a = same[0]; const b = same[same.length - 1]; const span = (Date.parse(b.observedAt) - Date.parse(a.observedAt)) / 3600000;
+  const changes = same.filter((sample, index) => index === 0 || sample.usedPercent !== same[index - 1]!.usedPercent);
+  if (changes.length < 2) return base;
+  const a = changes[0]; const b = changes[changes.length - 1]; const span = (Date.parse(b.observedAt) - Date.parse(a.observedAt)) / 3600000;
   if (!(span > 0) || b.usedPercent < a.usedPercent) return { ...base, provider: first.provider, window, sampleSpanHours: Math.max(0, span), explanation: 'Counter decreased or reset rollover detected; projection unavailable.' };
   const velocity = (b.usedPercent - a.usedPercent) / span;
   const resetMs = b.resetAt ? Date.parse(b.resetAt) : NaN;

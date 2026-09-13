@@ -1,0 +1,52 @@
+{
+  "configurations" : [
+    {
+      "id" : "8E9F8BC4-9380-4B6D-BF39-9F5B12E9370C",
+      "name" : "Release",
+      "options" : {
+        "testExecutionOrdering" : "lexical"
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "commandLineArguments" : [
+      {
+        "argument" : "-LifeOSVisualFixtures",
+        "enabled" : true
+      }
+    ],
+    "codeCoverage" : false,
+    "targetForVariableExpansion" : {
+      "containerPath" : "container:LifeOS.xcodeproj",
+      "identifier" : "71437E54A44714BC8BB2AFEC",
+      "name" : "LifeOSMac"
+    }
+  },
+  "testTargets" : [
+    {
+      "parallelizable" : false,
+      "target" : {
+        "containerPath" : "container:LifeOS.xcodeproj",
+        "identifier" : "2538E14CF3E9C3897F91D13B",
+        "name" : "LifeOSMacSnapshotTests"
+      }
+    },
+    {
+      "parallelizable" : false,
+      "target" : {
+        "containerPath" : "container:LifeOS.xcodeproj",
+        "identifier" : "E02714DF1E6E1D2F74181BCC",
+        "name" : "LifeOSMacUITests"
+      }
+    },
+    {
+      "parallelizable" : false,
+      "target" : {
+        "containerPath" : "container:LifeOS.xcodeproj",
+        "identifier" : "744652A86D2BF1DB30BFA2B9",
+        "name" : "LifeOSWidgetSnapshotTests"
+      }
+    }
+  ],
+  "version" : 1
+}

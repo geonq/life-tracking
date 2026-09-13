@@ -1,4 +1,5 @@
 import XCTest
+import ImageIO
 @testable import LifeOS
 
 final class CalendarIconAssetTests: XCTestCase {
@@ -49,10 +50,75 @@ final class CalendarIconAssetTests: XCTestCase {
         XCTAssertFalse(String(decoding: first, as: UTF8.self).contains("file://"))
     }
 
-    func testEmojiFallbackRemainsWhenNoAssetExists() throws {
+    func testInvalidEmojiWithoutAssetRemainsNoIcon() throws {
         let item = try CalendarItem(title: "Fallback", icon: "not-an-emoji",
                                     start: base, end: base.addingTimeInterval(60))
-        XCTAssertEqual(item.icon, "📅")
+        XCTAssertNil(item.icon)
         XCTAssertNil(item.iconAsset)
+    }
+
+    func testReusableIconLibraryPersistsSanitizedAssetAndSupportsDeterministicReuse() throws {
+        let suiteName = "LifeOS.CalendarIconAssetTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let asset = try CalendarIconAssetSanitizer.sanitize(validPNG)
+        let reusable = try CalendarReusableIcon(name: "Fixture mark", asset: asset)
+        XCTAssertEqual(CalendarIconLibrary.upsert(reusable, defaults: defaults), [reusable])
+        XCTAssertEqual(CalendarIconLibrary.load(defaults: defaults), [reusable])
+
+        // A second save of the same content reuses the deterministic hash and
+        // does not create a duplicate row; this is the relaunch/persistence
+        // contract used by the picker.
+        XCTAssertEqual(CalendarIconLibrary.upsert(reusable, defaults: defaults), [reusable])
+        XCTAssertEqual(CalendarIconLibrary.load(defaults: defaults).first?.id, reusable.id)
+    }
+
+    func testCuratedEmojiCatalogRemainsExactly678Entries() {
+        XCTAssertEqual(CalendarEmojiCatalog.curatedCount, 678)
+    }
+
+    func testSanitizerRendersPixelsAndStripsSensitiveMetadata() throws {
+        XCTAssertNoThrow(try CalendarIconAssetSanitizer.sanitize(validPNG))
+        guard let source = CGImageSourceCreateWithData(validPNG as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            XCTFail("Fixture image should decode")
+            return
+        }
+        let output = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(output as CFMutableData, "public.png" as CFString, 1, nil) else {
+            XCTFail("Could not create fixture encoder")
+            return
+        }
+        let privateProperties: [CFString: Any] = [
+            kCGImagePropertyGPSDictionary: [kCGImagePropertyGPSLatitude: 52.5, kCGImagePropertyGPSLongitude: 13.4] as [CFString: Any],
+            kCGImagePropertyExifDictionary: [kCGImagePropertyExifUserComment: "private fixture"] as [CFString: Any]
+        ]
+        CGImageDestinationAddImage(destination, image, privateProperties as CFDictionary)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+
+        let asset = try CalendarIconAssetSanitizer.sanitize(output as Data)
+        XCTAssertEqual(asset.format, .png)
+        XCTAssertLessThanOrEqual(asset.bytes.count, CalendarIconAsset.maxBytes)
+        guard let sanitizedSource = CGImageSourceCreateWithData(asset.bytes as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(sanitizedSource, 0, nil) as? [CFString: Any] else {
+            XCTFail("Sanitized image should decode")
+            return
+        }
+        XCTAssertNil(properties[kCGImagePropertyGPSDictionary])
+        if let exif = properties[kCGImagePropertyExifDictionary] as? NSDictionary {
+            let keys = Set(exif.allKeys.compactMap { $0 as? String })
+            XCTAssertTrue(keys.isSubset(of: Set(["ColorSpace", "PixelXDimension", "PixelYDimension"])))
+            XCTAssertTrue(keys.contains("PixelXDimension"))
+            XCTAssertTrue(keys.contains("PixelYDimension"))
+            if exif["ColorSpace"] != nil {
+                XCTAssertEqual((exif["ColorSpace"] as? NSNumber)?.intValue, 1)
+            }
+            XCTAssertEqual((exif["PixelXDimension"] as? NSNumber)?.intValue, 1)
+            XCTAssertEqual((exif["PixelYDimension"] as? NSNumber)?.intValue, 1)
+        }
+        XCTAssertNil(properties[kCGImagePropertyIPTCDictionary])
+        XCTAssertNil(properties[kCGImagePropertyTIFFDictionary])
+        XCTAssertEqual(properties[kCGImagePropertyOrientation] as? Int ?? 1, 1)
     }
 }

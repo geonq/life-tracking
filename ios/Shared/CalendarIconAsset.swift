@@ -18,6 +18,10 @@ public struct CalendarIconAsset: Codable, Equatable, Sendable {
     public var schemaVersion: Int { Self.currentSchemaVersion }
 
     public var contentHash: String {
+        Self.contentHash(for: bytes)
+    }
+
+    private static func contentHash(for bytes: Data) -> String {
         SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
     }
 
@@ -61,18 +65,20 @@ public struct CalendarIconAsset: Codable, Equatable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        let format = try container.decode(Format.self, forKey: .format)
-        let bytes = try container.decode(Data.self, forKey: .bytes)
-        try self.init(format: format, bytes: bytes)
-
         if let schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion),
            schemaVersion != Self.currentSchemaVersion {
             throw CalendarValidationError.invalidIconAsset
         }
-        if let encodedHash = try container.decodeIfPresent(String.self, forKey: .contentHash),
-           encodedHash != contentHash {
+        let encodedHash = try container.decodeIfPresent(String.self, forKey: .contentHash)
+        let format = try container.decode(Format.self, forKey: .format)
+        let bytes = try container.decode(Data.self, forKey: .bytes)
+        guard !bytes.isEmpty, bytes.count <= Self.maxBytes else {
             throw CalendarValidationError.invalidIconAsset
         }
+        if let encodedHash, encodedHash != Self.contentHash(for: bytes) {
+            throw CalendarValidationError.invalidIconAsset
+        }
+        try self.init(format: format, bytes: bytes)
     }
 
     public func encode(to encoder: Encoder) throws {

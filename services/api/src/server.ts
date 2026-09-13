@@ -1,13 +1,157 @@
+import { authorizeLocalApi, isLocalApiPath, localApiConfigurationReady, requiresLocalApiAuth } from './local-auth.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { FinanceConnectorCatalog, FinanceSummary as FinanceSummarySchema, UnifiedUsage, parseCodexFixture, parseOverview, fixtures, normalizeWindow, type UsageWindow } from '@iphone-life-os/contracts';
-import { readCodexLive } from './codex-adapter.js';
-import { UsageHistory } from './history.js';
+import { constants as fsConstants } from 'node:fs';
+import { access, lstat, open } from 'node:fs/promises';
+import { dirname, isAbsolute, resolve } from 'node:path';
+import { CalendarAuthorityUnavailable, FinanceConnectorCatalog, FinanceSummary as FinanceSummarySchema, UnifiedUsage, parseCodexFixture, parseOverview, fixtures, normalizeWindow, type UsageWindow } from '@iphone-life-os/contracts';
+import { parseCodexIngestEnvelope, readCodexLive } from './codex-adapter.js';
+import { isUsageIdempotencyKey, UsageHistory, UsageHistoryError } from './history.js';
 import { projectUsage } from './projection.js';
-import { constantTimeEqual, ingestClaudeStatusline, validClaudeContentType, MAX_BODY_BYTES } from './claude-ingest.js';
+import { constantTimeEqual, ingestClaudeStatusline, isValidClaudeSecret, MAX_BODY_BYTES } from './claude-ingest.js';
 import { financeConnectors } from './finance-connectors.js';
+import { readIngestSecretFile } from './ingest-secret.js';
+import { createConfiguredOpenFoodFactsClient, type OpenFoodFactsClient } from './open-food-facts.js';
+import {
+  createConfiguredNutritionPhotoProposalClient,
+  NUTRITION_PHOTO_MAX_BODY_BYTES,
+  NutritionPhotoProposalError,
+  type NutritionPhotoProposalClient,
+} from './nutrition-photo.js';
+import { CLIPPER_MAX_BYTES, ClipperStore, ClipperStoreError } from './clipper-store.js';
+import { parseStrictJSON } from './json-boundary.js';
 
-const history = () => new UsageHistory(process.env.USAGE_STORE_PATH || 'usage-history.jsonl');
-const json = (res: ServerResponse, status: number, value: unknown) => { res.statusCode = status; res.end(JSON.stringify(value)); };
+// Bound every phase of an inbound HTTP exchange. requestTimeout bounds the
+// complete request including the body; timeout bounds socket inactivity while
+// a body is streamed; headersTimeout bounds the header phase.
+export const API_HEADERS_TIMEOUT_MS = 10_000;
+export const API_REQUEST_TIMEOUT_MS = 30_000;
+export const API_SOCKET_TIMEOUT_MS = 30_000;
+export const API_KEEP_ALIVE_TIMEOUT_MS = 5_000;
+// The body limit is enforced per request. These process-wide admission limits
+// keep many individually valid photo/document requests from multiplying into
+// an unbounded resident-memory spike on the personal server.
+export const API_MAX_CONNECTIONS = 64;
+export const API_MAX_IN_FLIGHT_REQUESTS = 16;
+
+function usageStorePath(): string | undefined {
+  const configured = process.env.USAGE_STORE_PATH;
+  if (configured !== undefined && (!configured || configured.includes('\0') || !isAbsolute(configured))) return undefined;
+  return resolve(configured ?? 'usage-history.jsonl');
+}
+function clipperStorePath(): string | undefined {
+  const configured = process.env.CLIPPER_STORE_PATH;
+  if (configured !== undefined && (!configured || configured.includes('\0') || !isAbsolute(configured))) return undefined;
+  return resolve(configured ?? 'clipper-snapshot.json');
+}
+const history = () => new UsageHistory(usageStorePath() ?? resolve('usage-history.jsonl'));
+const defaultClipperStore = new ClipperStore(clipperStorePath());
+function setJSONHeaders(res: ServerResponse): void {
+  res.setHeader('content-type', 'application/json');
+  res.setHeader('cache-control', 'no-store');
+  res.setHeader('x-content-type-options', 'nosniff');
+}
+const json = (res: ServerResponse, status: number, value: unknown) => { setJSONHeaders(res); res.statusCode = status; res.end(JSON.stringify(value)); };
+
+/**
+ * Fixture endpoints are an explicit opt-in surface. In particular, a
+ * production-like NODE_ENV (including values such as staging) must never
+ * make the visual fixtures look like a live API. Production always wins over
+ * the opt-in mode so a stale fixture flag cannot reopen them at deployment.
+ */
+export type ApiMode = 'production' | 'fixture' | 'test' | 'development';
+export function apiMode(): ApiMode {
+  const configured = process.env.LIFEOS_API_MODE?.trim().toLowerCase();
+  if (process.env.NODE_ENV === 'production' || configured === 'production') return 'production';
+  if (configured === 'fixture' || configured === 'fixtures') return 'fixture';
+  if (process.env.NODE_ENV === 'test' || configured === 'test') return 'test';
+  return 'development';
+}
+const fixtureRoutesEnabled = () => apiMode() === 'fixture' || apiMode() === 'test';
+const fixtureRouteUnavailable = (res: ServerResponse) => json(res, 503, {
+  error: 'unavailable',
+  code: 'fixture_route_unavailable',
+  reason: 'explicit_fixture_or_test_mode_required',
+});
+const calendarAuthorityUnavailable = (res: ServerResponse) => json(res, 503, CalendarAuthorityUnavailable.parse({
+  error: 'calendar_authority_gateway_only',
+  authority: 'gateway',
+}));
+async function readClaudeSecretFile(pathValue: string): Promise<string | undefined> {
+  return readIngestSecretFile(pathValue);
+}
+async function claudeIngestSecret(): Promise<string | undefined> {
+  const configuredFile = process.env.CLAUDE_INGEST_SECRET_FILE;
+  if (configuredFile === undefined) return undefined;
+  const value = await readClaudeSecretFile(configuredFile);
+  return isValidClaudeSecret(value) ? value : undefined;
+}
+const claudeIngestEnabled = () => process.env.CLAUDE_INGEST_ENABLED === 'true' || process.env.CLAUDE_STATUSLINE_ENABLED === 'true';
+const codexIngestEnabled = () => process.env.CODEX_INGEST_ENABLED === 'true';
+const codexIngestSecret = () => readIngestSecretFile(process.env.CODEX_INGEST_SECRET_FILE);
+const clipperIngestEnabled = () => process.env.CLIPPER_INGEST_ENABLED === 'true';
+const clipperIngestSecret = () => readIngestSecretFile(process.env.CLIPPER_INGEST_SECRET_FILE);
+
+/** Validate the store's parent/file identity and contents without mutating it. */
+async function validateUsageStore(): Promise<boolean> {
+  const filePath = usageStorePath();
+  if (!filePath) return false;
+  const parentPath = dirname(filePath);
+  try {
+    const parent = await lstat(parentPath);
+    if (!parent.isDirectory() || parent.isSymbolicLink()
+      || (process.platform !== 'win32' && (parent.mode & 0o022) !== 0)) return false;
+    await access(parentPath, fsConstants.R_OK | fsConstants.W_OK | fsConstants.X_OK);
+    let fileExists = false;
+    try {
+      const file = await lstat(filePath);
+      if (!file.isFile() || file.isSymbolicLink()
+        || (process.platform !== 'win32' && (file.mode & 0o077) !== 0)) return false;
+      await access(filePath, fsConstants.R_OK | fsConstants.W_OK);
+      let descriptor: Awaited<ReturnType<typeof open>> | undefined;
+      try {
+        descriptor = await open(filePath, fsConstants.O_RDWR | (fsConstants.O_NOFOLLOW ?? 0));
+        const opened = await descriptor.stat();
+        if (!opened.isFile() || opened.isSymbolicLink()
+          || opened.dev !== file.dev || opened.ino !== file.ino || opened.size !== file.size) return false;
+      } finally {
+        if (descriptor) await descriptor.close().catch(() => undefined);
+      }
+      fileExists = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false;
+    }
+    // A missing file is valid when its safe parent is writable. Once any
+    // authoritative artifact exists, validate the complete state envelope and
+    // projections; otherwise a corrupt state sidecar could pass readiness just
+    // because the legacy JSONL projection is absent.
+    let companionExists = false;
+    for (const companionPath of [`${filePath}.meta.json`, `${filePath}.state.json`]) {
+      try {
+        const companion = await lstat(companionPath);
+        companionExists = true;
+        if (!companion.isFile() || companion.isSymbolicLink()
+          || (process.platform !== 'win32' && (companion.mode & 0o077) !== 0)) return false;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false;
+      }
+    }
+    return fileExists || companionExists ? history().ready() : true;
+  } catch {
+    return false;
+  }
+}
+
+/** Startup gate: validate secrets, usage state, and the non-mutating Clipper state before binding. */
+export async function validateStartupConfiguration(clipperStore?: ClipperStore): Promise<boolean> {
+  if (!(await localApiConfigurationReady())) return false;
+  if (claudeIngestEnabled() && (await claudeIngestSecret()) === undefined) return false;
+  if (codexIngestEnabled() && (await codexIngestSecret()) === undefined) return false;
+  if (clipperIngestEnabled() && (await clipperIngestSecret()) === undefined) return false;
+  if (process.env.CLIPPER_STORE_PATH !== undefined && clipperStorePath() === undefined) return false;
+  if (!(await validateUsageStore())) return false;
+  const configuredStore = clipperStore ?? new ClipperStore(clipperStorePath() ?? resolve('clipper-snapshot.json'));
+  return configuredStore.ready();
+}
 const unavailableFinanceSummary = () => {
   const generatedAt = new Date().toISOString();
   const metric = () => ({
@@ -23,69 +167,422 @@ const unavailableFinanceSummary = () => {
     discretionaryBuffer: metric(), spent: metric(), savingsGoal: metric(), saved: metric(),
   });
 };
-const loopback = (req: IncomingMessage) => req.socket.remoteAddress === '127.0.0.1' || req.socket.remoteAddress === '::1';
-async function body(req: IncomingMessage): Promise<string> {
-  if (Number(req.headers['content-length'] || 0) > MAX_BODY_BYTES) throw new Error('body_too_large');
-  let result = '';
-  for await (const chunk of req) { result += String(chunk); if (Buffer.byteLength(result) > MAX_BODY_BYTES) throw new Error('body_too_large'); }
-  return result;
+const loopback = (req: IncomingMessage) => ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress ?? '');
+const IPV4_HOST_NAMES = new Set(['localhost', '127.0.0.1']);
+const IPV6_HOST_NAMES = new Set(['localhost', '::1', '::ffff:127.0.0.1']);
+
+function parseHostHeader(value: string): { name: string; port: number } | undefined {
+  if (!value || value.trim() !== value) return undefined;
+  const match = value.startsWith('[')
+    ? /^\[([^\]]+)\]:(\d+)$/.exec(value)
+    : /^([^:]+):(\d+)$/.exec(value);
+  if (!match) return undefined;
+  const port = Number(match[2]);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535 || String(port) !== match[2]) return undefined;
+  return { name: match[1]!.toLowerCase(), port };
+}
+
+/** Require an explicit loopback Host with the port assigned to this socket. */
+export function validApiHost(req: IncomingMessage): boolean {
+  const localPort = req.socket.localPort;
+  if (typeof localPort !== 'number' || !Number.isSafeInteger(localPort) || localPort < 1 || localPort > 65_535) return false;
+  const host = singleHeader(req, 'host');
+  const parsed = host === undefined ? undefined : parseHostHeader(host);
+  if (parsed === undefined || parsed.port !== localPort) return false;
+  // startApiServer binds 127.0.0.1. Only a caller that deliberately binds
+  // this handler to an IPv6 loopback address may use an IPv6 Host spelling;
+  // accepting it for an IPv4 listener would make the allowlist broader than
+  // the actual server boundary.
+  const boundAddress = req.socket.localAddress;
+  const hostNames = boundAddress === '::1' || boundAddress === '::ffff:127.0.0.1'
+    ? IPV6_HOST_NAMES : IPV4_HOST_NAMES;
+  return hostNames.has(parsed.name);
+}
+
+async function body(req: IncomingMessage, maximumBytes = MAX_BODY_BYTES): Promise<Buffer> {
+  const declared = singleHeader(req, 'content-length');
+  if (headerValues(req, 'content-length').length > 0 && declared === undefined) {
+    throw new Error('invalid_content_length');
+  }
+  let declaredLength: number | undefined;
+  if (declared !== undefined) {
+    if (!/^\d+$/.test(declared)) throw new Error('invalid_content_length');
+    const value = Number(declared);
+    if (!Number.isSafeInteger(value) || value < 0 || value > maximumBytes) throw new Error('body_too_large');
+    declaredLength = value;
+  }
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of req) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+    total += bytes.byteLength;
+    if (total > maximumBytes) throw new Error('body_too_large');
+    chunks.push(bytes);
+  }
+  if (declaredLength !== undefined && total !== declaredLength) {
+    throw new Error('invalid_content_length');
+  }
+  return Buffer.concat(chunks);
 }
 async function ingest(req: IncomingMessage, res: ServerResponse) {
   if (!loopback(req)) return json(res, 403, { error: 'loopback_only' });
-  const expected = process.env.CLAUDE_INGEST_SECRET || process.env.CLAUDE_STATUSLINE_TOKEN || '';
-  const auth = req.headers.authorization || '';
+  const expected = await claudeIngestSecret();
+  const auth = singleHeader(req, 'authorization') || '';
   if (!expected || !auth.startsWith('Bearer ') || !constantTimeEqual(auth.slice(7), expected)) return json(res, 401, { error: 'unauthorized' });
-  if (!validClaudeContentType(req.headers['content-type'])) return json(res, 415, { error: 'content_type' });
+  if (singleHeader(req, 'content-type') !== 'application/json') return json(res, 415, { error: 'content_type' });
+  const idempotencyKey = singleHeader(req, 'idempotency-key');
+  if (idempotencyKey === undefined) return json(res, 400, { error: 'missing_idempotency_key' });
+  if (!isUsageIdempotencyKey(idempotencyKey)) {
+    return json(res, 400, { error: 'invalid_idempotency_key' });
+  }
   let parsed: unknown;
-  try { parsed = JSON.parse(await body(req)); } catch (error) { return json(res, error instanceof Error && error.message === 'body_too_large' ? 413 : 400, { error: error instanceof Error ? error.message : 'invalid_json' }); }
-  const windows = ingestClaudeStatusline(parsed);
-  const observedAt = new Date().toISOString();
+  try { parsed = parseStrictJSON(await body(req)); } catch (error) { return json(res, error instanceof Error && error.message === 'body_too_large' ? 413 : 400, { error: error instanceof Error ? error.message : 'invalid_json' }); }
+  const observedHeader = singleHeader(req, 'x-observed-at');
+  let observedAt = new Date().toISOString();
+  if (typeof observedHeader === 'string' && (observedHeader.length > 64 || !Number.isFinite(Date.parse(observedHeader))
+      || Date.parse(observedHeader) > Date.now() + 5_000)) {
+    return json(res, 400, { error: 'invalid_request' });
+  }
+  if (typeof observedHeader === 'string') observedAt = new Date(observedHeader).toISOString();
+  const windows = ingestClaudeStatusline(parsed, observedAt);
   const observed = windows.filter(window => window.availability === 'observed' && window.usedPercent !== undefined);
   if (!observed.length) return json(res, 422, { error: 'usage_unavailable' });
-  const connector = observed.some(window => window.provenance.connectorState === 'rate_limited') ? 'rate_limited' : 'healthy';
+  const connector = observed.some(window => window.provenance.connectorState === 'refresh_due') ? 'refresh_due'
+    : observed.some(window => window.provenance.connectorState === 'rate_limited') ? 'rate_limited' : 'healthy';
   const validated = UnifiedUsage.parse({ generatedAt: observedAt, windows: observed, estimates: [],
-    connectors: { codex: 'unavailable', claude: connector } });
-  for (const window of validated.windows) await history().add({ provider: 'claude', window: window.window,
-    durationMinutes: window.durationMinutes, usedPercent: window.usedPercent!, resetAt: window.resetAt, observedAt });
+    connectors: {
+      codex: 'unavailable', claude: connector,
+      glm: 'unavailable', deepseek: 'unavailable', google_ai_studio: 'unavailable',
+  } });
+  try {
+    const outcome = await history().addMany(validated.windows.map(window => ({ provider: 'claude', window: window.window,
+      durationMinutes: window.durationMinutes, usedPercent: window.usedPercent!, resetAt: window.resetAt, observedAt })), idempotencyKey);
+    res.setHeader('x-lifeos-revision', String(outcome.revision));
+    res.setHeader('x-lifeos-schema-version', '1');
+    if (outcome.kind === 'replay') res.setHeader('x-lifeos-idempotent-replay', 'true');
+    if (outcome.kind === 'stale') res.setHeader('x-lifeos-stale-ingest', 'true');
+  } catch (error) {
+    if (error instanceof UsageHistoryError && error.code === 'idempotency_key_reuse') {
+      return json(res, 409, { error: error.code });
+    }
+    return json(res, 503, { error: 'usage_store_unavailable' });
+  }
   return json(res, 200, { windows: validated.windows, connector: validated.connectors.claude });
 }
 
-export async function app(req: IncomingMessage, res: ServerResponse, readLive: typeof readCodexLive = readCodexLive) {
-  res.setHeader('content-type', 'application/json'); res.setHeader('cache-control', 'no-store');
+async function ingestCodex(req: IncomingMessage, res: ServerResponse) {
+  if (!loopback(req)) return json(res, 403, { error: 'forbidden' });
+  const expected = await codexIngestSecret();
+  const auth = singleHeader(req, 'authorization') || '';
+  if (!expected || !auth.startsWith('Bearer ') || !constantTimeEqual(auth.slice(7), expected)) {
+    return json(res, 401, { error: 'unauthorized' });
+  }
+  if (singleHeader(req, 'content-type') !== 'application/json') return json(res, 415, { error: 'invalid_request' });
+  const idempotencyKey = singleHeader(req, 'idempotency-key');
+  if (idempotencyKey === undefined) return json(res, 400, { error: 'missing_idempotency_key' });
+  if (!isUsageIdempotencyKey(idempotencyKey)) {
+    return json(res, 400, { error: 'invalid_idempotency_key' });
+  }
+  let parsed: unknown;
+  try {
+    parsed = parseStrictJSON(await body(req));
+  } catch (error) {
+    return json(res, error instanceof Error && error.message === 'body_too_large' ? 413 : 400, { error: 'invalid_request' });
+  }
+  let windows;
+  let observedAt: string;
+  try {
+    const envelope = parseCodexIngestEnvelope(parsed);
+    windows = envelope.windows;
+    const suppliedObservedAt = envelope.observedAt;
+    observedAt = suppliedObservedAt ?? new Date().toISOString();
+    const normalizedWindows = windows.map(window => normalizeWindow(
+      { usedPercent: window.usedPercent, ...(window.resetAt ? { resetAt: window.resetAt } : {}) },
+      'codex', window.minutes === 300 ? 'five_hour' : 'seven_day', 'codex-app-server', observedAt,
+    ));
+    const connector = normalizedWindows.some(window => window.provenance.connectorState === 'refresh_due') ? 'refresh_due'
+      : normalizedWindows.some(window => window.provenance.connectorState === 'rate_limited') ? 'rate_limited' : 'healthy';
+    try {
+      UnifiedUsage.parse({ generatedAt: observedAt, windows: normalizedWindows, estimates: [], connectors: {
+        codex: connector,
+        claude: 'unavailable', glm: 'unavailable', deepseek: 'unavailable', google_ai_studio: 'unavailable',
+      } });
+    } catch {
+      return json(res, 400, { error: 'invalid_request' });
+    }
+    // Keep the captured observation time in history; generatedAt above is
+    // validated against the same bounded timestamp contract as all usage.
+  } catch {
+    return json(res, 400, { error: 'invalid_request' });
+  }
+  try {
+    const outcome = await history().addMany(windows.map(window => ({
+      provider: 'codex' as const,
+      window: window.minutes === 300 ? 'five_hour' as const : 'seven_day' as const,
+      durationMinutes: window.minutes,
+      usedPercent: window.usedPercent,
+      ...(window.resetAt ? { resetAt: window.resetAt } : {}),
+      observedAt,
+    })), idempotencyKey);
+    res.setHeader('x-lifeos-revision', String(outcome.revision));
+    res.setHeader('x-lifeos-schema-version', '1');
+    if (outcome.kind === 'replay') res.setHeader('x-lifeos-idempotent-replay', 'true');
+    if (outcome.kind === 'stale') res.setHeader('x-lifeos-stale-ingest', 'true');
+  } catch (error) {
+    if (error instanceof UsageHistoryError && error.code === 'idempotency_key_reuse') {
+      return json(res, 409, { error: error.code });
+    }
+    return json(res, 503, { error: 'unavailable' });
+  }
+  return json(res, 200, { ok: true });
+}
+
+async function ingestClipper(req: IncomingMessage, res: ServerResponse, store: ClipperStore) {
+  if (!loopback(req)) return json(res, 403, { error: 'loopback_only' });
+  const expected = await clipperIngestSecret();
+  const auth = singleHeader(req, 'authorization') || '';
+  if (!expected || !auth.startsWith('Bearer ') || !constantTimeEqual(auth.slice(7), expected)) {
+    return json(res, 401, { error: 'unauthorized' });
+  }
+  if (singleHeader(req, 'content-type') !== 'application/json') return json(res, 415, { error: 'content_type' });
+  const key = singleHeader(req, 'idempotency-key');
+  let payload: Buffer;
+  try {
+    payload = await body(req, CLIPPER_MAX_BYTES);
+  } catch (error) {
+    return json(res, error instanceof Error && error.message === 'body_too_large' ? 413 : 400, { error: 'invalid_request' });
+  }
+  try {
+    const outcome = await store.ingest(key, payload);
+    res.setHeader('x-lifeos-revision', String(outcome.revision));
+    res.setHeader('x-lifeos-schema-version', '1');
+    if (outcome.kind === 'replay') res.setHeader('x-lifeos-idempotent-replay', 'true');
+    if (outcome.kind === 'stale') res.setHeader('x-lifeos-stale-ingest', 'true');
+    return json(res, 200, outcome.snapshot);
+  } catch (error) {
+    const code = error instanceof ClipperStoreError ? error.code : 'storage_unavailable';
+    const status: Record<string, number> = {
+      missing_idempotency_key: 400,
+      invalid_idempotency_key: 400,
+      invalid_json: 400,
+      invalid_snapshot: 422,
+      idempotency_key_reuse: 409,
+      idempotency_store_full: 503,
+      storage_unavailable: 503,
+    };
+    return json(res, status[code] ?? 503, { error: code });
+  }
+}
+
+function barcodeInput(url: string): string | undefined {
+  const prefixes = ['/api/nutrition/barcode/', '/nutrition/barcode/'];
+  const prefix = prefixes.find(value => url.startsWith(value));
+  if (!prefix) return undefined;
+  const encoded = url.slice(prefix.length);
+  if (!encoded || encoded.includes('/') || encoded.includes('?') || encoded.includes('#')) throw new Error('invalid_barcode');
+  try { return decodeURIComponent(encoded); } catch { throw new Error('invalid_barcode'); }
+}
+
+async function lookupBarcode(req: IncomingMessage, res: ServerResponse, client: OpenFoodFactsClient) {
+  let input: string;
+  try {
+    input = barcodeInput(req.url ?? '') ?? (() => { throw new Error('invalid_barcode'); })();
+  } catch {
+    return json(res, 400, { error: 'invalid_barcode' });
+  }
+  try {
+    const result = await client.lookup(input);
+    if (result.state === 'unavailable') {
+      if (result.reason === 'upstream_rate_limited') {
+        if (result.retryAfterSeconds !== undefined) res.setHeader('retry-after', String(result.retryAfterSeconds));
+        return json(res, 429, { error: 'rate_limited' });
+      }
+      return json(res, 503, { error: 'provider_unavailable' });
+    }
+    return json(res, 200, result);
+  } catch (error) {
+    // The adapter normally returns a typed unavailable result. Keep this
+    // fallback narrow so only its explicit input failure remains a client
+    // error; provider/configuration exceptions stay generic and bounded.
+    if (error instanceof Error && error.message === 'invalid_barcode') {
+      return json(res, 400, { error: 'invalid_barcode' });
+    }
+    if (error instanceof Error && error.message === 'upstream_rate_limited') {
+      return json(res, 429, { error: 'rate_limited' });
+    }
+    return json(res, 503, { error: 'provider_unavailable' });
+  }
+}
+
+async function nutritionPhotoProposal(
+  req: IncomingMessage,
+  res: ServerResponse,
+  client: NutritionPhotoProposalClient,
+) {
+  if (!loopback(req)) return json(res, 403, { error: 'loopback_only' });
+  if (singleHeader(req, 'content-type') !== 'application/json') return json(res, 415, { error: 'content_type' });
+  let parsed: unknown;
+  try {
+    parsed = parseStrictJSON(await body(req, NUTRITION_PHOTO_MAX_BODY_BYTES));
+  } catch (error) {
+    return json(res, error instanceof Error && error.message === 'body_too_large' ? 413 : 400, { error: 'invalid_request' });
+  }
+  try {
+    return json(res, 200, await client.generate(parsed));
+  } catch (error) {
+    if (error instanceof NutritionPhotoProposalError) {
+      const status: Record<NutritionPhotoProposalError['code'], number> = {
+        configuration_unavailable: 503,
+        request_invalid: 400,
+        provider_unavailable: 503,
+        provider_response_invalid: 502,
+        response_too_large: 502,
+      };
+      return json(res, status[error.code], { error: error.code });
+    }
+    return json(res, 503, { error: 'provider_unavailable' });
+  }
+}
+
+function headerValues(req: IncomingMessage, name: string): string[] {
+  const wanted = name.toLowerCase();
+  if (Array.isArray(req.rawHeaders) && req.rawHeaders.length > 0) {
+    const values: string[] = [];
+    for (let index = 0; index + 1 < req.rawHeaders.length; index += 2) {
+      if (req.rawHeaders[index]!.toLowerCase() === wanted) values.push(req.rawHeaders[index + 1]!);
+    }
+    return values;
+  }
+  const value = req.headers[wanted];
+  if (Array.isArray(value)) return value;
+  return value === undefined ? [] : [value];
+}
+
+function singleHeader(req: IncomingMessage, name: string): string | undefined {
+  const values = headerValues(req, name);
+  return values.length === 1 ? values[0] : undefined;
+}
+
+export async function app(
+  req: IncomingMessage,
+  res: ServerResponse,
+  readLive: typeof readCodexLive = readCodexLive,
+  barcodeClient?: OpenFoodFactsClient,
+  clipperStore?: ClipperStore,
+  nutritionPhotoClient?: NutritionPhotoProposalClient,
+) {
+  const configuredBarcodeClient = barcodeClient ?? createConfiguredOpenFoodFactsClient();
+  const configuredClipperStore = clipperStore ?? defaultClipperStore;
+  const configuredNutritionPhotoClient = nutritionPhotoClient ?? createConfiguredNutritionPhotoProposalClient();
+  setJSONHeaders(res);
+  // Real Node requests always expose the listener port. Direct unit callers
+  // may omit it because they are invoking this handler without a socket.
+  if (req.socket.localPort !== undefined && !validApiHost(req)) return json(res, 400, { error: 'invalid_host' });
+  if (req.url !== '/health' && req.url !== '/ready' && !loopback(req)) return json(res, 403, { error: 'loopback_only' });
+  // Keep the method/path matrix explicit before any URL-only handler can run.
+  // A protected route with the wrong verb is rejected without reading data or
+  // invoking a provider; only the exact matrix entry reaches authorization.
+  if (isLocalApiPath(req.url) && !requiresLocalApiAuth(req.method, req.url)) {
+    return json(res, 405, { error: 'read_only_api' });
+  }
+  if (requiresLocalApiAuth(req.method, req.url)) {
+    const failure = await authorizeLocalApi(req);
+    if (failure !== undefined) return json(res, failure, {
+      error: failure === 503 ? 'local_api_unavailable' : failure === 403 ? 'loopback_only' : 'unauthorized',
+    });
+  }
+  // These responses contain no personal data: static fixtures/catalog, unavailable
+  // finance summary, Calendar authority refusal and public barcode catalogue.
+  // There is no Node nutrition-summary route. Any future personal-data route
+  // must explicitly join the protected matrix in local-auth.ts before wiring.
   if (req.method === 'POST' && (req.url === '/api/usage/claude-ingest' || req.url === '/api/claude/statusline')) {
     if (process.env.CLAUDE_INGEST_ENABLED !== 'true' && process.env.CLAUDE_STATUSLINE_ENABLED !== 'true') return json(res, 404, { error: 'disabled' });
     return ingest(req, res);
   }
+  if (req.method === 'POST' && req.url === '/api/usage/codex-ingest') {
+    if (!codexIngestEnabled()) return json(res, 404, { error: 'disabled' });
+    return ingestCodex(req, res);
+  }
+  if (req.method === 'POST' && req.url === '/api/clipper/ingest') {
+    if (!clipperIngestEnabled()) return json(res, 404, { error: 'disabled' });
+    return ingestClipper(req, res, configuredClipperStore);
+  }
+  if (req.method === 'POST' && (req.url === '/api/nutrition/photo-proposal' || req.url === '/nutrition/photo-proposal')) {
+    return nutritionPhotoProposal(req, res, configuredNutritionPhotoClient);
+  }
+  if (req.url === '/api/calendar' || req.url === '/calendar') {
+    return calendarAuthorityUnavailable(res);
+  }
   if (req.method !== 'GET') return json(res, 405, { error: 'read_only_api' });
-  if (req.url === '/health') return json(res, 200, { status: 'ok', demo: true, service: 'iphone-life-os-api' });
-  if (req.url === '/api/overview') return json(res, 200, parseOverview(fixtures.overview));
-  if (req.url === '/api/codex') return json(res, 200, parseCodexFixture(fixtures.codex));
+  if (req.url?.startsWith('/api/nutrition/barcode/') || req.url?.startsWith('/nutrition/barcode/')) {
+    return lookupBarcode(req, res, configuredBarcodeClient);
+  }
+  if (req.url === '/ready') {
+    const ready = await validateStartupConfiguration(configuredClipperStore);
+    return json(res, ready ? 200 : 503, { readiness: ready ? 'ready' : 'unavailable' });
+  }
+  if (req.url === '/health') return json(res, 200, {
+    status: 'ok',
+    service: 'iphone-life-os-api',
+    mode: apiMode(),
+    readiness: await localApiConfigurationReady() ? 'ready' : 'unavailable',
+  });
+  if (req.url === '/api/overview') {
+    if (!fixtureRoutesEnabled()) return fixtureRouteUnavailable(res);
+    return json(res, 200, parseOverview(fixtures.overview));
+  }
+  if (req.url === '/api/codex') {
+    if (!fixtureRoutesEnabled()) return fixtureRouteUnavailable(res);
+    return json(res, 200, parseCodexFixture(fixtures.codex));
+  }
   if (req.url === '/api/codex/live') return json(res, 200, await readLive());
   if (req.url === '/api/finance/connectors') return json(res, 200, FinanceConnectorCatalog.parse({ connectors: financeConnectors }));
   if (req.url === '/api/finance/summary') return json(res, 200, unavailableFinanceSummary());
+  if (req.url === '/api/clipper/summary') {
+    try {
+      const committed = await configuredClipperStore.readCommitted();
+      res.setHeader('x-lifeos-revision', String(committed.revision));
+      res.setHeader('x-lifeos-schema-version', '1');
+      return json(res, 200, committed.snapshot);
+    } catch {
+      return json(res, 503, { error: 'clipper_unavailable' });
+    }
+  }
   if (req.url === '/api/usage') {
-    const now = new Date().toISOString(); const codex = await readLive(); const store = history();
+    const now = new Date().toISOString();
+    const codex = process.env.CODEX_LIVE_ENABLED === 'true'
+      ? await readLive()
+      : { connectorState: 'unavailable' as const, windows: [] };
+    const store = history();
     const windows: UsageWindow[] = [];
+    // A direct Codex read carries the source capture time. Keep that
+    // timestamp through normalization so delayed reads become stale instead
+    // of being relabeled as fresh at HTTP response time.
+    const codexObservedAt = codex.observedAt ?? now;
     for (const item of codex.windows) {
       const kind = item.minutes === 300 ? 'five_hour' : item.minutes === 10_080 ? 'seven_day' : undefined;
       if (!kind) continue;
-      const window = normalizeWindow({ usedPercent: item.usedPercent, resetsAt: item.resetAt }, 'codex', kind, 'codex-app-server', now);
+      const window = normalizeWindow({ usedPercent: item.usedPercent, resetsAt: item.resetAt }, 'codex', kind, 'codex-app-server', codexObservedAt);
       if (window.usedPercent !== undefined) windows.push(window);
     }
     const estimates = [];
-    for (const provider of ['claude', 'codex'] as const) {
-      for (const kind of ['five_hour', 'seven_day'] as const) {
-        const samples = await store.list(provider, kind === 'five_hour' ? 300 : 10080);
-        if (samples.length) {
-          const latest = samples.at(-1)!;
-          if (!windows.some(window => window.provider === provider && window.window === kind)) {
-            windows.push(normalizeWindow(latest, provider, kind, provider === 'claude' ? 'claude.ai-statusline' : 'codex-app-server', latest.observedAt));
+    try {
+      for (const provider of ['claude', 'codex'] as const) {
+        for (const kind of ['five_hour', 'seven_day'] as const) {
+          const samples = await store.list(provider, kind === 'five_hour' ? 300 : 10080);
+          if (samples.length) {
+            const latest = samples.at(-1)!;
+            if (!windows.some(window => window.provider === provider && window.window === kind)) {
+              windows.push(normalizeWindow(latest, provider, kind, provider === 'claude' ? 'claude.ai-statusline' : 'codex-app-server', latest.observedAt));
+            }
+            estimates.push(projectUsage(samples));
           }
-          estimates.push(projectUsage(samples));
         }
       }
+    } catch {
+      return json(res, 503, { error: 'usage_store_unavailable' });
     }
-    const claudeEnabled = process.env.CLAUDE_INGEST_ENABLED === 'true' || process.env.CLAUDE_STATUSLINE_ENABLED === 'true';
+    const claudeEnabled = claudeIngestEnabled();
     const claudeStates = windows
       .filter(window => window.provider === 'claude' && window.availability === 'observed')
       .map(window => window.provenance.connectorState);
@@ -93,12 +590,178 @@ export async function app(req: IncomingMessage, res: ServerResponse, readLive: t
       : claudeStates.includes('rate_limited') ? 'rate_limited'
         : claudeStates.includes('healthy') ? 'healthy'
           : claudeStates.includes('refresh_due') ? 'refresh_due' : 'unavailable';
+    const codexEnabled = process.env.CODEX_LIVE_ENABLED === 'true';
+    const codexStates = windows
+      .filter(window => window.provider === 'codex' && window.availability === 'observed')
+      .map(window => window.provenance.connectorState);
+    // The normalized window is the source of truth for an observed Codex
+    // value. A connector can report healthy while the captured observation is
+    // already stale, so do not let the connector's transport status relabel a
+    // stale window as healthy. If there is no usable window, preserve only an
+    // explicit rate-limit signal; a nominally healthy read without a value
+    // remains unavailable.
+    const codexState = codexStates.includes('rate_limited') ? 'rate_limited'
+      : codexStates.includes('refresh_due') ? 'refresh_due'
+        : codexStates.includes('healthy') ? 'healthy'
+          : codexEnabled && codex.connectorState === 'rate_limited'
+            ? codex.connectorState : 'unavailable';
     return json(res, 200, UnifiedUsage.parse({
       generatedAt: now, windows, estimates,
-      connectors: { codex: codex.connectorState, claude: claudeState },
+      connectors: {
+        codex: codexState,
+        claude: claudeState,
+        // GLM, DeepSeek, and Google AI Studio have no ingestion path in this
+        // tranche. They stay explicit and unavailable until a reviewed,
+        // server-side connector supplies validated observations.
+        glm: 'unavailable',
+        deepseek: 'unavailable',
+        google_ai_studio: 'unavailable',
+      },
     }));
   }
   return json(res, 404, { error: 'not_found' });
 }
-export function createApiServer(readLive: typeof readCodexLive = readCodexLive) { return createServer((req, res) => app(req, res, readLive)); }
-if (process.env.NODE_ENV !== 'test') createApiServer().listen(Number(process.env.PORT || 8787), '127.0.0.1');
+export function createApiServer(
+  readLive: typeof readCodexLive = readCodexLive,
+  barcodeClient?: OpenFoodFactsClient,
+  clipperStore: ClipperStore = defaultClipperStore,
+  nutritionPhotoClient?: NutritionPhotoProposalClient,
+) {
+  const configuredBarcodeClient = barcodeClient ?? createConfiguredOpenFoodFactsClient();
+  let inFlight = 0;
+  const server = createServer((req, res) => {
+    if (inFlight >= API_MAX_IN_FLIGHT_REQUESTS) {
+      req.resume();
+      json(res, 503, { error: 'server_busy' });
+      return;
+    }
+    inFlight += 1;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      inFlight -= 1;
+    };
+    void app(
+      req,
+      res,
+      readLive,
+      configuredBarcodeClient,
+      clipperStore,
+      nutritionPhotoClient,
+    ).catch(() => {
+      if (!res.headersSent) json(res, 503, { error: 'service_unavailable' });
+      else res.destroy();
+    }).finally(release);
+  });
+  server.maxConnections = API_MAX_CONNECTIONS;
+  server.maxRequestsPerSocket = 100;
+  server.headersTimeout = API_HEADERS_TIMEOUT_MS;
+  server.requestTimeout = API_REQUEST_TIMEOUT_MS;
+  server.timeout = API_SOCKET_TIMEOUT_MS;
+  server.keepAliveTimeout = API_KEEP_ALIVE_TIMEOUT_MS;
+  return server;
+}
+
+export type ApiRuntime = {
+  stdin: {
+    once(event: 'end', listener: () => void): unknown;
+    removeListener?: (event: 'end', listener: () => void) => unknown;
+    readableEnded?: boolean;
+  };
+  once(event: 'SIGTERM' | 'SIGINT', listener: () => void): unknown;
+  removeListener?: (event: 'SIGTERM' | 'SIGINT', listener: () => void) => unknown;
+  exitCode?: string | number | null;
+};
+export type StartedApiServer = {
+  server: ReturnType<typeof createApiServer>;
+  closed: Promise<void>;
+  shutdown: () => Promise<void>;
+};
+export type StartApiServerOptions = {
+  port?: number;
+  readLive?: typeof readCodexLive;
+  runtime?: ApiRuntime;
+  clipperStore?: ClipperStore;
+  nutritionPhotoClient?: NutritionPhotoProposalClient;
+};
+
+/** Validate, bind only to loopback, and install one idempotent graceful shutdown path. */
+export async function startApiServer(options: StartApiServerOptions = {}): Promise<StartedApiServer> {
+  if (!(await validateStartupConfiguration(options.clipperStore))) throw new Error('startup_configuration_invalid');
+  const server = createApiServer(
+    options.readLive ?? readCodexLive,
+    undefined,
+    options.clipperStore,
+    options.nutritionPhotoClient,
+  );
+  const port = options.port ?? Number(process.env.PORT || 8787);
+  try {
+    await new Promise<void>((resolveListen, rejectListen) => {
+      const onError = () => {
+        server.removeListener('error', onError);
+        rejectListen(new Error('startup_listen_failed'));
+      };
+      server.once('error', onError);
+      server.listen(port, '127.0.0.1', () => {
+        server.removeListener('error', onError);
+        resolveListen();
+      });
+    });
+  } catch {
+    await new Promise<void>(resolveClose => server.close(() => resolveClose())).catch(() => undefined);
+    throw new Error('startup_listen_failed');
+  }
+
+  let resolveClosed!: () => void;
+  let rejectClosed!: (error: Error) => void;
+  const closed = new Promise<void>((resolveClose, rejectClose) => {
+    resolveClosed = resolveClose;
+    rejectClosed = rejectClose;
+  });
+  let closePromise: Promise<void> | undefined;
+  const runtime = options.runtime;
+  const onShutdownSignal = () => { void shutdown().catch(() => { if (runtime) runtime.exitCode = 1; }); };
+  const detach = () => {
+    runtime?.stdin.removeListener?.('end', onShutdownSignal);
+    runtime?.removeListener?.('SIGTERM', onShutdownSignal);
+    runtime?.removeListener?.('SIGINT', onShutdownSignal);
+  };
+  const shutdown = () => {
+    if (closePromise) return closePromise;
+    closePromise = new Promise<void>((resolveClose, rejectClose) => {
+      server.close(error => {
+        detach();
+        if (error) {
+          const failure = new Error('shutdown_failed');
+          rejectClosed(failure);
+          rejectClose(failure);
+          return;
+        }
+        if (runtime) runtime.exitCode = 0;
+        resolveClosed();
+        resolveClose();
+      });
+    });
+    return closePromise;
+  };
+  if (runtime) {
+    if (runtime.stdin.readableEnded) queueMicrotask(onShutdownSignal);
+    else runtime.stdin.once('end', onShutdownSignal);
+    runtime.once('SIGTERM', onShutdownSignal);
+    runtime.once('SIGINT', onShutdownSignal);
+  }
+  return { server, closed, shutdown };
+}
+
+export async function runApiServer(runtime: ApiRuntime = process): Promise<void> {
+  const started = await startApiServer({ runtime });
+  await started.closed;
+}
+
+if (process.env.NODE_ENV !== 'test') {
+  void runApiServer().catch(() => {
+    process.stderr.write('startup_failed\n');
+    process.exitCode = 1;
+  });
+}

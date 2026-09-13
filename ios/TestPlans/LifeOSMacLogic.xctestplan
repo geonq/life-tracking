@@ -1,0 +1,42 @@
+{
+  "configurations" : [
+    {
+      "id" : "E500A717-6689-40B7-9F9C-04045E9D0A7A",
+      "name" : "Debug",
+      "options" : {
+        "testExecutionOrdering" : "lexical"
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "commandLineArguments" : [
+      {
+        "argument" : "-LifeOSVisualFixtures",
+        "enabled" : true
+      }
+    ],
+    "environmentVariableEntries" : [
+      {
+        "key" : "LIFEOS_VISUAL_FIXTURES",
+        "value" : "1"
+      }
+    ],
+    "codeCoverage" : false,
+    "targetForVariableExpansion" : {
+      "containerPath" : "container:LifeOS.xcodeproj",
+      "identifier" : "71437E54A44714BC8BB2AFEC",
+      "name" : "LifeOSMac"
+    }
+  },
+  "testTargets" : [
+    {
+      "parallelizable" : false,
+      "target" : {
+        "containerPath" : "container:LifeOS.xcodeproj",
+        "identifier" : "2538E14CF3E9C3897F91D13B",
+        "name" : "LifeOSMacSnapshotTests"
+      }
+    }
+  ],
+  "version" : 1
+}

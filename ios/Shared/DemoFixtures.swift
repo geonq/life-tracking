@@ -4,6 +4,12 @@ public enum DemoDataProvider {
     /// Fixed reference time keeps previews and screenshot fixtures reproducible.
     public static let observedAt = Date(timeIntervalSince1970: 1_785_283_200)
     public static let provenance = Provenance(source: "Demo fixture", observedAt: observedAt, quality: .demo, connector: .healthy)
+    public static let unavailableProvenance = Provenance(
+        source: "No validated demo provider observation",
+        observedAt: observedAt,
+        quality: .unavailable,
+        connector: .unavailable
+    )
     public static let codex = ProviderSnapshot(
         provider: .codex,
         accountLabel: "Demo Codex account",
@@ -24,7 +30,25 @@ public enum DemoDataProvider {
         ],
         provenance: provenance
     )
-    public static var providers: [ProviderSnapshot] { [codex, claude] }
+    public static let glm = ProviderSnapshot(
+        provider: .glm,
+        accountLabel: "GLM",
+        windows: [],
+        provenance: unavailableProvenance
+    )
+    public static let deepSeek = ProviderSnapshot(
+        provider: .deepseek,
+        accountLabel: "DeepSeek",
+        windows: [],
+        provenance: unavailableProvenance
+    )
+    public static let googleAIStudio = ProviderSnapshot(
+        provider: .googleAIStudio,
+        accountLabel: "Google AI Studio",
+        windows: [],
+        provenance: unavailableProvenance
+    )
+    public static var providers: [ProviderSnapshot] { [codex, claude, glm, deepSeek, googleAIStudio] }
     public static func widget(now: Date = .now) -> WidgetSnapshot {
         WidgetSnapshot(
             providers: providers,
@@ -44,6 +68,14 @@ public enum DemoDataProvider {
 /// It exercises overlap, overnight clipping, all progress states, emoji, a bounded
 /// custom image, and a month boundary without using personal information.
 public enum CalendarVisualFixtures {
+    /// A deterministic sanitized asset used only by icon-picker visual
+    /// evidence. It is never loaded by a normal production calendar.
+    public static var reusableIcon: CalendarReusableIcon? {
+        let bytes = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+        guard let bytes, let asset = try? CalendarIconAsset(format: .png, bytes: bytes) else { return nil }
+        return try? CalendarReusableIcon(name: "Fixture mark", asset: asset)
+    }
+
     public static func snapshot(anchor: Date = .now, calendar: Calendar = .current) -> CalendarSnapshot {
         let day = calendar.startOfDay(for: anchor)
         func instant(dayOffset: Int = 0, hour: Int, minute: Int = 0) -> Date {
