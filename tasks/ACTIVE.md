@@ -24,10 +24,9 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
 - Tax document local feature foundation.
 - Provenance-aware read-only Usage ingestion/API/native UI.
 - Fail-closed Finance summary and disabled connector contracts.
-- Current application source checkpoint: `e8bbefa` on
-  `lifeos-foundation-checkpoint-20260812`; current branch/docs checkpoint is
-  `93ea88e`. The branch push succeeded; GitHub CLI currently reports PR #1
-  open/draft/mergeable at that head; recheck before merge. The
+- Current application source checkpoint: `e8bbefa`; current mainline checkpoint
+  is `c09c3b7` (`Merge LifeOS implementation checkpoint`). The feature branch
+  push and merge succeeded; GitHub CLI reports PR #1 merged into `main`. The
   deployable Windows candidate is the verified `6baa1f3` source checkpoint;
   recovery reached journal unit 31,400 and was stopped before its final stage.
   The marker remains active and `LifeOSAPI` remains stopped before install.

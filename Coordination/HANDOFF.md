@@ -11,14 +11,12 @@ evidence is still incomplete.
 
 ## Current source checkpoint
 
-- Branch: `lifeos-foundation-checkpoint-20260812`.
 - Application source checkpoint: `e8bbefa Refine compact usage presentation and
   chart contract`; Windows recovery-instrumentation checkpoint: `0a8d5b6`;
-  historical deployable code candidate: `6baa1f3`. Current branch checkpoint is
-  `93ea88e`; later documentation-only commits may advance branch HEAD without
-  changing the application source checkpoint. GitHub CLI currently reports PR #1
-  OPEN, DRAFT, and MERGEABLE against `main` at `93ea88e`, with no submitted
-  reviews; recheck its live state before merge.
+  historical deployable code candidate: `6baa1f3`. The current mainline
+  checkpoint is `c09c3b7` (`Merge LifeOS implementation checkpoint`); later
+  documentation-only commits may advance main without changing the application
+  source checkpoint. GitHub CLI reports PR #1 merged into `main` at that commit.
 - Finance source checkpoint: `fd8ccfb Refine Finance responsive hierarchy`.
 - macOS now has one value-driven Home `NavigationStack` with a bounded typed
   path. Sidebar Home resets it; Back pops one detail and preserves origin.

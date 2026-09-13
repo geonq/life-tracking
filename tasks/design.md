@@ -1,5 +1,5 @@
 # LifeOS design and interaction implementation contract
-Updated 2026-09-14. Worker-facing contract; baseline source e8bbefa / branch 93ea88e. Status: authoritative worker-facing specification only; no implementation, build, or visual/runtime acceptance is claimed by this authoring pass.
+Updated 2026-09-14. Worker-facing contract; baseline source e8bbefa / mainline c09c3b7. Status: authoritative worker-facing specification only; no implementation, build, or visual/runtime acceptance is claimed by this authoring pass.
 
 ## 1. Authority, intent, and evidence
 - Deliver a compact daily planning instrument: precise hierarchy, calm surfaces, immediate feedback, coherent motion. Linear/Vercel are a quality bar, not layouts to clone or a reason to turn the app into a marketing page.

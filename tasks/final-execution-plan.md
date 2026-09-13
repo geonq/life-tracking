@@ -1,9 +1,12 @@
 # LifeOS final execution plan
-Planning baseline: 2026-09-14; inspected clean branch HEAD **93ea88e**, source **e8bbefa**. Approved planning artifact; documentation only. PR head was freshly observed at 93ea88e; Windows service facts below are the last recorded read-only observation. Release remains NO-GO.
+Planning baseline: 2026-09-14; inspected source **e8bbefa**, now merged into mainline **c09c3b7**. Approved planning artifact; documentation only. Windows service facts below are the last recorded read-only observation. Release remains NO-GO.
 
 ## 1. Current truth and explicit gates
-- **NO-GO.** The source checkpoint is `e8bbefa`; the branch is remote-synced
-  with later docs-only commits. GitHub CLI currently reports PR #1 OPEN/DRAFT/MERGEABLE at head `93ea88e`; no source acceptance or merge readiness is implied. A serialized Mac Usage build succeeded; the focused XCTest command compiled but the sandbox blocked `testmanagerd` before assertions.
+- **NO-GO.** The source checkpoint is `e8bbefa`; it is merged into mainline at
+  `c09c3b7`. GitHub CLI reports PR #1 MERGED into `main`; no source acceptance
+  or release readiness is implied. A serialized Mac Usage build succeeded; the
+  focused XCTest command compiled but the sandbox blocked `testmanagerd` before
+  assertions.
   A serialized Mac shell build passed; iOS lanes stop at asset
   compilation because no `iphonesimulator` runtime is installed. Last recorded
   read-only Windows observation shows BitLocker protected C:/D:, stopped

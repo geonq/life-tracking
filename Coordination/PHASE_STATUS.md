@@ -3,9 +3,9 @@
 Updated 2026-09-14 Europe/Berlin.
 
 - Release: **NO-GO**.
-- Deployable source checkpoint: `6baa1f3`; current source checkpoint is
-  `e8bbefa` on `lifeos-foundation-checkpoint-20260812`. The branch is
-  remote-synced; later docs-only commits may advance HEAD.
+- Deployable source checkpoint: `6baa1f3`; current application source checkpoint
+  is `e8bbefa`, merged into mainline at `c09c3b7`. Later documentation-only
+  commits may advance main HEAD without changing the application source.
 - Usage packet, per-scope authority, omission handling, persistence retry,
   identity handling, cancellation, and viewport bounds are implemented and
   independently reviewed **GREEN**.
