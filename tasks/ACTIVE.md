@@ -24,7 +24,7 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
 - Tax document local feature foundation.
 - Provenance-aware read-only Usage ingestion/API/native UI.
 - Fail-closed Finance summary and disabled connector contracts.
-- Current working checkpoint: `628d4b3` on `lifeos-foundation-checkpoint-20260812`.
+- Current working checkpoint: `39f2c21` on `lifeos-foundation-checkpoint-20260812`.
   The branch push succeeded; PR #1 is the matching open draft checkpoint. The
   deployable Windows candidate is the verified `6baa1f3` source checkpoint;
   recovery reached journal unit 31,400 and was stopped before its final stage.
@@ -42,6 +42,11 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
   compact SF Pro/neutral token contract, flat card treatment, a successful
   serialized Mac build, inspected Home/Calendar captures, and an Astra Medium
   GREEN review. This does not certify whole-app visual or device acceptance.
+  Shell refinement is committed at `39f2c21`, with an exact serialized Mac
+  build, opened Home/Usage/Calendar captures, and an Astra Medium GREEN review.
+  iOS simulator/generic lanes are blocked at asset compilation by the missing
+  iphonesimulator runtime; collapsed/compact reversal and iPhone tab rendering
+  remain runtime checks.
   Bounded recovery diagnostics are committed at `14a3b7f`; strict progress
   validation is committed at `4e14e38`; strict journal observation is committed
   at `9e43dd7`. Bounded phase telemetry is committed at `0a8d5b6`; the current
@@ -57,9 +62,10 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
   after it returned no handoff; no recovery source changes are present. Astra
   had already marked the proposal RED for byte binding, untouched-unit semantics,
   strict boundaries, invalidation, and Windows PowerShell 5.1 safety.
-- A narrow Mac shell candidate was compiled and tested, then rejected by Astra
-  Medium for missing actual shell evidence and collapsed-header geometry risk; its
-  patch is preserved in `/private/tmp/lifeos-mac-shell-candidate-red.patch`.
+- A prior narrow Mac shell candidate was compiled and tested, then rejected by
+  Astra Medium for missing actual shell evidence and collapsed-header geometry
+  risk; its patch is preserved in `/private/tmp/lifeos-mac-shell-candidate-red.patch`.
+  The causal replacement is the reviewed and pushed `39f2c21` shell refinement.
 - Pauli the 4th (Luna Max, worker `01a09bb2-0736-77b2-bf11-21ac106ac1cf`) and
   Fermat the 4th (worker `01a09bc6-739d-7cb2-b632-cb52466d5b11`) were
   dispatched for read-only audits of the Claude security findings and both were

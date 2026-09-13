@@ -4,7 +4,7 @@ Updated 2026-09-13 Europe/Berlin.
 
 - Release: **NO-GO**.
 - Deployable source checkpoint: `6baa1f3`; current branch HEAD and origin are
-  `628d4b3` on `lifeos-foundation-checkpoint-20260812`.
+  `39f2c21` on `lifeos-foundation-checkpoint-20260812`.
 - Usage packet, per-scope authority, omission handling, persistence retry,
   identity handling, cancellation, and viewport bounds are implemented and
   independently reviewed **GREEN**.
@@ -55,13 +55,19 @@ Updated 2026-09-13 Europe/Berlin.
   Astra Medium **GREEN** review. It applies the current SF Pro/compact token
   contract and flat card treatment; it does not pass whole-app visual or
   interaction gates.
+- Shell refinement at `39f2c21` has an exact serialized macOS build with
+  **BUILD SUCCEEDED**, inspected Home/Usage/Calendar captures, and Astra Medium
+  **GREEN** review. The iOS simulator/generic lanes stop at asset compilation
+  because this Mac has no `iphonesimulator` runtime; no Swift compiler error
+  was observed. Collapsed/compact shell reversal and iPhone tab rendering
+  remain unverified runtime interactions.
 - The frozen acceptance registry validates with 258 scored leaves and 7
   aliases, but records 0 accepted leaves; its `--score` gate fails as designed.
   Tranche GREEN reviews therefore do not represent a completion percentage.
-- The current 191-line visual contract is committed at `5ebc17e`. The latest
-  Mac shell candidate passed compile and 6 selected tests but was Astra RED for
+- The current 191-line visual contract is committed at `5ebc17e`. A prior Mac
+  shell candidate passed compile and 6 selected tests but was Astra RED for
   missing shell-state evidence and a possible collapsed-header overflow; it was
-  reverted and quarantined before the reviewed `66953af` repair. Pauli the 4th
+  reverted and quarantined before the reviewed `39f2c21` replacement. Pauli the 4th
   (Luna Max worker `01a09bb2-0736-77b2-bf11-21ac106ac1cf`) and Fermat the 4th
   (worker `01a09bc6-739d-7cb2-b632-cb52466d5b11`) were dispatched for
   read-only security reconciliation and both closed without a report. A third
