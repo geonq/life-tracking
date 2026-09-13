@@ -72,9 +72,12 @@ enum UsageRange: String, CaseIterable, Hashable {
 
 enum UsageLayoutContract {
     static let maxContentWidth: CGFloat = 1_040
-    static let contentGap: CGFloat = 24
+    static let contentGap: CGFloat = 16
     static let controlGap: CGFloat = 8
     static let twoColumnBreakpoint: CGFloat = 720
+    static let cardPadding: CGFloat = 12
+    static let macChartHeight: CGFloat = 204
+    static let macTokenActivityChartHeight: CGFloat = 196
 }
 
 struct UsageView: View {
@@ -512,7 +515,7 @@ struct UsageView: View {
                     guard selectedRange != range else { return }
                     selectedRange = range
                 } label: {
-                    LifeOSCard(level: .surface, cornerRadius: LifeOSTokens.Radius.card, padding: LifeOSTokens.Space.sm) {
+                    LifeOSCard(level: .surface, cornerRadius: LifeOSTokens.Radius.card, padding: UsageLayoutContract.cardPadding) {
                         content
                     }
                 }
@@ -520,7 +523,7 @@ struct UsageView: View {
                 .accessibilityAddTraits(selectedRange == range ? .isSelected : [])
                 .accessibilityIdentifier(accessibilityIdentifier)
             } else {
-                LifeOSCard(level: .surface, cornerRadius: LifeOSTokens.Radius.card, padding: LifeOSTokens.Space.sm) {
+                LifeOSCard(level: .surface, cornerRadius: LifeOSTokens.Radius.card, padding: UsageLayoutContract.cardPadding) {
                     content
                 }
                 .accessibilityIdentifier(accessibilityIdentifier)
@@ -537,8 +540,8 @@ struct UsageView: View {
         let hasChartData = hasObservedChartData(in: snapshot)
         let hasAvailableRange = !availableRanges.isEmpty
 
-        return LifeOSCard(level: .surface, cornerRadius: LifeOSTokens.Radius.card, padding: LifeOSTokens.Space.md) {
-            VStack(alignment: .leading, spacing: LifeOSTokens.Space.md) {
+        return LifeOSCard(level: .surface, cornerRadius: LifeOSTokens.Radius.card, padding: UsageLayoutContract.cardPadding) {
+            VStack(alignment: .leading, spacing: LifeOSTokens.Space.sm) {
                 ViewThatFits(in: .horizontal) {
                     HStack(alignment: .firstTextBaseline, spacing: UsageLayoutContract.controlGap) {
                         monitoringTitle(hasChartData: hasChartData)
@@ -694,7 +697,7 @@ struct UsageView: View {
         } label: {
             HStack(spacing: LifeOSTokens.Space.xs) {
                 LifeOSIcon(.usage, context: .toolbar)
-                    .foregroundStyle(LifeOSTokens.accent)
+                    .foregroundStyle(LifeOSTokens.secondaryText)
                 VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
                     Text(selectedProvider.displayName)
                         .lifeOSTypography(.label, weight: .medium)
@@ -713,7 +716,7 @@ struct UsageView: View {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .stroke(LifeOSTokens.subtleBorder, lineWidth: 1)
             }
-            .frame(minWidth: 160, minHeight: LifeOSTokens.Control.standardHeight, alignment: .leading)
+            .frame(minWidth: 148, minHeight: LifeOSTokens.Control.standardHeight, alignment: .leading)
         }
         // Menus re-tint their label with the system accent; pin neutral chrome (§1).
         .foregroundStyle(LifeOSTokens.secondaryText)
@@ -762,7 +765,7 @@ private struct UsageObservationSummary: View {
     }
 
     var body: some View {
-        LifeOSCard(level: .surface, cornerRadius: LifeOSTokens.Radius.card, padding: LifeOSTokens.Space.sm) {
+        LifeOSCard(level: .surface, cornerRadius: LifeOSTokens.Radius.card, padding: UsageLayoutContract.cardPadding) {
             VStack(alignment: .leading, spacing: LifeOSTokens.Space.xs) {
                 HStack(alignment: .firstTextBaseline, spacing: LifeOSTokens.Space.sm) {
                     VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
@@ -826,7 +829,7 @@ private struct UsageAdditionalObservations: View {
 
     var body: some View {
         DisclosureGroup(isExpanded: $isExpanded) {
-            VStack(alignment: .leading, spacing: LifeOSTokens.Space.md) {
+            VStack(alignment: .leading, spacing: LifeOSTokens.Space.sm) {
                 if !analytics.modelBreakdowns.isEmpty {
                     UsageModelMixCard(models: analytics.modelBreakdowns)
                 }
@@ -834,10 +837,10 @@ private struct UsageAdditionalObservations: View {
                     UsageHeatmapCard(cells: analytics.heatmap)
                 }
             }
-            .padding(.top, LifeOSTokens.Space.sm)
+            .padding(.top, LifeOSTokens.Space.xs)
         } label: {
             HStack(alignment: .firstTextBaseline, spacing: LifeOSTokens.Space.sm) {
-                LifeOSIcon(.views, context: .card)
+                LifeOSIcon(.graphUp, context: .card)
                     .foregroundStyle(LifeOSTokens.secondaryText)
                 VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
                     Text("Additional observations")
@@ -850,6 +853,8 @@ private struct UsageAdditionalObservations: View {
                 Spacer(minLength: 0)
             }
         }
+        .padding(UsageLayoutContract.cardPadding)
+        .flatCard()
         .accessibilityIdentifier("usage-additional-observations")
     }
 }
@@ -904,7 +909,7 @@ struct UsageEmptyState: View {
     private var horizontalLayout: some View {
         HStack(alignment: .center, spacing: LifeOSTokens.Space.sm) {
             LifeOSIcon(.usage, context: .card)
-                .foregroundStyle(LifeOSTokens.accent)
+                .foregroundStyle(LifeOSTokens.tertiaryText)
             messageBlock
                 .layoutPriority(1)
             actionView
@@ -915,7 +920,7 @@ struct UsageEmptyState: View {
         VStack(alignment: .leading, spacing: LifeOSTokens.Space.sm) {
             HStack(alignment: .top, spacing: LifeOSTokens.Space.sm) {
                 LifeOSIcon(.usage, context: .card)
-                    .foregroundStyle(LifeOSTokens.accent)
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
                 messageBlock
             }
             actionView
@@ -1042,7 +1047,7 @@ private struct UsageWindowSummaryRow: View {
                     .multilineTextAlignment(.trailing)
             }
         }
-        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 56, alignment: .leading)
+        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(window.label), \(remainingText) remaining, \(state.label), \(resetText)")
@@ -1055,10 +1060,11 @@ struct UsageModelMixCard: View {
     let models: [UsageModelBreakdown]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: LifeOSTokens.Space.sm) {
             UsageCardHeader(title: "Model mix", subtitle: "Token composition by model", icon: .usage)
             ModelCompositionChart(models: models)
         }
+        .padding(UsageLayoutContract.cardPadding)
         .flatCard()
         .accessibilityElement(children: .contain)
     }
@@ -1153,7 +1159,7 @@ struct UsageHeatmapCard: View {
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 4), count: 9)
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: LifeOSTokens.Space.sm) {
             UsageCardHeader(title: "Usage rhythm", subtitle: "When activity typically happens", icon: .usage)
             LazyVGrid(columns: columns, spacing: 4) {
                 ForEach(UsageHeatmapGrid.items(cells: cells)) { item in
@@ -1188,6 +1194,7 @@ struct UsageHeatmapCard: View {
             .lifeOSTypography(.metadata)
             .foregroundStyle(.secondary)
         }
+        .padding(UsageLayoutContract.cardPadding)
         .flatCard()
         .animation(reduceMotion ? nil : LifeOSMotion.snappy, value: selectedCell?.id)
     }
@@ -1250,7 +1257,7 @@ struct UsageCardHeader: View {
     let icon: LifeOSIconName
 
     var body: some View {
-        HStack(alignment: .top, spacing: LifeOSTokens.Space.sm) {
+        HStack(alignment: .top, spacing: LifeOSTokens.Space.xs) {
             LifeOSIcon(icon, context: .card)
                 .foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 2) {

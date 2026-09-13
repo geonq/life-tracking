@@ -57,7 +57,7 @@ struct UsageTokenActivityView: View {
 
     private var chartHeight: CGFloat {
 #if os(macOS)
-        230
+        UsageLayoutContract.macTokenActivityChartHeight
 #else
         215
 #endif
@@ -100,13 +100,13 @@ struct UsageTokenActivityView: View {
             AxisValueLabel()
                 // AxisValueLabel is AxisMark content, not a View, so use the
                 // system-default metadata size at this chart-only boundary.
-                .font(.system(size: 13, weight: .regular, design: .default))
+                .font(.system(size: 12, weight: .regular, design: .default))
                 .foregroundStyle(LifeOSTokens.metadataText)
         }
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: LifeOSTokens.Space.sm) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Token activity").lifeOSTypography(.cardTitle)
                 Text("Hourly token totals from your \(provider.displayName) account.")
@@ -210,6 +210,7 @@ struct UsageTokenActivityView: View {
                 footer
             }
         }
+        .padding(UsageLayoutContract.cardPadding)
         .flatCard()
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(provider.displayName) token activity")
@@ -217,7 +218,7 @@ struct UsageTokenActivityView: View {
 
     private var emptyActivityState: some View {
         VStack(alignment: .leading, spacing: 8) {
-            LifeOSIcon(.usage)
+            LifeOSIcon(.usage, context: .card)
                 .frame(width: 20, height: 20)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
             Text("No token activity")
@@ -227,33 +228,39 @@ struct UsageTokenActivityView: View {
                 .foregroundStyle(LifeOSTokens.secondaryText)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(16)
+        .padding(UsageLayoutContract.cardPadding)
         .background(LifeOSTokens.primaryText.opacity(0.045), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .accessibilityElement(children: .combine)
     }
 
     private var summaryCard: some View {
         ViewThatFits(in: .horizontal) {
-            HStack(alignment: .top) {
+            HStack(alignment: .top, spacing: LifeOSTokens.Space.sm) {
                 summaryPrimary
                 Spacer(minLength: 12)
                 summaryStats
             }
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: LifeOSTokens.Space.sm) {
                 summaryPrimary
-                Divider().opacity(0.3)
+                Divider().overlay(LifeOSTokens.hairlineBorder)
                 summaryStats
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(16)
+        .padding(UsageLayoutContract.cardPadding)
         .background(LifeOSTokens.primaryText.opacity(0.045), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(LifeOSTokens.subtleBorder, lineWidth: 1)
+        }
     }
 
     private var summaryPrimary: some View {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 6) {
-                    LifeOSIcon(.usage).frame(width: 14, height: 14).foregroundStyle(LifeOSTokens.Series.actual)
+                    LifeOSIcon(.usage, context: .disclosure)
+                        .frame(width: 16, height: 16)
+                        .foregroundStyle(LifeOSTokens.secondaryText)
                     Text(provider.displayName).lifeOSTypography(.cardTitle)
                 }
                 Text("Hourly token totals")
@@ -303,9 +310,10 @@ struct UsageTokenActivityView: View {
     private var keyboardStepper: some View {
         HStack(spacing: 8) {
             Button { stepSelection(by: -1) } label: {
-                LifeOSIcon(.chevronLeft).frame(width: 11, height: 11)
+                LifeOSIcon(.chevronLeft, context: .disclosure)
+                    .frame(width: stepperControlSize, height: stepperControlSize)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(FinanceMotionControlStyle())
             .disabled(orderedActivity.isEmpty)
 #if os(macOS)
             .keyboardShortcut(.leftArrow, modifiers: [])
@@ -317,15 +325,20 @@ struct UsageTokenActivityView: View {
                 .foregroundStyle(LifeOSTokens.secondaryText)
                 .lineLimit(1)
                 .minimumScaleFactor(0.75)
+#if os(macOS)
+                .frame(minWidth: 148)
+#else
                 .frame(minWidth: 180)
+#endif
                 .accessibilityLabel(selectedPoint.map {
                     "Selected token activity point \($0.date.formatted(.dateTime.month(.abbreviated).day().hour().minute()))"
                 } ?? "No token activity point selected")
 
             Button { stepSelection(by: 1) } label: {
-                LifeOSIcon(.chevronRight).frame(width: 11, height: 11)
+                LifeOSIcon(.chevronRight, context: .disclosure)
+                    .frame(width: stepperControlSize, height: stepperControlSize)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(FinanceMotionControlStyle())
             .disabled(orderedActivity.isEmpty)
 #if os(macOS)
             .keyboardShortcut(.rightArrow, modifiers: [])
@@ -333,11 +346,23 @@ struct UsageTokenActivityView: View {
             .accessibilityLabel("Next token activity point")
         }
         .foregroundStyle(LifeOSTokens.secondaryText)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .background(LifeOSTokens.primaryText.opacity(0.045), in: Capsule())
+        .padding(.horizontal, 4)
+        .padding(.vertical, 2)
+        .background(LifeOSTokens.raised, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(LifeOSTokens.subtleBorder, lineWidth: 1)
+        }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Token activity point stepper")
+    }
+
+    private var stepperControlSize: CGFloat {
+#if os(macOS)
+        28
+#else
+        44
+#endif
     }
 
     private var footer: some View {

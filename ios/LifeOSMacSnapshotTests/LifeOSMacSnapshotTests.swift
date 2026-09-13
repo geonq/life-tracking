@@ -873,6 +873,72 @@ final class LifeOSMacSnapshotTests: XCTestCase {
         )
     }
 
+    func testUsageCompactVisualContract() throws {
+        XCTAssertEqual(UsageLayoutContract.contentGap, 16)
+        XCTAssertEqual(UsageLayoutContract.cardPadding, 12)
+        XCTAssertEqual(UsageLayoutContract.macChartHeight, 204)
+        XCTAssertEqual(UsageLayoutContract.macTokenActivityChartHeight, 196)
+
+        let snapshot = try XCTUnwrap(
+            DemoDataProvider.providers.first(where: { $0.provider == .codex }),
+            "Codex fixture must exercise the usage route"
+        )
+        let analytics = try XCTUnwrap(
+            DemoUsageAnalytics.snapshots.first(where: { $0.provider == .codex }),
+            "Codex analytics fixture must exercise chart inspection"
+        )
+        let window = try XCTUnwrap(
+            snapshot.windows.first(where: { $0.id == analytics.windowID }),
+            "The chart fixture must carry a matching usage window"
+        )
+        let model = UsageProjectionDisplayModel(analytics: analytics, window: window)
+        XCTAssertFalse(model.actualPoints.isEmpty, "Fixture must provide an observed series")
+        XCTAssertFalse(model.estimatePoints.isEmpty, "Fixture must provide a selected estimate path")
+        XCTAssertTrue(model.selectablePoints.contains(where: { !$0.isProjected }))
+        XCTAssertTrue(model.selectablePoints.contains(where: \.isProjected))
+
+        let selectedPoint = try XCTUnwrap(model.selectablePoints.last)
+        XCTAssertEqual(model.selectionIndex[selectedPoint.id], selectedPoint)
+        XCTAssertEqual(model.selectionOffsets[selectedPoint.id], model.selectablePoints.count - 1)
+    }
+
+    func testUsageFactsCompactSnapshot() {
+        guard let snapshot = DemoDataProvider.providers.first(where: { $0.provider == .codex }),
+              let analytics = DemoUsageAnalytics.snapshots.first(where: { $0.provider == .codex }) else {
+            XCTFail("Codex demo usage fixtures must include a provider snapshot and analytics")
+            return
+        }
+
+        render(
+            UsageFactsView(snapshot: snapshot, analytics: analytics),
+            named: "UsageFactsView-dark-compact",
+            frameSize: CGSize(width: 560, height: 720),
+            colorScheme: .dark,
+            reduceMotion: true
+        )
+    }
+
+    func testUsageCompactRouteSnapshots() {
+        let usage = UsageView(
+            snapshots: DemoDataProvider.providers,
+            analytics: DemoUsageAnalytics.snapshots,
+            state: .demo
+        )
+
+        // These are full Usage routes, rather than isolated cards. Fixtures are explicit
+        // and never used by production data.
+        for width in [900, 1512] {
+            render(
+                usage,
+                named: "UsageView-dark-compact-\(width)",
+                frameSize: CGSize(width: CGFloat(width), height: 982),
+                colorScheme: .dark,
+                reduceMotion: true,
+                settleInterval: 0.2
+            )
+        }
+    }
+
     func testUsageSettledSnapshot() {
         render(
             UsageView(snapshots: DemoDataProvider.providers, analytics: DemoUsageAnalytics.snapshots, state: .demo),

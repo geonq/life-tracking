@@ -35,7 +35,7 @@ struct UsageFactsView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: LifeOSTokens.Space.sm) {
             factsCard
             bankedResetsCard
         }
@@ -96,6 +96,7 @@ struct UsageFactsView: View {
                 value: facts.freshness.map { freshnessLabel($0) } ?? "Not available"
             )
         }
+        .padding(UsageLayoutContract.cardPadding)
         .flatCard()
     }
 
@@ -111,13 +112,12 @@ struct UsageFactsView: View {
 
     private var bankedResetsCard: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("Banked resets")
-                .lifeOSTypography(.cardTitle)
-            Text("Provider detail is not modeled in this snapshot")
-                .lifeOSTypography(.metadata)
-                .foregroundStyle(LifeOSTokens.tertiaryText)
-                .padding(.top, 4)
-                .padding(.bottom, 12)
+            UsageCardHeader(
+                title: "Banked resets",
+                subtitle: "Provider detail is not modeled in this snapshot",
+                icon: .usage
+            )
+            .padding(.bottom, 12)
 
             // Banked resets — GAP across all four sub-fields. Only a static demo string exists
             // today (OverviewDomain.swift), not a real modeled field. 02 §0 data-gaps item 1.
@@ -129,25 +129,27 @@ struct UsageFactsView: View {
             divider
             factRow(label: "Source", value: "Not available")
         }
+        .padding(UsageLayoutContract.cardPadding)
         .flatCard()
     }
 
     private var divider: some View {
-        Divider().opacity(0.25).padding(.vertical, 8)
+        Divider().overlay(LifeOSTokens.hairlineBorder)
     }
 
     private func factRow(label: String, value: String) -> some View {
-        HStack(alignment: .top) {
+        HStack(alignment: .firstTextBaseline, spacing: LifeOSTokens.Space.sm) {
             Text(label)
                 .lifeOSTypography(.body)
                 .foregroundStyle(LifeOSTokens.primaryText)
-            Spacer(minLength: 12)
+            Spacer(minLength: LifeOSTokens.Space.sm)
             Text(value)
                 .lifeOSTypography(.button)
                 .foregroundStyle(value == "Not available" ? LifeOSTokens.tertiaryText : .primary)
                 .multilineTextAlignment(.trailing)
                 .lineLimit(2)
         }
+        .padding(.vertical, 6)
         .accessibilityElement(children: .combine)
     }
 }

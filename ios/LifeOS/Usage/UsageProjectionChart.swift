@@ -1254,7 +1254,7 @@ struct UsageProjectionChart: View {
 
     private var chartHeight: CGFloat {
 #if os(macOS)
-        224
+        UsageLayoutContract.macChartHeight
 #else
         200
 #endif
@@ -1318,18 +1318,8 @@ struct UsageProjectionChart: View {
     }
 
     private var sizedReferenceChart: some View {
-#if os(macOS)
-        ViewThatFits(in: .horizontal) {
-            interactiveReferenceChart
-                .frame(minWidth: 960)
-                .frame(height: 256)
-            interactiveReferenceChart
-                .frame(height: chartHeight)
-        }
-#else
         interactiveReferenceChart
             .frame(height: chartHeight)
-#endif
     }
 
     private var interactiveReferenceChart: some View {
@@ -1568,7 +1558,7 @@ struct UsageProjectionChart: View {
                     LinearGradient(
                         colors: [
                             LifeOSChartSeriesKind.observed.color.opacity(
-                                LifeOSChartSeriesKind.observed.style.areaOpacity
+                                LifeOSChartSeriesKind.observed.style.areaOpacity * 0.55
                             ),
                             .clear
                         ],
@@ -1591,7 +1581,7 @@ struct UsageProjectionChart: View {
     }
 
     private var yAxisMarks: some AxisContent {
-        AxisMarks(values: [0, 0.25, 0.5, 0.75, 1]) { value in
+        AxisMarks(values: [0, 0.5, 1]) { value in
             AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5)).foregroundStyle(LifeOSTokens.chartGrid)
             AxisValueLabel {
                 if let number = value.as(Double.self) {
@@ -1610,7 +1600,6 @@ struct UsageProjectionChart: View {
     private var xAxisMarks: some AxisContent {
         let isShortWindow = window?.durationMinutes == UsageRange.fiveHour.durationMinutes
         return AxisMarks(values: .automatic(desiredCount: isShortWindow ? 4 : 6)) { value in
-            AxisGridLine(stroke: StrokeStyle(lineWidth: 0.35)).foregroundStyle(LifeOSTokens.chartGrid.opacity(0.55))
             AxisValueLabel {
                 if let date = value.as(Date.self) {
                     Group {
@@ -1634,7 +1623,7 @@ struct UsageProjectionChart: View {
 
     private var legend: some View {
         ViewThatFits(in: .horizontal) {
-            HStack(spacing: 16) {
+            HStack(spacing: 20) {
                 legendItems
             }
             LazyVGrid(
@@ -1669,56 +1658,7 @@ struct UsageProjectionChart: View {
 
             Group {
                 if let selectedPoint {
-                    ViewThatFits(in: .horizontal) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack(spacing: 6) {
-                                Text(selectedPoint.isProjected ? "Estimate" : "Actual")
-                                    .lifeOSTypography(.button)
-                                    .foregroundStyle(selectedPoint.isProjected ? LifeOSTokens.Series.estimate : LifeOSTokens.Series.actual)
-                                Text("\(Int((1 - selectedPoint.usedPercent) * 100))% remaining")
-                                    .lifeOSTypography(.button)
-                                Text(selectedPoint.date, format: .dateTime.month(.abbreviated).day().hour().minute())
-                                    .lifeOSTypography(.metadata)
-                                    .foregroundStyle(LifeOSTokens.secondaryText)
-                            }
-                            Text(accountLabel)
-                                .lifeOSTypography(.metadata)
-                                .foregroundStyle(LifeOSTokens.tertiaryText)
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-                            Text(qualityTag)
-                                .lifeOSTypography(.metadata)
-                                .foregroundStyle(LifeOSTokens.tertiaryText)
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-                        }
-                        .fixedSize(horizontal: true, vertical: false)
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack(spacing: 6) {
-                                Text(selectedPoint.isProjected ? "Estimate" : "Actual")
-                                    .lifeOSTypography(.button)
-                                    .foregroundStyle(selectedPoint.isProjected ? LifeOSTokens.Series.estimate : LifeOSTokens.Series.actual)
-                                Text("\(Int((1 - selectedPoint.usedPercent) * 100))% remaining")
-                                    .lifeOSTypography(.button)
-                            }
-                            Text(selectedPoint.date, format: .dateTime.month(.abbreviated).day().hour().minute())
-                                .lifeOSTypography(.metadata)
-                                .foregroundStyle(LifeOSTokens.secondaryText)
-                                .fixedSize(horizontal: false, vertical: true)
-                            Text(accountLabel)
-                                .lifeOSTypography(.metadata)
-                                .foregroundStyle(LifeOSTokens.tertiaryText)
-                                .lineLimit(2)
-                                .truncationMode(.tail)
-                                .fixedSize(horizontal: false, vertical: true)
-                            Text(qualityTag)
-                                .lifeOSTypography(.metadata)
-                                .foregroundStyle(LifeOSTokens.tertiaryText)
-                                .lineLimit(2)
-                                .truncationMode(.tail)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
+                    inspectionDetails(for: selectedPoint)
                 } else {
                     Text(scrubHintText)
                         .lifeOSTypography(.metadata)
@@ -1735,6 +1675,82 @@ struct UsageProjectionChart: View {
         .background(LifeOSTokens.primaryText.opacity(0.045), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Usage chart point inspection")
+    }
+
+    /// The first candidate keeps the selected value compact on a wide surface. Its intrinsic
+    /// width is allowed to participate in `ViewThatFits`, so a long account or quality label
+    /// naturally selects the wrapped candidate instead of being squeezed into one lossy line.
+    private func inspectionDetails(for point: UsageSelectionPoint) -> some View {
+        ViewThatFits(in: .horizontal) {
+            wideInspectionDetails(for: point)
+            stackedInspectionDetails(for: point)
+        }
+    }
+
+    private func wideInspectionDetails(for point: UsageSelectionPoint) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                inspectionKindLabel(for: point)
+                inspectionRemainingLabel(for: point)
+                Spacer(minLength: 4)
+                inspectionDateLabel(for: point)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                inspectionMetadataLabel(accountLabel)
+                inspectionMetadataLabel(qualityTag)
+            }
+        }
+        // Keep the compact candidate honest about its width. The fallback below is the
+        // responsive path for narrow windows and long metadata.
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private func stackedInspectionDetails(for point: UsageSelectionPoint) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                inspectionKindLabel(for: point)
+                inspectionRemainingLabel(for: point)
+            }
+            inspectionDateLabel(for: point)
+            inspectionMetadataLabel(accountLabel)
+            inspectionMetadataLabel(qualityTag)
+        }
+    }
+
+    private func inspectionKindLabel(for point: UsageSelectionPoint) -> some View {
+        Text(point.isProjected ? "Estimate" : "Actual")
+            .lifeOSTypography(.button)
+            .foregroundStyle(point.isProjected ? LifeOSTokens.Series.estimate : LifeOSTokens.Series.actual)
+            .lineLimit(1)
+            .minimumScaleFactor(0.85)
+            .allowsTightening(true)
+    }
+
+    private func inspectionRemainingLabel(for point: UsageSelectionPoint) -> some View {
+        Text("\(Int((1 - point.usedPercent) * 100))% remaining")
+            .lifeOSTypography(.button)
+            .lineLimit(1)
+            .minimumScaleFactor(0.85)
+            .allowsTightening(true)
+    }
+
+    private func inspectionDateLabel(for point: UsageSelectionPoint) -> some View {
+        Text(point.date, format: .dateTime.month(.abbreviated).day().hour().minute())
+            .lifeOSTypography(.metadata)
+            .foregroundStyle(LifeOSTokens.secondaryText)
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+            .allowsTightening(true)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func inspectionMetadataLabel(_ value: String) -> some View {
+        Text(value)
+            .lifeOSTypography(.metadata)
+            .foregroundStyle(LifeOSTokens.tertiaryText)
+            .lineLimit(2)
+            .truncationMode(.tail)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private var inspectionRowHeight: CGFloat {
@@ -1769,7 +1785,7 @@ struct UsageProjectionChart: View {
 
     private func stepButton(direction: Int, icon: LifeOSIconName, label: String) -> some View {
         Button { stepSelection(by: direction) } label: {
-            LifeOSIcon(icon)
+            LifeOSIcon(icon, context: .disclosure)
                 .frame(width: compactControlSize, height: compactControlSize)
                 .contentShape(Rectangle())
         }
@@ -1823,7 +1839,7 @@ struct UsageProjectionChart: View {
 
     private var belowChartRows: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Divider().opacity(0.3)
+            Divider().overlay(LifeOSTokens.hairlineBorder)
             ViewThatFits(in: .horizontal) {
                 HStack(alignment: .center, spacing: 8) {
                     rangeStartControl
@@ -1879,7 +1895,7 @@ struct UsageProjectionChart: View {
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            LifeOSIcon(icon)
+            LifeOSIcon(icon, context: .disclosure)
                 .frame(width: compactControlSize, height: compactControlSize)
                 .contentShape(Rectangle())
                 .foregroundStyle(LifeOSTokens.secondaryText)
@@ -2011,7 +2027,6 @@ private struct UsageProjectionLegendKey: View {
                 .foregroundStyle(LifeOSTokens.secondaryText)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
