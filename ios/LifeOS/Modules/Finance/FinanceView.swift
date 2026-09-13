@@ -87,14 +87,6 @@ private struct FinanceDetailSelector: View {
     }
 }
 
-private struct FinanceContentWidthPreferenceKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
-}
-
 /// Semantic anchors are enough to restore the user's place after the main
 /// surface is temporarily replaced by Analytics. They avoid retaining a
 /// geometry-dependent pixel offset while remaining stable across refreshes and
@@ -337,7 +329,6 @@ public struct FinanceView: View {
 
     @StateObject private var presentationState: FinancePresentationState
     @State private var isRefreshing = false
-    @State private var measuredFinanceContentWidth: CGFloat = 0
     /// RF-03/RF-20: the Analytics & Tools surface is an in-place hero morph
     /// overlay, not a pushed screen — see `financeHeroNamespace` below and
     /// Motion §A (`03-motion-revolut.md`). It shares `selectedRange` and
@@ -396,24 +387,6 @@ public struct FinanceView: View {
         get { presentationState.analyticsSelectedEntry }
         nonmutating set { presentationState.analyticsSelectedEntry = newValue }
     }
-    private var financeContentWidth: CGFloat {
-        FinanceResponsiveLayoutContract.measuredContentWidth(
-            availableWidth: measuredFinanceContentWidth
-        )
-    }
-    private var financeUsesStackedLayout: Bool {
-        FinanceResponsiveLayoutContract.usesStackedLayout(
-            contentWidth: financeContentWidth,
-            accessibilitySize: dynamicTypeSize.isAccessibilitySize
-        )
-    }
-    private var financeUsesStackedChartAndCategories: Bool {
-        FinanceResponsiveLayoutContract.usesStackedChartAndCategories(
-            contentWidth: financeContentWidth,
-            accessibilitySize: dynamicTypeSize.isAccessibilitySize
-        )
-    }
-
     private var routeIntent: FinanceInitialRouteIntent {
         presentationState.externalRouteIntent
             ?? FinanceInitialRouteIntent(route: initialDetail)
@@ -537,74 +510,84 @@ public struct FinanceView: View {
     }
 
     private func mainScrollContent(snapshot: FinanceDisplaySnapshot) -> some View {
-        ScrollViewReader { scrollProxy in
-            ScrollView {
-                LifeOSResponsiveContentContainer(topPadding: 16, bottomPadding: 16) {
-                    VStack(alignment: .leading, spacing: 16) {
-                        financeScrollSection(.header) {
-                            financeHeader(snapshot: snapshot)
-                        }
+        GeometryReader { viewport in
+            let contentWidth = financeContentWidth(for: viewport.size.width)
+            let isStacked = FinanceResponsiveLayoutContract.usesStackedLayout(
+                contentWidth: contentWidth,
+                accessibilitySize: dynamicTypeSize.isAccessibilitySize
+            )
+            let stacksChartAndCategories = FinanceResponsiveLayoutContract.usesStackedChartAndCategories(
+                contentWidth: contentWidth,
+                accessibilitySize: dynamicTypeSize.isAccessibilitySize
+            )
 
-                        if snapshot.hasObservedValue {
-                            financeScrollSection(.summary) {
-                                VStack(alignment: .leading, spacing: 16) {
-                                    FinanceStateNotice(snapshot: snapshot, onRefresh: onRefresh)
-                                    FinanceHeroCard(snapshot: snapshot, isStacked: financeUsesStackedLayout)
-                                    FinanceSummaryMetricStrip(snapshot: snapshot)
+            ScrollViewReader { scrollProxy in
+                ScrollView {
+                    LifeOSResponsiveContentContainer(topPadding: 16, bottomPadding: 16) {
+                        VStack(alignment: .leading, spacing: 16) {
+                            financeScrollSection(.header) {
+                                financeHeader(snapshot: snapshot, isStacked: isStacked)
+                            }
+
+                            if snapshot.hasObservedValue {
+                                financeScrollSection(.summary) {
+                                    VStack(alignment: .leading, spacing: 16) {
+                                        FinanceStateNotice(snapshot: snapshot, onRefresh: onRefresh)
+                                        FinanceHeroCard(snapshot: snapshot, isStacked: isStacked)
+                                        FinanceSummaryMetricStrip(snapshot: snapshot)
+                                    }
+                                }
+
+                                financeScrollSection(.details) {
+                                    financeDetailAndCategories(
+                                        snapshot: snapshot,
+                                        isStacked: isStacked,
+                                        stacksChartAndCategories: stacksChartAndCategories
+                                    )
+                                }
+
+                                financeScrollSection(.accounts) {
+                                    FinanceAccountsCard(snapshot: snapshot, onOpenConnections: onOpenConnections)
+                                }
+                                financeScrollSection(.analytics) {
+                                    financeAnalyticsEntryCard
+                                }
+                                financeScrollSection(.importSection) {
+                                    FinanceImportCard(usesVisualFixtures: usesVisualFixtures)
+                                }
+                            } else {
+                                financeScrollSection(.connection) {
+                                    FinanceConnectionState(
+                                        snapshot: snapshot,
+                                        onOpenConnections: onOpenConnections,
+                                        onRefresh: onRefresh
+                                    )
+                                }
+                                financeScrollSection(.importSection) {
+                                    FinanceImportCard(usesVisualFixtures: usesVisualFixtures)
                                 }
                             }
-
-                            financeScrollSection(.details) {
-                                financeDetailAndCategories(snapshot: snapshot)
-                            }
-
-                            financeScrollSection(.accounts) {
-                                FinanceAccountsCard(snapshot: snapshot, onOpenConnections: onOpenConnections)
-                            }
-                            financeScrollSection(.analytics) {
-                                financeAnalyticsEntryCard
-                            }
-                            financeScrollSection(.importSection) {
-                                FinanceImportCard(usesVisualFixtures: usesVisualFixtures)
-                            }
-                        } else {
-                            financeScrollSection(.connection) {
-                                FinanceConnectionState(
-                                    snapshot: snapshot,
-                                    onOpenConnections: onOpenConnections,
-                                    onRefresh: onRefresh
-                                )
-                            }
-                            financeScrollSection(.importSection) {
-                                FinanceImportCard(usesVisualFixtures: usesVisualFixtures)
-                            }
-                        }
-                    }
-                    .background {
-                        GeometryReader { proxy in
-                            Color.clear.preference(
-                                key: FinanceContentWidthPreferenceKey.self,
-                                value: proxy.size.width
-                            )
                         }
                     }
                 }
-            }
-            .coordinateSpace(name: FinanceScrollCoordinateSpace.name)
-            .scrollIndicators(.hidden)
-            .onPreferenceChange(FinanceScrollAnchorPreferenceKey.self) { positions in
-                let anchor = FinanceScrollRestorationPolicy.anchor(for: positions)
-                presentationState.rememberMainScrollAnchor(anchor)
-            }
-            .onAppear {
-                restoreMainScrollPosition(using: scrollProxy)
+                .coordinateSpace(name: FinanceScrollCoordinateSpace.name)
+                .scrollIndicators(.hidden)
+                .onPreferenceChange(FinanceScrollAnchorPreferenceKey.self) { positions in
+                    let anchor = FinanceScrollRestorationPolicy.anchor(for: positions)
+                    presentationState.rememberMainScrollAnchor(anchor)
+                }
+                .onAppear {
+                    restoreMainScrollPosition(using: scrollProxy)
+                }
             }
         }
-        .onPreferenceChange(FinanceContentWidthPreferenceKey.self) { width in
-            let measured = FinanceResponsiveLayoutContract.measuredContentWidth(availableWidth: width)
-            guard abs(measured - measuredFinanceContentWidth) > 0.5 else { return }
-            measuredFinanceContentWidth = measured
-        }
+    }
+
+    private func financeContentWidth(for viewportWidth: CGFloat) -> CGFloat {
+        let metrics = LifeOSResponsiveMetrics(width: viewportWidth)
+        return FinanceResponsiveLayoutContract.measuredContentWidth(
+            availableWidth: metrics.contentWidth
+        )
     }
 
     private func financeScrollSection<Content: View>(
@@ -735,9 +718,9 @@ public struct FinanceView: View {
         }
     }
 
-    private func financeHeader(snapshot: FinanceDisplaySnapshot) -> some View {
+    private func financeHeader(snapshot: FinanceDisplaySnapshot, isStacked: Bool) -> some View {
         Group {
-            if financeUsesStackedLayout {
+            if isStacked {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack(alignment: .center, spacing: 12) {
                         financeHeaderTitle(snapshot: snapshot)
@@ -817,16 +800,20 @@ public struct FinanceView: View {
     }
 
     @ViewBuilder
-    private func financeDetailAndCategories(snapshot: FinanceDisplaySnapshot) -> some View {
+    private func financeDetailAndCategories(
+        snapshot: FinanceDisplaySnapshot,
+        isStacked: Bool,
+        stacksChartAndCategories: Bool
+    ) -> some View {
         Group {
-            if financeUsesStackedChartAndCategories {
+            if stacksChartAndCategories {
                 VStack(alignment: .leading, spacing: 16) {
-                    financeDetailPanel(snapshot: snapshot)
+                    financeDetailPanel(snapshot: snapshot, isStacked: isStacked)
                     financeCategoriesCard(snapshot: snapshot)
                 }
             } else {
                 HStack(alignment: .top, spacing: 24) {
-                    financeDetailPanel(snapshot: snapshot)
+                    financeDetailPanel(snapshot: snapshot, isStacked: isStacked)
                         .frame(maxWidth: .infinity, alignment: .topLeading)
                     financeCategoriesCard(snapshot: snapshot)
                         .frame(minWidth: 300, maxWidth: 336, alignment: .topLeading)
@@ -846,32 +833,52 @@ public struct FinanceView: View {
         )
     }
 
-    private func financeDetailPanel(snapshot: FinanceDisplaySnapshot) -> some View {
+    private func financeDetailPanel(snapshot: FinanceDisplaySnapshot, isStacked: Bool) -> some View {
         let availableRanges = snapshot.availableRanges(for: selectedDetail)
 
         return VStack(alignment: .leading, spacing: 12) {
             FinanceSectionHeader(title: "Details", subtitle: "Trend context for this period", icon: .views, accent: LifeOSTokens.Module.finance)
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 10) {
-                    FinanceDetailSelector(selection: $presentationState.selectedDetail)
-                    if !availableRanges.isEmpty {
-                        FinanceRangePills(
-                            selection: $presentationState.selectedRange,
-                            availableRanges: availableRanges
-                        )
-                    }
+            financeDetailControls(availableRanges: availableRanges, isStacked: isStacked)
+            detailCard(snapshot: snapshot)
+        }
+    }
+
+    @ViewBuilder
+    private func financeDetailControls(
+        availableRanges: Set<FinanceRange>,
+        isStacked: Bool
+    ) -> some View {
+        let detailControl = FinanceLabeledControl(title: "Detail") {
+            FinanceDetailSelector(selection: $presentationState.selectedDetail)
+        }
+
+        if availableRanges.isEmpty {
+            detailControl
+        } else {
+            let rangeControl = FinanceLabeledControl(title: "Date range") {
+                FinanceRangePills(
+                    selection: $presentationState.selectedRange,
+                    availableRanges: availableRanges
+                )
+            }
+
+            if dynamicTypeSize.isAccessibilitySize || isStacked {
+                VStack(alignment: .leading, spacing: 12) {
+                    detailControl
+                    rangeControl
                 }
-                VStack(alignment: .leading, spacing: 10) {
-                    FinanceDetailSelector(selection: $presentationState.selectedDetail)
-                    if !availableRanges.isEmpty {
-                        FinanceRangePills(
-                            selection: $presentationState.selectedRange,
-                            availableRanges: availableRanges
-                        )
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .top, spacing: 16) {
+                        detailControl
+                        rangeControl
+                    }
+                    VStack(alignment: .leading, spacing: 12) {
+                        detailControl
+                        rangeControl
                     }
                 }
             }
-            detailCard(snapshot: snapshot)
         }
     }
 
@@ -1344,35 +1351,15 @@ private struct FinanceHeroCard: View {
     let snapshot: FinanceDisplaySnapshot
     let isStacked: Bool
 
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 13) {
-            if isStacked {
-                VStack(alignment: .leading, spacing: 10) {
-                    heroSummary
-                    heroAccessory
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
+        Group {
+            if isStacked || dynamicTypeSize.isAccessibilitySize {
+                stackedComposition
             } else {
-                HStack(alignment: .top) {
-                    heroSummary
-                    Spacer(minLength: 10)
-                    heroAccessory
-                }
+                wideComposition
             }
-
-            if isStacked {
-                VStack(alignment: .leading, spacing: 10) {
-                    FinanceHeroFact(title: "Accounts", value: snapshot.accounts.isEmpty ? "Not available" : "\(snapshot.accounts.count) connected")
-                    FinanceHeroFact(title: "Currency", value: "EUR")
-                }
-            } else {
-                HStack(spacing: 0) {
-                    FinanceHeroFact(title: "Accounts", value: snapshot.accounts.isEmpty ? "Not available" : "\(snapshot.accounts.count) connected")
-                    Divider().frame(height: 28)
-                    FinanceHeroFact(title: "Currency", value: "EUR")
-                }
-            }
-
         }
         .padding(LifeOSTokens.cardPadding)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1380,6 +1367,27 @@ private struct FinanceHeroCard: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Total across accounts")
         .accessibilityValue("\(snapshot.netWorth.accessibilityValue). Accounts \(snapshot.accounts.isEmpty ? "not available" : "\(snapshot.accounts.count) connected"). Updated \(snapshot.updatedLabel).")
+    }
+
+    private var wideComposition: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .center, spacing: 24) {
+                heroSummary
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                heroAccessory
+                    .frame(width: 184, alignment: .trailing)
+            }
+            wideHeroFacts
+        }
+    }
+
+    private var stackedComposition: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            heroSummary
+            heroAccessory
+                .frame(maxWidth: .infinity, alignment: .leading)
+            stackedHeroFacts
+        }
     }
 
     private var heroSummary: some View {
@@ -1398,13 +1406,67 @@ private struct FinanceHeroCard: View {
         }
     }
 
+    private var wideHeroFacts: some View {
+        HStack(alignment: .top, spacing: 0) {
+            heroFact(title: "Accounts", value: snapshot.accounts.isEmpty ? "Not available" : "\(snapshot.accounts.count) connected")
+            heroFactDivider
+            heroFact(title: "Updated", value: snapshot.updatedLabel)
+            heroFactDivider
+            heroFact(title: "Currency", value: snapshot.currency)
+        }
+    }
+
+    private var stackedHeroFacts: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 0) {
+                heroFact(title: "Accounts", value: snapshot.accounts.isEmpty ? "Not available" : "\(snapshot.accounts.count) connected")
+                heroFactDivider
+                heroFact(title: "Currency", value: snapshot.currency)
+            }
+            heroFact(title: "Updated", value: snapshot.updatedLabel)
+        }
+    }
+
+    private func heroFact(title: String, value: String) -> some View {
+        FinanceHeroFact(title: title, value: value)
+    }
+
+    private var heroFactDivider: some View {
+        Divider()
+            .frame(height: 28)
+            .padding(.horizontal, 8)
+    }
+
     @ViewBuilder
     private var heroAccessory: some View {
         if snapshot.netWorth.isUnavailable {
             UnavailableMetricMark(label: "Not available")
+        } else if snapshot.netWorthPoints.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("History")
+                    .lifeOSTypography(.metadata, weight: .semibold)
+                    .foregroundStyle(LifeOSTokens.secondaryText)
+                Text("No history available")
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+            }
         } else {
-            FinanceMiniSparkline(points: snapshot.netWorthPoints)
-                .frame(width: 132, height: 62)
+            VStack(alignment: .trailing, spacing: 6) {
+                Text("History")
+                    .lifeOSTypography(.metadata, weight: .semibold)
+                    .foregroundStyle(LifeOSTokens.secondaryText)
+                FinanceMiniSparkline(points: snapshot.netWorthPoints)
+                    .frame(height: 56)
+                    .padding(.horizontal, 8)
+                    .background(
+                        LifeOSTokens.primaryText.opacity(0.04),
+                        in: RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
+                    )
+                    .overlay {
+                        RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
+                            .stroke(LifeOSTokens.subtleBorder, lineWidth: 1)
+                    }
+            }
         }
     }
 }
@@ -1765,7 +1827,7 @@ struct FinanceDetailChartCard: View {
                             detail: chartState.emptyStateDetail(fallback: emptyDetail),
                             showMaxAction: chartState.showsShowMax && effectiveMode != .ring ? showMaxAction : nil
                         )
-                        .frame(minHeight: chartState.preservesPlotGeometry ? 220 : 78)
+                        .frame(minHeight: chartState.preservesPlotGeometry ? 220 : 72)
                 }
             } else {
                 FinanceUnavailableChart(detail: chartState.emptyStateDetail(fallback: emptyDetail))
@@ -1977,7 +2039,7 @@ private struct FinanceUnavailableChart: View {
                     .buttonStyle(.plain)
             }
         }
-        .frame(maxWidth: .infinity, minHeight: 78, alignment: .center)
+        .frame(maxWidth: .infinity, minHeight: 72, alignment: .center)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Chart not available")
         .accessibilityValue(detail)
@@ -3237,6 +3299,25 @@ struct FinanceEmptyModuleRow: View {
 }
 
 // MARK: - Range controls and reusable chrome
+
+private struct FinanceLabeledControl<Content: View>: View {
+    let title: String
+    private let content: () -> Content
+
+    init(title: String, @ViewBuilder content: @escaping () -> Content) {
+        self.title = title
+        self.content = content
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: LifeOSTokens.Space.xs) {
+            Text(title)
+                .lifeOSTypography(.metadata, weight: .semibold)
+                .foregroundStyle(LifeOSTokens.secondaryText)
+            content()
+        }
+    }
+}
 
 struct FinanceRangePills: View {
     @Binding var selection: FinanceRange
