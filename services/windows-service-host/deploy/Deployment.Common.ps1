@@ -81,12 +81,33 @@ $script:LifeOSRecoveryDiagnosticsMaxScopes = 64
 $script:LifeOSRecoveryDiagnosticsMaxRecordBytes = 1024
 $script:LifeOSRecoveryDiagnosticsCounterLimit = [long]9007199254740991
 $script:LifeOSRecoveryDiagnosticsScopeNames = @('journal-validation', 'recovery-finalize') + @($script:LifeOSRecoveryStageNames)
+$script:LifeOSRecoveryDiagnosticsMaxDetailRecords = 64
+$script:LifeOSRecoveryDiagnosticsMaxHeartbeatRecords = 47
+$script:LifeOSRecoveryDiagnosticsHeartbeatIntervalMs = 10000
+$script:LifeOSRecoveryDiagnosticsMaxTotalRecords = ($script:LifeOSRecoveryDiagnosticsMaxScopes * 2) + 1 + $script:LifeOSRecoveryDiagnosticsMaxDetailRecords
+$script:LifeOSRecoveryDiagnosticsDetailPhaseNames = [string[]]@(
+    'journal-load',
+    'inventory-validation',
+    'progress-read',
+    'progress-replay',
+    'root-validation',
+    'unit-validation',
+    'state-precondition',
+    'tree-validation',
+    'state-validation'
+)
 $script:LifeOSRecoveryDiagnostics = $null
 
 function Convert-LifeOSRecoveryDiagnosticScope {
     param([AllowNull()][string]$Scope)
     if ([string]::IsNullOrWhiteSpace($Scope) -or $script:LifeOSRecoveryDiagnosticsScopeNames -notcontains $Scope) { return 'other' }
     return $Scope
+}
+
+function Convert-LifeOSRecoveryDiagnosticDetailPhase {
+    param([AllowNull()][string]$Phase)
+    if ([string]::IsNullOrWhiteSpace($Phase) -or $script:LifeOSRecoveryDiagnosticsDetailPhaseNames -notcontains $Phase) { return $null }
+    return $Phase
 }
 
 function Start-LifeOSRecoveryDiagnostics {
@@ -102,6 +123,11 @@ function Start-LifeOSRecoveryDiagnostics {
             sessionId                = $sessionId
             admittedScopes           = [long]0
             records                  = [long]0
+            legacyRecords            = [long]0
+            detailRecords            = [long]0
+            detailHeartbeats         = [long]0
+            detailOrdinals           = [long]0
+            detailReservedEndRecords = [long]0
             summaryWritten           = $false
             droppedScopes            = [long]0
             saturated                = $false
@@ -110,6 +136,18 @@ function Start-LifeOSRecoveryDiagnostics {
             progressReadCalls        = [long]0
             progressFileOpens        = [long]0
             progressReadBytes        = [long]0
+            detailUnits               = [long]0
+            detailCommittedFrames    = [long]0
+            detailProgressBytes      = [long]0
+            detailRootsScanned       = [long]0
+            detailRootsSkipped       = [long]0
+            detailFilesScanned       = [long]0
+            detailHashedFiles        = [long]0
+            detailHashedBytes        = [long]0
+            detailFallbackReads      = [long]0
+            detailDigestElapsedMs    = [long]0
+            detailDigestPhaseDepth   = [long]0
+            detailDigestSessionId     = ''
             memoryUnavailable        = $false
         }
         return ([pscustomobject]@{ sessionId = $sessionId })
@@ -137,6 +175,46 @@ function Add-LifeOSRecoveryDiagnosticCounter {
         $state.$Name = $current + $Delta
     } catch {
         # Diagnostics must never affect recovery behavior.
+    }
+}
+
+function Add-LifeOSRecoveryDiagnosticDetailCounter {
+    param(
+        [Parameter(Mandatory)][ValidateSet('units', 'committedFrames', 'progressBytes', 'rootsScanned', 'rootsSkipped', 'filesScanned', 'hashedFiles', 'hashedBytes', 'fallbackReads', 'digestElapsedMs')][string]$Name,
+        [long]$Delta = 1
+    )
+    try {
+        $state = $script:LifeOSRecoveryDiagnostics
+        if ($null -eq $state -or -not $state.enabled -or $Delta -le 0) { return }
+        $property = 'detail' + $Name.Substring(0, 1).ToUpperInvariant() + $Name.Substring(1)
+        $limit = [long]$script:LifeOSRecoveryDiagnosticsCounterLimit
+        $current = [long]$state.$property
+        if ($current -ge $limit -or $Delta -gt ($limit - $current)) {
+            $state.$property = $limit
+            $state.saturated = $true
+            return
+        }
+        $state.$property = $current + $Delta
+    } catch {
+        # Detail diagnostics must never affect recovery behavior.
+    }
+}
+
+function Add-LifeOSRecoveryDiagnosticDigestSample {
+    param(
+        [long]$ElapsedMs = 0,
+        [long]$Bytes = 0
+    )
+    try {
+        $state = $script:LifeOSRecoveryDiagnostics
+        if ($null -eq $state -or -not $state.enabled -or
+            $state.detailDigestPhaseDepth -le 0 -or
+            [string]$state.detailDigestSessionId -cne [string]$state.sessionId) { return }
+        Add-LifeOSRecoveryDiagnosticDetailCounter -Name 'hashedFiles'
+        if ($Bytes -gt 0) { Add-LifeOSRecoveryDiagnosticDetailCounter -Name 'hashedBytes' -Delta $Bytes }
+        if ($ElapsedMs -gt 0) { Add-LifeOSRecoveryDiagnosticDetailCounter -Name 'digestElapsedMs' -Delta $ElapsedMs }
+    } catch {
+        # Digest telemetry must never affect the hash result or recovery behavior.
     }
 }
 
@@ -206,7 +284,16 @@ function Write-LifeOSRecoveryDiagnosticRecord {
     try {
         $state = $script:LifeOSRecoveryDiagnostics
         if ($null -eq $state -or -not $state.enabled) { return }
-        if ($Event -ne 'summary' -and $state.records -ge ($script:LifeOSRecoveryDiagnosticsMaxScopes * 2)) {
+        if ($state.records -ge $script:LifeOSRecoveryDiagnosticsMaxTotalRecords) {
+            $state.saturated = $true
+            return
+        }
+        if ($Event -ne 'summary' -and
+            $state.records + $state.detailReservedEndRecords -ge $script:LifeOSRecoveryDiagnosticsMaxTotalRecords) {
+            $state.saturated = $true
+            return
+        }
+        if ($Event -ne 'summary' -and $state.legacyRecords -ge ($script:LifeOSRecoveryDiagnosticsMaxScopes * 2)) {
             $state.saturated = $true
             return
         }
@@ -239,10 +326,247 @@ function Write-LifeOSRecoveryDiagnosticRecord {
         }
         Write-Information -MessageData $json -Tags 'LifeOSRecoveryDiagnostics' -InformationAction Continue
         $state.records++
-        if ($Event -eq 'summary') { $state.summaryWritten = $true }
+        if ($Event -eq 'summary') {
+            $state.summaryWritten = $true
+        } else {
+            $state.legacyRecords++
+        }
     } catch {
         # Diagnostics must never change the deployment result or mask its errors.
     }
+}
+
+function Get-LifeOSRecoveryDiagnosticDetailDelta {
+    param(
+        [Parameter(Mandatory)]$Token,
+        [Parameter(Mandatory)][ValidateSet('units', 'committedFrames', 'progressBytes', 'rootsScanned', 'rootsSkipped', 'filesScanned', 'hashedFiles', 'hashedBytes', 'fallbackReads', 'digestElapsedMs')][string]$Name,
+        [switch]$SinceHeartbeat
+    )
+    try {
+        $state = $script:LifeOSRecoveryDiagnostics
+        if ($null -eq $state -or -not $state.enabled -or $null -eq $Token -or
+            -not $Token.admitted -or $Token.sessionId -cne $state.sessionId) { return [long]0 }
+        $suffix = $Name.Substring(0, 1).ToUpperInvariant() + $Name.Substring(1)
+        $currentProperty = $state.PSObject.Properties['detail' + $suffix]
+        $basePrefix = if ($SinceHeartbeat) { 'lastHeartbeat' } else { 'phaseStart' }
+        $baseProperty = $Token.PSObject.Properties[$basePrefix + $suffix]
+        if ($null -eq $currentProperty -or $null -eq $baseProperty) { return [long]0 }
+        $current = [long]$currentProperty.Value
+        $started = [long]$baseProperty.Value
+        return [long][Math]::Max([long]0, $current - $started)
+    } catch {
+        return [long]0
+    }
+}
+
+function Write-LifeOSRecoveryDiagnosticDetailRecord {
+    param(
+        [Parameter(Mandatory)][ValidateSet('begin', 'end', 'heartbeat')][string]$Event,
+        [Parameter(Mandatory)][string]$Phase,
+        [long]$Ordinal = 0,
+        [ValidateSet('started', 'returned', 'threw', 'heartbeat')][string]$Outcome = 'heartbeat',
+        [long]$ElapsedMs = 0,
+        [long]$DigestElapsedMs = 0,
+        [long]$Units = 0,
+        [long]$CommittedFrames = 0,
+        [long]$ProgressBytes = 0,
+        [long]$RootsScanned = 0,
+        [long]$RootsSkipped = 0,
+        [long]$FilesScanned = 0,
+        [long]$HashedFiles = 0,
+        [long]$HashedBytes = 0,
+        [long]$FallbackReads = 0
+    )
+    try {
+        $state = $script:LifeOSRecoveryDiagnostics
+        $normalizedPhase = Convert-LifeOSRecoveryDiagnosticDetailPhase $Phase
+        if ($null -eq $state -or -not $state.enabled -or $null -eq $normalizedPhase) { return }
+        if ($state.records -ge $script:LifeOSRecoveryDiagnosticsMaxTotalRecords -or
+            $state.detailRecords -ge $script:LifeOSRecoveryDiagnosticsMaxDetailRecords) {
+            $state.saturated = $true
+            return
+        }
+        if ($Event -eq 'heartbeat' -and
+            $state.detailRecords + $state.detailReservedEndRecords -ge $script:LifeOSRecoveryDiagnosticsMaxDetailRecords) {
+            $state.saturated = $true
+            return
+        }
+        if ($Event -eq 'heartbeat' -and $state.detailHeartbeats -ge $script:LifeOSRecoveryDiagnosticsMaxHeartbeatRecords) {
+            $state.saturated = $true
+            return
+        }
+        $payload = [ordered]@{
+            v               = 1
+            event           = $Event
+            phase           = $normalizedPhase
+            ordinal         = [long][Math]::Max([long]0, $Ordinal)
+            outcome         = $Outcome
+            elapsedMs       = [long][Math]::Max([long]0, $ElapsedMs)
+            digestMs        = [long][Math]::Max([long]0, $DigestElapsedMs)
+            units           = [long][Math]::Max([long]0, $Units)
+            committedFrames = [long][Math]::Max([long]0, $CommittedFrames)
+            progressBytes   = [long][Math]::Max([long]0, $ProgressBytes)
+            rootsScanned    = [long][Math]::Max([long]0, $RootsScanned)
+            rootsSkipped    = [long][Math]::Max([long]0, $RootsSkipped)
+            filesScanned    = [long][Math]::Max([long]0, $FilesScanned)
+            hashedFiles     = [long][Math]::Max([long]0, $HashedFiles)
+            hashedBytes     = [long][Math]::Max([long]0, $HashedBytes)
+            fallbackReads   = [long][Math]::Max([long]0, $FallbackReads)
+        }
+        $json = $payload | ConvertTo-Json -Compress -Depth 3
+        if ([Text.Encoding]::UTF8.GetByteCount($json + "`n") -gt $script:LifeOSRecoveryDiagnosticsMaxRecordBytes) {
+            $state.saturated = $true
+            return
+        }
+        Write-Information -MessageData $json -Tags 'LifeOSRecoveryDiagnosticsDetail' -InformationAction Continue
+        $state.records++
+        $state.detailRecords++
+        if ($Event -eq 'heartbeat') { $state.detailHeartbeats++ }
+        return $true
+    } catch {
+        # Detail diagnostics must never change the deployment result or mask its errors.
+        return $false
+    }
+}
+
+function Start-LifeOSRecoveryDiagnosticDetailPhase {
+    param([Parameter(Mandatory)][string]$Phase)
+    $state = $null
+    $token = $null
+    try {
+        $state = $script:LifeOSRecoveryDiagnostics
+        $normalizedPhase = Convert-LifeOSRecoveryDiagnosticDetailPhase $Phase
+        if ($null -eq $state -or -not $state.enabled -or $null -eq $normalizedPhase) { return $null }
+        if ($state.records + $state.detailReservedEndRecords + 2 -gt $script:LifeOSRecoveryDiagnosticsMaxTotalRecords -or
+            $state.detailRecords + $state.detailReservedEndRecords + 2 -gt $script:LifeOSRecoveryDiagnosticsMaxDetailRecords) {
+            $state.saturated = $true
+            return $null
+        }
+        $state.detailReservedEndRecords += 2
+        if ($state.detailOrdinals -lt $script:LifeOSRecoveryDiagnosticsCounterLimit) { $state.detailOrdinals++ }
+        $token = [pscustomobject]@{
+            admitted          = $true
+            completed         = $false
+            endReserved       = $true
+            ordinal           = [long]$state.detailOrdinals
+            sessionId         = [string]$state.sessionId
+            phase             = $normalizedPhase
+            started           = [System.Diagnostics.Stopwatch]::GetTimestamp()
+            lastHeartbeat     = [System.Diagnostics.Stopwatch]::GetTimestamp()
+            tracksDigest      = $normalizedPhase -in @('tree-validation', 'state-validation')
+            phaseStartUnits             = [long]$state.detailUnits
+            phaseStartCommittedFrames   = [long]$state.detailCommittedFrames
+            phaseStartProgressBytes     = [long]$state.detailProgressBytes
+            phaseStartRootsScanned      = [long]$state.detailRootsScanned
+            phaseStartRootsSkipped      = [long]$state.detailRootsSkipped
+            phaseStartFilesScanned      = [long]$state.detailFilesScanned
+            phaseStartHashedFiles       = [long]$state.detailHashedFiles
+            phaseStartHashedBytes       = [long]$state.detailHashedBytes
+            phaseStartFallbackReads     = [long]$state.detailFallbackReads
+            phaseStartDigestElapsedMs   = [long]$state.detailDigestElapsedMs
+            lastHeartbeatUnits           = [long]$state.detailUnits
+            lastHeartbeatCommittedFrames = [long]$state.detailCommittedFrames
+            lastHeartbeatProgressBytes   = [long]$state.detailProgressBytes
+            lastHeartbeatRootsScanned    = [long]$state.detailRootsScanned
+            lastHeartbeatRootsSkipped    = [long]$state.detailRootsSkipped
+            lastHeartbeatFilesScanned    = [long]$state.detailFilesScanned
+            lastHeartbeatHashedFiles     = [long]$state.detailHashedFiles
+            lastHeartbeatHashedBytes     = [long]$state.detailHashedBytes
+            lastHeartbeatFallbackReads   = [long]$state.detailFallbackReads
+            lastHeartbeatDigestElapsedMs = [long]$state.detailDigestElapsedMs
+        }
+        if ($token.tracksDigest) {
+            $state.detailDigestPhaseDepth++
+            $state.detailDigestSessionId = [string]$state.sessionId
+        }
+        $beginWritten = Write-LifeOSRecoveryDiagnosticDetailRecord -Event begin -Phase $token.phase -Ordinal $token.ordinal -Outcome started
+        if (-not $beginWritten) {
+            if ($token.tracksDigest) {
+                $state.detailDigestPhaseDepth = [Math]::Max([long]0, [long]$state.detailDigestPhaseDepth - 1)
+                if ($state.detailDigestPhaseDepth -eq 0) { $state.detailDigestSessionId = '' }
+            }
+            $state.detailReservedEndRecords -= 2
+            return $null
+        }
+        $state.detailReservedEndRecords--
+        return $token
+    } catch {
+        # Detail diagnostics must never affect recovery behavior.
+        try {
+            if ($null -ne $state -and $null -ne $token -and $token.tracksDigest -and $state.detailDigestPhaseDepth -gt 0) {
+                $state.detailDigestPhaseDepth = [Math]::Max([long]0, [long]$state.detailDigestPhaseDepth - 1)
+                if ($state.detailDigestPhaseDepth -eq 0) { $state.detailDigestSessionId = '' }
+            }
+            if ($null -ne $state) { $state.detailReservedEndRecords = [Math]::Max([long]0, [long]$state.detailReservedEndRecords - 2) }
+        } catch {}
+        return $null
+    }
+}
+
+function Write-LifeOSRecoveryDiagnosticDetailHeartbeat {
+    param([AllowNull()]$Token)
+    try {
+        $state = $script:LifeOSRecoveryDiagnostics
+        if ($null -eq $state -or -not $state.enabled -or $null -eq $Token -or
+            -not $Token.admitted -or $Token.completed -or
+            $Token.sessionId -cne $state.sessionId) { return }
+        $now = [System.Diagnostics.Stopwatch]::GetTimestamp()
+        $elapsedMs = [long]([Math]::Max([double]0, (($now - [long]$Token.lastHeartbeat) * 1000.0) / [System.Diagnostics.Stopwatch]::Frequency))
+        if ($elapsedMs -lt $script:LifeOSRecoveryDiagnosticsHeartbeatIntervalMs) { return }
+        $written = Write-LifeOSRecoveryDiagnosticDetailRecord -Event heartbeat -Phase $Token.phase -Ordinal $Token.ordinal -Outcome heartbeat -ElapsedMs $elapsedMs `
+            -Units (Get-LifeOSRecoveryDiagnosticDetailDelta -Token $Token -Name units -SinceHeartbeat) `
+            -CommittedFrames (Get-LifeOSRecoveryDiagnosticDetailDelta -Token $Token -Name committedFrames -SinceHeartbeat) `
+            -ProgressBytes (Get-LifeOSRecoveryDiagnosticDetailDelta -Token $Token -Name progressBytes -SinceHeartbeat) `
+            -RootsScanned (Get-LifeOSRecoveryDiagnosticDetailDelta -Token $Token -Name rootsScanned -SinceHeartbeat) `
+            -RootsSkipped (Get-LifeOSRecoveryDiagnosticDetailDelta -Token $Token -Name rootsSkipped -SinceHeartbeat) `
+            -FilesScanned (Get-LifeOSRecoveryDiagnosticDetailDelta -Token $Token -Name filesScanned -SinceHeartbeat) `
+            -HashedFiles (Get-LifeOSRecoveryDiagnosticDetailDelta -Token $Token -Name hashedFiles -SinceHeartbeat) `
+            -HashedBytes (Get-LifeOSRecoveryDiagnosticDetailDelta -Token $Token -Name hashedBytes -SinceHeartbeat) `
+            -FallbackReads (Get-LifeOSRecoveryDiagnosticDetailDelta -Token $Token -Name fallbackReads -SinceHeartbeat) `
+            -DigestElapsedMs (Get-LifeOSRecoveryDiagnosticDetailDelta -Token $Token -Name digestElapsedMs -SinceHeartbeat)
+        if (-not $written) { return $false }
+        $Token.lastHeartbeat = $now
+        foreach ($name in @('units', 'committedFrames', 'progressBytes', 'rootsScanned', 'rootsSkipped', 'filesScanned', 'hashedFiles', 'hashedBytes', 'fallbackReads', 'digestElapsedMs')) {
+            $suffix = $name.Substring(0, 1).ToUpperInvariant() + $name.Substring(1)
+            $lastHeartbeatProperty = 'lastHeartbeat' + $suffix
+            $detailProperty = 'detail' + $suffix
+            $Token.$lastHeartbeatProperty = [long]$state.$detailProperty
+        }
+        return $true
+    } catch {
+        # Heartbeats must never affect recovery behavior.
+        return $false
+    }
+}
+
+function Stop-LifeOSRecoveryDiagnosticDetailPhase {
+    param(
+        [AllowNull()]$Token,
+        [switch]$Succeeded
+    )
+    try {
+        $state = $script:LifeOSRecoveryDiagnostics
+        if ($null -eq $state -or -not $state.enabled -or $null -eq $Token -or
+            -not $Token.admitted -or $Token.completed -or
+            $Token.sessionId -cne $state.sessionId) { return }
+        $Token.completed = $true
+        if ($Token.endReserved) { $state.detailReservedEndRecords = [Math]::Max([long]0, [long]$state.detailReservedEndRecords - 1); $Token.endReserved = $false }
+        $elapsedTicks = [System.Diagnostics.Stopwatch]::GetTimestamp() - [long]$Token.started
+        $elapsedMs = [long][Math]::Max([double]0, ($elapsedTicks * 1000.0) / [System.Diagnostics.Stopwatch]::Frequency)
+        $outcome = if ($Succeeded) { 'returned' } else { 'threw' }
+        if ($Token.tracksDigest) { $state.detailDigestPhaseDepth = [Math]::Max([long]0, [long]$state.detailDigestPhaseDepth - 1); if ($state.detailDigestPhaseDepth -eq 0) { $state.detailDigestSessionId = '' } }
+        [void](Write-LifeOSRecoveryDiagnosticDetailRecord -Event end -Phase $Token.phase -Ordinal $Token.ordinal -Outcome $outcome -ElapsedMs $elapsedMs `
+            -DigestElapsedMs (Get-LifeOSRecoveryDiagnosticDetailDelta -Token $Token -Name digestElapsedMs) `
+            -Units (Get-LifeOSRecoveryDiagnosticDetailDelta -Token $Token -Name units) `
+            -CommittedFrames (Get-LifeOSRecoveryDiagnosticDetailDelta -Token $Token -Name committedFrames) `
+            -ProgressBytes (Get-LifeOSRecoveryDiagnosticDetailDelta -Token $Token -Name progressBytes) `
+            -RootsScanned (Get-LifeOSRecoveryDiagnosticDetailDelta -Token $Token -Name rootsScanned) `
+            -RootsSkipped (Get-LifeOSRecoveryDiagnosticDetailDelta -Token $Token -Name rootsSkipped) `
+            -FilesScanned (Get-LifeOSRecoveryDiagnosticDetailDelta -Token $Token -Name filesScanned) `
+            -HashedFiles (Get-LifeOSRecoveryDiagnosticDetailDelta -Token $Token -Name hashedFiles) `
+            -HashedBytes (Get-LifeOSRecoveryDiagnosticDetailDelta -Token $Token -Name hashedBytes) `
+            -FallbackReads (Get-LifeOSRecoveryDiagnosticDetailDelta -Token $Token -Name fallbackReads))
+    } catch { }
 }
 
 function Start-LifeOSRecoveryDiagnosticScope {
@@ -2559,7 +2883,8 @@ function Get-LifeOSFileDigest {
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][string]$Description,
-        [string]$ExpectedFileId = ''
+        [string]$ExpectedFileId = '',
+        [object]$DiagnosticSample = $null
     )
     for ($attempt = 0; $attempt -lt 3; $attempt++) {
         $beforeChain = $null
@@ -2568,6 +2893,10 @@ function Get-LifeOSFileDigest {
         $stream = $null
         $hasher = $null
         $retry = $false
+        $openedLength = [long]0
+        $diagnosticHashStarted = $null
+        $diagnosticHashElapsedMs = [long]0
+        $diagnosticHashSucceeded = $false
         try {
             Assert-ExistingFile $Path $Description
             $beforeChain = @(Get-LifeOSPathIdentityChain -Path $Path -Description $Description)
@@ -2595,7 +2924,18 @@ function Get-LifeOSFileDigest {
                 throw "$Description exceeds its bounded hash size."
             }
             $hasher = [Security.Cryptography.SHA256]::Create()
+            $diagnosticState = $script:LifeOSRecoveryDiagnostics
+            if ($null -ne $diagnosticState -and $diagnosticState.enabled -and
+                $diagnosticState.detailDigestPhaseDepth -gt 0 -and
+                [string]$diagnosticState.detailDigestSessionId -ceq [string]$diagnosticState.sessionId) {
+                $diagnosticHashStarted = [System.Diagnostics.Stopwatch]::GetTimestamp()
+            }
             $digest = $hasher.ComputeHash($stream)
+            if ($null -ne $diagnosticHashStarted) {
+                $diagnosticHashTicks = [System.Diagnostics.Stopwatch]::GetTimestamp() - [long]$diagnosticHashStarted
+                $diagnosticHashElapsedMs = [long][Math]::Max([double]0, ($diagnosticHashTicks * 1000.0) / [System.Diagnostics.Stopwatch]::Frequency)
+            }
+            $diagnosticHashSucceeded = $true
             if ([long]$stream.Length -ne $openedLength -or $stream.Position -ne $openedLength -or
                 [string][LifeOSNativeFileIdentity]::Get($stream.SafeFileHandle) -cne $openedId) {
                 throw "$Description changed while it was being read."
@@ -2603,6 +2943,14 @@ function Get-LifeOSFileDigest {
             Assert-LifeOSPathIdentityChain -Expected $beforeChain -Description $Description | Out-Null
             if ($null -eq $digest -or $digest.Length -ne 32) {
                 throw "Hash operation returned no SHA-256 value for $Path."
+            }
+            if ($diagnosticHashSucceeded -and $null -ne $diagnosticHashStarted) {
+                $sample = [pscustomobject]@{ ElapsedMs = $diagnosticHashElapsedMs; Bytes = $openedLength }
+                if ($null -ne $DiagnosticSample -and $null -ne $DiagnosticSample.PSObject.Properties['Value']) {
+                    $DiagnosticSample.Value = $sample
+                } else {
+                    Add-LifeOSRecoveryDiagnosticDigestSample -ElapsedMs $diagnosticHashElapsedMs -Bytes $openedLength
+                }
             }
             return [pscustomobject]@{
                 Length = $openedLength
@@ -3025,8 +3373,9 @@ function Get-TreeManifestIndex {
         }
         $itemIdentity = New-LifeOSTreeItemIdentity -Item $item -Description 'Tree manifest item'
         if ($byPath.ContainsKey($relative)) { throw "Tree manifest contains a duplicate path: $relative" }
+        $diagnosticHashSample = [pscustomobject]@{ Value = $null }
         try {
-            $hashRecord = Get-LifeOSFileDigest -Path $item.FullName -Description 'Tree manifest item' -ExpectedFileId ([string]$itemIdentity.FileId)
+            $hashRecord = Get-LifeOSFileDigest -Path $item.FullName -Description 'Tree manifest item' -ExpectedFileId ([string]$itemIdentity.FileId) -DiagnosticSample $diagnosticHashSample
             Assert-LifeOSTreeItemIdentity -Path $item.FullName -Expected $itemIdentity -Description 'Tree manifest item' | Out-Null
         } catch {
             throw "Could not hash tree item $($item.FullName): $($_.Exception.Message)"
@@ -3034,6 +3383,9 @@ function Get-TreeManifestIndex {
         if ($null -eq $hashRecord -or [string]$hashRecord.Sha256 -notmatch '^[0-9a-f]{64}$' -or
             [long]$hashRecord.Length -ne $enumeratedLength) {
             throw "Hash operation returned no SHA-256 value for tree item $($item.FullName)."
+        }
+        if ($null -ne $diagnosticHashSample.Value) {
+            Add-LifeOSRecoveryDiagnosticDigestSample -ElapsedMs $diagnosticHashSample.Value.ElapsedMs -Bytes $diagnosticHashSample.Value.Bytes
         }
         $entry = [ordered]@{ path = $relative; sha256 = ([string]$hashRecord.Sha256).ToLowerInvariant(); length = [long]$hashRecord.Length }
         [void]$items.Add($entry)
@@ -3619,6 +3971,9 @@ function Read-RecoveryProgress {
         [switch]$Strict
     )
     Add-LifeOSRecoveryDiagnosticCounter -Name 'progressReadCalls'
+    $progressReadPhase = Start-LifeOSRecoveryDiagnosticDetailPhase -Phase 'progress-read'
+    $progressReadPhaseSucceeded = $false
+    try {
     $progressPathValue = Get-JournalProperty $Journal 'progressPath'
     $progressPath = if ($null -eq $progressPathValue) {
         Get-RecoveryProgressPath $Manifest
@@ -3632,6 +3987,7 @@ function Read-RecoveryProgress {
     Set-JournalProperty $Journal 'progressPath' (Get-FullPath $progressPath)
     if (-not (Test-Path -LiteralPath $progressPath)) {
         Set-JournalProperty $Journal 'progressSequence' 0
+        $progressReadPhaseSucceeded = $true
         return
     }
     Assert-ExistingFile $progressPath 'Recovery progress log'
@@ -3676,11 +4032,19 @@ function Read-RecoveryProgress {
             $chunk = $stream.Read($buffer, $read, $buffer.Length - $read)
             if ($chunk -le 0) { throw 'Recovery progress log changed while it was being read.' }
             Add-LifeOSRecoveryDiagnosticCounter -Name 'progressReadBytes' -Delta ([long]$chunk)
+            Add-LifeOSRecoveryDiagnosticDetailCounter -Name 'progressBytes' -Delta ([long]$chunk)
             $read += $chunk
         }
         if ([long]$stream.Length -ne [long]$buffer.Length) { throw 'Recovery progress log changed while it was being read.' }
     } finally { $stream.Dispose() }
+    $progressReadPhaseSucceeded = $true
+    } finally {
+        [void](Stop-LifeOSRecoveryDiagnosticDetailPhase -Token $progressReadPhase -Succeeded:$progressReadPhaseSucceeded)
+    }
 
+    $progressReplayPhase = Start-LifeOSRecoveryDiagnosticDetailPhase -Phase 'progress-replay'
+    $progressReplayPhaseSucceeded = $false
+    try {
     $sequence = [long]0
     $offset = [long]0
     $committedOffset = [long]0
@@ -3756,10 +4120,13 @@ function Read-RecoveryProgress {
         Assert-RecoveryProgressRecord -Record $record -Manifest $Manifest -UnitCount $JournalUnits.Count -ExpectedSequence $sequence
         $progressUnit = $JournalUnits[[int](Get-JournalProperty $record 'unitIndex')]
         Set-JournalProperty $progressUnit 'phase' ([string](Get-JournalProperty $record 'phase'))
+        Add-LifeOSRecoveryDiagnosticDetailCounter -Name 'units'
+        Add-LifeOSRecoveryDiagnosticDetailCounter -Name 'committedFrames'
         $sequence++
         $offset += $frameBytes
         $committedOffset = $offset
         if ($sequence -gt $script:LifeOSRecoveryProgressMaxRecords) { throw 'Recovery progress log contains too many records.' }
+        if (($sequence % 1024) -eq 0) { [void](Write-LifeOSRecoveryDiagnosticDetailHeartbeat -Token $progressReplayPhase) }
     }
     if ($incompleteTail) {
         if ($Strict) {
@@ -3774,6 +4141,10 @@ function Read-RecoveryProgress {
         Assert-NoReparsePath $progressPath
     }
     Set-JournalProperty $Journal 'progressSequence' $sequence
+    $progressReplayPhaseSucceeded = $true
+    } finally {
+        [void](Stop-LifeOSRecoveryDiagnosticDetailPhase -Token $progressReplayPhase -Succeeded:$progressReplayPhaseSucceeded)
+    }
 }
 
 function Append-RecoveryProgress {
@@ -4174,11 +4545,21 @@ function Read-RecoveryJournal {
     $journalScope = Start-LifeOSRecoveryDiagnosticScope -Scope 'journal-validation'
     $journalScopeSucceeded = $false
     try {
+    $journalLoadPhase = Start-LifeOSRecoveryDiagnosticDetailPhase -Phase 'journal-load'
+    $journalLoadPhaseSucceeded = $false
+    try {
     $path = Get-RecoveryJournalPath $Manifest
-    if (-not (Test-Path -LiteralPath $path)) { $journalScopeSucceeded = $true; return $null }
+    if (-not (Test-Path -LiteralPath $path)) { $journalLoadPhaseSucceeded = $true; $journalScopeSucceeded = $true; return $null }
     Assert-ExistingFile $path 'Recovery journal'
     Assert-RestrictedAcl $path $Manifest.operatorSid @() @() -AllowInherited
     $journal = Read-LifeOSBoundedJsonFile -Path $path -MaxBytes $script:LifeOSRecoveryJournalMaxBytes -Description 'Recovery journal'
+    $journalLoadPhaseSucceeded = $true
+    } finally {
+        [void](Stop-LifeOSRecoveryDiagnosticDetailPhase -Token $journalLoadPhase -Succeeded:$journalLoadPhaseSucceeded)
+    }
+    $inventoryPhase = Start-LifeOSRecoveryDiagnosticDetailPhase -Phase 'inventory-validation'
+    $inventoryPhaseSucceeded = $false
+    try {
     foreach ($name in @('transactionId', 'generation', 'operatorSid', 'manifestPath')) {
         $manifestIdentity = Get-JournalProperty $Manifest $name
         $journalIdentity = Get-JournalProperty $journal $name
@@ -4233,6 +4614,10 @@ function Read-RecoveryJournal {
     }
     $manifestBackups = @($Manifest.backups)
     Assert-RecoveryInventoryBounds -TreeRoots $treeRoots -FileUnits $journalUnits -ManifestBackups $manifestBackups
+    $inventoryPhaseSucceeded = $true
+    } finally {
+        [void](Stop-LifeOSRecoveryDiagnosticDetailPhase -Token $inventoryPhase -Succeeded:$inventoryPhaseSucceeded)
+    }
     Read-RecoveryProgress -Manifest $Manifest -Journal $journal -JournalUnits $journalUnits -Strict:$Strict
     $journalHasIncompleteUnit = $false
     foreach ($unit in $journalUnits) {
@@ -4249,6 +4634,9 @@ function Read-RecoveryJournal {
     $backupPrefix = (Get-FullPath $Manifest.paths.backupDirectory).TrimEnd('\') + '\'
     $validatedTreeRoots = New-Object 'System.Collections.Generic.List[string]'
     $treeRootSet = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $rootPhase = Start-LifeOSRecoveryDiagnosticDetailPhase -Phase 'root-validation'
+    $rootPhaseSucceeded = $false
+    try {
     foreach ($root in $treeRoots) {
         if ($root -isnot [string]) { throw 'Recovery journal tree root is malformed.' }
         $rootText = [string]$root
@@ -4261,9 +4649,16 @@ function Read-RecoveryJournal {
     }
     $scanRootCandidates = New-Object 'System.Collections.Generic.List[string]'
     foreach ($root in $validatedTreeRoots) { [void]$scanRootCandidates.Add($root) }
+    $rootPhaseSucceeded = $true
+    } finally {
+        [void](Stop-LifeOSRecoveryDiagnosticDetailPhase -Token $rootPhase -Succeeded:$rootPhaseSucceeded)
+    }
     $destinationSet = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $stagingSet = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $unitIndex = 0
+    $unitPhase = Start-LifeOSRecoveryDiagnosticDetailPhase -Phase 'unit-validation'
+    $unitPhaseSucceeded = $false
+    try {
     foreach ($unit in $journalUnits) {
         if ($null -eq $unit) { throw 'Recovery journal unit is malformed.' }
         $expectedUnitFields = @('destination', 'backup', 'pre', 'post', 'phase', 'stagingPath')
@@ -4308,9 +4703,18 @@ function Read-RecoveryJournal {
             }
         }
         $unitIndex++
+        Add-LifeOSRecoveryDiagnosticDetailCounter -Name 'units'
+        if (($unitIndex % 256) -eq 0) { [void](Write-LifeOSRecoveryDiagnosticDetailHeartbeat -Token $unitPhase) }
     }
     Assert-RecoveryInventoryBounds -TreeRoots $scanRootCandidates.ToArray() -FileUnits $journalUnits -ManifestBackups $manifestBackups
+    $unitPhaseSucceeded = $true
+    } finally {
+        [void](Stop-LifeOSRecoveryDiagnosticDetailPhase -Token $unitPhase -Succeeded:$unitPhaseSucceeded)
+    }
     $scanRoots = @(Get-RecoveryCanonicalTreeRoots -Roots $scanRootCandidates.ToArray())
+    $preconditionPhase = Start-LifeOSRecoveryDiagnosticDetailPhase -Phase 'state-precondition'
+    $preconditionPhaseSucceeded = $false
+    try {
     $writerState = Get-JournalProperty $journal 'writersReleased'
     if ($null -ne $writerState -and $writerState -isnot [bool]) { throw 'Recovery writer boundary is not boolean.' }
     $writersReleased = $writerState -eq $true
@@ -4319,6 +4723,10 @@ function Read-RecoveryJournal {
     if ($journal.phase -eq 'completed' -and ($writersReleased -ne $true -or
         $journalHasIncompleteUnit)) {
         throw 'Completed recovery journal is not a verified terminal state.'
+    }
+    $preconditionPhaseSucceeded = $true
+    } finally {
+        [void](Stop-LifeOSRecoveryDiagnosticDetailPhase -Token $preconditionPhase -Succeeded:$preconditionPhaseSucceeded)
     }
     $discoveredFileCount = 0
     [long]$discoveredBytes = 0
@@ -4329,9 +4737,16 @@ function Read-RecoveryJournal {
     # memory bounded by the journal units, path sets, and one root enumerator.
     Add-LifeOSRecoveryDiagnosticCounter -Name 'journalScanPasses'
     $indexedStates = [System.Collections.Generic.Dictionary[string,string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $treePhase = Start-LifeOSRecoveryDiagnosticDetailPhase -Phase 'tree-validation'
+    $treePhaseSucceeded = $false
+    try {
     foreach ($root in $scanRoots) {
-        if ($writersReleased -and (Test-RecoveryAuthorityPath $Manifest $root)) { continue }
+        if ($writersReleased -and (Test-RecoveryAuthorityPath $Manifest $root)) {
+            Add-LifeOSRecoveryDiagnosticDetailCounter -Name 'rootsSkipped'
+            continue
+        }
         if (Test-Path -LiteralPath $root -PathType Container) {
+            Add-LifeOSRecoveryDiagnosticDetailCounter -Name 'rootsScanned'
             $allowNodeRuntime = Test-LifeOSNodeRuntimeArtifactPath -Manifest $Manifest -Path $root -TreeRoot
             $largeFileRelativePaths = @(Get-LifeOSNodeRuntimeStagingRelativePaths -Manifest $Manifest -Journal $journal -Root $root)
             $largeFileRelativePath = if ($allowNodeRuntime) { 'node.exe' } else { '' }
@@ -4346,12 +4761,14 @@ function Read-RecoveryJournal {
                         Assert-NoReparsePath $filePath
                     }
                     $discoveredFileCount++
+                    Add-LifeOSRecoveryDiagnosticDetailCounter -Name 'filesScanned'
                     if ($discoveredFileCount -gt $script:LifeOSRecoveryMaxFileUnits) { throw 'Recovery inventory contains too many files.' }
                     $discoveredBytes += [long]$item.Length
                     if ($discoveredBytes -gt $script:LifeOSRecoveryMaxInventoryBytes) { throw 'Recovery inventory exceeds its bounded byte size.' }
                     $itemIdentity = New-LifeOSTreeItemIdentity -Item $item -Description 'Recovery tree item'
+                    $diagnosticHashSample = [pscustomobject]@{ Value = $null }
                     try {
-                        $hashRecord = Get-LifeOSFileDigest -Path $filePath -Description 'Recovery tree item' -ExpectedFileId ([string]$itemIdentity.FileId)
+                        $hashRecord = Get-LifeOSFileDigest -Path $filePath -Description 'Recovery tree item' -ExpectedFileId ([string]$itemIdentity.FileId) -DiagnosticSample $diagnosticHashSample
                         Assert-LifeOSTreeItemIdentity -Path $filePath -Expected $itemIdentity -Description 'Recovery tree item' | Out-Null
                     } catch {
                         throw "Could not hash recovery tree item ${filePath}: $($_.Exception.Message)"
@@ -4359,17 +4776,41 @@ function Read-RecoveryJournal {
                     if ($null -eq $hashRecord -or [string]$hashRecord.Sha256 -notmatch '^[0-9a-f]{64}$' -or [long]$hashRecord.Length -ne [long]$item.Length) {
                         throw "Hash operation returned no SHA-256 value for recovery tree item $filePath."
                     }
+                    if ($null -ne $diagnosticHashSample.Value) {
+                        Add-LifeOSRecoveryDiagnosticDigestSample -ElapsedMs $diagnosticHashSample.Value.ElapsedMs -Bytes $diagnosticHashSample.Value.Bytes
+                    }
                     $indexedStates[$filePath] = 'file:' + ([string]$hashRecord.Sha256).ToLowerInvariant()
+                    if (($discoveredFileCount % 256) -eq 0) { [void](Write-LifeOSRecoveryDiagnosticDetailHeartbeat -Token $treePhase) }
                 }
         }
     }
+    $treePhaseSucceeded = $true
+    } finally {
+        [void](Stop-LifeOSRecoveryDiagnosticDetailPhase -Token $treePhase -Succeeded:$treePhaseSucceeded)
+    }
+    $statePhase = Start-LifeOSRecoveryDiagnosticDetailPhase -Phase 'state-validation'
+    $statePhaseSucceeded = $false
+    try {
+    $stateUnitIndex = 0
     foreach ($unit in $journalUnits) {
         if ($writersReleased -and (Test-RecoveryAuthorityPath $Manifest $unit.destination)) { continue }
         $unitDestination = Get-FullPath $unit.destination
         $allowNodeRuntime = Test-LifeOSNodeRuntimeArtifactPath -Manifest $Manifest -Path $unitDestination
         $allowServiceHostBinary = Test-LifeOSServiceHostArtifactPath -Manifest $Manifest -Path $unitDestination
-        $current = if ($indexedStates.ContainsKey($unitDestination)) { $indexedStates[$unitDestination] } else { Get-RecoveryArtifactState $unitDestination -AllowNodeRuntime:$allowNodeRuntime -AllowServiceHostBinary:$allowServiceHostBinary -Manifest $Manifest }
+        $current = if ($indexedStates.ContainsKey($unitDestination)) {
+            $indexedStates[$unitDestination]
+        } else {
+            Add-LifeOSRecoveryDiagnosticDetailCounter -Name 'fallbackReads'
+            Get-RecoveryArtifactState $unitDestination -AllowNodeRuntime:$allowNodeRuntime -AllowServiceHostBinary:$allowServiceHostBinary -Manifest $Manifest
+        }
         Assert-RecoveryUnitState $unit $current
+        $stateUnitIndex++
+        Add-LifeOSRecoveryDiagnosticDetailCounter -Name 'units'
+        if (($stateUnitIndex % 256) -eq 0) { [void](Write-LifeOSRecoveryDiagnosticDetailHeartbeat -Token $statePhase) }
+    }
+    $statePhaseSucceeded = $true
+    } finally {
+        [void](Stop-LifeOSRecoveryDiagnosticDetailPhase -Token $statePhase -Succeeded:$statePhaseSucceeded)
     }
     $journalScopeSucceeded = $true
     return $journal

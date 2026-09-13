@@ -4,8 +4,13 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
+$staticTestPath = [IO.Path]::GetFullPath($PSCommandPath)
 $files = @(Get-ChildItem -LiteralPath $root -File -Include '*.ps1', '*.py' -Recurse |
-    Where-Object { $_.FullName -ne $PSCommandPath })
+    Where-Object {
+        $_.Extension -in @('.ps1', '.py') -and
+        -not [String]::Equals($_.Name, 'Deployment.Static.Tests.ps1', [StringComparison]::OrdinalIgnoreCase) -and
+        -not [String]::Equals([IO.Path]::GetFullPath($_.FullName), $staticTestPath, [StringComparison]::OrdinalIgnoreCase)
+    })
 $text = ($files | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw }) -join "`n"
 $installText = Get-Content -LiteralPath (Join-Path $root 'install.ps1') -Raw
 $verifyText = Get-Content -LiteralPath (Join-Path $root 'verify.ps1') -Raw
@@ -834,6 +839,15 @@ foreach ($diagnosticContract in @(
     'function Stop-LifeOSRecoveryDiagnosticScope',
     '$script:LifeOSRecoveryDiagnosticsMaxScopes = 64',
     '$script:LifeOSRecoveryDiagnosticsMaxRecordBytes = 1024',
+    '$script:LifeOSRecoveryDiagnosticsMaxDetailRecords = 64',
+    '$script:LifeOSRecoveryDiagnosticsMaxHeartbeatRecords = 47',
+    '$script:LifeOSRecoveryDiagnosticsMaxTotalRecords',
+    'state-precondition',
+    'rootsSkipped',
+    'Start-LifeOSRecoveryDiagnosticDetailPhase',
+    'Stop-LifeOSRecoveryDiagnosticDetailPhase',
+    'Write-LifeOSRecoveryDiagnosticDetailHeartbeat',
+    'Get-LifeOSRecoveryDiagnosticDetailDelta',
     'journalReadCalls',
     'journalScanPasses',
     'progressReadCalls',
@@ -869,5 +883,64 @@ $rollbackStopIndex = $rollbackText.LastIndexOf('Stop-LifeOSRecoveryDiagnostics',
 if ($rollbackTryIndex -lt 0 -or $rollbackStartIndex -le $rollbackTryIndex -or
     $rollbackExitIndex -lt 0 -or $rollbackStopIndex -le $rollbackExitIndex) {
     throw 'FAIL: rollback diagnostics must begin inside the outer try and stop after transaction exit.'
+}
+if (-not $commonText.Contains('detailReservedEndRecords') -or
+    -not $commonText.Contains('phaseStartUnits') -or
+    -not $commonText.Contains('lastHeartbeatUnits') -or
+    -not $commonText.Contains('-SinceHeartbeat')) {
+    throw 'FAIL: detail telemetry must reserve close records and use independent phase and heartbeat baselines.'
+}
+if ($commonText.Contains('detailTreePhaseActive') -or
+    -not $commonText.Contains('detailDigestPhaseDepth') -or
+    -not $commonText.Contains('detailDigestSessionId')) {
+    throw 'FAIL: digest telemetry must be scoped to the active diagnostics session and phase depth.'
+}
+$detailReaderStart = $commonText.IndexOf('function Read-RecoveryProgress', [StringComparison]::Ordinal)
+$detailReaderEnd = $commonText.IndexOf('function Read-RecoveryJournal', [StringComparison]::Ordinal)
+if ($detailReaderStart -lt 0 -or $detailReaderEnd -le $detailReaderStart) {
+    throw 'FAIL: recovery progress reader source boundary is missing.'
+}
+$detailReaderText = $commonText.Substring($detailReaderStart, $detailReaderEnd - $detailReaderStart)
+if (-not $detailReaderText.Contains('finally') -or
+    -not $detailReaderText.Contains('Stop-LifeOSRecoveryDiagnosticDetailPhase') -or
+    -not $detailReaderText.Contains("-Phase 'progress-read'") -or
+    -not $detailReaderText.Contains("-Phase 'progress-replay'")) {
+    throw 'FAIL: progress reader detail phases must close in finally blocks.'
+}
+$digestStart = $commonText.IndexOf('function Get-LifeOSFileDigest', [StringComparison]::Ordinal)
+$digestEnd = $commonText.IndexOf('function Get-FileSha256', [StringComparison]::Ordinal)
+if ($digestStart -lt 0 -or $digestEnd -le $digestStart) { throw 'FAIL: digest source boundary is missing.' }
+$digestText = $commonText.Substring($digestStart, $digestEnd - $digestStart)
+if (-not $digestText.Contains('$hasher.ComputeHash($stream)') -or
+    -not $digestText.Contains('Add-LifeOSRecoveryDiagnosticDigestSample') -or
+    -not $digestText.Contains('diagnosticHashSucceeded')) {
+    throw 'FAIL: file digest telemetry must count only successfully validated descriptor-bound hashes.'
+}
+if ($digestText.Contains('Add-LifeOSRecoveryDiagnosticDigestSample -ElapsedMs $diagnosticMs')) {
+    throw 'FAIL: digest telemetry must not be emitted from finally after a failed validation.'
+}
+$treeIndexStart = $commonText.IndexOf('function Get-TreeManifestIndex', [StringComparison]::Ordinal)
+$treeIndexEnd = $commonText.IndexOf('function Get-TreeManifest {', [StringComparison]::Ordinal)
+if ($treeIndexStart -lt 0 -or $treeIndexEnd -le $treeIndexStart) { throw 'FAIL: tree-index source boundary is missing.' }
+$treeIndexText = $commonText.Substring($treeIndexStart, $treeIndexEnd - $treeIndexStart)
+$treeHashCall = $treeIndexText.IndexOf('Get-LifeOSFileDigest', [StringComparison]::Ordinal)
+$treeIdentityCheck = $treeIndexText.IndexOf('Assert-LifeOSTreeItemIdentity', [StringComparison]::Ordinal)
+$treeLengthCheck = $treeIndexText.IndexOf('[long]$hashRecord.Length -ne $enumeratedLength', [StringComparison]::Ordinal)
+$treeDigestCommit = $treeIndexText.LastIndexOf('Add-LifeOSRecoveryDiagnosticDigestSample', [StringComparison]::Ordinal)
+if ($treeHashCall -lt 0 -or $treeIdentityCheck -le $treeHashCall -or
+    $treeLengthCheck -le $treeIdentityCheck -or $treeDigestCommit -le $treeLengthCheck) {
+    throw 'FAIL: tree-index digest accounting must follow identity and enumerated-length validation.'
+}
+$recoveryTreeStart = $commonText.IndexOf("`$treePhase = Start-LifeOSRecoveryDiagnosticDetailPhase -Phase 'tree-validation'", [StringComparison]::Ordinal)
+$recoveryTreeEnd = $commonText.IndexOf("`$statePhase = Start-LifeOSRecoveryDiagnosticDetailPhase -Phase 'state-validation'", $recoveryTreeStart, [StringComparison]::Ordinal)
+if ($recoveryTreeStart -lt 0 -or $recoveryTreeEnd -le $recoveryTreeStart) { throw 'FAIL: recovery tree-validation source boundary is missing.' }
+$recoveryTreeText = $commonText.Substring($recoveryTreeStart, $recoveryTreeEnd - $recoveryTreeStart)
+$recoveryHashCall = $recoveryTreeText.IndexOf('Get-LifeOSFileDigest', [StringComparison]::Ordinal)
+$recoveryIdentityCheck = $recoveryTreeText.IndexOf('Assert-LifeOSTreeItemIdentity', [StringComparison]::Ordinal)
+$recoveryLengthCheck = $recoveryTreeText.IndexOf('[long]$hashRecord.Length -ne [long]$item.Length', [StringComparison]::Ordinal)
+$recoveryDigestCommit = $recoveryTreeText.LastIndexOf('Add-LifeOSRecoveryDiagnosticDigestSample', [StringComparison]::Ordinal)
+if ($recoveryHashCall -lt 0 -or $recoveryIdentityCheck -le $recoveryHashCall -or
+    $recoveryLengthCheck -le $recoveryIdentityCheck -or $recoveryDigestCommit -le $recoveryLengthCheck) {
+    throw 'FAIL: recovery tree digest accounting must follow identity and enumerated-length validation.'
 }
 Write-Host 'PASS: recovery diagnostics are opt-in, bounded, and transaction-scoped'

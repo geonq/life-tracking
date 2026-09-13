@@ -1352,6 +1352,37 @@ Assert-BehaviorThrows { Assert-CompleteLifeOSServiceSnapshot $unknownServiceSnap
             Assert-Behavior ([Convert]::ToBase64String($afterDefault) -ceq [Convert]::ToBase64String($committedBytes)) 'the default journal reader still truncates the same disposable torn tail.'
         } finally { Remove-Item -LiteralPath $strictTailFixture.Root -Recurse -Force -ErrorAction SilentlyContinue }
 
+        $readerFailureFixture = New-ProgressFixture -UnitCount 1
+        try {
+            Append-RecoveryProgress -Manifest $readerFailureFixture.Manifest -Journal $readerFailureFixture.Journal -UnitIndex 0 -Phase 'complete'
+            $readerFailurePath = Get-RecoveryProgressPath $readerFailureFixture.Manifest
+            $readerCommittedBytes = [IO.File]::ReadAllBytes($readerFailurePath)
+            $readerTail = New-Object byte[] 4
+            [Array]::Copy($readerFailureFixture.Frames[0].Header, 0, $readerTail, 0, $readerTail.Length)
+            $readerTornBytes = New-Object byte[] ($readerCommittedBytes.Length + $readerTail.Length)
+            [Array]::Copy($readerCommittedBytes, 0, $readerTornBytes, 0, $readerCommittedBytes.Length)
+            [Array]::Copy($readerTail, 0, $readerTornBytes, $readerCommittedBytes.Length, $readerTail.Length)
+            [IO.File]::WriteAllBytes($readerFailurePath, $readerTornBytes)
+
+            $disabledReaderError = $null
+            try { Read-RecoveryJournal $readerFailureFixture.Manifest -Strict | Out-Null } catch { $disabledReaderError = [string]$_.Exception.Message }
+            $script:readerFailureErrorText = $null
+            $readerFailureInformation = @(& {
+                $session = Start-LifeOSRecoveryDiagnostics -Enabled
+                try { Read-RecoveryJournal $readerFailureFixture.Manifest -Strict | Out-Null }
+                catch { $script:readerFailureErrorText = [string]$_.Exception.Message }
+                finally { Stop-LifeOSRecoveryDiagnostics -Session $session }
+            } 6>&1 | Where-Object { $_ -is [System.Management.Automation.InformationRecord] })
+            $readerFailureDetails = @($readerFailureInformation | Where-Object { $_.Tags -contains 'LifeOSRecoveryDiagnosticsDetail' } | ForEach-Object { ([string]$_.MessageData) | ConvertFrom-Json })
+            $readerFailureReplayEnd = @($readerFailureDetails | Where-Object { $_.phase -ceq 'progress-replay' -and $_.event -ceq 'end' })
+            Assert-Behavior ($disabledReaderError -ceq $script:readerFailureErrorText -and $script:readerFailureErrorText -ceq 'Recovery progress log contains an incomplete final frame.') 'reader instrumentation preserves the original strict reader error.'
+            Assert-Behavior ($readerFailureReplayEnd.Count -eq 1 -and $readerFailureReplayEnd[0].outcome -ceq 'threw') 'reader failure closes its replay detail phase with outcome threw.'
+            Assert-Behavior ($null -eq $script:LifeOSRecoveryDiagnostics) 'reader failure telemetry cleanup clears the owned diagnostics session.'
+        } finally {
+            Remove-Variable -Name readerFailureErrorText -Scope Script -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $readerFailureFixture.Root -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
         # Force the progress-log ACL precondition to fail in a disposable
         # fixture. Strict journal verification must stop at that boundary and
         # call no repair adapter while still allowing the journal ACL check.
@@ -2090,6 +2121,15 @@ Write-Host 'PASS: exact legacy Serve restoration is retryable without route muta
     # fixed schema, record cap, byte bound, counters, and cleanup behavior.
     Start-LifeOSRecoveryDiagnostics -Enabled:$false
     Assert-Behavior ($null -eq $script:LifeOSRecoveryDiagnostics) 'disabled recovery diagnostics do not allocate state.'
+    $disabledDetailRecords = @(& {
+        $session = Start-LifeOSRecoveryDiagnostics -Enabled:$false
+        $token = Start-LifeOSRecoveryDiagnosticDetailPhase -Phase 'progress-read'
+        Add-LifeOSRecoveryDiagnosticDetailCounter -Name 'progressBytes' -Delta 99
+        Write-LifeOSRecoveryDiagnosticDetailHeartbeat -Token $token
+        Stop-LifeOSRecoveryDiagnosticDetailPhase -Token $token -Succeeded
+        Stop-LifeOSRecoveryDiagnostics -Session $session
+    } 6>&1 | Where-Object { $_ -is [System.Management.Automation.InformationRecord] })
+    Assert-Behavior ($disabledDetailRecords.Count -eq 0 -and $null -eq $script:LifeOSRecoveryDiagnostics) 'disabled detail diagnostics are inert and emit no records.'
 
     $oldSession = Start-LifeOSRecoveryDiagnostics -Enabled
     $oldSessionToken = Start-LifeOSRecoveryDiagnosticScope -Scope 'Restore-AclSnapshots'
@@ -2166,6 +2206,273 @@ Write-Host 'PASS: exact legacy Serve restoration is retryable without route muta
         Assert-Behavior ([string]$parsed.scope -notmatch 'sentinel|from|untrusted|caller') 'diagnostic scope output redacts an untrusted path-like scope.'
     }
     Assert-Behavior ($null -eq $script:LifeOSRecoveryDiagnostics) 'diagnostic cleanup clears the session state.'
+
+    $detailRecords = @(& {
+        $session = Start-LifeOSRecoveryDiagnostics -Enabled
+        try {
+            $token = Start-LifeOSRecoveryDiagnosticDetailPhase -Phase 'progress-read'
+            Add-LifeOSRecoveryDiagnosticDetailCounter -Name 'units' -Delta 2
+            Add-LifeOSRecoveryDiagnosticDetailCounter -Name 'progressBytes' -Delta 128
+            $token.lastHeartbeat = 0
+            [void](Write-LifeOSRecoveryDiagnosticDetailHeartbeat -Token $token)
+            Add-LifeOSRecoveryDiagnosticDetailCounter -Name 'units' -Delta 3
+            Add-LifeOSRecoveryDiagnosticDetailCounter -Name 'committedFrames' -Delta 4
+            Add-LifeOSRecoveryDiagnosticDetailCounter -Name 'progressBytes' -Delta 64
+            Add-LifeOSRecoveryDiagnosticDetailCounter -Name 'rootsScanned' -Delta 1
+            Add-LifeOSRecoveryDiagnosticDetailCounter -Name 'rootsSkipped' -Delta 2
+            Add-LifeOSRecoveryDiagnosticDetailCounter -Name 'filesScanned' -Delta 5
+            Add-LifeOSRecoveryDiagnosticDetailCounter -Name 'hashedFiles' -Delta 7
+            Add-LifeOSRecoveryDiagnosticDetailCounter -Name 'hashedBytes' -Delta 9
+            Add-LifeOSRecoveryDiagnosticDetailCounter -Name 'fallbackReads' -Delta 11
+            Add-LifeOSRecoveryDiagnosticDetailCounter -Name 'digestElapsedMs' -Delta 13
+            $token.lastHeartbeat = 0
+            [void](Write-LifeOSRecoveryDiagnosticDetailHeartbeat -Token $token)
+            [void](Stop-LifeOSRecoveryDiagnosticDetailPhase -Token $token -Succeeded)
+        } finally { Stop-LifeOSRecoveryDiagnostics -Session $session }
+    } 6>&1 | Where-Object { $_ -is [System.Management.Automation.InformationRecord] -and $_.Tags -contains 'LifeOSRecoveryDiagnosticsDetail' })
+    Assert-Behavior ($detailRecords.Count -eq 4) 'one detail phase emits bounded begin, successive heartbeat, and end records.'
+    $expectedDetailFields = @('v', 'event', 'phase', 'ordinal', 'outcome', 'elapsedMs', 'digestMs', 'units', 'committedFrames', 'progressBytes', 'rootsScanned', 'rootsSkipped', 'filesScanned', 'hashedFiles', 'hashedBytes', 'fallbackReads') | Sort-Object
+    $parsedDetailRecords = @($detailRecords | ForEach-Object { ([string]$_.MessageData) | ConvertFrom-Json })
+    $heartbeatDetail = @($parsedDetailRecords | Where-Object { $_.event -ceq 'heartbeat' })
+    $endDetail = @($parsedDetailRecords | Where-Object { $_.event -ceq 'end' })
+    $secondHeartbeatDetail = @($parsedDetailRecords | Where-Object { $_.event -ceq 'heartbeat' } | Select-Object -Last 1)
+    Assert-Behavior ($heartbeatDetail.Count -eq 2 -and $heartbeatDetail[0].units -eq 2 -and
+        $heartbeatDetail[0].progressBytes -eq 128 -and $heartbeatDetail[0].committedFrames -eq 0 -and
+        $heartbeatDetail[0].rootsScanned -eq 0 -and $heartbeatDetail[0].rootsSkipped -eq 0 -and
+        $heartbeatDetail[0].filesScanned -eq 0 -and $heartbeatDetail[0].hashedFiles -eq 0 -and
+        $heartbeatDetail[0].hashedBytes -eq 0 -and $heartbeatDetail[0].fallbackReads -eq 0) 'detail heartbeat reports exact since-heartbeat counter deltas.'
+    Assert-Behavior ($secondHeartbeatDetail.Count -eq 1 -and $secondHeartbeatDetail[0].units -eq 3 -and
+        $secondHeartbeatDetail[0].committedFrames -eq 4 -and $secondHeartbeatDetail[0].progressBytes -eq 64 -and
+        $secondHeartbeatDetail[0].rootsScanned -eq 1 -and $secondHeartbeatDetail[0].rootsSkipped -eq 2 -and
+        $secondHeartbeatDetail[0].filesScanned -eq 5 -and $secondHeartbeatDetail[0].hashedFiles -eq 7 -and
+        $secondHeartbeatDetail[0].hashedBytes -eq 9 -and $secondHeartbeatDetail[0].fallbackReads -eq 11 -and
+        $secondHeartbeatDetail[0].digestMs -eq 13) 'successive detail heartbeats report only the new counter deltas.'
+    Assert-Behavior ($endDetail.Count -eq 1 -and $endDetail[0].units -eq 5 -and
+        $endDetail[0].committedFrames -eq 4 -and $endDetail[0].progressBytes -eq 192 -and
+        $endDetail[0].rootsScanned -eq 1 -and $endDetail[0].rootsSkipped -eq 2 -and
+        $endDetail[0].filesScanned -eq 5 -and $endDetail[0].hashedFiles -eq 7 -and
+        $endDetail[0].hashedBytes -eq 9 -and $endDetail[0].fallbackReads -eq 11 -and
+        $endDetail[0].digestMs -eq 13) 'detail end reports exact whole-phase counter deltas after successive heartbeats.'
+    foreach ($record in $detailRecords) {
+        $message = [string]$record.MessageData
+        Assert-Behavior ([Text.Encoding]::UTF8.GetByteCount($message + "`n") -le $script:LifeOSRecoveryDiagnosticsMaxRecordBytes) 'every detail record stays within its UTF-8 bound.'
+        $parsed = $message | ConvertFrom-Json
+        $actualDetailFields = @($parsed.PSObject.Properties | ForEach-Object { $_.Name } | Sort-Object)
+        Assert-Behavior (($actualDetailFields -join '|') -ceq ($expectedDetailFields -join '|')) 'detail records expose exactly the numeric/redacted property set.'
+        Assert-Behavior ($parsed.phase -in $script:LifeOSRecoveryDiagnosticsDetailPhaseNames -and
+            $parsed.event -in @('begin', 'end', 'heartbeat') -and
+            $parsed.outcome -in @('started', 'returned', 'threw', 'heartbeat')) 'detail phase and event enums remain allowlisted.'
+        Assert-Behavior ($parsed.PSObject.Properties.Name -notcontains 'path' -and
+            $parsed.PSObject.Properties.Name -notcontains 'id' -and
+            $parsed.PSObject.Properties.Name -notcontains 'hash') 'detail records contain no path, identity, or hash fields.'
+    }
+
+    $script:digestDeferralResult = $null
+    $digestDeferralRecords = @(& {
+        $digestRoot = Join-Path ([IO.Path]::GetTempPath()) ('lifeos-digest-telemetry-' + [Guid]::NewGuid().ToString('N'))
+        $digestPath = Join-Path $digestRoot 'sample.bin'
+        Ensure-Directory $digestRoot
+        [IO.File]::WriteAllBytes($digestPath, [byte[]](1..32))
+        $session = Start-LifeOSRecoveryDiagnostics -Enabled
+        try {
+            $rejectedPhase = Start-LifeOSRecoveryDiagnosticDetailPhase -Phase 'tree-validation'
+            $rejectedSample = [pscustomobject]@{ Value = $null }
+            try {
+                [void](Get-LifeOSFileDigest -Path $digestPath -Description 'diagnostic sample' -DiagnosticSample $rejectedSample)
+                $uncommittedCount = [long]$script:LifeOSRecoveryDiagnostics.detailHashedFiles
+                $uncommittedBytes = [long]$script:LifeOSRecoveryDiagnostics.detailHashedBytes
+            } finally { [void](Stop-LifeOSRecoveryDiagnosticDetailPhase -Token $rejectedPhase -Succeeded) }
+
+            $acceptedPhase = Start-LifeOSRecoveryDiagnosticDetailPhase -Phase 'tree-validation'
+            $acceptedSample = [pscustomobject]@{ Value = $null }
+            try {
+                [void](Get-LifeOSFileDigest -Path $digestPath -Description 'diagnostic sample' -DiagnosticSample $acceptedSample)
+                $acceptedBefore = [long]$script:LifeOSRecoveryDiagnostics.detailHashedFiles
+                Add-LifeOSRecoveryDiagnosticDigestSample -ElapsedMs $acceptedSample.Value.ElapsedMs -Bytes $acceptedSample.Value.Bytes
+                $acceptedAfter = [long]$script:LifeOSRecoveryDiagnostics.detailHashedFiles
+                $acceptedBytes = [long]$script:LifeOSRecoveryDiagnostics.detailHashedBytes
+            } finally { [void](Stop-LifeOSRecoveryDiagnosticDetailPhase -Token $acceptedPhase -Succeeded) }
+            $script:digestDeferralResult = [pscustomobject]@{
+                rejectedSample = ($null -ne $rejectedSample.Value)
+                uncommittedCount = $uncommittedCount
+                uncommittedBytes = $uncommittedBytes
+                acceptedSample = ($null -ne $acceptedSample.Value)
+                acceptedBefore = $acceptedBefore
+                acceptedAfter = $acceptedAfter
+                acceptedBytes = $acceptedBytes
+            }
+        } finally {
+            Stop-LifeOSRecoveryDiagnostics -Session $session
+            Remove-Item -LiteralPath $digestRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    } 6>&1 | Where-Object { $_ -is [System.Management.Automation.InformationRecord] -and $_.Tags -contains 'LifeOSRecoveryDiagnosticsDetail' })
+    Assert-Behavior ($null -ne $script:digestDeferralResult -and $script:digestDeferralResult.rejectedSample -and
+        $script:digestDeferralResult.uncommittedCount -eq 0 -and $script:digestDeferralResult.uncommittedBytes -eq 0 -and
+        $script:digestDeferralResult.acceptedSample -and $script:digestDeferralResult.acceptedBefore -eq 0 -and
+        $script:digestDeferralResult.acceptedAfter -eq 1 -and $script:digestDeferralResult.acceptedBytes -eq 32) 'tree digest telemetry remains uncommitted until the caller accepts the complete validation result.'
+    Remove-Variable -Name digestDeferralResult -Scope Script -ErrorAction SilentlyContinue
+
+    $originalTreeIdentityAssertion = ${function:Assert-LifeOSTreeItemIdentity}
+    $originalFileDigest = ${function:Get-LifeOSFileDigest}
+    $script:treeDigestOrderResult = $null
+    $script:treeDigestHashCompleted = 0
+    $treeDigestOrderRecords = @(& {
+        $treeOrderRoot = Join-Path ([IO.Path]::GetTempPath()) ('lifeos-tree-digest-order-' + [Guid]::NewGuid().ToString('N'))
+        $treeOrderPath = Join-Path $treeOrderRoot 'sample.bin'
+        Ensure-Directory $treeOrderRoot
+        [IO.File]::WriteAllBytes($treeOrderPath, [byte[]](1..16))
+        try {
+            function Get-LifeOSFileDigest {
+                param([string]$Path, [string]$Description, [string]$ExpectedFileId, [object]$DiagnosticSample)
+                $diagnosticState = $script:LifeOSRecoveryDiagnostics
+                $diagnosticWasEnabled = $false
+                if ($null -ne $diagnosticState) {
+                    $diagnosticWasEnabled = [bool]$diagnosticState.enabled
+                    $diagnosticState.enabled = $false
+                }
+                try {
+                    # Keep this fixture focused on caller ordering. The real
+                    # digest runs with telemetry disabled, then the wrapper
+                    # hands the caller a sample only after hashing returns.
+                    $digest = & $originalFileDigest -Path $Path -Description $Description -ExpectedFileId $ExpectedFileId
+                } finally {
+                    if ($null -ne $diagnosticState) { $diagnosticState.enabled = $diagnosticWasEnabled }
+                }
+                $script:treeDigestHashCompleted++
+                if ($null -ne $DiagnosticSample -and $null -ne $DiagnosticSample.PSObject.Properties['Value']) {
+                    $DiagnosticSample.Value = [pscustomobject]@{ ElapsedMs = 0; Bytes = [long]$digest.Length }
+                }
+                return $digest
+            }
+            function Assert-LifeOSTreeItemIdentity {
+                param($Path, $Expected, $Description)
+                if ($Description -ceq 'Tree manifest item') { throw 'fixture tree identity rejection' }
+                return (& $originalTreeIdentityAssertion -Path $Path -Expected $Expected -Description $Description)
+            }
+            $session = Start-LifeOSRecoveryDiagnostics -Enabled
+            try {
+                $rejectedPhase = Start-LifeOSRecoveryDiagnosticDetailPhase -Phase 'tree-validation'
+                try {
+                    $rejectedError = $null
+                    try {
+                        Get-TreeManifestIndex -Root $treeOrderRoot | Out-Null
+                    } catch { $rejectedError = [string]$_.Exception.Message }
+                    $rejectedCount = [long]$script:LifeOSRecoveryDiagnostics.detailHashedFiles
+                    $rejectedBytes = [long]$script:LifeOSRecoveryDiagnostics.detailHashedBytes
+                    $rejectedHashCompleted = [long]$script:treeDigestHashCompleted
+                } finally { [void](Stop-LifeOSRecoveryDiagnosticDetailPhase -Token $rejectedPhase) }
+
+                Set-Item -Path Function:\Assert-LifeOSTreeItemIdentity -Value $originalTreeIdentityAssertion
+                $acceptedPhase = Start-LifeOSRecoveryDiagnosticDetailPhase -Phase 'tree-validation'
+                try {
+                    Get-TreeManifestIndex -Root $treeOrderRoot | Out-Null
+                    $acceptedCount = [long]$script:LifeOSRecoveryDiagnostics.detailHashedFiles
+                    $acceptedBytes = [long]$script:LifeOSRecoveryDiagnostics.detailHashedBytes
+                } finally { [void](Stop-LifeOSRecoveryDiagnosticDetailPhase -Token $acceptedPhase -Succeeded) }
+                $script:treeDigestOrderResult = [pscustomobject]@{
+                    rejected = ($rejectedError -like '*fixture tree identity rejection*')
+                    rejectedCount = $rejectedCount
+                    rejectedBytes = $rejectedBytes
+                    rejectedHashCompleted = $rejectedHashCompleted
+                    acceptedCount = $acceptedCount
+                    acceptedBytes = $acceptedBytes
+                }
+            } finally { Stop-LifeOSRecoveryDiagnostics -Session $session }
+        } finally {
+            Set-Item -Path Function:\Assert-LifeOSTreeItemIdentity -Value $originalTreeIdentityAssertion
+            Set-Item -Path Function:\Get-LifeOSFileDigest -Value $originalFileDigest
+            Remove-Item -LiteralPath $treeOrderRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    } 6>&1 | Where-Object { $_ -is [System.Management.Automation.InformationRecord] -and $_.Tags -contains 'LifeOSRecoveryDiagnosticsDetail' })
+    Assert-Behavior ($null -ne $script:treeDigestOrderResult -and $script:treeDigestOrderResult.rejected -and
+        $script:treeDigestOrderResult.rejectedCount -eq 0 -and $script:treeDigestOrderResult.rejectedBytes -eq 0 -and
+        $script:treeDigestOrderResult.rejectedHashCompleted -eq 1 -and
+        $script:treeDigestOrderResult.acceptedCount -eq 1 -and $script:treeDigestOrderResult.acceptedBytes -eq 16) 'tree callers commit hash telemetry only after the real identity validation succeeds.'
+    Remove-Variable -Name treeDigestOrderResult -Scope Script -ErrorAction SilentlyContinue
+
+    $heartbeatRecords = @(& {
+        $session = Start-LifeOSRecoveryDiagnostics -Enabled
+        try {
+            for ($index = 0; $index -lt ($script:LifeOSRecoveryDiagnosticsMaxHeartbeatRecords + 5); $index++) {
+                Write-LifeOSRecoveryDiagnosticDetailRecord -Event heartbeat -Phase 'progress-replay' -Ordinal 1 -Outcome heartbeat -ElapsedMs 10000
+            }
+        } finally { Stop-LifeOSRecoveryDiagnostics -Session $session }
+    } 6>&1 | Where-Object { $_ -is [System.Management.Automation.InformationRecord] })
+    $heartbeatDetailRecords = @($heartbeatRecords | Where-Object { $_.Tags -contains 'LifeOSRecoveryDiagnosticsDetail' })
+    $heartbeatSummary = ([string]($heartbeatRecords | Where-Object { $_.Tags -contains 'LifeOSRecoveryDiagnostics' } | Select-Object -Last 1).MessageData) | ConvertFrom-Json
+    Assert-Behavior ($heartbeatDetailRecords.Count -eq $script:LifeOSRecoveryDiagnosticsMaxHeartbeatRecords -and $heartbeatSummary.saturated -eq $true) 'heartbeat records saturate at their bound without throwing.'
+
+    $reservedHeartbeatRecords = @(& {
+        $session = Start-LifeOSRecoveryDiagnostics -Enabled
+        try {
+            $firstToken = Start-LifeOSRecoveryDiagnosticDetailPhase -Phase 'progress-replay'
+            $secondToken = Start-LifeOSRecoveryDiagnosticDetailPhase -Phase 'progress-replay'
+            $firstToken.lastHeartbeat = 0
+            [void](Write-LifeOSRecoveryDiagnosticDetailHeartbeat -Token $firstToken)
+            [void](Stop-LifeOSRecoveryDiagnosticDetailPhase -Token $firstToken -Succeeded)
+            [void](Stop-LifeOSRecoveryDiagnosticDetailPhase -Token $secondToken -Succeeded)
+        } finally { Stop-LifeOSRecoveryDiagnostics -Session $session }
+    } 6>&1 | Where-Object { $_ -is [System.Management.Automation.InformationRecord] })
+    $reservedHeartbeatDetails = @($reservedHeartbeatRecords | Where-Object { $_.Tags -contains 'LifeOSRecoveryDiagnosticsDetail' })
+    Assert-Behavior ($reservedHeartbeatDetails.Count -eq 5) 'heartbeats remain admissible while other detail phases reserve their closing records.'
+
+    $script:admissionResult = $null
+    $admissionRecords = @(& {
+        $session = Start-LifeOSRecoveryDiagnostics -Enabled
+        try {
+            $tokens = New-Object 'System.Collections.Generic.List[object]'
+            for ($index = 0; $index -lt ($script:LifeOSRecoveryDiagnosticsMaxDetailRecords / 2); $index++) {
+                $token = Start-LifeOSRecoveryDiagnosticDetailPhase -Phase 'journal-load'
+                if ($null -ne $token) { [void]$tokens.Add($token) }
+            }
+            $rejectedToken = Start-LifeOSRecoveryDiagnosticDetailPhase -Phase 'journal-load'
+            $script:admissionResult = [pscustomobject]@{
+                rejected = ($null -eq $rejectedToken)
+                admitted = $tokens.Count
+                reservedBeforeStop = [long]$script:LifeOSRecoveryDiagnostics.detailReservedEndRecords
+                reservedAfterStop = [long]-1
+            }
+            foreach ($token in $tokens) { Stop-LifeOSRecoveryDiagnosticDetailPhase -Token $token -Succeeded }
+            $script:admissionResult.reservedAfterStop = [long]$script:LifeOSRecoveryDiagnostics.detailReservedEndRecords
+        } finally { Stop-LifeOSRecoveryDiagnostics -Session $session }
+    } 6>&1 | Where-Object { $_ -is [System.Management.Automation.InformationRecord] })
+    $admissionDetailRecords = @($admissionRecords | Where-Object { $_.Tags -contains 'LifeOSRecoveryDiagnosticsDetail' })
+    $admissionSummary = ([string]($admissionRecords | Where-Object { $_.Tags -contains 'LifeOSRecoveryDiagnostics' } | Select-Object -Last 1).MessageData) | ConvertFrom-Json
+    Assert-Behavior ($admissionDetailRecords.Count -eq $script:LifeOSRecoveryDiagnosticsMaxDetailRecords -and
+        $admissionSummary.saturated -eq $true -and $script:admissionResult.rejected -and
+        $script:admissionResult.admitted -eq ($script:LifeOSRecoveryDiagnosticsMaxDetailRecords / 2) -and
+        $script:admissionResult.reservedBeforeStop -eq ($script:LifeOSRecoveryDiagnosticsMaxDetailRecords / 2) -and
+        $script:admissionResult.reservedAfterStop -eq 0) 'detail phase admission reserves every end slot and rejects a phase that cannot close safely.'
+    $admissionParsed = @($admissionDetailRecords | ForEach-Object { ([string]$_.MessageData) | ConvertFrom-Json })
+    $admissionBegins = @($admissionParsed | Where-Object { $_.event -ceq 'begin' })
+    $admissionEnds = @($admissionParsed | Where-Object { $_.event -ceq 'end' })
+    $unmatchedAdmissionOrdinals = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($begin in $admissionBegins) {
+        if (@($admissionEnds | Where-Object { $_.ordinal -eq $begin.ordinal }).Count -ne 1) {
+            [void]$unmatchedAdmissionOrdinals.Add($begin.ordinal)
+        }
+    }
+    Assert-Behavior ($admissionBegins.Count -eq $admissionEnds.Count -and
+        $admissionBegins.Count -eq ($script:LifeOSRecoveryDiagnosticsMaxDetailRecords / 2) -and
+        $unmatchedAdmissionOrdinals.Count -eq 0) 'every admitted detail phase has exactly one closing record.'
+    Remove-Variable -Name admissionResult -Scope Script -ErrorAction SilentlyContinue
+
+    $combinedRecords = @(& {
+        $session = Start-LifeOSRecoveryDiagnostics -Enabled
+        try {
+            for ($index = 0; $index -lt ($script:LifeOSRecoveryDiagnosticsMaxDetailRecords + 1); $index++) {
+                Write-LifeOSRecoveryDiagnosticDetailRecord -Event begin -Phase 'journal-load' -Ordinal $index -Outcome started
+            }
+            for ($index = 0; $index -lt (($script:LifeOSRecoveryDiagnosticsMaxScopes * 2) + 1); $index++) {
+                Write-LifeOSRecoveryDiagnosticRecord -Event begin -Scope 'Restore-AclSnapshots' -Ordinal $index -Outcome summary
+            }
+        } finally { Stop-LifeOSRecoveryDiagnostics -Session $session }
+    } 6>&1 | Where-Object { $_ -is [System.Management.Automation.InformationRecord] })
+    $combinedDetails = @($combinedRecords | Where-Object { $_.Tags -contains 'LifeOSRecoveryDiagnosticsDetail' })
+    $combinedSummary = ([string]($combinedRecords | Where-Object { $_.Tags -contains 'LifeOSRecoveryDiagnostics' } | Select-Object -Last 1).MessageData) | ConvertFrom-Json
+    Assert-Behavior ($combinedRecords.Count -eq $script:LifeOSRecoveryDiagnosticsMaxTotalRecords -and
+        $combinedDetails.Count -eq $script:LifeOSRecoveryDiagnosticsMaxDetailRecords -and
+        $combinedSummary.saturated -eq $true) 'detail, legacy, and summary records saturate at the combined session bound without throwing.'
 }
 Write-Host 'PASS: recovery diagnostics are opt-in, bounded, schema-checked, and cleaned up'
 
