@@ -12,7 +12,8 @@ evidence is still incomplete.
 ## Current source checkpoint
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- HEAD and origin: `6baa1f3 Reduce recovery resume memory pressure`.
+- HEAD and origin: `0fc5c7b Add final LifeOS execution plan` (plan-only);
+  deployable code checkpoint remains `6baa1f3`.
 - Finance source checkpoint: `fd8ccfb Refine Finance responsive hierarchy`.
 - macOS now has one value-driven Home `NavigationStack` with a bounded typed
   path. Sidebar Home resets it; Back pops one detail and preserves origin.
