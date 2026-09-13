@@ -1,0 +1,25 @@
+{
+  "configurations" : [
+    {
+      "id" : "1F7CC2EA-6E6B-4BDB-B1B2-9D7E15EACDB9",
+      "name" : "Debug",
+      "options" : {
+        "testExecutionOrdering" : "lexical"
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "codeCoverage" : false
+  },
+  "testTargets" : [
+    {
+      "parallelizable" : false,
+      "target" : {
+        "containerPath" : "container:LifeOS.xcodeproj",
+        "identifier" : "744652A86D2BF1DB30BFA2B9",
+        "name" : "LifeOSWidgetSnapshotTests"
+      }
+    }
+  ],
+  "version" : 1
+}

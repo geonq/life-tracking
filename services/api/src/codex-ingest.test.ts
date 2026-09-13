@@ -1,0 +1,360 @@
+import { describe, expect, it } from 'vitest';
+import { request } from 'node:http';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { vi } from 'vitest';
+import { createApiServer, validateStartupConfiguration } from './server.js';
+import { main as collectorMain, postCodexPayload, runCodexCollector } from './codex-collector.js';
+
+type ResponseValue = { status: number; body: string };
+const post = (port: number, secret: string, payload: string, contentType = 'application/json') => new Promise<ResponseValue>(resolve => {
+  const req = request({ host: '127.0.0.1', port, path: '/api/usage/codex-ingest', method: 'POST', headers: {
+    authorization: `Bearer ${secret}`, 'content-type': contentType, 'idempotency-key': 'codex-ingest-test', 'content-length': Buffer.byteLength(payload),
+  } }, response => {
+    let value = '';
+    response.on('data', chunk => value += chunk);
+    response.on('end', () => resolve({ status: response.statusCode!, body: value }));
+  });
+  req.on('error', () => resolve({ status: 599, body: '' }));
+  req.setTimeout(5_000, () => { req.destroy(); resolve({ status: 598, body: '' }); });
+  req.end(payload);
+});
+const getUsage = (port: number, secret?: string) => new Promise<{ status: number; body: any }>(resolve => {
+  const req = request({ host: '127.0.0.1', port, path: '/api/usage', method: 'GET',
+    headers: secret === undefined ? {} : { authorization: `Bearer ${secret}` },
+  }, response => {
+    let value = '';
+    response.on('data', chunk => value += chunk);
+    response.on('end', () => resolve({ status: response.statusCode!, body: JSON.parse(value) }));
+  });
+  req.on('error', () => resolve({ status: 599, body: {} }));
+  req.setTimeout(5_000, () => { req.destroy(); resolve({ status: 598, body: {} }); });
+  req.end();
+});
+
+async function configuredServer(readLive: Parameters<typeof createApiServer>[0] = async () => ({ connectorState: 'unavailable', windows: [] })) {
+  const previous = {
+    localEnabled: process.env.LIFEOS_LOCAL_API_ENABLED,
+    localSecretFile: process.env.LIFEOS_LOCAL_API_SECRET_FILE,
+    enabled: process.env.CODEX_INGEST_ENABLED,
+    secretFile: process.env.CODEX_INGEST_SECRET_FILE,
+    store: process.env.USAGE_STORE_PATH,
+    live: process.env.CODEX_LIVE_ENABLED,
+    claude: process.env.CLAUDE_INGEST_ENABLED,
+    statusline: process.env.CLAUDE_STATUSLINE_ENABLED,
+  };
+  const directory = await mkdtemp(join(tmpdir(), 'usage-codex-ingest-'));
+  const secretPath = join(directory, 'codex.secret');
+  const storePath = join(directory, 'history.jsonl');
+  const secret = 'c'.repeat(32);
+  const localSecret = 'l'.repeat(32);
+  const localSecretPath = join(directory, 'local-api.secret');
+  const restore = () => {
+    if (previous.localEnabled === undefined) delete process.env.LIFEOS_LOCAL_API_ENABLED; else process.env.LIFEOS_LOCAL_API_ENABLED = previous.localEnabled;
+    if (previous.localSecretFile === undefined) delete process.env.LIFEOS_LOCAL_API_SECRET_FILE; else process.env.LIFEOS_LOCAL_API_SECRET_FILE = previous.localSecretFile;
+    if (previous.enabled === undefined) delete process.env.CODEX_INGEST_ENABLED; else process.env.CODEX_INGEST_ENABLED = previous.enabled;
+    if (previous.secretFile === undefined) delete process.env.CODEX_INGEST_SECRET_FILE; else process.env.CODEX_INGEST_SECRET_FILE = previous.secretFile;
+    if (previous.store === undefined) delete process.env.USAGE_STORE_PATH; else process.env.USAGE_STORE_PATH = previous.store;
+    if (previous.live === undefined) delete process.env.CODEX_LIVE_ENABLED; else process.env.CODEX_LIVE_ENABLED = previous.live;
+    if (previous.claude === undefined) delete process.env.CLAUDE_INGEST_ENABLED; else process.env.CLAUDE_INGEST_ENABLED = previous.claude;
+    if (previous.statusline === undefined) delete process.env.CLAUDE_STATUSLINE_ENABLED; else process.env.CLAUDE_STATUSLINE_ENABLED = previous.statusline;
+  };
+  let server: ReturnType<typeof createApiServer> | undefined;
+  try {
+    process.env.LIFEOS_LOCAL_API_ENABLED = 'true';
+    process.env.LIFEOS_LOCAL_API_SECRET_FILE = localSecretPath;
+    process.env.CODEX_INGEST_ENABLED = 'true';
+    process.env.CODEX_INGEST_SECRET_FILE = secretPath;
+    process.env.USAGE_STORE_PATH = storePath;
+    delete process.env.CODEX_LIVE_ENABLED;
+    delete process.env.CLAUDE_INGEST_ENABLED;
+    delete process.env.CLAUDE_STATUSLINE_ENABLED;
+    await writeFile(secretPath, secret, { mode: 0o600 });
+    await writeFile(localSecretPath, localSecret, { mode: 0o600 });
+    server = createApiServer(readLive);
+    await new Promise<void>((resolve, reject) => { server!.once('error', reject); server!.listen(0, '127.0.0.1', resolve); });
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('no address');
+    return {
+      port: address.port, secret, localSecret, storePath, server,
+      restore,
+    };
+  } catch (error) {
+    if (server) await new Promise<void>(resolve => server!.close(() => resolve()));
+    restore();
+    throw error;
+  }
+}
+
+describe('sanitized Codex collector boundary', () => {
+  it('accepts only an absolute secret-file task argument and keeps env fallback intact', async () => {
+    const previousArgv = process.argv;
+    const previousSecretFile = process.env.CODEX_INGEST_SECRET_FILE;
+    const directory = await mkdtemp(join(tmpdir(), 'usage-collector-args-'));
+    const secretPath = join(directory, 'codex.secret');
+    try {
+      await writeFile(secretPath, 'd'.repeat(32), { mode: 0o600 });
+      process.argv = ['node', 'codex-collector', '--secret-file', secretPath];
+      process.env.CODEX_INGEST_SECRET_FILE = join(directory, 'missing-secret');
+      // The live app-server is intentionally unavailable in this test. A
+      // valid path must get as far as the collector read, not fail argument
+      // parsing. Use a deterministic provider result so this test does not
+      // depend on a Codex installation on the development machine.
+      expect(await collectorMain({
+        read: async () => ({ connectorState: 'unavailable', windows: [], failureReason: 'provider_rejected' }),
+      })).toBe(2);
+      process.argv = ['node', 'codex-collector', '--secret-file', 'relative.secret'];
+      expect(await collectorMain()).toBe(1);
+    } finally {
+      process.argv = previousArgv;
+      if (previousSecretFile === undefined) delete process.env.CODEX_INGEST_SECRET_FILE;
+      else process.env.CODEX_INGEST_SECRET_FILE = previousSecretFile;
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects wrong credentials and every malformed/extra/type/duplicate shape without writing', async () => {
+    const fixture = await configuredServer();
+    const valid = JSON.stringify({ windows: [{ minutes: 300, usedPercent: 12, resetAt: '2026-08-12T05:00:00Z' }] });
+    const cases: Array<[string, string, string]> = [
+      ['wrong secret', 'x'.repeat(32), valid],
+      ['duplicate windows', fixture.secret, JSON.stringify({ windows: [
+        { minutes: 300, usedPercent: 12 }, { minutes: 300, usedPercent: 13 },
+      ] })],
+      ['sensitive sibling', fixture.secret, JSON.stringify({ windows: [{ minutes: 300, usedPercent: 12, prompt: 'do not persist' }] })],
+      ['extra top-level field', fixture.secret, JSON.stringify({ windows: [{ minutes: 300, usedPercent: 12 }], account: 'private' })],
+      ['wrong type', fixture.secret, JSON.stringify({ windows: [{ minutes: '300', usedPercent: 12 }] })],
+      ['malformed', fixture.secret, '{"windows":'],
+    ];
+    try {
+      expect((await post(fixture.port, ...cases[0]!.slice(1) as [string, string])).status).toBe(401);
+      for (const [, secret, payload] of cases.slice(1)) {
+        const result = await post(fixture.port, secret, payload);
+        expect(result.status).toBe(400);
+        expect(result.body).toBe('{"error":"invalid_request"}');
+      }
+      expect((await post(fixture.port, fixture.secret, valid, 'text/plain')).status).toBe(415);
+      const oversized = await post(fixture.port, fixture.secret, 'x'.repeat(16_385));
+      expect(oversized.status).toBe(413);
+      expect(oversized.body).toBe('{"error":"invalid_request"}');
+      await expect(readFile(fixture.storePath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await new Promise(resolve => fixture.server.close(resolve));
+      fixture.restore();
+    }
+  });
+
+  it('keeps local Usage reads and Codex ingestion credentials separate', async () => {
+    const fixture = await configuredServer();
+    const payload = JSON.stringify({ windows: [{ minutes: 300, usedPercent: 12 }] });
+    try {
+      expect(await getUsage(fixture.port)).toEqual({ status: 401, body: { error: 'unauthorized' } });
+      expect(await getUsage(fixture.port, fixture.secret)).toEqual({ status: 401, body: { error: 'unauthorized' } });
+      expect((await post(fixture.port, fixture.localSecret, payload)).status).toBe(401);
+      await expect(readFile(fixture.storePath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+      expect((await post(fixture.port, fixture.secret, payload)).status).toBe(200);
+      expect((await getUsage(fixture.port, fixture.localSecret)).status).toBe(200);
+    } finally {
+      await new Promise(resolve => fixture.server.close(resolve));
+      fixture.restore();
+    }
+  });
+
+  it('atomically accepts and deduplicates a replay, persisting only supported fields', async () => {
+    const fixture = await configuredServer();
+    const payload = JSON.stringify({ windows: [
+      { minutes: 300, usedPercent: 12, resetAt: '2026-08-12T05:00:00Z' },
+      { minutes: 10_080, usedPercent: 34 },
+    ] });
+    try {
+      expect((await post(fixture.port, fixture.secret, payload)).status).toBe(200);
+      expect((await post(fixture.port, fixture.secret, payload)).status).toBe(200);
+      const text = await readFile(fixture.storePath, 'utf8');
+      const entries = text.trim().split(/\r?\n/).map(line => JSON.parse(line));
+      expect(entries).toHaveLength(2);
+      expect(text).not.toMatch(/prompt|account|path|token|secret/);
+      expect(entries.map((entry: { window: string }) => entry.window)).toEqual(['five_hour', 'seven_day']);
+    } finally {
+      await new Promise(resolve => fixture.server.close(resolve));
+      fixture.restore();
+    }
+  });
+
+  it('returns a bounded unavailable error when the store cannot be written', async () => {
+    const fixture = await configuredServer();
+    process.env.USAGE_STORE_PATH = fixture.storePath + '.missing/..';
+    try {
+      const result = await post(fixture.port, fixture.secret, JSON.stringify({ windows: [{ minutes: 300, usedPercent: 1 }] }));
+      expect(result).toEqual({ status: 503, body: '{"error":"unavailable"}' });
+    } finally {
+      await new Promise(resolve => fixture.server.close(resolve));
+      fixture.restore();
+    }
+  });
+
+  it('uses cached Codex observations when direct live access is disabled, without making GET a writer', async () => {
+    const fixture = await configuredServer(async () => { throw new Error('direct live should be gated'); });
+    const fresh = new Date(Date.now() - 60_000).toISOString();
+    await writeFile(fixture.storePath, JSON.stringify({ provider: 'codex', window: 'five_hour', durationMinutes: 300, usedPercent: 12, observedAt: fresh }) + '\n');
+    try {
+      const healthy = await getUsage(fixture.port, fixture.localSecret);
+      expect(healthy.status).toBe(200);
+      expect(healthy.body.connectors.codex).toBe('healthy');
+      expect(healthy.body.windows.find((window: { provider: string }) => window.provider === 'codex').usedPercent).toBe(12);
+      const metadataBeforeGet = await stat(fixture.storePath);
+      const before = await readFile(fixture.storePath, 'utf8');
+      const repeated = await getUsage(fixture.port, fixture.localSecret);
+      expect(repeated.status).toBe(200);
+      expect((await stat(fixture.storePath)).mtimeMs).toBe(metadataBeforeGet.mtimeMs);
+      const stale = new Date(Date.now() - 60 * 60_000).toISOString();
+      await writeFile(fixture.storePath, JSON.stringify({ provider: 'codex', window: 'five_hour', durationMinutes: 300, usedPercent: 13, observedAt: stale }) + '\n');
+      const refreshDue = await getUsage(fixture.port, fixture.localSecret);
+      expect(refreshDue.body.connectors.codex).toBe('refresh_due');
+      expect(refreshDue.body.windows.find((window: { provider: string }) => window.provider === 'codex').provenance.connectorState).toBe('refresh_due');
+      expect(before).not.toBe('');
+      expect(await readFile(fixture.storePath, 'utf8')).toContain('"usedPercent":13');
+    } finally {
+      await new Promise(resolve => fixture.server.close(resolve));
+      fixture.restore();
+    }
+  });
+
+  it('validates every enabled ingestion secret at readiness', async () => {
+    const previousCodex = process.env.CODEX_INGEST_ENABLED;
+    const previousClaude = process.env.CLAUDE_INGEST_ENABLED;
+    const previousCodexFile = process.env.CODEX_INGEST_SECRET_FILE;
+    const previousClaudeFile = process.env.CLAUDE_INGEST_SECRET_FILE;
+    const previousStore = process.env.USAGE_STORE_PATH;
+    const previousClipper = process.env.CLIPPER_STORE_PATH;
+    const directory = await mkdtemp(join(tmpdir(), 'usage-readiness-'));
+    try {
+      process.env.CODEX_INGEST_ENABLED = 'true';
+      process.env.CLAUDE_INGEST_ENABLED = 'true';
+      process.env.CODEX_INGEST_SECRET_FILE = join(directory, 'codex');
+      process.env.CLAUDE_INGEST_SECRET_FILE = join(directory, 'claude');
+      process.env.USAGE_STORE_PATH = join(directory, 'history.jsonl');
+      process.env.CLIPPER_STORE_PATH = join(directory, 'clipper.json');
+      await writeFile(process.env.CODEX_INGEST_SECRET_FILE, 'x'.repeat(32), { mode: 0o600 });
+      expect(await validateStartupConfiguration()).toBe(false);
+      await writeFile(process.env.CLAUDE_INGEST_SECRET_FILE, 'y'.repeat(32), { mode: 0o600 });
+      expect(await validateStartupConfiguration()).toBe(true);
+    } finally {
+      if (previousCodex === undefined) delete process.env.CODEX_INGEST_ENABLED; else process.env.CODEX_INGEST_ENABLED = previousCodex;
+      if (previousClaude === undefined) delete process.env.CLAUDE_INGEST_ENABLED; else process.env.CLAUDE_INGEST_ENABLED = previousClaude;
+      if (previousCodexFile === undefined) delete process.env.CODEX_INGEST_SECRET_FILE; else process.env.CODEX_INGEST_SECRET_FILE = previousCodexFile;
+      if (previousClaudeFile === undefined) delete process.env.CLAUDE_INGEST_SECRET_FILE; else process.env.CLAUDE_INGEST_SECRET_FILE = previousClaudeFile;
+      if (previousStore === undefined) delete process.env.USAGE_STORE_PATH; else process.env.USAGE_STORE_PATH = previousStore;
+      if (previousClipper === undefined) delete process.env.CLIPPER_STORE_PATH; else process.env.CLIPPER_STORE_PATH = previousClipper;
+    }
+  });
+
+  it('fails readiness for unsafe/relative/corrupt stores without creating or truncating history', async () => {
+    const previous = {
+      usage: process.env.USAGE_STORE_PATH,
+      clipper: process.env.CLIPPER_STORE_PATH,
+      codex: process.env.CODEX_INGEST_ENABLED,
+      claude: process.env.CLAUDE_INGEST_ENABLED,
+      statusline: process.env.CLAUDE_STATUSLINE_ENABLED,
+    };
+    const directory = await mkdtemp(join(tmpdir(), 'usage-store-readiness-'));
+    try {
+      delete process.env.CODEX_INGEST_ENABLED;
+      delete process.env.CLAUDE_INGEST_ENABLED;
+      delete process.env.CLAUDE_STATUSLINE_ENABLED;
+      process.env.USAGE_STORE_PATH = 'relative-history.jsonl';
+      expect(await validateStartupConfiguration()).toBe(false);
+      process.env.USAGE_STORE_PATH = join(directory, 'missing-parent', 'history.jsonl');
+      expect(await validateStartupConfiguration()).toBe(false);
+      const safePath = join(directory, 'history.jsonl');
+      process.env.USAGE_STORE_PATH = safePath;
+      process.env.CLIPPER_STORE_PATH = join(directory, 'clipper.json');
+      expect(await validateStartupConfiguration()).toBe(true);
+      await writeFile(safePath, '{not-json}\n', { mode: 0o600 });
+      await chmod(safePath, 0o600);
+      expect(await validateStartupConfiguration()).toBe(false);
+      const orphanedStatePath = `${join(directory, 'orphaned-history.jsonl')}.state.json`;
+      await writeFile(orphanedStatePath, '{not-json}', { mode: 0o600 });
+      process.env.USAGE_STORE_PATH = orphanedStatePath.slice(0, -'.state.json'.length);
+      expect(await validateStartupConfiguration()).toBe(false);
+      if (process.platform !== 'win32') {
+        const readOnlyParent = join(directory, 'read-only-parent');
+        await mkdir(readOnlyParent);
+        await chmod(readOnlyParent, 0o500);
+        try {
+          process.env.USAGE_STORE_PATH = join(readOnlyParent, 'history.jsonl');
+          expect(await validateStartupConfiguration()).toBe(false);
+        } finally {
+          await chmod(readOnlyParent, 0o700);
+        }
+        const readOnlyStore = join(directory, 'read-only-history.jsonl');
+        await writeFile(readOnlyStore, JSON.stringify({ provider: 'codex', window: 'five_hour', durationMinutes: 300, usedPercent: 1, observedAt: new Date().toISOString() }) + '\n', { mode: 0o600 });
+        await chmod(readOnlyStore, 0o400);
+        try {
+          process.env.USAGE_STORE_PATH = readOnlyStore;
+          expect(await validateStartupConfiguration()).toBe(false);
+        } finally {
+          await chmod(readOnlyStore, 0o600);
+        }
+      }
+      const target = join(directory, 'target');
+      const linkParent = join(directory, 'linked-parent');
+      await writeFile(target, JSON.stringify({ provider: 'codex', window: 'five_hour', durationMinutes: 300, usedPercent: 1, observedAt: new Date().toISOString() }) + '\n', { mode: 0o600 });
+      await chmod(target, 0o600);
+      const parentDirectory = join(directory, 'real-parent');
+      const linkedStore = join(linkParent, 'history.jsonl');
+      await mkdir(parentDirectory);
+      await symlink(parentDirectory, linkParent);
+      process.env.USAGE_STORE_PATH = linkedStore;
+      expect(await validateStartupConfiguration()).toBe(false);
+      expect(await readFile(target, 'utf8')).toContain('"usedPercent":1');
+    } finally {
+      if (previous.usage === undefined) delete process.env.USAGE_STORE_PATH; else process.env.USAGE_STORE_PATH = previous.usage;
+      if (previous.clipper === undefined) delete process.env.CLIPPER_STORE_PATH; else process.env.CLIPPER_STORE_PATH = previous.clipper;
+      if (previous.codex === undefined) delete process.env.CODEX_INGEST_ENABLED; else process.env.CODEX_INGEST_ENABLED = previous.codex;
+      if (previous.claude === undefined) delete process.env.CLAUDE_INGEST_ENABLED; else process.env.CLAUDE_INGEST_ENABLED = previous.claude;
+      if (previous.statusline === undefined) delete process.env.CLAUDE_STATUSLINE_ENABLED; else process.env.CLAUDE_STATUSLINE_ENABLED = previous.statusline;
+    }
+  });
+
+  it('collector strips app-server siblings and reports network failure generically', async () => {
+    const posted: Array<{ windows: unknown[] }> = [];
+    await runCodexCollector({
+      secret: async () => 's'.repeat(32),
+      read: async () => ({ connectorState: 'healthy', windows: [{ minutes: 300, usedPercent: 22, resetAt: '2026-08-12T05:00:00.000Z', prompt: 'private' } as never] }),
+      post: async payload => posted.push(payload),
+    });
+    expect(posted).toEqual([{ windows: [{ minutes: 300, usedPercent: 22, resetAt: '2026-08-12T05:00:00.000Z' }] }]);
+    await expect(postCodexPayload({ windows: [{ minutes: 300, usedPercent: 1 }] }, 's'.repeat(32), 1)).rejects.toThrow('collector_unavailable');
+  });
+
+  it('uses the provider-only exit code narrowly and never fabricates an observation', async () => {
+    const previousArgv = process.argv;
+    const directory = await mkdtemp(join(tmpdir(), 'usage-collector-exit-codes-'));
+    const secretPath = join(directory, 'codex.secret');
+    const post = vi.fn(async () => undefined);
+    try {
+      await writeFile(secretPath, 'e'.repeat(32), { mode: 0o600 });
+      process.argv = ['node', 'codex-collector', '--secret-file', secretPath];
+      expect(await collectorMain({
+        read: async () => ({ connectorState: 'unavailable', windows: [], failureReason: 'provider_rejected' }), post,
+      })).toBe(2);
+      expect(post).not.toHaveBeenCalled();
+
+      expect(await collectorMain({
+        read: async () => ({ connectorState: 'unavailable', windows: [], failureReason: 'invalid_response' }), post,
+      })).toBe(1);
+      expect(await collectorMain({
+        read: async () => ({ connectorState: 'healthy', windows: [{ minutes: 300, usedPercent: 100 }] }), post,
+      })).toBe(0);
+      expect(post).toHaveBeenCalledTimes(1);
+      expect(await collectorMain({
+        read: async () => ({ connectorState: 'healthy', windows: [{ minutes: 300, usedPercent: 50 }] }),
+        post: async () => { throw new Error('API unavailable'); },
+      })).toBe(1);
+    } finally {
+      process.argv = previousArgv;
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});

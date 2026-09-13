@@ -155,6 +155,6 @@ public enum UsageIngestion {
     }
 
     private static func providerName(_ provider: Provider) -> String {
-        provider == .codex ? "Codex" : "Claude"
+        provider.displayName
     }
 }

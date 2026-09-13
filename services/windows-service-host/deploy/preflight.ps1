@@ -1,0 +1,216 @@
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory)][string]$CandidateRoot,
+    [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{40}$')][string]$ExpectedSourceSha,
+    [string]$ServiceHostBinarySource,
+    [string]$ApiSource = 'D:\Hermes\lifeos-api',
+    [string]$GatewaySource = 'D:\Hermes\lifeos-server',
+    [string]$LegacyGatewaySource = 'D:\Hermes\lifeos-server',
+    [string]$NodeRuntimeSource,
+    [string]$PythonRuntimeSource,
+    [string]$GatewayEntryPoint,
+    [string]$TailscaleExecutable,
+    # Path only: the operator must pre-create the canonical token file. The
+    # raw LIFEOS_TAILSCALE_EDGE_TOKEN value is never accepted here.
+    [string]$TailscaleEdgeTokenSource,
+    [string]$TailscaleServiceName = 'Tailscale',
+    [string]$LegacyTaskName = 'LifeOSSyncServer',
+    [string]$CodexTaskName = 'LifeOSCodexCollector'
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Deployment.Common.ps1')
+
+# Candidate verification is read-only and must happen before any source
+# resolution, listener inspection, task export, or other deployment decision.
+# ExpectedSourceSha is an independently supplied release value; SOURCE_SHA.txt
+# is checked against it by the candidate verifier and is never used to choose
+# the expected identity.
+$candidateRootFull = Assert-LifeOSCandidateRoot -Root $CandidateRoot -ExpectedSourceSha $ExpectedSourceSha -DeploymentScriptRoot $PSScriptRoot -VerifyCandidate
+
+function Assert-SafeServiceName {
+    param([Parameter(Mandatory)][string]$Name)
+    if ($Name -notmatch '^[A-Za-z0-9_.-]{1,80}$') { throw "Unsafe service/task name: $Name" }
+}
+
+Assert-WindowsAdministrator
+Assert-SafeServiceName 'LifeOSAPI'
+Assert-SafeServiceName 'LifeOSGateway'
+Assert-SafeServiceName $TailscaleServiceName
+Assert-SafeServiceName $LegacyTaskName
+Assert-SafeTaskName $CodexTaskName
+
+$paths = Get-LifeOSDefaultPaths
+$operatorSid = Get-InteractiveOperatorSid
+$null = Assert-TailscaleEdgeTokenSource -Path $TailscaleEdgeTokenSource -ExpectedPath (Get-LifeOSTailscaleEdgeTokenPath $paths.SecretRoot) -OperatorSid $operatorSid
+Assert-ExistingDirectory $ApiSource 'API source'
+Assert-ExistingDirectory $GatewaySource 'Gateway source'
+Assert-TrustedSourcePath $ApiSource $operatorSid
+Assert-TrustedSourcePath $GatewaySource $operatorSid
+Assert-ExistingDirectory $LegacyGatewaySource 'Legacy gateway source'
+Assert-TrustedSourcePath $LegacyGatewaySource $operatorSid
+$apiRoot = Resolve-ApiReleaseRoot $ApiSource
+Assert-TrustedSourcePath $apiRoot $operatorSid
+$contractsRoot = Resolve-ApiDependencyRoot $apiRoot '@iphone-life-os\contracts'
+$zodRoot = Resolve-ApiDependencyRoot $apiRoot 'zod'
+Assert-ExistingFile (Join-Path $contractsRoot 'package.json') 'Contracts package manifest'
+Assert-ExistingFile (Join-Path $contractsRoot 'dist\index.js') 'Contracts production entry point'
+Assert-ExistingFile (Join-Path $zodRoot 'package.json') 'Zod package manifest'
+if (-not (Test-Path -LiteralPath (Join-Path $apiRoot 'dist\server.js') -PathType Leaf)) { throw 'Built API dist/server.js is missing.' }
+$null = Get-TreeManifest (Join-Path $apiRoot 'dist')
+$null = Get-TreeManifest (Join-Path $contractsRoot 'dist')
+$null = Get-TreeManifest $zodRoot
+$nodeSource = Resolve-NodeRuntimeSource $NodeRuntimeSource $ApiSource
+$pythonRuntime = Resolve-PythonRuntimeSource $PythonRuntimeSource $GatewaySource
+$pythonSource = $pythonRuntime.Root
+$pythonExecutable = $pythonRuntime.Executable
+$gatewayEntry = Resolve-GatewayEntryPoint $GatewayEntryPoint $GatewaySource
+$gatewayLauncher = Join-Path $PSScriptRoot 'gateway_launcher.py'
+Assert-ExistingFile $gatewayLauncher 'Gateway launcher'
+$tailscaleSnapshotScript = Join-Path $PSScriptRoot 'tailscale_snapshot.ps1'
+Assert-ExistingFile $tailscaleSnapshotScript 'Tailscale snapshot script'
+# The SYSTEM snapshot task runs under Windows PowerShell 5.1 by absolute path;
+# a missing host would only surface as a failed task after cutover.
+$windowsPowerShell = Join-Path ([Environment]::GetFolderPath('Windows')) 'System32\WindowsPowerShell\v1.0\powershell.exe'
+Assert-ExistingFile $windowsPowerShell 'Windows PowerShell host'
+$staticDeploymentTest = Join-Path $PSScriptRoot 'tests\Deployment.Static.Tests.ps1'
+Assert-ExistingFile $staticDeploymentTest 'Deployment static test'
+$behaviorDeploymentTest = Join-Path $PSScriptRoot 'tests\Deployment.Behavior.Tests.ps1'
+Assert-ExistingFile $behaviorDeploymentTest 'Deployment behavioral test'
+$legacyServeDeploymentTest = Join-Path $PSScriptRoot 'tests\Deployment.LegacyServe.Tests.ps1'
+Assert-ExistingFile $legacyServeDeploymentTest 'Legacy Serve deployment test'
+$hostSource = Resolve-ServiceHostBinary $ServiceHostBinarySource $paths.ServiceHostPath
+$null = Assert-LifeOSCandidateSourceBindings -CandidateRoot $candidateRootFull -ApiRoot $apiRoot -GatewayRoot $GatewaySource -NodeRuntimeRoot $nodeSource -ServiceHostBinary $hostSource -GatewayEntryPoint $gatewayEntry -DeploymentScriptRoot $PSScriptRoot
+$tailscale = Resolve-TailscaleExecutable $TailscaleExecutable
+$tailscaleStatus = Get-TailscaleStatusJson $tailscale
+$tailscaleDecision = Get-TailscaleServeDecision $tailscaleStatus
+Write-Host ("Tailscale Serve decision: {0}; unrelated routes are preserved." -f $tailscaleDecision.Action)
+Assert-TrustedSourcePath $nodeSource $operatorSid
+Assert-TrustedSourcePath $pythonSource $operatorSid
+Assert-TrustedSourcePath $pythonExecutable $operatorSid
+Assert-TrustedSourcePath $gatewayEntry $operatorSid
+Assert-TrustedSourcePath $hostSource $operatorSid
+
+# Exercise the transferred source before any service, task, data, ACL, or
+# Serve mutation. Run each suite through the reviewed native-command wrapper
+# so a fixture's `exit` can terminate only its child PowerShell process. The
+# behavioral fixtures use local fake Tailscale commands; they never contact or
+# change the machine's real Tailscale state.
+foreach ($deploymentTest in @($staticDeploymentTest, $behaviorDeploymentTest, $legacyServeDeploymentTest)) {
+    $testResult = Invoke-NativeChecked -FilePath $deploymentTest -ArgumentList ([string[]]@())
+    $testResult.Output | Out-Host
+}
+
+# Validate the complete source-side Python import closure before any service
+# is stopped. The installer later stages these exact files, so an import
+# failure cannot be deferred until the Windows service has been cut over.
+$gatewayImportCheck = 'import importlib,os,pathlib,sys; assert sys.version_info[:2] == (3,12),sys.version; from zoneinfo import ZoneInfo; ZoneInfo("Europe/Berlin"); roots=[pathlib.Path(os.environ["LIFEOS_DEPLOY_PREFLIGHT_GATEWAY_SOURCE"]).resolve(),pathlib.Path(os.environ["LIFEOS_DEPLOY_PREFLIGHT_LAUNCHER_SOURCE"]).resolve()]; sys.path[:0]=[str(root) for root in roots]; names=("main","enablebanking","supplement_catalog","gateway_launcher"); modules=[importlib.import_module(name) for name in names]; expected=[roots[0],roots[0],roots[0],roots[1]]; assert all(pathlib.Path(module.__file__).resolve().parent == root for module,root in zip(modules,expected)), [(name,module.__file__) for name,module in zip(names,modules)]'
+$previousAllowedLogin = $env:LIFEOS_TAILSCALE_ALLOWED_LOGIN
+$previousGatewayImportSource = $env:LIFEOS_DEPLOY_PREFLIGHT_GATEWAY_SOURCE
+$previousLauncherImportSource = $env:LIFEOS_DEPLOY_PREFLIGHT_LAUNCHER_SOURCE
+$previousGatewayImportCheck = $env:LIFEOS_DEPLOY_PREFLIGHT_IMPORT_CHECK
+try {
+    # main.py validates this required identity at import time. A bounded
+    # non-production value proves module closure without borrowing or printing
+    # the operator's real Tailscale identity.
+    $env:LIFEOS_TAILSCALE_ALLOWED_LOGIN = 'preflight@lifeos.invalid'
+    # Windows PowerShell can re-tokenize a native -c payload when it contains
+    # embedded quotes and trailing argv values. Keep the check and its roots
+    # out of the native argv boundary; the runner itself contains no double
+    # quotes and therefore arrives as one Python argument on PS 5.1.
+    $env:LIFEOS_DEPLOY_PREFLIGHT_GATEWAY_SOURCE = $GatewaySource
+    $env:LIFEOS_DEPLOY_PREFLIGHT_LAUNCHER_SOURCE = $PSScriptRoot
+    $env:LIFEOS_DEPLOY_PREFLIGHT_IMPORT_CHECK = $gatewayImportCheck
+    # Keep the native `-c` payload quote-free for Windows PowerShell 5.1,
+    # which strips nested quote characters while binding native arguments.
+    $gatewayImportRunner = 'import os;exec(os.environ.get(chr(76)+chr(73)+chr(70)+chr(69)+chr(79)+chr(83)+chr(95)+chr(68)+chr(69)+chr(80)+chr(76)+chr(79)+chr(89)+chr(95)+chr(80)+chr(82)+chr(69)+chr(70)+chr(76)+chr(73)+chr(71)+chr(72)+chr(84)+chr(95)+chr(73)+chr(77)+chr(80)+chr(79)+chr(82)+chr(84)+chr(95)+chr(67)+chr(72)+chr(69)+chr(67)+chr(75)))'
+    # The candidate is immutable after transfer.  Import checks must not leave
+    # Python bytecode beside the reviewed source files and invalidate the
+    # candidate allowlist before install starts.
+    Invoke-NativeChecked -FilePath $pythonExecutable -ArgumentList ([string[]]@('-B', '-I', '-c', $gatewayImportRunner)) -Quiet | Out-Null
+} finally {
+    if ($null -eq $previousAllowedLogin) { Remove-Item Env:LIFEOS_TAILSCALE_ALLOWED_LOGIN -ErrorAction SilentlyContinue }
+    else { $env:LIFEOS_TAILSCALE_ALLOWED_LOGIN = $previousAllowedLogin }
+    if ($null -eq $previousGatewayImportSource) { Remove-Item Env:LIFEOS_DEPLOY_PREFLIGHT_GATEWAY_SOURCE -ErrorAction SilentlyContinue }
+    else { $env:LIFEOS_DEPLOY_PREFLIGHT_GATEWAY_SOURCE = $previousGatewayImportSource }
+    if ($null -eq $previousLauncherImportSource) { Remove-Item Env:LIFEOS_DEPLOY_PREFLIGHT_LAUNCHER_SOURCE -ErrorAction SilentlyContinue }
+    else { $env:LIFEOS_DEPLOY_PREFLIGHT_LAUNCHER_SOURCE = $previousLauncherImportSource }
+    if ($null -eq $previousGatewayImportCheck) { Remove-Item Env:LIFEOS_DEPLOY_PREFLIGHT_IMPORT_CHECK -ErrorAction SilentlyContinue }
+    else { $env:LIFEOS_DEPLOY_PREFLIGHT_IMPORT_CHECK = $previousGatewayImportCheck }
+}
+
+$tailscaleService = Get-Service -Name $TailscaleServiceName -ErrorAction SilentlyContinue
+if ($null -eq $tailscaleService) { throw "The required Tailscale SCM service was not found: $TailscaleServiceName" }
+$legacyTasks = @(Get-ScheduledTask -TaskName $LegacyTaskName -ErrorAction SilentlyContinue)
+if ($legacyTasks.Count -gt 1) { throw "Scheduled task name is ambiguous across task paths: $LegacyTaskName" }
+$legacyTask = if ($legacyTasks.Count -eq 1) { $legacyTasks[0] } else { $null }
+if ($null -eq $legacyTask) {
+    Write-Warning "The expected legacy task was not found: $LegacyTaskName. No task will be disabled by this toolkit."
+} else {
+    Write-Host ("Legacy task present; state is {0}. It will be backed up and preserved." -f $legacyTask.State)
+}
+
+$legacyTaskDefinition = if ($null -eq $legacyTask) {
+    [pscustomobject]@{ Exists = $false; Enabled = $false; State = 'Stopped'; TaskPath = '\'; Xml = $null }
+} else {
+    $legacyTaskPath = [string]$legacyTask.TaskPath
+    if ([string]::IsNullOrWhiteSpace($legacyTaskPath)) { $legacyTaskPath = '\' }
+    Assert-SafeTaskPath $legacyTaskPath
+    [pscustomobject]@{
+        Exists = $true
+        Enabled = ([string]$legacyTask.State -ne 'Disabled')
+        State = [string]$legacyTask.State
+        TaskPath = $legacyTaskPath
+        Xml = (Export-ScheduledTask -TaskName $LegacyTaskName -TaskPath $legacyTaskPath -ErrorAction Stop)
+    }
+}
+$legacyListener = Get-LegacyGatewayListenerSnapshot -TaskSnapshot $legacyTaskDefinition -TaskName $LegacyTaskName -TaskPath ([string]$legacyTaskDefinition.TaskPath) -Port 8421
+if ([bool]$legacyListener.Exists) {
+    Write-Host 'Legacy 8421 listener is attributable to the saved legacy task; no listener state was changed.'
+}
+
+$apiTarget = Join-Path $paths.InstallRoot 'api'
+$gatewayTarget = Join-Path $paths.InstallRoot 'gateway'
+$runtimeRoot = $paths.RuntimeRoot
+$dataRoot = $paths.DataRoot
+$secretRoot = $paths.SecretRoot
+$logRoot = $paths.LogRoot
+
+foreach ($path in @($paths.InstallRoot, $runtimeRoot, $dataRoot, $secretRoot, $logRoot, $paths.BackupRoot)) {
+    Assert-SafeAbsolutePath $path 'machine-owned path'
+    if (Test-Path -LiteralPath $path) { Assert-NoReparsePath $path }
+}
+
+$legacyData = Join-Path $LegacyGatewaySource 'data'
+Assert-ExistingDirectory $legacyData 'Legacy gateway data directory'
+$claudeSource = Join-Path $legacyData 'claude-ingest.secret'
+$usageSource = Join-Path $legacyData 'usage-history.jsonl'
+if (-not (Test-Path -LiteralPath $claudeSource -PathType Leaf)) {
+    throw 'The existing Claude secret must be present in the legacy gateway location for migration; it is never generated in a service-writable directory.'
+}
+Assert-NoReparsePath $claudeSource
+if (Test-Path -LiteralPath $usageSource) { Assert-NoReparsePath $usageSource }
+
+$calendarSource = Join-Path $legacyData 'calendar.json'
+if (Test-Path -LiteralPath $calendarSource) { Assert-NoReparsePath $calendarSource }
+
+$enableBankingConnectionsSource = Join-Path $legacyData 'enablebanking-connections.json'
+if (Test-Path -LiteralPath $enableBankingConnectionsSource) {
+    $null = Assert-BoundedFile $enableBankingConnectionsSource (256 * 1024) 'Legacy Enable Banking connection store'
+}
+$financeSummarySource = Join-Path $legacyData 'finance-summary.json'
+if (Test-Path -LiteralPath $financeSummarySource) {
+    $null = Assert-BoundedFile $financeSummarySource (256 * 1024) 'Legacy finance summary cache'
+}
+
+Write-Host 'LifeOS Windows deployment preflight passed.'
+Write-Host ("Operator SID: {0}" -f $operatorSid)
+Write-Host ("API source: {0}" -f $ApiSource)
+Write-Host ("Gateway source: {0}" -f $GatewaySource)
+Write-Host ("Node runtime source: {0}" -f $nodeSource)
+Write-Host ("Python runtime source: {0}" -f $pythonSource)
+Write-Host ("Python interpreter: {0}" -f $pythonExecutable)
+Write-Host ("Gateway entry point: {0}" -f $gatewayEntry)
+Write-Host ("Service host source: {0}" -f $hostSource)
+Write-Host 'No service, ACL, task, data, or Tailscale state was changed.'
