@@ -12,7 +12,7 @@ evidence is still incomplete.
 ## Current source checkpoint
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- HEAD and origin: `14a3b7f Add bounded recovery diagnostics instrumentation`;
+- HEAD and origin: `4e14e38 Add strict read-only recovery progress validation`;
   deployable code checkpoint remains `6baa1f3`.
 - Finance source checkpoint: `fd8ccfb Refine Finance responsive hierarchy`.
 - macOS now has one value-driven Home `NavigationStack` with a bounded typed
@@ -47,7 +47,8 @@ evidence is still incomplete.
 - Windows source suite: **61 passed, 1 skipped, 0 failures**; the pushed
   `6baa1f3` candidate verifier passed **108 files**. Native PowerShell 5.1
   static, behavior, failure-parity, and legacy Serve suites passed exit 0 for
-  diagnostics at `14a3b7f`; Astra Medium reviewed it **GREEN**.
+  diagnostics at `14a3b7f` and strict progress validation at `4e14e38`; Astra
+  Medium reviewed both slices **GREEN**.
 - Personal installer security slice: Astra Medium scoped GREEN at `1d1af18`;
   **13/13 tests** and `bash -n` pass. Exact Apple command allowlisting,
   minimal child environment, hostile Python-startup rejection, toolchain
@@ -94,7 +95,7 @@ evidence is still incomplete.
 Keep SF Pro/system styling, compact Linear/Vercel quality, truthful live data,
 no generic advisor or in-app AI, and calorie-photo tracking as the only AI.
 The old AppKit route-host/raster plan is superseded by the native stack in
-`070b7db`. Next: use the bounded diagnostics in disposable non-mutating
+`070b7db`. Next: use the bounded diagnostics and strict reader in disposable
 recovery validation, resolve the full-journal scan performance gate, then
 resume recovery and close live provider, device/signing, whole-app visual,
 Zepp, Obsidian, and security gates with evidence.

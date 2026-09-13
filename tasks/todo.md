@@ -29,7 +29,7 @@ Updated 2026-09-13 Europe/Berlin. Release: **NO-GO**.
 
 ## Verified checkpoint
 
-`14a3b7f` is pushed; the deployable Windows source checkpoint is `6baa1f3`.
+`4e14e38` is pushed; the deployable Windows source checkpoint is `6baa1f3`.
 The Finance source change is `fd8ccfb`. Calendar hardening is pushed at `8942b8e`; its focused
 iPhone 17 suite is 107/107 with exit 0 and the macOS production build exits 0.
 Usage visual/source, macOS route, and personal installer security slices have
@@ -37,7 +37,8 @@ source evidence; the Usage focused visual run is 3/3 with seven inspected
 captures. macOS route tests are 2/2 with exit 0; the full macOS snapshot run
 executed 51/51 cases with zero test failures before result-archive I/O failure.
 Windows source tests are 61 passed, 1 skipped; native static, behavior,
-failure-parity, and legacy Serve suites pass for the diagnostics tranche.
+failure-parity, and legacy Serve suites pass for the diagnostics and strict
+progress slices.
 The installer has 13/13 tests and `bash -n`; this does not prove physical
 signing, installation, or whole-product completion. Backend boundary security
 is also Astra-reviewed GREEN at `87e7db6` with 148/148 API tests; native
