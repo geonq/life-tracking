@@ -3,8 +3,8 @@
 Updated 2026-09-13 Europe/Berlin.
 
 - Release: **NO-GO**.
-- Source checkpoint: `6baa1f3`; current branch HEAD is `4e14e38` on
-  `lifeos-foundation-checkpoint-20260812`.
+- Source checkpoint: `6baa1f3`; current branch HEAD and origin are
+  `9e43dd7` on `lifeos-foundation-checkpoint-20260812`.
 - Usage packet, per-scope authority, omission handling, persistence retry,
   identity handling, cancellation, and viewport bounds are implemented and
   independently reviewed **GREEN**.
@@ -32,12 +32,13 @@ Updated 2026-09-13 Europe/Berlin.
   Windows source suite remains **61 passed, 1 skipped**. The pushed
   `6baa1f3` candidate verifier passed 108 files; remote static and behavior
   suites also passed.
-- Bounded recovery diagnostics at `14a3b7f` and strict progress validation at
-  `4e14e38` have opt-in session ownership, fixed redacted records,
-  counter/memory bounds, failure-path parity, and no strict ACL/tail repair.
-  Native Windows PowerShell 5.1 static, behavior, and legacy Serve suites
-  passed with exit 0; Astra Medium reviewed both slices **GREEN**. This does
-  not certify canonical recovery.
+- Bounded recovery diagnostics at `14a3b7f`, strict progress validation at
+  `4e14e38`, and strict journal observation at `9e43dd7` have opt-in session
+  ownership, fixed redacted records, counter/memory bounds, failure-path
+  parity, and no strict ACL/tail repair. Native Windows PowerShell 5.1
+  static, behavior, and legacy Serve suites passed exit 0 for the latest
+  slice; Astra Medium reviewed all three slices **GREEN**. This does not
+  certify canonical recovery.
 - Personal device installer security slice is Astra scoped GREEN at `1d1af18`:
   **13/13 tests**, `bash -n`, exact production command allowlist, minimal
   environment, and toolchain/Python injection regressions pass. Physical
@@ -61,13 +62,14 @@ Updated 2026-09-13 Europe/Berlin.
 - Whole-app pixel/runtime QA for hierarchy, icons, motion, scroll, pinch zoom,
   dark transparent homescreen, and widgets. The Usage slice and the repaired
   Fitness hero have focused evidence; this is not whole-app acceptance.
-- Windows recovery was run through the final journal unit but stopped after 45
-  minutes without a stage checkpoint; memory stayed near 674 MB, below the
-  earlier 985 MB peak. The marker is still active and `LifeOSAPI` is stopped.
-  Candidate verification passes, but reinstall, listener/health, Tailscale
-  Serve, and live banking remain open. The follow-up runtime patch is rejected
-  and is not in the branch; the diagnostics tranche was tested only in a
-  disposable copy.
+- Fresh SSH observation confirms GEONQSERVER is reachable, C: and D: are
+  BitLocker-protected, no LifeOS recovery/install process is running,
+  `LifeOSAPI` is stopped, and `LifeOSGateway` is absent. The marker remains
+  active with an `artifacts-complete` journal, 31,401 units, and sequence
+  59,167. The earlier resume stopped after 45 minutes without a stage
+  checkpoint; reinstall, listener/health, Tailscale Serve, and live banking
+  remain open. The follow-up runtime patch is rejected and is not in the
+  branch; disposable diagnostics/strict-reader validation passed.
 - iPhone install/signing renewal/Shortcuts and physical continuity.
 - Zepp workout import fidelity, Obsidian Canvas round trip, and final security.
 

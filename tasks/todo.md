@@ -13,7 +13,8 @@ Updated 2026-09-13 Europe/Berlin. Release: **NO-GO**.
    responsive hierarchy at `fd8ccfb`, each with scoped evidence. Finish the
    remaining Finance live-data/interaction pass, then SF Symbols, motion,
    calendar scroll/pinch, and widget states against the approved design plan.
-3. Use the bounded recovery diagnostics in a disposable validation, finish the
+3. Use the bounded recovery diagnostics and strict journal observation in a
+  disposable validation, finish the
    Windows recovery, install the verified `6baa1f3` candidate, and
    verify service listeners, health, ACLs, Tailscale Serve, and live Enable
    Banking reads on the reachable PC. The first real resume reached journal
@@ -29,7 +30,11 @@ Updated 2026-09-13 Europe/Berlin. Release: **NO-GO**.
 
 ## Verified checkpoint
 
-`4e14e38` is pushed; the deployable Windows source checkpoint is `6baa1f3`.
+`9e43dd7` is pushed; the deployable Windows source checkpoint is `6baa1f3`.
+The strict journal observation mode is native-Windows-validated and Astra
+reviewed GREEN. Fresh SSH readback confirms the canonical marker is still
+active, the journal is artifacts-complete at 31,401 units/sequence 59,167,
+LifeOSAPI is stopped, and LifeOSGateway is absent.
 The Finance source change is `fd8ccfb`. Calendar hardening is pushed at `8942b8e`; its focused
 iPhone 17 suite is 107/107 with exit 0 and the macOS production build exits 0.
 Usage visual/source, macOS route, and personal installer security slices have

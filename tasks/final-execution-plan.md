@@ -1,11 +1,22 @@
 # LifeOS final execution plan
-Planning baseline: 2026-09-13, HEAD `5e4f683e0268f6be203cb05638d986ec53f056af`. Specification only; no implementation completion claimed.
+Planning baseline: 2026-09-13, current source HEAD `9e43dd7`. This remains a
+planning and dispatch authority; it does not claim product completion.
 
 ## 1. Reconciled truth and authority
-- Local HEAD, origin tracking ref and GitHub CLI PR #1 head matched `5e4f683`; PR is OPEN/DRAFT, CLEAN, targeting `main`. Working tree was clean at final inspection. An initially staged ACTIVE update was committed externally during inspection; this planner did not commit it. Recheck before dispatch.
+- Local HEAD and origin tracking ref match `9e43dd7`; GitHub CLI confirms PR #1
+  is OPEN/DRAFT/MERGEABLE against `main` at the same head. Recheck before
+  every dispatch.
 - Release is **NO-GO**. `python3 -B scripts/validate_acceptance_registry.py --json` verified FROZEN, 258 leaves, 7 aliases, 0 accepted, no structural errors; `--score` reports the P0 failure. This measures accepted evidence, not zero implemented functionality or a reliable effort percentage.
-- HANDOFF/PHASE_STATUS/todo still name source `6baa1f3`; distinguish that deployable candidate from current documentation HEAD. Historical test counts are scoped receipts, not rerun results or final acceptance.
-- Last recorded Windows state, NOT freshly polled by this planner: `domke@100.88.47.111`, BitLocker protected; `LifeOSAPI` stopped, gateway absent; transaction marker active, recovery artifacts-complete, 31,401 units/sequence 59,167. Resume reached unit 31,400, stopped after 45 minutes without final stage progress, about 674 MB RSS. Candidate verifier (108 files), static and behavior suites reportedly passed for `6baa1f3`.
+- HANDOFF/PHASE_STATUS/todo now name the current source checkpoint and
+  distinguish deployable candidate `6baa1f3` from the documentation/code
+  head. Historical test counts are scoped receipts, not final acceptance.
+- Fresh read-only SSH observation: GEONQSERVER is reachable; C: and D: are
+  BitLocker-protected; no LifeOS recovery/install process is running;
+  `LifeOSAPI` is stopped and `LifeOSGateway` is absent. The marker remains
+  active; its journal is `artifacts-complete` with 31,401 units and progress
+  sequence 59,167. The earlier resume stopped after 45 minutes without a
+  final stage checkpoint. Canonical recovery/install and live bank readback
+  remain unverified.
 - Missing: current process/SCM/marker observation; completed recovery/cutover; exact deployed live banking; physical signing/App Groups/HealthKit/widgets; full runtime/visual/performance evidence; workout fidelity; Canvas implementation/round trip; final operational security and operator approval.
 - Read together: Coordination/{HANDOFF,PHASE_STATUS,DECISIONS}.md; tasks/{ACTIVE,todo,design,visual-overhaul-plan,bank-consent-spec,human-action-checklist}.md; docs/LIFEOS_ACCEPTANCE_REGISTRY.md; design-repo developers/design-coordination/00-READ-FIRST.md and referenced feature contracts; actual source. Issue #2 was read through `gh issue view 2`, remains OPEN.
 - Current user corrections and DECISIONS override older design recipes: SF Pro everywhere (including wordmark), estimates GREEN, calories orange, semantic SF Symbols (Fitness ECG), native Home NavigationStack; no AppKit raster host or card-flight route replacement. Older Manrope/Inter/Space Grotesk, amber estimates, giant KPIs, Iconoir adoption and embedded/Keychain sync-bearer provisioning are superseded.
@@ -14,7 +25,8 @@ Planning baseline: 2026-09-13, HEAD `5e4f683e0268f6be203cb05638d986ec53f056af`. 
 - ACTIVE phases 1–9 remain scope: Finance/ledger, Tax/Documents, Business, Investments, Reminders Tasks/Grocery/Shopping, shell/settings/reports, Fitness, hardware. Its “minimal Fitness” wording does not cancel the full Bevel functional contract. Missing modules are work, not permission to hide them as completion.
 
 ## 2. Execution protocol and evidence commands
-- This task authorizes ONLY this plan file. Everything below is a future dispatch; no code, deployments, commits or tests beyond read-only registry checks occurred here.
+- This file governs future bounded dispatches; each implementation still needs
+  its own reviewed diff, tests, commit, push, and acceptance evidence.
 - One Luna Max implementer at a time; Astra Medium plans/reviews after bounded batches. Request these tiers only if actually available; record actual worker/tool identity and effort, never infer a model from its nickname. Long code reads return file:symbol summaries and uncertainties.
 - Before every dispatch: pin base SHA, inspect dirty/index changes, expand the row's paths to an exact allowlist, refresh symbol line numbers with `rg -n`, assign matching tests, forbid edits outside scope. Rows below are sequential ownership transfers, never simultaneous shared-file ownership. New files are explicitly marked proposed.
 - Worker returns diff, producing SHA/base, complexity argument, executed commands/counts, artifact paths and unverified conditions. Parent inspects diff and evidence; Astra reviews security/data contracts before visual batching. RED patches are quarantined and fixed/reviewed or reverted only within that worker's owned changes; never reset unrelated work.
@@ -105,7 +117,7 @@ Planning baseline: 2026-09-13, HEAD `5e4f683e0268f6be203cb05638d986ec53f056af`. 
 - Windows timing alone is not a failure signal: inspect same live PID/CPU/stage; do not restart due polling timeout. Unexpected ACL/identity drift or memory danger stops mutation and retains marker/journal; no automatic destructive cleanup. No scheduling/Claude-limit watcher.
 | Area | Current verified or recorded status | Evidence required next |
 |---|---|---|
-| Git/PR | Observed HEAD/origin/PR `5e4f683`, draft OPEN/CLEAN | Recheck current SHA before every worker; canonical docs still distinguish candidate poorly |
+| Git/PR | Observed HEAD/origin/PR `9e43dd7`, draft OPEN/MERGEABLE | Recheck current SHA before every worker; canonical docs now distinguish candidate and current head |
 | Registry | Observed valid FROZEN,0/258 accepted; score failure | Audited conflict reconciliation and per-leaf immutable acceptance evidence |
 | Windows | Recorded `6baa1f3` candidate checks; active recovery marker/service stopped | Fresh SSH process/SCM/journal observation, measured reviewed recovery, cutover/live health |
 | Finance/device | Source foundations and historical scoped tests; live/physical unproven here | Existing consent readback; USB/team/HealthKit/widget/renewal receipts from Georg |

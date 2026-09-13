@@ -24,7 +24,7 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
 - Tax document local feature foundation.
 - Provenance-aware read-only Usage ingestion/API/native UI.
 - Fail-closed Finance summary and disabled connector contracts.
-- Current working checkpoint: `4e14e38` on `lifeos-foundation-checkpoint-20260812`.
+- Current working checkpoint: `9e43dd7` on `lifeos-foundation-checkpoint-20260812`.
   The branch push succeeded; PR #1 is the matching open draft checkpoint. The
   deployable Windows candidate is the verified `6baa1f3` source checkpoint;
   recovery reached journal unit 31,400 and was stopped before its final stage.
@@ -39,9 +39,10 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
   Mac snapshots, responsive captures at 900/1200/1512/1800, focused iPhone 17
   contracts, and an Astra Medium GREEN review.
   Bounded recovery diagnostics are committed at `14a3b7f`; strict progress
-  validation is committed at `4e14e38`. Native Windows PowerShell 5.1 static,
-  behavior, failure-parity, and legacy Serve suites passed with exit 0, and
-  Astra Medium reviewed both slices GREEN. The canonical transaction remains
+  validation is committed at `4e14e38`; strict journal observation is committed
+  at `9e43dd7`. Native Windows PowerShell 5.1 static, behavior, failure-parity,
+  and legacy Serve suites passed with exit 0 for the latest slice, and Astra
+  Medium reviewed all three slices GREEN. The canonical transaction remains
   untouched.
 
 ## Execution phases

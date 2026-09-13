@@ -63,8 +63,9 @@ Updated 2026-09-13 Europe/Berlin.
 - Windows gateway access remains fail-closed with scoped credentials, protected
   snapshots, atomic recovery, identity-bound bounded reads, ACL checks, and
   journal-bound Node staging. `6baa1f3` passed source/candidate/static/behavior;
-  diagnostics at `14a3b7f` and strict progress validation at `4e14e38` are
-  Astra-reviewed GREEN and were validated only in disposable Windows copies;
+  diagnostics at `14a3b7f`, strict progress validation at `4e14e38`, and
+  strict journal observation at `9e43dd7` are Astra-reviewed GREEN and were
+  validated only in disposable Windows copies;
   Astra rejected a mutating reconcile-only path and TOCTOU optimization; do
   not merge it.
 - Gateway and native calendar limits are both 1,024. Oversized incoming or
@@ -96,7 +97,7 @@ Updated 2026-09-13 Europe/Berlin.
 - Use Luna Max for bounded implementation and Astra Medium for batched review;
   keep write scopes disjoint, native builds serialized with `-jobs 1`, and
   close completed workers and processes immediately.
-- Keep coordination files below 100 lines; use live production reads, isolate
-  fixtures, and treat subagent reports as hypotheses until the parent reviews
-  the diff and runs relevant checks.
+- Keep coordination files below 100 lines where practical; use live production
+  reads, isolate fixtures, and treat subagent reports as hypotheses until the
+  parent reviews the diff and runs relevant checks.
 - Do not add a Claude usage-limit watcher, overnight supervisor, demo fallback, generic assistant, or unrelated conversational AI; do not merge PR #1 while Windows, provider, physical-device, and visual gates remain unresolved.

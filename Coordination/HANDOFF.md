@@ -12,8 +12,9 @@ evidence is still incomplete.
 ## Current source checkpoint
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- HEAD and origin: `4e14e38 Add strict read-only recovery progress validation`;
-  deployable code checkpoint remains `6baa1f3`.
+- HEAD and origin: `9e43dd7 Add strict recovery journal observation mode`;
+  deployable code checkpoint remains `6baa1f3`. PR #1 is OPEN, DRAFT, and
+  MERGEABLE against `main` at this same head.
 - Finance source checkpoint: `fd8ccfb Refine Finance responsive hierarchy`.
 - macOS now has one value-driven Home `NavigationStack` with a bounded typed
   path. Sidebar Home resets it; Back pops one detail and preserves origin.
@@ -47,8 +48,10 @@ evidence is still incomplete.
 - Windows source suite: **61 passed, 1 skipped, 0 failures**; the pushed
   `6baa1f3` candidate verifier passed **108 files**. Native PowerShell 5.1
   static, behavior, failure-parity, and legacy Serve suites passed exit 0 for
-  diagnostics at `14a3b7f` and strict progress validation at `4e14e38`; Astra
-  Medium reviewed both slices **GREEN**.
+  diagnostics at `14a3b7f`, strict progress validation at `4e14e38`, and
+  strict journal observation at `9e43dd7`; Astra Medium reviewed all three
+  slices **GREEN**. The disposable native run for the latest slice passed
+  static, behavior, and legacy Serve suites under Windows PowerShell 5.1.
 - Personal installer security slice: Astra Medium scoped GREEN at `1d1af18`;
   **13/13 tests** and `bash -n` pass. Exact Apple command allowlisting,
   minimal child environment, hostile Python-startup rejection, toolchain
@@ -66,14 +69,18 @@ evidence is still incomplete.
 
 ## Still open
 
-- Windows is reachable and BitLocker was last read fully encrypted/protected.
+- Windows is reachable and BitLocker was freshly read fully encrypted with
+  protection on for C: and D:. No LifeOS recovery/install process is running;
+  `LifeOSAPI` is stopped and `LifeOSGateway` is absent.
   The `6baa1f3` rollback was actually run through unit `31,400`; memory stayed
   near **674 MB** versus the earlier **985 MB** peak, but no final stage
   checkpoint appeared after 45 minutes, so it was safely stopped. The durable
   marker remains `active`, the journal remains `artifacts-complete`, and
   `LifeOSAPI` remains stopped. Install and live Enable Banking readback remain
   uncertified; diagnostics were tested only in a disposable copy, and the
-  canonical transaction was not resumed or installed.
+  canonical transaction was not resumed or installed. The current marker is
+  still `active`; its journal is `artifacts-complete` with 31,401 units and
+  progress sequence 59,167.
 - Astra rejected an uncommitted runtime optimization for a mutating
   reconcile-only path and TOCTOU gap; it is preserved at
   `/private/tmp/lifeos-red-runtime-optimization-20260913.patch` and excluded.
@@ -97,5 +104,6 @@ no generic advisor or in-app AI, and calorie-photo tracking as the only AI.
 The old AppKit route-host/raster plan is superseded by the native stack in
 `070b7db`. Next: use the bounded diagnostics and strict reader in disposable
 recovery validation, resolve the full-journal scan performance gate, then
-resume recovery and close live provider, device/signing, whole-app visual,
+resume recovery only after measured strict observation and close live provider,
+device/signing, whole-app visual,
 Zepp, Obsidian, and security gates with evidence.
