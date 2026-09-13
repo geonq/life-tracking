@@ -4,7 +4,7 @@ Updated 2026-09-13 Europe/Berlin.
 
 - Release: **NO-GO**.
 - Deployable source checkpoint: `6baa1f3`; current branch HEAD and origin are
-  `39f2c21` on `lifeos-foundation-checkpoint-20260812`.
+  `e8bbefa` on `lifeos-foundation-checkpoint-20260812`.
 - Usage packet, per-scope authority, omission handling, persistence retry,
   identity handling, cancellation, and viewport bounds are implemented and
   independently reviewed **GREEN**.
@@ -61,6 +61,13 @@ Updated 2026-09-13 Europe/Berlin.
   because this Mac has no `iphonesimulator` runtime; no Swift compiler error
   was observed. Collapsed/compact shell reversal and iPhone tab rendering
   remain unverified runtime interactions.
+- The follow-up Usage/Home/Clipper tranche at `e8bbefa` is Astra Medium
+  **GREEN** after two review/fix cycles. It keeps the empty-history range
+  selector reachable, preserves connector-specific recovery copy, and uses
+  measured 224/256pt Mac chart heights with exact 360/960 breakpoint crossing.
+  The serialized macOS build succeeded and the exact artifact was inspected.
+  The focused XCTest command compiled but could not establish the sandboxed
+  `testmanagerd` connection before assertions ran.
 - The frozen acceptance registry validates with 258 scored leaves and 7
   aliases, but records 0 accepted leaves; its `--score` gate fails as designed.
   Tranche GREEN reviews therefore do not represent a completion percentage.

@@ -12,11 +12,12 @@ evidence is still incomplete.
 ## Current source checkpoint
 
 - Branch: `lifeos-foundation-checkpoint-20260812`.
-- HEAD and origin: `39f2c21 Refine shell navigation geometry and motion`;
+- HEAD and origin: `e8bbefa Refine compact usage presentation and chart contract`;
   the source checkpoint remains `0a8d5b6 Instrument recovery runtime phases safely`;
-  deployable code checkpoint remains `6baa1f3`. Fresh GitHub CLI observation
-  shows PR #1 OPEN, DRAFT, and MERGEABLE against `main` at `e234af9`, with no
-  submitted reviews; recheck its live state before every dispatch or merge.
+  deployable code checkpoint remains `6baa1f3`. The last verified GitHub CLI
+  observation showed PR #1 OPEN, DRAFT, and MERGEABLE against `main` at
+  `e234af9`, with no submitted reviews; recheck its live state before every
+  dispatch or merge.
 - Finance source checkpoint: `fd8ccfb Refine Finance responsive hierarchy`.
 - macOS now has one value-driven Home `NavigationStack` with a bounded typed
   path. Sidebar Home resets it; Back pops one detail and preserves origin.
@@ -25,11 +26,15 @@ evidence is still incomplete.
 - Usage packet/authority, omission handling, persistence retry, and bounded
   chart interaction remain GREEN from `7877ec5`.
 - Usage hierarchy, compact quota cards, chart legend/controls, responsive
-  720/960pt boundaries, and endpoint hit targets are implemented at
-  `33c74c9`. The focused macOS Usage run is **3/3 with 0 failures**; fresh
-  900/1512pt route and Facts PNG attachments were inspected. Selected-point
-  metadata fallback remains source-reviewed, not pixel-tested. This is a
-  Usage slice, not whole-app visual acceptance.
+  720/960pt boundaries, and endpoint hit targets are implemented across
+  `33c74c9` and `e8bbefa`. The latter keeps empty-history range selection
+  reachable, preserves connector-specific recovery states, and applies the
+  224/256pt Mac chart contract. Astra Medium reviewed the corrected candidate
+  **GREEN**; the serialized Mac production build succeeded and the exact
+  artifact was inspected. The focused test harness compiled the candidate but
+  could not start XCTest because the sandbox blocked `testmanagerd`; no
+  assertion failure was observed. This is a Usage slice, not whole-app visual
+  acceptance.
 - Calendar pairing/authentication, bounded envelope negotiation, replay and
   merge rules, mutation fencing, durable store writes, and cross-OS symbol
   fallback are committed at `8942b8e`. The focused iPhone 17 suite is
@@ -137,7 +142,8 @@ Keep SF Pro/system styling, compact Linear/Vercel quality, truthful live data,
 no generic advisor or in-app AI, and calorie-photo tracking as the only AI.
 The old AppKit route-host/raster plan is superseded by the native stack in
 `070b7db`. Current next step: continue the bounded T11 Home/Usage/Clipper
-visual pass from the reviewed foundation and shell. The two broad security workers
+visual pass from the reviewed foundation and shell; the latest committed
+Usage tranche is `e8bbefa`. The two broad security workers
 returned no report, so any further security reconciliation must use a different,
 completed execution method before code changes. Keep the Windows marker untouched until a
 fresh strict recovery observation, identity/ACL checks, and reviewed performance

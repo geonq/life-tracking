@@ -1,10 +1,13 @@
 # LifeOS final execution plan
-Planning baseline: 2026-09-13; current trusted HEAD **39f2c21**. Documentation-only review; all execution below is prospective.
+Planning baseline: 2026-09-13; current trusted HEAD **e8bbefa**. Documentation records the current execution state; remaining dispatch below is prospective.
 
 ## 1. Current truth and explicit gates
-- **NO-GO.** Local HEAD and origin now match `e234af9`; fresh GitHub CLI
-  observation shows PR #1 OPEN/DRAFT/MERGEABLE against `main` with no submitted
-  reviews. A serialized Mac shell build passed; iOS lanes stop at asset
+- **NO-GO.** Local HEAD and origin now match `e8bbefa`; the last GitHub CLI
+  PR observation predates this push and must be refreshed before merge. A
+  serialized Mac Usage build succeeded; the focused XCTest command compiled
+  but the sandbox blocked `testmanagerd` before assertions. The last verified
+  PR state was OPEN/DRAFT/MERGEABLE against `main` with no submitted reviews.
+  A serialized Mac shell build passed; iOS lanes stop at asset
   compilation because no `iphonesimulator` runtime is installed. Fresh
   read-only Windows observation shows BitLocker protected C:/D:, stopped
   `LifeOSAPI`, absent `LifeOSGateway`, no LifeOS process, and an active recovery
@@ -23,6 +26,10 @@ Planning baseline: 2026-09-13; current trusted HEAD **39f2c21**. Documentation-o
   Mac build and opened Home/Usage/Calendar captures. It is a bounded shell
   checkpoint; collapsed/compact reversal, iPhone tab rendering, and the full
   route/gesture matrix remain unverified.
+- Usage/Home/Clipper refinement `e8bbefa` is Astra Medium GREEN after two
+  focused review/fix cycles, a serialized Mac build, and exact artifact
+  inspection. It preserves empty-history range selection and connector
+  recovery states, and implements the measured 224/256pt chart contract.
 - T0 must reconcile registry RM-01 hero morph, RM-02 ring reveal/halo, RM-03 chart draw, related atomic/non-overlap metadata and BF coaching language with current design. Preserve original hash, reviewed replacement contracts, rationale, amendment/refreeze history and unrelated thresholds; never silently accept obsolete behavior, prune scope or implement generic AI.
 - All ACTIVE phases1–9 and registry leaves remain scope: Finance/ledger, Tax/Documents, Business, Investments, Reminders Tasks/Grocery/Shopping, shell/settings/reports, bounded full Fitness and hardware; issue#2 Canvas adds explicit completion scope. Honest unavailable states do not erase unfinished functionality.
 - Gates: G0 reconciled contracts/evidence; G1 successful canonical Windows recovery/protected gateway; G2 live bank/import/health provenance; G3 permitted signed Mac+iPhone/widgets/App Groups; G4 full visual/runtime/performance matrix; G5 Canvas decisions/round trip; G6 final security, registry, branch/PR parity and geonq acceptance. All remain open here.

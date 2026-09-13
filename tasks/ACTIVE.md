@@ -24,8 +24,9 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
 - Tax document local feature foundation.
 - Provenance-aware read-only Usage ingestion/API/native UI.
 - Fail-closed Finance summary and disabled connector contracts.
-- Current working checkpoint: `39f2c21` on `lifeos-foundation-checkpoint-20260812`.
-  The branch push succeeded; PR #1 is the matching open draft checkpoint. The
+- Current working checkpoint: `e8bbefa` on `lifeos-foundation-checkpoint-20260812`.
+  The branch push succeeded; the last verified PR #1 state was open/draft and
+  mergeable; recheck its head before merge. The
   deployable Windows candidate is the verified `6baa1f3` source checkpoint;
   recovery reached journal unit 31,400 and was stopped before its final stage.
   The marker remains active and `LifeOSAPI` remains stopped before install.
@@ -47,6 +48,11 @@ Mode: prospective implementation of the complete LifeOS design plan; one verifie
   iOS simulator/generic lanes are blocked at asset compilation by the missing
   iphonesimulator runtime; collapsed/compact reversal and iPhone tab rendering
   remain runtime checks.
+  Usage/Home/Clipper refinement is committed at `e8bbefa`, with compact
+  truthful empty states, connector-specific recovery labels, measured chart
+  breakpoints, a successful serialized Mac build, and an Astra Medium GREEN
+  review. The focused XCTest command compiled but the sandbox blocked its
+  `testmanagerd` connection before assertions.
   Bounded recovery diagnostics are committed at `14a3b7f`; strict progress
   validation is committed at `4e14e38`; strict journal observation is committed
   at `9e43dd7`. Bounded phase telemetry is committed at `0a8d5b6`; the current
