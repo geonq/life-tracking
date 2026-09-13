@@ -1837,12 +1837,13 @@ enum FitnessReadinessHeroLayoutPolicy {
 private struct FitnessReadinessHeroLayout: Layout {
     let forceStacked: Bool
 
-    private func selectedIndex(for width: CGFloat, subviewCount: Int) -> Int {
-        guard subviewCount > 1 else { return 0 }
-        return FitnessReadinessHeroLayoutPolicy.usesStackedLayout(
+    private let spacing: CGFloat = 14
+
+    private func usesStackedLayout(for width: CGFloat) -> Bool {
+        FitnessReadinessHeroLayoutPolicy.usesStackedLayout(
             contentWidth: width,
             accessibilitySize: forceStacked
-        ) ? 1 : 0
+        )
     }
 
     func sizeThatFits(
@@ -1851,13 +1852,43 @@ private struct FitnessReadinessHeroLayout: Layout {
         cache: inout ()
     ) -> CGSize {
         guard !subviews.isEmpty else { return .zero }
-        let width = proposal.width ?? 0
-        let index = selectedIndex(for: width, subviewCount: subviews.count)
-        let childSize = subviews[index].sizeThatFits(proposal)
-        return CGSize(
-            width: proposal.width ?? childSize.width,
-            height: childSize.height
-        )
+        guard subviews.count > 1 else {
+            let childSize = subviews[0].sizeThatFits(proposal)
+            return CGSize(width: proposal.width ?? childSize.width, height: childSize.height)
+        }
+
+        let metric = subviews[0]
+        let ring = subviews[1]
+        let ringSize = ring.sizeThatFits(.init(width: nil, height: nil))
+        let hasRing = ringSize.width > 0 && ringSize.height > 0
+
+        guard let width = proposal.width, width.isFinite else {
+            // An unspecified proposal is an intrinsic measurement pass. Return
+            // enough height for either final arrangement so a later finite
+            // placement cannot escape the card while the parent settles width.
+            let metricSize = metric.sizeThatFits(.init(width: nil, height: nil))
+            let regularWidth = metricSize.width + (hasRing ? spacing + ringSize.width : 0)
+            let stackedWidth = max(metricSize.width, hasRing ? ringSize.width : 0)
+            let regularHeight = max(metricSize.height, hasRing ? ringSize.height : 0)
+            let stackedHeight = metricSize.height + (hasRing ? spacing + ringSize.height : 0)
+            return CGSize(
+                width: max(regularWidth, stackedWidth),
+                height: max(regularHeight, stackedHeight)
+            )
+        }
+
+        let safeWidth = max(0, width)
+        if usesStackedLayout(for: safeWidth) {
+            let metricSize = metric.sizeThatFits(.init(width: safeWidth, height: nil))
+            return CGSize(
+                width: safeWidth,
+                height: metricSize.height + (hasRing ? spacing + ringSize.height : 0)
+            )
+        }
+
+        let metricWidth = max(0, safeWidth - (hasRing ? spacing + ringSize.width : 0))
+        let metricSize = metric.sizeThatFits(.init(width: metricWidth, height: nil))
+        return CGSize(width: safeWidth, height: max(metricSize.height, hasRing ? ringSize.height : 0))
     }
 
     func placeSubviews(
@@ -1867,11 +1898,54 @@ private struct FitnessReadinessHeroLayout: Layout {
         cache: inout ()
     ) {
         guard !subviews.isEmpty else { return }
-        let index = selectedIndex(for: bounds.width, subviewCount: subviews.count)
-        subviews[index].place(
-            at: bounds.origin,
+        guard subviews.count > 1 else {
+            subviews[0].place(
+                at: bounds.origin,
+                anchor: .topLeading,
+                proposal: .init(width: bounds.width, height: nil)
+            )
+            return
+        }
+
+        let metric = subviews[0]
+        let ring = subviews[1]
+        let width = max(0, bounds.width)
+        let ringSize = ring.sizeThatFits(.init(width: nil, height: nil))
+        let hasRing = ringSize.width > 0 && ringSize.height > 0
+
+        if !width.isFinite || usesStackedLayout(for: width) {
+            let metricSize = metric.sizeThatFits(.init(width: width, height: nil))
+            metric.place(
+                at: bounds.origin,
+                anchor: .topLeading,
+                proposal: .init(width: width, height: metricSize.height)
+            )
+            guard hasRing else { return }
+            ring.place(
+                at: CGPoint(
+                    x: bounds.maxX - ringSize.width,
+                    y: bounds.minY + metricSize.height + spacing
+                ),
+                anchor: .topLeading,
+                proposal: .init(width: ringSize.width, height: ringSize.height)
+            )
+            return
+        }
+
+        let metricWidth = max(0, width - (hasRing ? spacing + ringSize.width : 0))
+        let metricSize = metric.sizeThatFits(.init(width: metricWidth, height: nil))
+        let rowHeight = max(metricSize.height, hasRing ? ringSize.height : 0)
+        let rowOriginY = bounds.minY + max(0, (bounds.height - rowHeight) / 2)
+        metric.place(
+            at: CGPoint(x: bounds.minX, y: rowOriginY),
             anchor: .topLeading,
-            proposal: ProposedViewSize(width: bounds.width, height: nil)
+            proposal: .init(width: metricWidth, height: metricSize.height)
+        )
+        guard hasRing else { return }
+        ring.place(
+            at: CGPoint(x: bounds.maxX - ringSize.width, y: rowOriginY),
+            anchor: .topLeading,
+            proposal: .init(width: ringSize.width, height: ringSize.height)
         )
     }
 }
@@ -1991,8 +2065,8 @@ private struct FitnessCoreReadinessHero: View {
         FitnessCoreNavigationCard(route: .readiness) {
             if metric.isValueAvailable {
                 FitnessReadinessHeroLayout(forceStacked: dynamicTypeSize.isAccessibilitySize) {
-                    regularReadinessLayout
-                    stackedReadinessLayout
+                    readinessMetricBlock
+                    readinessRing
                 }
             } else {
                 FitnessCoreUnavailableMetricState(
@@ -2037,28 +2111,6 @@ private struct FitnessCoreReadinessHero: View {
         if let progress = metric.progress {
             FitnessRing(progress: progress, hue: metric.hue, size: 78, color: FitnessRingPalette.threshold(progress))
                 .accessibilityHidden(true)
-        }
-    }
-
-    private var regularReadinessLayout: some View {
-        HStack(alignment: .center, spacing: 14) {
-            readinessMetricBlock
-                .layoutPriority(1)
-            Spacer(minLength: 8)
-            readinessRing
-        }
-    }
-
-    private var stackedReadinessLayout: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            readinessMetricBlock
-                .frame(maxWidth: .infinity, alignment: .leading)
-            if metric.progress != nil {
-                HStack {
-                    Spacer(minLength: 0)
-                    readinessRing
-                }
-            }
         }
     }
 
