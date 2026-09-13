@@ -8,10 +8,11 @@ final class LifeOSMacUITests: XCTestCase {
         app = XCUIApplication()
         app.launchArguments += ["-AppleLanguages", "(en)", "-AppleLocale", "en_US", "-LifeOSVisualFixtures"]
         app.launch()
+        app.activate()
     }
 
     func testPrimaryScreenshotsAndAccessibility() throws {
-        XCTAssertTrue(app.staticTexts["Life OS"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.buttons["mac-sidebar-home"].waitForExistence(timeout: 8))
         for module in ["home", "calendar", "finance", "fitness", "tax", "settings"] {
             XCTAssertTrue(app.buttons["mac-sidebar-\(module)"].exists, "Mac sidebar should expose \(module)")
         }
@@ -40,24 +41,27 @@ final class LifeOSMacUITests: XCTestCase {
         capture("mac-clipper-analytics")
         app.buttons["mac-sidebar-home"].tap()
 
-        let calendar = app.staticTexts["Calendar"].firstMatch
+        let calendar = app.buttons["mac-sidebar-calendar"]
         XCTAssertTrue(calendar.waitForExistence(timeout: 5))
         calendar.tap()
         XCTAssertTrue(app.buttons["calendar-add"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.segmentedControls.buttons["Week"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.radioButtons["Week"].waitForExistence(timeout: 5))
         capture("mac-calendar-week")
-        app.segmentedControls.buttons["Month"].tap()
+        app.radioButtons["Month"].tap()
         capture("mac-calendar-month")
+        app.buttons["mac-sidebar-tax"].tap()
 
-        let taxDocuments = app.staticTexts["Tax Documents"].firstMatch
+        let taxDocuments = app.staticTexts.containing(NSPredicate(format: "label CONTAINS[c] 'Tax Documents'")).firstMatch
         XCTAssertTrue(taxDocuments.waitForExistence(timeout: 5))
-        taxDocuments.tap()
-        XCTAssertTrue(app.buttons["Import PDF"].waitForExistence(timeout: 5))
+        let importPDF = app.buttons["import-tax-pdf"].firstMatch
+        XCTAssertTrue(importPDF.waitForExistence(timeout: 5))
+        XCTAssertTrue(importPDF.isEnabled)
+        XCTAssertTrue(importPDF.isHittable)
         capture("mac-tax-documents")
     }
 
     func testCalendarFocusedEventArrowMovePersistsExactDateAndTime() throws {
-        let calendar = app.staticTexts["Calendar"].firstMatch
+        let calendar = app.buttons["mac-sidebar-calendar"].firstMatch
         XCTAssertTrue(calendar.waitForExistence(timeout: 5))
         calendar.tap()
         XCTAssertTrue(app.buttons["calendar-add"].waitForExistence(timeout: 5))
@@ -95,8 +99,9 @@ final class LifeOSMacUITests: XCTestCase {
         app.terminate()
         app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         app.launch()
-        XCTAssertTrue(app.staticTexts["Calendar"].firstMatch.waitForExistence(timeout: 8))
-        app.staticTexts["Calendar"].firstMatch.tap()
+        let persistedCalendar = app.buttons["mac-sidebar-calendar"].firstMatch
+        XCTAssertTrue(persistedCalendar.waitForExistence(timeout: 8))
+        persistedCalendar.tap()
         XCTAssertTrue(app.buttons["calendar-add"].waitForExistence(timeout: 8))
         let persisted = app.descendants(matching: .any)["calendar-event-10000000-0000-0000-0000-000000000001"]
         let persistedRange = app.descendants(matching: .any)["calendar-visible-range"]
@@ -109,11 +114,11 @@ final class LifeOSMacUITests: XCTestCase {
     }
 
     func testCalendarMonthEventDragShowsDestinationAndPreservesTime() throws {
-        let calendar = app.staticTexts["Calendar"].firstMatch
+        let calendar = app.buttons["mac-sidebar-calendar"].firstMatch
         XCTAssertTrue(calendar.waitForExistence(timeout: 5))
         calendar.tap()
         XCTAssertTrue(app.buttons["calendar-add"].waitForExistence(timeout: 5))
-        app.segmentedControls.buttons["Month"].tap()
+        app.radioButtons["Month"].tap()
 
         let source = app.descendants(matching: .any)["calendar-month-event-10000000-0000-0000-0000-000000000001"]
         XCTAssertTrue(source.waitForExistence(timeout: 5), "Month view must expose the deterministic event chip")
@@ -136,7 +141,7 @@ final class LifeOSMacUITests: XCTestCase {
     }
 
     func testCalendarMacEditorContextualPopoverEntryAndChrome() throws {
-        let calendar = app.staticTexts["Calendar"].firstMatch
+        let calendar = app.buttons["mac-sidebar-calendar"].firstMatch
         XCTAssertTrue(calendar.waitForExistence(timeout: 8))
         calendar.tap()
         XCTAssertTrue(app.buttons["calendar-add"].waitForExistence(timeout: 5))
@@ -312,7 +317,7 @@ final class LifeOSMacUITests: XCTestCase {
     }
 
     func testCalendarPointerKeyboardAndAccessibilityMoveAcrossDays() throws {
-        let calendar = app.staticTexts["Calendar"].firstMatch
+        let calendar = app.buttons["mac-sidebar-calendar"].firstMatch
         XCTAssertTrue(calendar.waitForExistence(timeout: 5))
         calendar.tap()
         XCTAssertTrue(app.buttons["calendar-add"].waitForExistence(timeout: 5))
@@ -389,8 +394,9 @@ final class LifeOSMacUITests: XCTestCase {
         app.terminate()
         app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         app.launch()
-        XCTAssertTrue(app.staticTexts["Calendar"].firstMatch.waitForExistence(timeout: 8))
-        app.staticTexts["Calendar"].firstMatch.tap()
+        let persistedCalendar = app.buttons["mac-sidebar-calendar"].firstMatch
+        XCTAssertTrue(persistedCalendar.waitForExistence(timeout: 8))
+        persistedCalendar.tap()
         XCTAssertTrue(app.buttons["calendar-add"].waitForExistence(timeout: 8))
         let persistedEvent = app.descendants(matching: .any)["calendar-event-10000000-0000-0000-0000-000000000001"]
         XCTAssertTrue(persistedEvent.waitForExistence(timeout: 8), "The Mac cross-day move must persist after relaunch")

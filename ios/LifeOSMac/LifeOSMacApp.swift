@@ -512,6 +512,7 @@ struct LifeOSMacRootView: View {
         .frame(width: effectiveSidebarWidth(isCompact: isCompact))
         .frame(maxHeight: .infinity, alignment: .topLeading)
         .background(LifeOSTokens.canvas)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("mac-persistent-sidebar")
     }
 
@@ -579,6 +580,7 @@ struct LifeOSMacRootView: View {
         .padding(.horizontal, isCompact ? 12 : 24)
         .frame(height: 52)
         .background(LifeOSTokens.canvas)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("mac-global-top-bar")
     }
 

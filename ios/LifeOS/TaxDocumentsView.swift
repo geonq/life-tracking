@@ -335,17 +335,13 @@ struct TaxDocumentsView: View {
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
+                    #if os(macOS)
+                    headerImportButton
+                    #else
                     if !model.documents.isEmpty {
-                        Button { model.isImporterPresented = true } label: {
-                            HStack(spacing: 6) {
-                                LifeOSIcon(.importDocument).frame(width: 16, height: 16)
-                                Text("Import PDF")
-                            }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(model.isImporting)
-                        .accessibilityIdentifier("import-tax-pdf")
+                        headerImportButton
                     }
+                    #endif
                 }
                 .padding(LifeOSTokens.pagePadding)
 
@@ -387,9 +383,9 @@ struct TaxDocumentsView: View {
                                 icon: .security,
                                 title: "Stored documents unavailable",
                                 explanation: "The stored tax documents could not be loaded safely. Saving and deleting are disabled. You can still import a PDF for review, but it cannot be saved until storage is available.",
-                                actionTitle: model.isImporting ? nil : "Import PDF",
-                                action: model.isImporting ? nil : { model.isImporterPresented = true },
-                                actionAccessibilityIdentifier: "import-tax-pdf"
+                                actionTitle: emptyStateActionTitle,
+                                action: emptyStateAction,
+                                actionAccessibilityIdentifier: emptyStateActionAccessibilityIdentifier
                             )
                             .listRowInsets(EdgeInsets())
                             .listRowBackground(Color.clear)
@@ -403,9 +399,9 @@ struct TaxDocumentsView: View {
                                 icon: .importDocument,
                                 title: "No documents yet",
                                 explanation: "Import a PDF to review its locally extracted fields before saving it on this device.",
-                                actionTitle: model.isImporting ? nil : "Import PDF",
-                                action: model.isImporting ? nil : { model.isImporterPresented = true },
-                                actionAccessibilityIdentifier: "import-tax-pdf"
+                                actionTitle: emptyStateActionTitle,
+                                action: emptyStateAction,
+                                actionAccessibilityIdentifier: emptyStateActionAccessibilityIdentifier
                             )
                             .listRowInsets(EdgeInsets())
                             .listRowBackground(Color.clear)
@@ -440,6 +436,36 @@ struct TaxDocumentsView: View {
             Button("OK") { }
         } message: { Text(model.errorMessage ?? "") }
     }
+
+    private var headerImportButton: some View {
+        Button { model.isImporterPresented = true } label: {
+            HStack(spacing: 6) {
+                LifeOSIcon(.importDocument).frame(width: 16, height: 16)
+                Text("Import PDF")
+            }
+        }
+        .buttonStyle(.borderedProminent)
+        .disabled(model.isImporting)
+        .accessibilityIdentifier("import-tax-pdf")
+    }
+
+    #if os(macOS)
+    private var emptyStateActionTitle: String? { nil }
+    private var emptyStateAction: (() -> Void)? { nil }
+    private var emptyStateActionAccessibilityIdentifier: String? { nil }
+    #else
+    private var emptyStateActionTitle: String? {
+        model.isImporting ? nil : "Import PDF"
+    }
+
+    private var emptyStateAction: (() -> Void)? {
+        model.isImporting ? nil : { model.isImporterPresented = true }
+    }
+
+    private var emptyStateActionAccessibilityIdentifier: String? {
+        "import-tax-pdf"
+    }
+    #endif
 }
 
 struct TaxDocumentReviewView: View {
