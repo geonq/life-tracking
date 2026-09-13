@@ -1,6 +1,62 @@
 import SwiftUI
 import Charts
 
+enum UsageChartAxisPolicy {
+    static let shortWindowBreakpoint: CGFloat = 360
+
+    static func xTickCount(plotWidth: CGFloat) -> Int {
+        guard plotWidth.isFinite, plotWidth > 0 else { return 5 }
+        return plotWidth < shortWindowBreakpoint ? 3 : 5
+    }
+
+    static func shouldUpdatePlotWidth(from current: CGFloat, to proposed: CGFloat) -> Bool {
+        guard proposed.isFinite, proposed > 0 else { return false }
+        let crossedBreakpoint =
+            (current < shortWindowBreakpoint && proposed >= shortWindowBreakpoint)
+            || (current >= shortWindowBreakpoint && proposed < shortWindowBreakpoint)
+        return crossedBreakpoint || abs(proposed - current) > 0.5
+    }
+}
+
+enum UsageChartHeightPolicy {
+    static let wideContentBreakpoint: CGFloat = 960
+
+    static func macHeight(contentWidth: CGFloat) -> CGFloat {
+        guard contentWidth.isFinite, contentWidth >= wideContentBreakpoint else {
+            return UsageLayoutContract.macChartHeight
+        }
+        return 256
+    }
+
+    static func shouldUpdateContentWidth(from current: CGFloat, to proposed: CGFloat) -> Bool {
+        guard proposed.isFinite, proposed > 0 else { return false }
+        let crossedBreakpoint =
+            (current < wideContentBreakpoint && proposed >= wideContentBreakpoint)
+            || (current >= wideContentBreakpoint && proposed < wideContentBreakpoint)
+        return crossedBreakpoint || abs(proposed - current) > 0.5
+    }
+}
+
+private struct UsageChartPlotWidthKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        let candidate = nextValue()
+        guard candidate.isFinite, candidate > 0 else { return }
+        value = candidate
+    }
+}
+
+private struct UsageChartContentWidthKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        let candidate = nextValue()
+        guard candidate.isFinite, candidate > 0 else { return }
+        value = candidate
+    }
+}
+
 // MARK: - Projection chart (02-charts-rings-widgets.md §2) — 4-series model.
 //
 // Target (neutral dashed) / Actual (blue solid, area fill) / Current estimate (green dashed) /
@@ -1065,6 +1121,8 @@ struct UsageProjectionChart: View {
 
     @State private var inspectionState: UsageChartInspectionState
     @State private var motion = LifeOSMotionLifecycle()
+    @State private var chartPlotWidth: CGFloat = 0
+    @State private var chartContentWidth: CGFloat = 0
     @GestureState private var dragIsActive = false
 
     init(
@@ -1254,7 +1312,7 @@ struct UsageProjectionChart: View {
 
     private var chartHeight: CGFloat {
 #if os(macOS)
-        UsageLayoutContract.macChartHeight
+        UsageChartHeightPolicy.macHeight(contentWidth: chartContentWidth)
 #else
         200
 #endif
@@ -1283,8 +1341,8 @@ struct UsageProjectionChart: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: LifeOSTokens.Space.xs) {
+            VStack(alignment: .leading, spacing: LifeOSTokens.Space.xs) {
                 sizedReferenceChart
 
                 legend
@@ -1311,6 +1369,14 @@ struct UsageProjectionChart: View {
         .onChange(of: dragIsActive) { _, active in
             if !active { finishScrub(cancelled: true) }
         }
+        .onPreferenceChange(UsageChartPlotWidthKey.self) { width in
+            guard UsageChartAxisPolicy.shouldUpdatePlotWidth(from: chartPlotWidth, to: width) else { return }
+            chartPlotWidth = width
+        }
+        .onPreferenceChange(UsageChartContentWidthKey.self) { width in
+            guard UsageChartHeightPolicy.shouldUpdateContentWidth(from: chartContentWidth, to: width) else { return }
+            chartContentWidth = width
+        }
         .onDisappear { finishScrub(cancelled: true) }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(provider.displayName) usage remaining chart")
@@ -1320,6 +1386,14 @@ struct UsageProjectionChart: View {
     private var sizedReferenceChart: some View {
         interactiveReferenceChart
             .frame(height: chartHeight)
+            .background {
+                GeometryReader { geometry in
+                    Color.clear.preference(
+                        key: UsageChartContentWidthKey.self,
+                        value: geometry.size.width
+                    )
+                }
+            }
     }
 
     private var interactiveReferenceChart: some View {
@@ -1528,7 +1602,16 @@ struct UsageProjectionChart: View {
                 // Read the draw progress inside the Chart plot subtree. A
                 // parent view cannot capture a child-modified environment
                 // value while building its own body.
-                LifeOSChartDrawReveal(content: plot)
+                LifeOSChartDrawReveal(
+                    content: plot.background {
+                        GeometryReader { geometry in
+                            Color.clear.preference(
+                                key: UsageChartPlotWidthKey.self,
+                                value: geometry.size.width
+                            )
+                        }
+                    }
+                )
             }
             // Replacing observations or changing the viewport must not interpolate
             // data coordinates. The draw-on modifier owns only its reveal mask.
@@ -1555,15 +1638,8 @@ struct UsageProjectionChart: View {
                     series: .value("Series", segment.id)
                 )
                 .foregroundStyle(
-                    LinearGradient(
-                        colors: [
-                            LifeOSChartSeriesKind.observed.color.opacity(
-                                LifeOSChartSeriesKind.observed.style.areaOpacity * 0.55
-                            ),
-                            .clear
-                        ],
-                        startPoint: .top,
-                        endPoint: .bottom
+                    LifeOSChartSeriesKind.observed.color.opacity(
+                        LifeOSChartSeriesKind.observed.style.areaOpacity * 0.55
                     )
                 )
                 .interpolationMethod(.catmullRom)
@@ -1599,7 +1675,7 @@ struct UsageProjectionChart: View {
 
     private var xAxisMarks: some AxisContent {
         let isShortWindow = window?.durationMinutes == UsageRange.fiveHour.durationMinutes
-        return AxisMarks(values: .automatic(desiredCount: isShortWindow ? 4 : 6)) { value in
+        return AxisMarks(values: .automatic(desiredCount: UsageChartAxisPolicy.xTickCount(plotWidth: chartPlotWidth))) { value in
             AxisValueLabel {
                 if let date = value.as(Date.self) {
                     Group {
@@ -1623,13 +1699,13 @@ struct UsageProjectionChart: View {
 
     private var legend: some View {
         ViewThatFits(in: .horizontal) {
-            HStack(spacing: 20) {
+            HStack(spacing: LifeOSTokens.Space.md) {
                 legendItems
             }
             LazyVGrid(
                 columns: [GridItem(.adaptive(minimum: 130, maximum: 240), alignment: .leading)],
                 alignment: .leading,
-                spacing: 8
+                spacing: LifeOSTokens.Space.xs
             ) {
                 legendItems
             }
@@ -1653,7 +1729,7 @@ struct UsageProjectionChart: View {
     // MARK: Inspection row (02 §2 "Scrub bubble row")
 
     private var inspectionRow: some View {
-        HStack(alignment: .center, spacing: 8) {
+        HStack(alignment: .center, spacing: LifeOSTokens.Space.xs) {
             stepButton(direction: -1, icon: .chevronLeft, label: "Previous usage chart point")
 
             Group {
@@ -1669,10 +1745,10 @@ struct UsageProjectionChart: View {
 
             stepButton(direction: 1, icon: .chevronRight, label: "Next usage chart point")
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
+        .padding(.horizontal, LifeOSTokens.Space.xs)
+        .padding(.vertical, LifeOSTokens.Space.xxs)
         .frame(minHeight: inspectionRowHeight)
-        .background(LifeOSTokens.primaryText.opacity(0.045), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(LifeOSTokens.primaryText.opacity(0.045), in: RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Usage chart point inspection")
     }
@@ -1688,14 +1764,14 @@ struct UsageProjectionChart: View {
     }
 
     private func wideInspectionDetails(for point: UsageSelectionPoint) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
+        VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
+            HStack(alignment: .firstTextBaseline, spacing: LifeOSTokens.Space.xs) {
                 inspectionKindLabel(for: point)
                 inspectionRemainingLabel(for: point)
                 Spacer(minLength: 4)
                 inspectionDateLabel(for: point)
             }
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
                 inspectionMetadataLabel(accountLabel)
                 inspectionMetadataLabel(qualityTag)
             }
@@ -1706,8 +1782,8 @@ struct UsageProjectionChart: View {
     }
 
     private func stackedInspectionDetails(for point: UsageSelectionPoint) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
+        VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
+            HStack(alignment: .firstTextBaseline, spacing: LifeOSTokens.Space.xs) {
                 inspectionKindLabel(for: point)
                 inspectionRemainingLabel(for: point)
             }
@@ -1838,26 +1914,26 @@ struct UsageProjectionChart: View {
     // MARK: Below-chart rows (02 §2)
 
     private var belowChartRows: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: LifeOSTokens.Space.sm) {
             Divider().overlay(LifeOSTokens.hairlineBorder)
             ViewThatFits(in: .horizontal) {
-                HStack(alignment: .center, spacing: 8) {
+                HStack(alignment: .center, spacing: LifeOSTokens.Space.xs) {
                     rangeStartControl
                     Spacer(minLength: 0)
                     zoomControls
                 }
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: LifeOSTokens.Space.xs) {
                     rangeStartControl
                     zoomControls
                 }
             }
         }
-        .padding(.top, 2)
+        .padding(.top, LifeOSTokens.Space.xxs)
     }
 
     private var rangeStartControl: some View {
         Button(action: pinRangeStart) {
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
                 Text("Range start")
                     .lifeOSTypography(.metadata, weight: .medium)
                     .foregroundStyle(LifeOSTokens.primaryText)
@@ -1882,7 +1958,7 @@ struct UsageProjectionChart: View {
     }
 
     private var zoomControls: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: LifeOSTokens.Space.xs) {
             iconLabelButton(icon: .zoomIn, label: "Zoom in", isDisabled: !canZoomIn) { changeZoom(by: 0.6) }
             iconLabelButton(icon: .zoomOut, label: "Zoom out", isDisabled: !canZoomOut) { changeZoom(by: 1 / 0.6) }
         }
@@ -2005,7 +2081,7 @@ private struct UsageProjectionLegendKey: View {
         let style = kind.style
         let lineWidth = kind == .target ? 1.0 : style.lineWidth
 
-        HStack(spacing: 5) {
+        HStack(spacing: LifeOSTokens.Space.xxs) {
             if style.lineStyle == .solid {
                 Capsule()
                     .fill(lineColor)

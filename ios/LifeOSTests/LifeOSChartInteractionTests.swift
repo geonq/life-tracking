@@ -43,6 +43,20 @@ final class LifeOSChartInteractionTests: XCTestCase {
         changedKeys.forEach { XCTAssertNotEqual(key, $0) }
     }
 
+    func testUsageChartResponsiveBreakpointsTrackCrossingsDuringResize() {
+        XCTAssertEqual(UsageChartAxisPolicy.xTickCount(plotWidth: 359.9), 3)
+        XCTAssertEqual(UsageChartAxisPolicy.xTickCount(plotWidth: 360), 5)
+        XCTAssertTrue(UsageChartAxisPolicy.shouldUpdatePlotWidth(from: 359.9, to: 360.1))
+        XCTAssertTrue(UsageChartAxisPolicy.shouldUpdatePlotWidth(from: 360.1, to: 359.9))
+        XCTAssertFalse(UsageChartAxisPolicy.shouldUpdatePlotWidth(from: 300, to: 300.4))
+
+        XCTAssertEqual(UsageChartHeightPolicy.macHeight(contentWidth: 959.9), 224)
+        XCTAssertEqual(UsageChartHeightPolicy.macHeight(contentWidth: 960), 256)
+        XCTAssertTrue(UsageChartHeightPolicy.shouldUpdateContentWidth(from: 959.9, to: 960.1))
+        XCTAssertTrue(UsageChartHeightPolicy.shouldUpdateContentWidth(from: 960.1, to: 959.9))
+        XCTAssertFalse(UsageChartHeightPolicy.shouldUpdateContentWidth(from: 800, to: 800.4))
+    }
+
     func testUsageInspectionPreservesSelectionViewportAcrossSameKeyRevisions() throws {
         let base = Date(timeIntervalSince1970: 1_800_000_000)
         let key = inspectionKey(base: base)
@@ -923,6 +937,13 @@ final class LifeOSChartInteractionTests: XCTestCase {
         XCTAssertEqual(history.lineStyle, .dotted)
         XCTAssertEqual(history.lineWidth, 1.25, accuracy: 0.0001)
         XCTAssertEqual(history.dashPattern.map(Double.init), [1, 3])
+    }
+
+    func testUsageChartAxisTickCountUsesMeasuredPlotWidth() {
+        XCTAssertEqual(UsageChartAxisPolicy.xTickCount(plotWidth: 0), 5)
+        XCTAssertEqual(UsageChartAxisPolicy.xTickCount(plotWidth: 359.9), 3)
+        XCTAssertEqual(UsageChartAxisPolicy.xTickCount(plotWidth: 360), 5)
+        XCTAssertEqual(UsageChartAxisPolicy.xTickCount(plotWidth: .infinity), 5)
     }
 
     func testTooltipFrameStaysInsidePlotInset() {

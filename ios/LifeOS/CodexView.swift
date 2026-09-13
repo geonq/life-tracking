@@ -76,7 +76,7 @@ enum UsageLayoutContract {
     static let controlGap: CGFloat = 8
     static let twoColumnBreakpoint: CGFloat = 720
     static let cardPadding: CGFloat = 12
-    static let macChartHeight: CGFloat = 204
+    static let macChartHeight: CGFloat = 224
     static let macTokenActivityChartHeight: CGFloat = 196
 }
 
@@ -274,23 +274,20 @@ struct UsageView: View {
 #endif
                     if let activeSnapshot {
                         usageHeader(activeSnapshot)
-                        usageSummary(activeSnapshot)
-                        monitoringSurface(activeSnapshot)
-                        usageObservationSummary(for: activeSnapshot)
-                        if let activeAnalytics,
-                           !activeAnalytics.modelBreakdowns.isEmpty || !activeAnalytics.heatmap.isEmpty {
-                            UsageAdditionalObservations(analytics: activeAnalytics)
+                        if activeSnapshot.provenance.quality == .unavailable {
+                            unavailableProviderRow(for: activeSnapshot)
+                        } else {
+                            usageSummary(activeSnapshot)
+                            monitoringSurface(activeSnapshot)
+                            usageObservationSummary(for: activeSnapshot)
+                            if let activeAnalytics,
+                               !activeAnalytics.modelBreakdowns.isEmpty || !activeAnalytics.heatmap.isEmpty {
+                                UsageAdditionalObservations(analytics: activeAnalytics)
+                            }
                         }
                     } else {
                         usageHeader(nil)
-                        LifeOSCard(level: .surface, cornerRadius: LifeOSTokens.Radius.card, padding: 0) {
-                            UsageEmptyState(
-                                title: "Connect a usage provider",
-                                detail: "No provider account is connected. Connect one in Settings to see observed usage.",
-                                onOpenSettings: onOpenSettings
-                            )
-                        }
-                        .accessibilityIdentifier("usage-empty-provider")
+                        compactEmptyStateCard(for: nil)
                     }
                 }
                 .frame(maxWidth: UsageLayoutContract.maxContentWidth, alignment: .leading)
@@ -311,6 +308,114 @@ struct UsageView: View {
         }
         .onChange(of: snapshots) { _, newSnapshots in
             reconcileProviderAndRange(with: newSnapshots)
+        }
+    }
+
+    private func unavailableProviderRow(for snapshot: ProviderSnapshot) -> some View {
+        compactEmptyStateCard(for: snapshot)
+    }
+
+    private func compactEmptyStateCard(for snapshot: ProviderSnapshot?) -> some View {
+        let presentation = emptyStatePresentation(for: snapshot)
+        return LifeOSCard(level: .surface, cornerRadius: LifeOSTokens.Radius.card, padding: 0) {
+            UsageEmptyState(
+                title: presentation.title,
+                detail: presentation.detail,
+                onOpenSettings: presentation.action
+            )
+        }
+        .accessibilityIdentifier("usage-empty-provider")
+    }
+
+    private func emptyStatePresentation(
+        for snapshot: ProviderSnapshot?
+    ) -> (title: String, detail: String, action: (() -> Void)?) {
+        if state == .loading && activePresentationAuthority != .authoritativeEmpty {
+            return (
+                "Loading usage data",
+                "Waiting for the provider to supply quota observations.",
+                nil
+            )
+        }
+
+        if let failure = presentationPacket?.failure, failure != .none {
+            let detail: String
+            switch failure {
+            case .historyStorage:
+                detail = "The saved usage history could not be read. Retry to request a fresh observation."
+            case .transport, .invalidPayload:
+                detail = "The latest provider request failed. Retry from the toolbar or check Settings."
+            case .none:
+                detail = "The provider did not return a readable usage observation."
+            }
+            return ("Usage refresh failed", detail, nil)
+        }
+
+        guard let snapshot else {
+            if activePresentationAuthority == .authoritativeEmpty {
+                return (
+                    "No observed usage",
+                    "The provider returned no quota observations for this window.",
+                    nil
+                )
+            }
+            return (
+                "Connect a usage provider",
+                "No provider account is connected. Connect one in Settings to see observed usage.",
+                onOpenSettings
+            )
+        }
+
+        switch snapshot.provenance.connector {
+        case .reauthRequired:
+            return (
+                "Reconnect \(snapshot.provider.displayName)",
+                "Access to this provider has expired. Reconnect it in Settings to request new observations.",
+                onOpenSettings
+            )
+        case .revoked:
+            return (
+                "Reconnect \(snapshot.provider.displayName)",
+                "This provider authorization was revoked. Reconnect it in Settings before requesting data.",
+                onOpenSettings
+            )
+        case .rateLimited:
+            return (
+                "Usage refresh is rate-limited",
+                "The provider is temporarily refusing new quota reads. Try again later.",
+                nil
+            )
+        case .healthy, .refreshDue:
+            if activePresentationAuthority == .authoritativeEmpty {
+                return (
+                    "No observed usage",
+                    "The provider returned no quota observations for this window.",
+                    nil
+                )
+            }
+            return (
+                "No account data received yet",
+                "The configured source has not supplied a readable quota observation.",
+                nil
+            )
+        case .unavailable:
+            return (
+                "Usage source unavailable",
+                "No account data is available from the configured source. Check Settings or retry.",
+                onOpenSettings
+            )
+        case .disabled:
+            return (
+                "Usage source disabled",
+                "Enable this source in Settings to request a quota observation.",
+                onOpenSettings
+            )
+        case .error:
+            return (
+                "Usage source unavailable",
+                "The last provider request could not be read. Retry from the toolbar or check Settings.",
+                onOpenSettings
+            )
         }
     }
 
@@ -359,15 +464,19 @@ struct UsageView: View {
             HStack(alignment: .firstTextBaseline, spacing: LifeOSTokens.Space.xs) {
                 sourceIndicator(snapshot)
                 sourceStatus(snapshot)
-                lastUpdated(snapshot)
+                if shouldShowTimestamp(for: snapshot) {
+                    lastUpdated(snapshot)
+                }
             }
             VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
                 HStack(alignment: .firstTextBaseline, spacing: LifeOSTokens.Space.xs) {
                     sourceIndicator(snapshot)
                     sourceStatus(snapshot)
                 }
-                lastUpdated(snapshot)
-                    .padding(.leading, 6 + LifeOSTokens.Space.xs)
+                if shouldShowTimestamp(for: snapshot) {
+                    lastUpdated(snapshot)
+                        .padding(.leading, 6 + LifeOSTokens.Space.xs)
+                }
             }
         }
         .fixedSize(horizontal: false, vertical: true)
@@ -396,6 +505,10 @@ struct UsageView: View {
             .fixedSize(horizontal: false, vertical: true)
     }
 
+    private func shouldShowTimestamp(for snapshot: ProviderSnapshot) -> Bool {
+        snapshot.provenance.quality == .observed || snapshot.provenance.quality == .estimated
+    }
+
     private func sourceLabel(for snapshot: ProviderSnapshot) -> String {
         if let failure = presentationPacket?.failure, failure != .none {
             return "Refresh failed · \(snapshot.provenance.source)"
@@ -417,7 +530,21 @@ struct UsageView: View {
             }
         case .estimated: return "Estimate · non-official"
         case .demo: return "Demo · not live"
-        case .unavailable: return "Not connected"
+        case .unavailable:
+            switch snapshot.provenance.connector {
+            case .healthy, .refreshDue:
+                return "No account data · \(snapshot.provenance.source)"
+            case .reauthRequired:
+                return "Re-auth required · \(snapshot.provenance.source)"
+            case .revoked:
+                return "Authorization revoked · \(snapshot.provenance.source)"
+            case .rateLimited:
+                return "Rate limited · \(snapshot.provenance.source)"
+            case .disabled:
+                return "Disabled · \(snapshot.provenance.source)"
+            case .unavailable, .error:
+                return "Unavailable · \(snapshot.provenance.source)"
+            }
         }
     }
 
@@ -441,7 +568,12 @@ struct UsageView: View {
         case .demo:
             return LifeOSTokens.warningText
         case .unavailable:
-            return LifeOSTokens.tertiaryText
+            switch snapshot.provenance.connector {
+            case .reauthRequired, .revoked, .rateLimited, .error:
+                return LifeOSTokens.warningText
+            case .healthy, .refreshDue, .unavailable, .disabled:
+                return LifeOSTokens.tertiaryText
+            }
         }
     }
 
@@ -559,15 +691,23 @@ struct UsageView: View {
                     }
                 }
 
-                UsageProjectionChart(
-                    provider: snapshot.provider,
-                    window: selectedWindow(in: snapshot),
-                    analytics: chartAnalytics(for: snapshot),
-                    accountScope: snapshot.accountLabel,
-                    generation: presentationPacket?.generation ?? 0,
-                    presentationAuthority: activePresentationAuthority,
-                    updateKind: presentationPacket?.updateKind ?? .initial
-                )
+                if hasChartData {
+                    UsageProjectionChart(
+                        provider: snapshot.provider,
+                        window: selectedWindow(in: snapshot),
+                        analytics: chartAnalytics(for: snapshot),
+                        accountScope: snapshot.accountLabel,
+                        generation: presentationPacket?.generation ?? 0,
+                        presentationAuthority: activePresentationAuthority,
+                        updateKind: presentationPacket?.updateKind ?? .initial
+                    )
+                } else {
+                    UsageEmptyState(
+                        title: "No observed usage history",
+                        detail: "The provider has not supplied quota observations for this window."
+                    )
+                    .accessibilityIdentifier("usage-history-unavailable")
+                }
             }
         }
         .accessibilityIdentifier("usage-chart-shell")
@@ -626,7 +766,7 @@ struct UsageView: View {
     // MARK: Toolbar row — title, provider context, refresh and settings.
 
     private var heroActions: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: LifeOSTokens.Space.xs) {
             LifeOSIconButton(
                 icon: .refresh,
                 accessibilityLabel: "Refresh usage data",
@@ -675,9 +815,9 @@ struct UsageView: View {
             }
             .padding(.horizontal, LifeOSTokens.Space.sm)
             .padding(.vertical, LifeOSTokens.Space.xs)
-            .background(LifeOSTokens.raised, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .background(LifeOSTokens.raised, in: RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous))
             .overlay {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
                     .stroke(LifeOSTokens.subtleBorder, lineWidth: 1)
             }
             .frame(minHeight: LifeOSTokens.Control.standardHeight, alignment: .center)
@@ -696,24 +836,18 @@ struct UsageView: View {
             }
         } label: {
             HStack(spacing: LifeOSTokens.Space.xs) {
-                LifeOSIcon(.usage, context: .toolbar)
+                LifeOSIcon(providerIcon(selectedProvider), context: .toolbar)
                     .foregroundStyle(LifeOSTokens.secondaryText)
-                VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
-                    Text(selectedProvider.displayName)
-                        .lifeOSTypography(.label, weight: .medium)
-                        .foregroundStyle(LifeOSTokens.primaryText)
-                        .lineLimit(1)
-                    Text(statusText(for: selectedProvider))
-                        .lifeOSTypography(.metadata)
-                        .foregroundStyle(LifeOSTokens.secondaryText)
-                        .lineLimit(1)
-                }
+                Text(selectedProvider.displayName)
+                    .lifeOSTypography(.label, weight: .medium)
+                    .foregroundStyle(LifeOSTokens.primaryText)
+                    .lineLimit(1)
             }
             .padding(.horizontal, LifeOSTokens.Space.sm)
             .padding(.vertical, LifeOSTokens.Space.xs)
-            .background(LifeOSTokens.raised, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .background(LifeOSTokens.raised, in: RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous))
             .overlay {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                RoundedRectangle(cornerRadius: LifeOSTokens.Radius.control, style: .continuous)
                     .stroke(LifeOSTokens.subtleBorder, lineWidth: 1)
             }
             .frame(minWidth: 148, minHeight: LifeOSTokens.Control.standardHeight, alignment: .leading)
@@ -721,6 +855,13 @@ struct UsageView: View {
         // Menus re-tint their label with the system accent; pin neutral chrome (§1).
         .foregroundStyle(LifeOSTokens.secondaryText)
         .accessibilityLabel("Provider switcher, currently \(selectedProvider.displayName), \(statusText(for: selectedProvider))")
+    }
+
+    private func providerIcon(_ provider: Provider) -> LifeOSIconName {
+        switch provider {
+        case .codex, .claude, .glm, .deepseek, .googleAIStudio:
+            return .usage
+        }
     }
 
     private func statusText(for provider: Provider) -> String {
@@ -759,20 +900,15 @@ private struct UsageObservationSummary: View {
         UsageFacts.compute(from: analytics, fallbackProvenance: snapshot.provenance)
     }
 
-    private var peakActivityText: String {
-        guard let peak = facts.peakActivity else { return "—" }
-        return "\(peak.tokens.formatted(.number.notation(.compactName))) tokens"
-    }
-
     var body: some View {
         LifeOSCard(level: .surface, cornerRadius: LifeOSTokens.Radius.card, padding: UsageLayoutContract.cardPadding) {
             VStack(alignment: .leading, spacing: LifeOSTokens.Space.xs) {
                 HStack(alignment: .firstTextBaseline, spacing: LifeOSTokens.Space.sm) {
                     VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
-                        Text("Facts")
+                        Text("Window facts")
                             .lifeOSTypography(.cardTitle)
                             .foregroundStyle(LifeOSTokens.primaryText)
-                        Text("Factual detail for the selected window")
+                        Text("Observed details for the selected window")
                             .lifeOSTypography(.metadata)
                             .foregroundStyle(LifeOSTokens.secondaryText)
                     }
@@ -789,20 +925,42 @@ private struct UsageObservationSummary: View {
         .accessibilityIdentifier("usage-observation-summary")
     }
 
-    private var observedPointsText: String {
-        facts.observedTotals.map { $0.observationCount.formatted() } ?? "—"
-    }
-
     @ViewBuilder
     private var factsContent: some View {
         VStack(spacing: 0) {
-            factRow("Observed points", observedPointsText)
-            Divider().overlay(LifeOSTokens.hairlineBorder)
-            factRow("Peak activity", peakActivityText)
-            Divider().overlay(LifeOSTokens.hairlineBorder)
+            if let totals = facts.observedTotals {
+                factRow("Observed points", totals.observationCount.formatted())
+                Divider().overlay(LifeOSTokens.hairlineBorder)
+            }
+            if let peak = facts.peakActivity {
+                factRow("Peak hourly activity", "\(peak.tokens.formatted(.number.notation(.compactName))) tokens")
+                Divider().overlay(LifeOSTokens.hairlineBorder)
+            }
             factRow("Window status", state.label)
+            if facts.observedTotals == nil && facts.peakActivity == nil {
+                Divider().overlay(LifeOSTokens.hairlineBorder)
+                Text(noObservationsDetail)
+                    .lifeOSTypography(.metadata)
+                    .foregroundStyle(LifeOSTokens.tertiaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, LifeOSTokens.Space.xs)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var noObservationsDetail: String {
+        switch state {
+        case .loading:
+            return "Waiting for provider observations for this window."
+        case .demo:
+            return "No fixture activity observations are available for this window."
+        case .unavailable:
+            return "No provider activity observations are available for this window."
+        default:
+            return "No token activity observations were supplied for this window."
+        }
     }
 
     private func factRow(_ label: String, _ value: String) -> some View {
@@ -936,7 +1094,8 @@ private struct UsageWindowSummaryRow: View {
     let state: UsageValueState
 
     private var remainingFraction: Double? {
-        window.usedPercent.map { min(max(1 - $0, 0), 1) }
+        guard let usedPercent = window.usedPercent, usedPercent.isFinite else { return nil }
+        return min(max(1 - usedPercent, 0), 1)
     }
 
     private var remainingText: String {
@@ -961,7 +1120,13 @@ private struct UsageWindowSummaryRow: View {
             return LifeOSTokens.estimate
         case .demo:
             return LifeOSTokens.warningText
-        case .stale, .unavailable, .error, .loading:
+        case .stale:
+            return LifeOSTokens.warningText
+        case .error:
+            return LifeOSTokens.danger
+        case .loading:
+            return LifeOSTokens.info
+        case .unavailable:
             return LifeOSTokens.tertiaryText
         }
     }
@@ -974,8 +1139,14 @@ private struct UsageWindowSummaryRow: View {
             return LifeOSTokens.estimate
         case .demo:
             return LifeOSTokens.warningText
-        default:
-            return LifeOSTokens.primaryText
+        case .stale:
+            return LifeOSTokens.warningText
+        case .error:
+            return LifeOSTokens.danger
+        case .loading:
+            return LifeOSTokens.info
+        case .unavailable:
+            return LifeOSTokens.tertiaryText
         }
     }
 
@@ -987,7 +1158,13 @@ private struct UsageWindowSummaryRow: View {
             return LifeOSTokens.warningText
         case .observed:
             return LifeOSTokens.Series.actual
-        case .stale, .unavailable, .error, .loading:
+        case .stale:
+            return LifeOSTokens.warningText
+        case .error:
+            return LifeOSTokens.danger
+        case .loading:
+            return LifeOSTokens.info
+        case .unavailable:
             return LifeOSTokens.tertiaryText
         }
     }
@@ -1260,7 +1437,7 @@ struct UsageCardHeader: View {
         HStack(alignment: .top, spacing: LifeOSTokens.Space.xs) {
             LifeOSIcon(icon, context: .card)
                 .foregroundStyle(.secondary)
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
                 Text(title).lifeOSTypography(.cardTitle)
                 Text(subtitle)
                     .lifeOSTypography(.metadata)

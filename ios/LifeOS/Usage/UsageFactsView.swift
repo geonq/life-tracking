@@ -1,6 +1,6 @@
 import SwiftUI
 
-// MARK: - Facts tab (02-charts-rings-widgets.md §0 Facts table)
+// MARK: - Facts surface (02-charts-rings-widgets.md §0 Facts table)
 //
 // Every row is either computed by `UsageFacts.compute(from:)` from real fields on
 // `UsageAnalyticsSnapshot`, or rendered as an honest "Not available" when the local data model
@@ -16,12 +16,6 @@ struct UsageFactsView: View {
         UsageFacts.compute(from: analytics, fallbackProvenance: snapshot.provenance)
     }
 
-    private var timestamp: String {
-        snapshot.provenance.observedAt.formatted(.dateTime.month(.abbreviated).day().year().hour().minute())
-    }
-
-    private var subLabel: String { "\(snapshot.provider.displayName) · \(timestamp)" }
-
     private static let tokenFormatter: NumberFormatter = {
         let formatter = NumberFormatter()
         formatter.numberStyle = .decimal
@@ -35,69 +29,82 @@ struct UsageFactsView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: LifeOSTokens.Space.sm) {
-            factsCard
-            bankedResetsCard
-        }
+        factsCard
     }
 
     private var factsCard: some View {
         VStack(alignment: .leading, spacing: 0) {
             UsageCardHeader(
-                title: "Account facts",
-                subtitle: "Sourced observations for \(snapshot.provider.displayName)",
+                title: "Window facts",
+                subtitle: "Observed activity for \(snapshot.provider.displayName)",
                 icon: .usage
             )
-            Text(subLabel)
+            .padding(.bottom, LifeOSTokens.Space.xs)
+
+            activityRows
+            if facts.peakDailyActivity == nil && facts.peakActivity == nil && facts.observedTotals == nil {
+                divider
+            }
+
+            // Source freshness is derived from Provenance.freshness(); it is the one
+            // source-status fact retained on this compact detail surface.
+            factRow(label: "Source freshness", value: sourceFreshnessValue)
+            divider
+
+            Text("Provider details unavailable: lifetime totals, turn duration, streaks, credits, and banked resets are not supplied by this source.")
                 .lifeOSTypography(.metadata)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
-                .padding(.top, 4)
-                .padding(.bottom, 12)
-
-            // Lifetime tokens — GAP. No cumulative-tokens-ever field in UsageAnalytics.swift;
-            // `activity` only covers the current short window.
-            factRow(label: "Lifetime tokens", value: "Not available")
-            divider
-
-            // Peak daily tokens is only promoted when the activity feed contains
-            // every hour for a complete calendar day. Partial feeds stay unavailable.
-            factRow(
-                label: "Peak daily tokens",
-                value: facts.peakDailyActivity.map { "\(formatTokens($0.tokens)) tok" } ?? "Not available"
-            )
-            divider
-
-            // Observed tokens — sum across the currently loaded window, with the number of
-            // observations that contributed. Explicitly NOT lifetime usage.
-            factRow(
-                label: "Observed tokens (window)",
-                value: facts.observedTotals.map { "\(formatTokens($0.totalTokens)) tok · \($0.observationCount) obs" }
-                    ?? "Not available"
-            )
-            divider
-
-            // Longest running turn — GAP. No per-turn/session duration field in the domain model.
-            factRow(label: "Longest running turn", value: "Not available")
-            divider
-
-            // Current / Longest streak — GAP. No usage-streak concept modeled.
-            factRow(label: "Current streak", value: "Not available")
-            divider
-            factRow(label: "Longest streak", value: "Not available")
-            divider
-
-            // Credits — GAP. No credits/balance field; provider model here is percent-of-window.
-            factRow(label: "Credits", value: "Not available")
-            divider
-
-            // Source freshness — derived from Provenance.freshness(); real signal, not fabricated.
-            factRow(
-                label: "Source freshness",
-                value: facts.freshness.map { freshnessLabel($0) } ?? "Not available"
-            )
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, LifeOSTokens.Space.xs)
         }
         .padding(UsageLayoutContract.cardPadding)
         .flatCard()
+        .accessibilityIdentifier("usage-facts")
+    }
+
+    @ViewBuilder
+    private var activityRows: some View {
+        if let peakDaily = facts.peakDailyActivity {
+            factRow(
+                label: "Peak daily activity",
+                value: "\(formatTokens(peakDaily.tokens)) tok · \(peakDaily.granularityLabel)"
+            )
+            divider
+        }
+
+        if let peak = facts.peakActivity {
+            factRow(
+                label: "Peak hourly activity",
+                value: "\(formatTokens(peak.tokens)) tok · \(peak.granularityLabel)"
+            )
+            divider
+        }
+
+        if let totals = facts.observedTotals {
+            factRow(
+                label: "Observed tokens (window)",
+                value: "\(formatTokens(totals.totalTokens)) tok · \(totals.observationCount) obs"
+            )
+            divider
+        }
+
+        if facts.peakDailyActivity == nil && facts.peakActivity == nil && facts.observedTotals == nil {
+            Text(noActivityDetail)
+                .lifeOSTypography(.metadata)
+                .foregroundStyle(LifeOSTokens.tertiaryText)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.vertical, LifeOSTokens.Space.xs)
+        }
+    }
+
+    private var sourceFreshnessValue: String {
+        facts.freshness.map(freshnessLabel) ?? "Not available"
+    }
+
+    private var noActivityDetail: String {
+        snapshot.provenance.quality == .demo
+            ? "No fixture activity observations are available for this window."
+            : "No token activity observations were supplied for this window."
     }
 
     private func freshnessLabel(_ fact: UsageFreshnessFact) -> String {
@@ -110,29 +117,6 @@ struct UsageFactsView: View {
         }
     }
 
-    private var bankedResetsCard: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            UsageCardHeader(
-                title: "Banked resets",
-                subtitle: "Provider detail is not modeled in this snapshot",
-                icon: .usage
-            )
-            .padding(.bottom, 12)
-
-            // Banked resets — GAP across all four sub-fields. Only a static demo string exists
-            // today (OverviewDomain.swift), not a real modeled field. 02 §0 data-gaps item 1.
-            factRow(label: "Available", value: "Not available")
-            divider
-            factRow(label: "Reset detail", value: "Not available")
-            divider
-            factRow(label: "Next expiry", value: "Not available")
-            divider
-            factRow(label: "Source", value: "Not available")
-        }
-        .padding(UsageLayoutContract.cardPadding)
-        .flatCard()
-    }
-
     private var divider: some View {
         Divider().overlay(LifeOSTokens.hairlineBorder)
     }
@@ -140,16 +124,17 @@ struct UsageFactsView: View {
     private func factRow(label: String, value: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: LifeOSTokens.Space.sm) {
             Text(label)
-                .lifeOSTypography(.body)
-                .foregroundStyle(LifeOSTokens.primaryText)
+                .lifeOSTypography(.metadata)
+                .foregroundStyle(LifeOSTokens.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: LifeOSTokens.Space.sm)
             Text(value)
-                .lifeOSTypography(.button)
+                .lifeOSTypography(.label, weight: .medium)
                 .foregroundStyle(value == "Not available" ? LifeOSTokens.tertiaryText : .primary)
                 .multilineTextAlignment(.trailing)
-                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(.vertical, 6)
+        .padding(.vertical, LifeOSTokens.Space.xs)
         .accessibilityElement(children: .combine)
     }
 }

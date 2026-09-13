@@ -876,7 +876,9 @@ final class LifeOSMacSnapshotTests: XCTestCase {
     func testUsageCompactVisualContract() throws {
         XCTAssertEqual(UsageLayoutContract.contentGap, 16)
         XCTAssertEqual(UsageLayoutContract.cardPadding, 12)
-        XCTAssertEqual(UsageLayoutContract.macChartHeight, 204)
+        XCTAssertEqual(UsageLayoutContract.macChartHeight, 224)
+        XCTAssertEqual(UsageChartHeightPolicy.macHeight(contentWidth: 959.9), 224)
+        XCTAssertEqual(UsageChartHeightPolicy.macHeight(contentWidth: 960), 256)
         XCTAssertEqual(UsageLayoutContract.macTokenActivityChartHeight, 196)
 
         let snapshot = try XCTUnwrap(

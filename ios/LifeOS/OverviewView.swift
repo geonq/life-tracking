@@ -244,6 +244,8 @@ struct OverviewView: View {
         .accessibilityIdentifier("overview-updating")
     }
 
+    /// Home uses a compact setup row here; `LifeOSEmptyStatePanel` is page-sized
+    /// and would push the module links below the fold on the first-run surface.
     private var noSourceStatusBlock: some View {
         let settingsAction: (() -> Void)?
         if let openDestination {
@@ -252,14 +254,37 @@ struct OverviewView: View {
             settingsAction = nil
         }
 
-        return LifeOSEmptyStatePanel(
-            icon: .settings,
-            title: "No connected sources",
-            explanation: "Connect a supported source in Settings to populate Home with observed data.",
-            actionTitle: settingsAction == nil ? nil : "Open Settings",
-            action: settingsAction,
-            actionAccessibilityIdentifier: "overview-no-source-settings"
-        )
+        return LifeOSCard(
+            level: .surface,
+            cornerRadius: LifeOSTokens.Radius.card,
+            padding: 0
+        ) {
+            HStack(alignment: .center, spacing: LifeOSTokens.Space.sm) {
+                LifeOSIcon(.settings, context: .card)
+                    .foregroundStyle(LifeOSTokens.secondaryText)
+
+                VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
+                    Text("No connected sources")
+                        .lifeOSTypography(.cardTitle)
+                        .foregroundStyle(LifeOSTokens.primaryText)
+                    Text("Connect a source in Settings to populate Home with observed data.")
+                        .lifeOSTypography(.metadata)
+                        .foregroundStyle(LifeOSTokens.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .layoutPriority(1)
+
+                Spacer(minLength: LifeOSTokens.Space.xs)
+
+                if let settingsAction {
+                    LifeOSButton("Open Settings", variant: .tertiary, action: settingsAction)
+                        .accessibilityIdentifier("overview-no-source-settings")
+                }
+            }
+            .padding(.horizontal, LifeOSTokens.Space.sm)
+            .padding(.vertical, LifeOSTokens.Space.sm)
+            .frame(minHeight: 72, alignment: .leading)
+        }
         .accessibilityIdentifier("overview-no-source-status")
     }
 
@@ -309,16 +334,9 @@ struct OverviewView: View {
                 .foregroundStyle(LifeOSTokens.secondaryText)
                 .frame(width: 24, height: 24)
 
-            VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
-                Text(noSourceModuleTitle(kind))
-                    .lifeOSTypography(.cardTitle)
-                    .foregroundStyle(LifeOSTokens.primaryText)
-                Text(noSourceModuleCause(kind))
-                    .lifeOSTypography(.metadata)
-                    .foregroundStyle(LifeOSTokens.secondaryText)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            Text(noSourceModuleTitle(kind))
+                .lifeOSTypography(.label, weight: .medium)
+                .foregroundStyle(LifeOSTokens.primaryText)
 
             Spacer(minLength: LifeOSTokens.Space.xs)
 
@@ -329,8 +347,8 @@ struct OverviewView: View {
             }
         }
         .padding(.horizontal, LifeOSTokens.Space.md)
-        .padding(.vertical, LifeOSTokens.Space.sm)
-        .frame(minHeight: 56, alignment: .leading)
+        .padding(.vertical, LifeOSTokens.Space.xs)
+        .frame(minHeight: 48, alignment: .leading)
         .contentShape(Rectangle())
     }
 
@@ -382,21 +400,6 @@ struct OverviewView: View {
         case .clipper: "Clipper"
         case .health: "Health"
         case .finance: "Finance"
-        }
-    }
-
-    private func noSourceModuleCause(_ kind: OverviewSectionKind) -> String {
-        switch kind {
-        case .llm:
-            "Provider connection required"
-        case .clipper:
-            "Clipper connector required"
-        case .health:
-            fitnessSnapshot.source.status == .permissionRequired
-                ? "HealthKit permission required"
-                : "HealthKit observation required"
-        case .finance:
-            "Account connection required"
         }
     }
 
@@ -1097,7 +1100,7 @@ private struct OverviewMetricCard: View {
             }
 
             if shouldShowSourceStatus {
-                HStack(spacing: 6) {
+                HStack(spacing: LifeOSTokens.Space.xxs) {
                     Circle()
                         .fill(sourceStatusColor)
                         .frame(width: 6, height: 6)
@@ -1117,7 +1120,7 @@ private struct OverviewMetricCard: View {
             }
         }
         .padding(.horizontal, LifeOSTokens.Space.md)
-        .padding(.vertical, featured ? LifeOSTokens.Space.md : 14)
+        .padding(.vertical, featured ? LifeOSTokens.Space.md : LifeOSTokens.Space.sm)
         .frame(maxWidth: .infinity, alignment: .leading)
         .flatCard(cornerRadius: LifeOSTokens.Radius.widget, featured: featured)
         // §5.1 hover (macOS): border brightens to strongBorder; no offset lift.
@@ -1151,7 +1154,6 @@ private struct OverviewMetricCard: View {
                     Text("\(Int((remaining * 100).rounded()))")
                         .lifeOSTypography(.metric)
                         .foregroundStyle(.primary)
-                        .numericTransition()
                     Text("% remaining")
                         .lifeOSTypography(.metadata, weight: .medium)
                         .foregroundStyle(LifeOSTokens.tertiaryText)
@@ -1202,25 +1204,25 @@ private struct OverviewMetricCard: View {
     private var supportingBody: some View {
         switch section.kind {
         case .clipper:
-            VStack(alignment: .leading, spacing: 12) {
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 8) {
-                    ValueMetric(value: clipperHomeMetricValue(containing: "Views"), label: "Views today")
-                    ValueMetric(value: clipperHomeMetricValue(containing: "Subscribers"), label: "Subscribers")
-                    ValueMetric(value: clipperHomeMetricValue(containing: "Revenue"), label: "Revenue")
-                }
-                if let clipperTrend {
-                    OverviewSparkline(points: clipperTrend.points, tint: LifeOSTokens.Module.business)
-                        .frame(height: 36)
-                        .allowsHitTesting(false)
-                } else {
-                    OverviewChartUnavailable(detail: clipperChartDetail)
-                        .frame(minHeight: 40)
+            VStack(alignment: .leading, spacing: LifeOSTokens.Space.sm) {
+                if section.provenance.quality != .unavailable {
+                    clipperHomeMetrics
+                    if let clipperTrend {
+                        OverviewSparkline(points: clipperTrend.points, tint: LifeOSTokens.Module.business)
+                            .frame(height: 36)
+                            .allowsHitTesting(false)
+                    } else {
+                        OverviewChartUnavailable(detail: clipperChartDetail)
+                            .frame(minHeight: 40)
+                    }
                 }
             }
         case .health:
-            VStack(alignment: .leading, spacing: 10) {
-                if !homeHealthMetrics.isEmpty {
-                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: LifeOSTokens.Space.xs) {
+                if section.provenance.quality == .unavailable {
+                    EmptyView()
+                } else if !homeHealthMetrics.isEmpty {
+                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: LifeOSTokens.Space.xs) {
                         ForEach(homeHealthMetrics) { metric in
                             ValueMetric(value: fitnessDisplayValue(metric), label: metric.title)
                         }
@@ -1238,9 +1240,11 @@ private struct OverviewMetricCard: View {
                 }
             }
         case .finance:
-            VStack(alignment: .leading, spacing: 10) {
-                if !financeOverviewMetrics.isEmpty {
-                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: LifeOSTokens.Space.xs) {
+                if section.provenance.quality == .unavailable {
+                    EmptyView()
+                } else if !financeOverviewMetrics.isEmpty {
+                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: LifeOSTokens.Space.xs) {
                         ForEach(financeOverviewMetrics) { metric in
                             ValueMetric(value: metric.value, label: metric.label)
                         }
@@ -1259,6 +1263,30 @@ private struct OverviewMetricCard: View {
             }
         case .llm:
             EmptyView()
+        }
+    }
+
+    private var clipperHomeMetrics: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: LifeOSTokens.Space.sm) {
+                ValueMetric(value: clipperHomeMetricValue(containing: "Views"), label: "Views today")
+                ValueMetric(value: clipperHomeMetricValue(containing: "Subscribers"), label: "Subscribers")
+                ValueMetric(value: clipperHomeMetricValue(containing: "Revenue"), label: "Revenue")
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            LazyVGrid(
+                columns: [
+                    GridItem(.flexible(minimum: 0)),
+                    GridItem(.flexible(minimum: 0))
+                ],
+                alignment: .leading,
+                spacing: LifeOSTokens.Space.xs
+            ) {
+                ValueMetric(value: clipperHomeMetricValue(containing: "Views"), label: "Views today")
+                ValueMetric(value: clipperHomeMetricValue(containing: "Subscribers"), label: "Subscribers")
+                ValueMetric(value: clipperHomeMetricValue(containing: "Revenue"), label: "Revenue")
+            }
         }
     }
 
@@ -1318,7 +1346,7 @@ private struct OverviewMetricCard: View {
     }
 
     private var overviewFallbackMetrics: some View {
-        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 8) {
+        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: LifeOSTokens.Space.xs) {
             ForEach(section.metrics.filter { $0.value != nil }) { metric in
                 ValueMetric(value: metric.displayValue, label: metric.label)
             }
@@ -1561,7 +1589,7 @@ private struct ValueMetric: View {
     let label: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
             Text(value ?? "—")
                 .lifeOSTypography(.button, weight: .semibold)
                 .monospacedDigit()
@@ -1592,27 +1620,14 @@ struct ClipperAnalyticsView: View {
                 topPadding: 18,
                 bottomPadding: 28
             ) {
-                VStack(alignment: .leading, spacing: 16) {
-                    heroCard
+        VStack(alignment: .leading, spacing: LifeOSTokens.Space.md) {
+                    summaryCard
                     if let snapshot, snapshot.availability == .observed {
                         observedDetailCards(snapshot)
                     } else if section.provenance.quality == .demo {
                         demoDetailCard(
-                            title: "Bot and account breakdown",
-                            detail: "Fixture-only detail; this is a deterministic visual example and not live provider data."
-                        )
-                        demoDetailCard(
-                            title: "Trends",
-                            detail: "Fixture-only trend detail; no provider request or provider key is used in demo mode."
-                        )
-                    } else {
-                        unavailableDetailCard(
-                            title: "Bot and account breakdown",
-                            detail: "Per-bot and per-account earnings, views and subscribers are unavailable until a reviewed provider connector supplies them. LifeOS does not keep provider keys on the client."
-                        )
-                        unavailableDetailCard(
-                            title: "Trends",
-                            detail: "Views, subscribers and revenue history are unavailable until a reviewed provider connector supplies them. LifeOS will not invent a trend line."
+                            title: "Fixture detail",
+                            detail: "Account breakdown and trend history are fixture-only; no provider request is used in this mode."
                         )
                     }
                 }
@@ -1634,75 +1649,60 @@ struct ClipperAnalyticsView: View {
 #endif
     }
 
-    private var heroCard: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                LifeOSIcon(.clipper)
+    private var summaryCard: some View {
+        VStack(alignment: .leading, spacing: LifeOSTokens.Space.md) {
+            HStack(alignment: .top, spacing: LifeOSTokens.Space.sm) {
+                LifeOSIcon(.clipper, context: .card)
                     .foregroundStyle(LifeOSTokens.tertiaryText)
-                    .frame(width: 18, height: 18)
-                    .alignmentGuide(.firstTextBaseline) { dimensions in
-                        dimensions[.bottom]
-                    }
-                VStack(alignment: .leading, spacing: 3) {
+
+                VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
                     Text("Clipper Analytics")
                         .lifeOSTypography(.sectionTitle)
-                        .tracking(-0.2)
-                    HStack(spacing: 6) {
+                        .foregroundStyle(LifeOSTokens.primaryText)
+                    HStack(spacing: LifeOSTokens.Space.xxs) {
                         Circle()
                             .fill(sourceStatusColor)
                             .frame(width: 6, height: 6)
                         Text(sourceStatus)
                             .lifeOSTypography(.metadata)
-                            .tracking(0.2)
                             .foregroundStyle(sourceStatusColor)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                Spacer(minLength: 8)
+                .layoutPriority(1)
+
+                Spacer(minLength: LifeOSTokens.Space.xs)
                 refreshButton
             }
 
-            HStack(alignment: .bottom, spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(metricValue(containing: "Revenue") ?? "—")
-                        .lifeOSTypography(.metric)
-                        .tracking(-0.3)
-                    Text("Revenue this month")
-                        .lifeOSTypography(.metadata)
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
+            if section.provenance.quality == .unavailable {
+                Text("Connect the Clipper connector to show observed metrics and trend history.")
+                    .lifeOSTypography(.body)
+                    .foregroundStyle(LifeOSTokens.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                HStack(alignment: .top, spacing: LifeOSTokens.Space.sm) {
+                    detailMetric(label: "Views today", value: metricValue(containing: "Views"))
+                    detailMetric(label: "Subscribers today", value: metricValue(containing: "Subscribers"))
+                    detailMetric(label: "Revenue this month", value: metricValue(containing: "Revenue"))
                 }
-                Spacer(minLength: 12)
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(sourceStatusColor)
-                        .frame(width: 6, height: 6)
-                    Text(snapshotBadge)
-                        .lifeOSTypography(.label)
-                        .tracking(0.8)
-                        .textCase(.uppercase)
-                        .foregroundStyle(sourceStatusColor)
-                }
-                .accessibilityElement(children: .combine)
-            }
-
-            HStack(spacing: 14) {
-                detailMetric(label: "Views today", value: metricValue(containing: "Views"))
-                detailMetric(label: "Subscribers today", value: metricValue(containing: "Subscribers"))
             }
         }
-        .padding(22)
+        .padding(LifeOSTokens.Space.md)
         .frame(maxWidth: .infinity, alignment: .leading)
         .flatCard()
     }
 
     private func detailMetric(label: String, value: String?) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
             Text(value ?? "—")
-                .lifeOSTypography(.body, weight: .semibold)
+                .lifeOSTypography(.inlineMonitoringValue)
                 .monospacedDigit()
             Text(label)
                 .lifeOSTypography(.metadata)
-                .tracking(0.2)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
@@ -1726,28 +1726,28 @@ struct ClipperAnalyticsView: View {
             if accounts.isEmpty {
                 emptyObservedRow("No account or bot breakdown was supplied in this observed snapshot.")
             } else {
-                VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: LifeOSTokens.Space.md) {
                     ForEach(accounts) { account in
-                        VStack(alignment: .leading, spacing: 7) {
+                        VStack(alignment: .leading, spacing: LifeOSTokens.Space.xs) {
                             HStack(alignment: .firstTextBaseline) {
                                 Text(account.name)
                                     .lifeOSTypography(.label, weight: .semibold)
-                                Spacer(minLength: 8)
+                                Spacer(minLength: LifeOSTokens.Space.xs)
                                 Text("\(account.bots.count) bots · \(account.breakdowns.count) breakdowns")
                                     .lifeOSTypography(.metadata)
                                     .foregroundStyle(LifeOSTokens.tertiaryText)
                             }
                             compactMetricRow(account.metrics)
                             ForEach(account.bots) { bot in
-                                VStack(alignment: .leading, spacing: 5) {
+                                VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
                                     Text(bot.name)
                                         .lifeOSTypography(.metadata, weight: .medium)
                                     compactMetricRow(bot.metrics)
                                 }
-                                .padding(.leading, 12)
+                                .padding(.leading, LifeOSTokens.Space.md)
                             }
                         }
-                        .padding(.bottom, 2)
+                        .padding(.bottom, LifeOSTokens.Space.xxs)
                     }
                 }
             }
@@ -1759,13 +1759,13 @@ struct ClipperAnalyticsView: View {
             if breakdowns.isEmpty {
                 emptyObservedRow("No period breakdown was supplied in this observed snapshot.")
             } else {
-                VStack(alignment: .leading, spacing: 11) {
+                VStack(alignment: .leading, spacing: LifeOSTokens.Space.sm) {
                     ForEach(breakdowns) { breakdown in
-                        VStack(alignment: .leading, spacing: 5) {
+                        VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
                             HStack(alignment: .firstTextBaseline) {
                                 Text(breakdown.label)
                                     .lifeOSTypography(.label, weight: .semibold)
-                                Spacer(minLength: 8)
+                                Spacer(minLength: LifeOSTokens.Space.xs)
                                 Text(periodLabel(start: breakdown.periodStart, end: breakdown.periodEnd))
                                     .lifeOSTypography(.metadata)
                                     .foregroundStyle(LifeOSTokens.tertiaryText)
@@ -1783,9 +1783,9 @@ struct ClipperAnalyticsView: View {
             if trends.isEmpty {
                 emptyObservedRow("No trend points were supplied in this observed snapshot.")
             } else {
-                VStack(alignment: .leading, spacing: 11) {
+                VStack(alignment: .leading, spacing: LifeOSTokens.Space.sm) {
                     ForEach(Array(trends.suffix(8))) { trend in
-                        VStack(alignment: .leading, spacing: 5) {
+                        VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
                             Text(trend.at.formatted(date: .abbreviated, time: .shortened))
                                 .lifeOSTypography(.metadata, weight: .semibold)
                             compactMetricRow(trend.metrics)
@@ -1802,19 +1802,18 @@ struct ClipperAnalyticsView: View {
     }
 
     private func observedDetailCard<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: LifeOSTokens.Space.sm) {
             Text(title)
                 .lifeOSTypography(.cardTitle)
-                .tracking(-0.1)
             content()
         }
-        .padding(18)
+        .padding(LifeOSTokens.Space.md)
         .frame(maxWidth: .infinity, alignment: .leading)
         .flatCard()
     }
 
     private func compactMetricRow(_ metrics: ClipperMetricSet) -> some View {
-        HStack(spacing: 10) {
+        HStack(spacing: LifeOSTokens.Space.sm) {
             compactMetric(label: "Views", value: countValue(metrics.views))
             compactMetric(label: "Subscribers", value: countValue(metrics.subscribers))
             compactMetric(label: "Revenue", value: revenueValue(metrics.revenue))
@@ -1822,7 +1821,7 @@ struct ClipperAnalyticsView: View {
     }
 
     private func compactMetric(label: String, value: String?) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: LifeOSTokens.Space.xxs) {
             Text(value ?? "—")
                 .lifeOSTypography(.metadata, weight: .semibold)
                 .monospacedDigit()
@@ -1834,9 +1833,8 @@ struct ClipperAnalyticsView: View {
     }
 
     private func emptyObservedRow(_ detail: String) -> some View {
-        HStack(spacing: 10) {
-            LifeOSIcon(.clipper)
-                .frame(width: 15, height: 15)
+        HStack(spacing: LifeOSTokens.Space.sm) {
+            LifeOSIcon(.clipper, context: .card)
                 .foregroundStyle(LifeOSTokens.tertiaryText)
             Text(detail)
                 .lifeOSTypography(.metadata)
@@ -1864,54 +1862,17 @@ struct ClipperAnalyticsView: View {
         return "€\(euros).\(centsText)"
     }
 
-    private func unavailableDetailCard(title: String, detail: String) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(title)
-                .lifeOSTypography(.cardTitle)
-                .tracking(-0.1)
-            HStack(spacing: 10) {
-                LifeOSIcon(.clipper)
-                    .frame(width: 15, height: 15)
-                    .foregroundStyle(LifeOSTokens.tertiaryText)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Not connected")
-                        .lifeOSTypography(.label, weight: .semibold)
-                    Text(detail)
-                        .lifeOSTypography(.metadata)
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 0)
-            }
-        }
-        .padding(18)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .flatCard()
-        .accessibilityElement(children: .combine)
-    }
-
     private func demoDetailCard(title: String, detail: String) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: LifeOSTokens.Space.xs) {
             Text(title)
                 .lifeOSTypography(.cardTitle)
-                .tracking(-0.1)
-            HStack(spacing: 10) {
-                LifeOSIcon(.clipper)
-                    .frame(width: 15, height: 15)
-                    .foregroundStyle(LifeOSTokens.warning)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("DEMO FIXTURE · NOT LIVE")
-                        .lifeOSTypography(.label, weight: .semibold)
-                        .foregroundStyle(LifeOSTokens.warning)
-                    Text(detail)
-                        .lifeOSTypography(.metadata)
-                        .foregroundStyle(LifeOSTokens.tertiaryText)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 0)
-            }
+                .foregroundStyle(LifeOSTokens.primaryText)
+            Text(detail)
+                .lifeOSTypography(.metadata)
+                .foregroundStyle(LifeOSTokens.tertiaryText)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(18)
+        .padding(LifeOSTokens.Space.md)
         .frame(maxWidth: .infinity, alignment: .leading)
         .flatCard()
         .accessibilityElement(children: .combine)
@@ -1940,16 +1901,6 @@ struct ClipperAnalyticsView: View {
         return LifeOSTokens.tertiaryText
     }
 
-    private var snapshotBadge: String {
-        if clipperState == .stale { return "Stale snapshot" }
-        switch section.provenance.quality {
-        case .demo: return "Demo snapshot"
-        case .unavailable: return "Not connected"
-        case .observed: return section.state == .partial ? "Partial snapshot" : section.provenance.connector == .refreshDue ? "Stale snapshot" : "Observed snapshot"
-        case .estimated: return "Estimated snapshot"
-        }
-    }
-
     @ViewBuilder
     private var refreshButton: some View {
         if let refreshAction {
@@ -1961,10 +1912,10 @@ struct ClipperAnalyticsView: View {
                     isRefreshing = false
                 }
             } label: {
-                Label(
-                    isRefreshing ? "Refreshing…" : section.provenance.quality == .unavailable ? "Retry" : "Refresh",
-                    systemImage: "arrow.clockwise"
-                )
+                HStack(spacing: LifeOSTokens.Space.xs) {
+                    LifeOSIcon(.refresh, context: .toolbar)
+                    Text(isRefreshing ? "Refreshing…" : section.provenance.quality == .unavailable ? "Retry" : "Refresh")
+                }
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
